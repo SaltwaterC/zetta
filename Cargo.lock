@@ -9239,6 +9239,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "assets",
+ "embed-resource",
  "gpui",
  "gpui_platform",
  "menu",

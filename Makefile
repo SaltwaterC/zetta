@@ -4,6 +4,8 @@ INSTALL ?= install
 PREFIX ?= /usr
 DESTDIR ?=
 
+export CARGO
+
 APP_ID := Zetta
 BINDIR := $(DESTDIR)$(PREFIX)/bin
 DATADIR := $(DESTDIR)$(PREFIX)/share
@@ -14,8 +16,13 @@ ICON_512_DIR := $(DATADIR)/icons/hicolor/512x512/apps
 .PHONY: build install install-binary install-assets uninstall uninstall-binary \
 	uninstall-assets refresh-desktop-caches
 
+ifeq ($(OS),Windows_NT)
+build:
+	cmd.exe /d /c scripts\build-windows.cmd
+else
 build:
 	$(ENV) -u DESTDIR $(CARGO) build --release --locked
+endif
 
 install:
 	@if [ "$$(id -u)" -eq 0 ]; then \
