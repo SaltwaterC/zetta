@@ -93,6 +93,12 @@ profile. Use `Alt-Left`, `Alt-Right`, `Alt-Up`, and `Alt-Down` to move focus, or
 click a pane. Exiting a shell removes that pane; exiting the final pane closes
 its tab.
 
+Selecting terminal text copies it to the system clipboard while preserving the
+selection. On Linux and FreeBSD, selections also populate the PRIMARY
+selection and a middle click pastes from PRIMARY, falling back to the system
+clipboard when PRIMARY is unavailable or empty. On other platforms, a middle
+click pastes from the system clipboard.
+
 These bindings are built into Zetta; `keymap.example.json` mirrors them as a
 starting point for overrides and is not loaded automatically. Place overrides
 in `keymap.json` and keep the `Zetta > Terminal` context so they take precedence

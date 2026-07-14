@@ -1473,6 +1473,7 @@ fn run() -> Result<()> {
                 if let Some(font_size) = terminal_font_size {
                     terminal_settings.font_size = Some(px(font_size));
                 }
+                terminal_settings.copy_on_select = true;
                 terminal_settings.max_scroll_history_lines = Some(max_scroll_history_lines);
                 TerminalSettings::override_global(terminal_settings, cx);
             }
