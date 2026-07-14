@@ -17,16 +17,16 @@ const DEFAULT_MAX_SCROLL_HISTORY_LINES: usize = MAX_SCROLL_HISTORY_LINES;
 const DEFAULT_INACTIVE_PANE_OPACITY: f32 = 0.8;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ShellProfile {
+pub struct Profile {
     pub name: String,
-    pub shell: Shell,
+    pub command: Shell,
 }
 
 #[derive(Clone, Debug)]
 pub struct Config {
     pub config_path: PathBuf,
     pub keymap_override: Option<PathBuf>,
-    pub profiles: Vec<ShellProfile>,
+    pub profiles: Vec<Profile>,
     pub default_profile: usize,
     pub working_directory: Option<PathBuf>,
     pub keymap_path: PathBuf,
@@ -38,13 +38,12 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn load(config_path: Option<&Path>, keymap_path: Option<PathBuf>) -> Result<Self> {
+    pub fn defaults(config_path: Option<&Path>, keymap_path: Option<PathBuf>) -> Self {
         let config_dir = platform_config_dir();
-        let has_keymap_override = keymap_path.is_some();
         let config_path = config_path
             .map(Path::to_path_buf)
             .unwrap_or_else(|| config_dir.join("config.json"));
-        let mut config = Self {
+        Self {
             config_path: config_path.clone(),
             keymap_override: keymap_path.clone(),
             profiles: discovered_profiles(),
@@ -56,17 +55,24 @@ impl Config {
             terminal_font_family: DEFAULT_TERMINAL_FONT_FAMILY.to_owned(),
             max_scroll_history_lines: DEFAULT_MAX_SCROLL_HISTORY_LINES,
             inactive_pane_opacity: DEFAULT_INACTIVE_PANE_OPACITY,
-        };
+        }
+    }
 
-        let content = match fs::read_to_string(&config_path) {
+    pub fn load(config_path: Option<&Path>, keymap_path: Option<PathBuf>) -> Result<Self> {
+        let has_keymap_override = keymap_path.is_some();
+        let mut config = Self::defaults(config_path, keymap_path);
+
+        let content = match fs::read_to_string(&config.config_path) {
             Ok(content) => content,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(config),
             Err(error) => {
-                return Err(error).with_context(|| format!("reading {}", config_path.display()));
+                return Err(error)
+                    .with_context(|| format!("reading {}", config.config_path.display()));
             }
         };
         let root: Value = serde_json::from_str(&content)
-            .with_context(|| format!("parsing {}", config_path.display()))?;
+            .with_context(|| format!("parsing {}", config.config_path.display()))?;
+        validate_config_fields(&root)?;
 
         if let Some(directory) = root.get("working_directory").and_then(Value::as_str) {
             config.working_directory = Some(expand_home(directory));
@@ -104,25 +110,67 @@ impl Config {
             config.inactive_pane_opacity = parse_inactive_pane_opacity(opacity)?;
         }
 
-        if let Some(profiles) = root.get("shells").and_then(Value::as_array) {
+        if let Some(profiles) = root.get("profiles") {
+            let profiles = profiles.as_array().context("profiles must be an array")?;
             let parsed = profiles
                 .iter()
                 .map(parse_profile)
                 .collect::<Result<Vec<_>>>()?;
-            if !parsed.is_empty() {
-                config.profiles = parsed;
-            }
+            merge_profiles(&mut config.profiles, parsed);
         }
 
-        if let Some(default_name) = root.get("default_shell").and_then(Value::as_str) {
-            config.default_profile = config
-                .profiles
-                .iter()
-                .position(|profile| profile.name.eq_ignore_ascii_case(default_name))
-                .with_context(|| format!("default_shell {default_name:?} is not in shells"))?;
+        if let Some(default_profile) = root.get("default_profile") {
+            let default_name = default_profile
+                .as_str()
+                .context("default_profile must be a string")?;
+            config.default_profile = resolve_default_profile(&config.profiles, default_name)?;
         }
 
         Ok(config)
+    }
+}
+
+fn validate_config_fields(root: &Value) -> Result<()> {
+    const FIELDS: &[&str] = &[
+        "default_profile",
+        "working_directory",
+        "keymap",
+        "theme",
+        "terminal_font_size",
+        "terminal_font_family",
+        "max_scroll_history_lines",
+        "inactive_pane_opacity",
+        "profiles",
+    ];
+    let object = root
+        .as_object()
+        .context("configuration root must be an object")?;
+    if let Some(field) = object
+        .keys()
+        .find(|field| !FIELDS.contains(&field.as_str()))
+    {
+        anyhow::bail!("unrecognized configuration field {field:?}");
+    }
+    Ok(())
+}
+
+fn resolve_default_profile(profiles: &[Profile], name: &str) -> Result<usize> {
+    profiles
+        .iter()
+        .position(|profile| profile.name.eq_ignore_ascii_case(name))
+        .with_context(|| format!("default profile {name:?} is not available"))
+}
+
+fn merge_profiles(profiles: &mut Vec<Profile>, configured: Vec<Profile>) {
+    for profile in configured {
+        if let Some(index) = profiles
+            .iter()
+            .position(|existing| existing.name.eq_ignore_ascii_case(&profile.name))
+        {
+            profiles[index] = profile;
+        } else {
+            profiles.push(profile);
+        }
     }
 }
 
@@ -148,35 +196,37 @@ fn parse_max_scroll_history_lines(value: &Value) -> Result<usize> {
     Ok(history_lines as usize)
 }
 
-fn parse_profile(value: &Value) -> Result<ShellProfile> {
-    let object = value.as_object().context("each shell must be an object")?;
+fn parse_profile(value: &Value) -> Result<Profile> {
+    let object = value
+        .as_object()
+        .context("each profile must be an object")?;
     let name = object
         .get("name")
         .and_then(Value::as_str)
-        .context("shell.name must be a string")?
+        .context("profile.name must be a string")?
         .to_owned();
     let program = object
         .get("program")
         .and_then(Value::as_str)
-        .context("shell.program must be a string")?
+        .context("profile.program must be a string")?
         .to_owned();
     let args = object
         .get("args")
         .map(|args| {
             args.as_array()
-                .context("shell.args must be an array")?
+                .context("profile.args must be an array")?
                 .iter()
                 .map(|arg| {
                     arg.as_str()
                         .map(str::to_owned)
-                        .context("shell args must be strings")
+                        .context("profile args must be strings")
                 })
                 .collect::<Result<Vec<_>>>()
         })
         .transpose()?
         .unwrap_or_default();
 
-    let shell = if args.is_empty() {
+    let command = if args.is_empty() {
         Shell::Program(program)
     } else {
         Shell::WithArguments {
@@ -185,13 +235,13 @@ fn parse_profile(value: &Value) -> Result<ShellProfile> {
             title_override: Some(name.clone()),
         }
     };
-    Ok(ShellProfile { name, shell })
+    Ok(Profile { name, command })
 }
 
-fn discovered_profiles() -> Vec<ShellProfile> {
-    let mut profiles = vec![ShellProfile {
+fn discovered_profiles() -> Vec<Profile> {
+    let mut profiles = vec![Profile {
         name: "System".to_owned(),
-        shell: Shell::System,
+        command: Shell::System,
     }];
     let candidates: &[(&str, &str)] = if cfg!(windows) {
         &[
@@ -210,9 +260,9 @@ fn discovered_profiles() -> Vec<ShellProfile> {
     let mut seen = HashSet::new();
     for (name, program) in candidates {
         if command_exists(program) && seen.insert(*program) {
-            profiles.push(ShellProfile {
+            profiles.push(Profile {
                 name: (*name).to_owned(),
-                shell: Shell::Program((*program).to_owned()),
+                command: Shell::Program((*program).to_owned()),
             });
         }
     }
@@ -239,7 +289,7 @@ fn wsl_program() -> Option<String> {
 }
 
 #[cfg(windows)]
-fn discovered_wsl_profiles(program: &str) -> Vec<ShellProfile> {
+fn discovered_wsl_profiles(program: &str) -> Vec<Profile> {
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
     let output = Command::new(program)
@@ -256,14 +306,15 @@ fn discovered_wsl_profiles(program: &str) -> Vec<ShellProfile> {
     wsl_profiles_from_output(program, &output.stdout)
 }
 
-fn wsl_profiles_from_output(program: &str, output: &[u8]) -> Vec<ShellProfile> {
+#[cfg(any(windows, test))]
+fn wsl_profiles_from_output(program: &str, output: &[u8]) -> Vec<Profile> {
     parse_wsl_distribution_names(output)
         .into_iter()
         .map(|distribution| {
             let name = format!("WSL: {distribution}");
-            ShellProfile {
+            Profile {
                 name: name.clone(),
-                shell: Shell::WithArguments {
+                command: Shell::WithArguments {
                     program: program.to_owned(),
                     args: vec!["--distribution".to_owned(), distribution],
                     title_override: Some(name),
@@ -273,6 +324,7 @@ fn wsl_profiles_from_output(program: &str, output: &[u8]) -> Vec<ShellProfile> {
         .collect()
 }
 
+#[cfg(any(windows, test))]
 fn parse_wsl_distribution_names(output: &[u8]) -> Vec<String> {
     let decoded = if let Some(bytes) = output.strip_prefix(&[0xfe, 0xff]) {
         let code_units = bytes
@@ -302,6 +354,7 @@ fn parse_wsl_distribution_names(output: &[u8]) -> Vec<String> {
         .collect()
 }
 
+#[cfg(any(windows, test))]
 fn is_user_wsl_distribution(name: &str) -> bool {
     ![
         "docker-desktop",
@@ -369,7 +422,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_shell_profile_with_arguments() {
+    fn parses_profile_with_arguments() {
         let profile = parse_profile(&serde_json::json!({
             "name": "WSL Ubuntu",
             "program": "wsl.exe",
@@ -378,9 +431,89 @@ mod tests {
         .unwrap();
         assert_eq!(profile.name, "WSL Ubuntu");
         assert!(matches!(
-            profile.shell,
+            profile.command,
             Shell::WithArguments { ref program, ref args, .. }
                 if program == "wsl.exe" && args == &["-d", "Ubuntu"]
+        ));
+    }
+
+    #[test]
+    fn configuration_uses_profile_terminology() {
+        assert!(
+            validate_config_fields(&serde_json::json!({
+                "default_profile": "System",
+                "profiles": []
+            }))
+            .is_ok()
+        );
+
+        let error = validate_config_fields(&serde_json::json!({
+            "default_shell": "System",
+            "shells": []
+        }))
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unrecognized configuration field")
+        );
+    }
+
+    #[test]
+    fn configured_profiles_extend_detected_profiles() {
+        let mut profiles = vec![
+            Profile {
+                name: "System".to_owned(),
+                command: Shell::System,
+            },
+            Profile {
+                name: "Zsh".to_owned(),
+                command: Shell::Program("zsh".to_owned()),
+            },
+        ];
+
+        merge_profiles(
+            &mut profiles,
+            vec![Profile {
+                name: "Login Zsh".to_owned(),
+                command: Shell::Program("/bin/zsh".to_owned()),
+            }],
+        );
+
+        assert_eq!(
+            profiles
+                .iter()
+                .map(|profile| profile.name.as_str())
+                .collect::<Vec<_>>(),
+            ["System", "Zsh", "Login Zsh"]
+        );
+        assert_eq!(resolve_default_profile(&profiles, "system").unwrap(), 0);
+        assert_eq!(resolve_default_profile(&profiles, "ZSH").unwrap(), 1);
+    }
+
+    #[test]
+    fn configured_profiles_override_detected_profiles_by_name() {
+        let mut profiles = vec![Profile {
+            name: "Zsh".to_owned(),
+            command: Shell::Program("zsh".to_owned()),
+        }];
+
+        merge_profiles(
+            &mut profiles,
+            vec![Profile {
+                name: "zsh".to_owned(),
+                command: Shell::WithArguments {
+                    program: "/bin/zsh".to_owned(),
+                    args: vec!["-l".to_owned()],
+                    title_override: Some("zsh".to_owned()),
+                },
+            }],
+        );
+
+        assert_eq!(profiles.len(), 1);
+        assert!(matches!(
+            profiles[0].command,
+            Shell::WithArguments { ref args, .. } if args == &["-l"]
         ));
     }
 
@@ -420,7 +553,7 @@ mod tests {
         assert_eq!(profiles.len(), 2);
         assert_eq!(profiles[0].name, "WSL: Ubuntu");
         assert!(matches!(
-            profiles[0].shell,
+            profiles[0].command,
             Shell::WithArguments {
                 ref program,
                 ref args,

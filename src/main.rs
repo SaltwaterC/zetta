@@ -6,10 +6,15 @@ mod zetta_assets;
 const ZETTA_APP_ID: &str = "Zetta";
 const ZETTA_DEFAULT_THEME: &str = "One Light";
 
-use std::{collections::HashMap, env, fs, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    env, fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::{Context as _, Result};
-use config::{Config, ShellProfile};
+use config::{Config, Profile};
 use gpui::{
     Action, Anchor, App, AppContext as _, Bounds, Context, CursorStyle, Decorations, Entity,
     Focusable, HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent,
@@ -25,8 +30,8 @@ use terminal::{TerminalBuilder, terminal_settings::TerminalSettings};
 use terminal_view::{TerminalView, TerminalViewEvent};
 use theme::{ActiveTheme, ClientDecorationsExt as _, GlobalTheme, ThemeRegistry};
 use ui::{
-    ButtonCommon as _, ButtonSize, Clickable as _, Color, IconButton, IconButtonShape, IconName,
-    IconSize, Label, LabelSize, PopoverMenu, Tooltip, prelude::*,
+    Banner, ButtonCommon as _, ButtonSize, Clickable as _, Color, IconButton, IconButtonShape,
+    IconName, IconSize, Label, LabelSize, PopoverMenu, Severity, Tooltip, prelude::*,
 };
 use util::{ResultExt as _, paths::PathStyle};
 use zetta_assets::ZettaAssets;
@@ -245,10 +250,11 @@ impl Tab {
 
 struct Zetta {
     launch_config: Config,
+    configuration_error: Option<String>,
     tabs: Vec<Tab>,
     active_tab: usize,
     selected_profile: usize,
-    profiles: Vec<ShellProfile>,
+    profiles: Vec<Profile>,
     working_directory: Option<PathBuf>,
     next_tab_id: u64,
     next_pane_id: u64,
@@ -259,10 +265,16 @@ struct Zetta {
 }
 
 impl Zetta {
-    fn new(config: Config, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        config: Config,
+        configuration_error: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let button_layout = system_window_button_layout(cx);
         let mut this = Self {
             launch_config: config.clone(),
+            configuration_error,
             tabs: Vec::new(),
             active_tab: 0,
             selected_profile: config.default_profile,
@@ -325,7 +337,7 @@ impl Zetta {
         &mut self,
         tab_id: u64,
         pane_id: u64,
-        profile: ShellProfile,
+        profile: Profile,
         working_directory: Option<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -334,7 +346,7 @@ impl Zetta {
         let builder = TerminalBuilder::new(
             working_directory,
             None,
-            profile.shell,
+            profile.command,
             HashMap::default(),
             settings.cursor_shape,
             settings.alternate_scroll,
@@ -496,7 +508,12 @@ impl Zetta {
     }
 
     fn new_window(&mut self, _: &NewWindow, _: &mut Window, cx: &mut Context<Self>) {
-        open_zetta_window(self.launch_config.clone(), cx).log_err();
+        open_zetta_window(
+            self.launch_config.clone(),
+            self.configuration_error.clone(),
+            cx,
+        )
+        .log_err();
     }
 
     fn open_profile(&mut self, action: &OpenProfile, window: &mut Window, cx: &mut Context<Self>) {
@@ -602,14 +619,22 @@ impl Zetta {
         let config = match Config::load(Some(&config_path), keymap_override) {
             Ok(config) => config,
             Err(error) => {
-                eprintln!("Could not reload Zetta configuration: {error:#}");
+                self.configuration_error = Some(format!(
+                    "Could not load {}: {error:#}",
+                    config_path.display()
+                ));
+                cx.notify();
                 return;
             }
         };
 
         load_user_themes(cx).log_err();
         if let Err(error) = apply_config_settings(&config, cx) {
-            eprintln!("Could not reload Zetta configuration: {error:#}");
+            self.configuration_error = Some(format!(
+                "Could not apply {}: {error:#}",
+                config_path.display()
+            ));
+            cx.notify();
             return;
         }
         load_keybindings(&config.keymap_path, config.profiles.len(), cx);
@@ -618,6 +643,7 @@ impl Zetta {
         self.profiles = config.profiles.clone();
         self.working_directory = config.working_directory.clone();
         self.launch_config = config;
+        self.configuration_error = None;
         self.focus_active(window, cx);
         cx.notify();
     }
@@ -973,6 +999,7 @@ impl Render for Zetta {
             .collect::<Vec<_>>();
 
         let profile_menu_profiles = self.profiles.clone();
+        let default_profile = self.launch_config.default_profile;
         let profile_menu_handle = handle.clone();
         let profile_menu = PopoverMenu::new("new-tab-profile-menu")
             .trigger_with_tooltip(
@@ -990,6 +1017,7 @@ impl Render for Zetta {
                 let handle = profile_menu_handle.clone();
                 Some(ui::ContextMenu::build(window, cx, move |mut menu, _, _| {
                     for (index, profile) in profiles.iter().enumerate() {
+                        let is_default = index == default_profile;
                         let label = profile.name.clone();
                         let label_for_row = label.clone();
                         let shortcut = profile_shortcut_label(index + 1);
@@ -1000,7 +1028,25 @@ impl Render for Zetta {
                                     .w_full()
                                     .justify_between()
                                     .gap_4()
-                                    .child(Label::new(label_for_row.clone()))
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .when(is_default, |row| {
+                                                row.child(
+                                                    Icon::new(IconName::Check)
+                                                        .size(IconSize::Small)
+                                                        .color(Color::Accent),
+                                                )
+                                            })
+                                            .when(!is_default, |row| row.child(div().w_4()))
+                                            .child(Label::new(label_for_row.clone()).color(
+                                                if is_default {
+                                                    Color::Accent
+                                                } else {
+                                                    Color::Default
+                                                },
+                                            )),
+                                    )
                                     .when_some(shortcut.clone(), |row, shortcut| {
                                         row.child(
                                             Label::new(shortcut)
@@ -1102,6 +1148,25 @@ impl Render for Zetta {
                     )
                     .child(div().min_w_0().flex_1()),
             )
+            .when_some(self.configuration_error.clone(), |content, error| {
+                content.child(
+                    div().px_2().py_1().child(
+                        Banner::new()
+                            .severity(Severity::Error)
+                            .child(Label::new(error).size(LabelSize::Small).line_clamp(3))
+                            .action_slot(
+                                IconButton::new("reload-invalid-configuration", IconName::RotateCw)
+                                    .shape(IconButtonShape::Square)
+                                    .icon_size(IconSize::Small)
+                                    .aria_label("Reload configuration")
+                                    .tooltip(Tooltip::text("Reload configuration"))
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(Box::new(ReloadConfiguration), cx)
+                                    }),
+                            ),
+                    ),
+                )
+            })
             .child(div().flex_1().min_h_0().child(body));
 
         client_window_frame(content, window, cx)
@@ -1374,6 +1439,19 @@ fn parse_args() -> Result<(Option<PathBuf>, Option<PathBuf>)> {
     Ok((config, keymap))
 }
 
+fn load_startup_config(
+    config_path: Option<&Path>,
+    keymap_path: Option<PathBuf>,
+) -> (Config, Option<String>) {
+    match Config::load(config_path, keymap_path.clone()) {
+        Ok(config) => (config, None),
+        Err(error) => (
+            Config::defaults(config_path, keymap_path),
+            Some(format!("Could not load configuration: {error:#}")),
+        ),
+    }
+}
+
 fn profile_keybindings(slot: usize) -> Vec<KeyBinding> {
     const SHIFTED_DIGITS: [&str; 9] = ["!", "@", "#", "$", "%", "^", "&", "*", "("];
     let action = OpenProfile { slot };
@@ -1509,7 +1587,11 @@ fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut App) {
     }
 }
 
-fn open_zetta_window(config: Config, cx: &mut App) -> Result<()> {
+fn open_zetta_window(
+    config: Config,
+    configuration_error: Option<String>,
+    cx: &mut App,
+) -> Result<()> {
     let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
     cx.open_window(
         WindowOptions {
@@ -1528,7 +1610,7 @@ fn open_zetta_window(config: Config, cx: &mut App) -> Result<()> {
         },
         move |window, cx| {
             window.set_window_title("Zetta");
-            cx.new(|cx| Zetta::new(config, window, cx))
+            cx.new(|cx| Zetta::new(config, configuration_error, window, cx))
         },
     )
     .context("opening Zetta window")?;
@@ -1538,7 +1620,7 @@ fn open_zetta_window(config: Config, cx: &mut App) -> Result<()> {
 
 fn run() -> Result<()> {
     let (config_path, keymap_path) = parse_args()?;
-    let config = Config::load(config_path.as_deref(), keymap_path)?;
+    let (config, configuration_error) = load_startup_config(config_path.as_deref(), keymap_path);
     let keymap_path = config.keymap_path.clone();
     let profile_count = config.profiles.len();
     gpui_platform::application()
@@ -1560,7 +1642,8 @@ fn run() -> Result<()> {
             })
             .detach();
 
-            open_zetta_window(config, cx).expect("failed to open Zetta window");
+            open_zetta_window(config, configuration_error, cx)
+                .expect("failed to open Zetta window");
         });
     Ok(())
 }
@@ -1575,6 +1658,29 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_startup_config_falls_back_and_reports_the_error() {
+        let config_path = env::temp_dir().join(format!(
+            "zetta-invalid-config-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&config_path, r#"{"theme": "One Light",}"#).unwrap();
+
+        let (config, error) = load_startup_config(Some(&config_path), None);
+
+        fs::remove_file(&config_path).unwrap();
+        assert_eq!(config.config_path, config_path);
+        assert_eq!(config.default_profile, 0);
+        let error = error.expect("invalid JSON should be reported");
+        assert!(error.contains("Could not load configuration"));
+        assert!(error.contains("parsing"));
+        assert!(error.contains("line 1 column"));
+    }
 
     #[test]
     fn terminal_environment_identifies_zetta() {
