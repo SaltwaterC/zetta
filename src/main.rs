@@ -325,14 +325,12 @@ impl Zetta {
             .and_then(|pane| pane.view.as_ref())
             .and_then(|view| view.read(cx).terminal().read(cx).working_directory());
         let profile = self.profiles[self.selected_profile].clone();
-        let use_wsl_home = inherited_working_directory.is_none()
-            && !self.launch_config.working_directory_configured
-            && is_wsl_shell(&profile.command);
-        let working_directory = inherited_working_directory.or_else(|| {
-            (!use_wsl_home)
-                .then(|| self.working_directory.clone())
-                .flatten()
-        });
+        let (working_directory, use_wsl_home) = launch_working_directory(
+            &profile,
+            inherited_working_directory,
+            self.working_directory.clone(),
+            self.launch_config.working_directory_configured,
+        );
         let tab_id = self.next_tab_id;
         self.next_tab_id += 1;
         let pane_id = self.next_pane_id;
@@ -540,14 +538,12 @@ impl Zetta {
         let Some(profile) = tab.active_profile().cloned() else {
             return;
         };
-        let use_wsl_home = inherited_working_directory.is_none()
-            && !self.launch_config.working_directory_configured
-            && is_wsl_shell(&profile.command);
-        let working_directory = inherited_working_directory.or_else(|| {
-            (!use_wsl_home)
-                .then(|| self.working_directory.clone())
-                .flatten()
-        });
+        let (working_directory, use_wsl_home) = launch_working_directory(
+            &profile,
+            inherited_working_directory,
+            self.working_directory.clone(),
+            self.launch_config.working_directory_configured,
+        );
         let pane_id = self.next_pane_id;
         self.next_pane_id += 1;
 
@@ -1670,6 +1666,24 @@ fn is_wsl_shell(shell: &Shell) -> bool {
         .is_some_and(|name| name.eq_ignore_ascii_case("wsl.exe"))
 }
 
+fn launch_working_directory(
+    profile: &Profile,
+    inherited: Option<PathBuf>,
+    fallback: Option<PathBuf>,
+    fallback_is_configured: bool,
+) -> (Option<PathBuf>, bool) {
+    // Windows process inspection sees the cwd of wsl.exe, not of its Linux shell.
+    // Passing that value to a new WSL session leaks Zetta's own launch directory.
+    let is_wsl = is_wsl_shell(&profile.command);
+    let use_wsl_home = is_wsl && !fallback_is_configured;
+    let working_directory = if is_wsl {
+        fallback_is_configured.then_some(fallback).flatten()
+    } else {
+        inherited.or(fallback)
+    };
+    (working_directory, use_wsl_home)
+}
+
 fn wsl_shell_in_home(shell: Shell) -> Shell {
     match shell {
         Shell::Program(program) => Shell::WithArguments {
@@ -1974,6 +1988,69 @@ mod tests {
             wsl_shell_in_home(shell),
             Shell::WithArguments { args, .. } if args == ["--cd", "/work"]
         ));
+    }
+
+    #[test]
+    fn wsl_ignores_the_windows_side_inherited_directory() {
+        let profile = Profile {
+            name: "WSL: Ubuntu".to_owned(),
+            command: Shell::WithArguments {
+                program: "wsl.exe".to_owned(),
+                args: vec!["--distribution".to_owned(), "Ubuntu".to_owned()],
+                title_override: None,
+            },
+            theme: None,
+        };
+
+        let (directory, use_wsl_home) = launch_working_directory(
+            &profile,
+            Some(PathBuf::from(r"C:\source\zetta")),
+            Some(PathBuf::from(r"C:\Users\stefan")),
+            false,
+        );
+
+        assert_eq!(directory, None);
+        assert!(use_wsl_home);
+    }
+
+    #[test]
+    fn native_profiles_still_inherit_the_active_directory() {
+        let profile = Profile {
+            name: "PowerShell".to_owned(),
+            command: Shell::Program("pwsh.exe".to_owned()),
+            theme: None,
+        };
+        let inherited = PathBuf::from(r"C:\source\zetta");
+
+        let (directory, use_wsl_home) = launch_working_directory(
+            &profile,
+            Some(inherited.clone()),
+            Some(PathBuf::from(r"C:\Users\stefan")),
+            false,
+        );
+
+        assert_eq!(directory, Some(inherited));
+        assert!(!use_wsl_home);
+    }
+
+    #[test]
+    fn configured_directory_overrides_the_windows_side_wsl_directory() {
+        let profile = Profile {
+            name: "WSL: Ubuntu".to_owned(),
+            command: Shell::Program("wsl.exe".to_owned()),
+            theme: None,
+        };
+        let configured = PathBuf::from(r"C:\Users\stefan");
+
+        let (directory, use_wsl_home) = launch_working_directory(
+            &profile,
+            Some(PathBuf::from(r"C:\source\zetta")),
+            Some(configured.clone()),
+            true,
+        );
+
+        assert_eq!(directory, Some(configured));
+        assert!(!use_wsl_home);
     }
 
     #[test]

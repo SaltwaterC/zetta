@@ -83,8 +83,10 @@ the configuration cannot be parsed, Zetta starts with safe defaults and shows
 the error in the window; correct the file and reload it without restarting.
 The first tab starts in the user's home directory unless `working_directory`
 is configured. A detected WSL profile uses the selected distribution's Linux
-home rather than the Windows user profile. Later tabs and splits inherit the
-active pane's current directory.
+home rather than the Windows user profile. Later native-shell tabs and splits
+inherit the active pane's current directory. On Windows, `wsl.exe` exposes only
+its Windows-side directory, so WSL tabs continue to use the Linux home instead
+of inheriting that incorrect value.
 
 Keyboard shortcuts use Zed's keymap format. The default shortcuts are:
 
