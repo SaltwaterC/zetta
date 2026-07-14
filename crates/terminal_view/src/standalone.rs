@@ -213,6 +213,9 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        terminal.update(cx, |terminal, _| {
+            terminal.set_reported_theme(theme.clone());
+        });
         let focus_handle = cx.focus_handle();
         let focus_in = cx.on_focus_in(&focus_handle, window, |view, window, cx| {
             view.focus_in(window, cx)
@@ -305,6 +308,9 @@ impl TerminalView {
     }
 
     pub fn set_theme(&mut self, theme: Option<Arc<Theme>>, cx: &mut Context<Self>) {
+        self.terminal.update(cx, |terminal, _| {
+            terminal.set_reported_theme(theme.clone());
+        });
         self.theme = theme;
         cx.notify();
     }
