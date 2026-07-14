@@ -720,6 +720,14 @@ pub(crate) enum TerminalBackendEvent {
     ChildExit(ExitStatus),
 }
 
+const REPORTED_WORKING_DIRECTORY_TITLE_PREFIX: &str = "zetta-cwd:";
+
+fn reported_working_directory_from_title(title: &str) -> Option<String> {
+    let directory = title.strip_prefix(REPORTED_WORKING_DIRECTORY_TITLE_PREFIX)?;
+    (directory.starts_with('/') && !directory.chars().any(char::is_control))
+        .then(|| directory.to_owned())
+}
+
 impl fmt::Debug for TerminalBackendEvent {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
@@ -1005,6 +1013,7 @@ impl TerminalBuilder {
             background_executor: background_executor.clone(),
             path_style,
             reported_theme: None,
+            reported_working_directory: None,
             #[cfg(any(test, feature = "test-support"))]
             input_log: Vec::new(),
             #[cfg(any(test, feature = "test-support"))]
@@ -1279,6 +1288,7 @@ impl TerminalBuilder {
                 background_executor,
                 path_style,
                 reported_theme: None,
+                reported_working_directory: None,
                 #[cfg(any(test, feature = "test-support"))]
                 input_log: Vec::new(),
                 #[cfg(any(test, feature = "test-support"))]
@@ -1449,6 +1459,7 @@ pub struct Terminal {
     background_executor: BackgroundExecutor,
     path_style: PathStyle,
     reported_theme: Option<Arc<Theme>>,
+    reported_working_directory: Option<String>,
     #[cfg(any(test, feature = "test-support"))]
     input_log: Vec<Vec<u8>>,
     #[cfg(any(test, feature = "test-support"))]
@@ -1512,6 +1523,10 @@ impl Terminal {
         self.reported_theme = theme;
     }
 
+    pub fn reported_working_directory(&self) -> Option<&str> {
+        self.reported_working_directory.as_deref()
+    }
+
     fn process_pty_event(&mut self, event: PtyEvent, cx: &mut Context<Self>) {
         match event {
             PtyEvent::Event(event) => self.process_event(event, cx),
@@ -1521,6 +1536,11 @@ impl Terminal {
     fn process_event(&mut self, event: TerminalBackendEvent, cx: &mut Context<Self>) {
         match event {
             TerminalBackendEvent::Title(title) => {
+                if let Some(directory) = reported_working_directory_from_title(&title) {
+                    self.reported_working_directory = Some(directory);
+                    return;
+                }
+
                 // ignore default shell program title change as windows always sends those events
                 // and it would end up showing the shell executable path in breadcrumbs
                 #[cfg(windows)]
@@ -3334,6 +3354,20 @@ mod tests {
     use parking_lot::Mutex;
     use rand::{Rng, distr, rngs::StdRng};
     use task::{Shell, ShellBuilder};
+
+    #[test]
+    fn reported_working_directory_titles_require_safe_absolute_unix_paths() {
+        assert_eq!(
+            reported_working_directory_from_title("zetta-cwd:/home/user/project"),
+            Some("/home/user/project".to_owned())
+        );
+        assert_eq!(reported_working_directory_from_title("ordinary title"), None);
+        assert_eq!(reported_working_directory_from_title("zetta-cwd:relative"), None);
+        assert_eq!(
+            reported_working_directory_from_title("zetta-cwd:/home/user\nproject"),
+            None
+        );
+    }
 
     #[test]
     fn test_init_command_startup_marker_commands_do_not_contain_marker() {

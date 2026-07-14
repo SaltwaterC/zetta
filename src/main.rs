@@ -87,7 +87,17 @@ struct TerminalPane {
 }
 
 impl TerminalPane {
-    fn wsl_working_directory(&self) -> Option<String> {
+    fn wsl_working_directory(&self, cx: &App) -> Option<String> {
+        if let Some(directory) = self.view.as_ref().and_then(|view| {
+            view.read(cx)
+                .terminal()
+                .read(cx)
+                .reported_working_directory()
+                .map(str::to_owned)
+        }) {
+            return Some(directory);
+        }
+
         let path = self.wsl_cwd_file.as_ref()?;
         let directory = fs::read_to_string(path).ok()?;
         let directory = directory.trim_end_matches(['\r', '\n']);
@@ -459,7 +469,7 @@ impl Zetta {
             .and_then(|view| view.read(cx).terminal().read(cx).working_directory());
         let inherited_wsl_directory = active_pane
             .filter(|pane| pane.profile.name.eq_ignore_ascii_case(&profile.name))
-            .and_then(TerminalPane::wsl_working_directory);
+            .and_then(|pane| pane.wsl_working_directory(cx));
         let (working_directory, wsl_directory) = launch_working_directory(
             &profile,
             inherited_working_directory,
@@ -684,7 +694,7 @@ impl Zetta {
         let Some(profile) = tab.active_profile().cloned() else {
             return;
         };
-        let inherited_wsl_directory = active_pane.and_then(TerminalPane::wsl_working_directory);
+        let inherited_wsl_directory = active_pane.and_then(|pane| pane.wsl_working_directory(cx));
         let (working_directory, wsl_directory) = launch_working_directory(
             &profile,
             inherited_working_directory,
@@ -1985,6 +1995,47 @@ fn wsl_cwd_tracking_file(profile: &Profile, pane_id: u64) -> Option<PathBuf> {
 }
 
 const WSL_CWD_TRACKER: &str = r#"marker="$(wslpath -u "$1" 2>/dev/null || true)"
+shell="${SHELL:-}"
+if [ ! -x "$shell" ]; then
+    shell="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f7)"
+fi
+[ -x "$shell" ] || shell=/bin/sh
+
+cwd_command='case "$PWD" in /*) printf "\033]7;file://localhost%s\033\\\033]2;zetta-cwd:%s\033\\" "$PWD" "$PWD";; esac'
+case "${shell##*/}" in
+    bash)
+        PROMPT_COMMAND="${cwd_command}${PROMPT_COMMAND:+;${PROMPT_COMMAND}}"
+        export PROMPT_COMMAND
+        exec "$shell" -l
+        ;;
+    fish)
+        exec "$shell" -l -C 'function __zetta_report_cwd --on-event fish_prompt; if string match -qr "^/" -- "$PWD"; printf "\033]7;file://localhost%s\033\\\033]2;zetta-cwd:%s\033\\" "$PWD" "$PWD"; end; end'
+        ;;
+    zsh)
+        integration_zdotdir="$(mktemp -d "${TMPDIR:-/tmp}/zetta-zsh-XXXXXX" 2>/dev/null || true)"
+        if [ -n "$integration_zdotdir" ]; then
+            export ZETTA_ORIGINAL_ZDOTDIR="${ZDOTDIR:-$HOME}"
+            export ZETTA_INTEGRATION_ZDOTDIR="$integration_zdotdir"
+            cat > "$integration_zdotdir/.zshenv" <<'ZETTA_ZSHENV'
+ZDOTDIR="$ZETTA_ORIGINAL_ZDOTDIR"
+[[ -r "$ZDOTDIR/.zshenv" ]] && source "$ZDOTDIR/.zshenv"
+
+function __zetta_report_cwd() {
+    [[ "$PWD" == /* ]] && printf '\033]7;file://localhost%s\033\\\033]2;zetta-cwd:%s\033\\' "$PWD" "$PWD"
+}
+autoload -Uz add-zsh-hook
+add-zsh-hook precmd __zetta_report_cwd
+command rm -rf -- "$ZETTA_INTEGRATION_ZDOTDIR"
+unset ZETTA_ORIGINAL_ZDOTDIR ZETTA_INTEGRATION_ZDOTDIR
+ZETTA_ZSHENV
+            ZDOTDIR="$integration_zdotdir"
+            export ZDOTDIR
+            exec "$shell" -l
+        fi
+        ;;
+esac
+
+# Shells without an injection mechanism retain the legacy tracker.
 parent=$$
 if [ -n "$marker" ]; then
     (
@@ -2000,11 +2051,6 @@ if [ -n "$marker" ]; then
         rm -f "$marker" "${marker}.tmp"
     ) </dev/null >/dev/null 2>&1 &
 fi
-shell="${SHELL:-}"
-if [ ! -x "$shell" ]; then
-    shell="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f7)"
-fi
-[ -x "$shell" ] || shell=/bin/sh
 exec "$shell" -l"#;
 
 fn wsl_shell_with_tracking(
@@ -2509,6 +2555,19 @@ mod tests {
                     && args[4..8] == ["--exec", "/bin/sh", "-c", WSL_CWD_TRACKER]
                     && args.last().map(String::as_str) == marker.to_str()
         ));
+    }
+
+    #[test]
+    fn wsl_wrapper_prefers_prompt_cwd_reports_and_keeps_a_shell_fallback() {
+        assert!(WSL_CWD_TRACKER.contains("PROMPT_COMMAND="));
+        assert!(WSL_CWD_TRACKER.contains("--on-event fish_prompt"));
+        assert!(WSL_CWD_TRACKER.contains("add-zsh-hook precmd __zetta_report_cwd"));
+        assert!(WSL_CWD_TRACKER.contains("source \"$ZDOTDIR/.zshenv\""));
+        assert!(WSL_CWD_TRACKER.contains("rm -rf -- \"$ZETTA_INTEGRATION_ZDOTDIR\""));
+        assert!(!WSL_CWD_TRACKER.contains("source \"$ZDOTDIR/.zshrc\""));
+        assert!(WSL_CWD_TRACKER.contains("]7;file://localhost"));
+        assert!(WSL_CWD_TRACKER.contains("]2;zetta-cwd:"));
+        assert!(WSL_CWD_TRACKER.contains("readlink \"/proc/$parent/cwd\""));
     }
 
     #[test]
