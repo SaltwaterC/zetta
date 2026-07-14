@@ -20,6 +20,7 @@
       "ctrl--": "zetta::DecreaseTerminalFontSize",
       "ctrl-0": "zetta::ResetTerminalFontSize",
       "ctrl-shift-r": "zetta::ReloadConfiguration",
+      "ctrl-shift-f12": "zetta::TogglePerformanceOverlay",
       "ctrl-!": ["zetta::OpenProfile", { "slot": 1 }],
       "ctrl-@": ["zetta::OpenProfile", { "slot": 2 }],
       "ctrl-#": ["zetta::OpenProfile", { "slot": 3 }],

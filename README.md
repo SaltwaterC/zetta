@@ -124,6 +124,13 @@ Keyboard shortcuts use Zed's keymap format. The default shortcuts are:
 | `Ctrl--` | Decrease terminal font size |
 | `Ctrl-0` | Reset terminal font size |
 | `Ctrl-Shift-R` | Reload configuration, keymap, and user themes |
+| `Ctrl-Shift-F12` | Toggle the performance overlay |
+
+The performance overlay reports GPUI frames drawn during the latest one-second
+sample, average and 95th-percentile CPU draw time, average invalidation-to-draw
+latency, and frame counts exceeding the 120 Hz and 60 Hz budgets. GPUI renders
+on demand, so an idle terminal can report zero or a very low draw FPS; this is
+not the monitor refresh rate or GPU presentation latency.
 
 Tab names follow the active terminal process automatically. Press `F2` or
 double-click a tab to set a persistent name. Submit an empty name to clear the
