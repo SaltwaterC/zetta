@@ -81,6 +81,9 @@ Configuration is loaded from `~/.config/zetta/config.json` on Linux/macOS and
 starting point. `--config PATH` and `--keymap PATH` override the defaults. If
 the configuration cannot be parsed, Zetta starts with safe defaults and shows
 the error in the window; correct the file and reload it without restarting.
+The first tab starts in the user's home directory unless `working_directory`
+is configured. Later tabs and splits inherit the active pane's current
+directory.
 
 Keyboard shortcuts use Zed's keymap format. The default shortcuts are:
 
