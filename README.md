@@ -39,6 +39,22 @@ Desktop development with C++ workload must be installed.
 The executable is written to `target\release\zetta.exe` with the application
 icon from `assets\icons\zetta-terminal-icon.ico` embedded as a Windows resource.
 
+Install Zetta for the current Windows user with:
+
+```powershell
+make install
+```
+
+This requires no administrator privileges. It copies the executable to
+`%LOCALAPPDATA%\Programs\Zetta\zetta.exe` and creates
+`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Zetta.lnk`, making Zetta
+available through Start Menu application search. The shortcut uses the icon
+embedded in the executable. Run `make uninstall` to remove both files.
+
+`make install-binary` updates only the installed executable. `make
+install-assets` recreates only the Start Menu shortcut and requires the binary
+to already be installed.
+
 ### Linux desktop integration
 
 Zetta uses `Zetta` as its Wayland application ID and X11 `WM_CLASS`.

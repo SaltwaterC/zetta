@@ -19,10 +19,29 @@ ICON_512_DIR := $(DATADIR)/icons/hicolor/512x512/apps
 ifeq ($(OS),Windows_NT)
 build:
 	cmd.exe /d /c scripts\build-windows.cmd
+
+install: build
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Action Install
+
+install-binary:
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Action InstallBinary
+
+install-assets:
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Action InstallShortcut
+
+uninstall:
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Action Uninstall
+
+uninstall-binary:
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Action UninstallBinary
+
+uninstall-assets:
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Action UninstallShortcut
+
+refresh-desktop-caches:
 else
 build:
 	$(ENV) -u DESTDIR $(CARGO) build --release --locked
-endif
 
 install:
 	@if [ "$$(id -u)" -eq 0 ]; then \
@@ -71,3 +90,4 @@ refresh-desktop-caches:
 			gtk-update-icon-cache -f "$(PREFIX)/share/icons/hicolor"; \
 		fi; \
 	fi
+endif
