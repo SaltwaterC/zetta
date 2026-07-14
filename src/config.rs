@@ -11,6 +11,7 @@ use terminal::MAX_SCROLL_HISTORY_LINES;
 
 const DEFAULT_TERMINAL_FONT_FAMILY: &str = "MesloLGS NF";
 const DEFAULT_MAX_SCROLL_HISTORY_LINES: usize = MAX_SCROLL_HISTORY_LINES;
+const DEFAULT_INACTIVE_PANE_OPACITY: f32 = 0.8;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShellProfile {
@@ -28,6 +29,7 @@ pub struct Config {
     pub terminal_font_size: Option<f32>,
     pub terminal_font_family: String,
     pub max_scroll_history_lines: usize,
+    pub inactive_pane_opacity: f32,
 }
 
 impl Config {
@@ -46,6 +48,7 @@ impl Config {
             terminal_font_size: None,
             terminal_font_family: DEFAULT_TERMINAL_FONT_FAMILY.to_owned(),
             max_scroll_history_lines: DEFAULT_MAX_SCROLL_HISTORY_LINES,
+            inactive_pane_opacity: DEFAULT_INACTIVE_PANE_OPACITY,
         };
 
         let content = match fs::read_to_string(&config_path) {
@@ -90,6 +93,9 @@ impl Config {
         if let Some(history_lines) = root.get("max_scroll_history_lines") {
             config.max_scroll_history_lines = parse_max_scroll_history_lines(history_lines)?;
         }
+        if let Some(opacity) = root.get("inactive_pane_opacity") {
+            config.inactive_pane_opacity = parse_inactive_pane_opacity(opacity)?;
+        }
 
         if let Some(profiles) = root.get("shells").and_then(Value::as_array) {
             let parsed = profiles
@@ -111,6 +117,17 @@ impl Config {
 
         Ok(config)
     }
+}
+
+fn parse_inactive_pane_opacity(value: &Value) -> Result<f32> {
+    let opacity = value
+        .as_f64()
+        .context("inactive_pane_opacity must be a number")?;
+    anyhow::ensure!(
+        (0.0..=1.0).contains(&opacity),
+        "inactive_pane_opacity must be between 0 and 1"
+    );
+    Ok(opacity as f32)
 }
 
 fn parse_max_scroll_history_lines(value: &Value) -> Result<usize> {
@@ -280,5 +297,17 @@ mod tests {
         assert!(parse_max_scroll_history_lines(&serde_json::json!(-1)).is_err());
         assert!(parse_max_scroll_history_lines(&serde_json::json!(2_147_483_648_u64)).is_err());
         assert!(parse_max_scroll_history_lines(&serde_json::json!(1.5)).is_err());
+    }
+
+    #[test]
+    fn validates_inactive_pane_opacity() {
+        assert_eq!(DEFAULT_INACTIVE_PANE_OPACITY, 0.8);
+        assert_eq!(
+            parse_inactive_pane_opacity(&serde_json::json!(0.8)).unwrap(),
+            0.8
+        );
+        assert!(parse_inactive_pane_opacity(&serde_json::json!(-0.1)).is_err());
+        assert!(parse_inactive_pane_opacity(&serde_json::json!(1.1)).is_err());
+        assert!(parse_inactive_pane_opacity(&serde_json::json!("dim")).is_err());
     }
 }

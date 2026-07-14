@@ -752,7 +752,9 @@ impl Zetta {
                     .child(
                         div()
                             .size_full()
-                            .when(!active, |pane| pane.opacity(0.75))
+                            .when(!active, |pane| {
+                                pane.opacity(self.launch_config.inactive_pane_opacity)
+                            })
                             .child(content),
                     )
                     .into_any_element()

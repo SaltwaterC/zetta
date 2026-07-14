@@ -78,16 +78,19 @@ fallbacks.
 
 Set `theme` to the name of a bundled Zed theme and `terminal_font_size` to a
 value from 6 through 100 in `config.json`. `terminal_font_family` accepts the
-name of any bundled or system-installed font. `max_scroll_history_lines`
-defaults to the Alacritty engine's signed line-coordinate ceiling of
-2,147,483,647 lines and disables scrollback when set to 0. This is effectively
-unlimited for normal use; memory grows as output is retained. For example:
+name of any bundled or system-installed font. `inactive_pane_opacity` controls
+inactive split-pane dimming from 0 to 1 and defaults to 0.8.
+`max_scroll_history_lines` defaults to the Alacritty engine's signed
+line-coordinate ceiling of 2,147,483,647 lines and disables scrollback when set
+to 0. This is effectively unlimited for normal use; memory grows as output is
+retained. For example:
 
 ```json
 {
   "theme": "One Dark",
   "terminal_font_size": 14,
   "terminal_font_family": "MesloLGS NF",
+  "inactive_pane_opacity": 0.8,
   "max_scroll_history_lines": 2147483647
 }
 ```
