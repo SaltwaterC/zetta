@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Zetta
+GenericName=Terminal Emulator
+Comment=A high-performance terminal emulator
+TryExec=zetta
+Exec=zetta
+Icon=Zetta
+Terminal=false
+StartupNotify=true
+StartupWMClass=Zetta
+Categories=System;TerminalEmulator;
+Keywords=zetta;terminal;shell;console;command line;

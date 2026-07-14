@@ -7,6 +7,7 @@ use rust_embed::RustEmbed;
 
 #[derive(RustEmbed)]
 #[folder = "assets"]
+#[exclude = "**/*:Zone.Identifier"]
 struct ZettaEmbeddedAssets;
 
 pub struct ZettaAssets;

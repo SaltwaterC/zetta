@@ -3,6 +3,8 @@
 mod config;
 mod zetta_assets;
 
+const ZETTA_APP_ID: &str = "Zetta";
+
 use std::{collections::HashMap, env, fs, path::PathBuf, sync::Arc};
 
 use anyhow::{Context as _, Result};
@@ -1417,6 +1419,7 @@ fn open_zetta_window(config: Config, cx: &mut App) -> Result<()> {
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(520.), px(320.))),
+            app_id: Some(ZETTA_APP_ID.to_owned()),
             titlebar: Some(TitlebarOptions {
                 title: Some("Zetta".into()),
                 appears_transparent: true,
@@ -1496,6 +1499,13 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linux_desktop_entry_matches_app_id() {
+        let desktop_entry = include_str!("../resources/linux/Zetta.desktop");
+        assert!(desktop_entry.contains(&format!("\nIcon={ZETTA_APP_ID}\n")));
+        assert!(desktop_entry.contains(&format!("\nStartupWMClass={ZETTA_APP_ID}\n")));
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

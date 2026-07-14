@@ -36,4 +36,7 @@ debug = 1
 
 [profile.release]
 incremental = true
+# Incremental LLVM partitions have produced missing hidden symbols during the
+# final link. Keep incremental crate reuse while avoiding cross-CGU artifacts.
+codegen-units = 1
 strip = "symbols"

@@ -21,8 +21,41 @@ a stripped executable.
 
 Linux defaults to Wayland. Build with `cargo run --features x11` to include the
 X11 backend as well. GPUI currently links both xkbcommon libraries on Linux, so
-Debian/Ubuntu builds require both `libxkbcommon-dev` and
+Debian/Ubuntu builds require `libfontconfig-dev`, `libxkbcommon-dev`, and
 `libxkbcommon-x11-dev`, even for the default Wayland build.
+
+### Linux desktop integration
+
+Zetta uses `Zetta` as its Wayland application ID and X11 `WM_CLASS`.
+The Makefile builds the release binary as the current user, then installs it
+with the desktop entry and icons under `/usr` by default:
+
+```sh
+make build
+sudo make install
+```
+
+When run through `sudo`, `make install` uses the existing release artifact and
+does not invoke Cargo again. An unprivileged `make install` still builds first.
+
+To reinstall only the desktop entry and icons without rebuilding Zetta, run:
+
+```sh
+sudo make install-assets
+```
+
+Use `sudo make uninstall-assets` to remove only those assets. The full
+`uninstall` target removes the binary and assets. Set `PREFIX=/usr/local` for a
+traditional local system prefix, or use `PREFIX="$HOME/.local"` for a per-user
+installation without `sudo`. `DESTDIR` is supported for staged package builds.
+Desktop and icon caches are refreshed when the relevant utilities are available
+and `DESTDIR` is not set.
+
+WSLg only exports applications discovered in system desktop-entry directories,
+so use the default `/usr` prefix there. Zetta installs both 128px and 512px
+hicolor icons; the 128px variant is required for WSLg's application-icon lookup.
+After installing or upgrading under WSL2, close running Zetta windows and run
+`wsl --shutdown` from Windows if the previous taskbar icon remains cached.
 
 Zetta discovers common installed shells. On Windows this includes Windows
 PowerShell, PowerShell 7, Command Prompt, and WSL when their executables are on
