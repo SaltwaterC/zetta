@@ -48,7 +48,8 @@ actions!(
         FocusPaneDown,
         IncreaseTerminalFontSize,
         DecreaseTerminalFontSize,
-        ResetTerminalFontSize
+        ResetTerminalFontSize,
+        ReloadConfiguration
     ]
 );
 
@@ -590,6 +591,37 @@ impl Zetta {
         theme_settings::reset_buffer_font_size(cx);
     }
 
+    fn reload_configuration(
+        &mut self,
+        _: &ReloadConfiguration,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let config_path = self.launch_config.config_path.clone();
+        let keymap_override = self.launch_config.keymap_override.clone();
+        let config = match Config::load(Some(&config_path), keymap_override) {
+            Ok(config) => config,
+            Err(error) => {
+                eprintln!("Could not reload Zetta configuration: {error:#}");
+                return;
+            }
+        };
+
+        load_user_themes(cx).log_err();
+        if let Err(error) = apply_config_settings(&config, cx) {
+            eprintln!("Could not reload Zetta configuration: {error:#}");
+            return;
+        }
+        load_keybindings(&config.keymap_path, config.profiles.len(), cx);
+
+        self.selected_profile = config.default_profile;
+        self.profiles = config.profiles.clone();
+        self.working_directory = config.working_directory.clone();
+        self.launch_config = config;
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
     fn next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
         if !self.tabs.is_empty() {
             self.active_tab = (self.active_tab + 1) % self.tabs.len();
@@ -984,6 +1016,7 @@ impl Render for Zetta {
             .on_action(cx.listener(Self::increase_terminal_font_size))
             .on_action(cx.listener(Self::decrease_terminal_font_size))
             .on_action(cx.listener(Self::reset_terminal_font_size))
+            .on_action(cx.listener(Self::reload_configuration))
             .when(self.is_renaming_tab(), |content| {
                 content.track_focus(&self.rename_focus)
             })
@@ -1365,7 +1398,33 @@ fn apply_zetta_theme_overrides(cx: &mut App) {
     GlobalTheme::update_theme(cx, Arc::new(theme));
 }
 
+fn apply_config_settings(config: &Config, cx: &mut App) -> Result<()> {
+    let theme_name = config.theme.as_deref().unwrap_or(theme::DEFAULT_DARK_THEME);
+    let theme = ThemeRegistry::global(cx)
+        .get(theme_name)
+        .with_context(|| format!("using Zed theme {theme_name:?}"))?;
+    GlobalTheme::update_theme(cx, theme);
+    apply_zetta_theme_overrides(cx);
+
+    let mut terminal_settings = TerminalSettings::get_global(cx).clone();
+    terminal_settings.font_family = Some(theme_settings::FontFamilyName(
+        config.terminal_font_family.clone().into(),
+    ));
+    terminal_settings.font_size = config.terminal_font_size.map(px);
+    terminal_settings.copy_on_select = true;
+    terminal_settings.max_scroll_history_lines = Some(config.max_scroll_history_lines);
+    TerminalSettings::override_global(terminal_settings, cx);
+    Ok(())
+}
+
+fn normalize_keymap_key_names(content: &str) -> String {
+    content
+        .replace("page-up", "pageup")
+        .replace("page-down", "pagedown")
+}
+
 fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut App) {
+    cx.clear_key_bindings();
     match KeymapFile::load_asset_allow_partial_failure(settings::DEFAULT_KEYMAP_PATH, cx) {
         Ok(bindings) => cx.bind_keys(bindings),
         Err(error) => eprintln!("Could not load the default terminal keymap: {error:#}"),
@@ -1387,6 +1446,11 @@ fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut App) {
         KeyBinding::new("ctrl-+", IncreaseTerminalFontSize, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl--", DecreaseTerminalFontSize, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-0", ResetTerminalFontSize, Some("Zetta > Terminal")),
+        KeyBinding::new(
+            "ctrl-shift-r",
+            ReloadConfiguration,
+            Some("Zetta > Terminal"),
+        ),
         // Override Zed's inherited `pane::CloseActiveItem` binding in terminal focus.
         KeyBinding::new("ctrl-shift-w", CloseTab, Some("Terminal")),
     ];
@@ -1395,6 +1459,7 @@ fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut App) {
     let Ok(content) = fs::read_to_string(path) else {
         return;
     };
+    let content = normalize_keymap_key_names(&content);
     match KeymapFile::load(&content, cx) {
         KeymapFileLoadResult::Success { key_bindings } => cx.bind_keys(key_bindings),
         KeymapFileLoadResult::SomeFailedToLoad {
@@ -1445,9 +1510,6 @@ fn run() -> Result<()> {
     let config = Config::load(config_path.as_deref(), keymap_path)?;
     let keymap_path = config.keymap_path.clone();
     let profile_count = config.profiles.len();
-    let theme_name = config.theme.clone();
-    let terminal_font_size = config.terminal_font_size;
-    let max_scroll_history_lines = config.max_scroll_history_lines;
     gpui_platform::application()
         .with_assets(ZettaAssets)
         .run(move |cx: &mut App| {
@@ -1457,26 +1519,8 @@ fn run() -> Result<()> {
             settings::init(cx);
             theme_settings::init(theme::LoadThemes::All(Box::new(ZettaAssets)), cx);
             load_user_themes(cx).log_err();
-            if let Some(theme_name) = theme_name.as_deref() {
-                match ThemeRegistry::global(cx).get(theme_name) {
-                    Ok(theme) => GlobalTheme::update_theme(cx, theme),
-                    Err(error) => eprintln!("Could not use Zed theme {theme_name:?}: {error}"),
-                }
-            }
-            apply_zetta_theme_overrides(cx);
             ZettaAssets.load_fonts(cx).log_err();
-            {
-                let mut terminal_settings = TerminalSettings::get_global(cx).clone();
-                terminal_settings.font_family = Some(theme_settings::FontFamilyName(
-                    config.terminal_font_family.clone().into(),
-                ));
-                if let Some(font_size) = terminal_font_size {
-                    terminal_settings.font_size = Some(px(font_size));
-                }
-                terminal_settings.copy_on_select = true;
-                terminal_settings.max_scroll_history_lines = Some(max_scroll_history_lines);
-                TerminalSettings::override_global(terminal_settings, cx);
-            }
+            apply_config_settings(&config, cx).expect("failed to apply Zetta configuration");
             load_keybindings(&keymap_path, profile_count, cx);
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
@@ -1549,6 +1593,15 @@ mod tests {
             assert_eq!(bindings[0].match_keystrokes(&[shifted]), Some(false));
             assert_eq!(bindings[1].match_keystrokes(&[fallback]), Some(false));
         }
+    }
+
+    #[test]
+    fn normalizes_hyphenated_page_key_names() {
+        let keymap = r#"{"ctrl-page-up":"zetta::NextTab","ctrl-page-down":"zetta::PreviousTab"}"#;
+        assert_eq!(
+            normalize_keymap_key_names(keymap),
+            r#"{"ctrl-pageup":"zetta::NextTab","ctrl-pagedown":"zetta::PreviousTab"}"#
+        );
     }
 
     #[test]

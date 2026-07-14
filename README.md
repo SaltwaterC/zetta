@@ -82,6 +82,7 @@ Keyboard shortcuts use Zed's keymap format. The default shortcuts are:
 | `Ctrl-=` / `Ctrl-+` | Increase terminal font size |
 | `Ctrl--` | Decrease terminal font size |
 | `Ctrl-0` | Reset terminal font size |
+| `Ctrl-Shift-R` | Reload configuration, keymap, and user themes |
 
 Tab names follow the active terminal process automatically. Press `F2` or
 double-click a tab to set a persistent name. Submit an empty name to clear the
@@ -102,7 +103,12 @@ click pastes from the system clipboard.
 These bindings are built into Zetta; `keymap.example.json` mirrors them as a
 starting point for overrides and is not loaded automatically. Place overrides
 in `keymap.json` and keep the `Zetta > Terminal` context so they take precedence
-over Zed's terminal bindings.
+over Zed's terminal bindings. Key names accept both `pageup`/`pagedown` and the
+common `page-up`/`page-down` spellings.
+
+Press `Ctrl-Shift-R` after editing `config.json`, `keymap.json`, or files in the
+user themes directory. Configuration changes affect the active window and
+global terminal appearance; existing shells and their scrollback are retained.
 
 Shell profile shortcuts use the order displayed in the tab bar. With automatic
 discovery, profile 1 is `System`, followed by detected shells. An explicit

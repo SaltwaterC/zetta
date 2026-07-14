@@ -21,6 +21,8 @@ pub struct ShellProfile {
 
 #[derive(Clone, Debug)]
 pub struct Config {
+    pub config_path: PathBuf,
+    pub keymap_override: Option<PathBuf>,
     pub profiles: Vec<ShellProfile>,
     pub default_profile: usize,
     pub working_directory: Option<PathBuf>,
@@ -40,6 +42,8 @@ impl Config {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| config_dir.join("config.json"));
         let mut config = Self {
+            config_path: config_path.clone(),
+            keymap_override: keymap_path.clone(),
             profiles: discovered_profiles(),
             default_profile: 0,
             working_directory: None,
