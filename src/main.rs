@@ -1502,6 +1502,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn terminal_environment_identifies_zetta() {
+        let mut env = HashMap::from([("ZED_TERM".to_string(), "true".to_string())]);
+
+        terminal::insert_zetta_terminal_env(&mut env, &"0.1.0");
+
+        assert_eq!(env.get("ZETTA_TERM").map(String::as_str), Some("true"));
+        assert_eq!(env.get("TERM_PROGRAM").map(String::as_str), Some("zetta"));
+        assert_eq!(
+            env.get("TERM_PROGRAM_VERSION").map(String::as_str),
+            Some("0.1.0")
+        );
+        assert!(!env.contains_key("ZED_TERM"));
+    }
+
+    #[test]
     fn linux_desktop_entry_matches_app_id() {
         let desktop_entry = include_str!("../resources/linux/Zetta.desktop");
         assert!(desktop_entry.contains(&format!("\nIcon={ZETTA_APP_ID}\n")));
