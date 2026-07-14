@@ -1,0 +1,12 @@
+{
+  "default_shell": "System",
+  "working_directory": "~",
+  "theme": "One Dark",
+  "terminal_font_size": 14,
+  "terminal_font_family": "MesloLGS NF",
+  "max_scroll_history_lines": 2147483647,
+  "shells": [
+    { "name": "System", "program": "/bin/sh" },
+    { "name": "Login Zsh", "program": "/bin/zsh", "args": ["-l"] }
+  ]
+}

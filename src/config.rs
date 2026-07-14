@@ -1,0 +1,284 @@
+use std::{
+    collections::HashSet,
+    env, fs,
+    path::{Path, PathBuf},
+};
+
+use anyhow::{Context as _, Result};
+use serde_json::Value;
+use task::Shell;
+use terminal::MAX_SCROLL_HISTORY_LINES;
+
+const DEFAULT_TERMINAL_FONT_FAMILY: &str = "MesloLGS NF";
+const DEFAULT_MAX_SCROLL_HISTORY_LINES: usize = MAX_SCROLL_HISTORY_LINES;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShellProfile {
+    pub name: String,
+    pub shell: Shell,
+}
+
+#[derive(Clone, Debug)]
+pub struct Config {
+    pub profiles: Vec<ShellProfile>,
+    pub default_profile: usize,
+    pub working_directory: Option<PathBuf>,
+    pub keymap_path: PathBuf,
+    pub theme: Option<String>,
+    pub terminal_font_size: Option<f32>,
+    pub terminal_font_family: String,
+    pub max_scroll_history_lines: usize,
+}
+
+impl Config {
+    pub fn load(config_path: Option<&Path>, keymap_path: Option<PathBuf>) -> Result<Self> {
+        let config_dir = platform_config_dir();
+        let has_keymap_override = keymap_path.is_some();
+        let config_path = config_path
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| config_dir.join("config.json"));
+        let mut config = Self {
+            profiles: discovered_profiles(),
+            default_profile: 0,
+            working_directory: None,
+            keymap_path: keymap_path.unwrap_or_else(|| config_dir.join("keymap.json")),
+            theme: None,
+            terminal_font_size: None,
+            terminal_font_family: DEFAULT_TERMINAL_FONT_FAMILY.to_owned(),
+            max_scroll_history_lines: DEFAULT_MAX_SCROLL_HISTORY_LINES,
+        };
+
+        let content = match fs::read_to_string(&config_path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(config),
+            Err(error) => {
+                return Err(error).with_context(|| format!("reading {}", config_path.display()));
+            }
+        };
+        let root: Value = serde_json::from_str(&content)
+            .with_context(|| format!("parsing {}", config_path.display()))?;
+
+        if let Some(directory) = root.get("working_directory").and_then(Value::as_str) {
+            config.working_directory = Some(expand_home(directory));
+        }
+        if !has_keymap_override && let Some(path) = root.get("keymap").and_then(Value::as_str) {
+            config.keymap_path = expand_home(path);
+        }
+        if let Some(theme) = root.get("theme") {
+            config.theme = Some(theme.as_str().context("theme must be a string")?.to_owned());
+        }
+        if let Some(font_size) = root.get("terminal_font_size") {
+            let font_size = font_size
+                .as_f64()
+                .context("terminal_font_size must be a number")? as f32;
+            anyhow::ensure!(
+                (6.0..=100.0).contains(&font_size),
+                "terminal_font_size must be between 6 and 100"
+            );
+            config.terminal_font_size = Some(font_size);
+        }
+        if let Some(font_family) = root.get("terminal_font_family") {
+            config.terminal_font_family = font_family
+                .as_str()
+                .context("terminal_font_family must be a string")?
+                .to_owned();
+            anyhow::ensure!(
+                !config.terminal_font_family.trim().is_empty(),
+                "terminal_font_family must not be empty"
+            );
+        }
+        if let Some(history_lines) = root.get("max_scroll_history_lines") {
+            config.max_scroll_history_lines = parse_max_scroll_history_lines(history_lines)?;
+        }
+
+        if let Some(profiles) = root.get("shells").and_then(Value::as_array) {
+            let parsed = profiles
+                .iter()
+                .map(parse_profile)
+                .collect::<Result<Vec<_>>>()?;
+            if !parsed.is_empty() {
+                config.profiles = parsed;
+            }
+        }
+
+        if let Some(default_name) = root.get("default_shell").and_then(Value::as_str) {
+            config.default_profile = config
+                .profiles
+                .iter()
+                .position(|profile| profile.name.eq_ignore_ascii_case(default_name))
+                .with_context(|| format!("default_shell {default_name:?} is not in shells"))?;
+        }
+
+        Ok(config)
+    }
+}
+
+fn parse_max_scroll_history_lines(value: &Value) -> Result<usize> {
+    let history_lines = value
+        .as_u64()
+        .context("max_scroll_history_lines must be a non-negative integer")?;
+    anyhow::ensure!(
+        history_lines <= MAX_SCROLL_HISTORY_LINES as u64,
+        "max_scroll_history_lines must not exceed {MAX_SCROLL_HISTORY_LINES}"
+    );
+    Ok(history_lines as usize)
+}
+
+fn parse_profile(value: &Value) -> Result<ShellProfile> {
+    let object = value.as_object().context("each shell must be an object")?;
+    let name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .context("shell.name must be a string")?
+        .to_owned();
+    let program = object
+        .get("program")
+        .and_then(Value::as_str)
+        .context("shell.program must be a string")?
+        .to_owned();
+    let args = object
+        .get("args")
+        .map(|args| {
+            args.as_array()
+                .context("shell.args must be an array")?
+                .iter()
+                .map(|arg| {
+                    arg.as_str()
+                        .map(str::to_owned)
+                        .context("shell args must be strings")
+                })
+                .collect::<Result<Vec<_>>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+
+    let shell = if args.is_empty() {
+        Shell::Program(program)
+    } else {
+        Shell::WithArguments {
+            program,
+            args,
+            title_override: Some(name.clone()),
+        }
+    };
+    Ok(ShellProfile { name, shell })
+}
+
+fn discovered_profiles() -> Vec<ShellProfile> {
+    let mut profiles = vec![ShellProfile {
+        name: "System".to_owned(),
+        shell: Shell::System,
+    }];
+    let candidates: &[(&str, &str)] = if cfg!(windows) {
+        &[
+            ("PowerShell", "powershell.exe"),
+            ("PowerShell 7", "pwsh.exe"),
+            ("Command Prompt", "cmd.exe"),
+            ("WSL", "wsl.exe"),
+        ]
+    } else {
+        &[
+            ("Zsh", "zsh"),
+            ("Bash", "bash"),
+            ("Fish", "fish"),
+            ("Nushell", "nu"),
+        ]
+    };
+    let mut seen = HashSet::new();
+    for (name, program) in candidates {
+        if command_exists(program) && seen.insert(*program) {
+            profiles.push(ShellProfile {
+                name: (*name).to_owned(),
+                shell: Shell::Program((*program).to_owned()),
+            });
+        }
+    }
+    profiles
+}
+
+fn command_exists(program: &str) -> bool {
+    let program_path = Path::new(program);
+    if program_path.components().count() > 1 {
+        return program_path.is_file();
+    }
+    env::var_os("PATH").is_some_and(|path| {
+        env::split_paths(&path).any(|directory| {
+            if cfg!(windows) {
+                directory.join(program).is_file()
+                    || (!program.to_ascii_lowercase().ends_with(".exe")
+                        && directory.join(format!("{program}.exe")).is_file())
+            } else {
+                directory.join(program).is_file()
+            }
+        })
+    })
+}
+
+fn platform_config_dir() -> PathBuf {
+    if cfg!(windows) {
+        env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("Zetta")
+    } else if let Some(xdg) = env::var_os("XDG_CONFIG_HOME") {
+        PathBuf::from(xdg).join("zetta")
+    } else {
+        home_dir().join(".config/zetta")
+    }
+}
+
+pub fn themes_dir() -> PathBuf {
+    platform_config_dir().join("themes")
+}
+
+fn expand_home(path: &str) -> PathBuf {
+    if path == "~" {
+        home_dir()
+    } else if let Some(relative) = path.strip_prefix("~/") {
+        home_dir().join(relative)
+    } else {
+        PathBuf::from(path)
+    }
+}
+
+fn home_dir() -> PathBuf {
+    env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_shell_profile_with_arguments() {
+        let profile = parse_profile(&serde_json::json!({
+            "name": "WSL Ubuntu",
+            "program": "wsl.exe",
+            "args": ["-d", "Ubuntu"]
+        }))
+        .unwrap();
+        assert_eq!(profile.name, "WSL Ubuntu");
+        assert!(matches!(
+            profile.shell,
+            Shell::WithArguments { ref program, ref args, .. }
+                if program == "wsl.exe" && args == &["-d", "Ubuntu"]
+        ));
+    }
+
+    #[test]
+    fn validates_max_scroll_history_lines() {
+        assert_eq!(
+            parse_max_scroll_history_lines(&serde_json::json!(0)).unwrap(),
+            0
+        );
+        assert_eq!(
+            parse_max_scroll_history_lines(&serde_json::json!(2_147_483_647)).unwrap(),
+            2_147_483_647
+        );
+        assert!(parse_max_scroll_history_lines(&serde_json::json!(-1)).is_err());
+        assert!(parse_max_scroll_history_lines(&serde_json::json!(2_147_483_648_u64)).is_err());
+        assert!(parse_max_scroll_history_lines(&serde_json::json!(1.5)).is_err());
+    }
+}

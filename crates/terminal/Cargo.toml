@@ -1,0 +1,109 @@
+[package]
+name = "terminal"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "GPL-3.0-or-later"
+
+[features]
+test-support = [
+    "collections/test-support",
+    "gpui/test-support",
+    "settings/test-support",
+]
+
+[lib]
+path = "src/terminal.rs"
+doctest = false
+
+[dependencies]
+async-channel = "2.5.0"
+alacritty_terminal = { git = "https://github.com/zed-industries/alacritty", rev = "4c129667ce56611becdc82de6e28218c80e2e88f" }
+anyhow = "1.0.86"
+collections = { path = "../../zed/crates/collections", version = "0.1.0" }
+futures = "0.3.32"
+futures-lite = "1.13"
+gpui = { path = "../../zed/crates/gpui", default-features = false }
+itertools = "0.14.0"
+libc = "0.2"
+log = { version = "0.4.16", features = ["kv_unstable_serde", "serde"] }
+parking_lot = "0.12.1"
+percent-encoding = "2.3.2"
+regex = "1.5"
+release_channel = { path = "../../zed/crates/release_channel" }
+schemars = { version = "1.0", features = ["indexmap2"] }
+serde = { version = "1.0.221", features = ["derive", "rc"] }
+settings = { path = "../../zed/crates/settings" }
+sysinfo = "0.37.0"
+task = { path = "../../zed/crates/task" }
+theme = { path = "../../zed/crates/theme" }
+theme_settings = { path = "../../zed/crates/theme_settings" }
+thiserror = "2.0.12"
+url = "2.2"
+urlencoding = "2.1.2"
+util = { path = "../../zed/crates/util" }
+vte = { version = "0.15.0", features = ["ansi"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Foundation_Numerics",
+    "Globalization_DateTimeFormatting",
+    "Storage_Search",
+    "Storage_Streams",
+    "System_Threading",
+    "UI_ViewManagement",
+    "Wdk_System_SystemServices",
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D_Fxc",
+    "Win32_Graphics_DirectComposition",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_DirectManipulation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Imaging",
+    "Win32_Graphics_Hlsl",
+    "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_Security_Credentials",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_DataExchange",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_Performance",
+    "Win32_System_Pipes",
+    "Win32_System_RestartManager",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_System_WinRT",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_Ime",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Input_Pointer",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Media",
+] }
+
+[dev-dependencies]
+gpui = { path = "../../zed/crates/gpui", default-features = false, features = ["test-support"] }
+rand = "0.9"
+settings = { path = "../../zed/crates/settings", features = ["test-support"] }
+util_macros = { path = "../../zed/crates/util_macros" }

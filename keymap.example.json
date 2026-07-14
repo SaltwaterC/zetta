@@ -1,0 +1,31 @@
+[
+  {
+    "context": "Zetta > Terminal",
+    "bindings": {
+      "ctrl-shift-t": "zetta::NewTab",
+      "ctrl-shift-n": "zetta::NewWindow",
+      "ctrl-shift-w": "zetta::CloseTab",
+      "ctrl-shift-o": "zetta::SplitHorizontal",
+      "ctrl-shift-e": "zetta::SplitVertical",
+      "alt-left": "zetta::FocusPaneLeft",
+      "alt-right": "zetta::FocusPaneRight",
+      "alt-up": "zetta::FocusPaneUp",
+      "alt-down": "zetta::FocusPaneDown",
+      "ctrl-tab": "zetta::NextTab",
+      "ctrl-shift-tab": "zetta::PreviousTab",
+      "f2": "zetta::RenameTab",
+      "ctrl-=": "zetta::IncreaseTerminalFontSize",
+      "ctrl--": "zetta::DecreaseTerminalFontSize",
+      "ctrl-0": "zetta::ResetTerminalFontSize",
+      "ctrl-!": ["zetta::OpenProfile", { "slot": 1 }],
+      "ctrl-@": ["zetta::OpenProfile", { "slot": 2 }],
+      "ctrl-#": ["zetta::OpenProfile", { "slot": 3 }],
+      "ctrl-$": ["zetta::OpenProfile", { "slot": 4 }],
+      "ctrl-%": ["zetta::OpenProfile", { "slot": 5 }],
+      "ctrl-^": ["zetta::OpenProfile", { "slot": 6 }],
+      "ctrl-&": ["zetta::OpenProfile", { "slot": 7 }],
+      "ctrl-*": ["zetta::OpenProfile", { "slot": 8 }],
+      "ctrl-(": ["zetta::OpenProfile", { "slot": 9 }]
+    }
+  }
+]
