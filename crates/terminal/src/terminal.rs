@@ -2531,10 +2531,17 @@ impl Terminal {
                             .push_back(InternalEvent::SetSelection(Some(selection)));
                     }
                 }
-                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                 MouseButton::Middle => {
-                    if let Some(item) = cx.read_from_primary() {
-                        let text = item.text().unwrap_or_default();
+                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                    let text = cx
+                        .read_from_primary()
+                        .and_then(|item| item.text())
+                        .filter(|text| !text.is_empty())
+                        .or_else(|| cx.read_from_clipboard().and_then(|item| item.text()));
+                    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+                    let text = cx.read_from_clipboard().and_then(|item| item.text());
+
+                    if let Some(text) = text {
                         self.paste(&text);
                     }
                 }
@@ -3753,6 +3760,40 @@ mod tests {
                 "a deliberate drag should start a selection"
             );
             assert!(terminal.selection_phase == SelectionPhase::Selecting);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_terminal_middle_click_pastes_selection_clipboard(cx: &mut TestAppContext) {
+        let terminal = init_ctrl_click_hyperlink_test(cx, b"");
+
+        cx.update(|cx| {
+            let item = ClipboardItem::new_string("middle-click paste".to_owned());
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            {
+                cx.write_to_primary(ClipboardItem::new_string(String::new()));
+                cx.write_to_clipboard(item);
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+            cx.write_to_clipboard(item);
+        });
+
+        terminal.update(cx, |terminal, cx| {
+            terminal.mouse_down(
+                &MouseDownEvent {
+                    button: MouseButton::Middle,
+                    position: point(px(10.0), px(10.0)),
+                    modifiers: Modifiers::none(),
+                    click_count: 1,
+                    first_mouse: true,
+                },
+                cx,
+            );
+
+            assert_eq!(
+                terminal.take_pty_write_log(),
+                vec![b"middle-click paste".to_vec()]
+            );
         });
     }
 
