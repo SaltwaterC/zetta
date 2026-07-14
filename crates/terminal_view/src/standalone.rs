@@ -694,10 +694,6 @@ impl Render for TerminalView {
                             Scrollbars::for_settings::<TerminalScrollbarSettings>()
                                 .show_along(ScrollAxes::Vertical)
                                 .style(ScrollbarStyle::Editor)
-                                .with_stable_track_along(
-                                    ScrollAxes::Vertical,
-                                    theme.colors().editor_background,
-                                )
                                 .tracked_scroll_handle(&self.scroll_handle),
                             window,
                             cx,
