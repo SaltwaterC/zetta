@@ -10,18 +10,23 @@ use std::{
     collections::HashMap,
     env, fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context as _, Result};
 use config::{Config, Profile};
 use gpui::{
     Action, Anchor, App, AppContext as _, Bounds, Context, CursorStyle, Decorations, Entity,
-    Focusable, HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent,
-    MAX_BUTTONS_PER_SIDE, MouseButton, Pixels, Point, Render, ResizeEdge, Size, Subscription,
-    Tiling, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowButton,
-    WindowButtonLayout, WindowControlArea, WindowControls, WindowDecorations, WindowOptions,
-    actions, canvas, div, point, px, size, svg, transparent_black,
+    Focusable, FrameTiming, FrameTimingCollector, HitboxBehavior, InteractiveElement as _,
+    IntoElement, KeyBinding, KeyDownEvent, MAX_BUTTONS_PER_SIDE, MouseButton, Pixels, Point,
+    Render, ResizeEdge, Size, Subscription, Tiling, TitlebarOptions, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowButton, WindowButtonLayout, WindowControlArea,
+    WindowControls, WindowDecorations, WindowId, WindowOptions, actions, canvas, div, point,
+    profiler, px, size, svg, transparent_black,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -55,9 +60,16 @@ actions!(
         IncreaseTerminalFontSize,
         DecreaseTerminalFontSize,
         ResetTerminalFontSize,
-        ReloadConfiguration
+        ReloadConfiguration,
+        TogglePerformanceOverlay
     ]
 );
+
+static PERFORMANCE_OVERLAY_COUNT: AtomicUsize = AtomicUsize::new(0);
+static PERFORMANCE_OWNS_FRAME_TRACING: AtomicBool = AtomicBool::new(false);
+const PERFORMANCE_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+const FRAME_BUDGET_120_HZ: Duration = Duration::from_nanos(8_333_333);
+const FRAME_BUDGET_60_HZ: Duration = Duration::from_nanos(16_666_667);
 
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
 #[action(namespace = zetta)]
@@ -275,6 +287,90 @@ impl Tab {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct PerformanceMetrics {
+    draw_fps: f64,
+    average_draw_ms: f64,
+    p95_draw_ms: f64,
+    average_latency_ms: f64,
+    slow_120_hz: usize,
+    slow_60_hz: usize,
+}
+
+impl PerformanceMetrics {
+    fn from_timings(timings: &[FrameTiming], elapsed: Duration) -> Self {
+        if timings.is_empty() || elapsed.is_zero() {
+            return Self::default();
+        }
+
+        let mut draw_durations = timings
+            .iter()
+            .map(FrameTiming::draw_duration)
+            .collect::<Vec<_>>();
+        draw_durations.sort_unstable();
+        let total_draw = draw_durations.iter().sum::<Duration>();
+        let p95_index = ((draw_durations.len() as f64 * 0.95).ceil() as usize)
+            .saturating_sub(1)
+            .min(draw_durations.len() - 1);
+        let latencies = timings
+            .iter()
+            .filter_map(FrameTiming::dirty_to_draw_duration)
+            .collect::<Vec<_>>();
+        let average_latency_ms = if latencies.is_empty() {
+            0.0
+        } else {
+            latencies.iter().sum::<Duration>().as_secs_f64() * 1_000.0 / latencies.len() as f64
+        };
+
+        Self {
+            draw_fps: timings.len() as f64 / elapsed.as_secs_f64(),
+            average_draw_ms: total_draw.as_secs_f64() * 1_000.0 / timings.len() as f64,
+            p95_draw_ms: draw_durations[p95_index].as_secs_f64() * 1_000.0,
+            average_latency_ms,
+            slow_120_hz: draw_durations
+                .iter()
+                .filter(|duration| **duration > FRAME_BUDGET_120_HZ)
+                .count(),
+            slow_60_hz: draw_durations
+                .iter()
+                .filter(|duration| **duration > FRAME_BUDGET_60_HZ)
+                .count(),
+        }
+    }
+}
+
+struct PerformanceOverlay {
+    collector: FrameTimingCollector,
+    window_id: WindowId,
+    sampled_at: Instant,
+    metrics: PerformanceMetrics,
+    generation: u64,
+}
+
+impl PerformanceOverlay {
+    fn new(window_id: WindowId, generation: u64) -> Self {
+        Self {
+            collector: FrameTimingCollector::new(),
+            window_id,
+            sampled_at: Instant::now(),
+            metrics: PerformanceMetrics::default(),
+            generation,
+        }
+    }
+
+    fn sample(&mut self) {
+        let now = Instant::now();
+        let timings = self
+            .collector
+            .collect_unseen()
+            .into_iter()
+            .filter(|timing| timing.window_id == self.window_id)
+            .collect::<Vec<_>>();
+        self.metrics = PerformanceMetrics::from_timings(&timings, now - self.sampled_at);
+        self.sampled_at = now;
+    }
+}
+
 struct Zetta {
     launch_config: Config,
     configuration_error: Option<String>,
@@ -288,6 +384,8 @@ struct Zetta {
     rename_focus: gpui::FocusHandle,
     titlebar_dragging: bool,
     button_layout: WindowButtonLayout,
+    performance_overlay: Option<PerformanceOverlay>,
+    performance_overlay_generation: u64,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -312,6 +410,8 @@ impl Zetta {
             rename_focus: cx.focus_handle(),
             titlebar_dragging: false,
             button_layout,
+            performance_overlay: None,
+            performance_overlay_generation: 0,
             _subscriptions: vec![
                 cx.observe_button_layout_changed(window, |this, _, cx| {
                     this.button_layout = system_window_button_layout(cx);
@@ -703,6 +803,51 @@ impl Zetta {
         theme_settings::reset_buffer_font_size(cx);
     }
 
+    fn toggle_performance_overlay(
+        &mut self,
+        _: &TogglePerformanceOverlay,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.performance_overlay_generation = self.performance_overlay_generation.wrapping_add(1);
+        if self.performance_overlay.take().is_some() {
+            disable_frame_tracing();
+            cx.notify();
+            return;
+        }
+
+        enable_frame_tracing();
+        let generation = self.performance_overlay_generation;
+        self.performance_overlay = Some(PerformanceOverlay::new(
+            window.window_handle().window_id(),
+            generation,
+        ));
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            loop {
+                executor.timer(PERFORMANCE_SAMPLE_INTERVAL).await;
+                let keep_sampling = this
+                    .update(cx, |this, cx| {
+                        let Some(overlay) = this.performance_overlay.as_mut() else {
+                            return false;
+                        };
+                        if overlay.generation != generation {
+                            return false;
+                        }
+                        overlay.sample();
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep_sampling {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn reload_configuration(
         &mut self,
         _: &ReloadConfiguration,
@@ -973,6 +1118,29 @@ impl Zetta {
     }
 }
 
+impl Drop for Zetta {
+    fn drop(&mut self) {
+        if self.performance_overlay.is_some() {
+            disable_frame_tracing();
+        }
+    }
+}
+
+fn enable_frame_tracing() {
+    if PERFORMANCE_OVERLAY_COUNT.fetch_add(1, Ordering::AcqRel) == 0 {
+        PERFORMANCE_OWNS_FRAME_TRACING
+            .store(profiler::set_frame_trace_enabled(true), Ordering::Release);
+    }
+}
+
+fn disable_frame_tracing() {
+    let previous = PERFORMANCE_OVERLAY_COUNT.fetch_sub(1, Ordering::AcqRel);
+    debug_assert!(previous > 0);
+    if previous == 1 && PERFORMANCE_OWNS_FRAME_TRACING.swap(false, Ordering::AcqRel) {
+        profiler::set_frame_trace_enabled(false);
+    }
+}
+
 impl Render for Zetta {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors().clone();
@@ -1237,10 +1405,71 @@ impl Render for Zetta {
             Some(tab) => self.render_pane_layout(tab, &tab.layout, window, cx),
             None => div().size_full().into_any_element(),
         };
+        let performance_overlay = self.performance_overlay.as_ref().map(|overlay| {
+            let metrics = overlay.metrics;
+            let rows = [
+                ("Draw FPS", format!("{:.1}", metrics.draw_fps)),
+                (
+                    "Frame avg / p95",
+                    format!(
+                        "{:.2} / {:.2} ms",
+                        metrics.average_draw_ms, metrics.p95_draw_ms
+                    ),
+                ),
+                (
+                    "Invalidation avg",
+                    format!("{:.2} ms", metrics.average_latency_ms),
+                ),
+                ("Frames > 8.3 ms", metrics.slow_120_hz.to_string()),
+                ("Frames > 16.7 ms", metrics.slow_60_hz.to_string()),
+                (
+                    "Window",
+                    if window.is_window_active() {
+                        "Active".to_owned()
+                    } else {
+                        "Inactive".to_owned()
+                    },
+                ),
+            ];
+            div()
+                .id("performance-overlay")
+                .absolute()
+                .top(px(74.))
+                .right(px(10.))
+                .w(px(232.))
+                .p_2()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .rounded(px(4.))
+                .border_1()
+                .border_color(colors.border)
+                .bg(colors.elevated_surface_background.opacity(0.96))
+                .shadow_sm()
+                .text_sm()
+                .text_color(colors.text)
+                .child(
+                    div()
+                        .pb_1()
+                        .border_b_1()
+                        .border_color(colors.border)
+                        .child("Performance"),
+                )
+                .children(rows.into_iter().map(|(label, value)| {
+                    h_flex()
+                        .w_full()
+                        .justify_between()
+                        .gap_3()
+                        .child(div().text_color(colors.text_muted).child(label))
+                        .child(div().child(value))
+                }))
+                .into_any_element()
+        });
 
         let content = div()
             .key_context("Zetta")
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .bg(colors.editor_background)
@@ -1261,6 +1490,7 @@ impl Render for Zetta {
             .on_action(cx.listener(Self::decrease_terminal_font_size))
             .on_action(cx.listener(Self::reset_terminal_font_size))
             .on_action(cx.listener(Self::reload_configuration))
+            .on_action(cx.listener(Self::toggle_performance_overlay))
             .when(self.is_renaming_tab(), |content| {
                 content.track_focus(&self.rename_focus)
             })
@@ -1330,7 +1560,10 @@ impl Render for Zetta {
                     ),
                 )
             })
-            .child(div().flex_1().min_h_0().child(body));
+            .child(div().flex_1().min_h_0().child(body))
+            .when_some(performance_overlay, |content, overlay| {
+                content.child(overlay)
+            });
 
         client_window_frame(content, window, cx)
     }
@@ -1870,6 +2103,11 @@ fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut App) {
             ReloadConfiguration,
             Some("Zetta > Terminal"),
         ),
+        KeyBinding::new(
+            "ctrl-shift-f12",
+            TogglePerformanceOverlay,
+            Some("Zetta > Terminal"),
+        ),
         // Override Zed's inherited `pane::CloseActiveItem` binding in terminal focus.
         KeyBinding::new("ctrl-shift-w", CloseTab, Some("Terminal")),
     ];
@@ -1968,6 +2206,37 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn performance_metrics_report_fps_percentiles_and_slow_frames() {
+        let draw_start = Instant::now();
+        let timing = |milliseconds| FrameTiming {
+            window_id: WindowId::from(1),
+            dirty_at: Some(draw_start),
+            invalidations: 1,
+            draw_start,
+            draw_end: draw_start + Duration::from_millis(milliseconds),
+        };
+        let metrics = PerformanceMetrics::from_timings(
+            &[timing(5), timing(10), timing(20)],
+            Duration::from_secs(1),
+        );
+
+        assert!((metrics.draw_fps - 3.0).abs() < f64::EPSILON);
+        assert!((metrics.average_draw_ms - 11.666_666).abs() < 0.001);
+        assert!((metrics.p95_draw_ms - 20.0).abs() < f64::EPSILON);
+        assert!((metrics.average_latency_ms - 11.666_666).abs() < 0.001);
+        assert_eq!(metrics.slow_120_hz, 2);
+        assert_eq!(metrics.slow_60_hz, 1);
+    }
+
+    #[test]
+    fn performance_metrics_handle_an_idle_sample() {
+        assert_eq!(
+            PerformanceMetrics::from_timings(&[], Duration::from_secs(1)),
+            PerformanceMetrics::default()
+        );
+    }
 
     #[test]
     fn invalid_startup_config_falls_back_and_reports_the_error() {
