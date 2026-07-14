@@ -98,6 +98,8 @@ Keyboard shortcuts use Zed's keymap format. The default shortcuts are:
 | `Ctrl-Shift-W` | Close tab |
 | `Ctrl-Shift-O` | Split active pane horizontally (top/bottom) |
 | `Ctrl-Shift-E` | Split active pane vertically (left/right) |
+| `Ctrl-Shift-A` | Select all terminal text |
+| `Ctrl-Shift-Backspace` | Clear the system clipboard |
 | `Alt-Arrow` | Focus the pane in that direction |
 | `Ctrl-Tab` | Next tab |
 | `Ctrl-Shift-Tab` | Previous tab |
@@ -118,7 +120,9 @@ click a pane. Exiting a shell removes that pane; exiting the final pane closes
 its tab.
 
 Selecting terminal text copies it to the system clipboard while preserving the
-selection. On Linux and FreeBSD, selections also populate the PRIMARY
+selection. Plain right-click pastes when the clipboard contains data and opens
+the context menu when it is empty; `Shift`-right-click always opens the context
+menu. On Linux and FreeBSD, selections also populate the PRIMARY
 selection and a middle click pastes from PRIMARY, falling back to the system
 clipboard when PRIMARY is unavailable or empty. On other platforms, a middle
 click pastes from the system clipboard.

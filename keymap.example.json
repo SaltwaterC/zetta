@@ -7,6 +7,8 @@
       "ctrl-shift-w": "zetta::CloseTab",
       "ctrl-shift-o": "zetta::SplitHorizontal",
       "ctrl-shift-e": "zetta::SplitVertical",
+      "ctrl-shift-a": "terminal_view::SelectAll",
+      "ctrl-shift-backspace": "terminal_view::ClearClipboard",
       "alt-left": "zetta::FocusPaneLeft",
       "alt-right": "zetta::FocusPaneRight",
       "alt-up": "zetta::FocusPaneUp",

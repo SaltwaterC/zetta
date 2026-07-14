@@ -28,7 +28,7 @@ use serde::Deserialize;
 use settings::{KeymapFile, KeymapFileLoadResult, Settings as _};
 use task::Shell;
 use terminal::{TerminalBuilder, terminal_settings::TerminalSettings};
-use terminal_view::{TerminalView, TerminalViewEvent};
+use terminal_view::{ClearClipboard, SelectAll, TerminalView, TerminalViewEvent};
 use theme::{ActiveTheme, ClientDecorationsExt as _, GlobalTheme, Theme, ThemeRegistry};
 use ui::{
     Banner, ButtonCommon as _, ButtonSize, Clickable as _, Color, IconButton, IconButtonShape,
@@ -1848,6 +1848,12 @@ fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut App) {
         KeyBinding::new("ctrl-shift-w", CloseTab, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-shift-o", SplitHorizontal, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-shift-e", SplitVertical, Some("Zetta > Terminal")),
+        KeyBinding::new("ctrl-shift-a", SelectAll, Some("Zetta > Terminal")),
+        KeyBinding::new(
+            "ctrl-shift-backspace",
+            ClearClipboard,
+            Some("Zetta > Terminal"),
+        ),
         KeyBinding::new("alt-left", FocusPaneLeft, Some("Zetta > Terminal")),
         KeyBinding::new("alt-right", FocusPaneRight, Some("Zetta > Terminal")),
         KeyBinding::new("alt-up", FocusPaneUp, Some("Zetta > Terminal")),

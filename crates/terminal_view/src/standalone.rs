@@ -4,10 +4,10 @@ mod terminal_scrollbar;
 use std::{cmp, ops::Range as StdRange, sync::Arc, time::Duration};
 
 use gpui::{
-    Action, AnyElement, App, AppContext as _, ClipboardEntry, Context, Entity, EventEmitter,
-    DismissEvent, FocusHandle, Focusable, KeyContext, KeyDownEvent, Keystroke, MouseButton,
-    MouseDownEvent, Pixels, Point, Render, ScrollWheelEvent, Subscription, Window, actions,
-    anchored, deferred, div, px,
+    Action, AnyElement, App, AppContext as _, ClipboardEntry, ClipboardItem, Context, Entity,
+    EventEmitter, DismissEvent, FocusHandle, Focusable, KeyContext, KeyDownEvent, Keystroke,
+    MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollWheelEvent, Subscription, Window,
+    actions, anchored, deferred, div, px,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -41,7 +41,7 @@ pub struct SendKeystroke(pub String);
 #[action(namespace = terminal)]
 pub struct RenameTerminal;
 
-actions!(terminal_view, [SelectAll]);
+actions!(terminal_view, [SelectAll, ClearClipboard]);
 
 #[derive(Clone, Copy, Debug)]
 pub enum TerminalViewEvent {
@@ -474,6 +474,21 @@ impl TerminalView {
         cx.notify();
     }
 
+    fn clear_clipboard(&mut self, _: &ClearClipboard, _: &mut Window, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem {
+            entries: Vec::new(),
+        });
+    }
+
+    fn clipboard_has_content(cx: &App) -> bool {
+        cx.read_from_clipboard().is_some_and(|clipboard| {
+            clipboard.text().is_some()
+                || clipboard.entries().iter().any(
+                    |entry| matches!(entry, ClipboardEntry::Image(image) if !image.bytes.is_empty()),
+                )
+        })
+    }
+
     fn deploy_context_menu(
         &mut self,
         position: Point<Pixels>,
@@ -484,9 +499,9 @@ impl TerminalView {
             menu.context(self.focus_handle.clone())
                 .action("Copy", Box::new(Copy))
                 .action("Paste", Box::new(Paste))
-                .action("Paste Text", Box::new(PasteText))
                 .action("Select All", Box::new(SelectAll))
                 .separator()
+                .action("Clear Clipboard", Box::new(ClearClipboard))
                 .action("Clear", Box::new(Clear))
         });
         window.focus(&menu.focus_handle(cx), cx);
@@ -616,6 +631,7 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::paste_text))
             .on_action(cx.listener(Self::clear))
             .on_action(cx.listener(Self::select_all))
+            .on_action(cx.listener(Self::clear_clipboard))
             .on_action(cx.listener(Self::scroll_line_up))
             .on_action(cx.listener(Self::scroll_line_down))
             .on_action(cx.listener(Self::scroll_page_up))
@@ -629,7 +645,11 @@ impl Render for TerminalView {
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
                     if !this.terminal.read(cx).mouse_mode(event.modifiers.shift) {
-                        this.deploy_context_menu(event.position, window, cx);
+                        if event.modifiers.shift || !Self::clipboard_has_content(cx) {
+                            this.deploy_context_menu(event.position, window, cx);
+                        } else {
+                            this.paste(&Paste, window, cx);
+                        }
                         cx.stop_propagation();
                         cx.notify();
                     }
