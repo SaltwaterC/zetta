@@ -194,6 +194,10 @@ impl Focusable for TerminalView {
 }
 
 impl TerminalView {
+    pub fn has_open_context_menu(&self) -> bool {
+        self.context_menu.is_some()
+    }
+
     pub fn new(
         terminal: Entity<Terminal>,
         window: &mut Window,
@@ -577,6 +581,7 @@ impl Render for TerminalView {
         }
 
         let focused = self.focus_handle.is_focused(window);
+        let owns_transient_focus = focused || self.has_open_context_menu();
         div()
             .id("terminal-view")
             .size_full()
@@ -625,12 +630,12 @@ impl Render for TerminalView {
                         None,
                         self.mode.clone(),
                     ))
-                    .when(focused, |container| {
+                    .when(owns_transient_focus, |container| {
                         container.custom_scrollbars(
                             Scrollbars::for_settings::<TerminalScrollbarSettings>()
                                 .show_along(ScrollAxes::Vertical)
                                 .style(ScrollbarStyle::Editor)
-                                .with_track_along(
+                                .with_stable_track_along(
                                     ScrollAxes::Vertical,
                                     cx.theme().colors().editor_background,
                                 )
