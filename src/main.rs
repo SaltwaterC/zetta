@@ -4,14 +4,15 @@ mod config;
 mod zetta_assets;
 
 const ZETTA_APP_ID: &str = "Zetta";
+const ZETTA_DEFAULT_THEME: &str = "One Light";
 
 use std::{collections::HashMap, env, fs, path::PathBuf, sync::Arc};
 
 use anyhow::{Context as _, Result};
 use config::{Config, ShellProfile};
 use gpui::{
-    Action, App, AppContext as _, Bounds, Context, CursorStyle, Decorations, Entity, Focusable,
-    HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent,
+    Action, Anchor, App, AppContext as _, Bounds, Context, CursorStyle, Decorations, Entity,
+    Focusable, HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent,
     MAX_BUTTONS_PER_SIDE, MouseButton, Pixels, Point, Render, ResizeEdge, Size, Subscription,
     Tiling, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowButton,
     WindowButtonLayout, WindowControlArea, WindowControls, WindowDecorations, WindowOptions,
@@ -24,9 +25,8 @@ use terminal::{TerminalBuilder, terminal_settings::TerminalSettings};
 use terminal_view::{TerminalView, TerminalViewEvent};
 use theme::{ActiveTheme, ClientDecorationsExt as _, GlobalTheme, ThemeRegistry};
 use ui::{
-    Button, ButtonCommon as _, ButtonSize, ButtonStyle, Clickable as _, Color, IconButton,
-    IconButtonShape, IconName, IconSize, Label, LabelSize, SelectableButton as _, Tooltip,
-    prelude::*,
+    ButtonCommon as _, ButtonSize, Clickable as _, Color, IconButton, IconButtonShape, IconName,
+    IconSize, Label, LabelSize, PopoverMenu, Tooltip, prelude::*,
 };
 use util::{ResultExt as _, paths::PathStyle};
 use zetta_assets::ZettaAssets;
@@ -972,22 +972,57 @@ impl Render for Zetta {
             })
             .collect::<Vec<_>>();
 
-        let profiles = self.profiles.iter().enumerate().map(|(index, profile)| {
-            let handle = handle.clone();
-            Button::new(("shell-profile", index), profile.name.clone())
-                .size(ButtonSize::Compact)
-                .style(ButtonStyle::Subtle)
-                .selected_style(ButtonStyle::Filled)
-                .toggle_state(index == self.selected_profile)
-                .on_click(move |_, _, cx| {
-                    handle
-                        .update(cx, |this, cx| {
-                            this.selected_profile = index;
-                            cx.notify();
-                        })
-                        .ok();
-                })
-        });
+        let profile_menu_profiles = self.profiles.clone();
+        let profile_menu_handle = handle.clone();
+        let profile_menu = PopoverMenu::new("new-tab-profile-menu")
+            .trigger_with_tooltip(
+                IconButton::new("new-tab-profile-menu-trigger", IconName::ChevronDown)
+                    .shape(IconButtonShape::Wide)
+                    .size(ButtonSize::Large)
+                    .width(px(32.))
+                    .icon_size(IconSize::Small)
+                    .aria_label("New tab profile"),
+                Tooltip::text("New tab profile"),
+            )
+            .anchor(Anchor::TopRight)
+            .menu(move |window, cx| {
+                let profiles = profile_menu_profiles.clone();
+                let handle = profile_menu_handle.clone();
+                Some(ui::ContextMenu::build(window, cx, move |mut menu, _, _| {
+                    for (index, profile) in profiles.iter().enumerate() {
+                        let label = profile.name.clone();
+                        let label_for_row = label.clone();
+                        let shortcut = profile_shortcut_label(index + 1);
+                        let handle = handle.clone();
+                        menu = menu.custom_entry(
+                            move |_, _| {
+                                h_flex()
+                                    .w_full()
+                                    .justify_between()
+                                    .gap_4()
+                                    .child(Label::new(label_for_row.clone()))
+                                    .when_some(shortcut.clone(), |row, shortcut| {
+                                        row.child(
+                                            Label::new(shortcut)
+                                                .size(LabelSize::Small)
+                                                .color(Color::Muted),
+                                        )
+                                    })
+                                    .into_any_element()
+                            },
+                            move |window, cx| {
+                                handle
+                                    .update(cx, |this, cx| {
+                                        this.selected_profile = index;
+                                        this.open_tab(window, cx);
+                                    })
+                                    .ok();
+                            },
+                        );
+                    }
+                    menu
+                }))
+            });
 
         let body = match self.tabs.get(self.active_tab) {
             Some(tab) => self.render_pane_layout(tab, &tab.layout, window, cx),
@@ -1044,40 +1079,26 @@ impl Render for Zetta {
                             .children(tabs),
                     )
                     .child(
-                        div().ml_1().h_8().flex_none().flex().items_center().child(
-                            IconButton::new("new-tab", IconName::Plus)
-                                .shape(IconButtonShape::Wide)
-                                .size(ButtonSize::Large)
-                                .width(px(32.))
-                                .icon_size(IconSize::Small)
-                                .aria_label("New tab")
-                                .tooltip(Tooltip::text("New tab"))
-                                .on_click(|_, window, cx| {
-                                    window.dispatch_action(Box::new(NewTab), cx)
-                                }),
-                        ),
-                    )
-                    .child(
                         div()
-                            .mx_1()
-                            .h_4()
-                            .flex_none()
-                            .border_l_1()
-                            .border_color(colors.border),
-                    )
-                    .child(
-                        div()
-                            .id("profiles-scroll")
-                            .h_full()
-                            .min_w_0()
-                            .max_w(px(360.))
+                            .ml_1()
+                            .mr_2()
+                            .h_8()
                             .flex_none()
                             .flex()
                             .items_center()
-                            .gap_1()
-                            .overflow_x_scroll()
-                            .pr_2()
-                            .children(profiles),
+                            .child(
+                                IconButton::new("new-tab", IconName::Plus)
+                                    .shape(IconButtonShape::Wide)
+                                    .size(ButtonSize::Large)
+                                    .width(px(32.))
+                                    .icon_size(IconSize::Small)
+                                    .aria_label("New tab")
+                                    .tooltip(Tooltip::text("New tab"))
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(Box::new(NewTab), cx)
+                                    }),
+                            )
+                            .child(profile_menu),
                     )
                     .child(div().min_w_0().flex_1()),
             )
@@ -1370,6 +1391,12 @@ fn profile_keybindings(slot: usize) -> Vec<KeyBinding> {
     ]
 }
 
+fn profile_shortcut_label(slot: usize) -> Option<String> {
+    (1..=9)
+        .contains(&slot)
+        .then(|| format!("Ctrl+Shift+{slot}"))
+}
+
 fn load_user_themes(cx: &mut App) -> Result<()> {
     let themes_dir = config::themes_dir();
     fs::create_dir_all(&themes_dir)
@@ -1399,7 +1426,7 @@ fn apply_zetta_theme_overrides(cx: &mut App) {
 }
 
 fn apply_config_settings(config: &Config, cx: &mut App) -> Result<()> {
-    let theme_name = config.theme.as_deref().unwrap_or(theme::DEFAULT_DARK_THEME);
+    let theme_name = selected_theme_name(config.theme.as_deref());
     let theme = ThemeRegistry::global(cx)
         .get(theme_name)
         .with_context(|| format!("using Zed theme {theme_name:?}"))?;
@@ -1415,6 +1442,10 @@ fn apply_config_settings(config: &Config, cx: &mut App) -> Result<()> {
     terminal_settings.max_scroll_history_lines = Some(config.max_scroll_history_lines);
     TerminalSettings::override_global(terminal_settings, cx);
     Ok(())
+}
+
+fn selected_theme_name(configured_theme: Option<&str>) -> &str {
+    configured_theme.unwrap_or(ZETTA_DEFAULT_THEME)
 }
 
 fn normalize_keymap_key_names(content: &str) -> String {
@@ -1561,6 +1592,12 @@ mod tests {
     }
 
     #[test]
+    fn defaults_to_light_theme_without_overriding_configuration() {
+        assert_eq!(selected_theme_name(None), "One Light");
+        assert_eq!(selected_theme_name(Some("One Dark")), "One Dark");
+    }
+
+    #[test]
     fn linux_desktop_entry_matches_app_id() {
         let desktop_entry = include_str!("../resources/linux/Zetta.desktop");
         assert!(desktop_entry.contains(&format!("\nIcon={ZETTA_APP_ID}\n")));
@@ -1593,6 +1630,13 @@ mod tests {
             assert_eq!(bindings[0].match_keystrokes(&[shifted]), Some(false));
             assert_eq!(bindings[1].match_keystrokes(&[fallback]), Some(false));
         }
+    }
+
+    #[test]
+    fn profile_shortcut_labels_cover_the_number_row() {
+        assert_eq!(profile_shortcut_label(1).as_deref(), Some("Ctrl+Shift+1"));
+        assert_eq!(profile_shortcut_label(9).as_deref(), Some("Ctrl+Shift+9"));
+        assert_eq!(profile_shortcut_label(10), None);
     }
 
     #[test]

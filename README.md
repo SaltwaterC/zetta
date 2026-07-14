@@ -24,6 +24,21 @@ X11 backend as well. GPUI currently links both xkbcommon libraries on Linux, so
 Debian/Ubuntu builds require `libfontconfig-dev`, `libxkbcommon-dev`, and
 `libxkbcommon-x11-dev`, even for the default Wayland build.
 
+### Windows
+
+Build a release executable from PowerShell with Chocolatey's GNU Make:
+
+```powershell
+make build
+```
+
+The Windows build target locates the Visual Studio C++ toolchain with
+`vswhere.exe` and initializes its x64 build environment automatically. The
+Desktop development with C++ workload must be installed.
+
+The executable is written to `target\release\zetta.exe` with the application
+icon from `assets\icons\zetta-terminal-icon.ico` embedded as a Windows resource.
+
 ### Linux desktop integration
 
 Zetta uses `Zetta` as its Wayland application ID and X11 `WM_CLASS`.
@@ -121,10 +136,11 @@ keymaps should use `ctrl-!`, `ctrl-@`, through `ctrl-(` as shown in
 `keymap.example.json`. `Ctrl-Alt-1` through `Ctrl-Alt-9` are also built-in
 fallbacks.
 
-Set `theme` to the name of a bundled Zed theme and `terminal_font_size` to a
-value from 6 through 100 in `config.json`. `terminal_font_family` accepts the
-name of any bundled or system-installed font. `inactive_pane_opacity` controls
-inactive split-pane dimming from 0 to 1 and defaults to 0.8.
+Zetta defaults to the bundled `One Light` theme. Set `theme` to the name of a
+bundled Zed theme and `terminal_font_size` to a value from 6 through 100 in
+`config.json`. `terminal_font_family` accepts the name of any bundled or
+system-installed font. `inactive_pane_opacity` controls inactive split-pane
+dimming from 0 to 1 and defaults to 0.8.
 `max_scroll_history_lines` defaults to the Alacritty engine's signed
 line-coordinate ceiling of 2,147,483,647 lines and disables scrollback when set
 to 0. This is effectively unlimited for normal use; memory grows as output is

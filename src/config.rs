@@ -4,6 +4,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(windows)]
+use std::{os::windows::process::CommandExt as _, process::Command};
+
 use anyhow::{Context as _, Result};
 use serde_json::Value;
 use task::Shell;
@@ -195,7 +198,6 @@ fn discovered_profiles() -> Vec<ShellProfile> {
             ("PowerShell", "powershell.exe"),
             ("PowerShell 7", "pwsh.exe"),
             ("Command Prompt", "cmd.exe"),
-            ("WSL", "wsl.exe"),
         ]
     } else {
         &[
@@ -214,7 +216,101 @@ fn discovered_profiles() -> Vec<ShellProfile> {
             });
         }
     }
+    #[cfg(windows)]
+    if let Some(program) = wsl_program() {
+        profiles.extend(discovered_wsl_profiles(&program));
+    }
     profiles
+}
+
+#[cfg(windows)]
+fn wsl_program() -> Option<String> {
+    let system_root = env::var_os("SystemRoot").or_else(|| env::var_os("WINDIR"));
+    let system_wsl = system_root.map(PathBuf::from).map(|root| {
+        root.join("System32")
+            .join("wsl.exe")
+            .to_string_lossy()
+            .into_owned()
+    });
+
+    system_wsl
+        .filter(|program| Path::new(program).is_file())
+        .or_else(|| command_exists("wsl.exe").then(|| "wsl.exe".to_owned()))
+}
+
+#[cfg(windows)]
+fn discovered_wsl_profiles(program: &str) -> Vec<ShellProfile> {
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let output = Command::new(program)
+        .args(["--list", "--quiet"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    wsl_profiles_from_output(program, &output.stdout)
+}
+
+fn wsl_profiles_from_output(program: &str, output: &[u8]) -> Vec<ShellProfile> {
+    parse_wsl_distribution_names(output)
+        .into_iter()
+        .map(|distribution| {
+            let name = format!("WSL: {distribution}");
+            ShellProfile {
+                name: name.clone(),
+                shell: Shell::WithArguments {
+                    program: program.to_owned(),
+                    args: vec!["--distribution".to_owned(), distribution],
+                    title_override: Some(name),
+                },
+            }
+        })
+        .collect()
+}
+
+fn parse_wsl_distribution_names(output: &[u8]) -> Vec<String> {
+    let decoded = if let Some(bytes) = output.strip_prefix(&[0xfe, 0xff]) {
+        let code_units = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            .collect::<Vec<_>>();
+        String::from_utf16_lossy(&code_units)
+    } else if output.starts_with(&[0xff, 0xfe]) || output.contains(&0) {
+        let bytes = output.strip_prefix(&[0xff, 0xfe]).unwrap_or(output);
+        let code_units = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect::<Vec<_>>();
+        String::from_utf16_lossy(&code_units)
+    } else {
+        String::from_utf8_lossy(output).into_owned()
+    };
+
+    let mut seen = HashSet::new();
+    decoded
+        .lines()
+        .map(|line| line.trim_matches(['\0', '\u{feff}', ' ', '\t', '\r']))
+        .filter(|name| !name.is_empty())
+        .filter(|name| is_user_wsl_distribution(name))
+        .filter(|name| seen.insert(name.to_lowercase()))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn is_user_wsl_distribution(name: &str) -> bool {
+    ![
+        "docker-desktop",
+        "docker-desktop-data",
+        "rancher-desktop",
+        "rancher-desktop-data",
+    ]
+    .iter()
+    .any(|service| name.eq_ignore_ascii_case(service))
 }
 
 fn command_exists(program: &str) -> bool {
@@ -285,6 +381,53 @@ mod tests {
             profile.shell,
             Shell::WithArguments { ref program, ref args, .. }
                 if program == "wsl.exe" && args == &["-d", "Ubuntu"]
+        ));
+    }
+
+    #[test]
+    fn parses_utf8_wsl_distribution_names() {
+        assert_eq!(
+            parse_wsl_distribution_names(b"Ubuntu\r\nDocker-Desktop\r\nDebian\r\nubuntu\r\n\r\n"),
+            ["Ubuntu", "Debian"]
+        );
+    }
+
+    #[test]
+    fn parses_utf16_wsl_distribution_names() {
+        let output = "Ubuntu-24.04\r\nopenSUSE Tumbleweed\r\n"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            parse_wsl_distribution_names(&output),
+            ["Ubuntu-24.04", "openSUSE Tumbleweed"]
+        );
+    }
+
+    #[test]
+    fn parses_big_endian_utf16_wsl_distribution_names() {
+        let mut output = vec![0xfe, 0xff];
+        output.extend("Debian\r\n".encode_utf16().flat_map(u16::to_be_bytes));
+
+        assert_eq!(parse_wsl_distribution_names(&output), ["Debian"]);
+    }
+
+    #[test]
+    fn creates_a_profile_for_each_wsl_distribution() {
+        let profiles = wsl_profiles_from_output("wsl.exe", b"Ubuntu\r\nDebian\r\n");
+
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(profiles[0].name, "WSL: Ubuntu");
+        assert!(matches!(
+            profiles[0].shell,
+            Shell::WithArguments {
+                ref program,
+                ref args,
+                ref title_override,
+            } if program == "wsl.exe"
+                && args == &["--distribution", "Ubuntu"]
+                && title_override.as_deref() == Some("WSL: Ubuntu")
         ));
     }
 
