@@ -35,15 +35,27 @@ if (-not $ShortcutPath) {
 }
 
 $installedBinary = Join-Path $InstallDirectory "zetta.exe"
+$runtimeFileNames = @("conpty.dll", "OpenConsole.exe")
+$sourceDirectory = Split-Path -Parent $SourceBinary
 
 function Install-Binary {
     if (-not (Test-Path -LiteralPath $SourceBinary -PathType Leaf)) {
         throw "Release binary not found at $SourceBinary. Run 'make build' first."
     }
+    foreach ($fileName in $runtimeFileNames) {
+        $source = Join-Path $sourceDirectory $fileName
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+            throw "Required Windows runtime not found at $source. Run 'make build' first."
+        }
+    }
 
     New-Item -ItemType Directory -Force -Path $InstallDirectory | Out-Null
     Copy-Item -LiteralPath $SourceBinary -Destination $installedBinary -Force
-    Write-Host "Installed Zetta to $installedBinary"
+    foreach ($fileName in $runtimeFileNames) {
+        Copy-Item -LiteralPath (Join-Path $sourceDirectory $fileName) `
+            -Destination (Join-Path $InstallDirectory $fileName) -Force
+    }
+    Write-Host "Installed Zetta and its Windows runtime to $InstallDirectory"
 }
 
 function Install-Shortcut {
@@ -72,9 +84,12 @@ function Uninstall-Shortcut {
 }
 
 function Uninstall-Binary {
-    if (Test-Path -LiteralPath $installedBinary) {
-        Remove-Item -LiteralPath $installedBinary -Force
-        Write-Host "Removed $installedBinary"
+    foreach ($fileName in @("zetta.exe") + $runtimeFileNames) {
+        $installedFile = Join-Path $InstallDirectory $fileName
+        if (Test-Path -LiteralPath $installedFile) {
+            Remove-Item -LiteralPath $installedFile -Force
+            Write-Host "Removed $installedFile"
+        }
     }
     if ((Test-Path -LiteralPath $InstallDirectory -PathType Container) -and
         -not (Get-ChildItem -LiteralPath $InstallDirectory -Force | Select-Object -First 1)) {
