@@ -32,8 +32,10 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use settings::{KeymapFile, KeymapFileLoadResult, Settings as _};
 use task::Shell;
-use terminal::{TerminalBuilder, terminal_settings::TerminalSettings};
-use terminal_view::{ClearClipboard, SelectAll, TerminalView, TerminalViewEvent};
+use terminal::{Paste, TerminalBuilder, terminal_settings::TerminalSettings};
+use terminal_view::{
+    ClearClipboard, CopyAndClearSelection, SelectAll, TerminalView, TerminalViewEvent,
+};
 use theme::{ActiveTheme, ClientDecorationsExt as _, GlobalTheme, Theme, ThemeRegistry};
 use ui::{
     Banner, ButtonCommon as _, ButtonSize, Clickable as _, Color, IconButton, IconButtonShape,
@@ -2162,6 +2164,14 @@ fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut App) {
         KeyBinding::new("alt-down", FocusPaneDown, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-tab", NextTab, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, Some("Zetta > Terminal")),
+        KeyBinding::new("ctrl-pageup", NextTab, Some("Zetta > Terminal")),
+        KeyBinding::new("ctrl-pagedown", PreviousTab, Some("Zetta > Terminal")),
+        KeyBinding::new(
+            "ctrl-c",
+            CopyAndClearSelection,
+            Some("Zetta > Terminal && selection"),
+        ),
+        KeyBinding::new("ctrl-v", Paste, Some("Zetta > Terminal")),
         KeyBinding::new("f2", RenameTab, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-=", IncreaseTerminalFontSize, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-+", IncreaseTerminalFontSize, Some("Zetta > Terminal")),

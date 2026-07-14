@@ -15,6 +15,9 @@
       "alt-down": "zetta::FocusPaneDown",
       "ctrl-tab": "zetta::NextTab",
       "ctrl-shift-tab": "zetta::PreviousTab",
+      "ctrl-pageup": "zetta::NextTab",
+      "ctrl-pagedown": "zetta::PreviousTab",
+      "ctrl-v": "terminal::Paste",
       "f2": "zetta::RenameTab",
       "ctrl-=": "zetta::IncreaseTerminalFontSize",
       "ctrl--": "zetta::DecreaseTerminalFontSize",
@@ -30,6 +33,12 @@
       "ctrl-&": ["zetta::OpenProfile", { "slot": 7 }],
       "ctrl-*": ["zetta::OpenProfile", { "slot": 8 }],
       "ctrl-(": ["zetta::OpenProfile", { "slot": 9 }]
+    }
+  },
+  {
+    "context": "Zetta > Terminal && selection",
+    "bindings": {
+      "ctrl-c": "terminal_view::CopyAndClearSelection"
     }
   }
 ]

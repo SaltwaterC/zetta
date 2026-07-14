@@ -122,6 +122,10 @@ Keyboard shortcuts use Zed's keymap format. The default shortcuts are:
 | `Alt-Arrow` | Focus the pane in that direction |
 | `Ctrl-Tab` | Next tab |
 | `Ctrl-Shift-Tab` | Previous tab |
+| `Ctrl-PageUp` | Next tab |
+| `Ctrl-PageDown` | Previous tab |
+| `Ctrl-C` | Copy when text is selected; otherwise send interrupt |
+| `Ctrl-V` | Paste |
 | `F2` | Rename active tab |
 | `Ctrl-=` / `Ctrl-+` | Increase terminal font size |
 | `Ctrl--` | Decrease terminal font size |
@@ -146,7 +150,10 @@ click a pane. Exiting a shell removes that pane; exiting the final pane closes
 its tab.
 
 Selecting terminal text copies it to the system clipboard while preserving the
-selection. Plain right-click pastes when the clipboard contains data and opens
+selection. `Ctrl-C` copies an existing selection and continues to send an
+interrupt when nothing is selected. `Ctrl-V` pastes; this takes precedence over
+the shell's traditional quoted-insert use of that chord. Plain right-click
+pastes when the clipboard contains data and opens
 the context menu when it is empty; `Shift`-right-click always opens the context
 menu. On Linux and FreeBSD, selections also populate the PRIMARY
 selection and a middle click pastes from PRIMARY, falling back to the system
