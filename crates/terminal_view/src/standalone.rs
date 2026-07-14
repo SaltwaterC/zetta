@@ -41,7 +41,10 @@ pub struct SendKeystroke(pub String);
 #[action(namespace = terminal)]
 pub struct RenameTerminal;
 
-actions!(terminal_view, [SelectAll, ClearClipboard]);
+actions!(
+    terminal_view,
+    [SelectAll, ClearClipboard, CopyAndClearSelection]
+);
 
 #[derive(Clone, Copy, Debug)]
 pub enum TerminalViewEvent {
@@ -451,6 +454,16 @@ impl TerminalView {
         self.terminal.update(cx, |terminal, _| terminal.copy(None));
     }
 
+    fn copy_and_clear_selection(
+        &mut self,
+        _: &CopyAndClearSelection,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.terminal
+            .update(cx, |terminal, _| terminal.copy(Some(false)));
+    }
+
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
         let Some(clipboard) = cx.read_from_clipboard() else { return };
         match clipboard.entries().first() {
@@ -633,6 +646,7 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::send_text))
             .on_action(cx.listener(Self::send_keystroke))
             .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::copy_and_clear_selection))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::paste_text))
             .on_action(cx.listener(Self::clear))
