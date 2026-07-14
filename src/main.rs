@@ -71,6 +71,17 @@ struct TerminalPane {
     profile: Profile,
     view: Option<Entity<TerminalView>>,
     error: Option<String>,
+    wsl_cwd_file: Option<PathBuf>,
+}
+
+impl TerminalPane {
+    fn wsl_working_directory(&self) -> Option<String> {
+        let path = self.wsl_cwd_file.as_ref()?;
+        let directory = fs::read_to_string(path).ok()?;
+        let directory = directory.trim_end_matches(['\r', '\n']);
+        (directory.starts_with('/') && !directory.contains(['\r', '\n', '\0']))
+            .then(|| directory.to_owned())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -318,16 +329,19 @@ impl Zetta {
     }
 
     fn open_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let inherited_working_directory = self
-            .tabs
-            .get(self.active_tab)
-            .and_then(Tab::active_pane)
+        let profile = self.profiles[self.selected_profile].clone();
+        let active_pane = self.tabs.get(self.active_tab).and_then(Tab::active_pane);
+        let inherited_working_directory = active_pane
+            .filter(|pane| !is_wsl_shell(&pane.profile.command))
             .and_then(|pane| pane.view.as_ref())
             .and_then(|view| view.read(cx).terminal().read(cx).working_directory());
-        let profile = self.profiles[self.selected_profile].clone();
-        let (working_directory, use_wsl_home) = launch_working_directory(
+        let inherited_wsl_directory = active_pane
+            .filter(|pane| pane.profile.name.eq_ignore_ascii_case(&profile.name))
+            .and_then(TerminalPane::wsl_working_directory);
+        let (working_directory, wsl_directory) = launch_working_directory(
             &profile,
             inherited_working_directory,
+            inherited_wsl_directory,
             self.working_directory.clone(),
             self.launch_config.working_directory_configured,
         );
@@ -335,6 +349,7 @@ impl Zetta {
         self.next_tab_id += 1;
         let pane_id = self.next_pane_id;
         self.next_pane_id += 1;
+        let wsl_cwd_file = wsl_cwd_tracking_file(&profile, pane_id);
         self.tabs.push(Tab {
             id: tab_id,
             panes: vec![TerminalPane {
@@ -342,6 +357,7 @@ impl Zetta {
                 profile: profile.clone(),
                 view: None,
                 error: None,
+                wsl_cwd_file: wsl_cwd_file.clone(),
             }],
             layout: PaneLayout::Pane(pane_id),
             active_pane: pane_id,
@@ -356,7 +372,8 @@ impl Zetta {
             pane_id,
             profile,
             working_directory,
-            use_wsl_home,
+            wsl_directory,
+            wsl_cwd_file,
             window,
             cx,
         );
@@ -368,7 +385,8 @@ impl Zetta {
         pane_id: u64,
         profile: Profile,
         working_directory: Option<PathBuf>,
-        use_wsl_home: bool,
+        wsl_directory: Option<String>,
+        wsl_cwd_file: Option<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -388,8 +406,12 @@ impl Zetta {
             }
         };
         let settings = TerminalSettings::get_global(cx).clone();
-        let command = if use_wsl_home {
-            wsl_shell_in_home(profile.command)
+        let command = if is_wsl_shell(&profile.command) {
+            wsl_shell_with_tracking(
+                profile.command,
+                wsl_directory.as_deref(),
+                wsl_cwd_file.as_deref(),
+            )
         } else {
             profile.command
         };
@@ -530,25 +552,29 @@ impl Zetta {
             return;
         };
         let tab_id = tab.id;
-        let active_pane = tab.active_pane;
-        let inherited_working_directory = tab
-            .active_pane()
+        let active_pane_id = tab.active_pane;
+        let active_pane = tab.active_pane();
+        let inherited_working_directory = active_pane
+            .filter(|pane| !is_wsl_shell(&pane.profile.command))
             .and_then(|pane| pane.view.as_ref())
             .and_then(|view| view.read(cx).terminal().read(cx).working_directory());
         let Some(profile) = tab.active_profile().cloned() else {
             return;
         };
-        let (working_directory, use_wsl_home) = launch_working_directory(
+        let inherited_wsl_directory = active_pane.and_then(TerminalPane::wsl_working_directory);
+        let (working_directory, wsl_directory) = launch_working_directory(
             &profile,
             inherited_working_directory,
+            inherited_wsl_directory,
             self.working_directory.clone(),
             self.launch_config.working_directory_configured,
         );
         let pane_id = self.next_pane_id;
         self.next_pane_id += 1;
+        let wsl_cwd_file = wsl_cwd_tracking_file(&profile, pane_id);
 
         let tab = &mut self.tabs[self.active_tab];
-        if !tab.layout.split(active_pane, axis, pane_id) {
+        if !tab.layout.split(active_pane_id, axis, pane_id) {
             return;
         }
         tab.panes.push(TerminalPane {
@@ -556,6 +582,7 @@ impl Zetta {
             profile: profile.clone(),
             view: None,
             error: None,
+            wsl_cwd_file: wsl_cwd_file.clone(),
         });
         tab.active_pane = pane_id;
         self.spawn_terminal(
@@ -563,7 +590,8 @@ impl Zetta {
             pane_id,
             profile,
             working_directory,
-            use_wsl_home,
+            wsl_directory,
+            wsl_cwd_file,
             window,
             cx,
         );
@@ -1669,46 +1697,113 @@ fn is_wsl_shell(shell: &Shell) -> bool {
 fn launch_working_directory(
     profile: &Profile,
     inherited: Option<PathBuf>,
+    inherited_wsl: Option<String>,
     fallback: Option<PathBuf>,
     fallback_is_configured: bool,
-) -> (Option<PathBuf>, bool) {
+) -> (Option<PathBuf>, Option<String>) {
     // Windows process inspection sees the cwd of wsl.exe, not of its Linux shell.
     // Passing that value to a new WSL session leaks Zetta's own launch directory.
     let is_wsl = is_wsl_shell(&profile.command);
-    let use_wsl_home = is_wsl && !fallback_is_configured;
-    let working_directory = if is_wsl {
+    let has_inherited_wsl = inherited_wsl.is_some();
+    let working_directory = if is_wsl && has_inherited_wsl {
+        None
+    } else if is_wsl {
         fallback_is_configured.then_some(fallback).flatten()
     } else {
         inherited.or(fallback)
     };
-    (working_directory, use_wsl_home)
+    let wsl_directory = if is_wsl && has_inherited_wsl {
+        inherited_wsl
+    } else {
+        (is_wsl && !fallback_is_configured).then(|| "~".to_owned())
+    };
+    (working_directory, wsl_directory)
 }
 
-fn wsl_shell_in_home(shell: Shell) -> Shell {
+fn wsl_cwd_tracking_file(profile: &Profile, pane_id: u64) -> Option<PathBuf> {
+    (cfg!(windows) && is_wsl_shell(&profile.command)).then(|| {
+        let path = env::temp_dir().join(format!("zetta-wsl-cwd-{}-{pane_id}", std::process::id()));
+        let _ = fs::remove_file(&path);
+        path
+    })
+}
+
+const WSL_CWD_TRACKER: &str = r#"marker="$(wslpath -u "$1" 2>/dev/null || true)"
+parent=$$
+if [ -n "$marker" ]; then
+    (
+        previous=
+        while kill -0 "$parent" 2>/dev/null; do
+            cwd="$(readlink "/proc/$parent/cwd" 2>/dev/null)" || break
+            if [ "$cwd" != "$previous" ]; then
+                printf '%s\n' "$cwd" > "${marker}.tmp" && mv -f "${marker}.tmp" "$marker"
+                previous="$cwd"
+            fi
+            sleep 0.1
+        done
+        rm -f "$marker" "${marker}.tmp"
+    ) </dev/null >/dev/null 2>&1 &
+fi
+shell="${SHELL:-}"
+if [ ! -x "$shell" ]; then
+    shell="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f7)"
+fi
+[ -x "$shell" ] || shell=/bin/sh
+exec "$shell" -l"#;
+
+fn wsl_shell_with_tracking(
+    shell: Shell,
+    directory: Option<&str>,
+    cwd_file: Option<&Path>,
+) -> Shell {
     match shell {
-        Shell::Program(program) => Shell::WithArguments {
-            program,
-            args: vec!["--cd".to_owned(), "~".to_owned()],
-            title_override: None,
-        },
+        Shell::Program(program) => {
+            wsl_command_with_tracking(program, Vec::new(), None, directory, cwd_file)
+        }
         Shell::WithArguments {
             program,
-            mut args,
+            args,
             title_override,
-        } => {
-            if !args
-                .iter()
-                .any(|arg| arg == "--cd" || arg.starts_with("--cd="))
-            {
-                args.extend(["--cd".to_owned(), "~".to_owned()]);
-            }
-            Shell::WithArguments {
-                program,
-                args,
-                title_override,
-            }
-        }
+        } => wsl_command_with_tracking(program, args, title_override, directory, cwd_file),
         Shell::System => Shell::System,
+    }
+}
+
+fn wsl_command_with_tracking(
+    program: String,
+    mut args: Vec<String>,
+    title_override: Option<String>,
+    directory: Option<&str>,
+    cwd_file: Option<&Path>,
+) -> Shell {
+    let exec_index = args.iter().position(|arg| arg == "--exec" || arg == "-e");
+    if let Some(directory) = directory
+        && !args
+            .iter()
+            .take(exec_index.unwrap_or(args.len()))
+            .any(|arg| arg == "--cd" || arg.starts_with("--cd="))
+    {
+        args.splice(
+            exec_index.unwrap_or(args.len())..exec_index.unwrap_or(args.len()),
+            ["--cd".to_owned(), directory.to_owned()],
+        );
+    }
+    if exec_index.is_none()
+        && let Some(cwd_file) = cwd_file
+    {
+        args.extend([
+            "--exec".to_owned(),
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            WSL_CWD_TRACKER.to_owned(),
+            "zetta-wsl-cwd".to_owned(),
+            cwd_file.to_string_lossy().into_owned(),
+        ]);
+    }
+    Shell::WithArguments {
+        program,
+        args,
+        title_override,
     }
 }
 
@@ -1964,7 +2059,7 @@ mod tests {
 
         assert!(is_wsl_shell(&shell));
         assert!(matches!(
-            wsl_shell_in_home(shell),
+            wsl_shell_with_tracking(shell, Some("~"), None),
             Shell::WithArguments { args, title_override, .. }
                 if args == ["--distribution", "Ubuntu", "--cd", "~"]
                     && title_override.as_deref() == Some("WSL: Ubuntu")
@@ -1985,7 +2080,7 @@ mod tests {
         };
 
         assert!(matches!(
-            wsl_shell_in_home(shell),
+            wsl_shell_with_tracking(shell, Some("~"), None),
             Shell::WithArguments { args, .. } if args == ["--cd", "/work"]
         ));
     }
@@ -2002,15 +2097,16 @@ mod tests {
             theme: None,
         };
 
-        let (directory, use_wsl_home) = launch_working_directory(
+        let (directory, wsl_directory) = launch_working_directory(
             &profile,
             Some(PathBuf::from(r"C:\source\zetta")),
+            None,
             Some(PathBuf::from(r"C:\Users\stefan")),
             false,
         );
 
         assert_eq!(directory, None);
-        assert!(use_wsl_home);
+        assert_eq!(wsl_directory.as_deref(), Some("~"));
     }
 
     #[test]
@@ -2022,15 +2118,16 @@ mod tests {
         };
         let inherited = PathBuf::from(r"C:\source\zetta");
 
-        let (directory, use_wsl_home) = launch_working_directory(
+        let (directory, wsl_directory) = launch_working_directory(
             &profile,
             Some(inherited.clone()),
+            None,
             Some(PathBuf::from(r"C:\Users\stefan")),
             false,
         );
 
         assert_eq!(directory, Some(inherited));
-        assert!(!use_wsl_home);
+        assert_eq!(wsl_directory, None);
     }
 
     #[test]
@@ -2042,15 +2139,78 @@ mod tests {
         };
         let configured = PathBuf::from(r"C:\Users\stefan");
 
-        let (directory, use_wsl_home) = launch_working_directory(
+        let (directory, wsl_directory) = launch_working_directory(
             &profile,
             Some(PathBuf::from(r"C:\source\zetta")),
+            None,
             Some(configured.clone()),
             true,
         );
 
         assert_eq!(directory, Some(configured));
-        assert!(!use_wsl_home);
+        assert_eq!(wsl_directory, None);
+    }
+
+    #[test]
+    fn tracked_wsl_directory_takes_precedence_over_the_initial_configuration() {
+        let profile = Profile {
+            name: "WSL: Ubuntu".to_owned(),
+            command: Shell::Program("wsl.exe".to_owned()),
+            theme: None,
+        };
+
+        let (directory, wsl_directory) = launch_working_directory(
+            &profile,
+            None,
+            Some("/work".to_owned()),
+            Some(PathBuf::from(r"C:\Users\stefan")),
+            true,
+        );
+
+        assert_eq!(directory, None);
+        assert_eq!(wsl_directory.as_deref(), Some("/work"));
+    }
+
+    #[test]
+    fn wsl_inherits_the_tracked_linux_directory() {
+        let profile = Profile {
+            name: "WSL: Ubuntu".to_owned(),
+            command: Shell::Program("wsl.exe".to_owned()),
+            theme: None,
+        };
+
+        let (directory, wsl_directory) = launch_working_directory(
+            &profile,
+            Some(PathBuf::from(r"C:\source\zetta")),
+            Some("/home/stefan/source/zetta".to_owned()),
+            Some(PathBuf::from(r"C:\Users\stefan")),
+            false,
+        );
+
+        assert_eq!(directory, None);
+        assert_eq!(wsl_directory.as_deref(), Some("/home/stefan/source/zetta"));
+    }
+
+    #[test]
+    fn wsl_tracker_wraps_the_default_login_shell() {
+        let marker = Path::new(r"C:\Users\stefan\AppData\Local\Temp\zetta-cwd");
+        let shell = wsl_shell_with_tracking(
+            Shell::WithArguments {
+                program: "wsl.exe".to_owned(),
+                args: vec!["--distribution".to_owned(), "Ubuntu".to_owned()],
+                title_override: None,
+            },
+            Some("/work"),
+            Some(marker),
+        );
+
+        assert!(matches!(
+            shell,
+            Shell::WithArguments { args, .. }
+                if args[..4] == ["--distribution", "Ubuntu", "--cd", "/work"]
+                    && args[4..8] == ["--exec", "/bin/sh", "-c", WSL_CWD_TRACKER]
+                    && args.last().map(String::as_str) == marker.to_str()
+        ));
     }
 
     #[test]
@@ -2100,12 +2260,14 @@ mod tests {
                     profile: system,
                     view: None,
                     error: None,
+                    wsl_cwd_file: None,
                 },
                 TerminalPane {
                     id: 2,
                     profile: zsh,
                     view: None,
                     error: None,
+                    wsl_cwd_file: None,
                 },
             ],
             layout: PaneLayout::Split {
