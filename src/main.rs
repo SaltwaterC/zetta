@@ -21,14 +21,14 @@ use gpui::{
     MAX_BUTTONS_PER_SIDE, MouseButton, Pixels, Point, Render, ResizeEdge, Size, Subscription,
     Tiling, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowButton,
     WindowButtonLayout, WindowControlArea, WindowControls, WindowDecorations, WindowOptions,
-    actions, canvas, div, point, px, size, transparent_black,
+    actions, canvas, div, point, px, size, svg, transparent_black,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
 use settings::{KeymapFile, KeymapFileLoadResult, Settings as _};
 use terminal::{TerminalBuilder, terminal_settings::TerminalSettings};
 use terminal_view::{TerminalView, TerminalViewEvent};
-use theme::{ActiveTheme, ClientDecorationsExt as _, GlobalTheme, ThemeRegistry};
+use theme::{ActiveTheme, ClientDecorationsExt as _, GlobalTheme, Theme, ThemeRegistry};
 use ui::{
     Banner, ButtonCommon as _, ButtonSize, Clickable as _, Color, IconButton, IconButtonShape,
     IconName, IconSize, Label, LabelSize, PopoverMenu, Severity, Tooltip, prelude::*,
@@ -67,7 +67,7 @@ struct OpenProfile {
 
 struct TerminalPane {
     id: u64,
-    profile_name: String,
+    profile: Profile,
     view: Option<Entity<TerminalView>>,
     error: Option<String>,
 }
@@ -246,6 +246,21 @@ impl Tab {
     fn active_pane(&self) -> Option<&TerminalPane> {
         self.pane(self.active_pane)
     }
+
+    fn active_profile(&self) -> Option<&Profile> {
+        self.active_pane().map(|pane| &pane.profile)
+    }
+
+    fn theme(&self, cx: &App) -> Arc<Theme> {
+        self.active_pane()
+            .and_then(|pane| pane.view.as_ref())
+            .and_then(|view| view.read(cx).theme().cloned())
+            .or_else(|| {
+                self.active_profile()
+                    .and_then(|profile| resolve_profile_theme(profile, cx).ok().flatten())
+            })
+            .unwrap_or_else(|| cx.theme().clone())
+    }
 }
 
 struct Zetta {
@@ -318,7 +333,7 @@ impl Zetta {
             id: tab_id,
             panes: vec![TerminalPane {
                 id: pane_id,
-                profile_name: profile.name.clone(),
+                profile: profile.clone(),
                 view: None,
                 error: None,
             }],
@@ -342,6 +357,21 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let terminal_theme = match resolve_profile_theme(&profile, cx) {
+            Ok(theme) => theme,
+            Err(error) => {
+                if let Some(pane) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.id == tab_id)
+                    .and_then(|tab| tab.pane_mut(pane_id))
+                {
+                    pane.error = Some(format!("Could not apply profile theme: {error:#}"));
+                }
+                cx.notify();
+                return;
+            }
+        };
         let settings = TerminalSettings::get_global(cx).clone();
         let builder = TerminalBuilder::new(
             working_directory,
@@ -367,7 +397,9 @@ impl Zetta {
                 Ok(builder) => {
                     this.update_in(cx, |this, window, cx| {
                         let terminal = cx.new(|cx| builder.subscribe(cx));
-                        let view = cx.new(|cx| TerminalView::new(terminal, window, cx));
+                        let view = cx.new(|cx| {
+                            TerminalView::new_with_theme(terminal, terminal_theme, window, cx)
+                        });
                         cx.subscribe_in(
                             &view,
                             window,
@@ -484,7 +516,9 @@ impl Zetta {
             .and_then(|pane| pane.view.as_ref())
             .and_then(|view| view.read(cx).terminal().read(cx).working_directory())
             .or_else(|| self.working_directory.clone());
-        let profile = self.profiles[self.selected_profile].clone();
+        let Some(profile) = tab.active_profile().cloned() else {
+            return;
+        };
         let pane_id = self.next_pane_id;
         self.next_pane_id += 1;
 
@@ -494,7 +528,7 @@ impl Zetta {
         }
         tab.panes.push(TerminalPane {
             id: pane_id,
-            profile_name: profile.name.clone(),
+            profile: profile.clone(),
             view: None,
             error: None,
         });
@@ -636,6 +670,42 @@ impl Zetta {
             ));
             cx.notify();
             return;
+        }
+        let profile_themes = match config
+            .profiles
+            .iter()
+            .map(|profile| {
+                resolve_profile_theme(profile, cx).map(|theme| (profile.name.to_lowercase(), theme))
+            })
+            .collect::<Result<HashMap<_, _>>>()
+        {
+            Ok(themes) => themes,
+            Err(error) => {
+                self.configuration_error = Some(format!(
+                    "Could not apply {}: {error:#}",
+                    config_path.display()
+                ));
+                cx.notify();
+                return;
+            }
+        };
+        for pane in self.tabs.iter_mut().flat_map(|tab| &mut tab.panes) {
+            if let Some(profile) = config
+                .profiles
+                .iter()
+                .find(|profile| profile.name.eq_ignore_ascii_case(&pane.profile.name))
+            {
+                pane.profile = profile.clone();
+            } else {
+                pane.profile.theme = None;
+            }
+            if let Some(view) = pane.view.as_ref() {
+                let theme = profile_themes
+                    .get(&pane.profile.name.to_lowercase())
+                    .cloned()
+                    .flatten();
+                view.update(cx, |view, cx| view.set_theme(theme, cx));
+            }
         }
         load_keybindings(&config.keymap_path, config.profiles.len(), cx);
 
@@ -797,7 +867,7 @@ impl Zetta {
                         .justify_center()
                         .bg(colors.editor_background)
                         .text_color(colors.text_muted)
-                        .child(format!("Starting {}...", pane.profile_name))
+                        .child(format!("Starting {}...", pane.profile.name))
                         .into_any_element(),
                 };
                 div()
@@ -917,6 +987,23 @@ impl Render for Zetta {
             .enumerate()
             .map(|(index, tab)| {
                 let selected = index == self.active_tab;
+                let tab_theme = tab.theme(cx);
+                let tab_colors = tab_theme.colors();
+                let tab_background = if selected {
+                    tab_colors.tab_active_background
+                } else {
+                    tab_colors.tab_inactive_background
+                };
+                let tab_text = if selected {
+                    tab_colors.text
+                } else {
+                    tab_colors.text_muted
+                };
+                let tab_icon = if selected {
+                    tab_colors.icon
+                } else {
+                    tab_colors.icon_muted
+                };
                 let select_handle = handle.clone();
                 let close_handle = handle.clone();
                 let rename_view = tab.active_pane().and_then(|pane| pane.view.clone());
@@ -928,27 +1015,31 @@ impl Render for Zetta {
                     view.read(cx).tab_content_text(0, cx)
                 } else {
                     tab.active_pane()
-                        .map(|pane| pane.profile_name.clone())
+                        .map(|pane| pane.profile.name.clone())
                         .unwrap_or_else(|| "Terminal".to_string())
                         .into()
                 };
-                let content =
-                    h_flex()
-                        .min_w_0()
-                        .gap_1()
-                        .child(
-                            Icon::new(IconName::Terminal)
-                                .size(IconSize::Small)
-                                .color(Color::Muted),
-                        )
-                        .child(Label::new(title).truncate().size(LabelSize::Small).color(
-                            if selected {
-                                Color::Default
-                            } else {
-                                Color::Muted
-                            },
-                        ))
-                        .into_any_element();
+                let content = h_flex()
+                    .min_w_0()
+                    .gap_1()
+                    .child(
+                        svg()
+                            .path(IconName::Terminal.path())
+                            .size(px(14.))
+                            .flex_none()
+                            .text_color(tab_icon),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_sm()
+                            .text_color(tab_text)
+                            .child(title),
+                    )
+                    .into_any_element();
                 div()
                     .id(("tab", tab.id as usize))
                     .h_8()
@@ -961,13 +1052,11 @@ impl Render for Zetta {
                     .items_center()
                     .gap_1()
                     .border_r_1()
-                    .border_color(colors.border)
+                    .border_color(tab_colors.border)
+                    .bg(tab_background)
                     .when(selected, |this| {
-                        this.bg(colors.editor_background)
-                            .border_t_2()
-                            .border_color(colors.text_accent)
+                        this.border_t_2().border_color(tab_colors.text_accent)
                     })
-                    .when(!selected, |this| this.bg(colors.tab_inactive_background))
                     .on_click(move |event, window, cx| {
                         select_handle
                             .update(cx, |this, cx| {
@@ -984,12 +1073,25 @@ impl Render for Zetta {
                     })
                     .child(div().min_w_0().flex_1().overflow_hidden().child(content))
                     .child(
-                        IconButton::new(("close-tab", tab.id as usize), IconName::Close)
-                            .shape(IconButtonShape::Square)
-                            .icon_size(IconSize::XSmall)
+                        div()
+                            .id(("close-tab", tab.id as usize))
+                            .size(px(24.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .hover(|style| style.bg(tab_colors.element_hover))
                             .aria_label("Close tab")
                             .tooltip(Tooltip::text("Close tab"))
+                            .child(
+                                svg()
+                                    .path(IconName::Close.path())
+                                    .size(px(12.))
+                                    .text_color(tab_icon),
+                            )
                             .on_click(move |_, window, cx| {
+                                cx.stop_propagation();
                                 close_handle
                                     .update(cx, |this, cx| this.close_tab_at(index, window, cx))
                                     .ok();
@@ -1494,13 +1596,30 @@ fn load_user_themes(cx: &mut App) -> Result<()> {
     Ok(())
 }
 
-fn apply_zetta_theme_overrides(cx: &mut App) {
-    let mut theme = cx.theme().as_ref().clone();
+fn with_zetta_theme_overrides(theme: Arc<Theme>) -> Arc<Theme> {
+    let mut theme = theme.as_ref().clone();
     let colors = &mut theme.styles.colors;
     colors.scrollbar_thumb_background = colors.text_muted.opacity(0.7);
     colors.scrollbar_thumb_hover_background = colors.text.opacity(0.85);
     colors.scrollbar_thumb_active_background = colors.text_accent.opacity(0.95);
-    GlobalTheme::update_theme(cx, Arc::new(theme));
+    Arc::new(theme)
+}
+
+fn apply_zetta_theme_overrides(cx: &mut App) {
+    GlobalTheme::update_theme(cx, with_zetta_theme_overrides(cx.theme().clone()));
+}
+
+fn resolve_profile_theme(profile: &Profile, cx: &App) -> Result<Option<Arc<Theme>>> {
+    profile
+        .theme
+        .as_deref()
+        .map(|name| {
+            ThemeRegistry::global(cx)
+                .get(name)
+                .map(with_zetta_theme_overrides)
+                .with_context(|| format!("using theme {name:?} for profile {:?}", profile.name))
+        })
+        .transpose()
 }
 
 fn apply_config_settings(config: &Config, cx: &mut App) -> Result<()> {
@@ -1770,6 +1889,50 @@ mod tests {
                 second: Box::new(PaneLayout::Pane(3)),
             }
         );
+    }
+
+    #[test]
+    fn split_profile_comes_from_the_active_pane() {
+        let system = Profile {
+            name: "System".to_owned(),
+            command: task::Shell::System,
+            theme: None,
+        };
+        let zsh = Profile {
+            name: "Zsh".to_owned(),
+            command: task::Shell::Program("zsh".to_owned()),
+            theme: Some("One Light".to_owned()),
+        };
+        let tab = Tab {
+            id: 1,
+            panes: vec![
+                TerminalPane {
+                    id: 1,
+                    profile: system,
+                    view: None,
+                    error: None,
+                },
+                TerminalPane {
+                    id: 2,
+                    profile: zsh,
+                    view: None,
+                    error: None,
+                },
+            ],
+            layout: PaneLayout::Split {
+                axis: SplitAxis::Vertical,
+                first: Box::new(PaneLayout::Pane(1)),
+                second: Box::new(PaneLayout::Pane(2)),
+            },
+            active_pane: 2,
+            custom_title: None,
+            rename_buffer: None,
+            rename_select_all: false,
+        };
+
+        let profile = tab.active_profile().unwrap();
+        assert_eq!(profile.name, "Zsh");
+        assert_eq!(profile.theme.as_deref(), Some("One Light"));
     }
 
     #[test]

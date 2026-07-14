@@ -1,7 +1,7 @@
 mod terminal_element;
 mod terminal_scrollbar;
 
-use std::{cmp, ops::Range as StdRange, time::Duration};
+use std::{cmp, ops::Range as StdRange, sync::Arc, time::Duration};
 
 use gpui::{
     Action, AnyElement, App, AppContext as _, ClipboardEntry, Context, Entity, EventEmitter,
@@ -20,7 +20,7 @@ use terminal::{
 };
 use terminal_element::TerminalElement;
 use terminal_scrollbar::TerminalScrollHandle;
-use theme::ActiveTheme;
+use theme::{ActiveTheme, Theme};
 use ui::{
     ContextMenu, ScrollAxes, ScrollbarStyle, Scrollbars, WithScrollbar,
     prelude::*,
@@ -170,6 +170,7 @@ impl BlinkManager {
 
 pub struct TerminalView {
     terminal: Entity<Terminal>,
+    theme: Option<Arc<Theme>>,
     pub(crate) focus_handle: FocusHandle,
     cursor_shape: CursorShape,
     blink_manager: Entity<BlinkManager>,
@@ -200,6 +201,15 @@ impl TerminalView {
 
     pub fn new(
         terminal: Entity<Terminal>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_with_theme(terminal, None, window, cx)
+    }
+
+    pub fn new_with_theme(
+        terminal: Entity<Terminal>,
+        theme: Option<Arc<Theme>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -267,6 +277,7 @@ impl TerminalView {
         Self {
             scroll_handle: TerminalScrollHandle::new(terminal.read(cx)),
             terminal,
+            theme,
             focus_handle,
             cursor_shape: TerminalSettings::get_global(cx).cursor_shape,
             blink_manager,
@@ -291,6 +302,15 @@ impl TerminalView {
 
     pub fn terminal(&self) -> &Entity<Terminal> {
         &self.terminal
+    }
+
+    pub fn set_theme(&mut self, theme: Option<Arc<Theme>>, cx: &mut Context<Self>) {
+        self.theme = theme;
+        cx.notify();
+    }
+
+    pub fn theme(&self) -> Option<&Arc<Theme>> {
+        self.theme.as_ref()
     }
 
     pub fn tab_content_text(&self, detail: usize, cx: &App) -> SharedString {
@@ -582,6 +602,7 @@ impl Render for TerminalView {
 
         let focused = self.focus_handle.is_focused(window);
         let owns_transient_focus = focused || self.has_open_context_menu();
+        let theme = self.theme.clone().unwrap_or_else(|| cx.theme().clone());
         div()
             .id("terminal-view")
             .size_full()
@@ -618,7 +639,7 @@ impl Render for TerminalView {
                 div()
                     .id("terminal-view-container")
                     .size_full()
-                    .bg(cx.theme().colors().editor_background)
+                    .bg(theme.colors().editor_background)
                     .child(TerminalElement::new(
                         self.terminal.clone(),
                         cx.entity(),
@@ -627,7 +648,7 @@ impl Render for TerminalView {
                         self.should_show_cursor(focused, cx),
                         None,
                         self.mode.clone(),
-                    ))
+                    ).with_theme(self.theme.clone()))
                     .when(owns_transient_focus, |container| {
                         container.custom_scrollbars(
                             Scrollbars::for_settings::<TerminalScrollbarSettings>()
@@ -635,7 +656,7 @@ impl Render for TerminalView {
                                 .style(ScrollbarStyle::Editor)
                                 .with_stable_track_along(
                                     ScrollAxes::Vertical,
-                                    cx.theme().colors().editor_background,
+                                    theme.colors().editor_background,
                                 )
                                 .tracked_scroll_handle(&self.scroll_handle),
                             window,

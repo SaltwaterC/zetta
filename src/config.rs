@@ -20,6 +20,13 @@ const DEFAULT_INACTIVE_PANE_OPACITY: f32 = 0.8;
 pub struct Profile {
     pub name: String,
     pub command: Shell,
+    pub theme: Option<String>,
+}
+
+struct ProfileConfig {
+    name: String,
+    command: Option<Shell>,
+    theme: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -116,7 +123,7 @@ impl Config {
                 .iter()
                 .map(parse_profile)
                 .collect::<Result<Vec<_>>>()?;
-            merge_profiles(&mut config.profiles, parsed);
+            merge_profiles(&mut config.profiles, parsed)?;
         }
 
         if let Some(default_profile) = root.get("default_profile") {
@@ -161,17 +168,33 @@ fn resolve_default_profile(profiles: &[Profile], name: &str) -> Result<usize> {
         .with_context(|| format!("default profile {name:?} is not available"))
 }
 
-fn merge_profiles(profiles: &mut Vec<Profile>, configured: Vec<Profile>) {
+fn merge_profiles(profiles: &mut Vec<Profile>, configured: Vec<ProfileConfig>) -> Result<()> {
     for profile in configured {
         if let Some(index) = profiles
             .iter()
             .position(|existing| existing.name.eq_ignore_ascii_case(&profile.name))
         {
-            profiles[index] = profile;
+            if let Some(command) = profile.command {
+                profiles[index].command = command;
+            }
+            if let Some(theme) = profile.theme {
+                profiles[index].theme = Some(theme);
+            }
         } else {
-            profiles.push(profile);
+            let command = profile.command.with_context(|| {
+                format!(
+                    "profile {:?} must specify program because it was not detected",
+                    profile.name
+                )
+            })?;
+            profiles.push(Profile {
+                name: profile.name,
+                command,
+                theme: profile.theme,
+            });
         }
     }
+    Ok(())
 }
 
 fn parse_inactive_pane_opacity(value: &Value) -> Result<f32> {
@@ -196,10 +219,17 @@ fn parse_max_scroll_history_lines(value: &Value) -> Result<usize> {
     Ok(history_lines as usize)
 }
 
-fn parse_profile(value: &Value) -> Result<Profile> {
+fn parse_profile(value: &Value) -> Result<ProfileConfig> {
     let object = value
         .as_object()
         .context("each profile must be an object")?;
+    const FIELDS: &[&str] = &["name", "program", "args", "theme"];
+    if let Some(field) = object
+        .keys()
+        .find(|field| !FIELDS.contains(&field.as_str()))
+    {
+        anyhow::bail!("unrecognized profile field {field:?}");
+    }
     let name = object
         .get("name")
         .and_then(Value::as_str)
@@ -207,9 +237,13 @@ fn parse_profile(value: &Value) -> Result<Profile> {
         .to_owned();
     let program = object
         .get("program")
-        .and_then(Value::as_str)
-        .context("profile.program must be a string")?
-        .to_owned();
+        .map(|program| {
+            program
+                .as_str()
+                .context("profile.program must be a string")
+                .map(str::to_owned)
+        })
+        .transpose()?;
     let args = object
         .get("args")
         .map(|args| {
@@ -225,23 +259,42 @@ fn parse_profile(value: &Value) -> Result<Profile> {
         })
         .transpose()?
         .unwrap_or_default();
-
-    let command = if args.is_empty() {
-        Shell::Program(program)
-    } else {
-        Shell::WithArguments {
-            program,
-            args,
-            title_override: Some(name.clone()),
+    anyhow::ensure!(
+        program.is_some() || args.is_empty(),
+        "profile.args requires program"
+    );
+    let command = program.map(|program| {
+        if args.is_empty() {
+            Shell::Program(program)
+        } else {
+            Shell::WithArguments {
+                program,
+                args,
+                title_override: Some(name.clone()),
+            }
         }
-    };
-    Ok(Profile { name, command })
+    });
+    let theme = object
+        .get("theme")
+        .map(|theme| {
+            theme
+                .as_str()
+                .context("profile.theme must be a string")
+                .map(str::to_owned)
+        })
+        .transpose()?;
+    Ok(ProfileConfig {
+        name,
+        command,
+        theme,
+    })
 }
 
 fn discovered_profiles() -> Vec<Profile> {
     let mut profiles = vec![Profile {
         name: "System".to_owned(),
         command: Shell::System,
+        theme: None,
     }];
     let candidates: &[(&str, &str)] = if cfg!(windows) {
         &[
@@ -263,6 +316,7 @@ fn discovered_profiles() -> Vec<Profile> {
             profiles.push(Profile {
                 name: (*name).to_owned(),
                 command: Shell::Program((*program).to_owned()),
+                theme: None,
             });
         }
     }
@@ -319,6 +373,7 @@ fn wsl_profiles_from_output(program: &str, output: &[u8]) -> Vec<Profile> {
                     args: vec!["--distribution".to_owned(), distribution],
                     title_override: Some(name),
                 },
+                theme: None,
             }
         })
         .collect()
@@ -432,7 +487,7 @@ mod tests {
         assert_eq!(profile.name, "WSL Ubuntu");
         assert!(matches!(
             profile.command,
-            Shell::WithArguments { ref program, ref args, .. }
+            Some(Shell::WithArguments { ref program, ref args, .. })
                 if program == "wsl.exe" && args == &["-d", "Ubuntu"]
         ));
     }
@@ -465,20 +520,24 @@ mod tests {
             Profile {
                 name: "System".to_owned(),
                 command: Shell::System,
+                theme: None,
             },
             Profile {
                 name: "Zsh".to_owned(),
                 command: Shell::Program("zsh".to_owned()),
+                theme: None,
             },
         ];
 
         merge_profiles(
             &mut profiles,
-            vec![Profile {
+            vec![ProfileConfig {
                 name: "Login Zsh".to_owned(),
-                command: Shell::Program("/bin/zsh".to_owned()),
+                command: Some(Shell::Program("/bin/zsh".to_owned())),
+                theme: None,
             }],
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             profiles
@@ -496,25 +555,48 @@ mod tests {
         let mut profiles = vec![Profile {
             name: "Zsh".to_owned(),
             command: Shell::Program("zsh".to_owned()),
+            theme: None,
         }];
 
         merge_profiles(
             &mut profiles,
-            vec![Profile {
+            vec![ProfileConfig {
                 name: "zsh".to_owned(),
-                command: Shell::WithArguments {
+                command: Some(Shell::WithArguments {
                     program: "/bin/zsh".to_owned(),
                     args: vec!["-l".to_owned()],
                     title_override: Some("zsh".to_owned()),
-                },
+                }),
+                theme: Some("Solarized Dark".to_owned()),
             }],
-        );
+        )
+        .unwrap();
 
         assert_eq!(profiles.len(), 1);
         assert!(matches!(
             profiles[0].command,
             Shell::WithArguments { ref args, .. } if args == &["-l"]
         ));
+        assert_eq!(profiles[0].theme.as_deref(), Some("Solarized Dark"));
+    }
+
+    #[test]
+    fn profile_theme_override_does_not_require_a_program() {
+        let mut profiles = vec![Profile {
+            name: "Zsh".to_owned(),
+            command: Shell::Program("zsh".to_owned()),
+            theme: None,
+        }];
+        let profile = parse_profile(&serde_json::json!({
+            "name": "Zsh",
+            "theme": "Solarized Dark"
+        }))
+        .unwrap();
+
+        merge_profiles(&mut profiles, vec![profile]).unwrap();
+
+        assert!(matches!(profiles[0].command, Shell::Program(ref program) if program == "zsh"));
+        assert_eq!(profiles[0].theme.as_deref(), Some("Solarized Dark"));
     }
 
     #[test]

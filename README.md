@@ -136,6 +136,27 @@ match is case-insensitive and the default is marked in the profile menu.
 Opening a profile from the menu or a shortcut makes it the selection used by
 subsequent `Ctrl-Shift-T` tabs. Missing profile slots have no effect.
 
+Profiles may select a Zed theme independently from the application theme. A
+detected profile needs only its name and theme; its detected command is
+retained. New profiles still require `program`. The override applies to each
+terminal pane created from that profile. Each tab also uses its active pane's
+theme for its background, text, icons, border, and active indicator:
+
+```json
+{
+  "default_profile": "Zsh",
+  "profiles": [
+    { "name": "Zsh", "theme": "Solarized Light" },
+    {
+      "name": "Login Zsh",
+      "program": "/bin/zsh",
+      "args": ["-l"],
+      "theme": "One Dark"
+    }
+  ]
+}
+```
+
 GPUI represents shifted number-row keys by their symbols internally, so custom
 keymaps should use `ctrl-!`, `ctrl-@`, through `ctrl-(` as shown in
 `keymap.example.json`. `Ctrl-Alt-1` through `Ctrl-Alt-9` are also built-in

@@ -7,6 +7,7 @@
   "max_scroll_history_lines": 2147483647,
   "inactive_pane_opacity": 0.8,
   "profiles": [
+    { "name": "System", "theme": "One Light" },
     { "name": "Login Zsh", "program": "/bin/zsh", "args": ["-l"] }
   ]
 }

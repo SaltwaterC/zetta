@@ -22,7 +22,7 @@ use ui::{ParentElement, Tooltip};
 use util::ResultExt;
 
 use std::mem;
-use std::{fmt::Debug, rc::Rc};
+use std::{fmt::Debug, rc::Rc, sync::Arc};
 
 use crate::{BlockContext, BlockProperties, ContentMode, TerminalMode, TerminalView};
 
@@ -384,6 +384,7 @@ pub struct TerminalElement {
     interactivity: Interactivity,
     mode: TerminalMode,
     block_below_cursor: Option<Rc<BlockProperties>>,
+    theme: Option<Arc<Theme>>,
 }
 
 impl InteractiveElement for TerminalElement {
@@ -411,10 +412,16 @@ impl TerminalElement {
             focus: focus.clone(),
             cursor_visible,
             block_below_cursor,
+            theme: None,
             mode,
             interactivity: Default::default(),
         }
         .track_focus(&focus)
+    }
+
+    pub fn with_theme(mut self, theme: Option<Arc<Theme>>) -> Self {
+        self.theme = theme;
+        self
     }
 
     pub fn layout_grid<T: TerminalLayoutCell>(
@@ -423,10 +430,9 @@ impl TerminalElement {
         text_style: &TextStyle,
         hyperlink: Option<(HighlightStyle, &Range)>,
         minimum_contrast: f32,
-        cx: &App,
+        theme: &Theme,
     ) -> (Vec<LayoutRect>, Vec<BatchedTextRun>) {
         let start_time = Instant::now();
-        let theme = cx.theme();
 
         // Pre-allocate with estimated capacity to reduce reallocations
         let estimated_cells = grid.size_hint().0;
@@ -1019,7 +1025,7 @@ impl Element for TerminalElement {
                         }),
                 };
 
-                let theme = cx.theme().clone();
+                let theme = self.theme.clone().unwrap_or_else(|| cx.theme().clone());
 
                 let link_style = HighlightStyle {
                     color: Some(theme.colors().link_text_hover),
@@ -1225,7 +1231,7 @@ impl Element for TerminalElement {
                             .as_ref()
                             .map(|last_hovered_word| (link_style, &last_hovered_word.word_match)),
                         minimum_contrast,
-                        cx,
+                        &theme,
                     )
                 } else {
                     // Calculate which screen rows are visible based on pixel positions.
@@ -1256,7 +1262,7 @@ impl Element for TerminalElement {
                             .as_ref()
                             .map(|last_hovered_word| (link_style, &last_hovered_word.word_match)),
                         minimum_contrast,
-                        cx,
+                        &theme,
                     )
                 };
 
