@@ -55,7 +55,7 @@ impl Config {
             keymap_override: keymap_path.clone(),
             profiles: discovered_profiles(),
             default_profile: 0,
-            working_directory: None,
+            working_directory: Some(home_dir()),
             keymap_path: keymap_path.unwrap_or_else(|| config_dir.join("keymap.json")),
             theme: None,
             terminal_font_size: None,
@@ -512,6 +512,12 @@ mod tests {
                 .to_string()
                 .contains("unrecognized configuration field")
         );
+    }
+
+    #[test]
+    fn default_working_directory_is_the_user_home() {
+        let config = Config::defaults(None, None);
+        assert_eq!(config.working_directory, Some(home_dir()));
     }
 
     #[test]
