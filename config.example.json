@@ -1,13 +1,12 @@
 {
-  "default_shell": "System",
+  "default_profile": "System",
   "working_directory": "~",
   "theme": "One Dark",
   "terminal_font_size": 14,
   "terminal_font_family": "MesloLGS NF",
   "max_scroll_history_lines": 2147483647,
   "inactive_pane_opacity": 0.8,
-  "shells": [
-    { "name": "System", "program": "/bin/sh" },
+  "profiles": [
     { "name": "Login Zsh", "program": "/bin/zsh", "args": ["-l"] }
   ]
 }

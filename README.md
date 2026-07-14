@@ -3,7 +3,7 @@
 Zetta is a standalone terminal emulator built from Zed's GPUI and terminal
 engine. Its local terminal-view fork retains the GPU renderer and terminal
 interaction code without Zed's editor, project, workspace, database, or
-language subsystems. It supports multiple tabs, selectable shell profiles, and
+language subsystems. It supports multiple tabs, selectable profiles, and
 user-defined key bindings on Linux, macOS, and Windows.
 
 ## Build and run
@@ -72,13 +72,15 @@ hicolor icons; the 128px variant is required for WSLg's application-icon lookup.
 After installing or upgrading under WSL2, close running Zetta windows and run
 `wsl --shutdown` from Windows if the previous taskbar icon remains cached.
 
-Zetta discovers common installed shells. On Windows this includes Windows
-PowerShell, PowerShell 7, Command Prompt, and WSL when their executables are on
-`PATH`. Select a profile in the top bar, then open a new tab.
+Zetta creates profiles for common installed command interpreters. On Windows
+this includes Windows PowerShell, PowerShell 7, Command Prompt, and registered
+WSL distributions. Select a profile in the top bar, then open a new tab.
 
 Configuration is loaded from `~/.config/zetta/config.json` on Linux/macOS and
 `%APPDATA%\\Zetta\\config.json` on Windows. Use `config.example.json` as a
-starting point. `--config PATH` and `--keymap PATH` override the defaults.
+starting point. `--config PATH` and `--keymap PATH` override the defaults. If
+the configuration cannot be parsed, Zetta starts with safe defaults and shows
+the error in the window; correct the file and reload it without restarting.
 
 Keyboard shortcuts use Zed's keymap format. The default shortcuts are:
 
@@ -86,7 +88,7 @@ Keyboard shortcuts use Zed's keymap format. The default shortcuts are:
 | --- | --- |
 | `Ctrl-Shift-T` | New tab |
 | `Ctrl-Shift-N` | New window |
-| `Ctrl-Shift-1` ... `Ctrl-Shift-9` | New tab with shell profile 1 ... 9 |
+| `Ctrl-Shift-1` ... `Ctrl-Shift-9` | New tab with profile 1 ... 9 |
 | `Ctrl-Shift-W` | Close tab |
 | `Ctrl-Shift-O` | Split active pane horizontally (top/bottom) |
 | `Ctrl-Shift-E` | Split active pane vertically (left/right) |
@@ -104,7 +106,7 @@ double-click a tab to set a persistent name. Submit an empty name to clear the
 override and resume automatic naming. Tabs retain a fixed width as names
 change.
 
-Splits inherit the active pane's working directory and use the selected shell
+Splits inherit the active pane's working directory and use the selected
 profile. Use `Alt-Left`, `Alt-Right`, `Alt-Up`, and `Alt-Down` to move focus, or
 click a pane. Exiting a shell removes that pane; exiting the final pane closes
 its tab.
@@ -123,13 +125,16 @@ common `page-up`/`page-down` spellings.
 
 Press `Ctrl-Shift-R` after editing `config.json`, `keymap.json`, or files in the
 user themes directory. Configuration changes affect the active window and
-global terminal appearance; existing shells and their scrollback are retained.
+global terminal appearance; existing sessions and their scrollback are retained.
 
-Shell profile shortcuts use the order displayed in the tab bar. With automatic
-discovery, profile 1 is `System`, followed by detected shells. An explicit
-`shells` configuration uses its configured order instead. Opening a profile
-this way also makes it the selection used by subsequent `Ctrl-Shift-T` tabs.
-Missing profile slots have no effect.
+Profile shortcuts use the order displayed in the profile menu. Profile 1 is
+`System`, followed by detected profiles and any additional configured
+`profiles`. A configured profile with the same name as a detected profile
+overrides that profile in place. Set `default_profile` to any displayed name,
+including a detected profile such as `Zsh`, `PowerShell`, or `WSL: Ubuntu`; the
+match is case-insensitive and the default is marked in the profile menu.
+Opening a profile from the menu or a shortcut makes it the selection used by
+subsequent `Ctrl-Shift-T` tabs. Missing profile slots have no effect.
 
 GPUI represents shifted number-row keys by their symbols internally, so custom
 keymaps should use `ctrl-!`, `ctrl-@`, through `ctrl-(` as shown in
@@ -174,7 +179,7 @@ Zetta loads Zed theme-family JSON files from `~/.config/zetta/themes` on
 Linux/macOS and `%APPDATA%\Zetta\themes` on Windows. The directory is created
 on first launch. Download or extract the `.json` file from a Zed theme
 extension, place it directly in that directory, set `theme` in `config.json` to
-the theme name declared inside the file, and restart Zetta.
+the theme name declared inside the file, and reload the configuration.
 
 For Solarized on Linux/macOS:
 
