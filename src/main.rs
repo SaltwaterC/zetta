@@ -253,6 +253,7 @@ struct Tab {
     panes: Vec<TerminalPane>,
     layout: PaneLayout,
     active_pane: u64,
+    focus_history: Vec<u64>,
     custom_title: Option<String>,
     rename_buffer: Option<String>,
     rename_select_all: bool,
@@ -273,6 +274,27 @@ impl Tab {
 
     fn active_profile(&self) -> Option<&Profile> {
         self.active_pane().map(|pane| &pane.profile)
+    }
+
+    fn activate_pane(&mut self, id: u64) {
+        if self.pane(id).is_none() {
+            return;
+        }
+        self.focus_history.retain(|pane_id| *pane_id != id);
+        self.focus_history.push(id);
+        self.active_pane = id;
+    }
+
+    fn restore_focus_after_close(&mut self, closed: u64, fallback: u64) {
+        let surviving = self.panes.iter().map(|pane| pane.id).collect::<Vec<_>>();
+        self.focus_history
+            .retain(|pane_id| *pane_id != closed && surviving.contains(pane_id));
+
+        if self.active_pane != closed && surviving.contains(&self.active_pane) {
+            return;
+        }
+        let next = self.focus_history.last().copied().unwrap_or(fallback);
+        self.activate_pane(next);
     }
 
     fn theme(&self, cx: &App) -> Arc<Theme> {
@@ -461,6 +483,7 @@ impl Zetta {
             }],
             layout: PaneLayout::Pane(pane_id),
             active_pane: pane_id,
+            focus_history: vec![pane_id],
             custom_title: None,
             rename_buffer: None,
             rename_select_all: false,
@@ -556,7 +579,7 @@ impl Zetta {
                         let focus_handle = view.focus_handle(cx);
                         cx.on_focus(&focus_handle, window, move |this, _, cx| {
                             if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.id == tab_id) {
-                                tab.active_pane = pane_id;
+                                tab.activate_pane(pane_id);
                                 cx.notify();
                             }
                         })
@@ -641,7 +664,7 @@ impl Zetta {
             self.close_tab_at(tab_index, window, cx);
             return;
         };
-        tab.active_pane = layout.first_pane();
+        tab.restore_focus_after_close(pane_id, layout.first_pane());
         tab.layout = layout;
         self.active_tab = tab_index;
         self.focus_active(window, cx);
@@ -684,7 +707,7 @@ impl Zetta {
             error: None,
             wsl_cwd_file: wsl_cwd_file.clone(),
         });
-        tab.active_pane = pane_id;
+        tab.activate_pane(pane_id);
         self.spawn_terminal(
             tab_id,
             pane_id,
@@ -751,7 +774,7 @@ impl Zetta {
         let Some(pane_id) = tab.layout.adjacent_pane(tab.active_pane, direction) else {
             return;
         };
-        tab.active_pane = pane_id;
+        tab.activate_pane(pane_id);
         self.focus_active(window, cx);
     }
 
@@ -2551,6 +2574,7 @@ mod tests {
                 second: Box::new(PaneLayout::Pane(2)),
             },
             active_pane: 2,
+            focus_history: vec![1, 2],
             custom_title: None,
             rename_buffer: None,
             rename_select_all: false,
@@ -2559,6 +2583,70 @@ mod tests {
         let profile = tab.active_profile().unwrap();
         assert_eq!(profile.name, "Zsh");
         assert_eq!(profile.theme.as_deref(), Some("One Light"));
+    }
+
+    #[test]
+    fn closing_active_pane_restores_previous_focus() {
+        let profile = Profile {
+            name: "System".to_owned(),
+            command: task::Shell::System,
+            theme: None,
+        };
+        let pane = |id| TerminalPane {
+            id,
+            profile: profile.clone(),
+            view: None,
+            error: None,
+            wsl_cwd_file: None,
+        };
+        let mut tab = Tab {
+            id: 1,
+            panes: vec![pane(1), pane(2), pane(3)],
+            layout: PaneLayout::Pane(1),
+            active_pane: 3,
+            focus_history: vec![1, 2, 3],
+            custom_title: None,
+            rename_buffer: None,
+            rename_select_all: false,
+        };
+
+        tab.panes.retain(|pane| pane.id != 3);
+        tab.restore_focus_after_close(3, 1);
+
+        assert_eq!(tab.active_pane, 2);
+        assert_eq!(tab.focus_history, vec![1, 2]);
+    }
+
+    #[test]
+    fn closing_inactive_pane_preserves_focus() {
+        let profile = Profile {
+            name: "System".to_owned(),
+            command: task::Shell::System,
+            theme: None,
+        };
+        let pane = |id| TerminalPane {
+            id,
+            profile: profile.clone(),
+            view: None,
+            error: None,
+            wsl_cwd_file: None,
+        };
+        let mut tab = Tab {
+            id: 1,
+            panes: vec![pane(1), pane(2), pane(3)],
+            layout: PaneLayout::Pane(1),
+            active_pane: 3,
+            focus_history: vec![1, 2, 3],
+            custom_title: None,
+            rename_buffer: None,
+            rename_select_all: false,
+        };
+
+        tab.panes.retain(|pane| pane.id != 1);
+        tab.restore_focus_after_close(1, 2);
+
+        assert_eq!(tab.active_pane, 3);
+        assert_eq!(tab.focus_history, vec![2, 3]);
     }
 
     #[test]

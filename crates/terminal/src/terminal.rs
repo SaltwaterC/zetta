@@ -1004,6 +1004,7 @@ impl TerminalBuilder {
             event_loop_task: Task::ready(Ok(())),
             background_executor: background_executor.clone(),
             path_style,
+            reported_theme: None,
             #[cfg(any(test, feature = "test-support"))]
             input_log: Vec::new(),
             #[cfg(any(test, feature = "test-support"))]
@@ -1277,6 +1278,7 @@ impl TerminalBuilder {
                 event_loop_task: Task::ready(Ok(())),
                 background_executor,
                 path_style,
+                reported_theme: None,
                 #[cfg(any(test, feature = "test-support"))]
                 input_log: Vec::new(),
                 #[cfg(any(test, feature = "test-support"))]
@@ -1446,6 +1448,7 @@ pub struct Terminal {
     event_loop_task: Task<Result<(), anyhow::Error>>,
     background_executor: BackgroundExecutor,
     path_style: PathStyle,
+    reported_theme: Option<Arc<Theme>>,
     #[cfg(any(test, feature = "test-support"))]
     input_log: Vec<Vec<u8>>,
     #[cfg(any(test, feature = "test-support"))]
@@ -1505,6 +1508,10 @@ const FIND_HYPERLINK_THROTTLE_PX: Pixels = px(5.0);
 const SELECTION_DRAG_THRESHOLD: f64 = 2.0;
 
 impl Terminal {
+    pub fn set_reported_theme(&mut self, theme: Option<Arc<Theme>>) {
+        self.reported_theme = theme;
+    }
+
     fn process_pty_event(&mut self, event: PtyEvent, cx: &mut Context<Self>) {
         match event {
             PtyEvent::Event(event) => self.process_event(event, cx),
@@ -1580,8 +1587,12 @@ impl Terminal {
                 // we might respond with out of date value if a "set color" sequence is immediately
                 // followed by a color request sequence.
 
+                let theme = self
+                    .reported_theme
+                    .clone()
+                    .unwrap_or_else(|| cx.theme().clone());
                 let color = self.term.lock().colors()[index]
-                    .unwrap_or_else(|| to_vte_rgb(get_color_at_index(index, cx.theme().as_ref())));
+                    .unwrap_or_else(|| to_vte_rgb(get_color_at_index(index, theme.as_ref())));
                 self.write_to_pty(format(color).into_bytes());
             }
             TerminalBackendEvent::ChildExit(exit_status) => {
