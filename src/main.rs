@@ -703,17 +703,6 @@ impl Zetta {
             .is_some_and(|tab| tab.rename_buffer.is_some())
     }
 
-    fn active_pane_needs_focus(&self, window: &Window, cx: &App) -> bool {
-        if self.is_renaming_tab() {
-            return false;
-        }
-        self.tabs
-            .get(self.active_tab)
-            .and_then(Tab::active_pane)
-            .and_then(|pane| pane.view.as_ref())
-            .is_some_and(|view| !view.focus_handle(cx).is_focused(window))
-    }
-
     fn render_pane_layout(
         &self,
         tab: &Tab,
@@ -727,11 +716,10 @@ impl Zetta {
                 let Some(pane) = tab.pane(*pane_id) else {
                     return div().size_full().into_any_element();
                 };
-                let active = pane
-                    .view
-                    .as_ref()
-                    .is_some_and(|view| view.focus_handle(cx).is_focused(window))
-                    || (pane.view.is_none() && tab.active_pane == *pane_id);
+                let active = pane.view.as_ref().is_some_and(|view| {
+                    view.focus_handle(cx).is_focused(window)
+                        || view.read(cx).has_open_context_menu()
+                }) || (pane.view.is_none() && tab.active_pane == *pane_id);
                 let content = match (&pane.view, &pane.error) {
                     (Some(view), _) => div().size_full().child(view.clone()).into_any_element(),
                     (_, Some(error)) => div()
@@ -794,13 +782,6 @@ impl Zetta {
 
 impl Render for Zetta {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if window.is_window_active() && self.active_pane_needs_focus(window, cx) {
-            cx.on_next_frame(window, |this, window, cx| {
-                if window.is_window_active() && !this.is_renaming_tab() {
-                    this.focus_active(window, cx);
-                }
-            });
-        }
         let colors = cx.theme().colors().clone();
         let handle = cx.entity().downgrade();
         let supported_controls = window.window_controls();
@@ -999,7 +980,9 @@ impl Render for Zetta {
             .on_action(cx.listener(Self::increase_terminal_font_size))
             .on_action(cx.listener(Self::decrease_terminal_font_size))
             .on_action(cx.listener(Self::reset_terminal_font_size))
-            .track_focus(&self.rename_focus)
+            .when(self.is_renaming_tab(), |content| {
+                content.track_focus(&self.rename_focus)
+            })
             .on_key_down(cx.listener(Self::rename_key_down))
             .child(title_bar)
             .child(
