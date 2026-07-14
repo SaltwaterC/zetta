@@ -82,8 +82,9 @@ starting point. `--config PATH` and `--keymap PATH` override the defaults. If
 the configuration cannot be parsed, Zetta starts with safe defaults and shows
 the error in the window; correct the file and reload it without restarting.
 The first tab starts in the user's home directory unless `working_directory`
-is configured. Later tabs and splits inherit the active pane's current
-directory.
+is configured. A detected WSL profile uses the selected distribution's Linux
+home rather than the Windows user profile. Later tabs and splits inherit the
+active pane's current directory.
 
 Keyboard shortcuts use Zed's keymap format. The default shortcuts are:
 

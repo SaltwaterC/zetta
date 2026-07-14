@@ -26,6 +26,7 @@ use gpui::{
 use schemars::JsonSchema;
 use serde::Deserialize;
 use settings::{KeymapFile, KeymapFileLoadResult, Settings as _};
+use task::Shell;
 use terminal::{TerminalBuilder, terminal_settings::TerminalSettings};
 use terminal_view::{TerminalView, TerminalViewEvent};
 use theme::{ActiveTheme, ClientDecorationsExt as _, GlobalTheme, Theme, ThemeRegistry};
@@ -317,14 +318,21 @@ impl Zetta {
     }
 
     fn open_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let working_directory = self
+        let inherited_working_directory = self
             .tabs
             .get(self.active_tab)
             .and_then(Tab::active_pane)
             .and_then(|pane| pane.view.as_ref())
-            .and_then(|view| view.read(cx).terminal().read(cx).working_directory())
-            .or_else(|| self.working_directory.clone());
+            .and_then(|view| view.read(cx).terminal().read(cx).working_directory());
         let profile = self.profiles[self.selected_profile].clone();
+        let use_wsl_home = inherited_working_directory.is_none()
+            && !self.launch_config.working_directory_configured
+            && is_wsl_shell(&profile.command);
+        let working_directory = inherited_working_directory.or_else(|| {
+            (!use_wsl_home)
+                .then(|| self.working_directory.clone())
+                .flatten()
+        });
         let tab_id = self.next_tab_id;
         self.next_tab_id += 1;
         let pane_id = self.next_pane_id;
@@ -345,7 +353,15 @@ impl Zetta {
         });
         self.active_tab = self.tabs.len() - 1;
 
-        self.spawn_terminal(tab_id, pane_id, profile, working_directory, window, cx);
+        self.spawn_terminal(
+            tab_id,
+            pane_id,
+            profile,
+            working_directory,
+            use_wsl_home,
+            window,
+            cx,
+        );
     }
 
     fn spawn_terminal(
@@ -354,6 +370,7 @@ impl Zetta {
         pane_id: u64,
         profile: Profile,
         working_directory: Option<PathBuf>,
+        use_wsl_home: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -373,10 +390,15 @@ impl Zetta {
             }
         };
         let settings = TerminalSettings::get_global(cx).clone();
+        let command = if use_wsl_home {
+            wsl_shell_in_home(profile.command)
+        } else {
+            profile.command
+        };
         let builder = TerminalBuilder::new(
             working_directory,
             None,
-            profile.command,
+            command,
             HashMap::default(),
             settings.cursor_shape,
             settings.alternate_scroll,
@@ -511,14 +533,21 @@ impl Zetta {
         };
         let tab_id = tab.id;
         let active_pane = tab.active_pane;
-        let working_directory = tab
+        let inherited_working_directory = tab
             .active_pane()
             .and_then(|pane| pane.view.as_ref())
-            .and_then(|view| view.read(cx).terminal().read(cx).working_directory())
-            .or_else(|| self.working_directory.clone());
+            .and_then(|view| view.read(cx).terminal().read(cx).working_directory());
         let Some(profile) = tab.active_profile().cloned() else {
             return;
         };
+        let use_wsl_home = inherited_working_directory.is_none()
+            && !self.launch_config.working_directory_configured
+            && is_wsl_shell(&profile.command);
+        let working_directory = inherited_working_directory.or_else(|| {
+            (!use_wsl_home)
+                .then(|| self.working_directory.clone())
+                .flatten()
+        });
         let pane_id = self.next_pane_id;
         self.next_pane_id += 1;
 
@@ -533,7 +562,15 @@ impl Zetta {
             error: None,
         });
         tab.active_pane = pane_id;
-        self.spawn_terminal(tab_id, pane_id, profile, working_directory, window, cx);
+        self.spawn_terminal(
+            tab_id,
+            pane_id,
+            profile,
+            working_directory,
+            use_wsl_home,
+            window,
+            cx,
+        );
         cx.notify();
     }
 
@@ -1622,6 +1659,45 @@ fn resolve_profile_theme(profile: &Profile, cx: &App) -> Result<Option<Arc<Theme
         .transpose()
 }
 
+fn is_wsl_shell(shell: &Shell) -> bool {
+    let program = match shell {
+        Shell::System => return false,
+        Shell::Program(program) | Shell::WithArguments { program, .. } => program,
+    };
+    program
+        .rsplit(['/', '\\'])
+        .next()
+        .is_some_and(|name| name.eq_ignore_ascii_case("wsl.exe"))
+}
+
+fn wsl_shell_in_home(shell: Shell) -> Shell {
+    match shell {
+        Shell::Program(program) => Shell::WithArguments {
+            program,
+            args: vec!["--cd".to_owned(), "~".to_owned()],
+            title_override: None,
+        },
+        Shell::WithArguments {
+            program,
+            mut args,
+            title_override,
+        } => {
+            if !args
+                .iter()
+                .any(|arg| arg == "--cd" || arg.starts_with("--cd="))
+            {
+                args.extend(["--cd".to_owned(), "~".to_owned()]);
+            }
+            Shell::WithArguments {
+                program,
+                args,
+                title_override,
+            }
+        }
+        Shell::System => Shell::System,
+    }
+}
+
 fn apply_config_settings(config: &Config, cx: &mut App) -> Result<()> {
     let theme_name = selected_theme_name(config.theme.as_deref());
     let theme = ThemeRegistry::global(cx)
@@ -1862,6 +1938,42 @@ mod tests {
         assert_eq!(profile_shortcut_label(1).as_deref(), Some("Ctrl+Shift+1"));
         assert_eq!(profile_shortcut_label(9).as_deref(), Some("Ctrl+Shift+9"));
         assert_eq!(profile_shortcut_label(10), None);
+    }
+
+    #[test]
+    fn wsl_home_is_applied_to_detected_wsl_commands() {
+        let shell = Shell::WithArguments {
+            program: "C:\\Windows\\System32\\wsl.exe".to_owned(),
+            args: vec!["--distribution".to_owned(), "Ubuntu".to_owned()],
+            title_override: Some("WSL: Ubuntu".to_owned()),
+        };
+
+        assert!(is_wsl_shell(&shell));
+        assert!(matches!(
+            wsl_shell_in_home(shell),
+            Shell::WithArguments { args, title_override, .. }
+                if args == ["--distribution", "Ubuntu", "--cd", "~"]
+                    && title_override.as_deref() == Some("WSL: Ubuntu")
+        ));
+    }
+
+    #[test]
+    fn native_shells_are_not_treated_as_wsl() {
+        assert!(!is_wsl_shell(&Shell::Program("pwsh.exe".to_owned())));
+    }
+
+    #[test]
+    fn explicit_wsl_directory_is_not_overridden() {
+        let shell = Shell::WithArguments {
+            program: "wsl.exe".to_owned(),
+            args: vec!["--cd".to_owned(), "/work".to_owned()],
+            title_override: None,
+        };
+
+        assert!(matches!(
+            wsl_shell_in_home(shell),
+            Shell::WithArguments { args, .. } if args == ["--cd", "/work"]
+        ));
     }
 
     #[test]

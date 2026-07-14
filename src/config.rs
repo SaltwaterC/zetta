@@ -36,6 +36,7 @@ pub struct Config {
     pub profiles: Vec<Profile>,
     pub default_profile: usize,
     pub working_directory: Option<PathBuf>,
+    pub working_directory_configured: bool,
     pub keymap_path: PathBuf,
     pub theme: Option<String>,
     pub terminal_font_size: Option<f32>,
@@ -56,6 +57,7 @@ impl Config {
             profiles: discovered_profiles(),
             default_profile: 0,
             working_directory: Some(home_dir()),
+            working_directory_configured: false,
             keymap_path: keymap_path.unwrap_or_else(|| config_dir.join("keymap.json")),
             theme: None,
             terminal_font_size: None,
@@ -81,8 +83,13 @@ impl Config {
             .with_context(|| format!("parsing {}", config.config_path.display()))?;
         validate_config_fields(&root)?;
 
-        if let Some(directory) = root.get("working_directory").and_then(Value::as_str) {
-            config.working_directory = Some(expand_home(directory));
+        if let Some(directory) = root.get("working_directory") {
+            config.working_directory = Some(expand_home(
+                directory
+                    .as_str()
+                    .context("working_directory must be a string")?,
+            ));
+            config.working_directory_configured = true;
         }
         if !has_keymap_override && let Some(path) = root.get("keymap").and_then(Value::as_str) {
             config.keymap_path = expand_home(path);
@@ -518,6 +525,26 @@ mod tests {
     fn default_working_directory_is_the_user_home() {
         let config = Config::defaults(None, None);
         assert_eq!(config.working_directory, Some(home_dir()));
+        assert!(!config.working_directory_configured);
+    }
+
+    #[test]
+    fn configured_working_directory_is_marked_explicit() {
+        let config_path = env::temp_dir().join(format!(
+            "zetta-working-directory-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&config_path, r#"{"working_directory":"~"}"#).unwrap();
+
+        let config = Config::load(Some(&config_path), None).unwrap();
+
+        fs::remove_file(config_path).unwrap();
+        assert_eq!(config.working_directory, Some(home_dir()));
+        assert!(config.working_directory_configured);
     }
 
     #[test]
