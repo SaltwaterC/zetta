@@ -2,9 +2,18 @@
 
 Zetta is a standalone terminal emulator built from Zed's GPUI and terminal
 engine. Its local terminal-view fork retains the GPU renderer and terminal
-interaction code without Zed's editor, project, workspace, database, or
-language subsystems. It supports multiple tabs, selectable profiles, and
-user-defined key bindings on Linux, macOS, and Windows.
+interaction code without Zed's subsystems. It supports multiple tabs,
+selectable profiles, and user-defined key bindings on Linux, macOS, and
+Windows.
+
+## Design philosophy
+
+There is more than one way to do things. This is to allow for muscle memory
+formed over years of working under multiple platforms using multiple terminal
+emulators that all do things in their specific ways.
+
+There is an explicit aim to have things work outside the boxt at the cost of
+bundling as well as minimal configuration.
 
 ## Build and run
 
@@ -126,12 +135,31 @@ Keyboard shortcuts use Zed's keymap format. The default shortcuts are:
 | `Ctrl-PageDown` | Previous tab |
 | `Ctrl-C` | Copy when text is selected; otherwise send interrupt |
 | `Ctrl-V` | Paste |
+| `Ctrl-Shift-F` | Search the active pane's scrollback |
+| `Ctrl-Alt-F` | Search scrollback across every pane in the active tab |
+| `Ctrl-Alt-V` | Paste after trimming leading and trailing whitespace |
+| `Ctrl-Shift-P` | Open the command palette |
 | `F2` | Rename active tab |
-| `Ctrl-=` / `Ctrl-+` | Increase terminal font size |
-| `Ctrl--` | Decrease terminal font size |
-| `Ctrl-0` | Reset terminal font size |
+| `Ctrl-=` / `Ctrl-+` | Increase font size globally |
+| `Ctrl--` | Decrease font size globally |
+| `Ctrl-0` | Reset font size globally |
+| `Ctrl-Alt-=` / `Ctrl-Alt-+` | Increase active pane font size |
+| `Ctrl-Alt--` | Decrease active pane font size |
+| `Ctrl-Alt-0` | Reset active pane font size |
 | `Ctrl-Shift-R` | Reload configuration, keymap, and user themes |
 | `Ctrl-Shift-F12` | Toggle the performance overlay |
+
+The command palette lists the actions available in the focused terminal and
+Zetta window, including their effective keyboard shortcuts. Type to filter,
+use the arrow keys to select a command, and press `Enter` to run it.
+
+Scrollback search is scoped to the active pane. `Enter` and `F3` select the
+next match, `Shift-Enter` and `Shift-F3` select the previous match, and `Escape`
+closes the search. In terminal vi mode, `/` also opens scrollback search.
+
+Tab-wide search uses `Ctrl-Alt-F`, highlights matches in every pane in
+the active tab, and activates the pane containing the current result while you
+navigate.
 
 The performance overlay reports GPUI frames drawn during the latest one-second
 sample, average and 95th-percentile CPU draw time, average invalidation-to-draw
@@ -155,7 +183,9 @@ interrupt when nothing is selected. `Ctrl-V` pastes; this takes precedence over
 the shell's traditional quoted-insert use of that chord. Plain right-click
 pastes when the clipboard contains data and opens
 the context menu when it is empty; `Shift`-right-click always opens the context
-menu. On Linux and FreeBSD, selections also populate the PRIMARY
+menu. The context menu's **Paste Trimmed** action removes leading and trailing
+whitespace while preserving whitespace inside the copied text. On Linux and
+FreeBSD, selections also populate the PRIMARY
 selection and a middle click pastes from PRIMARY, falling back to the system
 clipboard when PRIMARY is unavailable or empty. On other platforms, a middle
 click pastes from the system clipboard.
@@ -208,7 +238,10 @@ fallbacks.
 Zetta defaults to the bundled `One Light` theme. Set `theme` to the name of a
 bundled Zed theme and `terminal_font_size` to a value from 6 through 100 in
 `config.json`. `terminal_font_family` accepts the name of any bundled or
-system-installed font. `inactive_pane_opacity` controls inactive split-pane
+system-installed font. The built binary includes `Solarized Dark` and
+`Solarized Light`.
+
+`inactive_pane_opacity` controls inactive split-pane
 dimming from 0 to 1 and defaults to 0.8.
 `max_scroll_history_lines` defaults to the Alacritty engine's signed
 line-coordinate ceiling of 2,147,483,647 lines and disables scrollback when set
@@ -227,8 +260,10 @@ retained. For example:
 
 Scrollback changes apply to newly opened tabs.
 
-Font-size shortcuts apply immediately to every open terminal. Reset returns to
-`terminal_font_size` when configured, otherwise to Zed's default buffer size.
+The standard font-size shortcuts apply globally to every terminal. The
+`Ctrl-Alt` variants apply only to the active pane, so split panes can use
+independent sizes. Pane reset removes that pane's override; global reset returns
+to `terminal_font_size` when configured, otherwise to Zed's default buffer size.
 Zetta bundles the Regular, Bold, Italic, and Bold Italic faces of MesloLGS NF
 and uses that family by default, so Nerd Font prompt glyphs work without a
 system font installation.
@@ -236,6 +271,10 @@ system font installation.
 The bundled MesloLGS NF files come from the Powerlevel10k media repository at
 the commit recorded in `assets/fonts/meslo-lg-nerd-font/UPSTREAM.md` and retain
 their Apache-2.0 license in the same directory.
+
+The bundled Solarized themes come from the official Zed Solarized extension at
+the revision recorded in `assets/themes/solarized/UPSTREAM.md` and retain
+their GPL-3.0 license in the same directory.
 
 ## User themes
 
@@ -245,31 +284,8 @@ on first launch. Download or extract the `.json` file from a Zed theme
 extension, place it directly in that directory, set `theme` in `config.json` to
 the theme name declared inside the file, and reload the configuration.
 
-For Solarized on Linux/macOS:
-
-```sh
-mkdir -p ~/.config/zetta/themes
-curl -L https://raw.githubusercontent.com/harmtemolder/Solarized.zed/main/themes/solarized.json \
-  -o ~/.config/zetta/themes/solarized.json
-```
-
-On Windows PowerShell:
-
-```powershell
-$themes = Join-Path $env:APPDATA "Zetta\themes"
-New-Item -ItemType Directory -Force $themes
-Invoke-WebRequest `
-  https://raw.githubusercontent.com/harmtemolder/Solarized.zed/main/themes/solarized.json `
-  -OutFile (Join-Path $themes "solarized.json")
-```
-
-Then configure:
-
-```json
-{
-  "theme": "Solarized Light"
-}
-```
+Solarized Dark and Solarized Light are already bundled and do not belong in
+the user themes directory.
 
 Only standalone Zed theme JSON files are loaded; Zetta does not currently
 install complete Zed extension packages.

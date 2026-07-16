@@ -12,6 +12,7 @@ doctest = false
 [dependencies]
 gpui = { path = "../../zed/crates/gpui", default-features = false }
 itertools = "0.14.0"
+regex = "1.11"
 log = { version = "0.4.16", features = ["kv_unstable_serde", "serde"] }
 schemars = { version = "1.0", features = ["indexmap2"] }
 serde = { version = "1.0.221", features = ["derive"] }

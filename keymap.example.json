@@ -18,6 +18,8 @@
       "ctrl-pageup": "zetta::NextTab",
       "ctrl-pagedown": "zetta::PreviousTab",
       "ctrl-v": "terminal::Paste",
+      "ctrl-alt-v": "terminal::PasteTrimmed",
+      "ctrl-shift-p": "zetta::ToggleCommandPalette",
       "f2": "zetta::RenameTab",
       "ctrl-=": "zetta::IncreaseTerminalFontSize",
       "ctrl--": "zetta::DecreaseTerminalFontSize",

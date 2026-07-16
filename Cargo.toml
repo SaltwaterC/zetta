@@ -13,7 +13,7 @@ x11 = ["gpui_platform/x11"]
 anyhow = "1"
 assets = { path = "zed/crates/assets" }
 gpui = { path = "zed/crates/gpui" }
-gpui_platform = { path = "zed/crates/gpui_platform" }
+gpui_platform = { path = "crates/gpui_platform" }
 menu = { path = "zed/crates/menu" }
 release_channel = { path = "zed/crates/release_channel" }
 rust-embed = "8"
@@ -21,6 +21,7 @@ schemars = "1"
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+regex = "1.11"
 settings = { path = "zed/crates/settings" }
 task = { path = "zed/crates/task" }
 terminal = { path = "crates/terminal" }

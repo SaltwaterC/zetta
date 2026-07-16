@@ -602,6 +602,8 @@ actions!(
         Paste,
         /// Pastes the text from the clipboard.
         PasteText,
+        /// Trims leading and trailing whitespace before pasting clipboard text.
+        PasteTrimmed,
         /// Shows the character palette for special characters.
         ShowCharacterPalette,
         /// Searches for text in the terminal.

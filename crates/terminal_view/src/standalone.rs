@@ -4,7 +4,7 @@ mod terminal_scrollbar;
 use std::{cmp, ops::Range as StdRange, sync::Arc, time::Duration};
 
 use gpui::{
-    Action, AnyElement, App, AppContext as _, ClipboardEntry, ClipboardItem, Context, Entity,
+    Action, AnyElement, App, AppContext as _, ClipboardItem, Context, Entity,
     EventEmitter, DismissEvent, FocusHandle, Focusable, KeyContext, KeyDownEvent, Keystroke,
     MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollWheelEvent, Subscription, Window,
     actions, anchored, deferred, div, px,
@@ -13,14 +13,15 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use settings::{Settings, SettingsStore, TerminalBell, TerminalBlink};
 use terminal::{
-    Clear, Copy, Event, HoveredWord, MaybeNavigationTarget, Modes, Paste, PasteText,
+    Clear, Copy, Event, HoveredWord, MaybeNavigationTarget, Modes, Paste, PasteText, PasteTrimmed,
     ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop,
-    ShowCharacterPalette, Terminal, TerminalBounds, ToggleViMode,
+    Search, ShowCharacterPalette, Terminal, TerminalBounds, ToggleViMode,
     terminal_settings::{CursorShape, TerminalSettings},
 };
 use terminal_element::TerminalElement;
 use terminal_scrollbar::TerminalScrollHandle;
 use theme::{ActiveTheme, Theme};
+use theme_settings::ThemeSettings;
 use ui::{
     ContextMenu, ScrollAxes, ScrollbarStyle, Scrollbars, WithScrollbar,
     prelude::*,
@@ -43,7 +44,16 @@ pub struct RenameTerminal;
 
 actions!(
     terminal_view,
-    [SelectAll, ClearClipboard, CopyAndClearSelection]
+    [
+        SelectAll,
+        ClearClipboard,
+        CopyAndClearSelection,
+        SearchScrollback,
+        SearchNextMatch,
+        SearchPreviousMatch,
+        DismissSearch,
+        SelectAllSearchText,
+    ]
 );
 
 #[derive(Clone, Copy, Debug)]
@@ -174,6 +184,13 @@ impl BlinkManager {
 pub struct TerminalView {
     terminal: Entity<Terminal>,
     theme: Option<Arc<Theme>>,
+    font_size_override: Option<Pixels>,
+    search_focus_handle: FocusHandle,
+    search_query: Option<String>,
+    search_active_match: Option<usize>,
+    search_generation: u64,
+    search_select_all: bool,
+    search_cursor: usize,
     pub(crate) focus_handle: FocusHandle,
     cursor_shape: CursorShape,
     blink_manager: Entity<BlinkManager>,
@@ -202,6 +219,20 @@ impl TerminalView {
         self.context_menu.is_some()
     }
 
+    pub fn has_open_search(&self) -> bool {
+        self.search_query.is_some()
+    }
+
+    pub fn clear_search(&mut self, cx: &mut Context<Self>) {
+        self.search_query = None;
+        self.search_generation = self.search_generation.wrapping_add(1);
+        self.search_active_match = None;
+        self.search_select_all = false;
+        self.search_cursor = 0;
+        self.terminal.update(cx, |terminal, _| terminal.matches.clear());
+        cx.notify();
+    }
+
     pub fn new(
         terminal: Entity<Terminal>,
         window: &mut Window,
@@ -220,6 +251,7 @@ impl TerminalView {
             terminal.set_reported_theme(theme.clone());
         });
         let focus_handle = cx.focus_handle();
+        let search_focus_handle = cx.focus_handle();
         let focus_in = cx.on_focus_in(&focus_handle, window, |view, window, cx| {
             view.focus_in(window, cx)
         });
@@ -238,6 +270,7 @@ impl TerminalView {
                     window.invalidate_character_coordinates();
                     if matches!(event, Event::Wakeup) {
                         cx.emit(TerminalViewEvent::TitleChanged);
+                        view.refresh_search(cx);
                     }
                     cx.notify();
                 }
@@ -284,6 +317,13 @@ impl TerminalView {
             scroll_handle: TerminalScrollHandle::new(terminal.read(cx)),
             terminal,
             theme,
+            font_size_override: None,
+            search_focus_handle,
+            search_query: None,
+            search_active_match: None,
+            search_generation: 0,
+            search_select_all: false,
+            search_cursor: 0,
             focus_handle,
             cursor_shape: TerminalSettings::get_global(cx).cursor_shape,
             blink_manager,
@@ -316,6 +356,33 @@ impl TerminalView {
         });
         self.theme = theme;
         cx.notify();
+    }
+
+    pub fn increase_font_size(&mut self, cx: &mut Context<Self>) {
+        let current = self.effective_font_size(cx);
+        self.font_size_override = Some(theme_settings::clamp_font_size(current + px(1.0)));
+        cx.notify();
+    }
+
+    pub fn decrease_font_size(&mut self, cx: &mut Context<Self>) {
+        let current = self.effective_font_size(cx);
+        self.font_size_override = Some(theme_settings::clamp_font_size(current - px(1.0)));
+        cx.notify();
+    }
+
+    pub fn reset_font_size(&mut self, cx: &mut Context<Self>) {
+        self.font_size_override = None;
+        cx.notify();
+    }
+
+    fn effective_font_size(&self, cx: &App) -> Pixels {
+        self.font_size_override.unwrap_or_else(|| {
+            let settings = ThemeSettings::get_global(cx);
+            TerminalSettings::get_global(cx).font_size.map_or_else(
+                || settings.buffer_font_size(cx),
+                |size| theme_settings::adjusted_font_size(size, cx),
+            )
+        })
     }
 
     pub fn theme(&self) -> Option<&Arc<Theme>> {
@@ -425,13 +492,245 @@ impl TerminalView {
         }
     }
 
-    fn process_keystroke(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) -> bool {
-        self.terminal.update(cx, |terminal, cx| {
-            terminal.try_keystroke(keystroke, TerminalSettings::get_global(cx).option_as_meta)
-        })
+    fn search_scrollback(
+        &mut self,
+        _: &SearchScrollback,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.search_query.is_none() {
+            self.search_query = Some(String::new());
+            self.search_cursor = 0;
+            self.search_select_all = false;
+            self.refresh_search(cx);
+        }
+        self.search_focus_handle.focus(window, cx);
+        cx.notify();
     }
 
-    fn key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn dismiss_search(
+        &mut self,
+        _: &DismissSearch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.search_query.take().is_none() {
+            return;
+        }
+        self.search_generation = self.search_generation.wrapping_add(1);
+        self.search_active_match = None;
+        self.search_select_all = false;
+        self.search_cursor = 0;
+        self.terminal.update(cx, |terminal, _| terminal.matches.clear());
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    fn select_all_search_text(
+        &mut self,
+        _: &SelectAllSearchText,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.search_query.as_ref().is_some_and(|query| !query.is_empty()) {
+            self.search_select_all = true;
+            cx.notify();
+        }
+    }
+
+    fn insert_search_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        if let Some(query) = self.search_query.as_mut() {
+            if self.search_select_all {
+                query.clear();
+                self.search_cursor = 0;
+            }
+            query.insert_str(self.search_cursor, text);
+            self.search_cursor += text.len();
+            self.search_select_all = false;
+            self.refresh_search(cx);
+        }
+    }
+
+    fn search_next_match(
+        &mut self,
+        _: &SearchNextMatch,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.navigate_search(false, cx);
+    }
+
+    fn search_previous_match(
+        &mut self,
+        _: &SearchPreviousMatch,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.navigate_search(true, cx);
+    }
+
+    fn navigate_search(&mut self, previous: bool, cx: &mut Context<Self>) {
+        let match_count = self.terminal.read(cx).matches.len();
+        let Some(index) = navigated_match_index(self.search_active_match, match_count, previous)
+        else {
+            return;
+        };
+        self.search_active_match = Some(index);
+        self.terminal.update(cx, |terminal, _| terminal.activate_match(index));
+        cx.notify();
+    }
+
+    fn refresh_search(&mut self, cx: &mut Context<Self>) {
+        let Some(query) = self.search_query.as_ref().cloned() else {
+            return;
+        };
+        self.search_generation = self.search_generation.wrapping_add(1);
+        let generation = self.search_generation;
+        if query.is_empty() {
+            self.search_active_match = None;
+            self.terminal.update(cx, |terminal, _| terminal.matches.clear());
+            cx.notify();
+            return;
+        }
+        let Some(search) = Search::new(&regex::escape(&query)) else {
+            return;
+        };
+        let search_task = self
+            .terminal
+            .update(cx, |terminal, cx| terminal.find_matches(search, cx));
+        cx.spawn(async move |this, cx| {
+            let matches = search_task.await;
+            this.update(cx, |this, cx| {
+                if this.search_generation != generation
+                    || this.search_query.as_deref() != Some(query.as_str())
+                {
+                    return;
+                }
+                let active_match = matches.len().checked_sub(1);
+                this.search_active_match = active_match;
+                this.terminal.update(cx, |terminal, _| {
+                    terminal.matches = matches;
+                    if let Some(index) = active_match {
+                        terminal.activate_match(index);
+                    }
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn process_keystroke(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) -> bool {
+        let (handled, vi_mode_enabled) = self.terminal.update(cx, |terminal, cx| {
+            (
+                terminal.try_keystroke(keystroke, TerminalSettings::get_global(cx).option_as_meta),
+                terminal.vi_mode_enabled(),
+            )
+        });
+        if handled && vi_mode_enabled {
+            cx.notify();
+        }
+        handled
+    }
+
+    fn key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.search_query.is_some() {
+            match event.keystroke.key.as_str() {
+                "escape" => self.dismiss_search(&DismissSearch, window, cx),
+                "enter" | "f3" if event.keystroke.modifiers.shift => {
+                    self.search_previous_match(&SearchPreviousMatch, window, cx)
+                }
+                "enter" | "f3" => self.search_next_match(&SearchNextMatch, window, cx),
+                "backspace" => {
+                    if let Some(query) = self.search_query.as_mut() {
+                        if self.search_select_all {
+                            query.clear();
+                            self.search_cursor = 0;
+                        } else if self.search_cursor > 0 {
+                            let previous = previous_char_boundary(query, self.search_cursor);
+                            query.replace_range(previous..self.search_cursor, "");
+                            self.search_cursor = previous;
+                        }
+                    }
+                    self.search_select_all = false;
+                    self.refresh_search(cx);
+                }
+                "delete" => {
+                    if let Some(query) = self.search_query.as_mut() {
+                        if self.search_select_all {
+                            query.clear();
+                            self.search_cursor = 0;
+                        } else if self.search_cursor < query.len() {
+                            let next = next_char_boundary(query, self.search_cursor);
+                            query.replace_range(self.search_cursor..next, "");
+                        }
+                    }
+                    self.search_select_all = false;
+                    self.refresh_search(cx);
+                }
+                "left" => {
+                    if let Some(query) = self.search_query.as_ref() {
+                        self.search_cursor = if self.search_select_all {
+                            0
+                        } else {
+                            previous_char_boundary(query, self.search_cursor)
+                        };
+                    }
+                    self.search_select_all = false;
+                    cx.notify();
+                }
+                "right" => {
+                    if let Some(query) = self.search_query.as_ref() {
+                        self.search_cursor = if self.search_select_all {
+                            query.len()
+                        } else {
+                            next_char_boundary(query, self.search_cursor)
+                        };
+                    }
+                    self.search_select_all = false;
+                    cx.notify();
+                }
+                "home" => {
+                    self.search_cursor = 0;
+                    self.search_select_all = false;
+                    cx.notify();
+                }
+                "end" => {
+                    self.search_cursor = self.search_query.as_ref().map_or(0, String::len);
+                    self.search_select_all = false;
+                    cx.notify();
+                }
+                _ if !event.keystroke.modifiers.control
+                    && !event.keystroke.modifiers.platform
+                    && !event.keystroke.modifiers.alt =>
+                {
+                    if let Some(text) = event.keystroke.key_char.as_ref() {
+                        self.insert_search_text(text, cx);
+                    }
+                }
+                _ => {}
+            }
+            cx.stop_propagation();
+            return;
+        }
+
+        if self.terminal.read(cx).vi_mode_enabled()
+            && event.keystroke.key == "/"
+            && !event.keystroke.modifiers.control
+            && !event.keystroke.modifiers.platform
+            && !event.keystroke.modifiers.alt
+        {
+            self.search_scrollback(&SearchScrollback, window, cx);
+            cx.stop_propagation();
+            return;
+        }
+
         self.has_bell = false;
         self.blink_manager.update(cx, BlinkManager::pause);
         if self.process_keystroke(&event.keystroke, cx) {
@@ -442,6 +741,12 @@ impl TerminalView {
     fn dispatch_context(&self, cx: &App) -> KeyContext {
         let mut context = KeyContext::new_with_defaults();
         context.add("Terminal");
+        if self.search_query.is_some() {
+            context.add("scrollback_search");
+        }
+        if self.terminal.read(cx).vi_mode_enabled() {
+            context.add("vi_mode");
+        }
         let mode = self.terminal.read(cx).last_content.mode;
         context.set("screen", if mode.contains(Modes::ALT_SCREEN) { "alt" } else { "normal" });
         if self.terminal.read(cx).last_content.selection.is_some() {
@@ -466,20 +771,30 @@ impl TerminalView {
 
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
         let Some(clipboard) = cx.read_from_clipboard() else { return };
-        match clipboard.entries().first() {
-            Some(ClipboardEntry::Image(image)) if !image.bytes.is_empty() => {
-                self.terminal.update(cx, |terminal, _| terminal.input(vec![0x16]));
-            }
-            _ => {
-                if let Some(text) = clipboard.text() {
-                    self.terminal.update(cx, |terminal, _| terminal.paste(&text));
-                }
+        if let Some(text) = clipboard.text() {
+            if self.search_query.is_some() {
+                self.insert_search_text(&text, cx);
+            } else {
+                self.terminal.update(cx, |terminal, _| terminal.paste(&text));
             }
         }
     }
 
     fn paste_text(&mut self, _: &PasteText, window: &mut Window, cx: &mut Context<Self>) {
         self.paste(&Paste, window, cx);
+    }
+
+    fn paste_trimmed(&mut self, _: &PasteTrimmed, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(clipboard) = cx.read_from_clipboard() else { return };
+        if let Some(text) = clipboard.text() {
+            let text = trim_paste_text(&text);
+            if self.search_query.is_some() {
+                self.insert_search_text(text, cx);
+            } else {
+                self.terminal
+                    .update(cx, |terminal, _| terminal.paste(text));
+            }
+        }
     }
 
     fn clear(&mut self, _: &Clear, _: &mut Window, cx: &mut Context<Self>) {
@@ -500,12 +815,8 @@ impl TerminalView {
     }
 
     fn clipboard_has_content(cx: &App) -> bool {
-        cx.read_from_clipboard().is_some_and(|clipboard| {
-            clipboard.text().is_some()
-                || clipboard.entries().iter().any(
-                    |entry| matches!(entry, ClipboardEntry::Image(image) if !image.bytes.is_empty()),
-                )
-        })
+        cx.read_from_clipboard()
+            .is_some_and(|clipboard| clipboard.text().is_some())
     }
 
     fn deploy_context_menu(
@@ -518,6 +829,7 @@ impl TerminalView {
             menu.context(self.focus_handle.clone())
                 .action("Copy", Box::new(Copy))
                 .action("Paste", Box::new(Paste))
+                .action("Paste Trimmed", Box::new(PasteTrimmed))
                 .action("Select All", Box::new(SelectAll))
                 .separator()
                 .action("Clear Clipboard", Box::new(ClearClipboard))
@@ -635,8 +947,90 @@ impl Render for TerminalView {
         }
 
         let focused = self.focus_handle.is_focused(window);
-        let owns_transient_focus = focused || self.has_open_context_menu();
+        let owns_transient_focus =
+            focused || self.has_open_context_menu() || self.search_query.is_some();
         let theme = self.theme.clone().unwrap_or_else(|| cx.theme().clone());
+        let search_overlay = self.search_query.as_ref().map(|query| {
+            let match_count = self.terminal.read(cx).matches.len();
+            let status = self
+                .search_active_match
+                .map(|index| format!("{} / {}", index + 1, match_count))
+                .unwrap_or_else(|| format!("0 / {match_count}"));
+            let cursor = self.search_cursor.min(query.len());
+            let (query_before, query_after) = query.split_at(cursor);
+            let query_before = query_before.to_owned();
+            let query_after = query_after.to_owned();
+            let query_selected = self.search_select_all;
+            let search_focus_handle = self.search_focus_handle.clone();
+
+            div()
+                .absolute()
+                .top_2()
+                .left_2()
+                .right_2()
+                .flex()
+                .justify_end()
+                .child(
+                    div()
+                        .id("terminal-search")
+                        .track_focus(&self.search_focus_handle)
+                        .w_full()
+                        .max_w(px(440.0))
+                        .px_3()
+                        .py_2()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .rounded(px(5.0))
+                        .border_1()
+                        .border_color(theme.colors().border)
+                        .bg(theme.colors().elevated_surface_background.alpha(1.0))
+                        .shadow_sm()
+                        .text_sm()
+                        .text_color(theme.colors().text)
+                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                            search_focus_handle.focus(window, cx);
+                            cx.stop_propagation();
+                        })
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .justify_between()
+                                .gap_3()
+                                .child(
+                                    h_flex()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .when(query_selected, |input| {
+                                            input.bg(theme.colors().element_selection_background)
+                                        })
+                                        .child(div().whitespace_nowrap().child(query_before))
+                                        .when(!query_selected, |input| {
+                                            input.child(
+                                                div()
+                                                    .flex_none()
+                                                    .w(px(1.0))
+                                                    .h(px(16.0))
+                                                    .bg(theme.colors().text_accent),
+                                            )
+                                        })
+                                        .child(div().whitespace_nowrap().child(query_after)),
+                                )
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_color(theme.colors().text_muted)
+                                        .child(status),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.colors().text_muted)
+                                .child("Enter next  Shift+Enter previous  Esc close"),
+                        ),
+                )
+        });
         div()
             .id("terminal-view")
             .size_full()
@@ -649,6 +1043,7 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::copy_and_clear_selection))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::paste_text))
+            .on_action(cx.listener(Self::paste_trimmed))
             .on_action(cx.listener(Self::clear))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::clear_clipboard))
@@ -660,7 +1055,12 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::scroll_to_bottom))
             .on_action(cx.listener(Self::toggle_vi_mode))
             .on_action(cx.listener(Self::show_character_palette))
-            .on_key_down(cx.listener(Self::key_down))
+            .on_action(cx.listener(Self::search_scrollback))
+            .on_action(cx.listener(Self::search_next_match))
+            .on_action(cx.listener(Self::search_previous_match))
+            .on_action(cx.listener(Self::dismiss_search))
+            .on_action(cx.listener(Self::select_all_search_text))
+            .capture_key_down(cx.listener(Self::key_down))
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
@@ -680,15 +1080,19 @@ impl Render for TerminalView {
                     .id("terminal-view-container")
                     .size_full()
                     .bg(theme.colors().editor_background)
-                    .child(TerminalElement::new(
-                        self.terminal.clone(),
-                        cx.entity(),
-                        self.focus_handle.clone(),
-                        focused,
-                        self.should_show_cursor(focused, cx),
-                        None,
-                        self.mode.clone(),
-                    ).with_theme(self.theme.clone()))
+                    .child(
+                        TerminalElement::new(
+                            self.terminal.clone(),
+                            cx.entity(),
+                            self.focus_handle.clone(),
+                            focused,
+                            self.should_show_cursor(focused, cx),
+                            None,
+                            self.mode.clone(),
+                        )
+                        .with_theme(self.theme.clone())
+                        .with_font_size(self.font_size_override),
+                    )
                     .when(owns_transient_focus, |container| {
                         container.custom_scrollbars(
                             Scrollbars::for_settings::<TerminalScrollbarSettings>()
@@ -709,5 +1113,71 @@ impl Render for TerminalView {
                 )
                 .with_priority(1)
             }))
+            .when_some(search_overlay, |view, search| view.child(search))
+    }
+}
+
+fn previous_char_boundary(text: &str, cursor: usize) -> usize {
+    text[..cursor]
+        .char_indices()
+        .next_back()
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+fn next_char_boundary(text: &str, cursor: usize) -> usize {
+    text[cursor..]
+        .chars()
+        .next()
+        .map(|character| cursor + character.len_utf8())
+        .unwrap_or(text.len())
+}
+
+fn navigated_match_index(
+    active: Option<usize>,
+    match_count: usize,
+    previous: bool,
+) -> Option<usize> {
+    if match_count == 0 {
+        return None;
+    }
+    let active = active
+        .filter(|index| *index < match_count)
+        .unwrap_or(if previous { 0 } else { match_count - 1 });
+    Some(if previous {
+        active.checked_sub(1).unwrap_or(match_count - 1)
+    } else {
+        (active + 1) % match_count
+    })
+}
+
+fn trim_paste_text(text: &str) -> &str {
+    text.trim()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{navigated_match_index, next_char_boundary, previous_char_boundary, trim_paste_text};
+
+    #[test]
+    fn trimmed_paste_removes_only_outer_whitespace() {
+        assert_eq!(
+            trim_paste_text(" \t\r\n first line \n second line \r\n\t "),
+            "first line \n second line"
+        );
+    }
+
+    #[test]
+    fn search_navigation_wraps_in_both_directions() {
+        assert_eq!(navigated_match_index(Some(2), 3, false), Some(0));
+        assert_eq!(navigated_match_index(Some(0), 3, true), Some(2));
+        assert_eq!(navigated_match_index(None, 0, false), None);
+    }
+
+    #[test]
+    fn search_caret_respects_utf8_boundaries() {
+        let text = "aé中";
+        assert_eq!(next_char_boundary(text, 1), 3);
+        assert_eq!(previous_char_boundary(text, 3), 1);
     }
 }

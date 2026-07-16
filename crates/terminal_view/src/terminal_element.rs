@@ -3,7 +3,7 @@ use gpui::{
     DispatchPhase, Element, ElementId, Entity, FocusHandle, Font, FontFeatures, FontStyle,
     FontWeight, GlobalElementId, HighlightStyle, Hitbox, Hsla, InputHandler, InteractiveElement,
     Interactivity, IntoElement, LayoutId, Length, ModifiersChangedEvent, MouseButton,
-    MouseMoveEvent, Pixels, Point as GpuiPoint, ShapedLine, StatefulInteractiveElement,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint, ShapedLine, StatefulInteractiveElement,
     StrikethroughStyle, Styled, TextAlign, TextRun, TextStyle, UTF16Selection, UnderlineStyle,
     WhiteSpace, Window, div, fill, outline, point, px, relative, size,
 };
@@ -385,6 +385,7 @@ pub struct TerminalElement {
     mode: TerminalMode,
     block_below_cursor: Option<Rc<BlockProperties>>,
     theme: Option<Arc<Theme>>,
+    font_size_override: Option<Pixels>,
 }
 
 impl InteractiveElement for TerminalElement {
@@ -413,6 +414,7 @@ impl TerminalElement {
             cursor_visible,
             block_below_cursor,
             theme: None,
+            font_size_override: None,
             mode,
             interactivity: Default::default(),
         }
@@ -421,6 +423,11 @@ impl TerminalElement {
 
     pub fn with_theme(mut self, theme: Option<Arc<Theme>>) -> Self {
         self.theme = theme;
+        self
+    }
+
+    pub fn with_font_size(mut self, font_size: Option<Pixels>) -> Self {
+        self.font_size_override = font_size;
         self
     }
 
@@ -810,6 +817,26 @@ impl TerminalElement {
             }
         });
 
+        window.on_mouse_event({
+            let terminal = self.terminal.clone();
+            let hitbox = hitbox.clone();
+            move |event: &MouseUpEvent, phase, window, cx| {
+                if phase != DispatchPhase::Bubble
+                    || event.button != MouseButton::Left
+                    || hitbox.is_hovered(window)
+                {
+                    return;
+                }
+
+                terminal.update(cx, |terminal, cx| {
+                    if terminal.selection_started() {
+                        terminal.mouse_up(event, cx);
+                        cx.notify();
+                    }
+                });
+            }
+        });
+
         self.interactivity.on_mouse_up(
             MouseButton::Left,
             TerminalElement::generic_button_handler(
@@ -1018,11 +1045,13 @@ impl Element for TerminalElement {
                     TerminalMode::Embedded { .. } => {
                         window.text_style().font_size.to_pixels(window.rem_size())
                     }
-                    TerminalMode::Standalone => terminal_settings
-                        .font_size
-                        .map_or(buffer_font_size, |size| {
-                            theme_settings::adjusted_font_size(size, cx)
-                        }),
+                    TerminalMode::Standalone => self.font_size_override.unwrap_or_else(|| {
+                        terminal_settings
+                            .font_size
+                            .map_or(buffer_font_size, |size| {
+                                theme_settings::adjusted_font_size(size, cx)
+                            })
+                    }),
                 };
 
                 let theme = self.theme.clone().unwrap_or_else(|| cx.theme().clone());

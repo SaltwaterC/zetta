@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod command_palette;
 mod config;
 mod zetta_assets;
 
@@ -18,6 +19,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
+use command_palette::{CommandPalette, PaletteCommand, humanize_action_name};
 use config::{Config, Profile};
 use gpui::{
     Action, Anchor, App, AppContext as _, Bounds, Context, CursorStyle, Decorations, Entity,
@@ -32,9 +34,10 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use settings::{KeymapFile, KeymapFileLoadResult, Settings as _};
 use task::Shell;
-use terminal::{Paste, TerminalBuilder, terminal_settings::TerminalSettings};
+use terminal::{Paste, PasteTrimmed, Range, Search, TerminalBuilder, terminal_settings::TerminalSettings};
 use terminal_view::{
-    ClearClipboard, CopyAndClearSelection, SelectAll, TerminalView, TerminalViewEvent,
+    ClearClipboard, CopyAndClearSelection, DismissSearch, SearchNextMatch, SearchPreviousMatch,
+    SearchScrollback, SelectAll, SelectAllSearchText, TerminalView, TerminalViewEvent,
 };
 use theme::{ActiveTheme, ClientDecorationsExt as _, GlobalTheme, Theme, ThemeRegistry};
 use ui::{
@@ -62,7 +65,12 @@ actions!(
         IncreaseTerminalFontSize,
         DecreaseTerminalFontSize,
         ResetTerminalFontSize,
+        IncreasePaneFontSize,
+        DecreasePaneFontSize,
+        ResetPaneFontSize,
+        SearchTabScrollback,
         ReloadConfiguration,
+        ToggleCommandPalette,
         TogglePerformanceOverlay
     ]
 );
@@ -268,6 +276,7 @@ struct Tab {
     focus_history: Vec<u64>,
     custom_title: Option<String>,
     rename_buffer: Option<String>,
+    rename_cursor: usize,
     rename_select_all: bool,
 }
 
@@ -405,6 +414,22 @@ impl PerformanceOverlay {
     }
 }
 
+#[derive(Clone, Copy)]
+struct TabSearchMatch {
+    pane_id: u64,
+    match_index: usize,
+}
+
+struct TabSearch {
+    tab_id: u64,
+    query: String,
+    cursor: usize,
+    select_all: bool,
+    generation: u64,
+    matches: Vec<TabSearchMatch>,
+    active_match: Option<usize>,
+}
+
 struct Zetta {
     launch_config: Config,
     configuration_error: Option<String>,
@@ -416,11 +441,31 @@ struct Zetta {
     next_tab_id: u64,
     next_pane_id: u64,
     rename_focus: gpui::FocusHandle,
+    command_palette_focus: gpui::FocusHandle,
+    command_palette: Option<CommandPalette>,
+    tab_search_focus: gpui::FocusHandle,
+    tab_search: Option<TabSearch>,
     titlebar_dragging: bool,
     button_layout: WindowButtonLayout,
     performance_overlay: Option<PerformanceOverlay>,
     performance_overlay_generation: u64,
     _subscriptions: Vec<Subscription>,
+}
+
+fn previous_char_boundary(text: &str, cursor: usize) -> usize {
+    text[..cursor]
+        .char_indices()
+        .next_back()
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+fn next_char_boundary(text: &str, cursor: usize) -> usize {
+    text[cursor..]
+        .chars()
+        .next()
+        .map(|character| cursor + character.len_utf8())
+        .unwrap_or(text.len())
 }
 
 impl Zetta {
@@ -442,6 +487,10 @@ impl Zetta {
             next_tab_id: 1,
             next_pane_id: 1,
             rename_focus: cx.focus_handle(),
+            command_palette_focus: cx.focus_handle(),
+            command_palette: None,
+            tab_search_focus: cx.focus_handle(),
+            tab_search: None,
             titlebar_dragging: false,
             button_layout,
             performance_overlay: None,
@@ -452,7 +501,11 @@ impl Zetta {
                     cx.notify();
                 }),
                 cx.observe_window_activation(window, |this, window, cx| {
-                    if window.is_window_active() && !this.is_renaming_tab() {
+                    if window.is_window_active()
+                        && !this.is_renaming_tab()
+                        && this.command_palette.is_none()
+                        && this.tab_search.is_none()
+                    {
                         this.focus_active(window, cx);
                     }
                 }),
@@ -498,6 +551,7 @@ impl Zetta {
             focus_history: vec![pane_id],
             custom_title: None,
             rename_buffer: None,
+            rename_cursor: 0,
             rename_select_all: false,
         });
         self.active_tab = self.tabs.len() - 1;
@@ -584,7 +638,16 @@ impl Zetta {
                                 TerminalViewEvent::Close => {
                                     this.close_pane(tab_id, pane_id, window, cx);
                                 }
-                                TerminalViewEvent::TitleChanged => cx.notify(),
+                                TerminalViewEvent::TitleChanged => {
+                                    if this
+                                        .tab_search
+                                        .as_ref()
+                                        .is_some_and(|search| search.tab_id == tab_id)
+                                    {
+                                        this.refresh_tab_search(cx);
+                                    }
+                                    cx.notify();
+                                }
                             },
                         )
                         .detach();
@@ -838,6 +901,54 @@ impl Zetta {
         theme_settings::reset_buffer_font_size(cx);
     }
 
+    fn increase_pane_font_size(
+        &mut self,
+        _: &IncreasePaneFontSize,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(view) = self
+            .tabs
+            .get(self.active_tab)
+            .and_then(Tab::active_pane)
+            .and_then(|pane| pane.view.clone())
+        {
+            view.update(cx, TerminalView::increase_font_size);
+        }
+    }
+
+    fn decrease_pane_font_size(
+        &mut self,
+        _: &DecreasePaneFontSize,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(view) = self
+            .tabs
+            .get(self.active_tab)
+            .and_then(Tab::active_pane)
+            .and_then(|pane| pane.view.clone())
+        {
+            view.update(cx, TerminalView::decrease_font_size);
+        }
+    }
+
+    fn reset_pane_font_size(
+        &mut self,
+        _: &ResetPaneFontSize,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(view) = self
+            .tabs
+            .get(self.active_tab)
+            .and_then(Tab::active_pane)
+            .and_then(|pane| pane.view.clone())
+        {
+            view.update(cx, TerminalView::reset_font_size);
+        }
+    }
+
     fn toggle_performance_overlay(
         &mut self,
         _: &TogglePerformanceOverlay,
@@ -960,6 +1071,9 @@ impl Zetta {
     }
 
     fn next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tab_search.is_some() {
+            self.dismiss_tab_search(window, cx);
+        }
         if !self.tabs.is_empty() {
             self.active_tab = (self.active_tab + 1) % self.tabs.len();
             self.focus_active(window, cx);
@@ -967,6 +1081,9 @@ impl Zetta {
     }
 
     fn previous_tab(&mut self, _: &PreviousTab, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tab_search.is_some() {
+            self.dismiss_tab_search(window, cx);
+        }
         if !self.tabs.is_empty() {
             self.active_tab = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
             self.focus_active(window, cx);
@@ -993,11 +1110,493 @@ impl Zetta {
     ) {
         let automatic_title = view.read(cx).tab_content_text(0, cx).to_string();
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-            tab.rename_buffer = Some(tab.custom_title.clone().unwrap_or(automatic_title));
-            tab.rename_select_all = true;
+            let title = tab.custom_title.clone().unwrap_or(automatic_title);
+            tab.rename_cursor = title.len();
+            tab.rename_buffer = Some(title);
+            tab.rename_select_all = false;
         }
         self.rename_focus.focus(window, cx);
         cx.notify();
+    }
+
+    fn search_tab_scrollback(
+        &mut self,
+        _: &SearchTabScrollback,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.tab_search.is_none() {
+            let Some(tab) = self.tabs.get(self.active_tab) else {
+                return;
+            };
+            let tab_id = tab.id;
+            let views = tab
+                .panes
+                .iter()
+                .filter_map(|pane| pane.view.clone())
+                .collect::<Vec<_>>();
+            for view in views {
+                view.update(cx, TerminalView::clear_search);
+            }
+            self.command_palette = None;
+            self.tab_search = Some(TabSearch {
+                tab_id,
+                query: String::new(),
+                cursor: 0,
+                select_all: false,
+                generation: 0,
+                matches: Vec::new(),
+                active_match: None,
+            });
+            self.refresh_tab_search(cx);
+        }
+        self.tab_search_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn clear_tab_search_matches(&mut self, tab_id: u64, cx: &mut Context<Self>) {
+        let terminals = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .into_iter()
+            .flat_map(|tab| tab.panes.iter())
+            .filter_map(|pane| pane.view.as_ref())
+            .map(|view| view.read(cx).terminal().clone())
+            .collect::<Vec<_>>();
+        for terminal in terminals {
+            terminal.update(cx, |terminal, _| terminal.matches.clear());
+        }
+    }
+
+    fn dismiss_tab_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(search) = self.tab_search.take() else {
+            return;
+        };
+        self.clear_tab_search_matches(search.tab_id, cx);
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    fn refresh_tab_search(&mut self, cx: &mut Context<Self>) {
+        let Some(search_state) = self.tab_search.as_mut() else {
+            return;
+        };
+        search_state.generation = search_state.generation.wrapping_add(1);
+        search_state.matches.clear();
+        search_state.active_match = None;
+        let tab_id = search_state.tab_id;
+        let query = search_state.query.clone();
+        let generation = search_state.generation;
+
+        let terminals = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .into_iter()
+            .flat_map(|tab| tab.panes.iter())
+            .filter_map(|pane| {
+                pane.view
+                    .as_ref()
+                    .map(|view| (pane.id, view.read(cx).terminal().clone()))
+            })
+            .collect::<Vec<_>>();
+        for (_, terminal) in &terminals {
+            terminal.update(cx, |terminal, _| terminal.matches.clear());
+        }
+        if query.is_empty() {
+            cx.notify();
+            return;
+        }
+        let Some(pattern) = Search::new(&regex::escape(&query)) else {
+            return;
+        };
+        let tasks = terminals
+            .into_iter()
+            .map(|(pane_id, terminal)| {
+                let task = terminal.update(cx, |terminal, cx| {
+                    terminal.find_matches(pattern.clone(), cx)
+                });
+                (pane_id, terminal, task)
+            })
+            .collect::<Vec<_>>();
+
+        cx.spawn(async move |this, cx| {
+            let mut results = Vec::with_capacity(tasks.len());
+            for (pane_id, terminal, task) in tasks {
+                let matches: Vec<Range> = task.await;
+                results.push((pane_id, terminal, matches));
+            }
+            this.update(cx, |this, cx| {
+                let valid = this.tab_search.as_ref().is_some_and(|search| {
+                    search.tab_id == tab_id
+                        && search.generation == generation
+                        && search.query == query
+                });
+                if !valid {
+                    return;
+                }
+
+                let mut aggregated = Vec::new();
+                for (pane_id, terminal, matches) in results {
+                    let match_count = matches.len();
+                    terminal.update(cx, |terminal, _| terminal.matches = matches);
+                    aggregated.extend((0..match_count).map(|match_index| TabSearchMatch {
+                        pane_id,
+                        match_index,
+                    }));
+                }
+                let active_match = aggregated.len().checked_sub(1);
+                if let Some(search) = this.tab_search.as_mut() {
+                    search.matches = aggregated;
+                    search.active_match = active_match;
+                }
+                if let Some(index) = active_match {
+                    this.activate_tab_search_match(index, cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn activate_tab_search_match(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some((tab_id, search_match)) = self.tab_search.as_ref().and_then(|search| {
+            search.matches.get(index).copied().map(|search_match| {
+                (search.tab_id, search_match)
+            })
+        }) else {
+            return;
+        };
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+            return;
+        };
+        tab.activate_pane(search_match.pane_id);
+        let terminal = tab
+            .pane(search_match.pane_id)
+            .and_then(|pane| pane.view.as_ref())
+            .map(|view| view.read(cx).terminal().clone());
+        if let Some(terminal) = terminal {
+            terminal.update(cx, |terminal, _| {
+                terminal.activate_match(search_match.match_index)
+            });
+        }
+        cx.notify();
+    }
+
+    fn navigate_tab_search(&mut self, previous: bool, cx: &mut Context<Self>) {
+        let Some(search) = self.tab_search.as_mut() else {
+            return;
+        };
+        let match_count = search.matches.len();
+        if match_count == 0 {
+            return;
+        }
+        let current = search.active_match.unwrap_or(if previous { 0 } else { match_count - 1 });
+        let index = if previous {
+            current.checked_sub(1).unwrap_or(match_count - 1)
+        } else {
+            (current + 1) % match_count
+        };
+        search.active_match = Some(index);
+        self.activate_tab_search_match(index, cx);
+    }
+
+    fn insert_tab_search_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        let Some(search) = self.tab_search.as_mut() else {
+            return;
+        };
+        if search.select_all {
+            search.query.clear();
+            search.cursor = 0;
+        }
+        search.query.insert_str(search.cursor, text);
+        search.cursor += text.len();
+        search.select_all = false;
+        self.refresh_tab_search(cx);
+    }
+
+    fn tab_search_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event.keystroke.key.as_str() {
+            "escape" => self.dismiss_tab_search(window, cx),
+            "enter" | "f3" if event.keystroke.modifiers.shift => {
+                self.navigate_tab_search(true, cx)
+            }
+            "enter" | "f3" => self.navigate_tab_search(false, cx),
+            "backspace" => {
+                if let Some(search) = self.tab_search.as_mut() {
+                    if search.select_all {
+                        search.query.clear();
+                        search.cursor = 0;
+                    } else if search.cursor > 0 {
+                        let previous = previous_char_boundary(&search.query, search.cursor);
+                        search.query.replace_range(previous..search.cursor, "");
+                        search.cursor = previous;
+                    }
+                    search.select_all = false;
+                }
+                self.refresh_tab_search(cx);
+            }
+            "delete" => {
+                if let Some(search) = self.tab_search.as_mut() {
+                    if search.select_all {
+                        search.query.clear();
+                        search.cursor = 0;
+                    } else if search.cursor < search.query.len() {
+                        let next = next_char_boundary(&search.query, search.cursor);
+                        search.query.replace_range(search.cursor..next, "");
+                    }
+                    search.select_all = false;
+                }
+                self.refresh_tab_search(cx);
+            }
+            "left" => {
+                if let Some(search) = self.tab_search.as_mut() {
+                    search.cursor = if search.select_all {
+                        0
+                    } else {
+                        previous_char_boundary(&search.query, search.cursor)
+                    };
+                    search.select_all = false;
+                }
+                cx.notify();
+            }
+            "right" => {
+                if let Some(search) = self.tab_search.as_mut() {
+                    search.cursor = if search.select_all {
+                        search.query.len()
+                    } else {
+                        next_char_boundary(&search.query, search.cursor)
+                    };
+                    search.select_all = false;
+                }
+                cx.notify();
+            }
+            "home" => {
+                if let Some(search) = self.tab_search.as_mut() {
+                    search.cursor = 0;
+                    search.select_all = false;
+                }
+                cx.notify();
+            }
+            "end" => {
+                if let Some(search) = self.tab_search.as_mut() {
+                    search.cursor = search.query.len();
+                    search.select_all = false;
+                }
+                cx.notify();
+            }
+            "a" if event.keystroke.modifiers.control || event.keystroke.modifiers.platform => {
+                if let Some(search) = self.tab_search.as_mut() {
+                    search.select_all = !search.query.is_empty();
+                }
+                cx.notify();
+            }
+            "v" if event.keystroke.modifiers.control || event.keystroke.modifiers.platform => {
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    self.insert_tab_search_text(&text, cx);
+                }
+            }
+            _ if !event.keystroke.modifiers.control
+                && !event.keystroke.modifiers.platform
+                && !event.keystroke.modifiers.alt =>
+            {
+                if let Some(text) = event.keystroke.key_char.as_ref() {
+                    self.insert_tab_search_text(text, cx);
+                }
+            }
+            _ => {}
+        }
+        cx.stop_propagation();
+    }
+
+    fn toggle_command_palette(
+        &mut self,
+        _: &ToggleCommandPalette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.tab_search.is_some() {
+            self.dismiss_tab_search(window, cx);
+        }
+        if self.command_palette.is_some() {
+            self.dismiss_command_palette(window, cx);
+            return;
+        }
+
+        let terminal_focus = self
+            .tabs
+            .get(self.active_tab)
+            .and_then(Tab::active_pane)
+            .and_then(|pane| pane.view.as_ref())
+            .map(|view| view.focus_handle(cx));
+        let commands = window
+            .available_actions(cx)
+            .into_iter()
+            .filter(|action| action.name() != ToggleCommandPalette.name())
+            .map(|action| {
+                let shortcut = terminal_focus
+                    .as_ref()
+                    .and_then(|focus| {
+                        window.highest_precedence_binding_for_action_in(action.as_ref(), focus)
+                    })
+                    .map(|binding| {
+                        binding
+                            .keystrokes()
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    });
+                PaletteCommand {
+                    name: humanize_action_name(action.name()),
+                    shortcut,
+                    action,
+                }
+            })
+            .collect();
+        self.command_palette = Some(CommandPalette::new(commands));
+        self.command_palette_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn dismiss_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.command_palette = None;
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    fn run_palette_command(
+        &mut self,
+        command_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let action = self
+            .command_palette
+            .as_ref()
+            .and_then(|palette| palette.commands.get(command_index))
+            .map(|command| command.action.boxed_clone());
+        self.command_palette = None;
+        self.focus_active(window, cx);
+        if let Some(action) = action {
+            window.dispatch_action(action, cx);
+        }
+        cx.notify();
+    }
+
+    fn command_palette_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.tab_search.is_some() {
+            self.tab_search_key_down(event, window, cx);
+            return;
+        }
+        let Some(palette) = self.command_palette.as_mut() else {
+            self.rename_key_down(event, window, cx);
+            return;
+        };
+        match event.keystroke.key.as_str() {
+            "escape" => self.dismiss_command_palette(window, cx),
+            "up" => {
+                palette.selected = palette.selected.saturating_sub(1);
+                cx.notify();
+            }
+            "down" => {
+                palette.selected =
+                    (palette.selected + 1).min(palette.matches().len().saturating_sub(1));
+                cx.notify();
+            }
+            "enter" => {
+                let command = palette.matches().get(palette.selected).copied();
+                if let Some(command) = command {
+                    self.run_palette_command(command, window, cx);
+                }
+            }
+            "backspace" => {
+                if palette.select_all {
+                    palette.query.clear();
+                    palette.cursor = 0;
+                } else if palette.cursor > 0 {
+                    let previous = previous_char_boundary(&palette.query, palette.cursor);
+                    palette.query.replace_range(previous..palette.cursor, "");
+                    palette.cursor = previous;
+                }
+                palette.select_all = false;
+                palette.selected = 0;
+                cx.notify();
+            }
+            "delete" => {
+                if palette.select_all {
+                    palette.query.clear();
+                    palette.cursor = 0;
+                } else if palette.cursor < palette.query.len() {
+                    let next = next_char_boundary(&palette.query, palette.cursor);
+                    palette.query.replace_range(palette.cursor..next, "");
+                }
+                palette.select_all = false;
+                palette.selected = 0;
+                cx.notify();
+            }
+            "left" => {
+                palette.cursor = if palette.select_all {
+                    0
+                } else {
+                    previous_char_boundary(&palette.query, palette.cursor)
+                };
+                palette.select_all = false;
+                cx.notify();
+            }
+            "right" => {
+                palette.cursor = if palette.select_all {
+                    palette.query.len()
+                } else {
+                    next_char_boundary(&palette.query, palette.cursor)
+                };
+                palette.select_all = false;
+                cx.notify();
+            }
+            "home" => {
+                palette.cursor = 0;
+                palette.select_all = false;
+                cx.notify();
+            }
+            "end" => {
+                palette.cursor = palette.query.len();
+                palette.select_all = false;
+                cx.notify();
+            }
+            "a" if event.keystroke.modifiers.control || event.keystroke.modifiers.platform => {
+                palette.select_all = !palette.query.is_empty();
+                cx.notify();
+            }
+            _ if !event.keystroke.modifiers.control
+                && !event.keystroke.modifiers.platform
+                && !event.keystroke.modifiers.alt =>
+            {
+                if let Some(text) = event.keystroke.key_char.as_ref() {
+                    if palette.select_all {
+                        palette.query.clear();
+                        palette.cursor = 0;
+                        palette.select_all = false;
+                    }
+                    palette.query.insert_str(palette.cursor, text);
+                    palette.cursor += text.len();
+                    palette.selected = 0;
+                    cx.notify();
+                }
+            }
+            _ => {}
+        }
     }
 
     fn rename_key_down(
@@ -1028,14 +1627,56 @@ impl Zetta {
             "backspace" => {
                 if tab.rename_select_all {
                     buffer.clear();
+                    tab.rename_cursor = 0;
                     tab.rename_select_all = false;
-                } else {
-                    buffer.pop();
+                } else if tab.rename_cursor > 0 {
+                    let previous = previous_char_boundary(buffer, tab.rename_cursor);
+                    buffer.replace_range(previous..tab.rename_cursor, "");
+                    tab.rename_cursor = previous;
                 }
                 cx.notify();
             }
+            "delete" => {
+                if tab.rename_select_all {
+                    buffer.clear();
+                    tab.rename_cursor = 0;
+                    tab.rename_select_all = false;
+                } else if tab.rename_cursor < buffer.len() {
+                    let next = next_char_boundary(buffer, tab.rename_cursor);
+                    buffer.replace_range(tab.rename_cursor..next, "");
+                }
+                cx.notify();
+            }
+            "left" => {
+                tab.rename_cursor = if tab.rename_select_all {
+                    0
+                } else {
+                    previous_char_boundary(buffer, tab.rename_cursor)
+                };
+                tab.rename_select_all = false;
+                cx.notify();
+            }
+            "right" => {
+                tab.rename_cursor = if tab.rename_select_all {
+                    buffer.len()
+                } else {
+                    next_char_boundary(buffer, tab.rename_cursor)
+                };
+                tab.rename_select_all = false;
+                cx.notify();
+            }
+            "home" => {
+                tab.rename_cursor = 0;
+                tab.rename_select_all = false;
+                cx.notify();
+            }
+            "end" => {
+                tab.rename_cursor = buffer.len();
+                tab.rename_select_all = false;
+                cx.notify();
+            }
             "a" if event.keystroke.modifiers.control || event.keystroke.modifiers.platform => {
-                tab.rename_select_all = true;
+                tab.rename_select_all = !buffer.is_empty();
                 cx.notify();
             }
             _ if !event.keystroke.modifiers.control
@@ -1045,9 +1686,11 @@ impl Zetta {
                 if let Some(text) = event.keystroke.key_char.as_ref() {
                     if tab.rename_select_all {
                         buffer.clear();
+                        tab.rename_cursor = 0;
                         tab.rename_select_all = false;
                     }
-                    buffer.push_str(text);
+                    buffer.insert_str(tab.rename_cursor, text);
+                    tab.rename_cursor += text.len();
                     cx.notify();
                 }
             }
@@ -1090,6 +1733,10 @@ impl Zetta {
                 let active = pane.view.as_ref().is_some_and(|view| {
                     view.focus_handle(cx).is_focused(window)
                         || view.read(cx).has_open_context_menu()
+                        || view.read(cx).has_open_search()
+                        || self.tab_search.as_ref().is_some_and(|search| {
+                            search.tab_id == tab.id && tab.active_pane == *pane_id
+                        })
                 }) || (pane.view.is_none() && tab.active_pane == *pane_id);
                 let content = match (&pane.view, &pane.error) {
                     (Some(view), _) => div().size_full().child(view.clone()).into_any_element(),
@@ -1272,11 +1919,29 @@ impl Render for Zetta {
                 let close_handle = handle.clone();
                 let rename_view = tab.active_pane().and_then(|pane| pane.view.clone());
                 let title = if let Some(buffer) = tab.rename_buffer.as_ref() {
-                    format!("{buffer}|").into()
+                    if tab.rename_select_all {
+                        buffer.clone().into()
+                    } else {
+                        let cursor = tab.rename_cursor.min(buffer.len());
+                        let (before, after) = buffer.split_at(cursor);
+                        format!("{before}|{after}").into()
+                    }
                 } else if let Some(custom_title) = tab.custom_title.as_ref() {
                     custom_title.clone().into()
                 } else if let Some(view) = tab.active_pane().and_then(|pane| pane.view.as_ref()) {
                     view.read(cx).tab_content_text(0, cx)
+                } else {
+                    tab.active_pane()
+                        .map(|pane| pane.profile.name.clone())
+                        .unwrap_or_else(|| "Terminal".to_string())
+                        .into()
+                };
+                let full_title = if let Some(buffer) = tab.rename_buffer.as_ref() {
+                    buffer.clone().into()
+                } else if let Some(custom_title) = tab.custom_title.as_ref() {
+                    custom_title.clone().into()
+                } else if let Some(view) = tab.active_pane().and_then(|pane| pane.view.as_ref()) {
+                    view.read(cx).tab_content_text(1, cx)
                 } else {
                     tab.active_pane()
                         .map(|pane| pane.profile.name.clone())
@@ -1295,11 +1960,17 @@ impl Render for Zetta {
                     )
                     .child(
                         div()
+                            .id(("tab-title", tab.id as usize))
                             .min_w_0()
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_ellipsis()
                             .text_sm()
+                            .when(
+                                tab.rename_buffer.is_some() && tab.rename_select_all,
+                                |title| title.bg(tab_colors.element_selection_background),
+                            )
+                            .tooltip(Tooltip::text(full_title))
                             .text_color(tab_text)
                             .child(title),
                     )
@@ -1501,6 +2172,248 @@ impl Render for Zetta {
                 .into_any_element()
         });
 
+        let tab_search_overlay = self.tab_search.as_ref().map(|search| {
+            let cursor = search.cursor.min(search.query.len());
+            let (before, after) = search.query.split_at(cursor);
+            let before = before.to_owned();
+            let after = after.to_owned();
+            let selected = search.select_all;
+            let status = search
+                .active_match
+                .map(|index| format!("{} / {}", index + 1, search.matches.len()))
+                .unwrap_or_else(|| format!("0 / {}", search.matches.len()));
+
+            div()
+                .absolute()
+                .top(px(74.0))
+                .left_2()
+                .right_2()
+                .flex()
+                .justify_end()
+                .child(
+                    div()
+                        .id("tab-scrollback-search")
+                        .track_focus(&self.tab_search_focus)
+                        .w_full()
+                        .max_w(px(460.0))
+                        .px_3()
+                        .py_2()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .rounded(px(5.0))
+                        .border_1()
+                        .border_color(colors.border)
+                        .bg(colors.elevated_surface_background.alpha(1.0))
+                        .shadow_sm()
+                        .text_sm()
+                        .text_color(colors.text)
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .justify_between()
+                                .gap_3()
+                                .child(
+                                    h_flex()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .when(selected, |input| {
+                                            input.bg(colors.element_selection_background)
+                                        })
+                                        .child(div().whitespace_nowrap().child(before))
+                                        .when(!selected, |input| {
+                                            input.child(
+                                                div()
+                                                    .flex_none()
+                                                    .w(px(1.0))
+                                                    .h(px(16.0))
+                                                    .bg(colors.text_accent),
+                                            )
+                                        })
+                                        .child(div().whitespace_nowrap().child(after)),
+                                )
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_color(colors.text_muted)
+                                        .child(status),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(colors.text_muted)
+                                .child("All panes  Enter next  Shift+Enter previous  Esc close"),
+                        ),
+                )
+                .into_any_element()
+        });
+
+        let palette_overlay = self.command_palette.as_ref().map(|palette| {
+            let cursor = palette.cursor.min(palette.query.len());
+            let (query_before, query_after) = palette.query.split_at(cursor);
+            let query_before = query_before.to_owned();
+            let query_after = query_after.to_owned();
+            let query_empty = palette.query.is_empty();
+            let query_selected = palette.select_all;
+            let matches = palette.matches();
+            let selected = palette.selected;
+            let result_count = matches.len();
+            let visible_start = selected.saturating_sub(9);
+            let rows = matches
+                .into_iter()
+                .skip(visible_start)
+                .take(10)
+                .enumerate()
+                .map(|(position, command_index)| {
+                    let command = &palette.commands[command_index];
+                    let row_handle = handle.clone();
+                    div()
+                        .id(("command-palette-row", command_index))
+                        .h_9()
+                        .w_full()
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .cursor_pointer()
+                        .text_sm()
+                        .text_color(colors.text)
+                        .when(visible_start + position == selected, |row| {
+                            row.bg(colors.element_selected)
+                        })
+                        .hover(|style| style.bg(colors.element_hover))
+                        .on_click(move |_, window, cx| {
+                            row_handle
+                                .update(cx, |this, cx| {
+                                    this.run_palette_command(command_index, window, cx)
+                                })
+                                .ok();
+                        })
+                        .child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .child(command.name.clone()),
+                        )
+                        .when_some(command.shortcut.clone(), |row, shortcut| {
+                            row.child(
+                                div()
+                                    .flex_none()
+                                    .text_xs()
+                                    .text_color(colors.text_muted)
+                                    .child(shortcut),
+                            )
+                        })
+                })
+                .collect::<Vec<_>>();
+            let dismiss_handle = handle.clone();
+
+            div()
+                .id("command-palette-backdrop")
+                .absolute()
+                .inset_0()
+                .pt(px(72.))
+                .px_4()
+                .flex()
+                .items_start()
+                .justify_center()
+                .bg(transparent_black().opacity(0.24))
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    dismiss_handle
+                        .update(cx, |this, cx| this.dismiss_command_palette(window, cx))
+                        .ok();
+                })
+                .child(
+                    div()
+                        .id("command-palette")
+                        .track_focus(&self.command_palette_focus)
+                        .w_full()
+                        .max_w(px(680.))
+                        .overflow_hidden()
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_color(colors.border)
+                        .bg(colors.elevated_surface_background)
+                        .shadow_lg()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(
+                            div()
+                                .h_12()
+                                .px_3()
+                                .flex()
+                                .items_center()
+                                .border_b_1()
+                                .border_color(colors.border)
+                                .text_color(colors.text)
+                                .child(div().text_color(colors.text_accent).mr_2().child(">"))
+                                .child(
+                                    h_flex()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .when(query_selected, |input| {
+                                            input.bg(colors.element_selection_background)
+                                        })
+                                        .child(div().whitespace_nowrap().child(query_before))
+                                        .when(!query_selected, |input| {
+                                            input.child(
+                                                div()
+                                                    .flex_none()
+                                                    .w(px(1.0))
+                                                    .h(px(16.0))
+                                                    .bg(colors.text_accent),
+                                            )
+                                        })
+                                        .child(div().whitespace_nowrap().child(query_after))
+                                        .when(query_empty, |input| {
+                                            input.child(
+                                                div()
+                                                    .text_color(colors.text_placeholder)
+                                                    .child("Type a command"),
+                                            )
+                                        }),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .py_1()
+                                .when(result_count == 0, |list| {
+                                    list.child(
+                                        div()
+                                            .h_12()
+                                            .px_3()
+                                            .flex()
+                                            .items_center()
+                                            .text_sm()
+                                            .text_color(colors.text_muted)
+                                            .child("No matching commands"),
+                                    )
+                                })
+                                .children(rows),
+                        )
+                        .child(
+                            div()
+                                .h_7()
+                                .px_3()
+                                .flex()
+                                .items_center()
+                                .border_t_1()
+                                .border_color(colors.border)
+                                .text_xs()
+                                .text_color(colors.text_muted)
+                                .child(format!(
+                                    "{result_count} command{}",
+                                    if result_count == 1 { "" } else { "s" }
+                                )),
+                        ),
+                )
+                .into_any_element()
+        });
+
         let content = div()
             .key_context("Zetta")
             .size_full()
@@ -1524,12 +2437,17 @@ impl Render for Zetta {
             .on_action(cx.listener(Self::increase_terminal_font_size))
             .on_action(cx.listener(Self::decrease_terminal_font_size))
             .on_action(cx.listener(Self::reset_terminal_font_size))
+            .on_action(cx.listener(Self::increase_pane_font_size))
+            .on_action(cx.listener(Self::decrease_pane_font_size))
+            .on_action(cx.listener(Self::reset_pane_font_size))
+            .on_action(cx.listener(Self::search_tab_scrollback))
             .on_action(cx.listener(Self::reload_configuration))
+            .on_action(cx.listener(Self::toggle_command_palette))
             .on_action(cx.listener(Self::toggle_performance_overlay))
             .when(self.is_renaming_tab(), |content| {
                 content.track_focus(&self.rename_focus)
             })
-            .on_key_down(cx.listener(Self::rename_key_down))
+            .on_key_down(cx.listener(Self::command_palette_key_down))
             .child(title_bar)
             .child(
                 div()
@@ -1598,7 +2516,9 @@ impl Render for Zetta {
             .child(div().flex_1().min_h_0().child(body))
             .when_some(performance_overlay, |content, overlay| {
                 content.child(overlay)
-            });
+            })
+            .when_some(palette_overlay, |content, overlay| content.child(overlay))
+            .when_some(tab_search_overlay, |content, overlay| content.child(overlay));
 
         client_window_frame(content, window, cx)
     }
@@ -2172,11 +3092,57 @@ fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut App) {
             Some("Zetta > Terminal && selection"),
         ),
         KeyBinding::new("ctrl-v", Paste, Some("Zetta > Terminal")),
+        KeyBinding::new("ctrl-shift-f", SearchScrollback, Some("Zetta > Terminal")),
+        KeyBinding::new(
+            "ctrl-alt-f",
+            SearchTabScrollback,
+            Some("Zetta > Terminal"),
+        ),
+        KeyBinding::new(
+            "enter",
+            SearchNextMatch,
+            Some("Zetta > Terminal && scrollback_search"),
+        ),
+        KeyBinding::new(
+            "shift-enter",
+            SearchPreviousMatch,
+            Some("Zetta > Terminal && scrollback_search"),
+        ),
+        KeyBinding::new(
+            "f3",
+            SearchNextMatch,
+            Some("Zetta > Terminal && scrollback_search"),
+        ),
+        KeyBinding::new(
+            "shift-f3",
+            SearchPreviousMatch,
+            Some("Zetta > Terminal && scrollback_search"),
+        ),
+        KeyBinding::new(
+            "escape",
+            DismissSearch,
+            Some("Zetta > Terminal && scrollback_search"),
+        ),
+        KeyBinding::new(
+            "ctrl-a",
+            SelectAllSearchText,
+            Some("Zetta > Terminal && scrollback_search"),
+        ),
+        KeyBinding::new("ctrl-alt-v", PasteTrimmed, Some("Zetta > Terminal")),
+        KeyBinding::new(
+            "ctrl-shift-p",
+            ToggleCommandPalette,
+            Some("Zetta > Terminal"),
+        ),
         KeyBinding::new("f2", RenameTab, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-=", IncreaseTerminalFontSize, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-+", IncreaseTerminalFontSize, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl--", DecreaseTerminalFontSize, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-0", ResetTerminalFontSize, Some("Zetta > Terminal")),
+        KeyBinding::new("ctrl-alt-=", IncreasePaneFontSize, Some("Zetta > Terminal")),
+        KeyBinding::new("ctrl-alt-+", IncreasePaneFontSize, Some("Zetta > Terminal")),
+        KeyBinding::new("ctrl-alt--", DecreasePaneFontSize, Some("Zetta > Terminal")),
+        KeyBinding::new("ctrl-alt-0", ResetPaneFontSize, Some("Zetta > Terminal")),
         KeyBinding::new(
             "ctrl-shift-r",
             ReloadConfiguration,
@@ -2646,6 +3612,7 @@ mod tests {
             focus_history: vec![1, 2],
             custom_title: None,
             rename_buffer: None,
+            rename_cursor: 0,
             rename_select_all: false,
         };
 
@@ -2676,6 +3643,7 @@ mod tests {
             focus_history: vec![1, 2, 3],
             custom_title: None,
             rename_buffer: None,
+            rename_cursor: 0,
             rename_select_all: false,
         };
 
@@ -2708,6 +3676,7 @@ mod tests {
             focus_history: vec![1, 2, 3],
             custom_title: None,
             rename_buffer: None,
+            rename_cursor: 0,
             rename_select_all: false,
         };
 
