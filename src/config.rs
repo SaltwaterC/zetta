@@ -68,8 +68,7 @@ impl Config {
     }
 
     pub fn load(config_path: Option<&Path>, keymap_path: Option<PathBuf>) -> Result<Self> {
-        let has_keymap_override = keymap_path.is_some();
-        let mut config = Self::defaults(config_path, keymap_path);
+        let config = Self::defaults(config_path, keymap_path.clone());
 
         let content = match fs::read_to_string(&config.config_path) {
             Ok(content) => content,
@@ -79,6 +78,17 @@ impl Config {
                     .with_context(|| format!("reading {}", config.config_path.display()));
             }
         };
+        Self::parse(&content, config_path, keymap_path)
+    }
+
+    /// Parses configuration text using the same defaults and path resolution as [`Self::load`].
+    /// This lets the settings UI reject invalid edits before replacing the user's file.
+    pub fn parse(
+        content: &str,
+        config_path: Option<&Path>,
+        keymap_path: Option<PathBuf>,
+    ) -> Result<Self> {
+        let mut config = Self::defaults(config_path, keymap_path);
         let root: Value = serde_json::from_str(&content)
             .with_context(|| format!("parsing {}", config.config_path.display()))?;
         validate_config_fields(&root)?;
@@ -90,9 +100,6 @@ impl Config {
                     .context("working_directory must be a string")?,
             ));
             config.working_directory_configured = true;
-        }
-        if !has_keymap_override && let Some(path) = root.get("keymap").and_then(Value::as_str) {
-            config.keymap_path = expand_home(path);
         }
         if let Some(theme) = root.get("theme") {
             config.theme = Some(theme.as_str().context("theme must be a string")?.to_owned());
@@ -148,7 +155,6 @@ fn validate_config_fields(root: &Value) -> Result<()> {
     const FIELDS: &[&str] = &[
         "default_profile",
         "working_directory",
-        "keymap",
         "theme",
         "terminal_font_size",
         "terminal_font_family",
@@ -516,6 +522,16 @@ mod tests {
         .unwrap_err();
         assert!(
             error
+                .to_string()
+                .contains("unrecognized configuration field")
+        );
+
+        let keymap_error = validate_config_fields(&serde_json::json!({
+            "keymap": "custom-keymap.json"
+        }))
+        .unwrap_err();
+        assert!(
+            keymap_error
                 .to_string()
                 .contains("unrecognized configuration field")
         );

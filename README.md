@@ -139,6 +139,7 @@ Keyboard shortcuts use Zed's keymap format. The default shortcuts are:
 | `Ctrl-Alt-F` | Search scrollback across every pane in the active tab |
 | `Ctrl-Alt-V` | Paste after trimming leading and trailing whitespace |
 | `Ctrl-Shift-P` | Open the command palette |
+| `Ctrl-,` | Open the configuration and keymap editor |
 | `F2` | Rename active tab |
 | `Ctrl-=` / `Ctrl-+` | Increase font size globally |
 | `Ctrl--` | Decrease font size globally |
@@ -152,6 +153,19 @@ Keyboard shortcuts use Zed's keymap format. The default shortcuts are:
 The command palette lists the actions available in the focused terminal and
 Zetta window, including their effective keyboard shortcuts. Type to filter,
 use the arrow keys to select a command, and press `Enter` to run it.
+
+The settings button in the tab bar (or `Ctrl-,`) opens typed controls for the
+active configuration and keymap files. Profiles and themes use checked
+dropdowns, the font picker searches installed families in its own modal, and
+detected profiles expose theme overrides. Font size and scrollback accept typed
+values as well as press-and-hold steppers; scrollback uses a `Max` sentinel.
+Inactive-pane opacity uses a percentage slider. Settings and font lists have
+independent, visible scrollbars, and new profiles are created in a labeled modal. Key bindings are grouped by context with
+action dropdowns. Configuration and keymap paths follow the platform
+conventions above; overriding either path remains CLI-only through `--config`
+and `--keymap`. Saving validates the changed page, persists it, applies it
+without restarting, closes the dialog, and returns focus to the terminal.
+Invalid settings or bindings are reported without replacing the existing file.
 
 Scrollback search is scoped to the active pane. `Enter` and `F3` select the
 next match, `Shift-Enter` and `Shift-F3` select the previous match, and `Escape`

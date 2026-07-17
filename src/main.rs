@@ -2,6 +2,7 @@
 
 mod command_palette;
 mod config;
+mod settings_editor;
 mod zetta_assets;
 
 const ZETTA_APP_ID: &str = "Zetta";
@@ -25,7 +26,7 @@ use gpui::{
     Action, Anchor, App, AppContext as _, Bounds, Context, CursorStyle, Decorations, Entity,
     Focusable, FrameTiming, FrameTimingCollector, HitboxBehavior, InteractiveElement as _,
     IntoElement, KeyBinding, KeyDownEvent, MAX_BUTTONS_PER_SIDE, MouseButton, Pixels, Point,
-    Render, ResizeEdge, Size, Subscription, Tiling, TitlebarOptions, Window,
+    Render, ResizeEdge, ScrollHandle, Size, Subscription, Tiling, TitlebarOptions, Window,
     WindowBackgroundAppearance, WindowBounds, WindowButton, WindowButtonLayout, WindowControlArea,
     WindowControls, WindowDecorations, WindowId, WindowOptions, actions, canvas, div, point,
     profiler, px, size, svg, transparent_black,
@@ -33,16 +34,23 @@ use gpui::{
 use schemars::JsonSchema;
 use serde::Deserialize;
 use settings::{KeymapFile, KeymapFileLoadResult, Settings as _};
+use settings_editor::{
+    BindingForm, ConfigTextField, ConfigurationForm, KeymapForm, KeymapSectionForm,
+    KeymapTextField, SettingsPage, TextField, save as save_settings_file,
+};
 use task::Shell;
-use terminal::{Paste, PasteTrimmed, Range, Search, TerminalBuilder, terminal_settings::TerminalSettings};
+use terminal::{
+    Paste, PasteTrimmed, Range, Search, TerminalBuilder, terminal_settings::TerminalSettings,
+};
 use terminal_view::{
     ClearClipboard, CopyAndClearSelection, DismissSearch, SearchNextMatch, SearchPreviousMatch,
     SearchScrollback, SelectAll, SelectAllSearchText, TerminalView, TerminalViewEvent,
 };
 use theme::{ActiveTheme, ClientDecorationsExt as _, GlobalTheme, Theme, ThemeRegistry};
 use ui::{
-    Banner, ButtonCommon as _, ButtonSize, Clickable as _, Color, IconButton, IconButtonShape,
-    IconName, IconSize, Label, LabelSize, PopoverMenu, Severity, Tooltip, prelude::*,
+    Banner, ButtonCommon as _, ButtonSize, Clickable as _, Color, DropdownMenu, DropdownStyle,
+    IconButton, IconButtonShape, IconName, IconPosition, IconSize, Label, LabelSize, PopoverMenu,
+    Severity, Tooltip, prelude::*,
 };
 use util::{ResultExt as _, paths::PathStyle};
 use zetta_assets::ZettaAssets;
@@ -71,6 +79,7 @@ actions!(
         SearchTabScrollback,
         ReloadConfiguration,
         ToggleCommandPalette,
+        ToggleSettings,
         TogglePerformanceOverlay
     ]
 );
@@ -430,6 +439,71 @@ struct TabSearch {
     active_match: Option<usize>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettingsInput {
+    Configuration(ConfigTextField),
+    Keymap(KeymapTextField),
+    FontSearch,
+    ProfileDraft(ProfileDraftField),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProfileDraftField {
+    Name,
+    Program,
+    Arguments,
+}
+
+fn adjacent_profile_draft_field(
+    current: Option<ProfileDraftField>,
+    reverse: bool,
+) -> ProfileDraftField {
+    match (current, reverse) {
+        (Some(ProfileDraftField::Name), false) => ProfileDraftField::Program,
+        (Some(ProfileDraftField::Program), false) => ProfileDraftField::Arguments,
+        (Some(ProfileDraftField::Arguments), false) | (None, false) => ProfileDraftField::Name,
+        (Some(ProfileDraftField::Arguments), true) => ProfileDraftField::Program,
+        (Some(ProfileDraftField::Program), true) => ProfileDraftField::Name,
+        (Some(ProfileDraftField::Name), true) | (None, true) => ProfileDraftField::Arguments,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettingsDropdown {
+    DefaultProfile,
+    Theme,
+    ProfileTheme(usize),
+    ProfileDraftTheme,
+    BindingAction(usize, usize),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NumericSetting {
+    FontSize,
+    ScrollHistory,
+}
+
+#[derive(Clone)]
+struct SettingsEditor {
+    page: SettingsPage,
+    configuration: ConfigurationForm,
+    keymap: KeymapForm,
+    profile_names: Vec<String>,
+    themes: Vec<String>,
+    actions: Vec<String>,
+    fonts: Vec<String>,
+    font_query: Option<TextField>,
+    profile_draft: Option<settings_editor::ProfileForm>,
+    settings_scroll: ScrollHandle,
+    font_scroll: ScrollHandle,
+    numeric_repeat_generation: u64,
+    scroll_geometry_initialized: bool,
+    focused_input: Option<SettingsInput>,
+    configuration_dirty: bool,
+    keymap_dirty: bool,
+    message: Option<(bool, String)>,
+}
+
 struct Zetta {
     launch_config: Config,
     configuration_error: Option<String>,
@@ -443,6 +517,8 @@ struct Zetta {
     rename_focus: gpui::FocusHandle,
     command_palette_focus: gpui::FocusHandle,
     command_palette: Option<CommandPalette>,
+    settings_focus: gpui::FocusHandle,
+    settings_editor: Option<SettingsEditor>,
     tab_search_focus: gpui::FocusHandle,
     tab_search: Option<TabSearch>,
     titlebar_dragging: bool,
@@ -458,6 +534,26 @@ fn previous_char_boundary(text: &str, cursor: usize) -> usize {
         .next_back()
         .map(|(index, _)| index)
         .unwrap_or(0)
+}
+
+fn adjusted_scroll_history(current: u64, direction: i32, maximum: u64) -> u64 {
+    let step_basis = if direction < 0 {
+        current.saturating_sub(1)
+    } else {
+        current
+    };
+    let step = match step_basis {
+        0..100_000 => 1_000,
+        100_000..1_000_000 => 100_000,
+        1_000_000..10_000_000 => 1_000_000,
+        10_000_000..100_000_000 => 10_000_000,
+        _ => 100_000_000,
+    };
+    if direction < 0 {
+        current.saturating_sub(step)
+    } else {
+        current.saturating_add(step).min(maximum)
+    }
 }
 
 fn next_char_boundary(text: &str, cursor: usize) -> usize {
@@ -489,6 +585,8 @@ impl Zetta {
             rename_focus: cx.focus_handle(),
             command_palette_focus: cx.focus_handle(),
             command_palette: None,
+            settings_focus: cx.focus_handle(),
+            settings_editor: None,
             tab_search_focus: cx.focus_handle(),
             tab_search: None,
             titlebar_dragging: false,
@@ -1263,9 +1361,11 @@ impl Zetta {
 
     fn activate_tab_search_match(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some((tab_id, search_match)) = self.tab_search.as_ref().and_then(|search| {
-            search.matches.get(index).copied().map(|search_match| {
-                (search.tab_id, search_match)
-            })
+            search
+                .matches
+                .get(index)
+                .copied()
+                .map(|search_match| (search.tab_id, search_match))
         }) else {
             return;
         };
@@ -1293,7 +1393,9 @@ impl Zetta {
         if match_count == 0 {
             return;
         }
-        let current = search.active_match.unwrap_or(if previous { 0 } else { match_count - 1 });
+        let current = search
+            .active_match
+            .unwrap_or(if previous { 0 } else { match_count - 1 });
         let index = if previous {
             current.checked_sub(1).unwrap_or(match_count - 1)
         } else {
@@ -1325,9 +1427,7 @@ impl Zetta {
     ) {
         match event.keystroke.key.as_str() {
             "escape" => self.dismiss_tab_search(window, cx),
-            "enter" | "f3" if event.keystroke.modifiers.shift => {
-                self.navigate_tab_search(true, cx)
-            }
+            "enter" | "f3" if event.keystroke.modifiers.shift => self.navigate_tab_search(true, cx),
             "enter" | "f3" => self.navigate_tab_search(false, cx),
             "backspace" => {
                 if let Some(search) = self.tab_search.as_mut() {
@@ -1416,6 +1516,1817 @@ impl Zetta {
         cx.stop_propagation();
     }
 
+    fn toggle_settings(&mut self, _: &ToggleSettings, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_editor.is_some() {
+            self.dismiss_settings(window, cx);
+            return;
+        }
+
+        self.command_palette = None;
+        if self.tab_search.is_some() {
+            self.dismiss_tab_search(window, cx);
+        }
+
+        let configuration =
+            match ConfigurationForm::load(&self.launch_config.config_path, &self.launch_config) {
+                Ok(configuration) => configuration,
+                Err(error) => {
+                    self.configuration_error = Some(format!("Could not open settings: {error:#}"));
+                    cx.notify();
+                    return;
+                }
+            };
+        let keymap = match KeymapForm::load(&self.launch_config.keymap_path) {
+            Ok(keymap) => keymap,
+            Err(error) => {
+                self.configuration_error =
+                    Some(format!("Could not open keymap settings: {error:#}"));
+                cx.notify();
+                return;
+            }
+        };
+        let mut actions = window
+            .available_actions(cx)
+            .into_iter()
+            .map(|action| action.name().to_owned())
+            .collect::<Vec<_>>();
+        actions.sort();
+        actions.dedup();
+        let mut themes = ThemeRegistry::global(cx)
+            .list()
+            .into_iter()
+            .map(|theme| theme.name.to_string())
+            .collect::<Vec<_>>();
+        themes.sort();
+        themes.dedup();
+        let mut fonts = cx.text_system().all_font_names();
+        if !fonts.contains(&configuration.terminal_font_family) {
+            fonts.push(configuration.terminal_font_family.clone());
+        }
+        fonts.sort_by_key(|font| font.to_lowercase());
+        fonts.dedup();
+        self.settings_editor = Some(SettingsEditor {
+            page: SettingsPage::Configuration,
+            configuration,
+            keymap,
+            profile_names: self
+                .profiles
+                .iter()
+                .map(|profile| profile.name.clone())
+                .collect(),
+            themes,
+            actions,
+            fonts,
+            font_query: None,
+            profile_draft: None,
+            settings_scroll: ScrollHandle::new(),
+            font_scroll: ScrollHandle::new(),
+            numeric_repeat_generation: 0,
+            scroll_geometry_initialized: false,
+            focused_input: None,
+            configuration_dirty: false,
+            keymap_dirty: false,
+            message: None,
+        });
+        self.settings_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn dismiss_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_editor = None;
+        self.focus_active(window, cx);
+    }
+
+    fn select_settings_page(
+        &mut self,
+        page: SettingsPage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(editor) = self.settings_editor.as_mut() {
+            editor.page = page;
+            editor.message = None;
+            editor.focused_input = None;
+            editor.font_query = None;
+            editor.profile_draft = None;
+            editor.numeric_repeat_generation = editor.numeric_repeat_generation.wrapping_add(1);
+            self.settings_focus.focus(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn focus_settings_input(
+        &mut self,
+        input: SettingsInput,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self.settings_editor.as_mut() else {
+            return;
+        };
+        editor.focused_input = Some(input);
+        let field = match input {
+            SettingsInput::Configuration(field) => editor.configuration.text_mut(field),
+            SettingsInput::Keymap(field) => editor.keymap.text_mut(field),
+            SettingsInput::FontSearch => editor.font_query.as_mut(),
+            SettingsInput::ProfileDraft(field) => {
+                editor.profile_draft.as_mut().map(|draft| match field {
+                    ProfileDraftField::Name => &mut draft.name,
+                    ProfileDraftField::Program => &mut draft.program,
+                    ProfileDraftField::Arguments => &mut draft.arguments,
+                })
+            }
+        };
+        if let Some(field) = field {
+            field.cursor = field.text.len();
+            field.select_all =
+                !matches!(input, SettingsInput::ProfileDraft(_)) && !field.text.is_empty();
+        }
+        self.settings_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn focus_adjacent_profile_draft(
+        &mut self,
+        reverse: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self.settings_editor.as_ref().and_then(|editor| {
+            if let Some(SettingsInput::ProfileDraft(field)) = editor.focused_input {
+                Some(field)
+            } else {
+                None
+            }
+        });
+        let field = adjacent_profile_draft_field(current, reverse);
+        self.focus_settings_input(SettingsInput::ProfileDraft(field), window, cx);
+    }
+
+    fn set_settings_dropdown(
+        &mut self,
+        dropdown: SettingsDropdown,
+        value: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self.settings_editor.as_mut() else {
+            return;
+        };
+        match dropdown {
+            SettingsDropdown::DefaultProfile => {
+                editor.configuration.default_profile = value;
+            }
+            SettingsDropdown::Theme => editor.configuration.theme = value,
+            SettingsDropdown::ProfileTheme(index) => {
+                if let Some(profile) = editor.configuration.profiles.get_mut(index) {
+                    profile.theme = (value != "Use application theme").then_some(value);
+                }
+            }
+            SettingsDropdown::ProfileDraftTheme => {
+                if let Some(profile) = editor.profile_draft.as_mut() {
+                    profile.theme = (value != "Use application theme").then_some(value);
+                }
+            }
+            SettingsDropdown::BindingAction(section, binding) => {
+                if let Some(binding) = editor
+                    .keymap
+                    .sections
+                    .get_mut(section)
+                    .and_then(|section| section.bindings.get_mut(binding))
+                {
+                    binding.action = serde_json::Value::String(value);
+                }
+            }
+        }
+        match dropdown {
+            SettingsDropdown::BindingAction(_, _) => editor.keymap_dirty = true,
+            SettingsDropdown::ProfileDraftTheme => {}
+            _ => editor.configuration_dirty = true,
+        }
+        editor.message = None;
+        cx.notify();
+    }
+
+    fn adjust_numeric_setting(
+        &mut self,
+        setting: NumericSetting,
+        direction: i32,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self.settings_editor.as_mut() else {
+            return;
+        };
+        let configuration = &mut editor.configuration;
+        match setting {
+            NumericSetting::FontSize => {
+                let current = configuration
+                    .terminal_font_size
+                    .text
+                    .trim()
+                    .parse::<f32>()
+                    .unwrap_or(14.);
+                let value = (current + direction as f32).clamp(6., 100.);
+                configuration.terminal_font_size = TextField::new(format!("{value}"));
+            }
+            NumericSetting::ScrollHistory => {
+                let maximum = terminal::MAX_SCROLL_HISTORY_LINES as u64;
+                let current = if configuration
+                    .max_scroll_history_lines
+                    .text
+                    .trim()
+                    .eq_ignore_ascii_case("max")
+                {
+                    maximum
+                } else {
+                    configuration
+                        .max_scroll_history_lines
+                        .text
+                        .trim()
+                        .parse::<u64>()
+                        .unwrap_or(0)
+                        .min(maximum)
+                };
+                let value = adjusted_scroll_history(current, direction, maximum);
+                configuration.max_scroll_history_lines = TextField::new(if value == maximum {
+                    "Max".to_owned()
+                } else {
+                    value.to_string()
+                });
+            }
+        }
+        editor.configuration_dirty = true;
+        editor.message = None;
+        cx.notify();
+    }
+
+    fn begin_numeric_repeat(
+        &mut self,
+        setting: NumericSetting,
+        direction: i32,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self.settings_editor.as_mut() else {
+            return;
+        };
+        editor.numeric_repeat_generation = editor.numeric_repeat_generation.wrapping_add(1);
+        let generation = editor.numeric_repeat_generation;
+        self.adjust_numeric_setting(setting, direction, cx);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(400))
+                .await;
+            loop {
+                let repeating = this
+                    .update(cx, |this, cx| {
+                        let repeating = this
+                            .settings_editor
+                            .as_ref()
+                            .is_some_and(|editor| editor.numeric_repeat_generation == generation);
+                        if repeating {
+                            this.adjust_numeric_setting(setting, direction, cx);
+                        }
+                        repeating
+                    })
+                    .unwrap_or(false);
+                if !repeating {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(Duration::from_millis(75))
+                    .await;
+            }
+        })
+        .detach();
+    }
+
+    fn end_numeric_repeat(&mut self, cx: &mut Context<Self>) {
+        if let Some(editor) = self.settings_editor.as_mut() {
+            editor.numeric_repeat_generation = editor.numeric_repeat_generation.wrapping_add(1);
+        }
+        cx.notify();
+    }
+
+    fn save_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.settings_editor.as_ref() else {
+            return;
+        };
+        let config_path = self.launch_config.config_path.clone();
+        let result = (|| -> Result<()> {
+            let keymap = if editor.keymap_dirty {
+                let keymap = editor.keymap.to_json()?;
+                validate_keymap_contents(&keymap, cx)?;
+                Some(keymap)
+            } else {
+                None
+            };
+            let configuration = if editor.configuration_dirty {
+                let configuration = editor.configuration.to_json()?;
+                Config::parse(
+                    &configuration,
+                    Some(&config_path),
+                    self.launch_config.keymap_override.clone(),
+                )?;
+                Some(configuration)
+            } else {
+                None
+            };
+
+            if let Some(keymap) = keymap {
+                save_settings_file(&self.launch_config.keymap_path, &keymap)?;
+            }
+            if let Some(configuration) = configuration {
+                save_settings_file(&config_path, &configuration)?;
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.settings_editor = None;
+                self.reload_configuration(&ReloadConfiguration, window, cx);
+            }
+            Err(error) => {
+                if let Some(editor) = self.settings_editor.as_mut() {
+                    editor.message = Some((true, format!("Not saved: {error:#}")));
+                }
+                cx.notify();
+            }
+        }
+    }
+
+    fn settings_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let command = event.keystroke.modifiers.control || event.keystroke.modifiers.platform;
+        match event.keystroke.key.as_str() {
+            "escape" => {
+                if self.settings_editor.as_ref().is_some_and(|editor| {
+                    editor.font_query.is_some() || editor.profile_draft.is_some()
+                }) {
+                    if let Some(editor) = self.settings_editor.as_mut() {
+                        editor.font_query = None;
+                        editor.profile_draft = None;
+                        editor.focused_input = None;
+                        editor.message = None;
+                    }
+                    cx.notify();
+                } else {
+                    self.dismiss_settings(window, cx);
+                }
+            }
+            "s" if command => self.save_settings(window, cx),
+            "1" if command => self.select_settings_page(SettingsPage::Configuration, window, cx),
+            "2" if command => self.select_settings_page(SettingsPage::Keymap, window, cx),
+            "tab"
+                if self
+                    .settings_editor
+                    .as_ref()
+                    .is_some_and(|editor| editor.profile_draft.is_some()) =>
+            {
+                self.focus_adjacent_profile_draft(event.keystroke.modifiers.shift, window, cx);
+            }
+            "enter" => {
+                if let Some(editor) = self.settings_editor.as_mut() {
+                    editor.focused_input = None;
+                }
+                cx.notify();
+            }
+            key => {
+                let Some(editor) = self.settings_editor.as_mut() else {
+                    return;
+                };
+                let Some(input) = editor.focused_input else {
+                    cx.stop_propagation();
+                    return;
+                };
+                let field = match input {
+                    SettingsInput::Configuration(field) => editor.configuration.text_mut(field),
+                    SettingsInput::Keymap(field) => editor.keymap.text_mut(field),
+                    SettingsInput::FontSearch => editor.font_query.as_mut(),
+                    SettingsInput::ProfileDraft(field) => {
+                        editor.profile_draft.as_mut().map(|draft| match field {
+                            ProfileDraftField::Name => &mut draft.name,
+                            ProfileDraftField::Program => &mut draft.program,
+                            ProfileDraftField::Arguments => &mut draft.arguments,
+                        })
+                    }
+                };
+                let Some(field) = field else {
+                    return;
+                };
+                match key {
+                    "backspace" => field.backspace(),
+                    "delete" => field.delete(),
+                    "left" => field.move_left(),
+                    "right" => field.move_right(),
+                    "home" => {
+                        field.cursor = 0;
+                        field.select_all = false;
+                    }
+                    "end" => {
+                        field.cursor = field.text.len();
+                        field.select_all = false;
+                    }
+                    "a" if command => field.select_all(),
+                    "v" if command => {
+                        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                            field.insert(&text);
+                        }
+                    }
+                    _ if !command && !event.keystroke.modifiers.alt => {
+                        if let Some(text) = event.keystroke.key_char.as_ref() {
+                            field.insert(text);
+                        }
+                    }
+                    _ => {}
+                }
+                match input {
+                    SettingsInput::Configuration(_) => editor.configuration_dirty = true,
+                    SettingsInput::Keymap(_) => editor.keymap_dirty = true,
+                    SettingsInput::FontSearch | SettingsInput::ProfileDraft(_) => {}
+                }
+                editor.message = None;
+                cx.notify();
+            }
+        }
+        cx.stop_propagation();
+    }
+
+    fn render_settings_overlay(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let editor = self.settings_editor.clone()?;
+        let colors = cx.theme().colors().clone();
+        let handle = cx.entity().downgrade();
+        if !editor.scroll_geometry_initialized {
+            let geometry_handle = handle.clone();
+            window.on_next_frame(move |_, cx| {
+                geometry_handle
+                    .update(cx, |this, cx| {
+                        if let Some(editor) = this.settings_editor.as_mut() {
+                            editor.scroll_geometry_initialized = true;
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+            });
+        }
+
+        let scroll_indicator = |id: String, scroll: &ScrollHandle| -> gpui::AnyElement {
+            let viewport = scroll.bounds().size.height;
+            let maximum = scroll.max_offset().y;
+            let content_height = viewport + maximum;
+            let thumb_fraction = if content_height > px(0.) {
+                (viewport / content_height).clamp(0.08, 1.)
+            } else {
+                1.
+            };
+            let progress = if maximum > px(0.) {
+                (-scroll.offset().y / maximum).clamp(0., 1.)
+            } else {
+                0.
+            };
+            let top_fraction = progress * (1. - thumb_fraction);
+            let click_scroll = scroll.clone();
+            let click_handle = handle.clone();
+            let wheel_scroll = scroll.clone();
+            let wheel_handle = handle.clone();
+            div()
+                .id(id)
+                .absolute()
+                .top_0()
+                .right_0()
+                .bottom_0()
+                .w(px(10.))
+                .bg(colors.scrollbar_track_background)
+                .cursor_pointer()
+                .child(
+                    div()
+                        .absolute()
+                        .right(px(2.))
+                        .top(gpui::relative(top_fraction))
+                        .h(gpui::relative(thumb_fraction))
+                        .w(px(6.))
+                        .rounded_full()
+                        .bg(colors.scrollbar_thumb_background),
+                )
+                .on_scroll_wheel(move |event, window, cx| {
+                    let delta = event.delta.pixel_delta(window.line_height());
+                    let offset = wheel_scroll.offset();
+                    let minimum = -wheel_scroll.max_offset().y;
+                    wheel_scroll
+                        .set_offset(point(offset.x, (offset.y + delta.y).clamp(minimum, px(0.))));
+                    wheel_handle.update(cx, |_, cx| cx.notify()).ok();
+                    cx.stop_propagation();
+                })
+                .on_click(move |event, _, cx| {
+                    let bounds = click_scroll.bounds();
+                    let maximum = click_scroll.max_offset().y;
+                    if bounds.size.height > px(0.) && maximum > px(0.) {
+                        let progress = ((event.position().y - bounds.top()) / bounds.size.height)
+                            .clamp(0., 1.);
+                        let offset = click_scroll.offset();
+                        click_scroll.set_offset(point(offset.x, -(maximum * progress)));
+                        click_handle.update(cx, |_, cx| cx.notify()).ok();
+                    }
+                    cx.stop_propagation();
+                })
+                .into_any_element()
+        };
+
+        let text_input = |id: String, field: TextField, input: SettingsInput| -> gpui::AnyElement {
+            let focused = editor.focused_input == Some(input);
+            let centered = matches!(
+                input,
+                SettingsInput::Configuration(
+                    ConfigTextField::FontSize | ConfigTextField::ScrollHistory
+                )
+            );
+            let cursor = field.cursor.min(field.text.len());
+            let (before, after) = field.text.split_at(cursor);
+            let input_handle = handle.clone();
+            div()
+                .id(id)
+                .h_9()
+                .w_full()
+                .min_w(px(180.))
+                .px_2()
+                .flex()
+                .items_center()
+                .when(centered, |input| input.justify_center().text_center())
+                .overflow_hidden()
+                .rounded(px(4.))
+                .border_1()
+                .border_color(if focused {
+                    colors.border_focused
+                } else {
+                    colors.border
+                })
+                .bg(colors.editor_background)
+                .cursor_text()
+                .when(field.select_all && focused, |input| {
+                    input.bg(colors.element_selection_background)
+                })
+                .when(!focused, |input| {
+                    input.child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .flex_1()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(field.text.clone()),
+                    )
+                })
+                .when(focused, |input| {
+                    input
+                        .child(div().whitespace_nowrap().child(before.to_owned()))
+                        .when(!field.select_all, |input| {
+                            input.child(
+                                div()
+                                    .flex_none()
+                                    .w(px(1.))
+                                    .h(px(16.))
+                                    .bg(colors.text_accent),
+                            )
+                        })
+                        .child(div().whitespace_nowrap().child(after.to_owned()))
+                })
+                .on_click(move |_, window, cx| {
+                    input_handle
+                        .update(cx, |this, cx| this.focus_settings_input(input, window, cx))
+                        .ok();
+                })
+                .into_any_element()
+        };
+
+        let dropdown = |id: String,
+                        label: String,
+                        options: Vec<String>,
+                        selection: SettingsDropdown,
+                        window: &mut Window,
+                        cx: &mut Context<Self>|
+         -> gpui::AnyElement {
+            let menu_handle = handle.clone();
+            let selected = label.clone();
+            let is_binding_action = matches!(selection, SettingsDropdown::BindingAction(_, _));
+            let menu = ui::ContextMenu::build(window, cx, move |mut menu, _, _| {
+                for option in &options {
+                    let value = option.clone();
+                    let label = option.clone();
+                    let toggled = label == selected;
+                    let handle = menu_handle.clone();
+                    if is_binding_action {
+                        let rendered_label = label.clone();
+                        menu = menu.custom_entry(
+                            move |_, _| {
+                                h_flex()
+                                    .gap_2()
+                                    .whitespace_nowrap()
+                                    .child(
+                                        div()
+                                            .w(px(16.))
+                                            .flex_none()
+                                            .text_center()
+                                            .child(if toggled { "✓" } else { "" }),
+                                    )
+                                    .child(Label::new(rendered_label.clone()))
+                                    .into_any_element()
+                            },
+                            move |_, cx| {
+                                handle
+                                    .update(cx, |this, cx| {
+                                        this.set_settings_dropdown(selection, value.clone(), cx)
+                                    })
+                                    .ok();
+                            },
+                        );
+                    } else {
+                        menu = menu.toggleable_entry(
+                            label,
+                            toggled,
+                            IconPosition::Start,
+                            None,
+                            move |_, cx| {
+                                handle
+                                    .update(cx, |this, cx| {
+                                        this.set_settings_dropdown(selection, value.clone(), cx)
+                                    })
+                                    .ok();
+                            },
+                        );
+                    }
+                }
+                menu
+            });
+            DropdownMenu::new(id, label, menu)
+                .style(DropdownStyle::Outlined)
+                .full_width(true)
+                .into_any_element()
+        };
+
+        let setting_row =
+            |label: &'static str, description: &'static str, control: gpui::AnyElement| {
+                h_flex()
+                    .w_full()
+                    .min_h(px(54.))
+                    .py_2()
+                    .gap_4()
+                    .justify_between()
+                    .border_b_1()
+                    .border_color(colors.border_variant)
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .child(div().text_sm().text_color(colors.text).child(label))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(colors.text_muted)
+                                    .child(description),
+                            ),
+                    )
+                    .child(div().w(px(330.)).flex_none().child(control))
+                    .into_any_element()
+            };
+
+        let numeric = |id: &'static str,
+                       field: TextField,
+                       setting: NumericSetting,
+                       input: ConfigTextField|
+         -> gpui::AnyElement {
+            let decrease_down = handle.clone();
+            let decrease_up = handle.clone();
+            let decrease_out = handle.clone();
+            let increase_down = handle.clone();
+            let increase_up = handle.clone();
+            let increase_out = handle.clone();
+            h_flex()
+                .id(id)
+                .h_9()
+                .w_full()
+                .rounded(px(4.))
+                .border_1()
+                .border_color(colors.border)
+                .bg(colors.editor_background)
+                .child(
+                    div()
+                        .id(format!("{id}-decrease"))
+                        .h_full()
+                        .w_9()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(colors.element_hover))
+                        .child("−")
+                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                            decrease_down
+                                .update(cx, |this, cx| this.begin_numeric_repeat(setting, -1, cx))
+                                .ok();
+                        })
+                        .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                            decrease_up
+                                .update(cx, |this, cx| this.end_numeric_repeat(cx))
+                                .ok();
+                        })
+                        .on_mouse_up_out(MouseButton::Left, move |_, _, cx| {
+                            decrease_out
+                                .update(cx, |this, cx| this.end_numeric_repeat(cx))
+                                .ok();
+                        }),
+                )
+                .child(div().min_w_0().flex_1().child(text_input(
+                    format!("{id}-value"),
+                    field,
+                    SettingsInput::Configuration(input),
+                )))
+                .child(
+                    div()
+                        .id(format!("{id}-increase"))
+                        .h_full()
+                        .w_9()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(colors.element_hover))
+                        .child("+")
+                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                            increase_down
+                                .update(cx, |this, cx| this.begin_numeric_repeat(setting, 1, cx))
+                                .ok();
+                        })
+                        .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                            increase_up
+                                .update(cx, |this, cx| this.end_numeric_repeat(cx))
+                                .ok();
+                        })
+                        .on_mouse_up_out(MouseButton::Left, move |_, _, cx| {
+                            increase_out
+                                .update(cx, |this, cx| this.end_numeric_repeat(cx))
+                                .ok();
+                        }),
+                )
+                .into_any_element()
+        };
+        let opacity_slider = |opacity: f32| -> gpui::AnyElement {
+            let selected = (opacity.clamp(0., 1.) * 20.).round() as usize;
+            let stops = (0usize..=20)
+                .map(|step| {
+                    let slider_handle = handle.clone();
+                    div()
+                        .id(("inactive-opacity-stop", step))
+                        .h_full()
+                        .flex_1()
+                        .cursor_pointer()
+                        .on_click(move |_, _, cx| {
+                            slider_handle
+                                .update(cx, |this, cx| {
+                                    if let Some(editor) = this.settings_editor.as_mut() {
+                                        editor.configuration.inactive_pane_opacity =
+                                            step as f32 / 20.;
+                                        editor.configuration_dirty = true;
+                                        editor.message = None;
+                                        cx.notify();
+                                    }
+                                })
+                                .ok();
+                        })
+                })
+                .collect::<Vec<_>>();
+            let fraction = selected as f32 / 20.;
+            h_flex()
+                .w_full()
+                .gap_3()
+                .child(
+                    div()
+                        .relative()
+                        .h_5()
+                        .min_w_0()
+                        .flex_1()
+                        .flex()
+                        .items_center()
+                        .child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .right_0()
+                                .h_1()
+                                .rounded_full()
+                                .bg(colors.element_background),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .w(gpui::relative(fraction))
+                                .h_1()
+                                .rounded_full()
+                                .bg(colors.text_accent),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .left(gpui::relative(fraction))
+                                .ml(px(-5.))
+                                .size(px(10.))
+                                .rounded_full()
+                                .border_1()
+                                .border_color(colors.border_focused)
+                                .bg(colors.text_accent),
+                        )
+                        .child(h_flex().absolute().inset_0().children(stops)),
+                )
+                .child(
+                    div()
+                        .w(px(44.))
+                        .text_right()
+                        .text_sm()
+                        .child(format!("{}%", selected * 5)),
+                )
+                .into_any_element()
+        };
+
+        let content = match editor.page {
+            SettingsPage::Configuration => {
+                let configuration = &editor.configuration;
+                let mut profile_names = editor.profile_names.clone();
+                profile_names.extend(
+                    configuration
+                        .profiles
+                        .iter()
+                        .map(|profile| profile.name.text.clone())
+                        .filter(|name| !name.trim().is_empty()),
+                );
+                profile_names.sort();
+                profile_names.dedup();
+                let default_profile = dropdown(
+                    "settings-default-profile".to_owned(),
+                    configuration.default_profile.clone(),
+                    profile_names,
+                    SettingsDropdown::DefaultProfile,
+                    window,
+                    cx,
+                );
+                let theme = dropdown(
+                    "settings-theme".to_owned(),
+                    configuration.theme.clone(),
+                    editor.themes.clone(),
+                    SettingsDropdown::Theme,
+                    window,
+                    cx,
+                );
+                let current_font = configuration.terminal_font_family.clone();
+                let picker_handle = handle.clone();
+                let font_family = h_flex()
+                    .id("terminal-font-family-picker-trigger")
+                    .h_9()
+                    .w_full()
+                    .min_w(px(180.))
+                    .px_3()
+                    .justify_between()
+                    .rounded(px(4.))
+                    .border_1()
+                    .border_color(colors.border)
+                    .bg(colors.editor_background)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(colors.element_hover))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .font_family(current_font.clone())
+                            .child(current_font),
+                    )
+                    .child(
+                        svg()
+                            .path(IconName::ChevronDown.path())
+                            .size(px(14.))
+                            .text_color(colors.icon_muted),
+                    )
+                    .on_click(move |_, window, cx| {
+                        picker_handle
+                            .update(cx, |this, cx| {
+                                if let Some(editor) = this.settings_editor.as_mut() {
+                                    editor.font_query = Some(TextField::default());
+                                    editor.scroll_geometry_initialized = false;
+                                }
+                                this.focus_settings_input(SettingsInput::FontSearch, window, cx);
+                            })
+                            .ok();
+                    })
+                    .into_any_element();
+                let mut rows = vec![
+                    setting_row(
+                        "Default profile",
+                        "Profile selected when Zetta starts",
+                        default_profile,
+                    ),
+                    setting_row("Theme", "Application color theme", theme),
+                    setting_row(
+                        "Terminal font size",
+                        "Point size from 6 through 100",
+                        numeric(
+                            "settings-font-size",
+                            configuration.terminal_font_size.clone(),
+                            NumericSetting::FontSize,
+                            ConfigTextField::FontSize,
+                        ),
+                    ),
+                    setting_row(
+                        "Terminal font family",
+                        "Search bundled and system-installed font families",
+                        font_family,
+                    ),
+                    setting_row(
+                        "Working directory",
+                        "Initial directory; ~ expands to your home directory",
+                        text_input(
+                            "settings-working-directory".to_owned(),
+                            configuration.working_directory.clone(),
+                            SettingsInput::Configuration(ConfigTextField::WorkingDirectory),
+                        ),
+                    ),
+                    setting_row(
+                        "Scrollback history",
+                        "Enter 0 through Max; steppers accelerate across the range",
+                        numeric(
+                            "settings-scroll-history",
+                            configuration.max_scroll_history_lines.clone(),
+                            NumericSetting::ScrollHistory,
+                            ConfigTextField::ScrollHistory,
+                        ),
+                    ),
+                    setting_row(
+                        "Inactive pane opacity",
+                        "Dimming level as a percentage",
+                        opacity_slider(configuration.inactive_pane_opacity),
+                    ),
+                ];
+                rows.push(
+                    div()
+                        .pt_4()
+                        .pb_2()
+                        .text_sm()
+                        .text_color(colors.text_muted)
+                        .child("Profiles")
+                        .into_any_element(),
+                );
+                for (index, profile) in configuration.profiles.iter().enumerate() {
+                    let mut theme_options = vec!["Use application theme".to_owned()];
+                    theme_options.extend(editor.themes.clone());
+                    let profile_theme = profile
+                        .theme
+                        .clone()
+                        .unwrap_or_else(|| "Use application theme".to_owned());
+                    let profile_theme = dropdown(
+                        format!("settings-profile-{index}-theme"),
+                        profile_theme,
+                        theme_options,
+                        SettingsDropdown::ProfileTheme(index),
+                        window,
+                        cx,
+                    );
+                    let card = if profile.detected {
+                        h_flex()
+                            .p_3()
+                            .mb_2()
+                            .gap_4()
+                            .justify_between()
+                            .rounded(px(6.))
+                            .border_1()
+                            .border_color(colors.border)
+                            .bg(colors.editor_background)
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(colors.text)
+                                            .child(profile.name.text.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(colors.text_muted)
+                                            .child("Detected profile"),
+                                    ),
+                            )
+                            .child(div().w(px(330.)).flex_none().child(profile_theme))
+                            .into_any_element()
+                    } else {
+                        let remove_handle = handle.clone();
+                        div()
+                            .p_3()
+                            .mb_2()
+                            .rounded(px(6.))
+                            .border_1()
+                            .border_color(colors.border)
+                            .bg(colors.editor_background)
+                            .child(
+                                h_flex()
+                                    .items_end()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .flex_1()
+                                            .child(
+                                                div()
+                                                    .mb_1()
+                                                    .text_xs()
+                                                    .text_color(colors.text_muted)
+                                                    .child("Profile name"),
+                                            )
+                                            .child(text_input(
+                                                format!("settings-profile-{index}-name"),
+                                                profile.name.clone(),
+                                                SettingsInput::Configuration(
+                                                    ConfigTextField::ProfileName(index),
+                                                ),
+                                            )),
+                                    )
+                                    .child(
+                                        IconButton::new(
+                                            ("remove-settings-profile", index),
+                                            IconName::Trash,
+                                        )
+                                        .icon_size(IconSize::Small)
+                                        .tooltip(Tooltip::text("Remove profile"))
+                                        .on_click(
+                                            move |_, _, cx| {
+                                                remove_handle
+                                                    .update(cx, |this, cx| {
+                                                        if let Some(editor) =
+                                                            this.settings_editor.as_mut()
+                                                        {
+                                                            editor
+                                                                .configuration
+                                                                .profiles
+                                                                .remove(index);
+                                                            editor.configuration_dirty = true;
+                                                            cx.notify();
+                                                        }
+                                                    })
+                                                    .ok();
+                                            },
+                                        ),
+                                    ),
+                            )
+                            .child(
+                                h_flex()
+                                    .mt_2()
+                                    .items_end()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .flex_1()
+                                            .child(
+                                                div()
+                                                    .mb_1()
+                                                    .text_xs()
+                                                    .text_color(colors.text_muted)
+                                                    .child("Program"),
+                                            )
+                                            .child(text_input(
+                                                format!("settings-profile-{index}-program"),
+                                                profile.program.clone(),
+                                                SettingsInput::Configuration(
+                                                    ConfigTextField::ProfileProgram(index),
+                                                ),
+                                            )),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .flex_1()
+                                            .child(
+                                                div()
+                                                    .mb_1()
+                                                    .text_xs()
+                                                    .text_color(colors.text_muted)
+                                                    .child("Arguments (comma separated)"),
+                                            )
+                                            .child(text_input(
+                                                format!("settings-profile-{index}-arguments"),
+                                                profile.arguments.clone(),
+                                                SettingsInput::Configuration(
+                                                    ConfigTextField::ProfileArguments(index),
+                                                ),
+                                            )),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .mt_2()
+                                    .child(
+                                        div()
+                                            .mb_1()
+                                            .text_xs()
+                                            .text_color(colors.text_muted)
+                                            .child("Theme"),
+                                    )
+                                    .child(profile_theme),
+                            )
+                            .into_any_element()
+                    };
+                    rows.push(card);
+                }
+                let add_handle = handle.clone();
+                rows.push(
+                    div()
+                        .id("add-settings-profile")
+                        .h_9()
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(4.))
+                        .border_1()
+                        .border_color(colors.border)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(colors.element_hover))
+                        .child("Add profile")
+                        .on_click(move |_, window, cx| {
+                            add_handle
+                                .update(cx, |this, cx| {
+                                    if let Some(editor) = this.settings_editor.as_mut() {
+                                        editor.profile_draft = Some(settings_editor::ProfileForm {
+                                            name: TextField::default(),
+                                            program: TextField::default(),
+                                            arguments: TextField::default(),
+                                            theme: None,
+                                            detected: false,
+                                        });
+                                        editor.message = None;
+                                    }
+                                    this.focus_settings_input(
+                                        SettingsInput::ProfileDraft(ProfileDraftField::Name),
+                                        window,
+                                        cx,
+                                    );
+                                })
+                                .ok();
+                        })
+                        .into_any_element(),
+                );
+                div().children(rows).into_any_element()
+            }
+            SettingsPage::Keymap => {
+                let mut sections = Vec::new();
+                for (section_index, section) in editor.keymap.sections.iter().enumerate() {
+                    let mut bindings = Vec::new();
+                    for (binding_index, binding) in section.bindings.iter().enumerate() {
+                        let action = dropdown(
+                            format!("settings-binding-{section_index}-{binding_index}-action"),
+                            binding.action_name(),
+                            editor.actions.clone(),
+                            SettingsDropdown::BindingAction(section_index, binding_index),
+                            window,
+                            cx,
+                        );
+                        let remove_handle = handle.clone();
+                        bindings.push(
+                            h_flex()
+                                .mb_2()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .w(px(220.))
+                                        .flex_none()
+                                        .child(text_input(
+                                            format!(
+                                                "settings-binding-{section_index}-{binding_index}-key"
+                                            ),
+                                            binding.keystroke.clone(),
+                                            SettingsInput::Keymap(
+                                                KeymapTextField::Keystroke(
+                                                    section_index,
+                                                    binding_index,
+                                                ),
+                                            ),
+                                        )),
+                                )
+                                .child(div().min_w_0().flex_1().child(action))
+                                .child(
+                                    IconButton::new(
+                                        format!("remove-settings-binding-{section_index}-{binding_index}"),
+                                        IconName::Trash,
+                                    )
+                                    .icon_size(IconSize::Small)
+                                    .tooltip(Tooltip::text("Remove binding"))
+                                    .on_click(move |_, _, cx| {
+                                        remove_handle
+                                            .update(cx, |this, cx| {
+                                                if let Some(editor) =
+                                                    this.settings_editor.as_mut()
+                                                {
+                                                    editor.keymap.sections[section_index]
+                                                        .bindings
+                                                        .remove(binding_index);
+                                                    editor.keymap_dirty = true;
+                                                    cx.notify();
+                                                }
+                                            })
+                                            .ok();
+                                    }),
+                                )
+                                .into_any_element(),
+                        );
+                    }
+                    let add_handle = handle.clone();
+                    sections.push(
+                        div()
+                            .p_3()
+                            .mb_3()
+                            .rounded(px(6.))
+                            .border_1()
+                            .border_color(colors.border)
+                            .bg(colors.editor_background)
+                            .child(
+                                h_flex()
+                                    .mb_3()
+                                    .gap_2()
+                                    .child(div().flex_none().text_sm().child("Context"))
+                                    .child(div().min_w_0().flex_1().child(text_input(
+                                        format!("settings-keymap-section-{section_index}-context"),
+                                        section.context.clone(),
+                                        SettingsInput::Keymap(KeymapTextField::Context(
+                                            section_index,
+                                        )),
+                                    ))),
+                            )
+                            .children(bindings)
+                            .child(
+                                div()
+                                    .id(("add-settings-binding", section_index))
+                                    .h_8()
+                                    .px_3()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(4.))
+                                    .border_1()
+                                    .border_color(colors.border)
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(colors.element_hover))
+                                    .child("Add binding")
+                                    .on_click(move |_, _, cx| {
+                                        add_handle
+                                            .update(cx, |this, cx| {
+                                                if let Some(editor) = this.settings_editor.as_mut()
+                                                {
+                                                    editor.keymap.sections[section_index]
+                                                        .bindings
+                                                        .push(BindingForm {
+                                                            keystroke: TextField::new(
+                                                                "ctrl-shift-x",
+                                                            ),
+                                                            action: serde_json::Value::String(
+                                                                "zetta::NewTab".to_owned(),
+                                                            ),
+                                                        });
+                                                    editor.keymap_dirty = true;
+                                                    cx.notify();
+                                                }
+                                            })
+                                            .ok();
+                                    }),
+                            )
+                            .into_any_element(),
+                    );
+                }
+                let add_handle = handle.clone();
+                sections.push(
+                    div()
+                        .id("add-keymap-section")
+                        .h_9()
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(4.))
+                        .border_1()
+                        .border_color(colors.border)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(colors.element_hover))
+                        .child("Add keymap context")
+                        .on_click(move |_, _, cx| {
+                            add_handle
+                                .update(cx, |this, cx| {
+                                    if let Some(editor) = this.settings_editor.as_mut() {
+                                        editor
+                                            .keymap
+                                            .sections
+                                            .push(KeymapSectionForm::new("Zetta > Terminal"));
+                                        editor.keymap_dirty = true;
+                                        cx.notify();
+                                    }
+                                })
+                                .ok();
+                        })
+                        .into_any_element(),
+                );
+                div().children(sections).into_any_element()
+            }
+        };
+
+        let font_modal = editor.font_query.as_ref().map(|query| {
+            let search = query.text.to_lowercase();
+            let current_font = editor.configuration.terminal_font_family.clone();
+            let close_handle = handle.clone();
+            let font_rows = editor
+                .fonts
+                .iter()
+                .enumerate()
+                .filter(|(_, font)| search.is_empty() || font.to_lowercase().contains(&search))
+                .map(|(index, font)| {
+                    let selected = *font == current_font;
+                    let value = font.clone();
+                    let row_handle = handle.clone();
+                    h_flex()
+                        .id(("settings-font-option", index))
+                        .h_10()
+                        .px_3()
+                        .justify_between()
+                        .cursor_pointer()
+                        .rounded(px(4.))
+                        .when(selected, |row| row.bg(colors.element_selected))
+                        .hover(|style| style.bg(colors.element_hover))
+                        .child(
+                            div()
+                                .font_family(font.clone())
+                                .text_sm()
+                                .child(font.clone()),
+                        )
+                        .when(selected, |row| {
+                            row.child(
+                                svg()
+                                    .path(IconName::Check.path())
+                                    .size(px(14.))
+                                    .text_color(colors.text_accent),
+                            )
+                        })
+                        .on_click(move |_, _, cx| {
+                            row_handle
+                                .update(cx, |this, cx| {
+                                    if let Some(editor) = this.settings_editor.as_mut() {
+                                        editor.configuration.terminal_font_family = value.clone();
+                                        editor.configuration_dirty = true;
+                                        editor.font_query = None;
+                                        editor.focused_input = None;
+                                        editor.message = None;
+                                        cx.notify();
+                                    }
+                                })
+                                .ok();
+                        })
+                })
+                .collect::<Vec<_>>();
+            div()
+                .id("font-picker-modal")
+                .absolute()
+                .inset_0()
+                .p_8()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(transparent_black().opacity(0.55))
+                .occlude()
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(px(560.))
+                        .h_full()
+                        .max_h(px(520.))
+                        .p_3()
+                        .flex()
+                        .flex_col()
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_color(colors.border)
+                        .bg(colors.elevated_surface_background)
+                        .shadow_lg()
+                        .child(
+                            h_flex()
+                                .mb_3()
+                                .gap_2()
+                                .child(div().min_w_0().flex_1().child(text_input(
+                                    "settings-font-search".to_owned(),
+                                    query.clone(),
+                                    SettingsInput::FontSearch,
+                                )))
+                                .child(
+                                    IconButton::new("close-font-picker", IconName::Close)
+                                        .icon_size(IconSize::Small)
+                                        .tooltip(Tooltip::text("Close font picker"))
+                                        .on_click(move |_, _, cx| {
+                                            close_handle
+                                                .update(cx, |this, cx| {
+                                                    if let Some(editor) =
+                                                        this.settings_editor.as_mut()
+                                                    {
+                                                        editor.font_query = None;
+                                                        editor.focused_input = None;
+                                                        cx.notify();
+                                                    }
+                                                })
+                                                .ok();
+                                        }),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .relative()
+                                .min_h_0()
+                                .flex_1()
+                                .child(
+                                    div()
+                                        .id("settings-font-list")
+                                        .size_full()
+                                        .overflow_y_scroll()
+                                        .track_scroll(&editor.font_scroll)
+                                        .children(font_rows),
+                                )
+                                .child(scroll_indicator(
+                                    "settings-font-scrollbar".to_owned(),
+                                    &editor.font_scroll,
+                                )),
+                        ),
+                )
+                .into_any_element()
+        });
+
+        let profile_modal = editor.profile_draft.as_ref().map(|draft| {
+            let mut theme_options = vec!["Use application theme".to_owned()];
+            theme_options.extend(editor.themes.clone());
+            let profile_theme = dropdown(
+                "settings-new-profile-theme".to_owned(),
+                draft
+                    .theme
+                    .clone()
+                    .unwrap_or_else(|| "Use application theme".to_owned()),
+                theme_options,
+                SettingsDropdown::ProfileDraftTheme,
+                window,
+                cx,
+            );
+            let cancel_handle = handle.clone();
+            let create_handle = handle.clone();
+            div()
+                .id("new-profile-modal")
+                .absolute()
+                .inset_0()
+                .p_8()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(transparent_black().opacity(0.55))
+                .occlude()
+                .child(
+                    div()
+                        .id("new-profile-form")
+                        .w_full()
+                        .max_w(px(640.))
+                        .p_6()
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_color(colors.border)
+                        .bg(colors.elevated_surface_background)
+                        .shadow_lg()
+                        .child(
+                            h_flex()
+                                .mb_4()
+                                .justify_between()
+                                .child(div().text_lg().child("Add profile"))
+                                .child(
+                                    IconButton::new("close-new-profile", IconName::Close)
+                                        .icon_size(IconSize::Small)
+                                        .on_click(move |_, _, cx| {
+                                            cancel_handle
+                                                .update(cx, |this, cx| {
+                                                    if let Some(editor) =
+                                                        this.settings_editor.as_mut()
+                                                    {
+                                                        editor.profile_draft = None;
+                                                        editor.focused_input = None;
+                                                        editor.message = None;
+                                                        cx.notify();
+                                                    }
+                                                })
+                                                .ok();
+                                        }),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .mb_1()
+                                .text_xs()
+                                .text_color(colors.text_muted)
+                                .child("Profile name"),
+                        )
+                        .child(text_input(
+                            "settings-new-profile-name".to_owned(),
+                            draft.name.clone(),
+                            SettingsInput::ProfileDraft(ProfileDraftField::Name),
+                        ))
+                        .child(
+                            div()
+                                .mt_3()
+                                .mb_1()
+                                .text_xs()
+                                .text_color(colors.text_muted)
+                                .child("Program"),
+                        )
+                        .child(text_input(
+                            "settings-new-profile-program".to_owned(),
+                            draft.program.clone(),
+                            SettingsInput::ProfileDraft(ProfileDraftField::Program),
+                        ))
+                        .child(
+                            div()
+                                .mt_3()
+                                .mb_1()
+                                .text_xs()
+                                .text_color(colors.text_muted)
+                                .child("Arguments (comma separated)"),
+                        )
+                        .child(text_input(
+                            "settings-new-profile-arguments".to_owned(),
+                            draft.arguments.clone(),
+                            SettingsInput::ProfileDraft(ProfileDraftField::Arguments),
+                        ))
+                        .child(
+                            div()
+                                .mt_3()
+                                .mb_1()
+                                .text_xs()
+                                .text_color(colors.text_muted)
+                                .child("Theme"),
+                        )
+                        .child(profile_theme)
+                        .when_some(editor.message.clone(), |modal, (_, message)| {
+                            modal.child(
+                                div()
+                                    .mt_3()
+                                    .text_xs()
+                                    .text_color(colors.text)
+                                    .child(message),
+                            )
+                        })
+                        .child(
+                            h_flex().mt_5().justify_end().child(
+                                div()
+                                    .id("create-settings-profile")
+                                    .px_4()
+                                    .py_2()
+                                    .rounded(px(4.))
+                                    .cursor_pointer()
+                                    .bg(colors.element_selected)
+                                    .hover(|style| style.bg(colors.element_hover))
+                                    .child("Create profile")
+                                    .on_click(move |_, _, cx| {
+                                        create_handle
+                                            .update(cx, |this, cx| {
+                                                let Some(editor) = this.settings_editor.as_mut()
+                                                else {
+                                                    return;
+                                                };
+                                                let valid = editor
+                                                    .profile_draft
+                                                    .as_ref()
+                                                    .is_some_and(|draft| {
+                                                        !draft.name.text.trim().is_empty()
+                                                            && !draft.program.text.trim().is_empty()
+                                                    });
+                                                if !valid {
+                                                    editor.message = Some((
+                                                        true,
+                                                        "Profile name and program are required."
+                                                            .to_owned(),
+                                                    ));
+                                                    cx.notify();
+                                                    return;
+                                                }
+                                                let draft = editor.profile_draft.take().unwrap();
+                                                editor.configuration.profiles.push(draft);
+                                                editor.configuration_dirty = true;
+                                                editor.focused_input = None;
+                                                editor.message = None;
+                                                cx.notify();
+                                            })
+                                            .ok();
+                                    }),
+                            ),
+                        ),
+                )
+                .into_any_element()
+        });
+
+        let config_handle = handle.clone();
+        let keymap_handle = handle.clone();
+        let save_handle = handle.clone();
+        let close_handle = handle.clone();
+        let path = match editor.page {
+            SettingsPage::Configuration => &self.launch_config.config_path,
+            SettingsPage::Keymap => &self.launch_config.keymap_path,
+        };
+        Some(
+            div()
+                .id("settings-backdrop")
+                .absolute()
+                .inset_0()
+                .p_4()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(transparent_black().opacity(0.3))
+                .occlude()
+                .child(
+                    div()
+                        .id("settings-editor")
+                        .track_focus(&self.settings_focus)
+                        .relative()
+                        .size_full()
+                        .max_w(px(980.))
+                        .max_h(px(680.))
+                        .flex()
+                        .flex_col()
+                        .overflow_hidden()
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_color(colors.border)
+                        .bg(colors.elevated_surface_background)
+                        .shadow_lg()
+                        .child(
+                            h_flex()
+                                .h_12()
+                                .px_3()
+                                .flex_none()
+                                .justify_between()
+                                .border_b_1()
+                                .border_color(colors.border)
+                                .child(
+                                    h_flex()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .id("settings-configuration-tab")
+                                                .px_3()
+                                                .py_1()
+                                                .rounded(px(4.))
+                                                .cursor_pointer()
+                                                .when(
+                                                    editor.page == SettingsPage::Configuration,
+                                                    |tab| tab.bg(colors.element_selected),
+                                                )
+                                                .on_click(move |_, window, cx| {
+                                                    config_handle
+                                                        .update(cx, |this, cx| {
+                                                            this.select_settings_page(
+                                                                SettingsPage::Configuration,
+                                                                window,
+                                                                cx,
+                                                            )
+                                                        })
+                                                        .ok();
+                                                })
+                                                .child("Configuration"),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("settings-keymap-tab")
+                                                .px_3()
+                                                .py_1()
+                                                .rounded(px(4.))
+                                                .cursor_pointer()
+                                                .when(editor.page == SettingsPage::Keymap, |tab| {
+                                                    tab.bg(colors.element_selected)
+                                                })
+                                                .on_click(move |_, window, cx| {
+                                                    keymap_handle
+                                                        .update(cx, |this, cx| {
+                                                            this.select_settings_page(
+                                                                SettingsPage::Keymap,
+                                                                window,
+                                                                cx,
+                                                            )
+                                                        })
+                                                        .ok();
+                                                })
+                                                .child("Keymap"),
+                                        ),
+                                )
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .id("save-settings")
+                                                .px_3()
+                                                .py_1()
+                                                .rounded(px(4.))
+                                                .cursor_pointer()
+                                                .bg(colors.element_selected)
+                                                .hover(|style| style.bg(colors.element_hover))
+                                                .on_click(move |_, window, cx| {
+                                                    save_handle
+                                                        .update(cx, |this, cx| {
+                                                            this.save_settings(window, cx)
+                                                        })
+                                                        .ok();
+                                                })
+                                                .child(
+                                                    if editor.configuration_dirty
+                                                        || editor.keymap_dirty
+                                                    {
+                                                        "Save *"
+                                                    } else {
+                                                        "Save"
+                                                    },
+                                                ),
+                                        )
+                                        .child(
+                                            IconButton::new("close-settings", IconName::Close)
+                                                .icon_size(IconSize::Small)
+                                                .tooltip(Tooltip::text("Close settings"))
+                                                .on_click(move |_, window, cx| {
+                                                    close_handle
+                                                        .update(cx, |this, cx| {
+                                                            this.dismiss_settings(window, cx)
+                                                        })
+                                                        .ok();
+                                                }),
+                                        ),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .h_9()
+                                .px_3()
+                                .flex_none()
+                                .border_b_1()
+                                .border_color(colors.border)
+                                .text_xs()
+                                .text_color(colors.text_muted)
+                                .child(path.display().to_string()),
+                        )
+                        .child(
+                            div()
+                                .relative()
+                                .flex_1()
+                                .min_h_0()
+                                .child(
+                                    div()
+                                        .id("settings-form-scroll")
+                                        .size_full()
+                                        .overflow_y_scroll()
+                                        .track_scroll(&editor.settings_scroll)
+                                        .px_5()
+                                        .py_3()
+                                        .text_color(colors.text)
+                                        .child(content),
+                                )
+                                .child(scroll_indicator(
+                                    "settings-form-scrollbar".to_owned(),
+                                    &editor.settings_scroll,
+                                )),
+                        )
+                        .when_some(editor.message.clone(), |dialog, (error, message)| {
+                            dialog.child(
+                                div()
+                                    .px_3()
+                                    .py_2()
+                                    .border_t_1()
+                                    .border_color(colors.border)
+                                    .text_xs()
+                                    .text_color(if error {
+                                        colors.text
+                                    } else {
+                                        colors.text_muted
+                                    })
+                                    .child(message),
+                            )
+                        })
+                        .when_some(font_modal, |dialog, modal| dialog.child(modal))
+                        .when_some(profile_modal, |dialog, modal| dialog.child(modal)),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn toggle_command_palette(
         &mut self,
         _: &ToggleCommandPalette,
@@ -1497,6 +3408,10 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.settings_editor.is_some() {
+            self.settings_key_down(event, window, cx);
+            return;
+        }
         if self.tab_search.is_some() {
             self.tab_search_key_down(event, window, cx);
             return;
@@ -2414,6 +4329,8 @@ impl Render for Zetta {
                 .into_any_element()
         });
 
+        let settings_overlay = self.render_settings_overlay(window, cx);
+
         let content = div()
             .key_context("Zetta")
             .size_full()
@@ -2443,6 +4360,7 @@ impl Render for Zetta {
             .on_action(cx.listener(Self::search_tab_scrollback))
             .on_action(cx.listener(Self::reload_configuration))
             .on_action(cx.listener(Self::toggle_command_palette))
+            .on_action(cx.listener(Self::toggle_settings))
             .on_action(cx.listener(Self::toggle_performance_overlay))
             .when(self.is_renaming_tab(), |content| {
                 content.track_focus(&self.rename_focus)
@@ -2492,6 +4410,16 @@ impl Render for Zetta {
                             )
                             .child(profile_menu),
                     )
+                    .child(
+                        IconButton::new("open-settings", IconName::Settings)
+                            .shape(IconButtonShape::Square)
+                            .icon_size(IconSize::Small)
+                            .aria_label("Open settings")
+                            .tooltip(Tooltip::text("Open settings (Ctrl+,)"))
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(ToggleSettings), cx)
+                            }),
+                    )
                     .child(div().min_w_0().flex_1()),
             )
             .when_some(self.configuration_error.clone(), |content, error| {
@@ -2518,7 +4446,11 @@ impl Render for Zetta {
                 content.child(overlay)
             })
             .when_some(palette_overlay, |content, overlay| content.child(overlay))
-            .when_some(tab_search_overlay, |content, overlay| content.child(overlay));
+            .when_some(tab_search_overlay, |content, overlay| {
+                content.child(overlay)
+            });
+        let content =
+            content.when_some(settings_overlay, |content, overlay| content.child(overlay));
 
         client_window_frame(content, window, cx)
     }
@@ -3060,6 +4992,19 @@ fn normalize_keymap_key_names(content: &str) -> String {
         .replace("page-down", "pagedown")
 }
 
+fn validate_keymap_contents(content: &str, cx: &mut App) -> Result<()> {
+    let content = normalize_keymap_key_names(content);
+    match KeymapFile::load(&content, cx) {
+        KeymapFileLoadResult::Success { .. } => Ok(()),
+        KeymapFileLoadResult::SomeFailedToLoad { error_message, .. } => {
+            anyhow::bail!("some key bindings are invalid: {error_message}")
+        }
+        KeymapFileLoadResult::JsonParseFailure { error } => {
+            Err(error).context("parsing keymap JSON")
+        }
+    }
+}
+
 fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut App) {
     cx.clear_key_bindings();
     match KeymapFile::load_asset_allow_partial_failure(settings::DEFAULT_KEYMAP_PATH, cx) {
@@ -3093,11 +5038,7 @@ fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut App) {
         ),
         KeyBinding::new("ctrl-v", Paste, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-shift-f", SearchScrollback, Some("Zetta > Terminal")),
-        KeyBinding::new(
-            "ctrl-alt-f",
-            SearchTabScrollback,
-            Some("Zetta > Terminal"),
-        ),
+        KeyBinding::new("ctrl-alt-f", SearchTabScrollback, Some("Zetta > Terminal")),
         KeyBinding::new(
             "enter",
             SearchNextMatch,
@@ -3134,6 +5075,7 @@ fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut App) {
             ToggleCommandPalette,
             Some("Zetta > Terminal"),
         ),
+        KeyBinding::new("ctrl-,", ToggleSettings, Some("Zetta > Terminal")),
         KeyBinding::new("f2", RenameTab, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-=", IncreaseTerminalFontSize, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-+", IncreaseTerminalFontSize, Some("Zetta > Terminal")),
@@ -3273,6 +5215,38 @@ mod tests {
         assert!((metrics.average_latency_ms - 11.666_666).abs() < 0.001);
         assert_eq!(metrics.slow_120_hz, 2);
         assert_eq!(metrics.slow_60_hz, 1);
+    }
+
+    #[test]
+    fn profile_draft_tab_navigation_moves_forward_and_backward() {
+        assert_eq!(
+            adjacent_profile_draft_field(Some(ProfileDraftField::Name), false),
+            ProfileDraftField::Program
+        );
+        assert_eq!(
+            adjacent_profile_draft_field(Some(ProfileDraftField::Program), false),
+            ProfileDraftField::Arguments
+        );
+        assert_eq!(
+            adjacent_profile_draft_field(Some(ProfileDraftField::Arguments), true),
+            ProfileDraftField::Program
+        );
+        assert_eq!(
+            adjacent_profile_draft_field(Some(ProfileDraftField::Name), true),
+            ProfileDraftField::Arguments
+        );
+    }
+
+    #[test]
+    fn scroll_history_steps_cover_the_full_range_without_jumping_to_max() {
+        let maximum = i32::MAX as u64;
+        assert_eq!(adjusted_scroll_history(100_000, 1, maximum), 200_000);
+        assert_eq!(adjusted_scroll_history(100_000, -1, maximum), 99_000);
+        assert_eq!(
+            adjusted_scroll_history(maximum, -1, maximum),
+            maximum - 100_000_000
+        );
+        assert_eq!(adjusted_scroll_history(maximum - 1, 1, maximum), maximum);
     }
 
     #[test]
