@@ -9,6 +9,7 @@ use anyhow::{Context as _, Result, bail};
 use async_compression::futures::bufread::GzipDecoder;
 use async_tar::Archive;
 use futures::{AsyncReadExt as _, io::BufReader};
+use gpui::BackgroundExecutor;
 use gpui::http_client::{AsyncBody, HttpClient, Url};
 use serde::Deserialize;
 
@@ -67,13 +68,18 @@ pub async fn download(
     http: Arc<dyn HttpClient>,
     extension: &ThemeExtension,
     themes_dir: &Path,
+    executor: BackgroundExecutor,
 ) -> Result<usize> {
     let url = Url::parse(&format!(
         "https://api.zed.dev/extensions/{}/{}/download",
         extension.id, extension.version
     ))?;
     let archive = get(http, url.as_ref()).await?;
-    install_archive(&archive, &extension.id, themes_dir).await
+    let extension_id = extension.id.to_string();
+    let themes_dir = themes_dir.to_owned();
+    executor
+        .spawn(async move { install_archive(&archive, &extension_id, &themes_dir).await })
+        .await
 }
 
 async fn get(http: Arc<dyn HttpClient>, url: &str) -> Result<Vec<u8>> {

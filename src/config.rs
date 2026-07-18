@@ -2,6 +2,7 @@ use std::{
     collections::HashSet,
     env, fs,
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
 #[cfg(windows)]
@@ -78,7 +79,7 @@ impl Config {
                     .with_context(|| format!("reading {}", config.config_path.display()));
             }
         };
-        Self::parse(&content, config_path, keymap_path)
+        Self::parse_into(&content, config)
     }
 
     /// Parses configuration text using the same defaults and path resolution as [`Self::load`].
@@ -88,7 +89,10 @@ impl Config {
         config_path: Option<&Path>,
         keymap_path: Option<PathBuf>,
     ) -> Result<Self> {
-        let mut config = Self::defaults(config_path, keymap_path);
+        Self::parse_into(content, Self::defaults(config_path, keymap_path))
+    }
+
+    fn parse_into(content: &str, mut config: Self) -> Result<Self> {
         let root: Value = serde_json::from_str(&content)
             .with_context(|| format!("parsing {}", config.config_path.display()))?;
         validate_config_fields(&root)?;
@@ -304,6 +308,11 @@ fn parse_profile(value: &Value) -> Result<ProfileConfig> {
 }
 
 fn discovered_profiles() -> Vec<Profile> {
+    static DISCOVERED_PROFILES: OnceLock<Vec<Profile>> = OnceLock::new();
+    DISCOVERED_PROFILES.get_or_init(discover_profiles).clone()
+}
+
+fn discover_profiles() -> Vec<Profile> {
     let mut profiles = vec![Profile {
         name: "System".to_owned(),
         command: Shell::System,

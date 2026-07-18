@@ -1,6 +1,10 @@
 use gpui::{Context, Task};
 use parking_lot::{MappedRwLockReadGuard, Mutex, RwLock, RwLockReadGuard};
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 #[cfg(target_os = "windows")]
 use windows::Win32::{Foundation::HANDLE, System::Threading::GetProcessId};
@@ -80,6 +84,14 @@ pub(crate) struct PtyProcessInfo {
     last_foreground_pid: Mutex<Option<Pid>>,
     pub(crate) current: RwLock<Option<ProcessInfo>>,
     task: Mutex<Option<Task<()>>>,
+    last_refresh: Mutex<Option<Instant>>,
+}
+
+const PROCESS_INFO_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
+
+fn process_refresh_due(last_refresh: Option<Instant>, now: Instant) -> bool {
+    last_refresh
+        .is_none_or(|last| now.saturating_duration_since(last) >= PROCESS_INFO_REFRESH_INTERVAL)
 }
 
 impl PtyProcessInfo {
@@ -111,6 +123,7 @@ impl PtyProcessInfo {
             last_foreground_pid: Mutex::new(None),
             current: RwLock::new(None),
             task: Mutex::new(None),
+            last_refresh: Mutex::new(None),
         }
     }
 
@@ -137,6 +150,7 @@ impl PtyProcessInfo {
             &pids[..]
         };
         system.refresh_processes_specifics(ProcessesToUpdate::Some(pids), true, self.refresh_kind);
+        *self.last_refresh.lock() = Some(Instant::now());
         drop(system);
         RwLockReadGuard::try_map(self.system.read(), |system| system.process(pid)).ok()
     }
@@ -201,6 +215,11 @@ impl PtyProcessInfo {
         if self.task.lock().is_some() {
             return;
         }
+        let foreground_pid_changed = self.pid_getter.pid() != *self.last_foreground_pid.lock();
+        let refresh_due = process_refresh_due(*self.last_refresh.lock(), Instant::now());
+        if !foreground_pid_changed && !refresh_due {
+            return;
+        }
         let this = self.clone();
         let has_changed = cx.background_executor().spawn(async move {
             let previous = this.current.read().clone();
@@ -234,6 +253,20 @@ impl PtyProcessInfo {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn process_refreshes_are_throttled() {
+        let now = Instant::now();
+        assert!(process_refresh_due(None, now));
+        assert!(!process_refresh_due(
+            Some(now),
+            now + Duration::from_millis(499)
+        ));
+        assert!(process_refresh_due(
+            Some(now),
+            now + PROCESS_INFO_REFRESH_INTERVAL
+        ));
+    }
 
     /// Regression test for <https://github.com/zed-industries/zed/issues/58651>:
     /// on Linux, sysinfo keeps an open `/proc/<pid>/stat` handle for every

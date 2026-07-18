@@ -4,10 +4,10 @@ mod terminal_scrollbar;
 use std::{cmp, ops::Range as StdRange, sync::Arc, time::Duration};
 
 use gpui::{
-    Action, AnyElement, App, AppContext as _, ClipboardItem, Context, Entity,
-    EventEmitter, DismissEvent, FocusHandle, Focusable, KeyContext, KeyDownEvent, Keystroke,
-    MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollWheelEvent, Subscription, Window,
-    actions, anchored, deferred, div, px,
+    Action, AnyElement, App, AppContext as _, ClipboardItem, Context, DismissEvent, Entity,
+    EventEmitter, FocusHandle, Focusable, KeyContext, KeyDownEvent, Keystroke, MouseButton,
+    MouseDownEvent, Pixels, Point, Render, ScrollWheelEvent, Subscription, Task, Window, actions,
+    anchored, deferred, div, px,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -61,6 +61,22 @@ pub enum TerminalViewEvent {
     Close,
     TitleChanged,
     Input(TerminalInput),
+}
+
+fn enabled_input_event(
+    enabled: bool,
+    build: impl FnOnce() -> TerminalViewEvent,
+) -> Option<TerminalViewEvent> {
+    enabled.then(build)
+}
+
+fn search_request_is_current(
+    expected_generation: u64,
+    expected_query: &str,
+    current_generation: u64,
+    current_query: Option<&str>,
+) -> bool {
+    expected_generation == current_generation && current_query == Some(expected_query)
 }
 
 #[derive(Clone, Debug)]
@@ -158,9 +174,7 @@ impl BlinkManager {
         let epoch = self.next_epoch();
         cx.notify();
         cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(CURSOR_BLINK_INTERVAL)
-                .await;
+            cx.background_executor().timer(CURSOR_BLINK_INTERVAL).await;
             this.update(cx, |this, cx| {
                 if this.blink_epoch == epoch {
                     this.paused = false;
@@ -180,9 +194,7 @@ impl BlinkManager {
         cx.notify();
         let next_epoch = self.next_epoch();
         cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(CURSOR_BLINK_INTERVAL)
-                .await;
+            cx.background_executor().timer(CURSOR_BLINK_INTERVAL).await;
             this.update(cx, |this, cx| this.blink(next_epoch, cx)).ok();
         })
         .detach();
@@ -197,8 +209,10 @@ pub struct TerminalView {
     search_query: Option<String>,
     search_active_match: Option<usize>,
     search_generation: u64,
+    search_task: Option<Task<()>>,
     search_select_all: bool,
     search_cursor: usize,
+    emit_input_events: bool,
     pub(crate) focus_handle: FocusHandle,
     cursor_shape: CursorShape,
     blink_manager: Entity<BlinkManager>,
@@ -237,15 +251,13 @@ impl TerminalView {
         self.search_active_match = None;
         self.search_select_all = false;
         self.search_cursor = 0;
-        self.terminal.update(cx, |terminal, _| terminal.matches.clear());
+        self.terminal.update(cx, |terminal, _| {
+            Arc::make_mut(&mut terminal.matches).clear()
+        });
         cx.notify();
     }
 
-    pub fn new(
-        terminal: Entity<Terminal>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(terminal: Entity<Terminal>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self::new_with_theme(terminal, None, window, cx)
     }
 
@@ -277,7 +289,6 @@ impl TerminalView {
                 Event::Wakeup | Event::SelectionsChanged | Event::BreadcrumbsChanged => {
                     window.invalidate_character_coordinates();
                     if matches!(event, Event::Wakeup) {
-                        cx.emit(TerminalViewEvent::TitleChanged);
                         view.refresh_search(cx);
                     }
                     cx.notify();
@@ -330,8 +341,10 @@ impl TerminalView {
             search_query: None,
             search_active_match: None,
             search_generation: 0,
+            search_task: None,
             search_select_all: false,
             search_cursor: 0,
+            emit_input_events: false,
             focus_handle,
             cursor_shape: TerminalSettings::get_global(cx).cursor_shape,
             blink_manager,
@@ -356,6 +369,10 @@ impl TerminalView {
 
     pub fn terminal(&self) -> &Entity<Terminal> {
         &self.terminal
+    }
+
+    pub fn set_emit_input_events(&mut self, enabled: bool) {
+        self.emit_input_events = enabled;
     }
 
     pub fn set_theme(&mut self, theme: Option<Arc<Theme>>, cx: &mut Context<Self>) {
@@ -444,9 +461,11 @@ impl TerminalView {
         if !text.is_empty() {
             self.terminal
                 .update(cx, |terminal, _| terminal.input(text.as_bytes().to_vec()));
-            cx.emit(TerminalViewEvent::Input(TerminalInput::Text(
-                text.to_owned(),
-            )));
+            if let Some(event) = enabled_input_event(self.emit_input_events, || {
+                TerminalViewEvent::Input(TerminalInput::Text(text.to_owned()))
+            }) {
+                cx.emit(event);
+            }
         }
     }
 
@@ -506,7 +525,14 @@ impl TerminalView {
     }
 
     fn should_show_cursor(&self, focused: bool, cx: &App) -> bool {
-        if !focused || self.terminal.read(cx).last_content.mode.contains(Modes::ALT_SCREEN) {
+        if !focused
+            || self
+                .terminal
+                .read(cx)
+                .last_content
+                .mode
+                .contains(Modes::ALT_SCREEN)
+        {
             return true;
         }
         match TerminalSettings::get_global(cx).blinking {
@@ -534,12 +560,7 @@ impl TerminalView {
         cx.notify();
     }
 
-    fn dismiss_search(
-        &mut self,
-        _: &DismissSearch,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn dismiss_search(&mut self, _: &DismissSearch, window: &mut Window, cx: &mut Context<Self>) {
         if self.search_query.take().is_none() {
             return;
         }
@@ -547,7 +568,9 @@ impl TerminalView {
         self.search_active_match = None;
         self.search_select_all = false;
         self.search_cursor = 0;
-        self.terminal.update(cx, |terminal, _| terminal.matches.clear());
+        self.terminal.update(cx, |terminal, _| {
+            Arc::make_mut(&mut terminal.matches).clear()
+        });
         self.focus_handle.focus(window, cx);
         cx.notify();
     }
@@ -558,7 +581,11 @@ impl TerminalView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.search_query.as_ref().is_some_and(|query| !query.is_empty()) {
+        if self
+            .search_query
+            .as_ref()
+            .is_some_and(|query| !query.is_empty())
+        {
             self.search_select_all = true;
             cx.notify();
         }
@@ -577,12 +604,7 @@ impl TerminalView {
         }
     }
 
-    fn search_next_match(
-        &mut self,
-        _: &SearchNextMatch,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn search_next_match(&mut self, _: &SearchNextMatch, _: &mut Window, cx: &mut Context<Self>) {
         self.navigate_search(false, cx);
     }
 
@@ -602,11 +624,13 @@ impl TerminalView {
             return;
         };
         self.search_active_match = Some(index);
-        self.terminal.update(cx, |terminal, _| terminal.activate_match(index));
+        self.terminal
+            .update(cx, |terminal, _| terminal.activate_match(index));
         cx.notify();
     }
 
     fn refresh_search(&mut self, cx: &mut Context<Self>) {
+        self.search_task.take();
         let Some(query) = self.search_query.as_ref().cloned() else {
             return;
         };
@@ -614,28 +638,48 @@ impl TerminalView {
         let generation = self.search_generation;
         if query.is_empty() {
             self.search_active_match = None;
-            self.terminal.update(cx, |terminal, _| terminal.matches.clear());
+            self.terminal.update(cx, |terminal, _| {
+                Arc::make_mut(&mut terminal.matches).clear()
+            });
             cx.notify();
             return;
         }
         let Some(search) = Search::new(&regex::escape(&query)) else {
             return;
         };
-        let search_task = self
-            .terminal
-            .update(cx, |terminal, cx| terminal.find_matches(search, cx));
-        cx.spawn(async move |this, cx| {
+        let terminal = self.terminal.clone();
+        let executor = cx.background_executor().clone();
+        let task = cx.spawn(async move |this, cx| {
+            executor.timer(Duration::from_millis(75)).await;
+            let Some(search_task) = this
+                .update(cx, |this, cx| {
+                    search_request_is_current(
+                        generation,
+                        &query,
+                        this.search_generation,
+                        this.search_query.as_deref(),
+                    )
+                    .then(|| terminal.update(cx, |terminal, cx| terminal.find_matches(search, cx)))
+                })
+                .ok()
+                .flatten()
+            else {
+                return;
+            };
             let matches = search_task.await;
             this.update(cx, |this, cx| {
-                if this.search_generation != generation
-                    || this.search_query.as_deref() != Some(query.as_str())
-                {
+                if !search_request_is_current(
+                    generation,
+                    &query,
+                    this.search_generation,
+                    this.search_query.as_deref(),
+                ) {
                     return;
                 }
                 let active_match = matches.len().checked_sub(1);
                 this.search_active_match = active_match;
                 this.terminal.update(cx, |terminal, _| {
-                    terminal.matches = matches;
+                    terminal.matches = Arc::new(matches);
                     if let Some(index) = active_match {
                         terminal.activate_match(index);
                     }
@@ -643,8 +687,8 @@ impl TerminalView {
                 cx.notify();
             })
             .ok();
-        })
-        .detach();
+        });
+        self.search_task = Some(task);
     }
 
     fn process_keystroke(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) -> bool {
@@ -660,12 +704,7 @@ impl TerminalView {
         handled
     }
 
-    fn key_down(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.search_query.is_some() {
             match event.keystroke.key.as_str() {
                 "escape" => self.dismiss_search(&DismissSearch, window, cx),
@@ -760,9 +799,11 @@ impl TerminalView {
         self.has_bell = false;
         self.blink_manager.update(cx, BlinkManager::pause);
         if self.process_keystroke(&event.keystroke, cx) {
-            cx.emit(TerminalViewEvent::Input(TerminalInput::Keystroke(
-                event.keystroke.clone(),
-            )));
+            if let Some(event) = enabled_input_event(self.emit_input_events, || {
+                TerminalViewEvent::Input(TerminalInput::Keystroke(event.keystroke.clone()))
+            }) {
+                cx.emit(event);
+            }
             cx.stop_propagation();
         }
     }
@@ -777,7 +818,14 @@ impl TerminalView {
             context.add("vi_mode");
         }
         let mode = self.terminal.read(cx).last_content.mode;
-        context.set("screen", if mode.contains(Modes::ALT_SCREEN) { "alt" } else { "normal" });
+        context.set(
+            "screen",
+            if mode.contains(Modes::ALT_SCREEN) {
+                "alt"
+            } else {
+                "normal"
+            },
+        );
         if self.terminal.read(cx).last_content.selection.is_some() {
             context.add("selection");
         }
@@ -799,13 +847,20 @@ impl TerminalView {
     }
 
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(clipboard) = cx.read_from_clipboard() else { return };
+        let Some(clipboard) = cx.read_from_clipboard() else {
+            return;
+        };
         if let Some(text) = clipboard.text() {
             if self.search_query.is_some() {
                 self.insert_search_text(&text, cx);
             } else {
-                self.terminal.update(cx, |terminal, _| terminal.paste(&text));
-                cx.emit(TerminalViewEvent::Input(TerminalInput::Paste(text)));
+                self.terminal
+                    .update(cx, |terminal, _| terminal.paste(&text));
+                if let Some(event) = enabled_input_event(self.emit_input_events, || {
+                    TerminalViewEvent::Input(TerminalInput::Paste(text))
+                }) {
+                    cx.emit(event);
+                }
             }
         }
     }
@@ -815,17 +870,20 @@ impl TerminalView {
     }
 
     fn paste_trimmed(&mut self, _: &PasteTrimmed, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(clipboard) = cx.read_from_clipboard() else { return };
+        let Some(clipboard) = cx.read_from_clipboard() else {
+            return;
+        };
         if let Some(text) = clipboard.text() {
             let text = trim_paste_text(&text);
             if self.search_query.is_some() {
                 self.insert_search_text(text, cx);
             } else {
-                self.terminal
-                    .update(cx, |terminal, _| terminal.paste(text));
-                cx.emit(TerminalViewEvent::Input(TerminalInput::Paste(
-                    text.to_owned(),
-                )));
+                self.terminal.update(cx, |terminal, _| terminal.paste(text));
+                if let Some(event) = enabled_input_event(self.emit_input_events, || {
+                    TerminalViewEvent::Input(TerminalInput::Paste(text.to_owned()))
+                }) {
+                    cx.emit(event);
+                }
             }
         }
     }
@@ -837,7 +895,8 @@ impl TerminalView {
     }
 
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
-        self.terminal.update(cx, |terminal, _| terminal.select_all());
+        self.terminal
+            .update(cx, |terminal, _| terminal.select_all());
         cx.notify();
     }
 
@@ -869,15 +928,12 @@ impl TerminalView {
                 .action("Clear", Box::new(Clear))
         });
         window.focus(&menu.focus_handle(cx), cx);
-        let subscription = cx.subscribe_in(
-            &menu,
-            window,
-            |view, _, _: &DismissEvent, window, cx| {
+        let subscription =
+            cx.subscribe_in(&menu, window, |view, _, _: &DismissEvent, window, cx| {
                 view.context_menu.take();
                 view.focus_handle.focus(window, cx);
                 cx.notify();
-            },
-        );
+            });
         self.context_menu = Some((menu, position, subscription));
         cx.notify();
     }
@@ -892,37 +948,44 @@ impl TerminalView {
     }
 
     fn scroll_line_up(&mut self, _: &ScrollLineUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.terminal.update(cx, |terminal, _| terminal.scroll_line_up());
+        self.terminal
+            .update(cx, |terminal, _| terminal.scroll_line_up());
         cx.notify();
     }
 
     fn scroll_line_down(&mut self, _: &ScrollLineDown, _: &mut Window, cx: &mut Context<Self>) {
-        self.terminal.update(cx, |terminal, _| terminal.scroll_line_down());
+        self.terminal
+            .update(cx, |terminal, _| terminal.scroll_line_down());
         cx.notify();
     }
 
     fn scroll_page_up(&mut self, _: &ScrollPageUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.terminal.update(cx, |terminal, _| terminal.scroll_page_up());
+        self.terminal
+            .update(cx, |terminal, _| terminal.scroll_page_up());
         cx.notify();
     }
 
     fn scroll_page_down(&mut self, _: &ScrollPageDown, _: &mut Window, cx: &mut Context<Self>) {
-        self.terminal.update(cx, |terminal, _| terminal.scroll_page_down());
+        self.terminal
+            .update(cx, |terminal, _| terminal.scroll_page_down());
         cx.notify();
     }
 
     fn scroll_to_top(&mut self, _: &ScrollToTop, _: &mut Window, cx: &mut Context<Self>) {
-        self.terminal.update(cx, |terminal, _| terminal.scroll_to_top());
+        self.terminal
+            .update(cx, |terminal, _| terminal.scroll_to_top());
         cx.notify();
     }
 
     fn scroll_to_bottom(&mut self, _: &ScrollToBottom, _: &mut Window, cx: &mut Context<Self>) {
-        self.terminal.update(cx, |terminal, _| terminal.scroll_to_bottom());
+        self.terminal
+            .update(cx, |terminal, _| terminal.scroll_to_bottom());
         cx.notify();
     }
 
     fn toggle_vi_mode(&mut self, _: &ToggleViMode, _: &mut Window, cx: &mut Context<Self>) {
-        self.terminal.update(cx, |terminal, _| terminal.toggle_vi_mode());
+        self.terminal
+            .update(cx, |terminal, _| terminal.toggle_vi_mode());
         cx.notify();
     }
 
@@ -936,19 +999,24 @@ impl TerminalView {
     }
 
     fn send_text(&mut self, text: &SendText, _: &mut Window, cx: &mut Context<Self>) {
-        self.terminal
-            .update(cx, |terminal, _| terminal.input(text.0.clone().into_bytes()));
-        cx.emit(TerminalViewEvent::Input(TerminalInput::Text(
-            text.0.clone(),
-        )));
+        self.terminal.update(cx, |terminal, _| {
+            terminal.input(text.0.clone().into_bytes())
+        });
+        if let Some(event) = enabled_input_event(self.emit_input_events, || {
+            TerminalViewEvent::Input(TerminalInput::Text(text.0.clone()))
+        }) {
+            cx.emit(event);
+        }
     }
 
     fn send_keystroke(&mut self, key: &SendKeystroke, _: &mut Window, cx: &mut Context<Self>) {
         if let Ok(keystroke) = Keystroke::parse(&key.0) {
             if self.process_keystroke(&keystroke, cx) {
-                cx.emit(TerminalViewEvent::Input(TerminalInput::Keystroke(
-                    keystroke,
-                )));
+                if let Some(event) = enabled_input_event(self.emit_input_events, || {
+                    TerminalViewEvent::Input(TerminalInput::Keystroke(keystroke))
+                }) {
+                    cx.emit(event);
+                }
             }
         }
     }
@@ -1197,7 +1265,10 @@ fn trim_paste_text(text: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{navigated_match_index, next_char_boundary, previous_char_boundary, trim_paste_text};
+    use super::{
+        enabled_input_event, navigated_match_index, next_char_boundary, previous_char_boundary,
+        search_request_is_current, trim_paste_text,
+    };
 
     #[test]
     fn trimmed_paste_removes_only_outer_whitespace() {
@@ -1219,5 +1290,23 @@ mod tests {
         let text = "aé中";
         assert_eq!(next_char_boundary(text, 1), 3);
         assert_eq!(previous_char_boundary(text, 3), 1);
+    }
+
+    #[test]
+    fn superseded_search_requests_are_rejected() {
+        assert!(search_request_is_current(3, "cargo", 3, Some("cargo")));
+        assert!(!search_request_is_current(3, "cargo", 4, Some("cargo")));
+        assert!(!search_request_is_current(3, "cargo", 3, Some("rust")));
+    }
+
+    #[test]
+    fn disabled_input_events_are_not_allocated() {
+        let builds = std::cell::Cell::new(0);
+        let event = enabled_input_event(false, || {
+            builds.set(builds.get() + 1);
+            super::TerminalViewEvent::Input(super::TerminalInput::Text("ignored".into()))
+        });
+        assert!(event.is_none());
+        assert_eq!(builds.get(), 0);
     }
 }
