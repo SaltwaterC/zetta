@@ -61,10 +61,44 @@ fn leaves_single_quoted_and_escaped_braces_for_the_shell() {
 }
 
 #[test]
-fn requires_an_expandable_list() {
-    assert!(expand_multi_command("ssh example.com", 64).is_err());
-    assert!(expand_multi_command("echo {only}", 64).is_err());
-    assert!(expand_multi_command("echo {a,b}", 64).is_err());
+fn commands_without_active_double_braces_use_one_pane() {
+    assert_eq!(
+        expand_multi_command("ssh example.com", 64).unwrap(),
+        ["ssh example.com"]
+    );
+    assert_eq!(
+        expand_multi_command("echo {shell,brace}", 64).unwrap(),
+        ["echo {shell,brace}"]
+    );
+    assert_eq!(
+        expand_multi_command(r#"echo '{{quoted}}' \{{escaped}}"#, 64).unwrap(),
+        [r#"echo '{{quoted}}' \{{escaped}}"#]
+    );
+}
+
+#[test]
+fn one_command_uses_the_single_execution_path() {
+    let execution = MultiCommandExecution::new(vec!["ssh example.com".to_owned()]);
+
+    assert!(matches!(
+        execution,
+        MultiCommandExecution::Single(command) if command == "ssh example.com"
+    ));
+}
+
+#[test]
+fn expanded_commands_use_the_tiled_execution_path() {
+    let execution = MultiCommandExecution::new(vec!["ssh a".to_owned(), "ssh b".to_owned()]);
+
+    assert!(matches!(
+        execution,
+        MultiCommandExecution::Tiled(commands) if commands == ["ssh a", "ssh b"]
+    ));
+}
+
+#[test]
+fn active_double_braces_still_require_a_comma_separated_list() {
+    assert!(expand_multi_command("echo {{only}}", 64).is_err());
 }
 
 #[test]
@@ -400,6 +434,39 @@ fn rendered_query_parts_are_reused_until_the_query_changes() {
     let (changed_before, changed_after) = prompt.rendered_query_parts();
     assert_eq!(changed_before, prompt.query);
     assert_eq!(changed_after, "");
+}
+
+#[test]
+fn delete_previous_word_removes_whitespace_and_unicode_word() {
+    let mut prompt = prompt_with("ssh host café   ", &[], &[]);
+
+    prompt.delete_previous_word();
+
+    assert_eq!(prompt.query, "ssh host ");
+    assert_eq!(prompt.cursor, prompt.query.len());
+    assert!(!prompt.select_all);
+}
+
+#[test]
+fn delete_previous_word_stops_at_a_multi_command_comma() {
+    let mut prompt = prompt_with("ssh {{foo,bar", &[], &[]);
+
+    prompt.delete_previous_word();
+
+    assert_eq!(prompt.query, "ssh {{foo,");
+    assert_eq!(prompt.cursor, prompt.query.len());
+}
+
+#[test]
+fn delete_previous_word_removes_selected_query() {
+    let mut prompt = prompt_with("ssh host", &[], &[]);
+    prompt.select_all = true;
+
+    prompt.delete_previous_word();
+
+    assert_eq!(prompt.query, "");
+    assert_eq!(prompt.cursor, 0);
+    assert!(!prompt.select_all);
 }
 
 #[test]

@@ -60,6 +60,13 @@ impl Zetta {
                 return;
             }
         };
+        let commands = match MultiCommandExecution::new(commands) {
+            MultiCommandExecution::Single(command) => {
+                self.submit_single_multi_command(command, window, cx);
+                return;
+            }
+            MultiCommandExecution::Tiled(commands) => commands,
+        };
 
         let Some(tab) = self.tabs.get(self.active_tab) else {
             return;
@@ -158,6 +165,33 @@ impl Zetta {
         }
 
         self.enqueue_multi_command_launches(launches, window, cx);
+
+        self.multi_command = None;
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    fn submit_single_multi_command(
+        &mut self,
+        command: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            return;
+        };
+        let active_pane_id = tab.active_pane;
+        let active_view = tab.pane(active_pane_id).and_then(|pane| pane.view.clone());
+        if active_view.is_none() {
+            let Some(pane) = tab.pane_mut(active_pane_id) else {
+                return;
+            };
+            pane.pending_command = Some(command);
+        } else if let Some(view) = active_view {
+            view.update(cx, |view, cx| {
+                view.apply_input(&TerminalInput::Text(format!("{command}\r")), cx)
+            });
+        }
 
         self.multi_command = None;
         self.focus_active(window, cx);
@@ -380,6 +414,11 @@ impl Zetta {
                 prompt.cursor = prompt.query.len();
                 prompt.select_all = false;
                 prompt.mark_query_changed();
+                cx.notify();
+            }
+            "w" if event.keystroke.modifiers.control => {
+                prompt.clear_completion();
+                prompt.delete_previous_word();
                 cx.notify();
             }
             "a" if event.keystroke.modifiers.control || event.keystroke.modifiers.platform => {

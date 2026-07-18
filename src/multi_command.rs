@@ -76,6 +76,29 @@ pub(crate) enum CompletionSource {
     },
 }
 
+pub(crate) enum MultiCommandExecution {
+    Single(String),
+    Tiled(Vec<String>),
+}
+
+impl MultiCommandExecution {
+    pub(crate) fn new(mut commands: Vec<String>) -> Self {
+        assert!(
+            !commands.is_empty(),
+            "a multi-command execution must contain a command"
+        );
+        if commands.len() == 1 {
+            Self::Single(
+                commands
+                    .pop()
+                    .expect("a single-command execution contains one command"),
+            )
+        } else {
+            Self::Tiled(commands)
+        }
+    }
+}
+
 pub(crate) struct MultiCommandPrompt {
     pub(crate) query: String,
     pub(crate) cursor: usize,
@@ -276,6 +299,43 @@ impl MultiCommandPrompt {
 
     pub(crate) fn mark_query_changed(&mut self) {
         self.query_generation = self.query_generation.wrapping_add(1);
+    }
+
+    pub(crate) fn delete_previous_word(&mut self) {
+        if self.select_all {
+            self.query.clear();
+            self.cursor = 0;
+        } else {
+            let end = self.cursor.min(self.query.len());
+            let mut start = end;
+            while start > 0 {
+                let previous = previous_char_boundary(&self.query, start);
+                let character = self.query[previous..start]
+                    .chars()
+                    .next()
+                    .expect("character boundaries contain one character");
+                if !character.is_whitespace() {
+                    break;
+                }
+                start = previous;
+            }
+            while start > 0 {
+                let previous = previous_char_boundary(&self.query, start);
+                let character = self.query[previous..start]
+                    .chars()
+                    .next()
+                    .expect("character boundaries contain one character");
+                if character.is_whitespace() || character == ',' {
+                    break;
+                }
+                start = previous;
+            }
+            self.query.replace_range(start..end, "");
+            self.cursor = start;
+        }
+        self.select_all = false;
+        self.error = None;
+        self.mark_query_changed();
     }
 
     pub(crate) fn rendered_query_parts(&mut self) -> (SharedString, SharedString) {
@@ -722,13 +782,47 @@ pub(crate) fn expand_multi_command(template: &str, limit: usize) -> Result<Vec<S
             pending.push(next);
         }
     }
-    if expanded.len() < 2 {
+    if expanded.len() < 2 && has_active_double_brace_opener(template) {
         return Err(
             "Use a comma-separated double-brace list, for example ssh {{a,b}}.example.com"
                 .to_owned(),
         );
     }
     Ok(expanded)
+}
+
+fn has_active_double_brace_opener(command: &str) -> bool {
+    let bytes = command.as_bytes();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if byte == b'\\' && quote != Some(b'\'') {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        if matches!(byte, b'\'' | b'"') {
+            if quote == Some(byte) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(byte);
+            }
+            index += 1;
+            continue;
+        }
+        if quote.is_none() && index + 1 < bytes.len() && &bytes[index..index + 2] == b"{{" {
+            return true;
+        }
+        index += 1;
+    }
+    false
 }
 
 fn first_double_brace_list(command: &str) -> Option<(usize, usize, Vec<&str>)> {

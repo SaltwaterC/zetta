@@ -26,7 +26,7 @@
       "ctrl-alt-v": "terminal::PasteTrimmed",
       "ctrl-shift-p": "zetta::ToggleCommandPalette",
       "ctrl-,": "zetta::ToggleSettings",
-      "f2": "zetta::RenameTab",
+      "ctrl-alt-r": "zetta::RenameTab",
       "ctrl-=": "zetta::IncreaseTerminalFontSize",
       "ctrl--": "zetta::DecreaseTerminalFontSize",
       "ctrl-0": "zetta::ResetTerminalFontSize",

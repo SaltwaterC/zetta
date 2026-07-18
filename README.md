@@ -11,7 +11,8 @@ Use `Ctrl-Shift-M` to open the multi-command prompt. A command such as
 into four panes, and runs one command in each. Multiple and nested comma brace
 lists are supported. Single braces, quoted double braces, and escaped double
 braces are left for the shell. Templates are limited to 64 KiB so pasted input
-cannot monopolize the UI while it is expanded.
+cannot monopolize the UI while it is expanded. Commands without a double-brace
+list run in a single pane.
 
 The prompt provides native completion with `Tab` and reverse cycling with
 `Shift-Tab`. It completes executables from `PATH`, paths relative to the active
@@ -204,7 +205,7 @@ Keyboard shortcuts use Zed's keymap format. The default shortcuts are:
 | `Ctrl-Alt-V` | Paste after trimming leading and trailing whitespace |
 | `Ctrl-Shift-P` | Open the command palette |
 | `Ctrl-,` | Open the configuration and keymap editor |
-| `F2` | Rename active tab |
+| `Ctrl-Alt-R` | Rename active tab |
 | `Ctrl-=` / `Ctrl-+` | Increase font size globally |
 | `Ctrl--` | Decrease font size globally |
 | `Ctrl-0` | Reset font size globally |
@@ -302,10 +303,10 @@ invalidation-to-draw latency, and counts over the 120 Hz and 60 Hz frame
 budgets. Commit reports as CI artifacts or feed them into a separate comparison
 step; native stack traces remain separate platform-profiler artifacts.
 
-Tab names follow the active terminal process automatically. Press `F2` or
-double-click a tab to set a persistent name. Submit an empty name to clear the
-override and resume automatic naming. Tabs retain a fixed width as names
-change.
+Tab names follow the active terminal process automatically. Press `Ctrl-Alt-R`
+or double-click a tab to set a persistent name. Submit an empty name to clear
+the override and resume automatic naming. Tabs retain a fixed width as names
+change. Unmodified function keys are left available to terminal applications.
 
 Splits inherit the active pane's working directory and use the selected
 profile. Use `Alt-Left`, `Alt-Right`, `Alt-Up`, and `Alt-Down` to move focus, or

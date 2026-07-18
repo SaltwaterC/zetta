@@ -445,3 +445,9 @@ fn normalizes_hyphenated_page_key_names() {
         r#"{"ctrl-pageup":"zetta::NextTab","ctrl-pagedown":"zetta::PreviousTab"}"#
     );
 }
+
+#[test]
+fn tab_rename_does_not_capture_an_unmodified_function_key() {
+    assert!(RENAME_TAB_KEYBINDING.contains('-'));
+    assert_ne!(RENAME_TAB_KEYBINDING, "f2");
+}

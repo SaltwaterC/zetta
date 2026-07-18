@@ -445,6 +445,8 @@ pub(crate) fn validate_keymap_contents(content: &str, cx: &mut App) -> Result<()
     }
 }
 
+pub(crate) const RENAME_TAB_KEYBINDING: &str = "ctrl-alt-r";
+
 pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut App) {
     cx.clear_key_bindings();
     match KeymapFile::load_asset_allow_partial_failure(settings::DEFAULT_KEYMAP_PATH, cx) {
@@ -522,7 +524,7 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
             Some("Zetta > Terminal"),
         ),
         KeyBinding::new("ctrl-,", ToggleSettings, Some("Zetta > Terminal")),
-        KeyBinding::new("f2", RenameTab, Some("Zetta > Terminal")),
+        KeyBinding::new(RENAME_TAB_KEYBINDING, RenameTab, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-=", IncreaseTerminalFontSize, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-+", IncreaseTerminalFontSize, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl--", DecreaseTerminalFontSize, Some("Zetta > Terminal")),
