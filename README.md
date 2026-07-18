@@ -466,11 +466,11 @@ palette. For faster access, add bindings like these to `keymap.json`:
 
 ```json
 {
-  "ctrl-alt-o": [
+  "alt-shift-o": [
     "zetta::ApplyPaneSplitTemplate",
     { "name": "three-right" }
   ],
-  "ctrl-alt-e": [
+  "alt-shift-e": [
     "zetta::ApplyPaneSplitTemplate",
     { "name": "quarters" }
   ]
@@ -503,7 +503,7 @@ its profile and working directory. Applying a template again therefore
 recurses into that active pane without changing the rest of the tab.
 
 The standard font-size shortcuts apply globally to every terminal. The
-`Ctrl-Alt` variants apply only to the active pane, so split panes can use
+`Alt-Shift` variants apply only to the active pane, so split panes can use
 independent sizes. Pane reset removes that pane's override; global reset returns
 to `terminal_font_size` when configured, otherwise to Zed's default buffer size.
 Zetta bundles the Regular, Bold, Italic, and Bold Italic faces of MesloLGS NF

@@ -25,7 +25,7 @@ fn keymap_round_trip_preserves_parameterized_actions_and_section_metadata() {
 #[test]
 fn binding_form_exposes_string_action_parameters() {
     let binding = BindingForm {
-        keystroke: TextField::new("ctrl-alt-o"),
+        keystroke: TextField::new("alt-shift-o"),
         action: json!([
             "zetta::ApplyPaneSplitTemplate",
             { "name": "three-right" }

@@ -262,8 +262,8 @@ fn profile_shortcuts_match_shifted_and_fallback_chords() {
 #[test]
 fn pane_template_shortcuts_are_built_in() {
     let [three_right, quarters] = pane_template_keybindings();
-    let three_right_key = gpui::Keystroke::parse("ctrl-alt-o").unwrap();
-    let quarters_key = gpui::Keystroke::parse("ctrl-alt-e").unwrap();
+    let three_right_key = gpui::Keystroke::parse("alt-shift-o").unwrap();
+    let quarters_key = gpui::Keystroke::parse("alt-shift-e").unwrap();
 
     assert_eq!(
         three_right.match_keystrokes(&[three_right_key]),

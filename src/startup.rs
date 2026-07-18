@@ -147,14 +147,14 @@ pub(crate) fn profile_keybindings(slot: usize) -> Vec<KeyBinding> {
 pub(crate) fn pane_template_keybindings() -> [KeyBinding; 2] {
     [
         KeyBinding::new(
-            "ctrl-alt-o",
+            "alt-shift-o",
             ApplyPaneSplitTemplate {
                 name: "three-right".to_owned(),
             },
             Some("Zetta > Terminal"),
         ),
         KeyBinding::new(
-            "ctrl-alt-e",
+            "alt-shift-e",
             ApplyPaneSplitTemplate {
                 name: "quarters".to_owned(),
             },
