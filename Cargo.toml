@@ -11,11 +11,15 @@ x11 = ["gpui_platform/x11"]
 
 [dependencies]
 anyhow = "1"
+async-compression = { version = "0.4", features = ["gzip", "futures-io"] }
+async-tar = "0.6"
 assets = { path = "zed/crates/assets" }
+futures = "0.3"
 gpui = { path = "zed/crates/gpui" }
 gpui_platform = { path = "crates/gpui_platform" }
 menu = { path = "zed/crates/menu" }
 release_channel = { path = "zed/crates/release_channel" }
+reqwest_client = { path = "zed/crates/reqwest_client" }
 rust-embed = "8"
 schemars = "1"
 semver = "1"
@@ -26,8 +30,10 @@ settings = { path = "zed/crates/settings" }
 task = { path = "zed/crates/task" }
 terminal = { path = "crates/terminal" }
 terminal_view = { path = "crates/terminal_view" }
+tempfile = "3"
 theme = { path = "zed/crates/theme" }
 theme_settings = { path = "zed/crates/theme_settings" }
+toml = "0.8"
 ui = { path = "zed/crates/ui" }
 util = { path = "zed/crates/util" }
 zed_actions = { path = "zed/crates/zed_actions" }

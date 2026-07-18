@@ -8,6 +8,7 @@ use crate::config::Config;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsPage {
     Configuration,
+    Themes,
     Keymap,
 }
 

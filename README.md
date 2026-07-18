@@ -6,14 +6,65 @@ interaction code without Zed's subsystems. It supports multiple tabs,
 selectable profiles, and user-defined key bindings on Linux, macOS, and
 Windows.
 
+The name is a portmanteau of Zeta and tty, albeit if you are having a bad
+day, that's about the size of the binaries Rust produces. Pun not intended.
+
 ## Design philosophy
 
 There is more than one way to do things. This is to allow for muscle memory
 formed over years of working under multiple platforms using multiple terminal
-emulators that all do things in their specific ways.
+emulators that all do things in their specific ways. This applies for things
+like copying, pasting, changing tabs for example.
 
 There is an explicit aim to have things work outside the boxt at the cost of
-bundling as well as minimal configuration.
+bundling as well as minimal configuration. For example, a large chunk of the
+bundle is formed by the MesloLGS NF font faces.
+
+Convention is preferred over configuration, however, configurations options
+exist where they are needed.
+
+## Why?
+
+Have you ever wondered whether Zed's terminal can be a standalone application?
+I have and I am not the only one. However, the terminal view doesn't come with
+batteries included to make it a terminal emulator fit for the worklow usually
+done using a dedicated piece of software. I spent a significant amount of my
+life in a terminal emulator and this amount of time has now increased since
+various AI harnessess were pretty much released as TUI by default.
+
+Codex helped putting this together as it wouldn't have been possible to do it
+in such a short amount of time. Decided to give GPT 5.6-sol a go to see whether
+it can actually turn this idea into reality. It started off as a weekend project
+albeit once I got the ball rolling things started to add up. The project was
+self-hosted in terms of development using Codex TUI before the first commit was
+even made.
+
+While the implementation has been done by Codex, the design of the application,
+testing, as well as being rather particular about what goes where came from good
+old fashion brain and decades of experience typing commands into a box.
+
+I am one of those people who move across platforms quite often, sometimes even
+in the span of a single day. Terminal emulator experience has been inconsistent
+at best. I am a veteran user of iTerm (macOS) and Terminator (Linux) with
+Windows Terminal thrown in the mix since the early releases. While there is a new
+generation of terminal emulators that are now available, none cover this list
+entirely:
+
+- Cross platform across Windows, macOS, Linux at minimum. Most don't support
+Windows. The aim is to have a consitent experience out of the box across all
+platforms.
+- Focus on performance. The underlying emulator is an embedded Alacritty. While
+Alacritty itself works cross-platform, it doesn't implement the surrounding
+functionality like tabs or panes by choice.
+
+WSL is actually a first class citizen and the installed WSL instances are
+automatically detected as profiles. Furthermore, Zetta implements correct CWD
+tracking for WSL instances for bash, fish, and zsh while providing a fallback
+method for any other shell.
+
+Noting here that macOS support is not tested yet even though the codebase supports
+macOS and I would expect it would be possible to produce a build with minimum
+changes.
 
 ## Build and run
 
@@ -160,12 +211,13 @@ dropdowns, the font picker searches installed families in its own modal, and
 detected profiles expose theme overrides. Font size and scrollback accept typed
 values as well as press-and-hold steppers; scrollback uses a `Max` sentinel.
 Inactive-pane opacity uses a percentage slider. Settings and font lists have
-independent, visible scrollbars, and new profiles are created in a labeled modal. Key bindings are grouped by context with
-action dropdowns. Configuration and keymap paths follow the platform
-conventions above; overriding either path remains CLI-only through `--config`
-and `--keymap`. Saving validates the changed page, persists it, applies it
-without restarting, closes the dialog, and returns focus to the terminal.
-Invalid settings or bindings are reported without replacing the existing file.
+independent, visible scrollbars, and new profiles are created in a labeled modal.
+Key bindings are grouped by context with action dropdowns. Configuration and
+keymap paths follow the platform conventions above; overriding either path remains
+CLI-only through `--config` and `--keymap`. Saving validates the changed page,
+persists it, applies it without restarting, closes the dialog, and returns focus
+to the terminal. Invalid settings or bindings are reported without replacing the
+existing file.
 
 Scrollback search is scoped to the active pane. `Enter` and `F3` select the
 next match, `Shift-Enter` and `Shift-F3` select the previous match, and `Escape`
@@ -297,6 +349,14 @@ Linux/macOS and `%APPDATA%\Zetta\themes` on Windows. The directory is created
 on first launch. Download or extract the `.json` file from a Zed theme
 extension, place it directly in that directory, set `theme` in `config.json` to
 the theme name declared inside the file, and reload the configuration.
+
+The configuration UI also has a `Themes` tab for searching theme-providing
+extensions on the official Zed extensions site. Installing one downloads the
+extension archive, copies only the theme JSON files declared by its manifest,
+and reloads the configuration and theme selectors immediately. Themes installed
+this way are listed in the same tab and can be removed there. Manually placed
+theme files are never removed by this UI, and other extension features are not
+installed or run.
 
 Solarized Dark and Solarized Light are already bundled and do not belong in
 the user themes directory.

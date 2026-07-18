@@ -3,6 +3,7 @@
 mod command_palette;
 mod config;
 mod settings_editor;
+mod theme_extensions;
 mod zetta_assets;
 
 const ZETTA_APP_ID: &str = "Zetta";
@@ -26,10 +27,10 @@ use gpui::{
     Action, Anchor, App, AppContext as _, Bounds, Context, CursorStyle, Decorations, Entity,
     Focusable, FrameTiming, FrameTimingCollector, HitboxBehavior, InteractiveElement as _,
     IntoElement, KeyBinding, KeyDownEvent, MAX_BUTTONS_PER_SIDE, MouseButton, Pixels, Point,
-    Render, ResizeEdge, ScrollHandle, Size, Subscription, Tiling, TitlebarOptions, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowButton, WindowButtonLayout, WindowControlArea,
-    WindowControls, WindowDecorations, WindowId, WindowOptions, actions, canvas, div, point,
-    profiler, px, size, svg, transparent_black,
+    Render, ResizeEdge, ScrollHandle, SharedString, Size, Subscription, Tiling, TitlebarOptions,
+    Window, WindowBackgroundAppearance, WindowBounds, WindowButton, WindowButtonLayout,
+    WindowControlArea, WindowControls, WindowDecorations, WindowId, WindowOptions, actions, canvas,
+    div, point, profiler, px, size, svg, transparent_black,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -47,6 +48,7 @@ use terminal_view::{
     SearchScrollback, SelectAll, SelectAllSearchText, TerminalView, TerminalViewEvent,
 };
 use theme::{ActiveTheme, ClientDecorationsExt as _, GlobalTheme, Theme, ThemeRegistry};
+use theme_extensions::{InstalledThemeExtension, ThemeExtension};
 use ui::{
     Banner, ButtonCommon as _, ButtonSize, Clickable as _, Color, DropdownMenu, DropdownStyle,
     IconButton, IconButtonShape, IconName, IconPosition, IconSize, Label, LabelSize, PopoverMenu,
@@ -443,6 +445,7 @@ struct TabSearch {
 enum SettingsInput {
     Configuration(ConfigTextField),
     Keymap(KeymapTextField),
+    ThemeSearch,
     FontSearch,
     ProfileDraft(ProfileDraftField),
 }
@@ -490,6 +493,12 @@ struct SettingsEditor {
     keymap: KeymapForm,
     profile_names: Vec<String>,
     themes: Vec<String>,
+    theme_extension_query: TextField,
+    theme_extensions: Vec<ThemeExtension>,
+    installed_theme_extensions: Vec<InstalledThemeExtension>,
+    theme_extensions_loading: bool,
+    theme_extensions_searched: bool,
+    theme_extension_downloading: Option<Arc<str>>,
     actions: Vec<String>,
     fonts: Vec<String>,
     font_query: Option<TextField>,
@@ -1559,6 +1568,8 @@ impl Zetta {
             .collect::<Vec<_>>();
         themes.sort();
         themes.dedup();
+        let installed_theme_extensions =
+            theme_extensions::installed(&config::themes_dir()).unwrap_or_default();
         let mut fonts = cx.text_system().all_font_names();
         if !fonts.contains(&configuration.terminal_font_family) {
             fonts.push(configuration.terminal_font_family.clone());
@@ -1575,6 +1586,12 @@ impl Zetta {
                 .map(|profile| profile.name.clone())
                 .collect(),
             themes,
+            theme_extension_query: TextField::default(),
+            theme_extensions: Vec::new(),
+            installed_theme_extensions,
+            theme_extensions_loading: false,
+            theme_extensions_searched: false,
+            theme_extension_downloading: None,
             actions,
             fonts,
             font_query: None,
@@ -1597,6 +1614,217 @@ impl Zetta {
         self.focus_active(window, cx);
     }
 
+    fn fetch_theme_extensions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.settings_editor.as_mut() else {
+            return;
+        };
+        if editor.theme_extensions_loading {
+            return;
+        }
+        let query = editor.theme_extension_query.text.trim().to_owned();
+        if query.is_empty() {
+            editor.theme_extensions.clear();
+            editor.theme_extensions_searched = false;
+            editor.message = Some((false, "Enter a theme name to search.".to_owned()));
+            cx.notify();
+            return;
+        }
+        editor.theme_extensions_loading = true;
+        editor.theme_extensions_searched = true;
+        editor.message = None;
+        let http = cx.http_client();
+        let this = cx.entity().downgrade();
+        window
+            .spawn(cx, async move |cx| {
+                let result = theme_extensions::fetch(http, &query).await;
+                this.update_in(cx, |this, _, cx| {
+                    let Some(editor) = this.settings_editor.as_mut() else {
+                        return;
+                    };
+                    editor.theme_extensions_loading = false;
+                    match result {
+                        Ok(extensions) => editor.theme_extensions = extensions,
+                        Err(error) => {
+                            editor.message =
+                                Some((true, format!("Could not load themes: {error:#}")));
+                        }
+                    }
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+    }
+
+    fn download_theme_extension(
+        &mut self,
+        extension_id: Arc<str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self.settings_editor.as_mut() else {
+            return;
+        };
+        if editor.theme_extension_downloading.is_some() {
+            return;
+        }
+        let Some(extension) = editor
+            .theme_extensions
+            .iter()
+            .find(|extension| extension.id == extension_id)
+            .cloned()
+        else {
+            return;
+        };
+        editor.theme_extension_downloading = Some(extension_id);
+        editor.message = Some((false, format!("Downloading {}…", extension.name)));
+        let name = extension.name.clone();
+        let http = cx.http_client();
+        let themes_dir = config::themes_dir();
+        let this = cx.entity().downgrade();
+        window
+            .spawn(cx, async move |cx| {
+                let result = theme_extensions::download(http, &extension, &themes_dir).await;
+                this.update_in(cx, |this, window, cx| {
+                    if let Some(editor) = this.settings_editor.as_mut() {
+                        editor.theme_extension_downloading = None;
+                    }
+                    match result {
+                        Ok(count) => {
+                            this.reload_configuration(&ReloadConfiguration, window, cx);
+                            let mut themes = ThemeRegistry::global(cx)
+                                .list()
+                                .into_iter()
+                                .map(|theme| theme.name.to_string())
+                                .collect::<Vec<_>>();
+                            themes.sort();
+                            themes.dedup();
+                            let installed_theme_extensions =
+                                theme_extensions::installed(&config::themes_dir())
+                                    .unwrap_or_default();
+                            if let Some(editor) = this.settings_editor.as_mut() {
+                                editor.installed_theme_extensions = installed_theme_extensions;
+                                editor.themes = themes;
+                                editor.message = Some((
+                                    false,
+                                    format!(
+                                        "Installed {name} ({count} theme file{}). Theme selectors have been reloaded.",
+                                        if count == 1 { "" } else { "s" }
+                                    ),
+                                ));
+                            }
+                            this.settings_focus.focus(window, cx);
+                        }
+                        Err(error) => {
+                            if let Some(editor) = this.settings_editor.as_mut() {
+                                editor.message =
+                                    Some((true, format!("Could not install {name}: {error:#}")));
+                            }
+                        }
+                    }
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+    }
+
+    fn remove_theme_extension(
+        &mut self,
+        extension_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(installed) = self
+            .settings_editor
+            .as_ref()
+            .and_then(|editor| (editor.theme_extension_downloading.is_none()).then_some(editor))
+            .and_then(|editor| {
+                editor
+                    .installed_theme_extensions
+                    .iter()
+                    .find(|extension| extension.id == extension_id)
+            })
+            .cloned()
+        else {
+            return;
+        };
+        let in_use = self.settings_editor.as_ref().is_some_and(|editor| {
+            installed.theme_names.iter().any(|theme| {
+                editor.configuration.theme == *theme
+                    || editor.configuration.profiles.iter().any(|profile| {
+                        profile
+                            .theme
+                            .as_ref()
+                            .is_some_and(|selected| selected == theme)
+                    })
+            })
+        });
+        if in_use {
+            if let Some(editor) = self.settings_editor.as_mut() {
+                editor.message = Some((
+                    true,
+                    "Choose and save replacement application/profile themes before removing this extension."
+                        .to_owned(),
+                ));
+            }
+            cx.notify();
+            return;
+        }
+        if let Some(editor) = self.settings_editor.as_mut() {
+            editor.theme_extension_downloading = Some(Arc::from(extension_id.clone()));
+            editor.message = Some((false, format!("Removing {extension_id}…")));
+        }
+
+        let result = theme_extensions::remove(&extension_id, &config::themes_dir());
+        if let Some(editor) = self.settings_editor.as_mut() {
+            editor.theme_extension_downloading = None;
+        }
+        match result {
+            Ok(count) => {
+                let theme_names = installed
+                    .theme_names
+                    .iter()
+                    .cloned()
+                    .map(SharedString::from)
+                    .collect::<Vec<_>>();
+                let registry = ThemeRegistry::global(cx);
+                registry.remove_user_themes(&theme_names);
+                theme_settings::load_bundled_themes(&registry);
+                self.reload_configuration(&ReloadConfiguration, window, cx);
+
+                let mut themes = ThemeRegistry::global(cx)
+                    .list()
+                    .into_iter()
+                    .map(|theme| theme.name.to_string())
+                    .collect::<Vec<_>>();
+                themes.sort();
+                themes.dedup();
+                let installed_theme_extensions =
+                    theme_extensions::installed(&config::themes_dir()).unwrap_or_default();
+                if let Some(editor) = self.settings_editor.as_mut() {
+                    editor.themes = themes;
+                    editor.installed_theme_extensions = installed_theme_extensions;
+                    editor.message = Some((
+                        false,
+                        format!(
+                            "Removed {extension_id} ({count} theme file{}). Theme selectors have been reloaded.",
+                            if count == 1 { "" } else { "s" }
+                        ),
+                    ));
+                }
+                self.settings_focus.focus(window, cx);
+            }
+            Err(error) => {
+                if let Some(editor) = self.settings_editor.as_mut() {
+                    editor.message =
+                        Some((true, format!("Could not remove {extension_id}: {error:#}")));
+                }
+            }
+        }
+        cx.notify();
+    }
+
     fn select_settings_page(
         &mut self,
         page: SettingsPage,
@@ -1610,9 +1838,9 @@ impl Zetta {
             editor.font_query = None;
             editor.profile_draft = None;
             editor.numeric_repeat_generation = editor.numeric_repeat_generation.wrapping_add(1);
-            self.settings_focus.focus(window, cx);
-            cx.notify();
         }
+        self.settings_focus.focus(window, cx);
+        cx.notify();
     }
 
     fn focus_settings_input(
@@ -1628,6 +1856,7 @@ impl Zetta {
         let field = match input {
             SettingsInput::Configuration(field) => editor.configuration.text_mut(field),
             SettingsInput::Keymap(field) => editor.keymap.text_mut(field),
+            SettingsInput::ThemeSearch => Some(&mut editor.theme_extension_query),
             SettingsInput::FontSearch => editor.font_query.as_mut(),
             SettingsInput::ProfileDraft(field) => {
                 editor.profile_draft.as_mut().map(|draft| match field {
@@ -1878,7 +2107,8 @@ impl Zetta {
             }
             "s" if command => self.save_settings(window, cx),
             "1" if command => self.select_settings_page(SettingsPage::Configuration, window, cx),
-            "2" if command => self.select_settings_page(SettingsPage::Keymap, window, cx),
+            "2" if command => self.select_settings_page(SettingsPage::Themes, window, cx),
+            "3" if command => self.select_settings_page(SettingsPage::Keymap, window, cx),
             "tab"
                 if self
                     .settings_editor
@@ -1888,10 +2118,16 @@ impl Zetta {
                 self.focus_adjacent_profile_draft(event.keystroke.modifiers.shift, window, cx);
             }
             "enter" => {
-                if let Some(editor) = self.settings_editor.as_mut() {
+                let search = self
+                    .settings_editor
+                    .as_ref()
+                    .is_some_and(|editor| editor.focused_input == Some(SettingsInput::ThemeSearch));
+                if search {
+                    self.fetch_theme_extensions(window, cx);
+                } else if let Some(editor) = self.settings_editor.as_mut() {
                     editor.focused_input = None;
+                    cx.notify();
                 }
-                cx.notify();
             }
             key => {
                 let Some(editor) = self.settings_editor.as_mut() else {
@@ -1904,6 +2140,7 @@ impl Zetta {
                 let field = match input {
                     SettingsInput::Configuration(field) => editor.configuration.text_mut(field),
                     SettingsInput::Keymap(field) => editor.keymap.text_mut(field),
+                    SettingsInput::ThemeSearch => Some(&mut editor.theme_extension_query),
                     SettingsInput::FontSearch => editor.font_query.as_mut(),
                     SettingsInput::ProfileDraft(field) => {
                         editor.profile_draft.as_mut().map(|draft| match field {
@@ -1945,7 +2182,9 @@ impl Zetta {
                 match input {
                     SettingsInput::Configuration(_) => editor.configuration_dirty = true,
                     SettingsInput::Keymap(_) => editor.keymap_dirty = true,
-                    SettingsInput::FontSearch | SettingsInput::ProfileDraft(_) => {}
+                    SettingsInput::ThemeSearch
+                    | SettingsInput::FontSearch
+                    | SettingsInput::ProfileDraft(_) => {}
                 }
                 editor.message = None;
                 cx.notify();
@@ -2684,6 +2923,276 @@ impl Zetta {
                 );
                 div().children(rows).into_any_element()
             }
+            SettingsPage::Themes => {
+                let search = text_input(
+                    "settings-theme-extension-search".to_owned(),
+                    editor.theme_extension_query.clone(),
+                    SettingsInput::ThemeSearch,
+                );
+                let search_handle = handle.clone();
+                let mut rows = vec![
+                    div()
+                        .mb_3()
+                        .child(
+                            div()
+                                .mb_1()
+                                .text_sm()
+                                .child("Download themes from Zed extensions"),
+                        )
+                        .child(
+                            div()
+                                .mb_3()
+                                .text_xs()
+                                .text_color(colors.text_muted)
+                                .child(
+                                    "Only declared theme JSON files are installed. Other extension features are ignored.",
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .child(div().flex_1().child(search))
+                                .child(
+                                    div()
+                                        .id("search-theme-extensions")
+                                        .h_9()
+                                        .px_3()
+                                        .flex()
+                                        .items_center()
+                                        .rounded(px(4.))
+                                        .border_1()
+                                        .border_color(colors.border)
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(colors.element_hover))
+                                        .on_click(move |_, window, cx| {
+                                            search_handle
+                                                .update(cx, |this, cx| {
+                                                    this.fetch_theme_extensions(window, cx)
+                                                })
+                                                .ok();
+                                        })
+                                        .child(if editor.theme_extensions_loading {
+                                            "Loading…"
+                                        } else {
+                                            "Search"
+                                        }),
+                                ),
+                        )
+                        .into_any_element(),
+                ];
+                if !editor.installed_theme_extensions.is_empty() {
+                    rows.push(
+                        div()
+                            .mt_2()
+                            .mb_2()
+                            .text_sm()
+                            .child("Installed from Zed extensions")
+                            .into_any_element(),
+                    );
+                    for installed in &editor.installed_theme_extensions {
+                        let id = installed.id.clone();
+                        let removing = editor
+                            .theme_extension_downloading
+                            .as_ref()
+                            .is_some_and(|active| active.as_ref() == installed.id);
+                        let disabled = editor.theme_extension_downloading.is_some();
+                        let remove_handle = handle.clone();
+                        let theme_names = installed.theme_names.join(", ");
+                        rows.push(
+                            div()
+                                .mb_2()
+                                .p_3()
+                                .rounded(px(4.))
+                                .border_1()
+                                .border_color(colors.border)
+                                .child(
+                                    h_flex()
+                                        .justify_between()
+                                        .gap_3()
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .flex_1()
+                                                .child(div().text_sm().child(installed.id.clone()))
+                                                .child(
+                                                    div()
+                                                        .mt_1()
+                                                        .text_xs()
+                                                        .text_color(colors.text_muted)
+                                                        .child(format!(
+                                                            "{} theme file{}{}",
+                                                            installed.file_count,
+                                                            if installed.file_count == 1 {
+                                                                ""
+                                                            } else {
+                                                                "s"
+                                                            },
+                                                            if theme_names.is_empty() {
+                                                                String::new()
+                                                            } else {
+                                                                format!(" · {theme_names}")
+                                                            }
+                                                        )),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .id(format!(
+                                                    "remove-theme-extension-{}",
+                                                    installed.id
+                                                ))
+                                                .h_8()
+                                                .px_3()
+                                                .flex()
+                                                .items_center()
+                                                .flex_none()
+                                                .rounded(px(4.))
+                                                .border_1()
+                                                .border_color(colors.border)
+                                                .when(!disabled, |button| {
+                                                    button
+                                                        .cursor_pointer()
+                                                        .hover(|style| {
+                                                            style.bg(colors.element_hover)
+                                                        })
+                                                        .on_click(move |_, window, cx| {
+                                                            remove_handle
+                                                                .update(cx, |this, cx| {
+                                                                    this.remove_theme_extension(
+                                                                        id.clone(),
+                                                                        window,
+                                                                        cx,
+                                                                    )
+                                                                })
+                                                                .ok();
+                                                        })
+                                                })
+                                                .child(if removing {
+                                                    "Removing…"
+                                                } else {
+                                                    "Remove"
+                                                }),
+                                        ),
+                                )
+                                .into_any_element(),
+                        );
+                    }
+                }
+                if editor.theme_extensions.is_empty() && !editor.theme_extensions_loading {
+                    rows.push(
+                        div()
+                            .py_6()
+                            .text_center()
+                            .text_color(colors.text_muted)
+                            .child(if editor.theme_extensions_searched {
+                                "No matching theme extensions found."
+                            } else {
+                                "Enter a theme name and select Search."
+                            })
+                            .into_any_element(),
+                    );
+                }
+                for extension in &editor.theme_extensions {
+                    let id = extension.id.clone();
+                    let downloading = editor
+                        .theme_extension_downloading
+                        .as_ref()
+                        .is_some_and(|active| active == &id);
+                    let already_installed = editor
+                        .installed_theme_extensions
+                        .iter()
+                        .any(|installed| installed.id == extension.id.as_ref());
+                    let disabled =
+                        editor.theme_extension_downloading.is_some() || already_installed;
+                    let install_handle = handle.clone();
+                    let description = extension
+                        .description
+                        .clone()
+                        .unwrap_or_else(|| "Theme extension for Zed".to_owned());
+                    let author = if extension.authors.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" by {}", extension.authors.join(", "))
+                    };
+                    rows.push(
+                        div()
+                            .mb_2()
+                            .p_3()
+                            .rounded(px(4.))
+                            .border_1()
+                            .border_color(colors.border)
+                            .child(
+                                h_flex()
+                                    .justify_between()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .flex_1()
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .child(format!("{}{}", extension.name, author)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .mt_1()
+                                                    .text_xs()
+                                                    .text_color(colors.text_muted)
+                                                    .child(description),
+                                            )
+                                            .child(
+                                                div()
+                                                    .mt_1()
+                                                    .text_xs()
+                                                    .text_color(colors.text_muted)
+                                                    .child(format!(
+                                                        "{} downloads · version {}",
+                                                        extension.download_count, extension.version
+                                                    )),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(format!("install-theme-extension-{}", extension.id))
+                                            .h_8()
+                                            .px_3()
+                                            .flex()
+                                            .items_center()
+                                            .flex_none()
+                                            .rounded(px(4.))
+                                            .border_1()
+                                            .border_color(colors.border)
+                                            .when(!disabled, |button| {
+                                                button
+                                                    .cursor_pointer()
+                                                    .hover(|style| style.bg(colors.element_hover))
+                                                    .on_click(move |_, window, cx| {
+                                                        install_handle
+                                                            .update(cx, |this, cx| {
+                                                                this.download_theme_extension(
+                                                                    id.clone(),
+                                                                    window,
+                                                                    cx,
+                                                                )
+                                                            })
+                                                            .ok();
+                                                    })
+                                            })
+                                            .child(if downloading {
+                                                "Installing…"
+                                            } else if already_installed {
+                                                "Installed"
+                                            } else {
+                                                "Install"
+                                            }),
+                                    ),
+                            )
+                            .into_any_element(),
+                    );
+                }
+                div().children(rows).into_any_element()
+            }
             SettingsPage::Keymap => {
                 let mut sections = Vec::new();
                 for (section_index, section) in editor.keymap.sections.iter().enumerate() {
@@ -3136,12 +3645,17 @@ impl Zetta {
         });
 
         let config_handle = handle.clone();
+        let themes_handle = handle.clone();
         let keymap_handle = handle.clone();
         let save_handle = handle.clone();
         let close_handle = handle.clone();
         let path = match editor.page {
-            SettingsPage::Configuration => &self.launch_config.config_path,
-            SettingsPage::Keymap => &self.launch_config.keymap_path,
+            SettingsPage::Configuration => self.launch_config.config_path.display().to_string(),
+            SettingsPage::Themes => format!(
+                "Zed theme extensions · installed in {}",
+                config::themes_dir().display()
+            ),
+            SettingsPage::Keymap => self.launch_config.keymap_path.display().to_string(),
         };
         Some(
             div()
@@ -3204,6 +3718,29 @@ impl Zetta {
                                                         .ok();
                                                 })
                                                 .child("Configuration"),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("settings-themes-tab")
+                                                .px_3()
+                                                .py_1()
+                                                .rounded(px(4.))
+                                                .cursor_pointer()
+                                                .when(editor.page == SettingsPage::Themes, |tab| {
+                                                    tab.bg(colors.element_selected)
+                                                })
+                                                .on_click(move |_, window, cx| {
+                                                    themes_handle
+                                                        .update(cx, |this, cx| {
+                                                            this.select_settings_page(
+                                                                SettingsPage::Themes,
+                                                                window,
+                                                                cx,
+                                                            )
+                                                        })
+                                                        .ok();
+                                                })
+                                                .child("Themes"),
                                         )
                                         .child(
                                             div()
@@ -3281,7 +3818,7 @@ impl Zetta {
                                 .border_color(colors.border)
                                 .text_xs()
                                 .text_color(colors.text_muted)
-                                .child(path.display().to_string()),
+                                .child(path),
                         )
                         .child(
                             div()
@@ -5158,9 +5695,14 @@ fn run() -> Result<()> {
     let (config, configuration_error) = load_startup_config(config_path.as_deref(), keymap_path);
     let keymap_path = config.keymap_path.clone();
     let profile_count = config.profiles.len();
+    let http_client = Arc::new(
+        reqwest_client::ReqwestClient::user_agent(concat!("Zetta/", env!("CARGO_PKG_VERSION")))
+            .context("initializing HTTP client")?,
+    );
     gpui_platform::application()
         .with_assets(ZettaAssets)
         .run(move |cx: &mut App| {
+            cx.set_http_client(http_client);
             menu::init();
             zed_actions::init();
             release_channel::init(semver::Version::new(0, 1, 0), cx);
