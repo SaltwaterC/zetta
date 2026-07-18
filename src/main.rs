@@ -2,6 +2,7 @@
 
 mod command_palette;
 mod config;
+mod serial_console;
 mod settings_editor;
 mod theme_extensions;
 mod zetta_assets;
@@ -98,6 +99,7 @@ actions!(
         ReloadConfiguration,
         ToggleCommandPalette,
         ToggleSettings,
+        ToggleSerialConsole,
         TogglePerformanceOverlay
     ]
 );
@@ -126,8 +128,10 @@ mod tab_search;
 use tab_search::*;
 mod settings_ui;
 mod settings_view;
+use serial_console::*;
 use settings_ui::*;
 mod app;
+mod serial_console_ui;
 use app::*;
 mod app_render;
 mod window_frame;

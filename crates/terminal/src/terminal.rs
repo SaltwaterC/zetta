@@ -39,13 +39,16 @@ use std::{
     borrow::Cow,
     cmp::{self, min},
     fmt::{self, Display, Formatter},
+    io::{Read, Write},
     ops::{BitOr, BitOrAssign, Deref, Range as StdRange},
     path::{Path, PathBuf},
     process::ExitStatus,
     sync::{
         Arc, Once,
         atomic::{AtomicU8, AtomicU64, Ordering},
+        mpsc,
     },
+    thread,
     time::{Duration, Instant},
 };
 use thiserror::Error;
@@ -1006,6 +1009,7 @@ fn init_command_startup_marker_command(shell_kind: ShellKind, marker_id: u64) ->
 
 pub struct TerminalBuilder {
     terminal: Terminal,
+    events_tx: futures::channel::mpsc::UnboundedSender<PtyEvent>,
     events_rx: UnboundedReceiver<PtyEvent>,
 }
 
@@ -1046,12 +1050,18 @@ impl TerminalBuilder {
         let config = display_only_term_config(scrolling_history, cursor_shape);
 
         let (events_tx, events_rx) = unbounded();
-        let term = new_term(&config, terminal_bounds, events_tx, alternate_scroll);
+        let term = new_term(
+            &config,
+            terminal_bounds,
+            events_tx.clone(),
+            alternate_scroll,
+        );
 
         let terminal = Terminal {
             task: None,
             terminal_type: TerminalType::DisplayOnly,
             subprocess: None,
+            byte_stream: None,
             completion_tx: None,
             term,
             term_config: config,
@@ -1109,8 +1119,42 @@ impl TerminalBuilder {
 
         TerminalBuilder {
             terminal,
+            events_tx,
             events_rx,
         }
+    }
+
+    /// Creates a terminal backed by an arbitrary blocking byte stream.
+    ///
+    /// The reader must periodically return (for example by using an I/O timeout)
+    /// so dropping the terminal can stop its worker thread promptly.
+    pub fn new_byte_stream(
+        reader: Box<dyn Read + Send>,
+        writer: Box<dyn Write + Send>,
+        title: String,
+        cursor_shape: SettingsCursorShape,
+        alternate_scroll: AlternateScroll,
+        max_scroll_history_lines: Option<usize>,
+        window_id: u64,
+        background_executor: &BackgroundExecutor,
+        path_style: PathStyle,
+    ) -> TerminalBuilder {
+        let mut builder = Self::new_display_only(
+            cursor_shape,
+            alternate_scroll,
+            max_scroll_history_lines,
+            window_id,
+            background_executor,
+            path_style,
+        );
+        builder.terminal.title_override = Some(title);
+        builder.terminal.byte_stream = Some(spawn_byte_stream(
+            reader,
+            writer,
+            builder.terminal.term.clone(),
+            builder.events_tx.clone(),
+        ));
+        builder
     }
 
     pub fn new(
@@ -1234,6 +1278,7 @@ impl TerminalBuilder {
             //Spawn a task so the Alacritty EventLoop (or the subprocess reader) can communicate with us
             //TODO: Remove with a bounded sender which can be dispatched on &self
             let (events_tx, events_rx) = unbounded();
+            let builder_events_tx = events_tx.clone();
             //Set up the terminal...
             let term = new_term(
                 &config,
@@ -1329,6 +1374,7 @@ impl TerminalBuilder {
                 task,
                 terminal_type,
                 subprocess,
+                byte_stream: None,
                 completion_tx,
                 term,
                 term_config: config,
@@ -1407,6 +1453,7 @@ impl TerminalBuilder {
 
             Ok(TerminalBuilder {
                 terminal,
+                events_tx: builder_events_tx,
                 events_rx,
             })
         };
@@ -1508,6 +1555,8 @@ pub struct Terminal {
     /// Set for non-PTY terminals (see [`HeadlessTerminal`]); owns the spawned
     /// subprocess and the task pumping its output into the grid.
     subprocess: Option<SubprocessHandle>,
+    /// Set for terminals connected to a blocking bidirectional byte stream.
+    byte_stream: Option<ByteStreamHandle>,
     completion_tx: Option<Sender<Option<ExitStatus>>>,
     term: Arc<AlacrittyTermLock>,
     term_config: AlacrittyTermConfig,
@@ -2102,7 +2151,7 @@ impl Terminal {
         }
     }
 
-    /// Write the Input payload to the PTY, if applicable.
+    /// Write input to the interactive backend, if applicable.
     /// (This is a no-op for display-only terminals.)
     fn write_to_pty(&self, input: impl Into<Cow<'static, [u8]>>) {
         let input = input.into();
@@ -2117,6 +2166,8 @@ impl Terminal {
                 }
             }
             pty_tx.notify(input);
+        } else if let Some(byte_stream) = &self.byte_stream {
+            byte_stream.write(input.into_owned());
         }
     }
 
@@ -3147,6 +3198,99 @@ struct SubprocessHandle {
     _reader: Task<()>,
 }
 
+/// Owns the workers used by a blocking bidirectional byte stream.
+struct ByteStreamHandle {
+    input_tx: Option<mpsc::Sender<Vec<u8>>>,
+    stopped: Arc<std::sync::atomic::AtomicBool>,
+    _reader: thread::JoinHandle<()>,
+    _writer: thread::JoinHandle<()>,
+}
+
+impl ByteStreamHandle {
+    fn write(&self, bytes: Vec<u8>) {
+        if let Some(input_tx) = &self.input_tx {
+            input_tx.send(bytes).ok();
+        }
+    }
+
+    fn stop(&mut self) {
+        self.stopped.store(true, Ordering::Release);
+        self.input_tx.take();
+    }
+}
+
+fn spawn_byte_stream(
+    mut reader: Box<dyn Read + Send>,
+    mut writer: Box<dyn Write + Send>,
+    term: Arc<AlacrittyTermLock>,
+    events_tx: futures::channel::mpsc::UnboundedSender<PtyEvent>,
+) -> ByteStreamHandle {
+    let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader_stopped = stopped.clone();
+    let reader_events = events_tx.clone();
+    let reader_thread = thread::Builder::new()
+        .name("terminal-byte-stream-reader".to_owned())
+        .spawn(move || {
+            let mut processor = Processor::<StdSyncHandler>::new();
+            let mut buffer = [0u8; 8192];
+            let mut previous_byte_was_cr = false;
+            while !reader_stopped.load(Ordering::Acquire) {
+                match reader.read(&mut buffer) {
+                    Ok(0) => break,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                        ) => {}
+                    Err(error) => {
+                        log::warn!("byte stream read failed: {error}");
+                        let message = format!("\r\n[Connection error: {error}]\r\n");
+                        let mut terminal = term.lock();
+                        processor.advance(&mut *terminal, message.as_bytes());
+                        drop(terminal);
+                        reader_events
+                            .unbounded_send(PtyEvent::Event(TerminalBackendEvent::Wakeup))
+                            .ok();
+                        break;
+                    }
+                    Ok(count) => {
+                        let converted =
+                            convert_lf_to_crlf(&buffer[..count], &mut previous_byte_was_cr);
+                        let mut terminal = term.lock();
+                        processor.advance(&mut *terminal, &converted);
+                        drop(terminal);
+                        reader_events
+                            .unbounded_send(PtyEvent::Event(TerminalBackendEvent::Wakeup))
+                            .ok();
+                    }
+                }
+            }
+        })
+        .expect("spawning a terminal byte-stream reader");
+
+    let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>();
+    let writer_stopped = stopped.clone();
+    let writer_thread = thread::Builder::new()
+        .name("terminal-byte-stream-writer".to_owned())
+        .spawn(move || {
+            while !writer_stopped.load(Ordering::Acquire) {
+                let Ok(bytes) = input_rx.recv() else { break };
+                if let Err(error) = writer.write_all(&bytes).and_then(|()| writer.flush()) {
+                    log::warn!("byte stream write failed: {error}");
+                    break;
+                }
+            }
+        })
+        .expect("spawning a terminal byte-stream writer");
+
+    ByteStreamHandle {
+        input_tx: Some(input_tx),
+        stopped,
+        _reader: reader_thread,
+        _writer: writer_thread,
+    }
+}
+
 impl SubprocessHandle {
     fn kill(&self) {
         if let Some(child) = self.child.lock().as_mut() {
@@ -3259,6 +3403,9 @@ fn spawn_task_subprocess(
 
 impl Drop for Terminal {
     fn drop(&mut self) {
+        if let Some(mut byte_stream) = self.byte_stream.take() {
+            byte_stream.stop();
+        }
         if let Some(subprocess) = self.subprocess.take() {
             subprocess.kill();
         }

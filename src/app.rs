@@ -29,6 +29,9 @@ pub(crate) struct Zetta {
     pub(crate) multi_command_launches: BoundedLaunchQueue<QueuedTerminalLaunch>,
     pub(crate) settings_focus: gpui::FocusHandle,
     pub(crate) settings_editor: Option<SettingsEditor>,
+    pub(crate) serial_console_focus: gpui::FocusHandle,
+    pub(crate) serial_console: Option<SerialConsolePrompt>,
+    pub(crate) serial_console_generation: u64,
     pub(crate) tab_search_focus: gpui::FocusHandle,
     pub(crate) tab_search: Option<TabSearch>,
     pub(crate) minimized_panes_focus: gpui::FocusHandle,
@@ -105,6 +108,9 @@ impl Zetta {
             multi_command_launches: BoundedLaunchQueue::new(MAX_CONCURRENT_MULTI_COMMAND_SPAWNS),
             settings_focus: cx.focus_handle(),
             settings_editor: None,
+            serial_console_focus: cx.focus_handle(),
+            serial_console: None,
+            serial_console_generation: 0,
             tab_search_focus: cx.focus_handle(),
             tab_search: None,
             minimized_panes_focus: cx.focus_handle(),
@@ -126,6 +132,7 @@ impl Zetta {
                         && !this.is_renaming()
                         && this.command_palette.is_none()
                         && this.multi_command.is_none()
+                        && this.serial_console.is_none()
                         && this.tab_search.is_none()
                     {
                         this.focus_active(window, cx);
