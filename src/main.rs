@@ -45,7 +45,8 @@ use terminal::{
 };
 use terminal_view::{
     ClearClipboard, CopyAndClearSelection, DismissSearch, SearchNextMatch, SearchPreviousMatch,
-    SearchScrollback, SelectAll, SelectAllSearchText, TerminalView, TerminalViewEvent,
+    SearchScrollback, SelectAll, SelectAllSearchText, TerminalInput, TerminalView,
+    TerminalViewEvent,
 };
 use theme::{ActiveTheme, ClientDecorationsExt as _, GlobalTheme, Theme, ThemeRegistry};
 use theme_extensions::{InstalledThemeExtension, ThemeExtension};
@@ -72,6 +73,7 @@ actions!(
         FocusPaneRight,
         FocusPaneUp,
         FocusPaneDown,
+        ToggleBroadcastInput,
         IncreaseTerminalFontSize,
         DecreaseTerminalFontSize,
         ResetTerminalFontSize,
@@ -285,6 +287,7 @@ struct Tab {
     layout: PaneLayout,
     active_pane: u64,
     focus_history: Vec<u64>,
+    broadcast_input: bool,
     custom_title: Option<String>,
     rename_buffer: Option<String>,
     rename_cursor: usize,
@@ -656,6 +659,7 @@ impl Zetta {
             layout: PaneLayout::Pane(pane_id),
             active_pane: pane_id,
             focus_history: vec![pane_id],
+            broadcast_input: false,
             custom_title: None,
             rename_buffer: None,
             rename_cursor: 0,
@@ -754,6 +758,9 @@ impl Zetta {
                                         this.refresh_tab_search(cx);
                                     }
                                     cx.notify();
+                                }
+                                TerminalViewEvent::Input(input) => {
+                                    this.broadcast_input(tab_id, pane_id, input, cx);
                                 }
                             },
                         )
@@ -942,6 +949,43 @@ impl Zetta {
 
     fn split_vertical(&mut self, _: &SplitVertical, window: &mut Window, cx: &mut Context<Self>) {
         self.split_active_pane(SplitAxis::Vertical, window, cx);
+    }
+
+    fn broadcast_input(
+        &mut self,
+        tab_id: u64,
+        source_pane_id: u64,
+        input: &TerminalInput,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
+            return;
+        };
+        if !tab.broadcast_input || tab.active_pane != source_pane_id {
+            return;
+        }
+        let sibling_views = tab
+            .panes
+            .iter()
+            .filter(|pane| pane.id != source_pane_id)
+            .filter_map(|pane| pane.view.clone())
+            .collect::<Vec<_>>();
+        for view in sibling_views {
+            view.update(cx, |view, cx| view.apply_input(input, cx));
+        }
+    }
+
+    fn toggle_broadcast_input(
+        &mut self,
+        _: &ToggleBroadcastInput,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.broadcast_input = !tab.broadcast_input;
+        }
+        self.focus_active(window, cx);
+        cx.notify();
     }
 
     fn focus_pane(
@@ -4279,6 +4323,10 @@ impl Render for Zetta {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors().clone();
         let handle = cx.entity().downgrade();
+        let broadcast_input = self
+            .tabs
+            .get(self.active_tab)
+            .is_some_and(|tab| tab.broadcast_input);
         let supported_controls = window.window_controls();
         let is_maximized = window.is_maximized();
         let left_window_controls = render_window_controls(
@@ -4888,6 +4936,7 @@ impl Render for Zetta {
             .on_action(cx.listener(Self::focus_pane_right))
             .on_action(cx.listener(Self::focus_pane_up))
             .on_action(cx.listener(Self::focus_pane_down))
+            .on_action(cx.listener(Self::toggle_broadcast_input))
             .on_action(cx.listener(Self::increase_terminal_font_size))
             .on_action(cx.listener(Self::decrease_terminal_font_size))
             .on_action(cx.listener(Self::reset_terminal_font_size))
@@ -4948,8 +4997,27 @@ impl Render for Zetta {
                             .child(profile_menu),
                     )
                     .child(
+                        IconButton::new("toggle-broadcast-input", IconName::Keyboard)
+                            .shape(IconButtonShape::Wide)
+                            .size(ButtonSize::Large)
+                            .width(px(32.))
+                            .icon_size(IconSize::Small)
+                            .toggle_state(broadcast_input)
+                            .aria_label("Broadcast input to all panes")
+                            .tooltip(Tooltip::text(if broadcast_input {
+                                "Broadcast input is on (Ctrl-Shift-I)"
+                            } else {
+                                "Broadcast input to all panes (Ctrl-Shift-I)"
+                            }))
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(ToggleBroadcastInput), cx)
+                            }),
+                    )
+                    .child(
                         IconButton::new("open-settings", IconName::Settings)
-                            .shape(IconButtonShape::Square)
+                            .shape(IconButtonShape::Wide)
+                            .size(ButtonSize::Large)
+                            .width(px(32.))
                             .icon_size(IconSize::Small)
                             .aria_label("Open settings")
                             .tooltip(Tooltip::text("Open settings (Ctrl+,)"))
@@ -5564,6 +5632,11 @@ fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut App) {
         KeyBinding::new("alt-right", FocusPaneRight, Some("Zetta > Terminal")),
         KeyBinding::new("alt-up", FocusPaneUp, Some("Zetta > Terminal")),
         KeyBinding::new("alt-down", FocusPaneDown, Some("Zetta > Terminal")),
+        KeyBinding::new(
+            "ctrl-shift-i",
+            ToggleBroadcastInput,
+            Some("Zetta > Terminal"),
+        ),
         KeyBinding::new("ctrl-tab", NextTab, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-pageup", NextTab, Some("Zetta > Terminal")),
@@ -6126,6 +6199,7 @@ mod tests {
             },
             active_pane: 2,
             focus_history: vec![1, 2],
+            broadcast_input: false,
             custom_title: None,
             rename_buffer: None,
             rename_cursor: 0,
@@ -6157,6 +6231,7 @@ mod tests {
             layout: PaneLayout::Pane(1),
             active_pane: 3,
             focus_history: vec![1, 2, 3],
+            broadcast_input: false,
             custom_title: None,
             rename_buffer: None,
             rename_cursor: 0,
@@ -6190,6 +6265,7 @@ mod tests {
             layout: PaneLayout::Pane(1),
             active_pane: 3,
             focus_history: vec![1, 2, 3],
+            broadcast_input: false,
             custom_title: None,
             rename_buffer: None,
             rename_cursor: 0,

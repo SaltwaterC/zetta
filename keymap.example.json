@@ -13,6 +13,7 @@
       "alt-right": "zetta::FocusPaneRight",
       "alt-up": "zetta::FocusPaneUp",
       "alt-down": "zetta::FocusPaneDown",
+      "ctrl-shift-i": "zetta::ToggleBroadcastInput",
       "ctrl-tab": "zetta::NextTab",
       "ctrl-shift-tab": "zetta::PreviousTab",
       "ctrl-pageup": "zetta::NextTab",

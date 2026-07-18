@@ -56,10 +56,18 @@ actions!(
     ]
 );
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum TerminalViewEvent {
     Close,
     TitleChanged,
+    Input(TerminalInput),
+}
+
+#[derive(Clone, Debug)]
+pub enum TerminalInput {
+    Keystroke(Keystroke),
+    Text(String),
+    Paste(String),
 }
 
 #[derive(Clone)]
@@ -436,6 +444,24 @@ impl TerminalView {
         if !text.is_empty() {
             self.terminal
                 .update(cx, |terminal, _| terminal.input(text.as_bytes().to_vec()));
+            cx.emit(TerminalViewEvent::Input(TerminalInput::Text(
+                text.to_owned(),
+            )));
+        }
+    }
+
+    pub fn apply_input(&mut self, input: &TerminalInput, cx: &mut Context<Self>) {
+        match input {
+            TerminalInput::Keystroke(keystroke) => {
+                self.process_keystroke(keystroke, cx);
+            }
+            TerminalInput::Text(text) => {
+                self.terminal
+                    .update(cx, |terminal, _| terminal.input(text.as_bytes().to_vec()));
+            }
+            TerminalInput::Paste(text) => {
+                self.terminal.update(cx, |terminal, _| terminal.paste(text));
+            }
         }
     }
 
@@ -734,6 +760,9 @@ impl TerminalView {
         self.has_bell = false;
         self.blink_manager.update(cx, BlinkManager::pause);
         if self.process_keystroke(&event.keystroke, cx) {
+            cx.emit(TerminalViewEvent::Input(TerminalInput::Keystroke(
+                event.keystroke.clone(),
+            )));
             cx.stop_propagation();
         }
     }
@@ -776,6 +805,7 @@ impl TerminalView {
                 self.insert_search_text(&text, cx);
             } else {
                 self.terminal.update(cx, |terminal, _| terminal.paste(&text));
+                cx.emit(TerminalViewEvent::Input(TerminalInput::Paste(text)));
             }
         }
     }
@@ -793,6 +823,9 @@ impl TerminalView {
             } else {
                 self.terminal
                     .update(cx, |terminal, _| terminal.paste(text));
+                cx.emit(TerminalViewEvent::Input(TerminalInput::Paste(
+                    text.to_owned(),
+                )));
             }
         }
     }
@@ -905,11 +938,18 @@ impl TerminalView {
     fn send_text(&mut self, text: &SendText, _: &mut Window, cx: &mut Context<Self>) {
         self.terminal
             .update(cx, |terminal, _| terminal.input(text.0.clone().into_bytes()));
+        cx.emit(TerminalViewEvent::Input(TerminalInput::Text(
+            text.0.clone(),
+        )));
     }
 
     fn send_keystroke(&mut self, key: &SendKeystroke, _: &mut Window, cx: &mut Context<Self>) {
         if let Ok(keystroke) = Keystroke::parse(&key.0) {
-            self.process_keystroke(&keystroke, cx);
+            if self.process_keystroke(&keystroke, cx) {
+                cx.emit(TerminalViewEvent::Input(TerminalInput::Keystroke(
+                    keystroke,
+                )));
+            }
         }
     }
 }

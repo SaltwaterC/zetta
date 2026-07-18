@@ -180,6 +180,7 @@ Keyboard shortcuts use Zed's keymap format. The default shortcuts are:
 | `Ctrl-Shift-A` | Select all terminal text |
 | `Ctrl-Shift-Backspace` | Clear the system clipboard |
 | `Alt-Arrow` | Focus the pane in that direction |
+| `Ctrl-Shift-I` | Toggle input broadcasting to every pane in the active tab |
 | `Ctrl-Tab` | Next tab |
 | `Ctrl-Shift-Tab` | Previous tab |
 | `Ctrl-PageUp` | Next tab |
@@ -200,6 +201,10 @@ Keyboard shortcuts use Zed's keymap format. The default shortcuts are:
 | `Ctrl-Alt-0` | Reset active pane font size |
 | `Ctrl-Shift-R` | Reload configuration, keymap, and user themes |
 | `Ctrl-Shift-F12` | Toggle the performance overlay |
+
+Input broadcasting is scoped to the active tab and is off by default. When it is
+enabled, typing, terminal control keys, IME text, and pastes sent to the active
+pane are also sent to every other open pane in that tab.
 
 The command palette lists the actions available in the focused terminal and
 Zetta window, including their effective keyboard shortcuts. Type to filter,
