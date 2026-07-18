@@ -446,6 +446,15 @@ pub(crate) fn validate_keymap_contents(content: &str, cx: &mut App) -> Result<()
 }
 
 pub(crate) const RENAME_TAB_KEYBINDING: &str = "ctrl-alt-r";
+pub(crate) const SAVE_PANE_OUTPUT_KEYBINDING: &str = "ctrl-shift-s";
+
+pub(crate) fn pane_output_keybinding() -> KeyBinding {
+    KeyBinding::new(
+        SAVE_PANE_OUTPUT_KEYBINDING,
+        SavePaneOutput,
+        Some("Zetta > Terminal"),
+    )
+}
 
 pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut App) {
     cx.clear_key_bindings();
@@ -518,6 +527,7 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
             Some("Zetta > Terminal && scrollback_search"),
         ),
         KeyBinding::new("ctrl-alt-v", PasteTrimmed, Some("Zetta > Terminal")),
+        pane_output_keybinding(),
         KeyBinding::new(
             "ctrl-shift-p",
             ToggleCommandPalette,

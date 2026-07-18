@@ -451,3 +451,13 @@ fn tab_rename_does_not_capture_an_unmodified_function_key() {
     assert!(RENAME_TAB_KEYBINDING.contains('-'));
     assert_ne!(RENAME_TAB_KEYBINDING, "f2");
 }
+
+#[test]
+fn pane_output_uses_the_standard_save_shortcut() {
+    assert_eq!(SAVE_PANE_OUTPUT_KEYBINDING, "ctrl-shift-s");
+    let shortcut = gpui::Keystroke::parse(SAVE_PANE_OUTPUT_KEYBINDING).unwrap();
+    assert_eq!(
+        pane_output_keybinding().match_keystrokes(&[shortcut]),
+        Some(false)
+    );
+}

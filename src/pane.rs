@@ -3,6 +3,7 @@ use super::*;
 pub(crate) const MAX_PANES_PER_TAB: usize = 64;
 pub(crate) const MAX_CONCURRENT_MULTI_COMMAND_SPAWNS: usize = 4;
 pub(crate) const TERMINAL_SPAWN_NOTIFY_INTERVAL: Duration = Duration::from_millis(16);
+pub(crate) const PANE_OUTPUT_DEFAULT_FILENAME: &str = "terminal-output.txt";
 
 pub(crate) fn can_add_panes(current: usize, additional: usize) -> bool {
     current
@@ -17,6 +18,19 @@ pub(crate) fn begin_coalesced_notification(pending: &mut bool) -> bool {
         *pending = true;
         true
     }
+}
+
+pub(crate) fn begin_pane_output_save(in_progress: &mut bool) -> bool {
+    if *in_progress {
+        false
+    } else {
+        *in_progress = true;
+        true
+    }
+}
+
+pub(crate) fn finish_pane_output_save(in_progress: &mut bool) {
+    *in_progress = false;
 }
 
 pub(crate) fn prepare_pane_launches<T>(

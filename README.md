@@ -203,6 +203,7 @@ Keyboard shortcuts use Zed's keymap format. The default shortcuts are:
 | `Ctrl-Shift-F` | Search the active pane's scrollback |
 | `Ctrl-Alt-F` | Search scrollback across every pane in the active tab |
 | `Ctrl-Alt-V` | Paste after trimming leading and trailing whitespace |
+| `Ctrl-Shift-S` | Save the active pane's complete scrollback and visible output to a file |
 | `Ctrl-Shift-P` | Open the command palette |
 | `Ctrl-,` | Open the configuration and keymap editor |
 | `Ctrl-Alt-R` | Rename active tab |

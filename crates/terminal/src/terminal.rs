@@ -2348,6 +2348,17 @@ impl Terminal {
         content_text(&term)
     }
 
+    /// Takes a plain-text snapshot of the complete retained terminal buffer on
+    /// the background executor so grid traversal and text construction do not
+    /// run on the UI thread.
+    pub fn get_content_async(&self) -> Task<String> {
+        let term = self.term.clone();
+        self.background_executor.spawn(async move {
+            let term = term.lock_unfair();
+            content_text(&term)
+        })
+    }
+
     pub fn last_n_non_empty_lines(&self, n: usize) -> Vec<String> {
         let terminal = self.term.lock_unfair();
         last_non_empty_lines(&terminal, n)
@@ -3927,6 +3938,40 @@ mod tests {
         assert!(
             content_after.contains("from_injection"),
             "expected injected output to appear, got: {content_after}"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_async_content_snapshot_captures_complete_output(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                Some(100),
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+        let output = (0..20)
+            .map(|line| format!("retained line {line}\n"))
+            .collect::<String>();
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(output.as_bytes(), cx);
+        });
+
+        let snapshot = terminal.update(cx, |terminal, _| terminal.get_content_async());
+        let snapshot = snapshot.await;
+
+        assert!(
+            snapshot.contains("retained line 0"),
+            "snapshot was {snapshot:?}"
+        );
+        assert!(
+            snapshot.contains("retained line 19"),
+            "snapshot was {snapshot:?}"
         );
     }
 
