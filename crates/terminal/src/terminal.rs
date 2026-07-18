@@ -981,7 +981,9 @@ impl TerminalBuilder {
             },
             last_mouse: None,
             mouse_down_position: None,
-            matches: Vec::new(),
+            matches: Arc::new(Vec::new()),
+            content_dirty: true,
+            content_revision: 0,
 
             selection_head: None,
             breadcrumb_text: String::new(),
@@ -1253,7 +1255,9 @@ impl TerminalBuilder {
                 last_content: Default::default(),
                 last_mouse: None,
                 mouse_down_position: None,
-                matches: Vec::new(),
+                matches: Arc::new(Vec::new()),
+                content_dirty: true,
+                content_revision: 0,
 
                 selection_head: None,
                 breadcrumb_text: String::new(),
@@ -1433,8 +1437,10 @@ pub struct Terminal {
     /// Window-relative position of the most recent left mouse-down. Used to
     /// apply a drag threshold before starting a selection (see #58970).
     mouse_down_position: Option<GpuiPoint<Pixels>>,
-    pub matches: Vec<Range>,
+    pub matches: Arc<Vec<Range>>,
     pub last_content: Content,
+    content_dirty: bool,
+    content_revision: u64,
     pub selection_head: Option<Point>,
 
     pub breadcrumb_text: String,
@@ -1592,6 +1598,7 @@ impl Terminal {
                 //NOOP, Handled in render
             }
             TerminalBackendEvent::Wakeup => {
+                self.content_dirty = true;
                 self.detect_init_command_startup_marker();
                 cx.emit(Event::Wakeup);
 
@@ -1634,6 +1641,7 @@ impl Terminal {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.content_dirty = true;
         match event {
             &InternalEvent::Resize(new_bounds) => {
                 let new_bounds = normalize_terminal_bounds(new_bounds);
@@ -1854,6 +1862,10 @@ impl Terminal {
         &self.last_content
     }
 
+    pub fn content_revision(&self) -> u64 {
+        self.content_revision
+    }
+
     pub fn set_cursor_shape(&mut self, cursor_shape: SettingsCursorShape) {
         set_default_cursor_style(&mut self.term_config, cursor_shape);
         apply_config(&self.term, &self.term_config);
@@ -1862,6 +1874,7 @@ impl Terminal {
             make_content(&terminal, &self.last_content)
         };
         self.last_content = content;
+        self.content_revision = self.content_revision.wrapping_add(1);
     }
 
     pub fn write_output(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
@@ -1873,6 +1886,7 @@ impl Terminal {
         let mut term = self.term.lock();
         self.output_processor.advance(&mut *term, &converted);
         drop(term);
+        self.content_dirty = true;
         self.detect_init_command_startup_marker();
         cx.emit(Event::Wakeup);
     }
@@ -2126,6 +2140,7 @@ impl Terminal {
         let mut term = self.term.lock_unfair();
         clear_saved_screen(&mut term);
         self.last_content = make_content(&term, &self.last_content);
+        self.content_revision = self.content_revision.wrapping_add(1);
         cx.emit(Event::Wakeup);
     }
 
@@ -2305,7 +2320,11 @@ impl Terminal {
             self.process_terminal_event(&e, &mut terminal, window, cx)
         }
 
-        self.last_content = make_content(&terminal, &self.last_content);
+        if self.content_dirty {
+            self.last_content = make_content(&terminal, &self.last_content);
+            self.content_dirty = false;
+            self.content_revision = self.content_revision.wrapping_add(1);
+        }
     }
 
     pub fn with_renderable_cells<R>(&self, f: impl for<'a> FnOnce(RenderableCells<'a>) -> R) -> R {
@@ -3351,7 +3370,7 @@ mod tests {
     use gpui::MouseMoveEvent;
     use gpui::{
         ClipboardItem, Entity, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels,
-        TestAppContext, bounds, point, size,
+        TestAppContext, VisualContext, bounds, point, size,
     };
     use parking_lot::Mutex;
     use rand::{Rng, distr, rngs::StdRng};
@@ -3363,8 +3382,14 @@ mod tests {
             reported_working_directory_from_title("zetta-cwd:/home/user/project"),
             Some("/home/user/project".to_owned())
         );
-        assert_eq!(reported_working_directory_from_title("ordinary title"), None);
-        assert_eq!(reported_working_directory_from_title("zetta-cwd:relative"), None);
+        assert_eq!(
+            reported_working_directory_from_title("ordinary title"),
+            None
+        );
+        assert_eq!(
+            reported_working_directory_from_title("zetta-cwd:relative"),
+            None
+        );
         assert_eq!(
             reported_working_directory_from_title("zetta-cwd:/home/user\nproject"),
             None
@@ -4221,6 +4246,39 @@ mod tests {
             terminal.events.back(),
             Some(InternalEvent::Resize(_))
         ));
+    }
+
+    #[gpui::test]
+    async fn test_sync_reuses_renderable_content_until_terminal_changes(cx: &mut TestAppContext) {
+        let builder = cx.update(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::Block,
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+        });
+        let window = cx.add_empty_window();
+        let terminal = window.new(|cx| builder.subscribe(cx));
+
+        let first_revision = window.update_window_entity(&terminal, |terminal, window, cx| {
+            terminal.sync(window, cx);
+            terminal.content_revision()
+        });
+        let second_revision = window.update_window_entity(&terminal, |terminal, window, cx| {
+            terminal.sync(window, cx);
+            terminal.content_revision()
+        });
+        assert_eq!(second_revision, first_revision);
+
+        terminal.update(window, |terminal, cx| terminal.write_output(b"changed", cx));
+        let changed_revision = window.update_window_entity(&terminal, |terminal, window, cx| {
+            terminal.sync(window, cx);
+            terminal.content_revision()
+        });
+        assert!(changed_revision > second_revision);
     }
 
     fn get_cells(size: TerminalBounds, rng: &mut StdRng) -> Vec<Vec<char>> {

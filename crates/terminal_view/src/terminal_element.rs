@@ -3,9 +3,10 @@ use gpui::{
     DispatchPhase, Element, ElementId, Entity, FocusHandle, Font, FontFeatures, FontStyle,
     FontWeight, GlobalElementId, HighlightStyle, Hitbox, Hsla, InputHandler, InteractiveElement,
     Interactivity, IntoElement, LayoutId, Length, ModifiersChangedEvent, MouseButton,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint, ShapedLine, StatefulInteractiveElement,
-    StrikethroughStyle, Styled, TextAlign, TextRun, TextStyle, UTF16Selection, UnderlineStyle,
-    WhiteSpace, Window, div, fill, outline, point, px, relative, size,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint, ShapedLine,
+    StatefulInteractiveElement, StrikethroughStyle, Styled, TextAlign, TextRun, TextStyle,
+    UTF16Selection, UnderlineStyle, WhiteSpace, Window, div, fill, outline, point, px, relative,
+    size,
 };
 use itertools::Itertools;
 use settings::Settings;
@@ -52,7 +53,14 @@ impl CursorLayout {
         shape: ViewCursorShape,
         block_text: Option<ShapedLine>,
     ) -> Self {
-        Self { origin, width, height, color, shape, block_text }
+        Self {
+            origin,
+            width,
+            height,
+            color,
+            shape,
+            block_text,
+        }
     }
 
     fn bounds(&self, origin: GpuiPoint<Pixels>) -> Bounds<Pixels> {
@@ -76,8 +84,15 @@ impl CursorLayout {
             fill(bounds, self.color)
         });
         if let Some(text) = &self.block_text {
-            text.paint(self.origin + origin, self.height, TextAlign::Left, None, window, cx)
-                .log_err();
+            text.paint(
+                self.origin + origin,
+                self.height,
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            )
+            .log_err();
         }
     }
 }
@@ -139,7 +154,6 @@ impl LayoutPoint {
     fn new(line: i32, column: i32) -> Self {
         Self { line, column }
     }
-
 }
 
 /// A batched text run that combines multiple adjacent cells with the same style
@@ -1217,8 +1231,16 @@ impl Element for TerminalElement {
 
                 // searches, highlights to a single range representations
                 let mut relative_highlighted_ranges = Vec::new();
-                for search_match in search_matches {
-                    relative_highlighted_ranges.push((search_match, match_color))
+                let visible_lines = cells
+                    .first()
+                    .zip(cells.last())
+                    .map(|(first, last)| first.point.line..=last.point.line);
+                for search_match in search_matches.iter().filter(|search_match| {
+                    visible_lines
+                        .as_ref()
+                        .is_some_and(|visible| range_intersects_lines(search_match, visible))
+                }) {
+                    relative_highlighted_ranges.push((*search_match, match_color))
                 }
                 if let Some(selection) = selection {
                     relative_highlighted_ranges
@@ -1494,9 +1516,7 @@ impl Element for TerminalElement {
                                     Bounds::new(
                                         point(
                                             line.start_x,
-                                            start_y
-                                                + index as f32
-                                                    * layout.dimensions.line_height,
+                                            start_y + index as f32 * layout.dimensions.line_height,
                                         ),
                                         size(
                                             line.end_x - line.start_x,
@@ -1589,6 +1609,13 @@ impl Element for TerminalElement {
     }
 }
 
+fn range_intersects_lines(
+    range: &terminal::Range,
+    visible: &std::ops::RangeInclusive<i32>,
+) -> bool {
+    range.end().line >= *visible.start() && range.start().line <= *visible.end()
+}
+
 impl IntoElement for TerminalElement {
     type Element = Self;
 
@@ -1647,7 +1674,6 @@ impl InputHandler for TerminalInputHandler {
             view.clear_marked_text(view_cx);
             view.commit_text(text, view_cx);
         });
-
     }
 
     fn replace_and_mark_text_in_range(
@@ -1830,6 +1856,19 @@ mod tests {
     use super::*;
     use gpui::{AbsoluteLength, Hsla, font};
     use ui::utils::apca_contrast;
+
+    #[test]
+    fn search_highlights_are_limited_to_visible_lines() {
+        let above = terminal::Range::new(terminal::Point::new(-10, 0), terminal::Point::new(-8, 2));
+        let crossing =
+            terminal::Range::new(terminal::Point::new(-6, 0), terminal::Point::new(-3, 2));
+        let below = terminal::Range::new(terminal::Point::new(1, 0), terminal::Point::new(2, 2));
+        let visible = -5..=0;
+
+        assert!(!range_intersects_lines(&above, &visible));
+        assert!(range_intersects_lines(&crossing, &visible));
+        assert!(!range_intersects_lines(&below, &visible));
+    }
 
     #[test]
     fn test_is_decorative_character() {

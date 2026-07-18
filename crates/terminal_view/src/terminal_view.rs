@@ -1968,7 +1968,8 @@ impl SearchableItem for TerminalView {
 
     /// Clear stored matches
     fn clear_matches(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        self.terminal().update(cx, |term, _| term.matches.clear())
+        self.terminal()
+            .update(cx, |term, _| Arc::make_mut(&mut term.matches).clear())
     }
 
     /// Store matches returned from find_matches somewhere for rendering
@@ -1981,7 +1982,7 @@ impl SearchableItem for TerminalView {
         cx: &mut Context<Self>,
     ) {
         self.terminal()
-            .update(cx, |term, _| term.matches = matches.to_vec())
+            .update(cx, |term, _| term.matches = Arc::new(matches.to_vec()))
     }
 
     /// Returns the selection content to pre-load into this search

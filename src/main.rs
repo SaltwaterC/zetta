@@ -14,10 +14,10 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use anyhow::{Context as _, Result};
@@ -27,10 +27,11 @@ use gpui::{
     Action, Anchor, AnyElement, App, AppContext as _, Bounds, Context, CursorStyle, Decorations,
     Entity, Focusable, FrameTiming, FrameTimingCollector, HitboxBehavior, InteractiveElement as _,
     IntoElement, KeyBinding, KeyDownEvent, MAX_BUTTONS_PER_SIDE, MouseButton, Pixels, Point,
-    Render, ResizeEdge, ScrollHandle, SharedString, Size, Subscription, Tiling, TitlebarOptions,
-    Window, WindowBackgroundAppearance, WindowBounds, WindowButton, WindowButtonLayout,
-    WindowControlArea, WindowControls, WindowDecorations, WindowId, WindowOptions, actions, canvas,
-    div, point, profiler, px, size, svg, transparent_black,
+    Render, ResizeEdge, ScrollHandle, SharedString, Size, Subscription, Task, Tiling,
+    TitlebarOptions, UniformListScrollHandle, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowButton, WindowButtonLayout, WindowControlArea, WindowControls, WindowDecorations,
+    WindowId, WindowOptions, actions, canvas, div, point, profiler, px, size, svg,
+    transparent_black, uniform_list,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -51,7 +52,7 @@ use terminal_view::{
 use theme::{ActiveTheme, ClientDecorationsExt as _, GlobalTheme, Theme, ThemeRegistry};
 use theme_extensions::{InstalledThemeExtension, ThemeExtension};
 use ui::{
-    Banner, ButtonCommon as _, ButtonSize, Clickable as _, Color, DropdownMenu, DropdownStyle,
+    Banner, ButtonCommon as _, ButtonLike, ButtonSize, ButtonStyle, Clickable as _, Color, Icon,
     IconButton, IconButtonShape, IconName, IconPosition, IconSize, Label, LabelSize, PopoverMenu,
     Severity, Tooltip, prelude::*,
 };
@@ -442,6 +443,18 @@ struct TabSearch {
     generation: u64,
     matches: Vec<TabSearchMatch>,
     active_match: Option<usize>,
+    task: Option<Task<()>>,
+}
+
+fn tab_search_request_is_current(
+    search: Option<&TabSearch>,
+    tab_id: u64,
+    generation: u64,
+    query: &str,
+) -> bool {
+    search.is_some_and(|search| {
+        search.tab_id == tab_id && search.generation == generation && search.query == query
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -495,19 +508,20 @@ struct SettingsEditor {
     configuration: ConfigurationForm,
     keymap: KeymapForm,
     profile_names: Vec<String>,
-    themes: Vec<String>,
+    themes: Arc<[String]>,
     theme_extension_query: TextField,
     theme_extensions: Vec<ThemeExtension>,
     installed_theme_extensions: Vec<InstalledThemeExtension>,
     theme_extensions_loading: bool,
     theme_extensions_searched: bool,
     theme_extension_downloading: Option<Arc<str>>,
-    actions: Vec<String>,
-    fonts: Vec<String>,
+    actions: Arc<[String]>,
+    fonts: Arc<[String]>,
+    normalized_fonts: Arc<[String]>,
     font_query: Option<TextField>,
     profile_draft: Option<settings_editor::ProfileForm>,
     settings_scroll: ScrollHandle,
-    font_scroll: ScrollHandle,
+    font_scroll: UniformListScrollHandle,
     numeric_repeat_generation: u64,
     scroll_geometry_initialized: bool,
     focused_input: Option<SettingsInput>,
@@ -546,6 +560,16 @@ fn previous_char_boundary(text: &str, cursor: usize) -> usize {
         .next_back()
         .map(|(index, _)| index)
         .unwrap_or(0)
+}
+
+fn matching_font_indices(normalized_fonts: &[String], query: &str) -> Arc<[usize]> {
+    let search = query.to_lowercase();
+    normalized_fonts
+        .iter()
+        .enumerate()
+        .filter_map(|(index, font)| (search.is_empty() || font.contains(&search)).then_some(index))
+        .collect::<Vec<_>>()
+        .into()
 }
 
 fn adjusted_scroll_history(current: u64, direction: i32, maximum: u64) -> u64 {
@@ -750,13 +774,6 @@ impl Zetta {
                                     this.close_pane(tab_id, pane_id, window, cx);
                                 }
                                 TerminalViewEvent::TitleChanged => {
-                                    if this
-                                        .tab_search
-                                        .as_ref()
-                                        .is_some_and(|search| search.tab_id == tab_id)
-                                    {
-                                        this.refresh_tab_search(cx);
-                                    }
                                     cx.notify();
                                 }
                                 TerminalViewEvent::Input(input) => {
@@ -766,6 +783,12 @@ impl Zetta {
                         )
                         .detach();
                         let focus_handle = view.focus_handle(cx);
+                        let emit_input_events = this
+                            .tabs
+                            .iter()
+                            .find(|tab| tab.id == tab_id)
+                            .is_some_and(|tab| tab.broadcast_input);
+                        view.update(cx, |view, _| view.set_emit_input_events(emit_input_events));
                         cx.on_focus(&focus_handle, window, move |this, _, cx| {
                             if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.id == tab_id) {
                                 tab.activate_pane(pane_id);
@@ -983,6 +1006,15 @@ impl Zetta {
     ) {
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
             tab.broadcast_input = !tab.broadcast_input;
+            let enabled = tab.broadcast_input;
+            let views = tab
+                .panes
+                .iter()
+                .filter_map(|pane| pane.view.clone())
+                .collect::<Vec<_>>();
+            for view in views {
+                view.update(cx, |view, _| view.set_emit_input_events(enabled));
+            }
         }
         self.focus_active(window, cx);
         cx.notify();
@@ -1298,6 +1330,7 @@ impl Zetta {
                 generation: 0,
                 matches: Vec::new(),
                 active_match: None,
+                task: None,
             });
             self.refresh_tab_search(cx);
         }
@@ -1316,7 +1349,9 @@ impl Zetta {
             .map(|view| view.read(cx).terminal().clone())
             .collect::<Vec<_>>();
         for terminal in terminals {
-            terminal.update(cx, |terminal, _| terminal.matches.clear());
+            terminal.update(cx, |terminal, _| {
+                Arc::make_mut(&mut terminal.matches).clear()
+            });
         }
     }
 
@@ -1333,6 +1368,7 @@ impl Zetta {
         let Some(search_state) = self.tab_search.as_mut() else {
             return;
         };
+        search_state.task.take();
         search_state.generation = search_state.generation.wrapping_add(1);
         search_state.matches.clear();
         search_state.active_match = None;
@@ -1353,7 +1389,9 @@ impl Zetta {
             })
             .collect::<Vec<_>>();
         for (_, terminal) in &terminals {
-            terminal.update(cx, |terminal, _| terminal.matches.clear());
+            terminal.update(cx, |terminal, _| {
+                Arc::make_mut(&mut terminal.matches).clear()
+            });
         }
         if query.is_empty() {
             cx.notify();
@@ -1362,28 +1400,46 @@ impl Zetta {
         let Some(pattern) = Search::new(&regex::escape(&query)) else {
             return;
         };
-        let tasks = terminals
-            .into_iter()
-            .map(|(pane_id, terminal)| {
-                let task = terminal.update(cx, |terminal, cx| {
-                    terminal.find_matches(pattern.clone(), cx)
-                });
-                (pane_id, terminal, task)
-            })
-            .collect::<Vec<_>>();
-
-        cx.spawn(async move |this, cx| {
+        let executor = cx.background_executor().clone();
+        let task = cx.spawn(async move |this, cx| {
+            executor.timer(Duration::from_millis(75)).await;
+            let Some(tasks) = this
+                .update(cx, |this, cx| {
+                    let valid = tab_search_request_is_current(
+                        this.tab_search.as_ref(),
+                        tab_id,
+                        generation,
+                        &query,
+                    );
+                    valid.then(|| {
+                        terminals
+                            .into_iter()
+                            .map(|(pane_id, terminal)| {
+                                let task = terminal.update(cx, |terminal, cx| {
+                                    terminal.find_matches(pattern.clone(), cx)
+                                });
+                                (pane_id, terminal, task)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .ok()
+                .flatten()
+            else {
+                return;
+            };
             let mut results = Vec::with_capacity(tasks.len());
             for (pane_id, terminal, task) in tasks {
                 let matches: Vec<Range> = task.await;
                 results.push((pane_id, terminal, matches));
             }
             this.update(cx, |this, cx| {
-                let valid = this.tab_search.as_ref().is_some_and(|search| {
-                    search.tab_id == tab_id
-                        && search.generation == generation
-                        && search.query == query
-                });
+                let valid = tab_search_request_is_current(
+                    this.tab_search.as_ref(),
+                    tab_id,
+                    generation,
+                    &query,
+                );
                 if !valid {
                     return;
                 }
@@ -1391,7 +1447,7 @@ impl Zetta {
                 let mut aggregated = Vec::new();
                 for (pane_id, terminal, matches) in results {
                     let match_count = matches.len();
-                    terminal.update(cx, |terminal, _| terminal.matches = matches);
+                    terminal.update(cx, |terminal, _| terminal.matches = Arc::new(matches));
                     aggregated.extend((0..match_count).map(|match_index| TabSearchMatch {
                         pane_id,
                         match_index,
@@ -1408,8 +1464,10 @@ impl Zetta {
                 cx.notify();
             })
             .ok();
-        })
-        .detach();
+        });
+        if let Some(search) = self.tab_search.as_mut() {
+            search.task = Some(task);
+        }
     }
 
     fn activate_tab_search_match(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -1612,8 +1670,7 @@ impl Zetta {
             .collect::<Vec<_>>();
         themes.sort();
         themes.dedup();
-        let installed_theme_extensions =
-            theme_extensions::installed(&config::themes_dir()).unwrap_or_default();
+        let installed_theme_extensions = Vec::new();
         let mut fonts = cx.text_system().all_font_names();
         if !fonts.contains(&configuration.terminal_font_family) {
             fonts.push(configuration.terminal_font_family.clone());
@@ -1629,19 +1686,24 @@ impl Zetta {
                 .iter()
                 .map(|profile| profile.name.clone())
                 .collect(),
-            themes,
+            themes: themes.into(),
             theme_extension_query: TextField::default(),
             theme_extensions: Vec::new(),
             installed_theme_extensions,
             theme_extensions_loading: false,
             theme_extensions_searched: false,
             theme_extension_downloading: None,
-            actions,
-            fonts,
+            actions: actions.into(),
+            normalized_fonts: fonts
+                .iter()
+                .map(|font| font.to_lowercase())
+                .collect::<Vec<_>>()
+                .into(),
+            fonts: fonts.into(),
             font_query: None,
             profile_draft: None,
             settings_scroll: ScrollHandle::new(),
-            font_scroll: ScrollHandle::new(),
+            font_scroll: UniformListScrollHandle::new(),
             numeric_repeat_generation: 0,
             scroll_geometry_initialized: false,
             focused_input: None,
@@ -1649,6 +1711,25 @@ impl Zetta {
             keymap_dirty: false,
             message: None,
         });
+        let themes_dir = config::themes_dir();
+        let executor = cx.background_executor().clone();
+        let this = cx.entity().downgrade();
+        window
+            .spawn(cx, async move |cx| {
+                let installed = executor
+                    .spawn(async move { theme_extensions::installed(&themes_dir) })
+                    .await;
+                this.update_in(cx, |this, _, cx| {
+                    if let (Some(editor), Ok(installed)) =
+                        (this.settings_editor.as_mut(), installed)
+                    {
+                        editor.installed_theme_extensions = installed;
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
         self.settings_focus.focus(window, cx);
         cx.notify();
     }
@@ -1725,10 +1806,25 @@ impl Zetta {
         let name = extension.name.clone();
         let http = cx.http_client();
         let themes_dir = config::themes_dir();
+        let executor = cx.background_executor().clone();
         let this = cx.entity().downgrade();
         window
             .spawn(cx, async move |cx| {
-                let result = theme_extensions::download(http, &extension, &themes_dir).await;
+                let result = theme_extensions::download(
+                    http,
+                    &extension,
+                    &themes_dir,
+                    executor.clone(),
+                )
+                .await;
+                let installed_theme_extensions = if result.is_ok() {
+                    executor
+                        .spawn(async move { theme_extensions::installed(&themes_dir) })
+                        .await
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
                 this.update_in(cx, |this, window, cx| {
                     if let Some(editor) = this.settings_editor.as_mut() {
                         editor.theme_extension_downloading = None;
@@ -1743,12 +1839,9 @@ impl Zetta {
                                 .collect::<Vec<_>>();
                             themes.sort();
                             themes.dedup();
-                            let installed_theme_extensions =
-                                theme_extensions::installed(&config::themes_dir())
-                                    .unwrap_or_default();
                             if let Some(editor) = this.settings_editor.as_mut() {
                                 editor.installed_theme_extensions = installed_theme_extensions;
-                                editor.themes = themes;
+                                editor.themes = themes.into();
                                 editor.message = Some((
                                     false,
                                     format!(
@@ -1820,53 +1913,70 @@ impl Zetta {
             editor.message = Some((false, format!("Removing {extension_id}…")));
         }
 
-        let result = theme_extensions::remove(&extension_id, &config::themes_dir());
-        if let Some(editor) = self.settings_editor.as_mut() {
-            editor.theme_extension_downloading = None;
-        }
-        match result {
-            Ok(count) => {
-                let theme_names = installed
-                    .theme_names
-                    .iter()
-                    .cloned()
-                    .map(SharedString::from)
-                    .collect::<Vec<_>>();
-                let registry = ThemeRegistry::global(cx);
-                registry.remove_user_themes(&theme_names);
-                theme_settings::load_bundled_themes(&registry);
-                self.reload_configuration(&ReloadConfiguration, window, cx);
+        let themes_dir = config::themes_dir();
+        let executor = cx.background_executor().clone();
+        let this = cx.entity().downgrade();
+        window
+            .spawn(cx, async move |cx| {
+                let id_for_work = extension_id.clone();
+                let result = executor
+                    .spawn(async move {
+                        let count = theme_extensions::remove(&id_for_work, &themes_dir)?;
+                        let installed = theme_extensions::installed(&themes_dir)?;
+                        anyhow::Ok((count, installed))
+                    })
+                    .await;
+                this.update_in(cx, |this, window, cx| {
+                    if let Some(editor) = this.settings_editor.as_mut() {
+                        editor.theme_extension_downloading = None;
+                    }
+                    match result {
+                        Ok((count, installed_theme_extensions)) => {
+                            let theme_names = installed
+                                .theme_names
+                                .iter()
+                                .cloned()
+                                .map(SharedString::from)
+                                .collect::<Vec<_>>();
+                            let registry = ThemeRegistry::global(cx);
+                            registry.remove_user_themes(&theme_names);
+                            theme_settings::load_bundled_themes(&registry);
+                            this.reload_configuration(&ReloadConfiguration, window, cx);
 
-                let mut themes = ThemeRegistry::global(cx)
-                    .list()
-                    .into_iter()
-                    .map(|theme| theme.name.to_string())
-                    .collect::<Vec<_>>();
-                themes.sort();
-                themes.dedup();
-                let installed_theme_extensions =
-                    theme_extensions::installed(&config::themes_dir()).unwrap_or_default();
-                if let Some(editor) = self.settings_editor.as_mut() {
-                    editor.themes = themes;
-                    editor.installed_theme_extensions = installed_theme_extensions;
-                    editor.message = Some((
-                        false,
-                        format!(
-                            "Removed {extension_id} ({count} theme file{}). Theme selectors have been reloaded.",
-                            if count == 1 { "" } else { "s" }
-                        ),
-                    ));
-                }
-                self.settings_focus.focus(window, cx);
-            }
-            Err(error) => {
-                if let Some(editor) = self.settings_editor.as_mut() {
-                    editor.message =
-                        Some((true, format!("Could not remove {extension_id}: {error:#}")));
-                }
-            }
-        }
-        cx.notify();
+                            let mut themes = ThemeRegistry::global(cx)
+                                .list()
+                                .into_iter()
+                                .map(|theme| theme.name.to_string())
+                                .collect::<Vec<_>>();
+                            themes.sort();
+                            themes.dedup();
+                            if let Some(editor) = this.settings_editor.as_mut() {
+                                editor.themes = themes.into();
+                                editor.installed_theme_extensions = installed_theme_extensions;
+                                editor.message = Some((
+                                    false,
+                                    format!(
+                                        "Removed {extension_id} ({count} theme file{}). Theme selectors have been reloaded.",
+                                        if count == 1 { "" } else { "s" }
+                                    ),
+                                ));
+                            }
+                            this.settings_focus.focus(window, cx);
+                        }
+                        Err(error) => {
+                            if let Some(editor) = this.settings_editor.as_mut() {
+                                editor.message = Some((
+                                    true,
+                                    format!("Could not remove {extension_id}: {error:#}"),
+                                ));
+                            }
+                        }
+                    }
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
     }
 
     fn select_settings_page(
@@ -2242,7 +2352,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        let editor = self.settings_editor.clone()?;
+        let editor = self.settings_editor.as_ref()?;
         let colors = cx.theme().colors().clone();
         let handle = cx.entity().downgrade();
         if !editor.scroll_geometry_initialized {
@@ -2390,66 +2500,90 @@ impl Zetta {
 
         let dropdown = |id: String,
                         label: String,
-                        options: Vec<String>,
+                        options: Arc<[String]>,
                         selection: SettingsDropdown,
-                        window: &mut Window,
-                        cx: &mut Context<Self>|
+                        _window: &mut Window,
+                        _cx: &mut Context<Self>|
          -> gpui::AnyElement {
             let menu_handle = handle.clone();
             let selected = label.clone();
             let is_binding_action = matches!(selection, SettingsDropdown::BindingAction(_, _));
-            let menu = ui::ContextMenu::build(window, cx, move |mut menu, _, _| {
-                for option in &options {
-                    let value = option.clone();
-                    let label = option.clone();
-                    let toggled = label == selected;
-                    let handle = menu_handle.clone();
-                    if is_binding_action {
-                        let rendered_label = label.clone();
-                        menu = menu.custom_entry(
-                            move |_, _| {
-                                h_flex()
-                                    .gap_2()
-                                    .whitespace_nowrap()
-                                    .child(
-                                        div()
-                                            .w(px(16.))
-                                            .flex_none()
-                                            .text_center()
-                                            .child(if toggled { "✓" } else { "" }),
-                                    )
-                                    .child(Label::new(rendered_label.clone()))
-                                    .into_any_element()
-                            },
-                            move |_, cx| {
-                                handle
-                                    .update(cx, |this, cx| {
-                                        this.set_settings_dropdown(selection, value.clone(), cx)
-                                    })
-                                    .ok();
-                            },
-                        );
-                    } else {
-                        menu = menu.toggleable_entry(
-                            label,
-                            toggled,
-                            IconPosition::Start,
-                            None,
-                            move |_, cx| {
-                                handle
-                                    .update(cx, |this, cx| {
-                                        this.set_settings_dropdown(selection, value.clone(), cx)
-                                    })
-                                    .ok();
-                            },
-                        );
-                    }
-                }
-                menu
-            });
-            DropdownMenu::new(id, label, menu)
-                .style(DropdownStyle::Outlined)
+            let trigger = ButtonLike::new(id.clone())
+                .style(ButtonStyle::Outlined)
+                .full_width()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .justify_between()
+                        .child(Label::new(label))
+                        .child(Icon::new(IconName::ChevronDown).size(IconSize::XSmall)),
+                );
+            PopoverMenu::new(format!("{id}-popover"))
                 .full_width(true)
+                .trigger(trigger)
+                .anchor(Anchor::TopLeft)
+                .menu(move |window, cx| {
+                    let options = options.clone();
+                    let selected = selected.clone();
+                    let menu_handle = menu_handle.clone();
+                    Some(ui::ContextMenu::build(window, cx, move |mut menu, _, _| {
+                        for option in options.iter() {
+                            let value = option.clone();
+                            let option_label = option.clone();
+                            let toggled = option_label == selected;
+                            let handle = menu_handle.clone();
+                            if is_binding_action {
+                                let rendered_label = option_label.clone();
+                                menu = menu.custom_entry(
+                                    move |_, _| {
+                                        h_flex()
+                                            .gap_2()
+                                            .whitespace_nowrap()
+                                            .child(
+                                                div()
+                                                    .w(px(16.))
+                                                    .flex_none()
+                                                    .text_center()
+                                                    .child(if toggled { "✓" } else { "" }),
+                                            )
+                                            .child(Label::new(rendered_label.clone()))
+                                            .into_any_element()
+                                    },
+                                    move |_, cx| {
+                                        handle
+                                            .update(cx, |this, cx| {
+                                                this.set_settings_dropdown(
+                                                    selection,
+                                                    value.clone(),
+                                                    cx,
+                                                )
+                                            })
+                                            .ok();
+                                    },
+                                );
+                            } else {
+                                menu = menu.toggleable_entry(
+                                    option_label,
+                                    toggled,
+                                    IconPosition::Start,
+                                    None,
+                                    move |_, cx| {
+                                        handle
+                                            .update(cx, |this, cx| {
+                                                this.set_settings_dropdown(
+                                                    selection,
+                                                    value.clone(),
+                                                    cx,
+                                                )
+                                            })
+                                            .ok();
+                                    },
+                                );
+                            }
+                        }
+                        menu
+                    }))
+                })
                 .into_any_element()
         };
 
@@ -2653,7 +2787,7 @@ impl Zetta {
                 let default_profile = dropdown(
                     "settings-default-profile".to_owned(),
                     configuration.default_profile.clone(),
-                    profile_names,
+                    profile_names.into(),
                     SettingsDropdown::DefaultProfile,
                     window,
                     cx,
@@ -2766,7 +2900,7 @@ impl Zetta {
                 );
                 for (index, profile) in configuration.profiles.iter().enumerate() {
                     let mut theme_options = vec!["Use application theme".to_owned()];
-                    theme_options.extend(editor.themes.clone());
+                    theme_options.extend(editor.themes.iter().cloned());
                     let profile_theme = profile
                         .theme
                         .clone()
@@ -2774,7 +2908,7 @@ impl Zetta {
                     let profile_theme = dropdown(
                         format!("settings-profile-{index}-theme"),
                         profile_theme,
-                        theme_options,
+                        theme_options.into(),
                         SettingsDropdown::ProfileTheme(index),
                         window,
                         cx,
@@ -3397,57 +3531,68 @@ impl Zetta {
         };
 
         let font_modal = editor.font_query.as_ref().map(|query| {
-            let search = query.text.to_lowercase();
             let current_font = editor.configuration.terminal_font_family.clone();
             let close_handle = handle.clone();
-            let font_rows = editor
-                .fonts
-                .iter()
-                .enumerate()
-                .filter(|(_, font)| search.is_empty() || font.to_lowercase().contains(&search))
-                .map(|(index, font)| {
-                    let selected = *font == current_font;
-                    let value = font.clone();
-                    let row_handle = handle.clone();
-                    h_flex()
-                        .id(("settings-font-option", index))
-                        .h_10()
-                        .px_3()
-                        .justify_between()
-                        .cursor_pointer()
-                        .rounded(px(4.))
-                        .when(selected, |row| row.bg(colors.element_selected))
-                        .hover(|style| style.bg(colors.element_hover))
-                        .child(
-                            div()
-                                .font_family(font.clone())
-                                .text_sm()
-                                .child(font.clone()),
-                        )
-                        .when(selected, |row| {
-                            row.child(
-                                svg()
-                                    .path(IconName::Check.path())
-                                    .size(px(14.))
-                                    .text_color(colors.text_accent),
-                            )
-                        })
-                        .on_click(move |_, _, cx| {
-                            row_handle
-                                .update(cx, |this, cx| {
-                                    if let Some(editor) = this.settings_editor.as_mut() {
-                                        editor.configuration.terminal_font_family = value.clone();
-                                        editor.configuration_dirty = true;
-                                        editor.font_query = None;
-                                        editor.focused_input = None;
-                                        editor.message = None;
-                                        cx.notify();
-                                    }
+            let filtered_fonts = matching_font_indices(&editor.normalized_fonts, &query.text);
+            let fonts = editor.fonts.clone();
+            let font_handle = handle.clone();
+            let font_colors = colors.clone();
+            let font_rows = uniform_list(
+                "settings-font-list",
+                filtered_fonts.len(),
+                move |range, _, _| {
+                    range
+                        .map(|row_index| {
+                            let index = filtered_fonts[row_index];
+                            let font = &fonts[index];
+                            let selected = *font == current_font;
+                            let value = font.clone();
+                            let row_handle = font_handle.clone();
+                            h_flex()
+                                .id(("settings-font-option", index))
+                                .h_10()
+                                .px_3()
+                                .justify_between()
+                                .cursor_pointer()
+                                .rounded(px(4.))
+                                .when(selected, |row| row.bg(font_colors.element_selected))
+                                .hover(|style| style.bg(font_colors.element_hover))
+                                .child(
+                                    div()
+                                        .font_family(font.clone())
+                                        .text_sm()
+                                        .child(font.clone()),
+                                )
+                                .when(selected, |row| {
+                                    row.child(
+                                        svg()
+                                            .path(IconName::Check.path())
+                                            .size(px(14.))
+                                            .text_color(font_colors.text_accent),
+                                    )
                                 })
-                                .ok();
+                                .on_click(move |_, _, cx| {
+                                    row_handle
+                                        .update(cx, |this, cx| {
+                                            if let Some(editor) = this.settings_editor.as_mut() {
+                                                editor.configuration.terminal_font_family =
+                                                    value.clone();
+                                                editor.configuration_dirty = true;
+                                                editor.font_query = None;
+                                                editor.focused_input = None;
+                                                editor.message = None;
+                                                cx.notify();
+                                            }
+                                        })
+                                        .ok();
+                                })
                         })
-                })
-                .collect::<Vec<_>>();
+                        .collect::<Vec<_>>()
+                },
+            )
+            .h_full()
+            .track_scroll(&editor.font_scroll);
+            let font_scroll = editor.font_scroll.0.borrow().base_handle.clone();
             div()
                 .id("font-picker-modal")
                 .absolute()
@@ -3500,38 +3645,23 @@ impl Zetta {
                                         }),
                                 ),
                         )
-                        .child(
-                            div()
-                                .relative()
-                                .min_h_0()
-                                .flex_1()
-                                .child(
-                                    div()
-                                        .id("settings-font-list")
-                                        .size_full()
-                                        .overflow_y_scroll()
-                                        .track_scroll(&editor.font_scroll)
-                                        .children(font_rows),
-                                )
-                                .child(scroll_indicator(
-                                    "settings-font-scrollbar".to_owned(),
-                                    &editor.font_scroll,
-                                )),
-                        ),
+                        .child(div().relative().min_h_0().flex_1().child(font_rows).child(
+                            scroll_indicator("settings-font-scrollbar".to_owned(), &font_scroll),
+                        )),
                 )
                 .into_any_element()
         });
 
         let profile_modal = editor.profile_draft.as_ref().map(|draft| {
             let mut theme_options = vec!["Use application theme".to_owned()];
-            theme_options.extend(editor.themes.clone());
+            theme_options.extend(editor.themes.iter().cloned());
             let profile_theme = dropdown(
                 "settings-new-profile-theme".to_owned(),
                 draft
                     .theme
                     .clone()
                     .unwrap_or_else(|| "Use application theme".to_owned()),
-                theme_options,
+                theme_options.into(),
                 SettingsDropdown::ProfileDraftTheme,
                 window,
                 cx,
@@ -4022,10 +4152,12 @@ impl Zetta {
                 if palette.select_all {
                     palette.query.clear();
                     palette.cursor = 0;
+                    palette.refresh_matches();
                 } else if palette.cursor > 0 {
                     let previous = previous_char_boundary(&palette.query, palette.cursor);
                     palette.query.replace_range(previous..palette.cursor, "");
                     palette.cursor = previous;
+                    palette.refresh_matches();
                 }
                 palette.select_all = false;
                 palette.selected = 0;
@@ -4035,9 +4167,11 @@ impl Zetta {
                 if palette.select_all {
                     palette.query.clear();
                     palette.cursor = 0;
+                    palette.refresh_matches();
                 } else if palette.cursor < palette.query.len() {
                     let next = next_char_boundary(&palette.query, palette.cursor);
                     palette.query.replace_range(palette.cursor..next, "");
+                    palette.refresh_matches();
                 }
                 palette.select_all = false;
                 palette.selected = 0;
@@ -4087,6 +4221,7 @@ impl Zetta {
                     }
                     palette.query.insert_str(palette.cursor, text);
                     palette.cursor += text.len();
+                    palette.refresh_matches();
                     palette.selected = 0;
                     cx.notify();
                 }
@@ -4773,7 +4908,8 @@ impl Render for Zetta {
             let result_count = matches.len();
             let visible_start = selected.saturating_sub(9);
             let rows = matches
-                .into_iter()
+                .iter()
+                .copied()
                 .skip(visible_start)
                 .take(10)
                 .enumerate()
@@ -5489,18 +5625,55 @@ fn profile_shortcut_label(slot: usize) -> Option<String> {
         .then(|| format!("Ctrl+Shift+{slot}"))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ThemeFileStamp {
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+fn changed_theme_files(
+    themes_dir: &Path,
+    cache: &mut HashMap<PathBuf, ThemeFileStamp>,
+) -> Result<Vec<PathBuf>> {
+    let mut changed = Vec::new();
+    let mut present = std::collections::HashSet::new();
+    for entry in fs::read_dir(themes_dir)
+        .with_context(|| format!("reading theme directory {}", themes_dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let metadata = entry.metadata()?;
+        let stamp = ThemeFileStamp {
+            modified: metadata.modified().ok(),
+            len: metadata.len(),
+        };
+        present.insert(path.clone());
+        if cache.get(&path) != Some(&stamp) {
+            cache.insert(path.clone(), stamp);
+            changed.push(path);
+        }
+    }
+    cache.retain(|path, _| present.contains(path));
+    Ok(changed)
+}
+
 fn load_user_themes(cx: &mut App) -> Result<()> {
+    static THEME_FILE_CACHE: OnceLock<Mutex<HashMap<PathBuf, ThemeFileStamp>>> = OnceLock::new();
     let themes_dir = config::themes_dir();
     fs::create_dir_all(&themes_dir)
         .with_context(|| format!("creating theme directory {}", themes_dir.display()))?;
     let registry = ThemeRegistry::global(cx);
-    for entry in fs::read_dir(&themes_dir)
-        .with_context(|| format!("reading theme directory {}", themes_dir.display()))?
-    {
-        let path = entry?.path();
-        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
-            continue;
-        }
+    let paths = changed_theme_files(
+        &themes_dir,
+        &mut THEME_FILE_CACHE
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+    )?;
+    for path in paths {
         let bytes = fs::read(&path).with_context(|| format!("reading theme {}", path.display()))?;
         theme_settings::load_user_theme(&registry, &bytes)
             .with_context(|| format!("loading theme {}", path.display()))?;
@@ -5934,6 +6107,75 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unchanged_user_themes_are_not_reloaded() {
+        let themes_dir = env::temp_dir().join(format!(
+            "zetta-theme-cache-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&themes_dir).unwrap();
+        let theme_path = themes_dir.join("test.json");
+        fs::write(&theme_path, "one").unwrap();
+        let mut cache = HashMap::new();
+
+        assert_eq!(
+            changed_theme_files(&themes_dir, &mut cache).unwrap(),
+            [theme_path.clone()]
+        );
+        assert!(
+            changed_theme_files(&themes_dir, &mut cache)
+                .unwrap()
+                .is_empty()
+        );
+
+        fs::write(&theme_path, "a longer theme").unwrap();
+        assert_eq!(
+            changed_theme_files(&themes_dir, &mut cache).unwrap(),
+            [theme_path]
+        );
+        fs::remove_dir_all(themes_dir).unwrap();
+    }
+
+    #[test]
+    fn font_filter_uses_pre_normalized_names_and_preserves_indices() {
+        let fonts = vec![
+            "jetbrains mono".to_owned(),
+            "fira code".to_owned(),
+            "fira mono".to_owned(),
+        ];
+        assert_eq!(&*matching_font_indices(&fonts, "FIRA"), &[1, 2]);
+        assert_eq!(&*matching_font_indices(&fonts, "code"), &[1]);
+    }
+
+    #[test]
+    fn stale_tab_search_work_is_rejected() {
+        let search = TabSearch {
+            tab_id: 7,
+            query: "cargo".into(),
+            cursor: 0,
+            select_all: false,
+            generation: 4,
+            matches: Vec::new(),
+            active_match: None,
+            task: None,
+        };
+        assert!(tab_search_request_is_current(Some(&search), 7, 4, "cargo"));
+        assert!(!tab_search_request_is_current(Some(&search), 7, 3, "cargo"));
+        assert!(!tab_search_request_is_current(Some(&search), 7, 4, "rust"));
+    }
+
+    #[test]
+    fn settings_options_are_shared_without_copying_the_collection() {
+        let options: Arc<[String]> = vec!["One".into(), "Two".into()].into();
+        let menu_options = options.clone();
+        assert!(Arc::ptr_eq(&options, &menu_options));
+        assert_eq!(&*menu_options, &["One", "Two"]);
+    }
 
     #[test]
     fn performance_metrics_report_fps_percentiles_and_slow_frames() {

@@ -12,29 +12,41 @@ pub struct CommandPalette {
     pub select_all: bool,
     pub selected: usize,
     pub commands: Vec<PaletteCommand>,
+    normalized_names: Vec<String>,
+    matches: Vec<usize>,
 }
 
 impl CommandPalette {
     pub fn new(mut commands: Vec<PaletteCommand>) -> Self {
         commands.sort_by(|a, b| a.name.cmp(&b.name));
         commands.dedup_by(|a, b| a.name == b.name);
+        let normalized_names = commands
+            .iter()
+            .map(|command| command.name.to_lowercase())
+            .collect();
+        let matches = (0..commands.len()).collect();
         Self {
             select_all: false,
             query: String::new(),
             cursor: 0,
             selected: 0,
             commands,
+            normalized_names,
+            matches,
         }
     }
 
-    pub fn matches(&self) -> Vec<usize> {
+    pub fn matches(&self) -> &[usize] {
+        &self.matches
+    }
+
+    pub fn refresh_matches(&mut self) {
+        let query = self.query.trim().to_lowercase();
         let mut matches = self
-            .commands
+            .normalized_names
             .iter()
             .enumerate()
-            .filter_map(|(index, command)| {
-                fuzzy_score(&command.name, &self.query).map(|score| (index, score))
-            })
+            .filter_map(|(index, name)| fuzzy_score(name, &query).map(|score| (index, score)))
             .collect::<Vec<_>>();
         matches.sort_by(|(left_index, left_score), (right_index, right_score)| {
             right_score.cmp(left_score).then_with(|| {
@@ -43,7 +55,8 @@ impl CommandPalette {
                     .cmp(&self.commands[*right_index].name)
             })
         });
-        matches.into_iter().map(|(index, _)| index).collect()
+        self.matches = matches.into_iter().map(|(index, _)| index).collect();
+        self.selected = self.selected.min(self.matches.len().saturating_sub(1));
     }
 }
 
@@ -95,11 +108,9 @@ pub fn humanize_action_name(name: &str) -> String {
 }
 
 fn fuzzy_score(candidate: &str, query: &str) -> Option<i32> {
-    let query = query.trim().to_lowercase();
     if query.is_empty() {
         return Some(0);
     }
-    let candidate = candidate.to_lowercase();
     let mut characters = query.chars();
     let mut wanted = characters.next()?;
     let mut score = 0;
@@ -132,6 +143,7 @@ fn fuzzy_score(candidate: &str, query: &str) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    gpui::actions!(command_palette_test, [First, Second]);
 
     #[test]
     fn humanizes_action_names() {
@@ -150,5 +162,30 @@ mod tests {
     fn fuzzy_matching_finds_subsequences() {
         assert!(fuzzy_score("terminal: paste trimmed", "paste trim").is_some());
         assert!(fuzzy_score("terminal: paste", "missing").is_none());
+    }
+
+    #[test]
+    fn matches_are_cached_until_the_query_changes() {
+        let mut palette = CommandPalette::new(vec![
+            PaletteCommand {
+                name: "terminal: paste".into(),
+                shortcut: None,
+                action: Box::new(First),
+            },
+            PaletteCommand {
+                name: "window: new tab".into(),
+                shortcut: None,
+                action: Box::new(Second),
+            },
+        ]);
+        assert_eq!(palette.matches(), &[0, 1]);
+
+        palette.query = "paste".into();
+        palette.refresh_matches();
+        assert_eq!(palette.matches(), &[0]);
+        assert_eq!(
+            palette.commands[palette.matches()[0]].name,
+            "terminal: paste"
+        );
     }
 }

@@ -26,12 +26,18 @@ pub(crate) struct LinuxDispatcher {
 }
 
 const MIN_THREADS: usize = 2;
+const MAX_THREADS: usize = 8;
+
+fn worker_thread_count(available: usize) -> usize {
+    available.clamp(MIN_THREADS, MAX_THREADS)
+}
 
 impl LinuxDispatcher {
     pub fn new(main_sender: PriorityQueueCalloopSender<RunnableVariant>) -> Self {
         let (background_sender, background_receiver) = PriorityQueueReceiver::new();
-        let thread_count =
-            std::thread::available_parallelism().map_or(MIN_THREADS, |i| i.get().max(MIN_THREADS));
+        let thread_count = std::thread::available_parallelism().map_or(MIN_THREADS, |available| {
+            worker_thread_count(available.get())
+        });
 
         let mut background_threads = (0..thread_count)
             .map(|i| {
@@ -306,6 +312,13 @@ impl<T> calloop::EventSource for PriorityQueueCalloopReceiver<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_worker_count_is_bounded() {
+        assert_eq!(worker_thread_count(1), MIN_THREADS);
+        assert_eq!(worker_thread_count(4), 4);
+        assert_eq!(worker_thread_count(256), MAX_THREADS);
+    }
 
     #[test]
     fn calloop_works() {
