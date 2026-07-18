@@ -104,6 +104,36 @@ Do not run `make install`, uninstall targets, or system-cache refresh targets
 as validation; they mutate the host system. `make build` produces the release
 artifact and is only necessary for release, packaging, or installation work.
 
+## Performance profiling
+
+Use the built-in terminal-rendering workload for reproducible performance
+checks on Linux, macOS, and Windows. Always use an optimized build when
+recording or comparing results:
+
+```sh
+cargo run --release -- \
+  --profile-terminal-rendering \
+  --profile-report artifacts/zetta-performance.json \
+  --profile-duration 10
+```
+
+`--profile-report` enables an automated timed run and defaults to ten seconds
+when `--profile-duration` is omitted. The command creates missing report parent
+directories, writes versioned JSON, and exits. Treat a non-zero exit status or
+a missing report as a failed performance run. Preserve the JSON as a CI
+artifact and compare like-for-like release builds, workload settings, and
+platforms. Use the live `--profile-terminal-rendering` mode without report
+arguments for interactive investigation.
+
+Automated runs require a graphical session and the platform's normal GPU
+backend; do not compare a headless/software-rendered run with an interactive
+hardware-rendered baseline.
+
+The JSON contains portable frame timing summaries and per-second samples. Use
+`perf` on Linux, Instruments or `sample` on macOS, and Windows Performance
+Recorder/Analyzer when native stack traces are also needed; keep those traces
+as separate artifacts associated with the JSON report.
+
 ## Change guidelines
 
 - Keep changes behavior-preserving unless the task requests a behavior change.

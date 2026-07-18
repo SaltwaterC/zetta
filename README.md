@@ -238,6 +238,58 @@ latency, and frame counts exceeding the 120 Hz and 60 Hz budgets. GPUI renders
 on demand, so an idle terminal can report zero or a very low draw FPS; this is
 not the monitor refresh rate or GPU presentation latency.
 
+For repeatable terminal-rendering profiles, launch Zetta's built-in workload:
+
+```sh
+zetta --profile-terminal-rendering
+```
+
+When running from the repository, use
+`cargo run --release -- --profile-terminal-rendering`. The mode launches a
+deterministic 240 Hz full-grid producer and enables the performance overlay
+automatically. It is implemented by the Zetta executable rather than a shell
+script, so the same command works on Linux, macOS, and Windows. Use a release
+build when comparing CPU measurements. The workload is intentionally faster
+than common displays so frame coalescing and presentation overhead remain
+visible and comparable between runs.
+
+The overlay provides application-level frame timings. For native stack samples,
+attach the platform profiler to the Zetta process while this mode is running:
+Linux `perf`, macOS Instruments or `sample`, and Windows Performance Recorder
+and Analyzer are all suitable.
+
+For an automated ten-second run that writes a portable JSON report and exits:
+
+```sh
+zetta --profile-terminal-rendering \
+  --profile-report artifacts/zetta-performance.json
+```
+
+Set a different duration, including fractional seconds, with
+`--profile-duration`:
+
+```sh
+cargo run --release -- \
+  --profile-terminal-rendering \
+  --profile-report artifacts/zetta-performance.json \
+  --profile-duration 30
+```
+
+These commands have the same arguments in PowerShell, Command Prompt, and Unix
+shells (adjust line continuation syntax when splitting the command). Providing a
+report path defaults to ten seconds; `--profile-duration` requires a report
+path. Zetta creates missing parent directories, writes the report, and exits.
+Closing the window early or failing to write the report returns a non-zero exit
+status.
+
+Reports use a versioned JSON schema and include the Zetta version, build
+profile, operating system and architecture, workload parameters, requested and
+actual elapsed time, per-second samples, total frame count, draw FPS,
+average/p50/p95/p99 draw time, average
+invalidation-to-draw latency, and counts over the 120 Hz and 60 Hz frame
+budgets. Commit reports as CI artifacts or feed them into a separate comparison
+step; native stack traces remain separate platform-profiler artifacts.
+
 Tab names follow the active terminal process automatically. Press `F2` or
 double-click a tab to set a persistent name. Submit an empty name to clear the
 override and resume automatic naming. Tabs retain a fixed width as names

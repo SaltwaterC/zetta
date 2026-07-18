@@ -124,6 +124,8 @@ pub struct WaylandWindowState {
     hovered: bool,
     pub(crate) force_render_after_recovery: bool,
     renderer_presented: bool,
+    frame_requested: bool,
+    rendered_since_frame: bool,
     in_progress_configure: Option<InProgressConfigure>,
     resize_throttle: bool,
     in_progress_window_controls: Option<WindowControls>,
@@ -622,6 +624,8 @@ impl WaylandWindowState {
             hovered: false,
             force_render_after_recovery: false,
             renderer_presented: false,
+            frame_requested: false,
+            rendered_since_frame: false,
             in_progress_window_controls: None,
             window_controls: WindowControls::default(),
             client_inset: None,
@@ -838,21 +842,42 @@ impl WaylandWindowStatePtr {
         state.children.values().any(|&blocking| blocking)
     }
 
+    pub fn request_frame(&self) {
+        let mut state = self.state.borrow_mut();
+        if state.frame_requested {
+            return;
+        }
+        state.surface.frame(&state.globals.qh, state.surface.id());
+        state.surface.commit();
+        state.frame_requested = true;
+    }
+
     pub fn frame(&self) {
         let mut state = self.state.borrow_mut();
-        state.surface.frame(&state.globals.qh, state.surface.id());
+        state.frame_requested = false;
+        state.rendered_since_frame = false;
         state.resize_throttle = false;
         let force_render = state.force_render_after_recovery;
         state.force_render_after_recovery = false;
         drop(state);
 
-        let mut cb = self.callbacks.borrow_mut();
-        if let Some(fun) = cb.request_frame.as_mut() {
-            fun(RequestFrameOptions {
-                force_render,
-                ..Default::default()
-            });
-            self.update_ime_enabled();
+        {
+            let mut cb = self.callbacks.borrow_mut();
+            if let Some(fun) = cb.request_frame.as_mut() {
+                fun(RequestFrameOptions {
+                    force_render,
+                    ..Default::default()
+                });
+                self.update_ime_enabled();
+            }
+        }
+
+        let continue_frames = {
+            let state = self.state.borrow();
+            state.rendered_since_frame || state.force_render_after_recovery
+        };
+        if continue_frames {
+            self.request_frame();
         }
     }
 
@@ -950,6 +975,9 @@ impl WaylandWindowStatePtr {
                 state.acknowledged_first_configure = true;
                 drop(state);
                 self.frame();
+            } else {
+                drop(state);
+                self.request_frame();
             }
         }
     }
@@ -964,6 +992,7 @@ impl WaylandWindowStatePtr {
                         fun();
                         self.callbacks.borrow_mut().appearance_changed = Some(fun);
                     }
+                    self.request_frame();
                 }
                 WEnum::Value(zxdg_toplevel_decoration_v1::Mode::ClientSide) => {
                     self.state.borrow_mut().decorations = WindowDecorations::Client;
@@ -973,6 +1002,7 @@ impl WaylandWindowStatePtr {
                         fun();
                         self.callbacks.borrow_mut().appearance_changed = Some(fun);
                     }
+                    self.request_frame();
                 }
                 WEnum::Value(_) => {
                     log::warn!("Unknown decoration mode");
@@ -1282,6 +1312,7 @@ impl WaylandWindowStatePtr {
             fun(size, scale);
             self.callbacks.borrow_mut().resize = Some(fun);
         }
+        self.request_frame();
 
         {
             let state = self.state.borrow();
@@ -1330,6 +1361,7 @@ impl WaylandWindowStatePtr {
             let result = fun(input.clone());
             self.callbacks.borrow_mut().input = Some(fun);
             if !result.propagate {
+                self.request_frame();
                 return;
             }
         }
@@ -1344,6 +1376,7 @@ impl WaylandWindowStatePtr {
                 self.state.borrow_mut().input_handler = Some(input_handler);
             }
         }
+        self.request_frame();
     }
 
     pub fn set_focused(&self, focus: bool) {
@@ -1356,6 +1389,7 @@ impl WaylandWindowStatePtr {
         if let Some(adapter) = self.state.borrow_mut().accesskit_adapter.as_mut() {
             adapter.update_window_focus_state(focus);
         }
+        self.request_frame();
     }
 
     pub fn set_hovered(&self, focus: bool) {
@@ -1364,6 +1398,7 @@ impl WaylandWindowStatePtr {
             fun(focus);
             self.callbacks.borrow_mut().hover_status_change = Some(fun);
         }
+        self.request_frame();
     }
 
     pub fn set_appearance(&mut self, appearance: WindowAppearance) {
@@ -1374,6 +1409,7 @@ impl WaylandWindowStatePtr {
             fun();
             self.callbacks.borrow_mut().appearance_changed = Some(fun);
         }
+        self.request_frame();
     }
 
     pub fn set_button_layout(&self) {
@@ -1382,6 +1418,7 @@ impl WaylandWindowStatePtr {
             fun();
             self.callbacks.borrow_mut().button_layout_changed = Some(fun);
         }
+        self.request_frame();
     }
 
     pub fn primary_output_scale(&self) -> i32 {
@@ -1730,6 +1767,7 @@ impl PlatformWindow for WaylandWindow {
         }
 
         state.renderer_presented = state.renderer.draw(scene);
+        state.rendered_since_frame = true;
 
         if state.renderer.needs_redraw() {
             state.force_render_after_recovery = true;

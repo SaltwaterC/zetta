@@ -11,7 +11,10 @@ const ZETTA_DEFAULT_THEME: &str = "One Light";
 
 use std::{
     collections::HashMap,
-    env, fs,
+    env,
+    ffi::OsString,
+    fs,
+    io::Write as _,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock,
@@ -34,7 +37,7 @@ use gpui::{
     transparent_black, uniform_list,
 };
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use settings::{KeymapFile, KeymapFileLoadResult, Settings as _};
 use settings_editor::{
     BindingForm, ConfigTextField, ConfigurationForm, KeymapForm, KeymapSectionForm,
