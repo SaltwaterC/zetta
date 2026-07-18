@@ -321,6 +321,16 @@ impl BindingForm {
             action => action.to_string(),
         }
     }
+
+    pub fn action_parameter(&self, name: &str) -> Option<String> {
+        self.action
+            .as_array()?
+            .get(1)?
+            .as_object()?
+            .get(name)?
+            .as_str()
+            .map(str::to_owned)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -464,6 +474,22 @@ mod tests {
         fs::remove_file(root).unwrap();
         assert_eq!(output[0]["use_key_equivalents"], true);
         assert_eq!(output[0]["bindings"]["ctrl-!"][1]["slot"], 1);
+    }
+
+    #[test]
+    fn binding_form_exposes_string_action_parameters() {
+        let binding = BindingForm {
+            keystroke: TextField::new("ctrl-alt-o"),
+            action: json!([
+                "zetta::ApplyPaneSplitTemplate",
+                { "name": "three-right" }
+            ]),
+        };
+
+        assert_eq!(
+            binding.action_parameter("name").as_deref(),
+            Some("three-right")
+        );
     }
 
     #[test]

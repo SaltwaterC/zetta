@@ -22,7 +22,7 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use command_palette::{CommandPalette, PaletteCommand, humanize_action_name};
-use config::{Config, Profile};
+use config::{Config, PaneSplitAxis, PaneSplitTemplate, Profile};
 use gpui::{
     Action, Anchor, AnyElement, App, AppContext as _, Bounds, Context, CursorStyle, Decorations,
     Entity, Focusable, FrameTiming, FrameTimingCollector, HitboxBehavior, InteractiveElement as _,
@@ -49,7 +49,9 @@ use terminal_view::{
     SearchScrollback, SelectAll, SelectAllSearchText, TerminalInput, TerminalView,
     TerminalViewEvent,
 };
-use theme::{ActiveTheme, ClientDecorationsExt as _, GlobalTheme, Theme, ThemeRegistry};
+use theme::{
+    ActiveTheme, ClientDecorationsExt as _, GlobalTheme, Theme, ThemeColors, ThemeRegistry,
+};
 use theme_extensions::{InstalledThemeExtension, ThemeExtension};
 use ui::{
     Banner, ButtonCommon as _, ButtonLike, ButtonSize, ButtonStyle, Clickable as _, Color, Icon,
@@ -89,11 +91,55 @@ actions!(
     ]
 );
 
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = zetta)]
+#[serde(deny_unknown_fields)]
+struct ApplyPaneSplitTemplate {
+    name: String,
+}
+
 static PERFORMANCE_OVERLAY_COUNT: AtomicUsize = AtomicUsize::new(0);
 static PERFORMANCE_OWNS_FRAME_TRACING: AtomicBool = AtomicBool::new(false);
 const PERFORMANCE_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 const FRAME_BUDGET_120_HZ: Duration = Duration::from_nanos(8_333_333);
 const FRAME_BUDGET_60_HZ: Duration = Duration::from_nanos(16_666_667);
+const MAX_PANES_PER_TAB: usize = 64;
+const TERMINAL_SPAWN_NOTIFY_INTERVAL: Duration = Duration::from_millis(16);
+
+fn can_add_panes(current: usize, additional: usize) -> bool {
+    current
+        .checked_add(additional)
+        .is_some_and(|total| total <= MAX_PANES_PER_TAB)
+}
+
+fn begin_coalesced_notification(pending: &mut bool) -> bool {
+    if *pending {
+        false
+    } else {
+        *pending = true;
+        true
+    }
+}
+
+fn prepare_pane_launches<T>(
+    pane_ids: impl IntoIterator<Item = u64>,
+    mut prepare: impl FnMut(u64) -> T,
+) -> Vec<(u64, T)> {
+    pane_ids
+        .into_iter()
+        .map(|pane_id| (pane_id, prepare(pane_id)))
+        .collect()
+}
+
+fn pane_layout_from_configured_template(
+    templates: &HashMap<String, PaneSplitTemplate>,
+    name: &str,
+    pane_ids: &mut impl Iterator<Item = u64>,
+) -> Option<PaneLayout> {
+    templates
+        .get(name)
+        .map(|template| PaneLayout::from_template(template, pane_ids))
+}
 
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
 #[action(namespace = zetta)]
@@ -108,6 +154,39 @@ struct TerminalPane {
     view: Option<Entity<TerminalView>>,
     error: Option<String>,
     wsl_cwd_file: Option<PathBuf>,
+}
+
+struct TerminalSpawnSettings {
+    cursor_shape: terminal::terminal_settings::CursorShape,
+    alternate_scroll: terminal::terminal_settings::AlternateScroll,
+    max_scroll_history_lines: Option<usize>,
+    path_hyperlink_regexes: Vec<String>,
+    path_hyperlink_timeout_ms: u64,
+}
+
+impl TerminalSpawnSettings {
+    fn current(cx: &App) -> Self {
+        let settings = TerminalSettings::get_global(cx);
+        Self {
+            cursor_shape: settings.cursor_shape,
+            alternate_scroll: settings.alternate_scroll,
+            max_scroll_history_lines: settings.max_scroll_history_lines,
+            path_hyperlink_regexes: settings.path_hyperlink_regexes.clone(),
+            path_hyperlink_timeout_ms: settings.path_hyperlink_timeout_ms,
+        }
+    }
+
+    fn path_hyperlink_regexes(&mut self, final_spawn: bool) -> Vec<String> {
+        clone_or_take_for_final_spawn(&mut self.path_hyperlink_regexes, final_spawn)
+    }
+}
+
+fn clone_or_take_for_final_spawn<T: Clone + Default>(value: &mut T, final_spawn: bool) -> T {
+    if final_spawn {
+        std::mem::take(value)
+    } else {
+        value.clone()
+    }
 }
 
 impl TerminalPane {
@@ -178,6 +257,52 @@ impl PaneLayout {
             Self::Split { first, second, .. } => {
                 first.split(target, axis, new_pane) || second.split(target, axis, new_pane)
             }
+        }
+    }
+
+    fn replace(&mut self, target: u64, replacement: PaneLayout) -> bool {
+        let mut replacement = Some(replacement);
+        self.replace_inner(target, &mut replacement)
+    }
+
+    fn replace_inner(&mut self, target: u64, replacement: &mut Option<PaneLayout>) -> bool {
+        match self {
+            Self::Pane(id) if *id == target => {
+                *self = replacement
+                    .take()
+                    .expect("a pane layout replacement must only be consumed once");
+                true
+            }
+            Self::Pane(_) => false,
+            Self::Split { first, second, .. } => {
+                first.replace_inner(target, replacement)
+                    || second.replace_inner(target, replacement)
+            }
+        }
+    }
+
+    fn from_template(
+        template: &PaneSplitTemplate,
+        pane_ids: &mut impl Iterator<Item = u64>,
+    ) -> Self {
+        match template {
+            PaneSplitTemplate::Pane => Self::Pane(
+                pane_ids
+                    .next()
+                    .expect("pane template and allocated IDs must have equal lengths"),
+            ),
+            PaneSplitTemplate::Split {
+                axis,
+                first,
+                second,
+            } => Self::Split {
+                axis: match axis {
+                    PaneSplitAxis::Horizontal => SplitAxis::Horizontal,
+                    PaneSplitAxis::Vertical => SplitAxis::Vertical,
+                },
+                first: Box::new(Self::from_template(first, pane_ids)),
+                second: Box::new(Self::from_template(second, pane_ids)),
+            },
         }
     }
 
@@ -285,6 +410,7 @@ impl PaneLayout {
 struct Tab {
     id: u64,
     panes: Vec<TerminalPane>,
+    pane_indices: HashMap<u64, usize>,
     layout: PaneLayout,
     active_pane: u64,
     focus_history: Vec<u64>,
@@ -297,11 +423,28 @@ struct Tab {
 
 impl Tab {
     fn pane(&self, id: u64) -> Option<&TerminalPane> {
-        self.panes.iter().find(|pane| pane.id == id)
+        self.pane_indices
+            .get(&id)
+            .and_then(|index| self.panes.get(*index))
     }
 
     fn pane_mut(&mut self, id: u64) -> Option<&mut TerminalPane> {
-        self.panes.iter_mut().find(|pane| pane.id == id)
+        let index = *self.pane_indices.get(&id)?;
+        self.panes.get_mut(index)
+    }
+
+    fn push_pane(&mut self, pane: TerminalPane) {
+        self.pane_indices.insert(pane.id, self.panes.len());
+        self.panes.push(pane);
+    }
+
+    fn remove_pane(&mut self, id: u64) -> Option<TerminalPane> {
+        let index = self.pane_indices.remove(&id)?;
+        let pane = self.panes.remove(index);
+        for (index, pane) in self.panes.iter().enumerate().skip(index) {
+            self.pane_indices.insert(pane.id, index);
+        }
+        Some(pane)
     }
 
     fn active_pane(&self) -> Option<&TerminalPane> {
@@ -494,6 +637,7 @@ enum SettingsDropdown {
     ProfileTheme(usize),
     ProfileDraftTheme,
     BindingAction(usize, usize),
+    BindingTemplate(usize, usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -516,6 +660,7 @@ struct SettingsEditor {
     theme_extensions_searched: bool,
     theme_extension_downloading: Option<Arc<str>>,
     actions: Arc<[String]>,
+    pane_template_names: Arc<[String]>,
     fonts: Arc<[String]>,
     normalized_fonts: Arc<[String]>,
     font_query: Option<TextField>,
@@ -551,6 +696,7 @@ struct Zetta {
     button_layout: WindowButtonLayout,
     performance_overlay: Option<PerformanceOverlay>,
     performance_overlay_generation: u64,
+    terminal_spawn_notify_pending: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -629,6 +775,7 @@ impl Zetta {
             button_layout,
             performance_overlay: None,
             performance_overlay_generation: 0,
+            terminal_spawn_notify_pending: false,
             _subscriptions: vec![
                 cx.observe_button_layout_changed(window, |this, _, cx| {
                     this.button_layout = system_window_button_layout(cx);
@@ -680,6 +827,7 @@ impl Zetta {
                 error: None,
                 wsl_cwd_file: wsl_cwd_file.clone(),
             }],
+            pane_indices: HashMap::from([(pane_id, 0)]),
             layout: PaneLayout::Pane(pane_id),
             active_pane: pane_id,
             focus_history: vec![pane_id],
@@ -729,7 +877,38 @@ impl Zetta {
                 return;
             }
         };
-        let settings = TerminalSettings::get_global(cx).clone();
+        let mut terminal_settings = TerminalSpawnSettings::current(cx);
+        let path_hyperlink_regexes = terminal_settings.path_hyperlink_regexes(true);
+        self.spawn_terminal_with_theme(
+            tab_id,
+            pane_id,
+            profile,
+            working_directory,
+            wsl_directory,
+            wsl_cwd_file,
+            terminal_theme,
+            &terminal_settings,
+            path_hyperlink_regexes,
+            window,
+            cx,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_terminal_with_theme(
+        &mut self,
+        tab_id: u64,
+        pane_id: u64,
+        profile: Profile,
+        working_directory: Option<PathBuf>,
+        wsl_directory: Option<String>,
+        wsl_cwd_file: Option<PathBuf>,
+        terminal_theme: Option<Arc<Theme>>,
+        settings: &TerminalSpawnSettings,
+        path_hyperlink_regexes: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let command = if is_wsl_shell(&profile.command) {
             wsl_shell_with_tracking(
                 profile.command,
@@ -747,7 +926,7 @@ impl Zetta {
             settings.cursor_shape,
             settings.alternate_scroll,
             settings.max_scroll_history_lines,
-            settings.path_hyperlink_regexes,
+            path_hyperlink_regexes,
             settings.path_hyperlink_timeout_ms,
             false,
             cx.entity_id().as_u64(),
@@ -809,7 +988,7 @@ impl Zetta {
                         if should_focus {
                             view.focus_handle(cx).focus(window, cx);
                         }
-                        cx.notify();
+                        this.schedule_terminal_spawn_notify(cx);
                     })
                     .ok();
                 }
@@ -823,12 +1002,29 @@ impl Zetta {
                         {
                             pane.error = Some(format!("{error:#}"));
                         }
-                        cx.notify();
+                        this.schedule_terminal_spawn_notify(cx);
                     })
                     .ok();
                 }
             })
             .detach();
+    }
+
+    fn schedule_terminal_spawn_notify(&mut self, cx: &mut Context<Self>) {
+        if !begin_coalesced_notification(&mut self.terminal_spawn_notify_pending) {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(TERMINAL_SPAWN_NOTIFY_INTERVAL)
+                .await;
+            this.update(cx, |this, cx| {
+                this.terminal_spawn_notify_pending = false;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn close_tab_at(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -871,7 +1067,7 @@ impl Zetta {
         }
 
         let tab = &mut self.tabs[tab_index];
-        tab.panes.retain(|pane| pane.id != pane_id);
+        tab.remove_pane(pane_id);
         let Some(layout) = tab.layout.clone().without(pane_id) else {
             self.close_tab_at(tab_index, window, cx);
             return;
@@ -886,6 +1082,9 @@ impl Zetta {
         let Some(tab) = self.tabs.get(self.active_tab) else {
             return;
         };
+        if !can_add_panes(tab.panes.len(), 1) {
+            return;
+        }
         let tab_id = tab.id;
         let active_pane_id = tab.active_pane;
         let active_pane = tab.active_pane();
@@ -912,7 +1111,7 @@ impl Zetta {
         if !tab.layout.split(active_pane_id, axis, pane_id) {
             return;
         }
-        tab.panes.push(TerminalPane {
+        tab.push_pane(TerminalPane {
             id: pane_id,
             profile: profile.clone(),
             view: None,
@@ -972,6 +1171,116 @@ impl Zetta {
 
     fn split_vertical(&mut self, _: &SplitVertical, window: &mut Window, cx: &mut Context<Self>) {
         self.split_active_pane(SplitAxis::Vertical, window, cx);
+    }
+
+    fn apply_pane_split_template(
+        &mut self,
+        action: &ApplyPaneSplitTemplate,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(new_pane_count) = self
+            .launch_config
+            .pane_split_templates
+            .get(&action.name)
+            .map(|template| template.pane_count() - 1)
+        else {
+            self.configuration_error = Some(format!(
+                "Pane split template {:?} is not configured",
+                action.name
+            ));
+            cx.notify();
+            return;
+        };
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            return;
+        };
+        if !can_add_panes(tab.panes.len(), new_pane_count) {
+            return;
+        }
+        let tab_id = tab.id;
+        let active_pane_id = tab.active_pane;
+        let active_pane = tab.active_pane();
+        let inherited_working_directory = active_pane
+            .filter(|pane| !is_wsl_shell(&pane.profile.command))
+            .and_then(|pane| pane.view.as_ref())
+            .and_then(|view| view.read(cx).terminal().read(cx).working_directory());
+        let Some(profile) = tab.active_profile().cloned() else {
+            return;
+        };
+        let terminal_theme = match resolve_profile_theme(&profile, cx) {
+            Ok(theme) => theme,
+            Err(error) => {
+                self.configuration_error = Some(format!(
+                    "Could not apply profile theme for pane template: {error:#}"
+                ));
+                cx.notify();
+                return;
+            }
+        };
+        let mut terminal_settings = TerminalSpawnSettings::current(cx);
+        let inherited_wsl_directory = active_pane.and_then(|pane| pane.wsl_working_directory(cx));
+        let (working_directory, wsl_directory) = launch_working_directory(
+            &profile,
+            inherited_working_directory,
+            inherited_wsl_directory,
+            self.working_directory.clone(),
+            self.launch_config.working_directory_configured,
+        );
+
+        let new_pane_ids = (0..new_pane_count).map(|_| {
+            let pane_id = self.next_pane_id;
+            self.next_pane_id += 1;
+            pane_id
+        });
+        let new_panes = prepare_pane_launches(new_pane_ids, |pane_id| {
+            wsl_cwd_tracking_file(&profile, pane_id)
+        });
+        let mut all_pane_ids =
+            std::iter::once(active_pane_id).chain(new_panes.iter().map(|(pane_id, _)| *pane_id));
+        let replacement = pane_layout_from_configured_template(
+            &self.launch_config.pane_split_templates,
+            &action.name,
+            &mut all_pane_ids,
+        )
+        .expect("the configured pane template was resolved before allocating panes");
+
+        let tab = &mut self.tabs[self.active_tab];
+        if !tab.layout.replace(active_pane_id, replacement) {
+            return;
+        }
+        tab.panes.reserve(new_pane_count);
+        for (pane_id, wsl_cwd_file) in &new_panes {
+            tab.push_pane(TerminalPane {
+                id: *pane_id,
+                profile: profile.clone(),
+                view: None,
+                error: None,
+                wsl_cwd_file: wsl_cwd_file.clone(),
+            });
+        }
+        tab.activate_pane(active_pane_id);
+
+        let spawn_count = new_panes.len();
+        for (index, (pane_id, wsl_cwd_file)) in new_panes.into_iter().enumerate() {
+            let path_hyperlink_regexes =
+                terminal_settings.path_hyperlink_regexes(index + 1 == spawn_count);
+            self.spawn_terminal_with_theme(
+                tab_id,
+                pane_id,
+                profile.clone(),
+                working_directory.clone(),
+                wsl_directory.clone(),
+                wsl_cwd_file,
+                terminal_theme.clone(),
+                &terminal_settings,
+                path_hyperlink_regexes,
+                window,
+                cx,
+            );
+        }
+        self.focus_active(window, cx);
+        cx.notify();
     }
 
     fn broadcast_input(
@@ -1663,6 +1972,20 @@ impl Zetta {
             .collect::<Vec<_>>();
         actions.sort();
         actions.dedup();
+        if !actions
+            .iter()
+            .any(|action| action == ApplyPaneSplitTemplate::name_for_type())
+        {
+            actions.push(ApplyPaneSplitTemplate::name_for_type().to_owned());
+            actions.sort();
+        }
+        let mut pane_template_names = self
+            .launch_config
+            .pane_split_templates
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        pane_template_names.sort();
         let mut themes = ThemeRegistry::global(cx)
             .list()
             .into_iter()
@@ -1694,6 +2017,7 @@ impl Zetta {
             theme_extensions_searched: false,
             theme_extension_downloading: None,
             actions: actions.into(),
+            pane_template_names: pane_template_names.into(),
             normalized_fonts: fonts
                 .iter()
                 .map(|font| font.to_lowercase())
@@ -2077,12 +2401,40 @@ impl Zetta {
                     .get_mut(section)
                     .and_then(|section| section.bindings.get_mut(binding))
                 {
-                    binding.action = serde_json::Value::String(value);
+                    binding.action = if value == ApplyPaneSplitTemplate::name_for_type() {
+                        serde_json::json!([
+                            value,
+                            {
+                                "name": editor
+                                    .pane_template_names
+                                    .first()
+                                    .cloned()
+                                    .unwrap_or_default()
+                            }
+                        ])
+                    } else {
+                        serde_json::Value::String(value)
+                    };
+                }
+            }
+            SettingsDropdown::BindingTemplate(section, binding) => {
+                if let Some(arguments) = editor
+                    .keymap
+                    .sections
+                    .get_mut(section)
+                    .and_then(|section| section.bindings.get_mut(binding))
+                    .and_then(|binding| binding.action.as_array_mut())
+                    .and_then(|action| action.get_mut(1))
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    arguments.insert("name".to_owned(), serde_json::Value::String(value));
                 }
             }
         }
         match dropdown {
-            SettingsDropdown::BindingAction(_, _) => editor.keymap_dirty = true,
+            SettingsDropdown::BindingAction(_, _) | SettingsDropdown::BindingTemplate(_, _) => {
+                editor.keymap_dirty = true
+            }
             SettingsDropdown::ProfileDraftTheme => {}
             _ => editor.configuration_dirty = true,
         }
@@ -3385,6 +3737,18 @@ impl Zetta {
                             window,
                             cx,
                         );
+                        let template = binding.action_parameter("name").map(|name| {
+                            dropdown(
+                                format!(
+                                    "settings-binding-{section_index}-{binding_index}-template"
+                                ),
+                                name,
+                                editor.pane_template_names.clone(),
+                                SettingsDropdown::BindingTemplate(section_index, binding_index),
+                                window,
+                                cx,
+                            )
+                        });
                         let remove_handle = handle.clone();
                         bindings.push(
                             h_flex()
@@ -3408,6 +3772,9 @@ impl Zetta {
                                         )),
                                 )
                                 .child(div().min_w_0().flex_1().child(action))
+                                .when_some(template, |row, template| {
+                                    row.child(div().w(px(180.)).flex_none().child(template))
+                                })
                                 .child(
                                     IconButton::new(
                                         format!("remove-settings-binding-{section_index}-{binding_index}"),
@@ -4072,10 +4439,11 @@ impl Zetta {
             .and_then(Tab::active_pane)
             .and_then(|pane| pane.view.as_ref())
             .map(|view| view.focus_handle(cx));
-        let commands = window
+        let mut commands = window
             .available_actions(cx)
             .into_iter()
             .filter(|action| action.name() != ToggleCommandPalette.name())
+            .filter(|action| action.name() != ApplyPaneSplitTemplate::name_for_type())
             .map(|action| {
                 let shortcut = terminal_focus
                     .as_ref()
@@ -4096,7 +4464,26 @@ impl Zetta {
                     action,
                 }
             })
-            .collect();
+            .collect::<Vec<_>>();
+        commands.extend(self.launch_config.pane_split_templates.keys().map(|name| {
+            let action = ApplyPaneSplitTemplate { name: name.clone() };
+            let shortcut = terminal_focus
+                .as_ref()
+                .and_then(|focus| window.highest_precedence_binding_for_action_in(&action, focus))
+                .map(|binding| {
+                    binding
+                        .keystrokes()
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                });
+            PaletteCommand {
+                name: format!("zetta: apply pane split template: {name}"),
+                shortcut,
+                action: Box::new(action),
+            }
+        }));
         self.command_palette = Some(CommandPalette::new(commands));
         self.command_palette_focus.focus(window, cx);
         cx.notify();
@@ -4366,10 +4753,10 @@ impl Zetta {
         &self,
         tab: &Tab,
         layout: &PaneLayout,
+        colors: &ThemeColors,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let colors = cx.theme().colors().clone();
         match layout {
             PaneLayout::Pane(pane_id) => {
                 let Some(pane) = tab.pane(*pane_id) else {
@@ -4438,8 +4825,8 @@ impl Zetta {
                 })
                 .gap_px()
                 .bg(colors.border)
-                .child(self.render_pane_layout(tab, first, window, cx))
-                .child(self.render_pane_layout(tab, second, window, cx))
+                .child(self.render_pane_layout(tab, first, colors, window, cx))
+                .child(self.render_pane_layout(tab, second, colors, window, cx))
                 .into_any_element(),
         }
     }
@@ -4769,7 +5156,7 @@ impl Render for Zetta {
             });
 
         let body = match self.tabs.get(self.active_tab) {
-            Some(tab) => self.render_pane_layout(tab, &tab.layout, window, cx),
+            Some(tab) => self.render_pane_layout(tab, &tab.layout, &colors, window, cx),
             None => div().size_full().into_any_element(),
         };
         let performance_overlay = self.performance_overlay.as_ref().map(|overlay| {
@@ -5094,6 +5481,7 @@ impl Render for Zetta {
             .on_action(cx.listener(Self::rename_tab))
             .on_action(cx.listener(Self::split_horizontal))
             .on_action(cx.listener(Self::split_vertical))
+            .on_action(cx.listener(Self::apply_pane_split_template))
             .on_action(cx.listener(Self::focus_pane_left))
             .on_action(cx.listener(Self::focus_pane_right))
             .on_action(cx.listener(Self::focus_pane_up))
@@ -5643,6 +6031,25 @@ fn profile_keybindings(slot: usize) -> Vec<KeyBinding> {
     ]
 }
 
+fn pane_template_keybindings() -> [KeyBinding; 2] {
+    [
+        KeyBinding::new(
+            "ctrl-alt-o",
+            ApplyPaneSplitTemplate {
+                name: "three-right".to_owned(),
+            },
+            Some("Zetta > Terminal"),
+        ),
+        KeyBinding::new(
+            "ctrl-alt-e",
+            ApplyPaneSplitTemplate {
+                name: "quarters".to_owned(),
+            },
+            Some("Zetta > Terminal"),
+        ),
+    ]
+}
+
 fn profile_shortcut_label(slot: usize) -> Option<String> {
     (1..=9)
         .contains(&slot)
@@ -6031,6 +6438,7 @@ fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut App) {
         // Override Zed's inherited `pane::CloseActiveItem` binding in terminal focus.
         KeyBinding::new("ctrl-shift-w", CloseTab, Some("Terminal")),
     ];
+    bindings.extend(pane_template_keybindings());
     bindings.extend((1..=profile_count.min(9)).flat_map(profile_keybindings));
     cx.bind_keys(bindings);
     let Ok(content) = fs::read_to_string(path) else {
@@ -6303,6 +6711,185 @@ mod tests {
     }
 
     #[test]
+    fn pane_template_replaces_only_the_target_leaf() {
+        let template = PaneSplitTemplate::Split {
+            axis: PaneSplitAxis::Horizontal,
+            first: Box::new(PaneSplitTemplate::Pane),
+            second: Box::new(PaneSplitTemplate::Pane),
+        };
+        let mut layout = PaneLayout::Split {
+            axis: SplitAxis::Vertical,
+            first: Box::new(PaneLayout::Pane(1)),
+            second: Box::new(PaneLayout::Pane(2)),
+        };
+        let replacement = PaneLayout::from_template(&template, &mut [2, 3].into_iter());
+
+        assert!(layout.replace(2, replacement));
+        assert_eq!(
+            layout,
+            PaneLayout::Split {
+                axis: SplitAxis::Vertical,
+                first: Box::new(PaneLayout::Pane(1)),
+                second: Box::new(PaneLayout::Split {
+                    axis: SplitAxis::Horizontal,
+                    first: Box::new(PaneLayout::Pane(2)),
+                    second: Box::new(PaneLayout::Pane(3)),
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn pane_layout_replacement_moves_the_tree_without_cloning_it() {
+        let replacement = PaneLayout::Split {
+            axis: SplitAxis::Horizontal,
+            first: Box::new(PaneLayout::Pane(10)),
+            second: Box::new(PaneLayout::Pane(11)),
+        };
+        let original_first_child = match &replacement {
+            PaneLayout::Split { first, .. } => first.as_ref() as *const PaneLayout,
+            PaneLayout::Pane(_) => unreachable!(),
+        };
+        let mut layout = PaneLayout::Split {
+            axis: SplitAxis::Vertical,
+            first: Box::new(PaneLayout::Pane(1)),
+            second: Box::new(PaneLayout::Pane(2)),
+        };
+
+        assert!(layout.replace(1, replacement));
+        let inserted_first_child = match &layout {
+            PaneLayout::Split { first, .. } => match first.as_ref() {
+                PaneLayout::Split { first, .. } => first.as_ref() as *const PaneLayout,
+                PaneLayout::Pane(_) => unreachable!(),
+            },
+            PaneLayout::Pane(_) => unreachable!(),
+        };
+        assert_eq!(inserted_first_child, original_first_child);
+    }
+
+    #[test]
+    fn pane_limit_applies_to_total_tab_panes() {
+        assert!(can_add_panes(1, MAX_PANES_PER_TAB - 1));
+        assert!(!can_add_panes(2, MAX_PANES_PER_TAB - 1));
+        assert!(!can_add_panes(usize::MAX, 1));
+    }
+
+    #[test]
+    fn terminal_spawn_notifications_are_coalesced() {
+        let mut pending = false;
+        assert!(begin_coalesced_notification(&mut pending));
+        assert!(!begin_coalesced_notification(&mut pending));
+        assert!(!begin_coalesced_notification(&mut pending));
+        pending = false;
+        assert!(begin_coalesced_notification(&mut pending));
+    }
+
+    #[test]
+    fn pane_launch_metadata_is_prepared_once_per_pane() {
+        let mut preparations = 0;
+        let launches = prepare_pane_launches([2, 3, 4], |pane_id| {
+            preparations += 1;
+            format!("tracking-{pane_id}")
+        });
+
+        assert_eq!(preparations, 3);
+        assert_eq!(
+            launches,
+            [
+                (2, "tracking-2".to_owned()),
+                (3, "tracking-3".to_owned()),
+                (4, "tracking-4".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_regexes_are_cloned_then_moved_into_the_final_spawn() {
+        let mut regexes = vec!["first".to_owned(), "second".to_owned()];
+        let original_buffer = regexes[0].as_ptr();
+
+        let earlier_spawn = clone_or_take_for_final_spawn(&mut regexes, false);
+        assert_ne!(earlier_spawn[0].as_ptr(), original_buffer);
+        assert_eq!(regexes[0].as_ptr(), original_buffer);
+
+        let final_spawn = clone_or_take_for_final_spawn(&mut regexes, true);
+        assert_eq!(final_spawn[0].as_ptr(), original_buffer);
+        assert!(regexes.is_empty());
+    }
+
+    #[test]
+    fn configured_template_layout_is_built_through_a_borrow() {
+        let templates = HashMap::from([(
+            "two".to_owned(),
+            PaneSplitTemplate::Split {
+                axis: PaneSplitAxis::Vertical,
+                first: Box::new(PaneSplitTemplate::Pane),
+                second: Box::new(PaneSplitTemplate::Pane),
+            },
+        )]);
+        let layout =
+            pane_layout_from_configured_template(&templates, "two", &mut [10, 11].into_iter());
+
+        assert_eq!(
+            layout,
+            Some(PaneLayout::Split {
+                axis: SplitAxis::Vertical,
+                first: Box::new(PaneLayout::Pane(10)),
+                second: Box::new(PaneLayout::Pane(11)),
+            })
+        );
+        assert!(templates.contains_key("two"));
+    }
+
+    #[test]
+    fn tab_pane_index_resolves_panes_without_scanning() {
+        let profile = Profile {
+            name: "System".to_owned(),
+            command: Shell::System,
+            theme: None,
+        };
+        let panes = [1, 2, 3]
+            .into_iter()
+            .map(|id| TerminalPane {
+                id,
+                profile: profile.clone(),
+                view: None,
+                error: None,
+                wsl_cwd_file: None,
+            })
+            .collect::<Vec<_>>();
+        let mut tab = Tab {
+            id: 1,
+            panes,
+            pane_indices: HashMap::from([(1, 0), (2, 1), (3, 2)]),
+            layout: PaneLayout::Pane(1),
+            active_pane: 1,
+            focus_history: vec![1],
+            broadcast_input: false,
+            custom_title: None,
+            rename_buffer: None,
+            rename_cursor: 0,
+            rename_select_all: false,
+        };
+        for pane in &tab.panes {
+            assert!(std::ptr::eq(tab.pane(pane.id).unwrap(), pane));
+        }
+        assert!(tab.pane(99).is_none());
+
+        tab.remove_pane(1);
+        assert_eq!(tab.pane(2).map(|pane| pane.id), Some(2));
+        assert_eq!(tab.pane(3).map(|pane| pane.id), Some(3));
+        tab.push_pane(TerminalPane {
+            id: 4,
+            profile,
+            view: None,
+            error: None,
+            wsl_cwd_file: None,
+        });
+        assert_eq!(tab.pane(4).map(|pane| pane.id), Some(4));
+    }
+
+    #[test]
     fn defaults_to_light_theme_without_overriding_configuration() {
         assert_eq!(selected_theme_name(None), "One Light");
         assert_eq!(selected_theme_name(Some("One Dark")), "One Dark");
@@ -6364,6 +6951,19 @@ mod tests {
             assert_eq!(bindings[0].match_keystrokes(&[shifted]), Some(false));
             assert_eq!(bindings[1].match_keystrokes(&[fallback]), Some(false));
         }
+    }
+
+    #[test]
+    fn pane_template_shortcuts_are_built_in() {
+        let [three_right, quarters] = pane_template_keybindings();
+        let three_right_key = gpui::Keystroke::parse("ctrl-alt-o").unwrap();
+        let quarters_key = gpui::Keystroke::parse("ctrl-alt-e").unwrap();
+
+        assert_eq!(
+            three_right.match_keystrokes(&[three_right_key]),
+            Some(false)
+        );
+        assert_eq!(quarters.match_keystrokes(&[quarters_key]), Some(false));
     }
 
     #[test]
@@ -6607,6 +7207,7 @@ mod tests {
                     wsl_cwd_file: None,
                 },
             ],
+            pane_indices: HashMap::from([(1, 0), (2, 1)]),
             layout: PaneLayout::Split {
                 axis: SplitAxis::Vertical,
                 first: Box::new(PaneLayout::Pane(1)),
@@ -6643,6 +7244,7 @@ mod tests {
         let mut tab = Tab {
             id: 1,
             panes: vec![pane(1), pane(2), pane(3)],
+            pane_indices: HashMap::from([(1, 0), (2, 1), (3, 2)]),
             layout: PaneLayout::Pane(1),
             active_pane: 3,
             focus_history: vec![1, 2, 3],
@@ -6653,7 +7255,7 @@ mod tests {
             rename_select_all: false,
         };
 
-        tab.panes.retain(|pane| pane.id != 3);
+        tab.remove_pane(3);
         tab.restore_focus_after_close(3, 1);
 
         assert_eq!(tab.active_pane, 2);
@@ -6677,6 +7279,7 @@ mod tests {
         let mut tab = Tab {
             id: 1,
             panes: vec![pane(1), pane(2), pane(3)],
+            pane_indices: HashMap::from([(1, 0), (2, 1), (3, 2)]),
             layout: PaneLayout::Pane(1),
             active_pane: 3,
             focus_history: vec![1, 2, 3],
@@ -6687,7 +7290,7 @@ mod tests {
             rename_select_all: false,
         };
 
-        tab.panes.retain(|pane| pane.id != 1);
+        tab.remove_pane(1);
         tab.restore_focus_after_close(1, 2);
 
         assert_eq!(tab.active_pane, 3);

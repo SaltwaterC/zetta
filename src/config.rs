@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     env, fs,
     path::{Path, PathBuf},
     sync::OnceLock,
@@ -16,6 +16,31 @@ use terminal::MAX_SCROLL_HISTORY_LINES;
 const DEFAULT_TERMINAL_FONT_FAMILY: &str = "MesloLGS NF";
 const DEFAULT_MAX_SCROLL_HISTORY_LINES: usize = MAX_SCROLL_HISTORY_LINES;
 const DEFAULT_INACTIVE_PANE_OPACITY: f32 = 0.8;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PaneSplitTemplate {
+    Pane,
+    Split {
+        axis: PaneSplitAxis,
+        first: Box<PaneSplitTemplate>,
+        second: Box<PaneSplitTemplate>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaneSplitAxis {
+    Horizontal,
+    Vertical,
+}
+
+impl PaneSplitTemplate {
+    pub fn pane_count(&self) -> usize {
+        match self {
+            Self::Pane => 1,
+            Self::Split { first, second, .. } => first.pane_count() + second.pane_count(),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Profile {
@@ -44,6 +69,7 @@ pub struct Config {
     pub terminal_font_family: String,
     pub max_scroll_history_lines: usize,
     pub inactive_pane_opacity: f32,
+    pub pane_split_templates: HashMap<String, PaneSplitTemplate>,
 }
 
 impl Config {
@@ -65,6 +91,7 @@ impl Config {
             terminal_font_family: DEFAULT_TERMINAL_FONT_FAMILY.to_owned(),
             max_scroll_history_lines: DEFAULT_MAX_SCROLL_HISTORY_LINES,
             inactive_pane_opacity: DEFAULT_INACTIVE_PANE_OPACITY,
+            pane_split_templates: default_pane_split_templates(),
         }
     }
 
@@ -134,6 +161,24 @@ impl Config {
         if let Some(opacity) = root.get("inactive_pane_opacity") {
             config.inactive_pane_opacity = parse_inactive_pane_opacity(opacity)?;
         }
+        if let Some(templates) = root.get("pane_split_templates") {
+            let templates = templates
+                .as_object()
+                .context("pane_split_templates must be an object")?;
+            for (name, value) in templates {
+                anyhow::ensure!(
+                    !name.trim().is_empty(),
+                    "pane split template names must not be empty"
+                );
+                let template = parse_pane_split_template(value)
+                    .with_context(|| format!("parsing pane split template {name:?}"))?;
+                anyhow::ensure!(
+                    (2..=64).contains(&template.pane_count()),
+                    "pane split template {name:?} must contain between 2 and 64 panes"
+                );
+                config.pane_split_templates.insert(name.clone(), template);
+            }
+        }
 
         if let Some(profiles) = root.get("profiles") {
             let profiles = profiles.as_array().context("profiles must be an array")?;
@@ -164,6 +209,7 @@ fn validate_config_fields(root: &Value) -> Result<()> {
         "terminal_font_family",
         "max_scroll_history_lines",
         "inactive_pane_opacity",
+        "pane_split_templates",
         "profiles",
     ];
     let object = root
@@ -176,6 +222,81 @@ fn validate_config_fields(root: &Value) -> Result<()> {
         anyhow::bail!("unrecognized configuration field {field:?}");
     }
     Ok(())
+}
+
+fn default_pane_split_templates() -> HashMap<String, PaneSplitTemplate> {
+    let pane = || Box::new(PaneSplitTemplate::Pane);
+    HashMap::from([
+        (
+            "three-right".to_owned(),
+            PaneSplitTemplate::Split {
+                axis: PaneSplitAxis::Vertical,
+                first: pane(),
+                second: Box::new(PaneSplitTemplate::Split {
+                    axis: PaneSplitAxis::Horizontal,
+                    first: pane(),
+                    second: pane(),
+                }),
+            },
+        ),
+        (
+            "three-left".to_owned(),
+            PaneSplitTemplate::Split {
+                axis: PaneSplitAxis::Vertical,
+                first: Box::new(PaneSplitTemplate::Split {
+                    axis: PaneSplitAxis::Horizontal,
+                    first: pane(),
+                    second: pane(),
+                }),
+                second: pane(),
+            },
+        ),
+        (
+            "quarters".to_owned(),
+            PaneSplitTemplate::Split {
+                axis: PaneSplitAxis::Vertical,
+                first: Box::new(PaneSplitTemplate::Split {
+                    axis: PaneSplitAxis::Horizontal,
+                    first: pane(),
+                    second: pane(),
+                }),
+                second: Box::new(PaneSplitTemplate::Split {
+                    axis: PaneSplitAxis::Horizontal,
+                    first: pane(),
+                    second: pane(),
+                }),
+            },
+        ),
+    ])
+}
+
+fn parse_pane_split_template(value: &Value) -> Result<PaneSplitTemplate> {
+    if value.as_str() == Some("pane") {
+        return Ok(PaneSplitTemplate::Pane);
+    }
+
+    let object = value
+        .as_object()
+        .context("template nodes must be \"pane\" or a split object")?;
+    anyhow::ensure!(
+        object.len() == 1,
+        "split objects must have exactly one axis"
+    );
+    let (axis, children) = object.iter().next().unwrap();
+    let axis = match axis.as_str() {
+        "horizontal" => PaneSplitAxis::Horizontal,
+        "vertical" => PaneSplitAxis::Vertical,
+        _ => anyhow::bail!("split axis must be \"horizontal\" or \"vertical\""),
+    };
+    let children = children
+        .as_array()
+        .context("split children must be a two-element array")?;
+    anyhow::ensure!(children.len() == 2, "splits must have exactly two children");
+    Ok(PaneSplitTemplate::Split {
+        axis,
+        first: Box::new(parse_pane_split_template(&children[0])?),
+        second: Box::new(parse_pane_split_template(&children[1])?),
+    })
 }
 
 fn resolve_default_profile(profiles: &[Profile], name: &str) -> Result<usize> {
@@ -570,6 +691,67 @@ mod tests {
         fs::remove_file(config_path).unwrap();
         assert_eq!(config.working_directory, Some(home_dir()));
         assert!(config.working_directory_configured);
+    }
+
+    #[test]
+    fn pane_split_templates_include_built_ins_and_custom_layouts() {
+        let config = Config::parse(
+            r#"{
+                "pane_split_templates": {
+                    "custom": {
+                        "horizontal": [
+                            "pane",
+                            { "vertical": ["pane", "pane"] }
+                        ]
+                    }
+                }
+            }"#,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(config.pane_split_templates["three-right"].pane_count(), 3);
+        assert_eq!(config.pane_split_templates["three-left"].pane_count(), 3);
+        assert!(matches!(
+            config.pane_split_templates["three-left"],
+            PaneSplitTemplate::Split {
+                axis: PaneSplitAxis::Vertical,
+                ref first,
+                ref second,
+            } if matches!(first.as_ref(), PaneSplitTemplate::Split {
+                axis: PaneSplitAxis::Horizontal,
+                ..
+            }) && matches!(second.as_ref(), PaneSplitTemplate::Pane)
+        ));
+        assert_eq!(config.pane_split_templates["quarters"].pane_count(), 4);
+        assert_eq!(config.pane_split_templates["custom"].pane_count(), 3);
+        assert!(matches!(
+            config.pane_split_templates["custom"],
+            PaneSplitTemplate::Split {
+                axis: PaneSplitAxis::Horizontal,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn pane_split_templates_reject_malformed_and_single_pane_layouts() {
+        let malformed = Config::parse(
+            r#"{"pane_split_templates":{"bad":{"diagonal":["pane","pane"]}}}"#,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            malformed
+                .to_string()
+                .contains("parsing pane split template")
+        );
+
+        let single =
+            Config::parse(r#"{"pane_split_templates":{"bad":"pane"}}"#, None, None).unwrap_err();
+        assert!(single.to_string().contains("between 2 and 64 panes"));
     }
 
     #[test]

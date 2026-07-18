@@ -6,6 +6,14 @@
   "terminal_font_family": "MesloLGS NF",
   "max_scroll_history_lines": 2147483647,
   "inactive_pane_opacity": 0.8,
+  "pane_split_templates": {
+    "three-bottom": {
+      "horizontal": [
+        "pane",
+        { "vertical": ["pane", "pane"] }
+      ]
+    }
+  },
   "profiles": [
     { "name": "System", "theme": "One Light" },
     { "name": "Login Zsh", "program": "/bin/zsh", "args": ["-l"] }

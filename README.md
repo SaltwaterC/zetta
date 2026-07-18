@@ -331,6 +331,52 @@ retained. For example:
 
 Scrollback changes apply to newly opened tabs.
 
+## Pane split templates
+
+Use the parameterized `zetta::ApplyPaneSplitTemplate` action to replace the
+active pane with a reusable layout. Zetta includes `three-right` (one pane on
+the left and two stacked on the right), `three-left` (the mirror image), and
+`quarters` (a 2-by-2 grid). Each template is available by name in the command
+palette. For faster access, add bindings like these to `keymap.json`:
+
+```json
+{
+  "ctrl-alt-o": [
+    "zetta::ApplyPaneSplitTemplate",
+    { "name": "three-right" }
+  ],
+  "ctrl-alt-e": [
+    "zetta::ApplyPaneSplitTemplate",
+    { "name": "quarters" }
+  ]
+}
+```
+
+Templates are recursive. `"pane"` is a leaf, `vertical` places two children
+side by side, and `horizontal` stacks two children. Add named custom templates
+to `config.json` like this:
+
+```json
+{
+  "pane_split_templates": {
+    "three-bottom": {
+      "horizontal": [
+        "pane",
+        { "vertical": ["pane", "pane"] }
+      ]
+    }
+  }
+}
+```
+
+Each split must have exactly two children, and each template may contain from
+2 through 64 panes. A tab is limited to 64 panes in total, including panes
+created by recursive template applications. Custom entries extend the
+built-ins and may override them by using the same name. The active terminal
+becomes the first (top-left-most) leaf and keeps focus, while new panes inherit
+its profile and working directory. Applying a template again therefore
+recurses into that active pane without changing the rest of the tab.
+
 The standard font-size shortcuts apply globally to every terminal. The
 `Ctrl-Alt` variants apply only to the active pane, so split panes can use
 independent sizes. Pane reset removes that pane's override; global reset returns
