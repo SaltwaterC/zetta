@@ -16,7 +16,7 @@ formed over years of working under multiple platforms using multiple terminal
 emulators that all do things in their specific ways. This applies for things
 like copying, pasting, changing tabs for example.
 
-There is an explicit aim to have things work outside the boxt at the cost of
+There is an explicit aim to have things work outside the box at the cost of
 bundling as well as minimal configuration. For example, a large chunk of the
 bundle is formed by the MesloLGS NF font faces.
 
@@ -418,6 +418,14 @@ install complete Zed extension packages.
 ## Licensing
 
 Zetta source code is licensed primarily under GPL-3.0-or-later, with
-Apache-2.0 components where marked, matching Zed's licensing model. See
-`LICENSE-GPL` and `LICENSE-APACHE` for the full license texts. Zetta is an
-independent project and is not affiliated with Zed Industries, Inc.
+Apache-2.0 components where marked, matching Zed's licensing model. The full
+license texts are available separately:
+
+- [GNU General Public License v3.0](LICENSE-GPL)
+- [Apache License 2.0](LICENSE-APACHE)
+
+Copyright 2026 Ștefan Rusu. Portions derived from Zed are copyright
+2022–2025 Zed Industries, Inc.
+
+Zetta is an independent project and is not affiliated with Zed Industries,
+Inc.
