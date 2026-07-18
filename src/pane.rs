@@ -1,6 +1,7 @@
 use super::*;
 
 pub(crate) const MAX_PANES_PER_TAB: usize = 64;
+pub(crate) const MAX_CONCURRENT_MULTI_COMMAND_SPAWNS: usize = 4;
 pub(crate) const TERMINAL_SPAWN_NOTIFY_INTERVAL: Duration = Duration::from_millis(16);
 
 pub(crate) fn can_add_panes(current: usize, additional: usize) -> bool {
@@ -51,6 +52,7 @@ pub(crate) struct TerminalPane {
     pub(crate) view: Option<Entity<TerminalView>>,
     pub(crate) error: Option<String>,
     pub(crate) wsl_cwd_file: Option<PathBuf>,
+    pub(crate) pending_command: Option<String>,
 }
 
 pub(crate) struct TerminalSpawnSettings {
@@ -59,6 +61,54 @@ pub(crate) struct TerminalSpawnSettings {
     pub(crate) max_scroll_history_lines: Option<usize>,
     pub(crate) path_hyperlink_regexes: Vec<String>,
     pub(crate) path_hyperlink_timeout_ms: u64,
+}
+
+pub(crate) struct QueuedTerminalLaunch {
+    pub(crate) tab_id: u64,
+    pub(crate) pane_id: u64,
+    pub(crate) profile: Profile,
+    pub(crate) working_directory: Option<PathBuf>,
+    pub(crate) wsl_directory: Option<String>,
+    pub(crate) wsl_cwd_file: Option<PathBuf>,
+    pub(crate) terminal_theme: Option<Arc<Theme>>,
+    pub(crate) settings: Arc<TerminalSpawnSettings>,
+}
+
+pub(crate) struct BoundedLaunchQueue<T> {
+    pending: VecDeque<T>,
+    in_flight: usize,
+    limit: usize,
+}
+
+impl<T> BoundedLaunchQueue<T> {
+    pub(crate) fn new(limit: usize) -> Self {
+        assert!(limit > 0, "a launch queue must allow at least one launch");
+        Self {
+            pending: VecDeque::new(),
+            in_flight: 0,
+            limit,
+        }
+    }
+
+    pub(crate) fn extend(&mut self, launches: impl IntoIterator<Item = T>) {
+        self.pending.extend(launches);
+    }
+
+    pub(crate) fn pop_ready(&mut self) -> Option<T> {
+        if self.in_flight >= self.limit {
+            return None;
+        }
+        let launch = self.pending.pop_front()?;
+        self.in_flight += 1;
+        Some(launch)
+    }
+
+    pub(crate) fn complete(&mut self) {
+        self.in_flight = self
+            .in_flight
+            .checked_sub(1)
+            .expect("only an in-flight launch can complete");
+    }
 }
 
 impl TerminalSpawnSettings {
@@ -143,6 +193,30 @@ pub(crate) enum PaneLayout {
 }
 
 impl PaneLayout {
+    pub(crate) fn tiled(pane_ids: &[u64]) -> Option<Self> {
+        fn build(pane_ids: &[u64], axis: SplitAxis) -> PaneLayout {
+            if let [pane_id] = pane_ids {
+                return PaneLayout::Pane(*pane_id);
+            }
+            let midpoint = if pane_ids.len() == 3 {
+                1
+            } else {
+                pane_ids.len().div_ceil(2)
+            };
+            let next_axis = match axis {
+                SplitAxis::Horizontal => SplitAxis::Vertical,
+                SplitAxis::Vertical => SplitAxis::Horizontal,
+            };
+            PaneLayout::Split {
+                axis,
+                first: Box::new(build(&pane_ids[..midpoint], next_axis)),
+                second: Box::new(build(&pane_ids[midpoint..], next_axis)),
+            }
+        }
+
+        (!pane_ids.is_empty()).then(|| build(pane_ids, SplitAxis::Vertical))
+    }
+
     pub(crate) fn split(&mut self, target: u64, axis: SplitAxis, new_pane: u64) -> bool {
         match self {
             Self::Pane(id) if *id == target => {

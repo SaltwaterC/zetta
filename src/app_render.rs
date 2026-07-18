@@ -3,6 +3,7 @@ use super::*;
 impl Render for Zetta {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors().clone();
+        let error_color = cx.theme().status().error;
         let handle = cx.entity().downgrade();
         let broadcast_input = self
             .tabs
@@ -608,6 +609,164 @@ impl Render for Zetta {
                 .into_any_element()
         });
 
+        let multi_command_overlay = self.multi_command.as_mut().map(|prompt| {
+            let (query_before, query_after) = prompt.rendered_query_parts();
+            let query_empty = prompt.query.is_empty();
+            let query_selected = prompt.select_all;
+            let error = prompt.error.clone();
+            let completion_selected = prompt.completion_selected;
+            let completion_count = prompt.completion_candidates.len();
+            let completion_loading = prompt.completion_loading;
+            let completion_visible_start = completion_selected.unwrap_or(0).saturating_sub(7);
+            let completion_rows = prompt
+                .completion_candidates
+                .iter()
+                .skip(completion_visible_start)
+                .take(8)
+                .enumerate()
+                .map(|(index, candidate)| {
+                    let completion_index = completion_visible_start + index;
+                    let completion_handle = handle.clone();
+                    div()
+                        .id(("multi-command-completion", completion_index))
+                        .h_7()
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .cursor_pointer()
+                        .text_sm()
+                        .text_color(colors.text)
+                        .when(
+                            completion_selected == Some(completion_index),
+                            |row| row.bg(colors.element_selected),
+                        )
+                        .hover(|style| style.bg(colors.element_hover))
+                        .on_click(move |_, window, cx| {
+                            completion_handle
+                                .update(cx, |this, cx| {
+                                    this.select_multi_command_completion(
+                                        completion_index,
+                                        window,
+                                        cx,
+                                    )
+                                })
+                                .ok();
+                        })
+                        .child(candidate.clone())
+                })
+                .collect::<Vec<_>>();
+            let dismiss_handle = handle.clone();
+
+            div()
+                .id("multi-command-backdrop")
+                .absolute()
+                .inset_0()
+                .pt(px(72.))
+                .px_4()
+                .flex()
+                .items_start()
+                .justify_center()
+                .bg(transparent_black().opacity(0.24))
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    dismiss_handle
+                        .update(cx, |this, cx| this.dismiss_multi_command(window, cx))
+                        .ok();
+                })
+                .child(
+                    div()
+                        .id("multi-command-prompt")
+                        .track_focus(&self.multi_command_focus)
+                        .w_full()
+                        .max_w(px(680.))
+                        .overflow_hidden()
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_color(colors.border)
+                        .bg(colors.elevated_surface_background)
+                        .shadow_lg()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(
+                            div()
+                                .h_12()
+                                .px_3()
+                                .flex()
+                                .items_center()
+                                .text_color(colors.text)
+                                .child(div().text_color(colors.text_accent).mr_2().child("$"))
+                                .child(
+                                    h_flex()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .when(query_selected, |input| {
+                                            input.bg(colors.element_selection_background)
+                                        })
+                                        .child(
+                                            div()
+                                                .whitespace_nowrap()
+                                                .child(query_before),
+                                        )
+                                        .when(!query_selected, |input| {
+                                            input.child(
+                                                div()
+                                                    .flex_none()
+                                                    .w(px(1.0))
+                                                    .h(px(16.0))
+                                                    .bg(colors.text_accent),
+                                            )
+                                        })
+                                        .child(
+                                            div().whitespace_nowrap().child(query_after),
+                                        )
+                                        .when(query_empty, |input| {
+                                            input.child(
+                                                div()
+                                                    .text_color(colors.text_placeholder)
+                                                    .child("ssh {{a,b,c,d}}.example.com"),
+                                            )
+                                        }),
+                                ),
+                        )
+                        .when(completion_count > 0, |prompt| {
+                            prompt.child(
+                                div()
+                                    .py_1()
+                                    .border_t_1()
+                                    .border_color(colors.border)
+                                    .children(completion_rows),
+                            )
+                        })
+                        .child(
+                            div()
+                                .min_h_9()
+                                .px_3()
+                                .py_2()
+                                .border_t_1()
+                                .border_color(colors.border)
+                                .text_xs()
+                                .text_color(if error.is_some() {
+                                    error_color
+                                } else {
+                                    colors.text_muted
+                                })
+                                .child(error.unwrap_or_else(|| {
+                                    if completion_loading {
+                                        "Loading completions…".to_owned()
+                                    } else if completion_count > 0 {
+                                        format!(
+                                            "{completion_count} completion{} · Tab next · Shift+Tab previous",
+                                            if completion_count == 1 { "" } else { "s" }
+                                        )
+                                    } else {
+                                        "Double-brace values become tiled panes · Tab complete · Enter run · Esc cancel"
+                                            .to_owned()
+                                    }
+                                })),
+                        ),
+                )
+                .into_any_element()
+        });
+
         let settings_overlay = self.render_settings_overlay(window, cx);
 
         let content = div()
@@ -632,6 +791,7 @@ impl Render for Zetta {
             .on_action(cx.listener(Self::focus_pane_up))
             .on_action(cx.listener(Self::focus_pane_down))
             .on_action(cx.listener(Self::toggle_broadcast_input))
+            .on_action(cx.listener(Self::toggle_multi_command))
             .on_action(cx.listener(Self::increase_terminal_font_size))
             .on_action(cx.listener(Self::decrease_terminal_font_size))
             .on_action(cx.listener(Self::reset_terminal_font_size))
@@ -746,6 +906,9 @@ impl Render for Zetta {
                 content.child(overlay)
             })
             .when_some(palette_overlay, |content, overlay| content.child(overlay))
+            .when_some(multi_command_overlay, |content, overlay| {
+                content.child(overlay)
+            })
             .when_some(tab_search_overlay, |content, overlay| {
                 content.child(overlay)
             });

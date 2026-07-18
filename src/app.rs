@@ -13,6 +13,10 @@ pub(crate) struct Zetta {
     pub(crate) rename_focus: gpui::FocusHandle,
     pub(crate) command_palette_focus: gpui::FocusHandle,
     pub(crate) command_palette: Option<CommandPalette>,
+    pub(crate) multi_command_focus: gpui::FocusHandle,
+    pub(crate) multi_command: Option<MultiCommandPrompt>,
+    pub(crate) multi_command_catalog: CompletionCatalog,
+    pub(crate) multi_command_launches: BoundedLaunchQueue<QueuedTerminalLaunch>,
     pub(crate) settings_focus: gpui::FocusHandle,
     pub(crate) settings_editor: Option<SettingsEditor>,
     pub(crate) tab_search_focus: gpui::FocusHandle,
@@ -46,6 +50,10 @@ impl Zetta {
             rename_focus: cx.focus_handle(),
             command_palette_focus: cx.focus_handle(),
             command_palette: None,
+            multi_command_focus: cx.focus_handle(),
+            multi_command: None,
+            multi_command_catalog: CompletionCatalog::default(),
+            multi_command_launches: BoundedLaunchQueue::new(MAX_CONCURRENT_MULTI_COMMAND_SPAWNS),
             settings_focus: cx.focus_handle(),
             settings_editor: None,
             tab_search_focus: cx.focus_handle(),
@@ -64,6 +72,7 @@ impl Zetta {
                     if window.is_window_active()
                         && !this.is_renaming_tab()
                         && this.command_palette.is_none()
+                        && this.multi_command.is_none()
                         && this.tab_search.is_none()
                     {
                         this.focus_active(window, cx);
@@ -71,6 +80,7 @@ impl Zetta {
                 }),
             ],
         };
+        this.load_multi_command_catalog(cx);
         this.open_tab(window, cx);
         this
     }
@@ -105,6 +115,7 @@ impl Zetta {
                 view: None,
                 error: None,
                 wsl_cwd_file: wsl_cwd_file.clone(),
+                pending_command: None,
             }],
             pane_indices: HashMap::from([(pane_id, 0)]),
             layout: PaneLayout::Pane(pane_id),
@@ -168,6 +179,7 @@ impl Zetta {
             terminal_theme,
             &terminal_settings,
             path_hyperlink_regexes,
+            false,
             window,
             cx,
         );
@@ -185,6 +197,7 @@ impl Zetta {
         terminal_theme: Option<Arc<Theme>>,
         settings: &TerminalSpawnSettings,
         path_hyperlink_regexes: Vec<String>,
+        tracked_multi_command_launch: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -263,16 +276,27 @@ impl Zetta {
                             .and_then(|tab| tab.pane_mut(pane_id))
                         {
                             pane.view = Some(view.clone());
+                            if let Some(command) = pane.pending_command.take() {
+                                view.update(cx, |view, cx| {
+                                    view.apply_input(
+                                        &TerminalInput::Text(format!("{command}\r")),
+                                        cx,
+                                    )
+                                });
+                            }
                         }
                         if should_focus {
                             view.focus_handle(cx).focus(window, cx);
                         }
                         this.schedule_terminal_spawn_notify(cx);
+                        if tracked_multi_command_launch {
+                            this.finish_multi_command_launch(window, cx);
+                        }
                     })
                     .ok();
                 }
                 Err(error) => {
-                    this.update(cx, |this, cx| {
+                    this.update_in(cx, |this, window, cx| {
                         if let Some(pane) = this
                             .tabs
                             .iter_mut()
@@ -282,6 +306,9 @@ impl Zetta {
                             pane.error = Some(format!("{error:#}"));
                         }
                         this.schedule_terminal_spawn_notify(cx);
+                        if tracked_multi_command_launch {
+                            this.finish_multi_command_launch(window, cx);
+                        }
                     })
                     .ok();
                 }
@@ -406,6 +433,7 @@ impl Zetta {
             view: None,
             error: None,
             wsl_cwd_file: wsl_cwd_file.clone(),
+            pending_command: None,
         });
         tab.activate_pane(pane_id);
         self.spawn_terminal(
@@ -558,6 +586,7 @@ impl Zetta {
                 view: None,
                 error: None,
                 wsl_cwd_file: wsl_cwd_file.clone(),
+                pending_command: None,
             });
         }
         tab.activate_pane(active_pane_id);
@@ -576,6 +605,7 @@ impl Zetta {
                 terminal_theme.clone(),
                 &terminal_settings,
                 path_hyperlink_regexes,
+                false,
                 window,
                 cx,
             );

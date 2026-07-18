@@ -10,7 +10,7 @@ const ZETTA_APP_ID: &str = "Zetta";
 const ZETTA_DEFAULT_THEME: &str = "One Light";
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     env,
     ffi::OsString,
     fs,
@@ -80,6 +80,7 @@ actions!(
         FocusPaneUp,
         FocusPaneDown,
         ToggleBroadcastInput,
+        ToggleMultiCommand,
         IncreaseTerminalFontSize,
         DecreaseTerminalFontSize,
         ResetTerminalFontSize,
@@ -108,6 +109,9 @@ const FRAME_BUDGET_120_HZ: Duration = Duration::from_nanos(8_333_333);
 const FRAME_BUDGET_60_HZ: Duration = Duration::from_nanos(16_666_667);
 mod pane;
 use pane::*;
+mod multi_command;
+use multi_command::*;
+mod multi_command_ui;
 mod performance;
 use performance::*;
 mod command_palette_ui;

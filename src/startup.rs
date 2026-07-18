@@ -472,6 +472,7 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
             ToggleBroadcastInput,
             Some("Zetta > Terminal"),
         ),
+        KeyBinding::new("ctrl-shift-m", ToggleMultiCommand, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-tab", NextTab, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-pageup", NextTab, Some("Zetta > Terminal")),

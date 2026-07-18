@@ -7,6 +7,9 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.multi_command.is_some() {
+            self.dismiss_multi_command(window, cx);
+        }
         if self.tab_search.is_some() {
             self.dismiss_tab_search(window, cx);
         }
@@ -104,6 +107,10 @@ impl Zetta {
     ) {
         if self.settings_editor.is_some() {
             self.settings_key_down(event, window, cx);
+            return;
+        }
+        if self.multi_command.is_some() {
+            self.multi_command_key_down(event, window, cx);
             return;
         }
         if self.tab_search.is_some() {

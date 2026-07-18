@@ -58,6 +58,47 @@ fn pane_layout_replacement_moves_the_tree_without_cloning_it() {
 }
 
 #[test]
+fn four_commands_tile_into_quarters() {
+    assert_eq!(
+        PaneLayout::tiled(&[1, 2, 3, 4]),
+        Some(PaneLayout::Split {
+            axis: SplitAxis::Vertical,
+            first: Box::new(PaneLayout::Split {
+                axis: SplitAxis::Horizontal,
+                first: Box::new(PaneLayout::Pane(1)),
+                second: Box::new(PaneLayout::Pane(2)),
+            }),
+            second: Box::new(PaneLayout::Split {
+                axis: SplitAxis::Horizontal,
+                first: Box::new(PaneLayout::Pane(3)),
+                second: Box::new(PaneLayout::Pane(4)),
+            }),
+        })
+    );
+}
+
+#[test]
+fn three_commands_use_the_three_right_layout() {
+    assert_eq!(
+        PaneLayout::tiled(&[1, 2, 3]),
+        Some(PaneLayout::Split {
+            axis: SplitAxis::Vertical,
+            first: Box::new(PaneLayout::Pane(1)),
+            second: Box::new(PaneLayout::Split {
+                axis: SplitAxis::Horizontal,
+                first: Box::new(PaneLayout::Pane(2)),
+                second: Box::new(PaneLayout::Pane(3)),
+            }),
+        })
+    );
+}
+
+#[test]
+fn tiled_layout_rejects_an_empty_pane_list() {
+    assert_eq!(PaneLayout::tiled(&[]), None);
+}
+
+#[test]
 fn pane_limit_applies_to_total_tab_panes() {
     assert!(can_add_panes(1, MAX_PANES_PER_TAB - 1));
     assert!(!can_add_panes(2, MAX_PANES_PER_TAB - 1));
@@ -72,6 +113,23 @@ fn terminal_spawn_notifications_are_coalesced() {
     assert!(!begin_coalesced_notification(&mut pending));
     pending = false;
     assert!(begin_coalesced_notification(&mut pending));
+}
+
+#[test]
+fn bounded_launch_queue_applies_backpressure_and_preserves_order() {
+    let mut queue = BoundedLaunchQueue::new(2);
+    queue.extend([1, 2, 3, 4]);
+
+    assert_eq!(queue.pop_ready(), Some(1));
+    assert_eq!(queue.pop_ready(), Some(2));
+    assert_eq!(queue.pop_ready(), None);
+
+    queue.complete();
+    assert_eq!(queue.pop_ready(), Some(3));
+    assert_eq!(queue.pop_ready(), None);
+
+    queue.complete();
+    assert_eq!(queue.pop_ready(), Some(4));
 }
 
 #[test]
@@ -145,6 +203,7 @@ fn tab_pane_index_resolves_panes_without_scanning() {
             view: None,
             error: None,
             wsl_cwd_file: None,
+            pending_command: None,
         })
         .collect::<Vec<_>>();
     let mut tab = Tab {
@@ -174,6 +233,7 @@ fn tab_pane_index_resolves_panes_without_scanning() {
         view: None,
         error: None,
         wsl_cwd_file: None,
+        pending_command: None,
     });
     assert_eq!(tab.pane(4).map(|pane| pane.id), Some(4));
 }
@@ -217,6 +277,7 @@ fn split_profile_comes_from_the_active_pane() {
                 view: None,
                 error: None,
                 wsl_cwd_file: None,
+                pending_command: None,
             },
             TerminalPane {
                 id: 2,
@@ -224,6 +285,7 @@ fn split_profile_comes_from_the_active_pane() {
                 view: None,
                 error: None,
                 wsl_cwd_file: None,
+                pending_command: None,
             },
         ],
         pane_indices: HashMap::from([(1, 0), (2, 1)]),
@@ -259,6 +321,7 @@ fn closing_active_pane_restores_previous_focus() {
         view: None,
         error: None,
         wsl_cwd_file: None,
+        pending_command: None,
     };
     let mut tab = Tab {
         id: 1,
@@ -294,6 +357,7 @@ fn closing_inactive_pane_preserves_focus() {
         view: None,
         error: None,
         wsl_cwd_file: None,
+        pending_command: None,
     };
     let mut tab = Tab {
         id: 1,

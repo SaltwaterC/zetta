@@ -6,6 +6,18 @@ interaction code without Zed's subsystems. It supports multiple tabs,
 selectable profiles, and user-defined key bindings on Linux, macOS, and
 Windows.
 
+Use `Ctrl-Shift-M` to open the multi-command prompt. A command such as
+`ssh {{a,b,c,d}}.example.com` expands into four commands, tiles the active pane
+into four panes, and runs one command in each. Multiple and nested comma brace
+lists are supported. Single braces, quoted double braces, and escaped double
+braces are left for the shell. Templates are limited to 64 KiB so pasted input
+cannot monopolize the UI while it is expanded.
+
+The prompt provides native completion with `Tab` and reverse cycling with
+`Shift-Tab`. It completes executables from `PATH`, paths relative to the active
+pane's working directory, and SSH aliases declared by `Host` entries in
+`~/.ssh/config`.
+
 The name is a portmanteau of Zeta and tty, albeit if you are having a bad
 day, that's about the size of the binaries Rust produces. Pun not intended.
 
