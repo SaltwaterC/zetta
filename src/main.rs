@@ -2355,6 +2355,7 @@ impl Zetta {
         let editor = self.settings_editor.as_ref()?;
         let colors = cx.theme().colors().clone();
         let handle = cx.entity().downgrade();
+        let close_button_on_left = window_close_button_on_left(self.button_layout);
         if !editor.scroll_geometry_initialized {
             let geometry_handle = handle.clone();
             window.on_next_frame(move |_, cx| {
@@ -3532,7 +3533,23 @@ impl Zetta {
 
         let font_modal = editor.font_query.as_ref().map(|query| {
             let current_font = editor.configuration.terminal_font_family.clone();
-            let close_handle = handle.clone();
+            let close_font_picker_button = || {
+                let close_handle = handle.clone();
+                IconButton::new("close-font-picker", IconName::Close)
+                    .icon_size(IconSize::Small)
+                    .tooltip(Tooltip::text("Close font picker"))
+                    .on_click(move |_, _, cx| {
+                        close_handle
+                            .update(cx, |this, cx| {
+                                if let Some(editor) = this.settings_editor.as_mut() {
+                                    editor.font_query = None;
+                                    editor.focused_input = None;
+                                    cx.notify();
+                                }
+                            })
+                            .ok();
+                    })
+            };
             let filtered_fonts = matching_font_indices(&editor.normalized_fonts, &query.text);
             let fonts = editor.fonts.clone();
             let font_handle = handle.clone();
@@ -3621,29 +3638,17 @@ impl Zetta {
                             h_flex()
                                 .mb_3()
                                 .gap_2()
+                                .when(close_button_on_left, |header| {
+                                    header.child(close_font_picker_button())
+                                })
                                 .child(div().min_w_0().flex_1().child(text_input(
                                     "settings-font-search".to_owned(),
                                     query.clone(),
                                     SettingsInput::FontSearch,
                                 )))
-                                .child(
-                                    IconButton::new("close-font-picker", IconName::Close)
-                                        .icon_size(IconSize::Small)
-                                        .tooltip(Tooltip::text("Close font picker"))
-                                        .on_click(move |_, _, cx| {
-                                            close_handle
-                                                .update(cx, |this, cx| {
-                                                    if let Some(editor) =
-                                                        this.settings_editor.as_mut()
-                                                    {
-                                                        editor.font_query = None;
-                                                        editor.focused_input = None;
-                                                        cx.notify();
-                                                    }
-                                                })
-                                                .ok();
-                                        }),
-                                ),
+                                .when(!close_button_on_left, |header| {
+                                    header.child(close_font_picker_button())
+                                }),
                         )
                         .child(div().relative().min_h_0().flex_1().child(font_rows).child(
                             scroll_indicator("settings-font-scrollbar".to_owned(), &font_scroll),
@@ -3666,7 +3671,23 @@ impl Zetta {
                 window,
                 cx,
             );
-            let cancel_handle = handle.clone();
+            let close_new_profile_button = || {
+                let cancel_handle = handle.clone();
+                IconButton::new("close-new-profile", IconName::Close)
+                    .icon_size(IconSize::Small)
+                    .on_click(move |_, _, cx| {
+                        cancel_handle
+                            .update(cx, |this, cx| {
+                                if let Some(editor) = this.settings_editor.as_mut() {
+                                    editor.profile_draft = None;
+                                    editor.focused_input = None;
+                                    editor.message = None;
+                                    cx.notify();
+                                }
+                            })
+                            .ok();
+                    })
+            };
             let create_handle = handle.clone();
             div()
                 .id("new-profile-modal")
@@ -3692,26 +3713,14 @@ impl Zetta {
                         .child(
                             h_flex()
                                 .mb_4()
-                                .justify_between()
-                                .child(div().text_lg().child("Add profile"))
-                                .child(
-                                    IconButton::new("close-new-profile", IconName::Close)
-                                        .icon_size(IconSize::Small)
-                                        .on_click(move |_, _, cx| {
-                                            cancel_handle
-                                                .update(cx, |this, cx| {
-                                                    if let Some(editor) =
-                                                        this.settings_editor.as_mut()
-                                                    {
-                                                        editor.profile_draft = None;
-                                                        editor.focused_input = None;
-                                                        editor.message = None;
-                                                        cx.notify();
-                                                    }
-                                                })
-                                                .ok();
-                                        }),
-                                ),
+                                .gap_2()
+                                .when(close_button_on_left, |header| {
+                                    header.child(close_new_profile_button())
+                                })
+                                .child(div().min_w_0().flex_1().text_lg().child("Add profile"))
+                                .when(!close_button_on_left, |header| {
+                                    header.child(close_new_profile_button())
+                                }),
                         )
                         .child(
                             div()
@@ -3822,7 +3831,17 @@ impl Zetta {
         let themes_handle = handle.clone();
         let keymap_handle = handle.clone();
         let save_handle = handle.clone();
-        let close_handle = handle.clone();
+        let close_settings_button = || {
+            let close_handle = handle.clone();
+            IconButton::new("close-settings", IconName::Close)
+                .icon_size(IconSize::Small)
+                .tooltip(Tooltip::text("Close settings"))
+                .on_click(move |_, window, cx| {
+                    close_handle
+                        .update(cx, |this, cx| this.dismiss_settings(window, cx))
+                        .ok();
+                })
+        };
         let path = match editor.page {
             SettingsPage::Configuration => self.launch_config.config_path.display().to_string(),
             SettingsPage::Themes => format!(
@@ -3869,6 +3888,10 @@ impl Zetta {
                                 .child(
                                     h_flex()
                                         .gap_1()
+                                        .when(close_button_on_left, |controls| {
+                                            controls
+                                                .child(div().mr_1().child(close_settings_button()))
+                                        })
                                         .child(
                                             div()
                                                 .id("settings-configuration-tab")
@@ -3969,18 +3992,9 @@ impl Zetta {
                                                     },
                                                 ),
                                         )
-                                        .child(
-                                            IconButton::new("close-settings", IconName::Close)
-                                                .icon_size(IconSize::Small)
-                                                .tooltip(Tooltip::text("Close settings"))
-                                                .on_click(move |_, window, cx| {
-                                                    close_handle
-                                                        .update(cx, |this, cx| {
-                                                            this.dismiss_settings(window, cx)
-                                                        })
-                                                        .ok();
-                                                }),
-                                        ),
+                                        .when(!close_button_on_left, |controls| {
+                                            controls.child(close_settings_button())
+                                        }),
                                 ),
                         )
                         .child(
@@ -5211,6 +5225,16 @@ impl Render for Zetta {
 
 const RESIZE_HANDLE: Pixels = px(10.);
 
+fn window_close_button_on_left(layout: WindowButtonLayout) -> bool {
+    if layout.left.contains(&Some(WindowButton::Close)) {
+        true
+    } else if layout.right.contains(&Some(WindowButton::Close)) {
+        false
+    } else {
+        cfg!(target_os = "macos")
+    }
+}
+
 fn system_window_button_layout(cx: &App) -> WindowButtonLayout {
     #[cfg(target_os = "linux")]
     if let Some(layout) = read_gnome_button_layout() {
@@ -6282,6 +6306,29 @@ mod tests {
     fn defaults_to_light_theme_without_overriding_configuration() {
         assert_eq!(selected_theme_name(None), "One Light");
         assert_eq!(selected_theme_name(Some("One Dark")), "One Dark");
+    }
+
+    #[test]
+    fn modal_close_button_follows_window_close_button_side() {
+        let left = WindowButtonLayout {
+            left: [Some(WindowButton::Close), None, None],
+            right: [
+                Some(WindowButton::Minimize),
+                Some(WindowButton::Maximize),
+                None,
+            ],
+        };
+        let right = WindowButtonLayout {
+            left: [None; MAX_BUTTONS_PER_SIDE],
+            right: [
+                Some(WindowButton::Minimize),
+                Some(WindowButton::Maximize),
+                Some(WindowButton::Close),
+            ],
+        };
+
+        assert!(window_close_button_on_left(left));
+        assert!(!window_close_button_on_left(right));
     }
 
     #[test]
