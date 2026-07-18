@@ -429,6 +429,8 @@ impl Zetta {
         open_zetta_window(
             self.launch_config.clone(),
             self.configuration_error.clone(),
+            false,
+            None,
             cx,
         )
         .log_err();
@@ -798,6 +800,43 @@ impl Zetta {
         })
         .detach();
         cx.notify();
+    }
+
+    pub(crate) fn start_performance_report(
+        &mut self,
+        options: PerformanceReportOptions,
+        status: PerformanceReportStatus,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(overlay) = self.performance_overlay.as_mut() else {
+            *status
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Err(
+                "performance overlay was not enabled before report capture".to_owned(),
+            ));
+            cx.quit();
+            return;
+        };
+        overlay.begin_report();
+
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            executor.timer(options.duration).await;
+            let result = this
+                .update(cx, |this, _| {
+                    this.performance_overlay
+                        .as_mut()
+                        .context("performance overlay closed before report completed")?
+                        .write_report(&options.path, options.duration)
+                })
+                .unwrap_or_else(Err)
+                .map_err(|error| format!("{error:#}"));
+            *status
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(result);
+            cx.update(|cx| cx.quit());
+        })
+        .detach();
     }
 
     pub(crate) fn reload_configuration(

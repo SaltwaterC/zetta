@@ -882,7 +882,15 @@ impl Display for TerminalError {
 // Alacritty's grid stores line coordinates as i32 and grows history lazily.
 const DEFAULT_SCROLL_HISTORY_LINES: usize = i32::MAX as usize;
 pub const MAX_SCROLL_HISTORY_LINES: usize = i32::MAX as usize;
+// Terminal applications can emit multiple wakeups per display frame. Keep the
+// first update after a quiet period immediate, then coalesce sustained output
+// to a 60 Hz cadence to avoid redundant full-window GPU submissions.
+const TERMINAL_EVENT_BATCH_INTERVAL: Duration = Duration::from_nanos(16_666_667);
 static NEXT_INIT_COMMAND_STARTUP_MARKER_ID: AtomicU64 = AtomicU64::new(1);
+
+fn terminal_event_batch_delay(last_update: Instant, now: Instant) -> Duration {
+    TERMINAL_EVENT_BATCH_INTERVAL.saturating_sub(now.saturating_duration_since(last_update))
+}
 
 const INIT_COMMAND_STARTUP_MARKER_PREFIX: &str = "__zed_init_command_ready_";
 const INIT_COMMAND_STARTUP_MARKER_SUFFIX: &str = "__";
@@ -1333,24 +1341,25 @@ impl TerminalBuilder {
     pub fn subscribe(mut self, cx: &Context<Terminal>) -> Terminal {
         //Event loop
         self.terminal.event_loop_task = cx.spawn(async move |terminal, cx| {
+            let mut last_update = Instant::now()
+                .checked_sub(TERMINAL_EVENT_BATCH_INTERVAL)
+                .unwrap_or_else(Instant::now);
             while let Some(event) = self.events_rx.next().await {
-                terminal.update(cx, |terminal, cx| {
-                    //Process the first event immediately for lowered latency
-                    terminal.process_pty_event(event, cx);
-                })?;
+                let mut events = Vec::new();
+                let mut wakeup = false;
+                if matches!(event, PtyEvent::Event(TerminalBackendEvent::Wakeup)) {
+                    wakeup = true;
+                } else {
+                    events.push(event);
+                }
 
-                'outer: loop {
-                    let mut events = Vec::new();
-
+                let batch_delay = terminal_event_batch_delay(last_update, Instant::now());
+                if !batch_delay.is_zero() {
                     #[cfg(any(test, feature = "test-support"))]
                     let mut timer = cx.background_executor().simulate_random_delay().fuse();
                     #[cfg(not(any(test, feature = "test-support")))]
-                    let mut timer = cx
-                        .background_executor()
-                        .timer(std::time::Duration::from_millis(4))
-                        .fuse();
+                    let mut timer = cx.background_executor().timer(batch_delay).fuse();
 
-                    let mut wakeup = false;
                     loop {
                         futures::select_biased! {
                             _ = timer => break,
@@ -1372,23 +1381,24 @@ impl TerminalBuilder {
                             },
                         }
                     }
+                }
 
-                    if events.is_empty() && !wakeup {
-                        yield_now().await;
-                        break 'outer;
+                if events.is_empty() && !wakeup {
+                    yield_now().await;
+                    continue;
+                }
+
+                terminal.update(cx, |this, cx| {
+                    if wakeup {
+                        this.process_event(TerminalBackendEvent::Wakeup, cx);
                     }
 
-                    terminal.update(cx, |this, cx| {
-                        if wakeup {
-                            this.process_event(TerminalBackendEvent::Wakeup, cx);
-                        }
-
-                        for event in events {
-                            this.process_pty_event(event, cx);
-                        }
-                    })?;
-                    yield_now().await;
-                }
+                    for event in events {
+                        this.process_pty_event(event, cx);
+                    }
+                })?;
+                last_update = Instant::now();
+                yield_now().await;
             }
             anyhow::Ok(())
         });
@@ -3375,6 +3385,34 @@ mod tests {
     use parking_lot::Mutex;
     use rand::{Rng, distr, rngs::StdRng};
     use task::{Shell, ShellBuilder};
+
+    #[test]
+    fn terminal_event_batching_is_immediate_after_quiet_period() {
+        let last_update = Instant::now();
+
+        assert_eq!(
+            terminal_event_batch_delay(last_update, last_update + TERMINAL_EVENT_BATCH_INTERVAL),
+            Duration::ZERO
+        );
+        assert_eq!(
+            terminal_event_batch_delay(
+                last_update,
+                last_update + TERMINAL_EVENT_BATCH_INTERVAL + Duration::from_millis(1)
+            ),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn terminal_event_batching_caps_sustained_updates() {
+        let last_update = Instant::now();
+        let elapsed = Duration::from_millis(5);
+
+        assert_eq!(
+            terminal_event_batch_delay(last_update, last_update + elapsed),
+            TERMINAL_EVENT_BATCH_INTERVAL - elapsed
+        );
+    }
 
     #[test]
     fn reported_working_directory_titles_require_safe_absolute_unix_paths() {

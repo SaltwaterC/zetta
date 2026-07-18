@@ -1,6 +1,163 @@
 use super::*;
 
 #[test]
+fn version_flags_and_output_are_defined() {
+    assert!(is_version_argument("-v"));
+    assert!(is_version_argument("--version"));
+    assert!(!is_version_argument("-V"));
+    assert_eq!(
+        version_text(),
+        format!("Zetta {}", env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[test]
+fn terminal_rendering_profiler_arguments_are_cross_platform() {
+    assert_eq!(
+        parse_args_from([OsString::from("--profile-terminal-rendering")]).unwrap(),
+        StartupArgs {
+            config_path: None,
+            keymap_path: None,
+            mode: StartupMode::TerminalRenderingProfile,
+            profile_report: None,
+            profile_duration: None,
+        }
+    );
+    assert_eq!(
+        parse_args_from([OsString::from("--terminal-render-workload")]).unwrap(),
+        StartupArgs {
+            config_path: None,
+            keymap_path: None,
+            mode: StartupMode::TerminalRenderingWorkload,
+            profile_report: None,
+            profile_duration: None,
+        }
+    );
+}
+
+#[test]
+fn shorthand_options_match_long_options() {
+    let shorthand = parse_args_from([
+        OsString::from("-p"),
+        OsString::from("-r"),
+        OsString::from("profile.json"),
+        OsString::from("-d"),
+        OsString::from("2.5"),
+    ])
+    .unwrap();
+    let longhand = parse_args_from([
+        OsString::from("--profile-terminal-rendering"),
+        OsString::from("--profile-report"),
+        OsString::from("profile.json"),
+        OsString::from("--profile-duration"),
+        OsString::from("2.5"),
+    ])
+    .unwrap();
+    assert_eq!(shorthand, longhand);
+
+    let shorthand = parse_args_from([
+        OsString::from("-c"),
+        OsString::from("config.json"),
+        OsString::from("-k"),
+        OsString::from("keymap.json"),
+    ])
+    .unwrap();
+    let longhand = parse_args_from([
+        OsString::from("--config"),
+        OsString::from("config.json"),
+        OsString::from("--keymap"),
+        OsString::from("keymap.json"),
+    ])
+    .unwrap();
+    assert_eq!(shorthand, longhand);
+}
+
+#[test]
+fn terminal_rendering_report_defaults_to_ten_seconds() {
+    let args = parse_args_from([
+        OsString::from("--profile-terminal-rendering"),
+        OsString::from("--profile-report"),
+        OsString::from("profile.json"),
+    ])
+    .unwrap();
+
+    assert_eq!(args.profile_report, Some(PathBuf::from("profile.json")));
+    assert_eq!(
+        args.profile_duration,
+        Some(DEFAULT_PERFORMANCE_REPORT_DURATION)
+    );
+}
+
+#[test]
+fn terminal_rendering_report_accepts_fractional_duration() {
+    let args = parse_args_from([
+        OsString::from("--profile-terminal-rendering"),
+        OsString::from("--profile-report"),
+        OsString::from("profile.json"),
+        OsString::from("--profile-duration"),
+        OsString::from("2.5"),
+    ])
+    .unwrap();
+
+    assert_eq!(args.profile_duration, Some(Duration::from_secs_f64(2.5)));
+}
+
+#[test]
+fn terminal_rendering_report_options_require_profiler_mode() {
+    let error = parse_args_from([
+        OsString::from("--profile-report"),
+        OsString::from("profile.json"),
+    ])
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("require --profile-terminal-rendering")
+    );
+
+    let error = parse_args_from([
+        OsString::from("--profile-terminal-rendering"),
+        OsString::from("--profile-duration"),
+        OsString::from("1"),
+    ])
+    .unwrap_err();
+    assert!(error.to_string().contains("requires --profile-report"));
+}
+
+#[test]
+fn terminal_rendering_profiler_rejects_user_configuration() {
+    let error = parse_args_from([
+        OsString::from("--profile-terminal-rendering"),
+        OsString::from("--config"),
+        OsString::from("config.json"),
+    ])
+    .unwrap_err();
+
+    assert!(error.to_string().contains("cannot be combined"));
+}
+
+#[test]
+fn terminal_rendering_profiler_launches_the_current_executable() {
+    let executable = Path::new(if cfg!(windows) {
+        r"C:\tools\zetta.exe"
+    } else {
+        "/usr/local/bin/zetta"
+    });
+    let config = terminal_rendering_profile_config(executable);
+
+    assert_eq!(config.profiles.len(), 1);
+    assert_eq!(config.default_profile, 0);
+    assert_eq!(
+        config.profiles[0].command,
+        Shell::WithArguments {
+            program: executable.to_string_lossy().into_owned(),
+            args: vec!["--terminal-render-workload".to_owned()],
+            title_override: Some("Terminal rendering profiler".to_owned()),
+        }
+    );
+}
+
+#[test]
 fn unchanged_user_themes_are_not_reloaded() {
     let themes_dir = env::temp_dir().join(format!(
         "zetta-theme-cache-{}-{}",

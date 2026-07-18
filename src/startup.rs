@@ -1,21 +1,109 @@
 use super::*;
 
-pub(crate) fn parse_args() -> Result<(Option<PathBuf>, Option<PathBuf>)> {
+const DEFAULT_PERFORMANCE_REPORT_DURATION: Duration = Duration::from_secs(10);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum StartupMode {
+    Application,
+    TerminalRenderingProfile,
+    TerminalRenderingWorkload,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StartupArgs {
+    pub(crate) config_path: Option<PathBuf>,
+    pub(crate) keymap_path: Option<PathBuf>,
+    pub(crate) mode: StartupMode,
+    pub(crate) profile_report: Option<PathBuf>,
+    pub(crate) profile_duration: Option<Duration>,
+}
+
+pub(crate) fn version_text() -> String {
+    format!("Zetta {}", env!("CARGO_PKG_VERSION"))
+}
+
+fn is_version_argument(argument: &str) -> bool {
+    matches!(argument, "--version" | "-v")
+}
+
+pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Result<StartupArgs> {
     let mut config = None;
     let mut keymap = None;
-    let mut args = env::args_os().skip(1);
+    let mut mode = StartupMode::Application;
+    let mut profile_report = None;
+    let mut profile_duration = None;
+    let mut args = args.into_iter();
     while let Some(argument) = args.next() {
-        match argument.to_string_lossy().as_ref() {
-            "--config" => config = Some(args.next().context("--config requires a path")?.into()),
-            "--keymap" => keymap = Some(args.next().context("--keymap requires a path")?.into()),
+        let argument = argument.to_string_lossy();
+        if is_version_argument(&argument) {
+            println!("{}", version_text());
+            std::process::exit(0);
+        }
+        match argument.as_ref() {
+            "--config" | "-c" => {
+                config = Some(args.next().context("--config requires a path")?.into())
+            }
+            "--keymap" | "-k" => {
+                keymap = Some(args.next().context("--keymap requires a path")?.into())
+            }
+            "--profile-terminal-rendering" | "-p" => mode = StartupMode::TerminalRenderingProfile,
+            "--terminal-render-workload" => mode = StartupMode::TerminalRenderingWorkload,
+            "--profile-report" | "-r" => {
+                profile_report = Some(
+                    args.next()
+                        .context("--profile-report requires a path")?
+                        .into(),
+                )
+            }
+            "--profile-duration" | "-d" => {
+                let seconds = args
+                    .next()
+                    .context("--profile-duration requires seconds")?
+                    .to_string_lossy()
+                    .parse::<f64>()
+                    .context("--profile-duration must be a number of seconds")?;
+                anyhow::ensure!(
+                    seconds.is_finite() && seconds > 0.0,
+                    "--profile-duration must be greater than zero"
+                );
+                profile_duration = Some(Duration::from_secs_f64(seconds));
+            }
             "--help" | "-h" => {
-                println!("Zetta terminal\n\nUsage: zetta [--config PATH] [--keymap PATH]");
+                println!(
+                    "Zetta terminal\n\nUsage: zetta [OPTIONS]\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile-terminal-rendering    Profile terminal rendering\n  -r, --profile-report PATH           Write a profiling report\n  -d, --profile-duration SECONDS      Set the profiling duration"
+                );
                 std::process::exit(0);
             }
             unknown => anyhow::bail!("unknown argument {unknown:?}"),
         }
     }
-    Ok((config, keymap))
+    anyhow::ensure!(
+        mode == StartupMode::Application || (config.is_none() && keymap.is_none()),
+        "profiling modes cannot be combined with --config or --keymap"
+    );
+    anyhow::ensure!(
+        (profile_report.is_none() && profile_duration.is_none())
+            || mode == StartupMode::TerminalRenderingProfile,
+        "--profile-report and --profile-duration require --profile-terminal-rendering"
+    );
+    anyhow::ensure!(
+        profile_duration.is_none() || profile_report.is_some(),
+        "--profile-duration requires --profile-report"
+    );
+    if profile_report.is_some() && profile_duration.is_none() {
+        profile_duration = Some(DEFAULT_PERFORMANCE_REPORT_DURATION);
+    }
+    Ok(StartupArgs {
+        config_path: config,
+        keymap_path: keymap,
+        mode,
+        profile_report,
+        profile_duration,
+    })
+}
+
+pub(crate) fn parse_args() -> Result<StartupArgs> {
+    parse_args_from(env::args_os().skip(1))
 }
 
 pub(crate) fn load_startup_config(
@@ -483,6 +571,8 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
 pub(crate) fn open_zetta_window(
     config: Config,
     configuration_error: Option<String>,
+    enable_performance_overlay: bool,
+    performance_report: Option<(PerformanceReportOptions, PerformanceReportStatus)>,
     cx: &mut App,
 ) -> Result<()> {
     let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
@@ -503,7 +593,18 @@ pub(crate) fn open_zetta_window(
         },
         move |window, cx| {
             window.set_window_title("Zetta");
-            cx.new(|cx| Zetta::new(config, configuration_error, window, cx))
+            let zetta = cx.new(|cx| Zetta::new(config, configuration_error, window, cx));
+            if enable_performance_overlay {
+                zetta.update(cx, |zetta, cx| {
+                    zetta.toggle_performance_overlay(&TogglePerformanceOverlay, window, cx)
+                });
+            }
+            if let Some((options, status)) = performance_report {
+                zetta.update(cx, |zetta, cx| {
+                    zetta.start_performance_report(options, status, cx)
+                });
+            }
+            zetta
         },
     )
     .context("opening Zetta window")?;
@@ -511,15 +612,85 @@ pub(crate) fn open_zetta_window(
     Ok(())
 }
 
+fn terminal_rendering_profile_config(executable: &Path) -> Config {
+    let mut config = Config::defaults(None, None);
+    config.profiles = vec![Profile {
+        name: "Terminal rendering profiler".to_owned(),
+        command: Shell::WithArguments {
+            program: executable.to_string_lossy().into_owned(),
+            args: vec!["--terminal-render-workload".to_owned()],
+            title_override: Some("Terminal rendering profiler".to_owned()),
+        },
+        theme: None,
+    }];
+    config.default_profile = 0;
+    config
+}
+
+fn run_terminal_rendering_workload() -> Result<()> {
+    const FRAME_INTERVAL: Duration = Duration::from_nanos(4_166_667);
+    const ROW: &str = "0123456789 abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ │─╭╮╰╯ ✓ rendered cell workload";
+
+    let stdout = std::io::stdout();
+    let mut output = std::io::BufWriter::new(stdout.lock());
+    output.write_all(b"\x1b[2J\x1b[?25l")?;
+    let mut frame = 0_u64;
+    let mut next_frame = Instant::now();
+    loop {
+        if write!(
+            output,
+            "\x1b[H\x1b[1;36mZetta terminal rendering profiler\x1b[0m\r\n\
+             240 Hz producer · frame {frame:010}\r\n\
+             This deterministic workload is identical on Linux, macOS, and Windows.\r\n\r\n"
+        )
+        .is_err()
+        {
+            return Ok(());
+        }
+        for row in 0..34 {
+            writeln!(output, "{row:02} {ROW} {frame:010}\r")?;
+        }
+        output.flush()?;
+        frame = frame.wrapping_add(1);
+
+        next_frame += FRAME_INTERVAL;
+        let now = Instant::now();
+        if next_frame > now {
+            std::thread::sleep(next_frame - now);
+        } else {
+            next_frame = now;
+        }
+    }
+}
+
 pub(crate) fn run() -> Result<()> {
-    let (config_path, keymap_path) = parse_args()?;
-    let (config, configuration_error) = load_startup_config(config_path.as_deref(), keymap_path);
+    let args = parse_args()?;
+    if args.mode == StartupMode::TerminalRenderingWorkload {
+        return run_terminal_rendering_workload();
+    }
+
+    let profiling = args.mode == StartupMode::TerminalRenderingProfile;
+    let report_options = args
+        .profile_report
+        .zip(args.profile_duration)
+        .map(|(path, duration)| PerformanceReportOptions { path, duration });
+    let report_requested = report_options.is_some();
+    let report_status = Arc::new(Mutex::new(None));
+    let (config, configuration_error) = if profiling {
+        (
+            terminal_rendering_profile_config(&env::current_exe()?),
+            None,
+        )
+    } else {
+        load_startup_config(args.config_path.as_deref(), args.keymap_path)
+    };
     let keymap_path = config.keymap_path.clone();
     let profile_count = config.profiles.len();
     let http_client = Arc::new(
         reqwest_client::ReqwestClient::user_agent(concat!("Zetta/", env!("CARGO_PKG_VERSION")))
             .context("initializing HTTP client")?,
     );
+    let report_status_for_app = report_status.clone();
     gpui_platform::application()
         .with_assets(ZettaAssets)
         .run(move |cx: &mut App| {
@@ -540,9 +711,23 @@ pub(crate) fn run() -> Result<()> {
             })
             .detach();
 
-            open_zetta_window(config, configuration_error, cx)
-                .expect("failed to open Zetta window");
+            open_zetta_window(
+                config,
+                configuration_error,
+                profiling,
+                report_options.map(|options| (options, report_status_for_app)),
+                cx,
+            )
+            .expect("failed to open Zetta window");
         });
+    if report_requested {
+        let result = report_status
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .context("profiling window closed before the performance report completed")?;
+        result.map_err(anyhow::Error::msg)?;
+    }
     Ok(())
 }
 
