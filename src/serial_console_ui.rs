@@ -29,6 +29,10 @@ impl Zetta {
                         colors.border
                     })
                     .bg(colors.editor_background)
+                    .when(
+                        selected && field == SerialField::BaudRate && prompt.baud_select_all,
+                        |row| row.bg(colors.element_selection_background),
+                    )
                     .cursor_pointer()
                     .child(Label::new(label).size(LabelSize::Small).color(Color::Muted))
                     .child(Label::new(value).size(LabelSize::Small))
@@ -429,7 +433,15 @@ impl Zetta {
             "escape" => self.dismiss_serial_console(window, cx),
             "enter" => self.submit_serial_console(cx),
             "tab" => {
+                prompt.baud_select_all = false;
                 prompt.field = prompt.field.adjacent(event.keystroke.modifiers.shift);
+                cx.notify();
+            }
+            "a" if prompt.field == SerialField::BaudRate
+                && (event.keystroke.modifiers.control || event.keystroke.modifiers.platform) =>
+            {
+                prompt.baud_cursor = prompt.baud_rate.len();
+                prompt.baud_select_all = true;
                 cx.notify();
             }
             "up" | "left" => {
@@ -444,16 +456,25 @@ impl Zetta {
                 self.refresh_serial_devices(cx)
             }
             "backspace" if prompt.field == SerialField::BaudRate => {
-                if prompt.baud_cursor > 0 {
+                if prompt.baud_select_all {
+                    prompt.baud_rate.clear();
+                    prompt.baud_cursor = 0;
+                } else if prompt.baud_cursor > 0 {
                     prompt.baud_cursor -= 1;
                     prompt.baud_rate.remove(prompt.baud_cursor);
                 }
+                prompt.baud_select_all = false;
                 cx.notify();
             }
             key if prompt.field == SerialField::BaudRate
                 && key.len() == 1
                 && key.as_bytes()[0].is_ascii_digit() =>
             {
+                if prompt.baud_select_all {
+                    prompt.baud_rate.clear();
+                    prompt.baud_cursor = 0;
+                    prompt.baud_select_all = false;
+                }
                 prompt.baud_rate.insert_str(prompt.baud_cursor, key);
                 prompt.baud_cursor += 1;
                 cx.notify();

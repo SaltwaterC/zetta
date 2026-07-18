@@ -487,6 +487,17 @@ fn pane_output_uses_the_standard_save_shortcut() {
 }
 
 #[test]
+fn serial_console_avoids_the_linux_unicode_input_shortcut() {
+    assert_eq!(SERIAL_CONSOLE_KEYBINDING, "ctrl-shift-d");
+    assert_ne!(SERIAL_CONSOLE_KEYBINDING, "ctrl-shift-u");
+    let shortcut = gpui::Keystroke::parse(SERIAL_CONSOLE_KEYBINDING).unwrap();
+    assert_eq!(
+        serial_console_keybinding().match_keystrokes(&[shortcut]),
+        Some(false)
+    );
+}
+
+#[test]
 fn minimized_pane_shortcuts_are_built_in() {
     let bindings = minimized_pane_keybindings();
     for (binding, shortcut) in bindings.into_iter().zip([

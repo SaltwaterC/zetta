@@ -207,7 +207,7 @@ Keyboard shortcuts use Zed's keymap format. The default shortcuts are:
 | `Ctrl-Shift-S` | Save the active pane's complete scrollback and visible output to a file |
 | `Ctrl-Shift-P` | Open the command palette |
 | `Ctrl-,` | Open the configuration and keymap editor |
-| `Ctrl-Shift-U` | Select a serial device and open its console in a new pane |
+| `Ctrl-Shift-D` | Select a serial device and open its console in a new pane |
 | `Ctrl-Alt-R` | Rename active tab |
 | `Ctrl-Alt-L` | Label active pane; submit an empty label to restore its automatic label |
 | `Ctrl-=` / `Ctrl-+` | Increase font size globally |
@@ -227,7 +227,7 @@ The command palette lists the actions available in the focused terminal and
 Zetta window, including their effective keyboard shortcuts. Type to filter,
 use the arrow keys to select a command, and press `Enter` to run it.
 
-Use `Ctrl-Shift-U` (or **Zetta: Toggle Serial Console** in the command palette)
+Use `Ctrl-Shift-D` (or **Zetta: Toggle Serial Console** in the command palette)
 to enumerate serial devices and connect one in a new left/right split. The
 connection dialog defaults to 115200 baud, 8 data bits, no parity, 1 stop bit,
 and no flow control (115200 8N1). Use `Tab` to move between settings, arrow keys

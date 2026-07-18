@@ -456,11 +456,20 @@ pub(crate) fn validate_keymap_contents(content: &str, cx: &mut App) -> Result<()
 pub(crate) const RENAME_TAB_KEYBINDING: &str = "ctrl-alt-r";
 pub(crate) const RENAME_PANE_KEYBINDING: &str = "ctrl-alt-l";
 pub(crate) const SAVE_PANE_OUTPUT_KEYBINDING: &str = "ctrl-shift-s";
+pub(crate) const SERIAL_CONSOLE_KEYBINDING: &str = "ctrl-shift-d";
 
 pub(crate) fn pane_output_keybinding() -> KeyBinding {
     KeyBinding::new(
         SAVE_PANE_OUTPUT_KEYBINDING,
         SavePaneOutput,
+        Some("Zetta > Terminal"),
+    )
+}
+
+pub(crate) fn serial_console_keybinding() -> KeyBinding {
+    KeyBinding::new(
+        SERIAL_CONSOLE_KEYBINDING,
+        ToggleSerialConsole,
         Some("Zetta > Terminal"),
     )
 }
@@ -565,11 +574,7 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
             Some("Zetta > Terminal"),
         ),
         KeyBinding::new("ctrl-,", ToggleSettings, Some("Zetta > Terminal")),
-        KeyBinding::new(
-            "ctrl-shift-u",
-            ToggleSerialConsole,
-            Some("Zetta > Terminal"),
-        ),
+        serial_console_keybinding(),
         KeyBinding::new(RENAME_TAB_KEYBINDING, RenameTab, Some("Zetta > Terminal")),
         KeyBinding::new(RENAME_PANE_KEYBINDING, RenamePane, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-=", IncreaseTerminalFontSize, Some("Zetta > Terminal")),

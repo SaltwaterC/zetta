@@ -71,6 +71,7 @@ pub(crate) struct SerialConsolePrompt {
     pub(crate) selected_device: usize,
     pub(crate) baud_rate: String,
     pub(crate) baud_cursor: usize,
+    pub(crate) baud_select_all: bool,
     pub(crate) field: SerialField,
     pub(crate) data_bits: serialport::DataBits,
     pub(crate) parity: serialport::Parity,
@@ -88,6 +89,7 @@ impl Default for SerialConsolePrompt {
             selected_device: 0,
             baud_rate: "115200".to_owned(),
             baud_cursor: 6,
+            baud_select_all: false,
             field: SerialField::Device,
             data_bits: serialport::DataBits::Eight,
             parity: serialport::Parity::None,
@@ -127,6 +129,7 @@ impl SerialConsolePrompt {
                 };
                 self.baud_rate = COMMON_BAUD_RATES[index].to_string();
                 self.baud_cursor = self.baud_rate.len();
+                self.baud_select_all = false;
             }
             SerialField::DataBits => {
                 const VALUES: [serialport::DataBits; 4] = [

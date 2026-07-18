@@ -41,3 +41,9 @@ fn baud_rate_arrows_cycle_common_values_and_keep_custom_entry_available() {
     prompt.cycle_current_value(true);
     assert_eq!(prompt.baud_rate, "57600");
 }
+
+#[test]
+fn baud_rate_selection_defaults_to_inactive() {
+    let prompt = SerialConsolePrompt::default();
+    assert!(!prompt.baud_select_all);
+}
