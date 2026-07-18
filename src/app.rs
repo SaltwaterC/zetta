@@ -1,5 +1,13 @@
 use super::*;
 
+const PANE_CONTROLS_IDLE_DELAY: Duration = Duration::from_millis(1200);
+
+fn pane_controls_hide_delay(last_motion: Instant, now: Instant) -> Option<Duration> {
+    let elapsed = now.saturating_duration_since(last_motion);
+    let remaining = PANE_CONTROLS_IDLE_DELAY.checked_sub(elapsed)?;
+    (!remaining.is_zero()).then_some(remaining)
+}
+
 pub(crate) struct Zetta {
     pub(crate) launch_config: Config,
     pub(crate) configuration_error: Option<String>,
@@ -23,6 +31,10 @@ pub(crate) struct Zetta {
     pub(crate) settings_editor: Option<SettingsEditor>,
     pub(crate) tab_search_focus: gpui::FocusHandle,
     pub(crate) tab_search: Option<TabSearch>,
+    pub(crate) minimized_panes_focus: gpui::FocusHandle,
+    pub(crate) pane_controls_visible_for: Option<u64>,
+    pub(crate) pane_controls_last_motion: Instant,
+    pub(crate) pane_controls_hide_task: Option<Task<()>>,
     pub(crate) titlebar_dragging: bool,
     pub(crate) button_layout: WindowButtonLayout,
     pub(crate) performance_overlay: Option<PerformanceOverlay>,
@@ -32,6 +44,39 @@ pub(crate) struct Zetta {
 }
 
 impl Zetta {
+    pub(crate) fn configure_pane_profile_stress(&mut self, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            return;
+        };
+        let active_pane_id = tab.active_pane;
+        let Some(profile) = tab.active_profile().cloned() else {
+            return;
+        };
+        let mut pane_ids = vec![active_pane_id];
+        while pane_ids.len() < MAX_PANES_PER_TAB {
+            let pane_id = self.next_pane_id;
+            self.next_pane_id += 1;
+            tab.push_pane(TerminalPane {
+                id: pane_id,
+                label_number: 0,
+                generated_label: Some(format!("Stress {:02}", pane_ids.len() + 1)),
+                custom_label: None,
+                profile: profile.clone(),
+                view: None,
+                error: None,
+                wsl_cwd_file: None,
+                pending_command: None,
+            });
+            pane_ids.push(pane_id);
+        }
+        tab.layout = PaneLayout::tiled(&pane_ids).expect("a stress profile has panes");
+        tab.minimized_panes = pane_ids.into_iter().skip(1).collect();
+        tab.selected_minimized_pane = tab.minimized_panes.last().copied();
+        tab.maximized_pane = None;
+        tab.activate_pane(active_pane_id);
+        cx.notify();
+    }
+
     pub(crate) fn new(
         config: Config,
         configuration_error: Option<String>,
@@ -62,6 +107,10 @@ impl Zetta {
             settings_editor: None,
             tab_search_focus: cx.focus_handle(),
             tab_search: None,
+            minimized_panes_focus: cx.focus_handle(),
+            pane_controls_visible_for: None,
+            pane_controls_last_motion: Instant::now(),
+            pane_controls_hide_task: None,
             titlebar_dragging: false,
             button_layout,
             performance_overlay: None,
@@ -74,7 +123,7 @@ impl Zetta {
                 }),
                 cx.observe_window_activation(window, |this, window, cx| {
                     if window.is_window_active()
-                        && !this.is_renaming_tab()
+                        && !this.is_renaming()
                         && this.command_palette.is_none()
                         && this.multi_command.is_none()
                         && this.tab_search.is_none()
@@ -115,6 +164,9 @@ impl Zetta {
             id: tab_id,
             panes: vec![TerminalPane {
                 id: pane_id,
+                label_number: 1,
+                generated_label: None,
+                custom_label: None,
                 profile: profile.clone(),
                 view: None,
                 error: None,
@@ -122,11 +174,16 @@ impl Zetta {
                 pending_command: None,
             }],
             pane_indices: HashMap::from([(pane_id, 0)]),
+            next_pane_label: 2,
             layout: PaneLayout::Pane(pane_id),
             active_pane: pane_id,
             focus_history: vec![pane_id],
+            maximized_pane: None,
+            minimized_panes: Vec::new(),
+            selected_minimized_pane: None,
             broadcast_input: false,
             custom_title: None,
+            renaming_pane: None,
             rename_buffer: None,
             rename_cursor: 0,
             rename_select_all: false,
@@ -387,8 +444,8 @@ impl Zetta {
             self.close_tab_at(tab_index, window, cx);
             return;
         };
-        tab.restore_focus_after_close(pane_id, layout.first_pane());
         tab.layout = layout;
+        tab.restore_focus_after_close(pane_id, tab.layout.first_pane());
         self.active_tab = tab_index;
         self.focus_active(window, cx);
     }
@@ -428,11 +485,15 @@ impl Zetta {
         let wsl_cwd_file = wsl_cwd_tracking_file(&profile, pane_id);
 
         let tab = &mut self.tabs[self.active_tab];
+        tab.maximized_pane = None;
         if !tab.layout.split(active_pane_id, axis, pane_id) {
             return;
         }
         tab.push_pane(TerminalPane {
             id: pane_id,
+            label_number: 0,
+            generated_label: None,
+            custom_label: None,
             profile: profile.clone(),
             view: None,
             error: None,
@@ -463,6 +524,7 @@ impl Zetta {
             self.configuration_error.clone(),
             false,
             None,
+            false,
             cx,
         )
         .log_err();
@@ -638,6 +700,7 @@ impl Zetta {
         .expect("the configured pane template was resolved before allocating panes");
 
         let tab = &mut self.tabs[self.active_tab];
+        tab.maximized_pane = None;
         if !tab.layout.replace(active_pane_id, replacement) {
             return;
         }
@@ -645,6 +708,9 @@ impl Zetta {
         for (pane_id, wsl_cwd_file) in &new_panes {
             tab.push_pane(TerminalPane {
                 id: *pane_id,
+                label_number: 0,
+                generated_label: None,
+                custom_label: None,
                 profile: profile.clone(),
                 view: None,
                 error: None,
@@ -732,11 +798,131 @@ impl Zetta {
         let Some(tab) = self.tabs.get_mut(self.active_tab) else {
             return;
         };
-        let Some(pane_id) = tab.layout.adjacent_pane(tab.active_pane, direction) else {
+        if tab.maximized_pane.is_some() {
+            return;
+        }
+        let Some(pane_id) = tab
+            .visible_layout()
+            .and_then(|layout| layout.adjacent_pane(tab.active_pane, direction))
+        else {
             return;
         };
         tab.activate_pane(pane_id);
         self.focus_active(window, cx);
+    }
+
+    pub(crate) fn toggle_maximize_pane_by_id(
+        &mut self,
+        pane_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            return;
+        };
+        if tab.toggle_maximize(pane_id) {
+            self.focus_active(window, cx);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn toggle_maximize_pane(
+        &mut self,
+        _: &ToggleMaximizePane,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pane_id) = self.tabs.get(self.active_tab).map(|tab| tab.active_pane) else {
+            return;
+        };
+        self.toggle_maximize_pane_by_id(pane_id, window, cx);
+    }
+
+    pub(crate) fn minimize_pane_by_id(
+        &mut self,
+        pane_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            return;
+        };
+        if tab.minimize(pane_id) {
+            self.focus_active(window, cx);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn minimize_pane(
+        &mut self,
+        _: &MinimizePane,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pane_id) = self.tabs.get(self.active_tab).map(|tab| tab.active_pane) else {
+            return;
+        };
+        self.minimize_pane_by_id(pane_id, window, cx);
+    }
+
+    pub(crate) fn restore_minimized_pane_by_id(
+        &mut self,
+        pane_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            return;
+        };
+        if tab.restore_minimized(pane_id) {
+            self.focus_active(window, cx);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn restore_minimized_pane(
+        &mut self,
+        _: &RestoreMinimizedPane,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            return;
+        };
+        if tab.restore_last_minimized() {
+            self.focus_active(window, cx);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn select_previous_minimized_pane(
+        &mut self,
+        _: &SelectPreviousMinimizedPane,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let selected = self
+            .tabs
+            .get_mut(self.active_tab)
+            .is_some_and(Tab::select_previous_minimized);
+        if selected {
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn select_next_minimized_pane(
+        &mut self,
+        _: &SelectNextMinimizedPane,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let selected = self
+            .tabs
+            .get_mut(self.active_tab)
+            .is_some_and(Tab::select_next_minimized);
+        if selected {
+            cx.notify();
+        }
     }
 
     pub(crate) fn focus_pane_left(
@@ -865,9 +1051,16 @@ impl Zetta {
 
         enable_frame_tracing();
         let generation = self.performance_overlay_generation;
+        let (pane_count, minimized_pane_count) = self
+            .tabs
+            .get(self.active_tab)
+            .map(|tab| (tab.panes.len(), tab.minimized_panes.len()))
+            .unwrap_or_default();
         self.performance_overlay = Some(PerformanceOverlay::new(
             window.window_handle().window_id(),
             generation,
+            pane_count,
+            minimized_pane_count,
         ));
         let executor = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
@@ -1059,6 +1252,7 @@ impl Zetta {
         let automatic_title = view.read(cx).tab_content_text(0, cx).to_string();
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
             let title = tab.custom_title.clone().unwrap_or(automatic_title);
+            tab.renaming_pane = None;
             tab.rename_cursor = title.len();
             tab.rename_buffer = Some(title);
             tab.rename_select_all = false;
@@ -1067,19 +1261,98 @@ impl Zetta {
         cx.notify();
     }
 
+    pub(crate) fn rename_pane(
+        &mut self,
+        _: &RenamePane,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pane_id) = self.tabs.get(self.active_tab).map(|tab| tab.active_pane) else {
+            return;
+        };
+        self.begin_pane_rename(pane_id, window, cx);
+    }
+
+    pub(crate) fn begin_pane_rename(
+        &mut self,
+        pane_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            return;
+        };
+        let Some(label) = tab.pane(pane_id).map(TerminalPane::label) else {
+            return;
+        };
+        tab.activate_pane(pane_id);
+        tab.renaming_pane = Some(pane_id);
+        tab.rename_cursor = label.len();
+        tab.rename_buffer = Some(label);
+        tab.rename_select_all = true;
+        self.rename_focus.focus(window, cx);
+        cx.notify();
+    }
+
     pub(crate) fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(view) = self
-            .tabs
-            .get(self.active_tab)
-            .and_then(Tab::active_pane)
-            .and_then(|pane| pane.view.as_ref())
-        {
-            view.focus_handle(cx).focus(window, cx);
+        if let Some(tab) = self.tabs.get(self.active_tab) {
+            let active_is_visible = tab.pane_is_visible(tab.active_pane);
+            if active_is_visible {
+                if let Some(view) = tab.active_pane().and_then(|pane| pane.view.as_ref()) {
+                    view.focus_handle(cx).focus(window, cx);
+                }
+            } else if !tab.minimized_panes.is_empty() {
+                self.minimized_panes_focus.focus(window, cx);
+            }
         }
         cx.notify();
     }
 
-    pub(crate) fn is_renaming_tab(&self) -> bool {
+    pub(crate) fn show_pane_controls(
+        &mut self,
+        pane_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let visibility_changed = self.pane_controls_visible_for != Some(pane_id);
+        self.pane_controls_visible_for = Some(pane_id);
+        self.pane_controls_last_motion = Instant::now();
+
+        if self.pane_controls_hide_task.is_none() {
+            let executor = cx.background_executor().clone();
+            self.pane_controls_hide_task = Some(cx.spawn_in(window, async move |this, cx| {
+                let mut remaining = PANE_CONTROLS_IDLE_DELAY;
+                loop {
+                    executor.timer(remaining).await;
+                    let next_delay = this
+                        .update(cx, |this, cx| {
+                            let next_delay = pane_controls_hide_delay(
+                                this.pane_controls_last_motion,
+                                Instant::now(),
+                            );
+                            if next_delay.is_none() {
+                                this.pane_controls_visible_for = None;
+                                this.pane_controls_hide_task.take();
+                                cx.notify();
+                            }
+                            next_delay
+                        })
+                        .ok()
+                        .flatten();
+                    let Some(next_delay) = next_delay else {
+                        break;
+                    };
+                    remaining = next_delay;
+                }
+            }));
+        }
+
+        if visibility_changed {
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn is_renaming(&self) -> bool {
         self.tabs
             .get(self.active_tab)
             .is_some_and(|tab| tab.rename_buffer.is_some())
@@ -1098,6 +1371,12 @@ impl Zetta {
                 let Some(pane) = tab.pane(*pane_id) else {
                     return div().size_full().into_any_element();
                 };
+                let pane_label = tab
+                    .displayed_pane_label(*pane_id)
+                    .unwrap_or_else(|| pane.label());
+                let pane_label_selected = tab.renaming_pane == Some(*pane_id)
+                    && tab.rename_select_all
+                    && tab.rename_buffer.is_some();
                 let active = pane.view.as_ref().is_some_and(|view| {
                     view.focus_handle(cx).is_focused(window)
                         || view.read(cx).has_open_context_menu()
@@ -1128,6 +1407,16 @@ impl Zetta {
                 };
                 div()
                     .id(("terminal-pane", *pane_id as usize))
+                    .relative()
+                    .when(
+                        tab.panes.len() > 1 && tab.maximized_pane.is_none(),
+                        |pane| {
+                            let pane_id = *pane_id;
+                            pane.on_mouse_move(cx.listener(move |this, _, window, cx| {
+                                this.show_pane_controls(pane_id, window, cx);
+                            }))
+                        },
+                    )
                     .size_full()
                     .min_w_0()
                     .min_h_0()
@@ -1142,6 +1431,115 @@ impl Zetta {
                                 pane.opacity(self.launch_config.inactive_pane_opacity)
                             })
                             .child(content),
+                    )
+                    .when(
+                        tab.panes.len() > 1
+                            && tab.maximized_pane.is_none()
+                            && (self.pane_controls_visible_for == Some(*pane_id)
+                                || tab.renaming_pane == Some(*pane_id)),
+                        |pane| {
+                            let maximize_handle = cx.entity().downgrade();
+                            let minimize_handle = cx.entity().downgrade();
+                            let rename_handle = cx.entity().downgrade();
+                            let maximize_pane_id = *pane_id;
+                            let minimize_pane_id = *pane_id;
+                            let rename_pane_id = *pane_id;
+                            let pane_label_tooltip =
+                                format!("{pane_label}\nDouble-click to label this pane");
+                            pane.child(
+                                div()
+                                    .absolute()
+                                    .top(px(4.))
+                                    .right(px(4.))
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .id(("terminal-pane-label", *pane_id as usize))
+                                            .h_6()
+                                            .max_w(px(240.))
+                                            .flex()
+                                            .items_center()
+                                            .px_2()
+                                            .rounded_sm()
+                                            .border_1()
+                                            .border_color(colors.border)
+                                            .bg(colors.status_bar_background)
+                                            .when(pane_label_selected, |label| {
+                                                label.bg(colors.element_selected)
+                                            })
+                                            .cursor_text()
+                                            .overflow_hidden()
+                                            .tooltip(Tooltip::text(pane_label_tooltip))
+                                            .on_click(move |event, window, cx| {
+                                                if event.click_count() == 2 {
+                                                    cx.stop_propagation();
+                                                    rename_handle
+                                                        .update(cx, |this, cx| {
+                                                            this.begin_pane_rename(
+                                                                rename_pane_id,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        })
+                                                        .ok();
+                                                }
+                                            })
+                                            .child(
+                                                Label::new(pane_label)
+                                                    .size(LabelSize::Small)
+                                                    .color(Color::Muted),
+                                            ),
+                                    )
+                                    .child(
+                                        IconButton::new(
+                                            ("maximize-terminal-pane", *pane_id as usize),
+                                            IconName::Maximize,
+                                        )
+                                        .size(ButtonSize::Compact)
+                                        .icon_size(IconSize::XSmall)
+                                        .aria_label("Maximize pane")
+                                        .tooltip(Tooltip::text("Maximize pane (Shift-Escape)"))
+                                        .on_click(
+                                            move |_, window, cx| {
+                                                maximize_handle
+                                                    .update(cx, |this, cx| {
+                                                        this.toggle_maximize_pane_by_id(
+                                                            maximize_pane_id,
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    })
+                                                    .ok();
+                                            },
+                                        ),
+                                    )
+                                    .child(
+                                        IconButton::new(
+                                            ("minimize-terminal-pane", *pane_id as usize),
+                                            IconName::Dash,
+                                        )
+                                        .size(ButtonSize::Compact)
+                                        .icon_size(IconSize::XSmall)
+                                        .aria_label("Minimize pane")
+                                        .tooltip(Tooltip::text("Minimize pane"))
+                                        .on_click(
+                                            move |_, window, cx| {
+                                                minimize_handle
+                                                    .update(cx, |this, cx| {
+                                                        this.minimize_pane_by_id(
+                                                            minimize_pane_id,
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    })
+                                                    .ok();
+                                            },
+                                        ),
+                                    ),
+                            )
+                        },
                     )
                     .into_any_element()
             }
@@ -1190,3 +1588,7 @@ fn disable_frame_tracing() {
         profiler::set_frame_trace_enabled(false);
     }
 }
+
+#[cfg(test)]
+#[path = "tests/app.rs"]
+mod tests;

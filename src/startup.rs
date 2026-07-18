@@ -16,6 +16,7 @@ pub(crate) struct StartupArgs {
     pub(crate) mode: StartupMode,
     pub(crate) profile_report: Option<PathBuf>,
     pub(crate) profile_duration: Option<Duration>,
+    pub(crate) profile_pane_stress: bool,
 }
 
 pub(crate) fn version_text() -> String {
@@ -32,6 +33,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
     let mut mode = StartupMode::Application;
     let mut profile_report = None;
     let mut profile_duration = None;
+    let mut profile_pane_stress = false;
     let mut args = args.into_iter();
     while let Some(argument) = args.next() {
         let argument = argument.to_string_lossy();
@@ -47,6 +49,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 keymap = Some(args.next().context("--keymap requires a path")?.into())
             }
             "--profile-terminal-rendering" | "-p" => mode = StartupMode::TerminalRenderingProfile,
+            "--profile-pane-stress" => profile_pane_stress = true,
             "--terminal-render-workload" => mode = StartupMode::TerminalRenderingWorkload,
             "--profile-report" | "-r" => {
                 profile_report = Some(
@@ -70,7 +73,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             }
             "--help" | "-h" => {
                 println!(
-                    "Zetta terminal\n\nUsage: zetta [OPTIONS]\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile-terminal-rendering    Profile terminal rendering\n  -r, --profile-report PATH           Write a profiling report\n  -d, --profile-duration SECONDS      Set the profiling duration"
+                    "Zetta terminal\n\nUsage: zetta [OPTIONS]\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile-terminal-rendering    Profile terminal rendering\n      --profile-pane-stress           Use 64 panes with 63 minimized\n  -r, --profile-report PATH           Write a profiling report\n  -d, --profile-duration SECONDS      Set the profiling duration"
                 );
                 std::process::exit(0);
             }
@@ -90,6 +93,10 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
         profile_duration.is_none() || profile_report.is_some(),
         "--profile-duration requires --profile-report"
     );
+    anyhow::ensure!(
+        !profile_pane_stress || mode == StartupMode::TerminalRenderingProfile,
+        "--profile-pane-stress requires --profile-terminal-rendering"
+    );
     if profile_report.is_some() && profile_duration.is_none() {
         profile_duration = Some(DEFAULT_PERFORMANCE_REPORT_DURATION);
     }
@@ -99,6 +106,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
         mode,
         profile_report,
         profile_duration,
+        profile_pane_stress,
     })
 }
 
@@ -446,6 +454,7 @@ pub(crate) fn validate_keymap_contents(content: &str, cx: &mut App) -> Result<()
 }
 
 pub(crate) const RENAME_TAB_KEYBINDING: &str = "ctrl-alt-r";
+pub(crate) const RENAME_PANE_KEYBINDING: &str = "ctrl-alt-l";
 pub(crate) const SAVE_PANE_OUTPUT_KEYBINDING: &str = "ctrl-shift-s";
 
 pub(crate) fn pane_output_keybinding() -> KeyBinding {
@@ -454,6 +463,27 @@ pub(crate) fn pane_output_keybinding() -> KeyBinding {
         SavePaneOutput,
         Some("Zetta > Terminal"),
     )
+}
+
+pub(crate) fn minimized_pane_keybindings() -> [KeyBinding; 4] {
+    [
+        KeyBinding::new("alt-shift-down", MinimizePane, Some("Zetta > Terminal")),
+        KeyBinding::new(
+            "alt-shift-up",
+            RestoreMinimizedPane,
+            Some("Zetta > Terminal"),
+        ),
+        KeyBinding::new(
+            "alt-shift-left",
+            SelectPreviousMinimizedPane,
+            Some("Zetta > Terminal"),
+        ),
+        KeyBinding::new(
+            "alt-shift-right",
+            SelectNextMinimizedPane,
+            Some("Zetta > Terminal"),
+        ),
+    ]
 }
 
 pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut App) {
@@ -478,6 +508,7 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
         KeyBinding::new("alt-right", FocusPaneRight, Some("Zetta > Terminal")),
         KeyBinding::new("alt-up", FocusPaneUp, Some("Zetta > Terminal")),
         KeyBinding::new("alt-down", FocusPaneDown, Some("Zetta > Terminal")),
+        KeyBinding::new("shift-escape", ToggleMaximizePane, Some("Zetta > Terminal")),
         KeyBinding::new(
             "ctrl-shift-i",
             ToggleBroadcastInput,
@@ -535,6 +566,7 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
         ),
         KeyBinding::new("ctrl-,", ToggleSettings, Some("Zetta > Terminal")),
         KeyBinding::new(RENAME_TAB_KEYBINDING, RenameTab, Some("Zetta > Terminal")),
+        KeyBinding::new(RENAME_PANE_KEYBINDING, RenamePane, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-=", IncreaseTerminalFontSize, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-+", IncreaseTerminalFontSize, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl--", DecreaseTerminalFontSize, Some("Zetta > Terminal")),
@@ -556,6 +588,7 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
         // Override Zed's inherited `pane::CloseActiveItem` binding in terminal focus.
         KeyBinding::new("ctrl-shift-w", CloseTab, Some("Terminal")),
     ];
+    bindings.extend(minimized_pane_keybindings());
     bindings.extend(pane_template_keybindings());
     bindings.extend((1..=profile_count.min(9)).flat_map(profile_keybindings));
     cx.bind_keys(bindings);
@@ -586,6 +619,7 @@ pub(crate) fn open_zetta_window(
     configuration_error: Option<String>,
     enable_performance_overlay: bool,
     performance_report: Option<(PerformanceReportOptions, PerformanceReportStatus)>,
+    profile_pane_stress: bool,
     cx: &mut App,
 ) -> Result<()> {
     let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
@@ -607,6 +641,9 @@ pub(crate) fn open_zetta_window(
         move |window, cx| {
             window.set_window_title("Zetta");
             let zetta = cx.new(|cx| Zetta::new(config, configuration_error, window, cx));
+            if profile_pane_stress {
+                zetta.update(cx, |zetta, cx| zetta.configure_pane_profile_stress(cx));
+            }
             if enable_performance_overlay {
                 zetta.update(cx, |zetta, cx| {
                     zetta.toggle_performance_overlay(&TogglePerformanceOverlay, window, cx)
@@ -729,6 +766,7 @@ pub(crate) fn run() -> Result<()> {
                 configuration_error,
                 profiling,
                 report_options.map(|options| (options, report_status_for_app)),
+                args.profile_pane_stress,
                 cx,
             )
             .expect("failed to open Zetta window");

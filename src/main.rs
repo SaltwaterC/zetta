@@ -10,7 +10,7 @@ const ZETTA_APP_ID: &str = "Zetta";
 const ZETTA_DEFAULT_THEME: &str = "One Light";
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     env,
     ffi::OsString,
     fs,
@@ -73,12 +73,18 @@ actions!(
         NextTab,
         PreviousTab,
         RenameTab,
+        RenamePane,
         SplitHorizontal,
         SplitVertical,
         FocusPaneLeft,
         FocusPaneRight,
         FocusPaneUp,
         FocusPaneDown,
+        ToggleMaximizePane,
+        MinimizePane,
+        RestoreMinimizedPane,
+        SelectPreviousMinimizedPane,
+        SelectNextMinimizedPane,
         ToggleBroadcastInput,
         ToggleMultiCommand,
         IncreaseTerminalFontSize,

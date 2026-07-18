@@ -50,6 +50,36 @@ fn expands_multiple_and_nested_brace_lists() {
 }
 
 #[test]
+fn cartesian_expansions_include_parameter_labels_in_pane_order() {
+    let expansions =
+        expand_multi_command_with_labels("echo {{dev,prod}}-{{a,{{b,c}}}}", 64).unwrap();
+    let command_labels = expansions
+        .iter()
+        .map(|expansion| (expansion.command.as_str(), expansion.label.as_str()))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        command_labels,
+        [
+            ("echo dev-a", "dev · a"),
+            ("echo dev-b", "dev · b"),
+            ("echo dev-c", "dev · c"),
+            ("echo prod-a", "prod · a"),
+            ("echo prod-b", "prod · b"),
+            ("echo prod-c", "prod · c"),
+        ]
+    );
+}
+
+#[test]
+fn empty_cartesian_parameters_receive_a_visible_label() {
+    let expansions = expand_multi_command_with_labels("echo {{,value}}", 64).unwrap();
+
+    assert_eq!(expansions[0].label, "(empty)");
+    assert_eq!(expansions[1].label, "value");
+}
+
+#[test]
 fn leaves_single_quoted_and_escaped_braces_for_the_shell() {
     assert_eq!(
         expand_multi_command(r#"echo {shell,brace} '{{x,y}}' \{{a,b}} {{c,d}}"#, 64).unwrap(),
@@ -105,6 +135,14 @@ fn active_double_braces_still_require_a_comma_separated_list() {
 fn rejects_expansions_over_the_pane_limit() {
     assert_eq!(
         expand_multi_command("echo {{a,b}}-{{1,2}}", 3).unwrap_err(),
+        "A multi-command can create at most 3 panes"
+    );
+}
+
+#[test]
+fn rejects_nested_cartesian_alternatives_before_collecting_them_all() {
+    assert_eq!(
+        expand_multi_command_with_labels("echo {{x{{1,2}},y{{3,4}}}}", 3).unwrap_err(),
         "A multi-command can create at most 3 panes"
     );
 }

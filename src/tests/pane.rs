@@ -212,6 +212,9 @@ fn tab_pane_index_resolves_panes_without_scanning() {
         .into_iter()
         .map(|id| TerminalPane {
             id,
+            label_number: id as usize,
+            generated_label: None,
+            custom_label: None,
             profile: profile.clone(),
             view: None,
             error: None,
@@ -223,11 +226,16 @@ fn tab_pane_index_resolves_panes_without_scanning() {
         id: 1,
         panes,
         pane_indices: HashMap::from([(1, 0), (2, 1), (3, 2)]),
+        next_pane_label: 4,
         layout: PaneLayout::Pane(1),
         active_pane: 1,
         focus_history: vec![1],
+        maximized_pane: None,
+        minimized_panes: Vec::new(),
+        selected_minimized_pane: None,
         broadcast_input: false,
         custom_title: None,
+        renaming_pane: None,
         rename_buffer: None,
         rename_cursor: 0,
         rename_select_all: false,
@@ -242,6 +250,9 @@ fn tab_pane_index_resolves_panes_without_scanning() {
     assert_eq!(tab.pane(3).map(|pane| pane.id), Some(3));
     tab.push_pane(TerminalPane {
         id: 4,
+        label_number: 0,
+        generated_label: None,
+        custom_label: None,
         profile,
         view: None,
         error: None,
@@ -270,6 +281,22 @@ fn nested_pane_layouts_split_and_collapse() {
 }
 
 #[test]
+fn layout_removes_multiple_panes_in_one_traversal() {
+    let layout = PaneLayout::tiled(&[1, 2, 3, 4]).unwrap();
+    let minimized = HashSet::from([2, 3]);
+
+    assert_eq!(
+        layout.without_all(&minimized),
+        Some(PaneLayout::Split {
+            axis: SplitAxis::Vertical,
+            first: Box::new(PaneLayout::Pane(1)),
+            second: Box::new(PaneLayout::Pane(4)),
+        })
+    );
+    assert_eq!(layout.without_all(&HashSet::from([1, 2, 3, 4])), None);
+}
+
+#[test]
 fn split_profile_comes_from_the_active_pane() {
     let system = Profile {
         name: "System".to_owned(),
@@ -286,6 +313,9 @@ fn split_profile_comes_from_the_active_pane() {
         panes: vec![
             TerminalPane {
                 id: 1,
+                label_number: 1,
+                generated_label: None,
+                custom_label: None,
                 profile: system,
                 view: None,
                 error: None,
@@ -294,6 +324,9 @@ fn split_profile_comes_from_the_active_pane() {
             },
             TerminalPane {
                 id: 2,
+                label_number: 2,
+                generated_label: None,
+                custom_label: None,
                 profile: zsh,
                 view: None,
                 error: None,
@@ -302,6 +335,7 @@ fn split_profile_comes_from_the_active_pane() {
             },
         ],
         pane_indices: HashMap::from([(1, 0), (2, 1)]),
+        next_pane_label: 3,
         layout: PaneLayout::Split {
             axis: SplitAxis::Vertical,
             first: Box::new(PaneLayout::Pane(1)),
@@ -309,8 +343,12 @@ fn split_profile_comes_from_the_active_pane() {
         },
         active_pane: 2,
         focus_history: vec![1, 2],
+        maximized_pane: None,
+        minimized_panes: Vec::new(),
+        selected_minimized_pane: None,
         broadcast_input: false,
         custom_title: None,
+        renaming_pane: None,
         rename_buffer: None,
         rename_cursor: 0,
         rename_select_all: false,
@@ -330,6 +368,9 @@ fn closing_active_pane_restores_previous_focus() {
     };
     let pane = |id| TerminalPane {
         id,
+        label_number: id as usize,
+        generated_label: None,
+        custom_label: None,
         profile: profile.clone(),
         view: None,
         error: None,
@@ -340,11 +381,16 @@ fn closing_active_pane_restores_previous_focus() {
         id: 1,
         panes: vec![pane(1), pane(2), pane(3)],
         pane_indices: HashMap::from([(1, 0), (2, 1), (3, 2)]),
+        next_pane_label: 4,
         layout: PaneLayout::Pane(1),
         active_pane: 3,
         focus_history: vec![1, 2, 3],
+        maximized_pane: None,
+        minimized_panes: Vec::new(),
+        selected_minimized_pane: None,
         broadcast_input: false,
         custom_title: None,
+        renaming_pane: None,
         rename_buffer: None,
         rename_cursor: 0,
         rename_select_all: false,
@@ -366,6 +412,9 @@ fn closing_inactive_pane_preserves_focus() {
     };
     let pane = |id| TerminalPane {
         id,
+        label_number: id as usize,
+        generated_label: None,
+        custom_label: None,
         profile: profile.clone(),
         view: None,
         error: None,
@@ -376,11 +425,16 @@ fn closing_inactive_pane_preserves_focus() {
         id: 1,
         panes: vec![pane(1), pane(2), pane(3)],
         pane_indices: HashMap::from([(1, 0), (2, 1), (3, 2)]),
+        next_pane_label: 4,
         layout: PaneLayout::Pane(1),
         active_pane: 3,
         focus_history: vec![1, 2, 3],
+        maximized_pane: None,
+        minimized_panes: Vec::new(),
+        selected_minimized_pane: None,
         broadcast_input: false,
         custom_title: None,
+        renaming_pane: None,
         rename_buffer: None,
         rename_cursor: 0,
         rename_select_all: false,
@@ -406,6 +460,228 @@ fn directional_focus_moves_between_quarter_panes() {
     assert_eq!(layout.adjacent_pane(4, PaneDirection::Left), Some(2));
     assert_eq!(layout.adjacent_pane(4, PaneDirection::Up), Some(3));
     assert_eq!(layout.regions().len(), 4);
+}
+
+fn pane_management_tab() -> Tab {
+    let profile = Profile {
+        name: "System".to_owned(),
+        command: task::Shell::System,
+        theme: None,
+    };
+    let pane = |id| TerminalPane {
+        id,
+        label_number: id as usize,
+        generated_label: None,
+        custom_label: None,
+        profile: profile.clone(),
+        view: None,
+        error: None,
+        wsl_cwd_file: None,
+        pending_command: None,
+    };
+    let layout = PaneLayout::Split {
+        axis: SplitAxis::Vertical,
+        first: Box::new(PaneLayout::Pane(1)),
+        second: Box::new(PaneLayout::Split {
+            axis: SplitAxis::Horizontal,
+            first: Box::new(PaneLayout::Pane(2)),
+            second: Box::new(PaneLayout::Pane(3)),
+        }),
+    };
+    Tab {
+        id: 1,
+        panes: vec![pane(1), pane(2), pane(3)],
+        pane_indices: HashMap::from([(1, 0), (2, 1), (3, 2)]),
+        next_pane_label: 4,
+        layout,
+        active_pane: 2,
+        focus_history: vec![1, 3, 2],
+        maximized_pane: None,
+        minimized_panes: Vec::new(),
+        selected_minimized_pane: None,
+        broadcast_input: false,
+        custom_title: None,
+        renaming_pane: None,
+        rename_buffer: None,
+        rename_cursor: 0,
+        rename_select_all: false,
+    }
+}
+
+#[test]
+fn maximizing_and_restoring_preserves_the_original_layout() {
+    let mut tab = pane_management_tab();
+    let original = tab.layout.clone();
+
+    assert!(tab.toggle_maximize(2));
+    assert_eq!(tab.visible_layout(), Some(PaneLayout::Pane(2)));
+    assert_eq!(tab.layout, original);
+
+    assert!(tab.toggle_maximize(2));
+    assert_eq!(tab.visible_layout(), Some(original.clone()));
+    assert_eq!(tab.layout, original);
+}
+
+#[test]
+fn pane_labels_remain_stable_and_are_not_reused() {
+    let mut tab = pane_management_tab();
+
+    assert_eq!(tab.pane(1).unwrap().label(), "Pane 1");
+    assert_eq!(tab.pane(2).unwrap().label(), "Pane 2");
+    assert_eq!(tab.pane(3).unwrap().label(), "Pane 3");
+
+    let profile = tab.pane(1).unwrap().profile.clone();
+    tab.remove_pane(2);
+    tab.push_pane(TerminalPane {
+        id: 4,
+        label_number: 0,
+        generated_label: None,
+        custom_label: None,
+        profile,
+        view: None,
+        error: None,
+        wsl_cwd_file: None,
+        pending_command: None,
+    });
+
+    assert_eq!(tab.pane(1).unwrap().label(), "Pane 1");
+    assert_eq!(tab.pane(3).unwrap().label(), "Pane 3");
+    assert_eq!(tab.pane(4).unwrap().label(), "Pane 4");
+}
+
+#[test]
+fn custom_pane_labels_replace_the_fallback_and_render_while_editing() {
+    let mut tab = pane_management_tab();
+
+    tab.pane_mut(2).unwrap().generated_label = Some("dev · eu-west".to_owned());
+    assert_eq!(tab.pane(2).unwrap().label(), "dev · eu-west");
+
+    tab.pane_mut(2).unwrap().custom_label = Some("API server".to_owned());
+    assert_eq!(tab.pane(2).unwrap().label(), "API server");
+
+    tab.renaming_pane = Some(2);
+    tab.rename_buffer = Some("Database".to_owned());
+    tab.rename_cursor = 4;
+    assert_eq!(tab.displayed_pane_label(2).as_deref(), Some("Data|base"));
+
+    tab.pane_mut(2).unwrap().custom_label = None;
+    tab.renaming_pane = None;
+    tab.rename_buffer = None;
+    assert_eq!(tab.pane(2).unwrap().label(), "dev · eu-west");
+}
+
+#[test]
+fn minimizing_and_restoring_preserves_the_nested_split_position() {
+    let mut tab = pane_management_tab();
+    let original = tab.layout.clone();
+
+    assert!(tab.minimize(2));
+    assert_eq!(tab.minimized_panes, vec![2]);
+    assert_eq!(tab.selected_minimized_pane, Some(2));
+    assert_eq!(tab.active_pane, 3);
+    assert_eq!(
+        tab.visible_layout(),
+        Some(PaneLayout::Split {
+            axis: SplitAxis::Vertical,
+            first: Box::new(PaneLayout::Pane(1)),
+            second: Box::new(PaneLayout::Pane(3)),
+        })
+    );
+    assert_eq!(tab.layout, original);
+
+    assert!(tab.restore_minimized(2));
+    assert_eq!(tab.selected_minimized_pane, None);
+    assert_eq!(tab.active_pane, 2);
+    assert_eq!(tab.visible_layout(), Some(original.clone()));
+    assert_eq!(tab.layout, original);
+}
+
+#[test]
+fn minimized_pane_selection_wraps_and_restore_uses_the_selection() {
+    let mut tab = pane_management_tab();
+
+    assert!(tab.minimize(2));
+    assert!(tab.minimize(3));
+    assert_eq!(tab.selected_minimized_pane, Some(3));
+
+    assert!(tab.select_previous_minimized());
+    assert_eq!(tab.selected_minimized_pane, Some(2));
+    assert!(tab.select_previous_minimized());
+    assert_eq!(tab.selected_minimized_pane, Some(3));
+    assert!(tab.select_next_minimized());
+    assert_eq!(tab.selected_minimized_pane, Some(2));
+
+    assert!(tab.restore_last_minimized());
+    assert_eq!(tab.active_pane, 2);
+    assert_eq!(tab.minimized_panes, vec![3]);
+    assert_eq!(tab.selected_minimized_pane, Some(3));
+}
+
+#[test]
+fn closing_the_selected_minimized_pane_selects_a_surviving_item() {
+    let mut tab = pane_management_tab();
+    assert!(tab.minimize(2));
+    assert!(tab.minimize(3));
+
+    tab.remove_pane(3);
+    let layout = tab.layout.clone().without(3).unwrap();
+    tab.restore_focus_after_close(3, layout.first_pane());
+    tab.layout = layout;
+
+    assert_eq!(tab.minimized_panes, vec![2]);
+    assert_eq!(tab.selected_minimized_pane, Some(2));
+    assert_eq!(tab.visible_layout(), Some(PaneLayout::Pane(1)));
+}
+
+#[test]
+fn closing_the_only_visible_pane_preserves_keyboard_restorable_minimized_panes() {
+    let mut tab = pane_management_tab();
+    assert!(tab.minimize(2));
+    assert!(tab.minimize(3));
+
+    tab.remove_pane(1);
+    tab.layout = tab.layout.clone().without(1).unwrap();
+    tab.restore_focus_after_close(1, tab.layout.first_pane());
+
+    assert_eq!(tab.minimized_panes, vec![2, 3]);
+    assert_eq!(tab.selected_minimized_pane, Some(3));
+    assert_eq!(tab.active_pane, 3);
+    assert_eq!(tab.visible_layout(), None);
+    assert!(tab.restore_last_minimized());
+    assert_eq!(tab.active_pane, 3);
+    assert_eq!(tab.visible_layout(), Some(PaneLayout::Pane(3)));
+}
+
+#[test]
+fn closing_the_only_visible_pane_keeps_a_sole_remaining_pane_minimized() {
+    let mut tab = pane_management_tab();
+    tab.remove_pane(3);
+    tab.layout = tab.layout.clone().without(3).unwrap();
+    tab.restore_focus_after_close(3, tab.layout.first_pane());
+    assert!(tab.minimize(2));
+
+    tab.remove_pane(1);
+    tab.layout = tab.layout.clone().without(1).unwrap();
+    tab.restore_focus_after_close(1, tab.layout.first_pane());
+
+    assert_eq!(tab.minimized_panes, vec![2]);
+    assert_eq!(tab.selected_minimized_pane, Some(2));
+    assert_eq!(tab.active_pane, 2);
+    assert_eq!(tab.visible_layout(), None);
+    assert!(tab.restore_last_minimized());
+    assert_eq!(tab.visible_layout(), Some(PaneLayout::Pane(2)));
+}
+
+#[test]
+fn at_least_one_pane_must_remain_visible() {
+    let mut tab = pane_management_tab();
+
+    assert!(tab.minimize(2));
+    assert!(tab.minimize(3));
+    assert!(!tab.minimize(1));
+    assert_eq!(tab.visible_layout(), Some(PaneLayout::Pane(1)));
+    assert!(tab.restore_last_minimized());
+    assert_eq!(tab.active_pane, 3);
 }
 
 #[test]

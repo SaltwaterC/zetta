@@ -76,13 +76,13 @@ pub(crate) enum CompletionSource {
     },
 }
 
-pub(crate) enum MultiCommandExecution {
-    Single(String),
-    Tiled(Vec<String>),
+pub(crate) enum MultiCommandExecution<T> {
+    Single(T),
+    Tiled(Vec<T>),
 }
 
-impl MultiCommandExecution {
-    pub(crate) fn new(mut commands: Vec<String>) -> Self {
+impl<T> MultiCommandExecution<T> {
+    pub(crate) fn new(mut commands: Vec<T>) -> Self {
         assert!(
             !commands.is_empty(),
             "a multi-command execution must contain a command"
@@ -97,6 +97,12 @@ impl MultiCommandExecution {
             Self::Tiled(commands)
         }
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct MultiCommandExpansion {
+    pub(crate) command: String,
+    pub(crate) label: String,
 }
 
 pub(crate) struct MultiCommandPrompt {
@@ -742,7 +748,20 @@ fn bounded_sorted_unique_candidates<T: Ord>(
     unique_candidates.into_iter().collect()
 }
 
+#[cfg(test)]
 pub(crate) fn expand_multi_command(template: &str, limit: usize) -> Result<Vec<String>, String> {
+    expand_multi_command_with_labels(template, limit).map(|expansions| {
+        expansions
+            .into_iter()
+            .map(|expansion| expansion.command)
+            .collect()
+    })
+}
+
+pub(crate) fn expand_multi_command_with_labels(
+    template: &str,
+    limit: usize,
+) -> Result<Vec<MultiCommandExpansion>, String> {
     if template.trim().is_empty() {
         return Err("Enter a command containing a double-brace list".to_owned());
     }
@@ -753,16 +772,77 @@ pub(crate) fn expand_multi_command(template: &str, limit: usize) -> Result<Vec<S
     }
 
     let mut expanded = Vec::new();
-    let mut pending = vec![template.to_owned()];
-    while let Some(command) = pending.pop() {
+    let mut pending = vec![(template.to_owned(), Vec::<String>::new())];
+    while let Some((command, parameters)) = pending.pop() {
         let Some((start, end, alternatives)) = first_double_brace_list(&command) else {
             if expanded.len() >= limit {
                 return Err(format!("A multi-command can create at most {limit} panes"));
             }
-            expanded.push(command);
+            expanded.push(MultiCommandExpansion {
+                command,
+                label: parameters.join(" · "),
+            });
             continue;
         };
 
+        let pending_output_count = expanded
+            .len()
+            .checked_add(pending.len())
+            .ok_or_else(|| format!("A multi-command can create at most {limit} panes"))?;
+        let remaining_outputs = limit
+            .checked_sub(pending_output_count)
+            .ok_or_else(|| format!("A multi-command can create at most {limit} panes"))?;
+        let mut expanded_alternatives = Vec::new();
+        for alternative in alternatives {
+            if expanded_alternatives.len() >= remaining_outputs {
+                return Err(format!("A multi-command can create at most {limit} panes"));
+            }
+            for alternative in expand_multi_command_fragment(alternative, limit)? {
+                if expanded_alternatives.len() >= remaining_outputs {
+                    return Err(format!("A multi-command can create at most {limit} panes"));
+                }
+                expanded_alternatives.push(alternative);
+            }
+        }
+        let alternatives = expanded_alternatives;
+
+        let prefix = &command[..start];
+        let suffix = &command[end..];
+        for alternative in alternatives.into_iter().rev() {
+            let mut next = String::with_capacity(prefix.len() + alternative.len() + suffix.len());
+            next.push_str(prefix);
+            next.push_str(&alternative);
+            next.push_str(suffix);
+            let mut next_parameters = parameters.clone();
+            let parameter = alternative.trim();
+            next_parameters.push(if parameter.is_empty() {
+                "(empty)".to_owned()
+            } else {
+                parameter.to_owned()
+            });
+            pending.push((next, next_parameters));
+        }
+    }
+    if expanded.len() < 2 && has_active_double_brace_opener(template) {
+        return Err(
+            "Use a comma-separated double-brace list, for example ssh {{a,b}}.example.com"
+                .to_owned(),
+        );
+    }
+    Ok(expanded)
+}
+
+fn expand_multi_command_fragment(fragment: &str, limit: usize) -> Result<Vec<String>, String> {
+    let mut expanded = Vec::new();
+    let mut pending = vec![fragment.to_owned()];
+    while let Some(value) = pending.pop() {
+        let Some((start, end, alternatives)) = first_double_brace_list(&value) else {
+            if expanded.len() >= limit {
+                return Err(format!("A multi-command can create at most {limit} panes"));
+            }
+            expanded.push(value);
+            continue;
+        };
         if expanded
             .len()
             .checked_add(pending.len())
@@ -771,9 +851,8 @@ pub(crate) fn expand_multi_command(template: &str, limit: usize) -> Result<Vec<S
         {
             return Err(format!("A multi-command can create at most {limit} panes"));
         }
-
-        let prefix = &command[..start];
-        let suffix = &command[end..];
+        let prefix = &value[..start];
+        let suffix = &value[end..];
         for alternative in alternatives.into_iter().rev() {
             let mut next = String::with_capacity(prefix.len() + alternative.len() + suffix.len());
             next.push_str(prefix);
@@ -781,12 +860,6 @@ pub(crate) fn expand_multi_command(template: &str, limit: usize) -> Result<Vec<S
             next.push_str(suffix);
             pending.push(next);
         }
-    }
-    if expanded.len() < 2 && has_active_double_brace_opener(template) {
-        return Err(
-            "Use a comma-separated double-brace list, for example ssh {{a,b}}.example.com"
-                .to_owned(),
-        );
     }
     Ok(expanded)
 }

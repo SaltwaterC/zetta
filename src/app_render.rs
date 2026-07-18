@@ -112,7 +112,11 @@ impl Render for Zetta {
                 let select_handle = handle.clone();
                 let close_handle = handle.clone();
                 let rename_view = tab.active_pane().and_then(|pane| pane.view.clone());
-                let title = if let Some(buffer) = tab.rename_buffer.as_ref() {
+                let title = if let Some(buffer) = tab
+                    .rename_buffer
+                    .as_ref()
+                    .filter(|_| tab.renaming_pane.is_none())
+                {
                     if tab.rename_select_all {
                         buffer.clone().into()
                     } else {
@@ -130,7 +134,11 @@ impl Render for Zetta {
                         .unwrap_or_else(|| "Terminal".to_string())
                         .into()
                 };
-                let full_title = if let Some(buffer) = tab.rename_buffer.as_ref() {
+                let full_title = if let Some(buffer) = tab
+                    .rename_buffer
+                    .as_ref()
+                    .filter(|_| tab.renaming_pane.is_none())
+                {
                     buffer.clone().into()
                 } else if let Some(custom_title) = tab.custom_title.as_ref() {
                     custom_title.clone().into()
@@ -161,7 +169,9 @@ impl Render for Zetta {
                             .text_ellipsis()
                             .text_sm()
                             .when(
-                                tab.rename_buffer.is_some() && tab.rename_select_all,
+                                tab.rename_buffer.is_some()
+                                    && tab.renaming_pane.is_none()
+                                    && tab.rename_select_all,
                                 |title| title.bg(tab_colors.element_selection_background),
                             )
                             .tooltip(Tooltip::text(full_title))
@@ -302,7 +312,223 @@ impl Render for Zetta {
             });
 
         let body = match self.tabs.get(self.active_tab) {
-            Some(tab) => self.render_pane_layout(tab, &tab.layout, &colors, window, cx),
+            Some(tab) => {
+                let layout = tab.visible_layout();
+                let maximized_pane = tab.maximized_pane.and_then(|pane_id| {
+                    tab.pane(pane_id).map(|pane| {
+                        (
+                            pane_id,
+                            tab.displayed_pane_label(pane_id)
+                                .unwrap_or_else(|| pane.label()),
+                        )
+                    })
+                });
+                let minimized_count = tab.minimized_panes.len();
+                let minimized_index = tab
+                    .selected_minimized_pane
+                    .and_then(|selected| {
+                        tab.minimized_panes
+                            .iter()
+                            .position(|pane_id| *pane_id == selected)
+                    })
+                    .unwrap_or(0);
+                let minimized_pane = tab
+                    .minimized_panes
+                    .get(minimized_index)
+                    .and_then(|pane_id| {
+                        tab.pane(*pane_id).map(|pane| {
+                            (
+                                *pane_id,
+                                tab.displayed_pane_label(*pane_id)
+                                    .unwrap_or_else(|| pane.label()),
+                                pane.profile.name.clone(),
+                                minimized_index,
+                                minimized_count,
+                            )
+                        })
+                    });
+                let content = layout
+                    .as_ref()
+                    .map(|layout| self.render_pane_layout(tab, layout, &colors, window, cx))
+                    .unwrap_or_else(|| div().size_full().into_any_element());
+                let handle = cx.entity().downgrade();
+                div()
+                    .size_full()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .child(div().min_h_0().flex_1().child(content))
+                    .when_some(maximized_pane, |body, (pane_id, pane_label)| {
+                        let restore_handle = handle.clone();
+                        body.child(
+                            div()
+                                .h_7()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .px_2()
+                                .bg(colors.status_bar_background)
+                                .border_t_1()
+                                .border_color(colors.border)
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .child(
+                                            Icon::new(IconName::Maximize)
+                                                .size(IconSize::XSmall)
+                                                .color(Color::Accent),
+                                        )
+                                        .child(
+                                            Label::new(format!("{pane_label} maximized"))
+                                                .size(LabelSize::Small)
+                                                .color(Color::Muted),
+                                        ),
+                                )
+                                .child(
+                                    IconButton::new("restore-maximized-pane", IconName::Minimize)
+                                        .size(ButtonSize::Compact)
+                                        .icon_size(IconSize::XSmall)
+                                        .aria_label("Restore maximized pane")
+                                        .tooltip(Tooltip::text(
+                                            "Restore pane to its split position (Shift-Escape)",
+                                        ))
+                                        .on_click(move |_, window, cx| {
+                                            restore_handle
+                                                .update(cx, |this, cx| {
+                                                    this.toggle_maximize_pane_by_id(
+                                                        pane_id, window, cx,
+                                                    );
+                                                })
+                                                .ok();
+                                        }),
+                                ),
+                        )
+                    })
+                    .when_some(minimized_pane, |body, minimized| {
+                        let (pane_id, pane_label, profile_name, index, count) = minimized;
+                        let previous_handle = handle.clone();
+                        let next_handle = handle.clone();
+                        let restore_handle = handle.clone();
+                        let shelf_label = format!("{pane_label} · {profile_name}");
+                        body.child(
+                            div()
+                                .id("minimized-panes-shelf")
+                                .key_context("Terminal")
+                                .track_focus(&self.minimized_panes_focus)
+                                .h_8()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .px_2()
+                                .bg(colors.status_bar_background)
+                                .border_t_1()
+                                .border_color(colors.border)
+                                .child(
+                                    Label::new(
+                                        format!(
+                                            "Minimized {}/{} · Alt+Shift+←/→ select · Alt+Shift+↑ restore",
+                                            index + 1,
+                                            count
+                                        ),
+                                    )
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                                )
+                                .when(count > 1, |shelf| {
+                                    shelf.child(
+                                        IconButton::new(
+                                            "previous-minimized-pane",
+                                            IconName::ChevronLeft,
+                                        )
+                                        .size(ButtonSize::Compact)
+                                        .icon_size(IconSize::XSmall)
+                                        .aria_label("Select previous minimized pane")
+                                        .tooltip(Tooltip::text(
+                                            "Select previous minimized pane (Alt-Shift-Left)",
+                                        ))
+                                        .on_click(move |_, window, cx| {
+                                            previous_handle
+                                                .update(cx, |this, cx| {
+                                                    this.select_previous_minimized_pane(
+                                                        &SelectPreviousMinimizedPane,
+                                                        window,
+                                                        cx,
+                                                    );
+                                                })
+                                                .ok();
+                                        }),
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .id(("restore-minimized-pane", pane_id as usize))
+                                        .h_6()
+                                        .max_w(px(280.))
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .px_2()
+                                        .rounded_sm()
+                                        .border_1()
+                                        .border_color(colors.border_focused)
+                                        .bg(colors.element_selected)
+                                        .cursor_pointer()
+                                        .overflow_hidden()
+                                        .tooltip(Tooltip::text(format!(
+                                            "{shelf_label}\nSelected minimized pane; restore with Alt-Shift-Up"
+                                        )))
+                                        .on_click(move |_, window, cx| {
+                                            restore_handle
+                                                .update(cx, |this, cx| {
+                                                    this.restore_minimized_pane_by_id(
+                                                        pane_id, window, cx,
+                                                    );
+                                                })
+                                                .ok();
+                                        })
+                                        .child(
+                                            Icon::new(IconName::Dash)
+                                                .size(IconSize::XSmall)
+                                                .color(Color::Accent),
+                                        )
+                                        .child(
+                                            Label::new(shelf_label)
+                                                .size(LabelSize::Small)
+                                                .color(Color::Default),
+                                        ),
+                                )
+                                .when(count > 1, |shelf| {
+                                    shelf.child(
+                                        IconButton::new(
+                                            "next-minimized-pane",
+                                            IconName::ChevronRight,
+                                        )
+                                        .size(ButtonSize::Compact)
+                                        .icon_size(IconSize::XSmall)
+                                        .aria_label("Select next minimized pane")
+                                        .tooltip(Tooltip::text(
+                                            "Select next minimized pane (Alt-Shift-Right)",
+                                        ))
+                                        .on_click(move |_, window, cx| {
+                                            next_handle
+                                                .update(cx, |this, cx| {
+                                                    this.select_next_minimized_pane(
+                                                        &SelectNextMinimizedPane,
+                                                        window,
+                                                        cx,
+                                                    );
+                                                })
+                                                .ok();
+                                        }),
+                                    )
+                                }),
+                        )
+                    })
+                    .into_any_element()
+            }
             None => div().size_full().into_any_element(),
         };
         let performance_overlay = self.performance_overlay.as_ref().map(|overlay| {
@@ -783,6 +1009,7 @@ impl Render for Zetta {
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::rename_tab))
+            .on_action(cx.listener(Self::rename_pane))
             .on_action(cx.listener(Self::split_horizontal))
             .on_action(cx.listener(Self::split_vertical))
             .on_action(cx.listener(Self::apply_pane_split_template))
@@ -790,6 +1017,11 @@ impl Render for Zetta {
             .on_action(cx.listener(Self::focus_pane_right))
             .on_action(cx.listener(Self::focus_pane_up))
             .on_action(cx.listener(Self::focus_pane_down))
+            .on_action(cx.listener(Self::toggle_maximize_pane))
+            .on_action(cx.listener(Self::minimize_pane))
+            .on_action(cx.listener(Self::restore_minimized_pane))
+            .on_action(cx.listener(Self::select_previous_minimized_pane))
+            .on_action(cx.listener(Self::select_next_minimized_pane))
             .on_action(cx.listener(Self::toggle_broadcast_input))
             .on_action(cx.listener(Self::toggle_multi_command))
             .on_action(cx.listener(Self::increase_terminal_font_size))
@@ -804,7 +1036,7 @@ impl Render for Zetta {
             .on_action(cx.listener(Self::toggle_command_palette))
             .on_action(cx.listener(Self::toggle_settings))
             .on_action(cx.listener(Self::toggle_performance_overlay))
-            .when(self.is_renaming_tab(), |content| {
+            .when(self.is_renaming(), |content| {
                 content.track_focus(&self.rename_focus)
             })
             .on_key_down(cx.listener(Self::command_palette_key_down))

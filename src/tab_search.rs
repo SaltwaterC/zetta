@@ -210,6 +210,8 @@ impl Zetta {
         let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
             return;
         };
+        tab.restore_minimized(search_match.pane_id);
+        tab.maximized_pane = None;
         tab.activate_pane(search_match.pane_id);
         let terminal = tab
             .pane(search_match.pane_id)

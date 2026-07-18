@@ -53,25 +53,25 @@ impl Zetta {
         else {
             return;
         };
-        let commands = match expand_multi_command(&template, MAX_PANES_PER_TAB) {
-            Ok(commands) => commands,
+        let expansions = match expand_multi_command_with_labels(&template, MAX_PANES_PER_TAB) {
+            Ok(expansions) => expansions,
             Err(error) => {
                 self.set_multi_command_error(error, cx);
                 return;
             }
         };
-        let commands = match MultiCommandExecution::new(commands) {
-            MultiCommandExecution::Single(command) => {
-                self.submit_single_multi_command(command, window, cx);
+        let expansions = match MultiCommandExecution::new(expansions) {
+            MultiCommandExecution::Single(expansion) => {
+                self.submit_single_multi_command(expansion.command, window, cx);
                 return;
             }
-            MultiCommandExecution::Tiled(commands) => commands,
+            MultiCommandExecution::Tiled(expansions) => expansions,
         };
 
         let Some(tab) = self.tabs.get(self.active_tab) else {
             return;
         };
-        let additional = commands.len() - 1;
+        let additional = expansions.len() - 1;
         if !can_add_panes(tab.panes.len(), additional) {
             self.set_multi_command_error(
                 format!(
@@ -127,23 +127,29 @@ impl Zetta {
             .expect("a multi-command always contains at least two expansions");
 
         let tab = &mut self.tabs[self.active_tab];
+        tab.maximized_pane = None;
         if !tab.layout.replace(active_pane_id, replacement) {
             return;
         }
         let active_view = tab.pane(active_pane_id).and_then(|pane| pane.view.clone());
+        tab.pane_mut(active_pane_id).unwrap().generated_label = Some(expansions[0].label.clone());
         if active_view.is_none() {
-            tab.pane_mut(active_pane_id).unwrap().pending_command = Some(commands[0].clone());
+            tab.pane_mut(active_pane_id).unwrap().pending_command =
+                Some(expansions[0].command.clone());
         }
         let mut launches = Vec::with_capacity(additional);
-        for (pane_id, command) in new_pane_ids.iter().copied().zip(commands.iter().skip(1)) {
+        for (pane_id, expansion) in new_pane_ids.iter().copied().zip(expansions.iter().skip(1)) {
             let wsl_cwd_file = wsl_cwd_tracking_file(&profile, pane_id);
             tab.push_pane(TerminalPane {
                 id: pane_id,
+                label_number: 0,
+                generated_label: Some(expansion.label.clone()),
+                custom_label: None,
                 profile: profile.clone(),
                 view: None,
                 error: None,
                 wsl_cwd_file: wsl_cwd_file.clone(),
-                pending_command: Some(command.clone()),
+                pending_command: Some(expansion.command.clone()),
             });
             launches.push(QueuedTerminalLaunch {
                 tab_id,
@@ -160,7 +166,10 @@ impl Zetta {
 
         if let Some(view) = active_view {
             view.update(cx, |view, cx| {
-                view.apply_input(&TerminalInput::Text(format!("{}\r", commands[0])), cx)
+                view.apply_input(
+                    &TerminalInput::Text(format!("{}\r", expansions[0].command)),
+                    cx,
+                )
             });
         }
 

@@ -21,6 +21,7 @@ fn terminal_rendering_profiler_arguments_are_cross_platform() {
             mode: StartupMode::TerminalRenderingProfile,
             profile_report: None,
             profile_duration: None,
+            profile_pane_stress: false,
         }
     );
     assert_eq!(
@@ -31,6 +32,7 @@ fn terminal_rendering_profiler_arguments_are_cross_platform() {
             mode: StartupMode::TerminalRenderingWorkload,
             profile_report: None,
             profile_duration: None,
+            profile_pane_stress: false,
         }
     );
 }
@@ -85,6 +87,23 @@ fn terminal_rendering_report_defaults_to_ten_seconds() {
     assert_eq!(
         args.profile_duration,
         Some(DEFAULT_PERFORMANCE_REPORT_DURATION)
+    );
+}
+
+#[test]
+fn pane_stress_requires_and_records_profiler_mode() {
+    let args = parse_args_from([
+        OsString::from("--profile-terminal-rendering"),
+        OsString::from("--profile-pane-stress"),
+    ])
+    .unwrap();
+    assert!(args.profile_pane_stress);
+
+    let error = parse_args_from([OsString::from("--profile-pane-stress")]).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("requires --profile-terminal-rendering")
     );
 }
 
@@ -453,6 +472,11 @@ fn tab_rename_does_not_capture_an_unmodified_function_key() {
 }
 
 #[test]
+fn pane_label_uses_the_documented_shortcut() {
+    assert_eq!(RENAME_PANE_KEYBINDING, "ctrl-alt-l");
+}
+
+#[test]
 fn pane_output_uses_the_standard_save_shortcut() {
     assert_eq!(SAVE_PANE_OUTPUT_KEYBINDING, "ctrl-shift-s");
     let shortcut = gpui::Keystroke::parse(SAVE_PANE_OUTPUT_KEYBINDING).unwrap();
@@ -460,4 +484,18 @@ fn pane_output_uses_the_standard_save_shortcut() {
         pane_output_keybinding().match_keystrokes(&[shortcut]),
         Some(false)
     );
+}
+
+#[test]
+fn minimized_pane_shortcuts_are_built_in() {
+    let bindings = minimized_pane_keybindings();
+    for (binding, shortcut) in bindings.into_iter().zip([
+        "alt-shift-down",
+        "alt-shift-up",
+        "alt-shift-left",
+        "alt-shift-right",
+    ]) {
+        let shortcut = gpui::Keystroke::parse(shortcut).unwrap();
+        assert_eq!(binding.match_keystrokes(&[shortcut]), Some(false));
+    }
 }

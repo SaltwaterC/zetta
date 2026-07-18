@@ -62,6 +62,9 @@ pub(crate) struct OpenProfile {
 
 pub(crate) struct TerminalPane {
     pub(crate) id: u64,
+    pub(crate) label_number: usize,
+    pub(crate) generated_label: Option<String>,
+    pub(crate) custom_label: Option<String>,
     pub(crate) profile: Profile,
     pub(crate) view: Option<Entity<TerminalView>>,
     pub(crate) error: Option<String>,
@@ -154,6 +157,13 @@ pub(crate) fn clone_or_take_for_final_spawn<T: Clone + Default>(
 }
 
 impl TerminalPane {
+    pub(crate) fn label(&self) -> String {
+        self.custom_label
+            .clone()
+            .or_else(|| self.generated_label.clone())
+            .unwrap_or_else(|| format!("Pane {}", self.label_number))
+    }
+
     pub(crate) fn wsl_working_directory(&self, cx: &App) -> Option<String> {
         if let Some(directory) = self.view.as_ref().and_then(|view| {
             view.read(cx)
@@ -317,6 +327,25 @@ impl PaneLayout {
         }
     }
 
+    pub(crate) fn without_all(&self, targets: &HashSet<u64>) -> Option<Self> {
+        match self {
+            Self::Pane(id) => (!targets.contains(id)).then_some(Self::Pane(*id)),
+            Self::Split {
+                axis,
+                first,
+                second,
+            } => match (first.without_all(targets), second.without_all(targets)) {
+                (Some(first), Some(second)) => Some(Self::Split {
+                    axis: *axis,
+                    first: Box::new(first),
+                    second: Box::new(second),
+                }),
+                (Some(layout), None) | (None, Some(layout)) => Some(layout),
+                (None, None) => None,
+            },
+        }
+    }
+
     pub(crate) fn first_pane(&self) -> u64 {
         match self {
             Self::Pane(id) => *id,
@@ -403,17 +432,36 @@ pub(crate) struct Tab {
     pub(crate) id: u64,
     pub(crate) panes: Vec<TerminalPane>,
     pub(crate) pane_indices: HashMap<u64, usize>,
+    pub(crate) next_pane_label: usize,
     pub(crate) layout: PaneLayout,
     pub(crate) active_pane: u64,
     pub(crate) focus_history: Vec<u64>,
+    pub(crate) maximized_pane: Option<u64>,
+    pub(crate) minimized_panes: Vec<u64>,
+    pub(crate) selected_minimized_pane: Option<u64>,
     pub(crate) broadcast_input: bool,
     pub(crate) custom_title: Option<String>,
+    pub(crate) renaming_pane: Option<u64>,
     pub(crate) rename_buffer: Option<String>,
     pub(crate) rename_cursor: usize,
     pub(crate) rename_select_all: bool,
 }
 
 impl Tab {
+    pub(crate) fn displayed_pane_label(&self, id: u64) -> Option<String> {
+        let pane = self.pane(id)?;
+        if self.renaming_pane != Some(id) {
+            return Some(pane.label());
+        }
+        let buffer = self.rename_buffer.as_ref()?;
+        if self.rename_select_all {
+            return Some(buffer.clone());
+        }
+        let cursor = self.rename_cursor.min(buffer.len());
+        let (before, after) = buffer.split_at(cursor);
+        Some(format!("{before}|{after}"))
+    }
+
     pub(crate) fn pane(&self, id: u64) -> Option<&TerminalPane> {
         self.pane_indices
             .get(&id)
@@ -425,7 +473,11 @@ impl Tab {
         self.panes.get_mut(index)
     }
 
-    pub(crate) fn push_pane(&mut self, pane: TerminalPane) {
+    pub(crate) fn push_pane(&mut self, mut pane: TerminalPane) {
+        if pane.label_number == 0 {
+            pane.label_number = self.next_pane_label;
+        }
+        self.next_pane_label = self.next_pane_label.max(pane.label_number + 1);
         self.pane_indices.insert(pane.id, self.panes.len());
         self.panes.push(pane);
     }
@@ -456,15 +508,172 @@ impl Tab {
         self.active_pane = id;
     }
 
+    pub(crate) fn visible_layout(&self) -> Option<PaneLayout> {
+        if let Some(pane_id) = self.maximized_pane {
+            return self.pane(pane_id).map(|_| PaneLayout::Pane(pane_id));
+        }
+
+        if self.minimized_panes.is_empty() {
+            return Some(self.layout.clone());
+        }
+        let minimized = self.minimized_panes.iter().copied().collect::<HashSet<_>>();
+        self.layout.without_all(&minimized)
+    }
+
+    pub(crate) fn pane_is_visible(&self, pane_id: u64) -> bool {
+        self.pane(pane_id).is_some()
+            && self
+                .maximized_pane
+                .map_or(!self.minimized_panes.contains(&pane_id), |maximized| {
+                    maximized == pane_id
+                })
+    }
+
+    pub(crate) fn toggle_maximize(&mut self, pane_id: u64) -> bool {
+        if self.panes.len() < 2 || self.pane(pane_id).is_none() {
+            return false;
+        }
+        self.minimized_panes.retain(|id| *id != pane_id);
+        self.repair_minimized_selection();
+        self.maximized_pane = (self.maximized_pane != Some(pane_id)).then_some(pane_id);
+        self.activate_pane(pane_id);
+        true
+    }
+
+    pub(crate) fn minimize(&mut self, pane_id: u64) -> bool {
+        if self.pane(pane_id).is_none()
+            || self.minimized_panes.contains(&pane_id)
+            || self.panes.len().saturating_sub(self.minimized_panes.len()) <= 1
+        {
+            return false;
+        }
+
+        self.maximized_pane = None;
+        self.minimized_panes.push(pane_id);
+        self.selected_minimized_pane = Some(pane_id);
+        let fallback = self
+            .focus_history
+            .iter()
+            .rev()
+            .copied()
+            .find(|id| *id != pane_id && !self.minimized_panes.contains(id))
+            .or_else(|| {
+                self.layout
+                    .regions()
+                    .into_iter()
+                    .map(|region| region.id)
+                    .find(|id| !self.minimized_panes.contains(id))
+            })
+            .expect("minimizing is only allowed when another pane remains visible");
+        self.activate_pane(fallback);
+        true
+    }
+
+    pub(crate) fn restore_minimized(&mut self, pane_id: u64) -> bool {
+        let Some(index) = self.minimized_panes.iter().position(|id| *id == pane_id) else {
+            return false;
+        };
+        self.minimized_panes.remove(index);
+        if self.selected_minimized_pane == Some(pane_id) {
+            self.selected_minimized_pane = if self.minimized_panes.is_empty() {
+                None
+            } else {
+                Some(self.minimized_panes[index % self.minimized_panes.len()])
+            };
+        } else {
+            self.repair_minimized_selection();
+        }
+        self.maximized_pane = None;
+        self.activate_pane(pane_id);
+        true
+    }
+
+    pub(crate) fn restore_last_minimized(&mut self) -> bool {
+        self.selected_minimized_pane
+            .filter(|pane_id| self.minimized_panes.contains(pane_id))
+            .or_else(|| self.minimized_panes.last().copied())
+            .is_some_and(|pane_id| self.restore_minimized(pane_id))
+    }
+
+    pub(crate) fn select_previous_minimized(&mut self) -> bool {
+        self.select_adjacent_minimized(false)
+    }
+
+    pub(crate) fn select_next_minimized(&mut self) -> bool {
+        self.select_adjacent_minimized(true)
+    }
+
+    fn select_adjacent_minimized(&mut self, forward: bool) -> bool {
+        if self.minimized_panes.is_empty() {
+            self.selected_minimized_pane = None;
+            return false;
+        }
+        let index = self
+            .selected_minimized_pane
+            .and_then(|pane_id| self.minimized_panes.iter().position(|id| *id == pane_id))
+            .map(|index| {
+                if forward {
+                    (index + 1) % self.minimized_panes.len()
+                } else {
+                    index
+                        .checked_sub(1)
+                        .unwrap_or(self.minimized_panes.len() - 1)
+                }
+            })
+            .unwrap_or_else(|| {
+                if forward {
+                    0
+                } else {
+                    self.minimized_panes.len() - 1
+                }
+            });
+        self.selected_minimized_pane = Some(self.minimized_panes[index]);
+        true
+    }
+
+    fn repair_minimized_selection(&mut self) {
+        if !self
+            .selected_minimized_pane
+            .is_some_and(|pane_id| self.minimized_panes.contains(&pane_id))
+        {
+            self.selected_minimized_pane = self.minimized_panes.last().copied();
+        }
+    }
+
     pub(crate) fn restore_focus_after_close(&mut self, closed: u64, fallback: u64) {
+        if self.renaming_pane == Some(closed) {
+            self.renaming_pane = None;
+            self.rename_buffer = None;
+            self.rename_select_all = false;
+        }
+        if self.maximized_pane == Some(closed) {
+            self.maximized_pane = None;
+        }
+        self.minimized_panes.retain(|pane_id| *pane_id != closed);
+        self.repair_minimized_selection();
+        if self.panes.len() == 1 {
+            self.maximized_pane = None;
+        }
         let surviving = self.panes.iter().map(|pane| pane.id).collect::<Vec<_>>();
         self.focus_history
             .retain(|pane_id| *pane_id != closed && surviving.contains(pane_id));
 
-        if self.active_pane != closed && surviving.contains(&self.active_pane) {
+        if self.active_pane != closed
+            && surviving.contains(&self.active_pane)
+            && !self.minimized_panes.contains(&self.active_pane)
+        {
             return;
         }
-        let next = self.focus_history.last().copied().unwrap_or(fallback);
+        let next = self
+            .focus_history
+            .iter()
+            .rev()
+            .copied()
+            .find(|pane_id| !self.minimized_panes.contains(pane_id))
+            .or_else(|| self.visible_layout().map(|layout| layout.first_pane()))
+            .or(self.selected_minimized_pane)
+            .or_else(|| surviving.first().copied())
+            .unwrap_or(fallback);
         self.activate_pane(next);
     }
 

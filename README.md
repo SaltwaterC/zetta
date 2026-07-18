@@ -193,6 +193,7 @@ Keyboard shortcuts use Zed's keymap format. The default shortcuts are:
 | `Ctrl-Shift-A` | Select all terminal text |
 | `Ctrl-Shift-Backspace` | Clear the system clipboard |
 | `Alt-Arrow` | Focus the pane in that direction |
+| `Shift-Escape` | Maximize the active pane, or restore it to its split position |
 | `Ctrl-Shift-I` | Toggle input broadcasting to every pane in the active tab |
 | `Ctrl-Tab` | Next tab |
 | `Ctrl-Shift-Tab` | Previous tab |
@@ -207,6 +208,7 @@ Keyboard shortcuts use Zed's keymap format. The default shortcuts are:
 | `Ctrl-Shift-P` | Open the command palette |
 | `Ctrl-,` | Open the configuration and keymap editor |
 | `Ctrl-Alt-R` | Rename active tab |
+| `Ctrl-Alt-L` | Label active pane; submit an empty label to restore its automatic label |
 | `Ctrl-=` / `Ctrl-+` | Increase font size globally |
 | `Ctrl--` | Decrease font size globally |
 | `Ctrl-0` | Reset font size globally |
@@ -289,6 +291,18 @@ cargo run --release -- \
   --profile-duration 30
 ```
 
+To stress pane-management rendering while keeping the same producer, window,
+and capture settings, add `--profile-pane-stress`. This constructs a 64-pane
+layout with 63 minimized panes and leaves the profiler terminal visible:
+
+```sh
+cargo run --release -- \
+  --profile-terminal-rendering \
+  --profile-pane-stress \
+  --profile-report artifacts/zetta-pane-stress.json \
+  --profile-duration 10
+```
+
 These commands have the same arguments in PowerShell, Command Prompt, and Unix
 shells (adjust line continuation syntax when splitting the command). Providing a
 report path defaults to ten seconds; `--profile-duration` requires a report
@@ -303,6 +317,23 @@ average/p50/p95/p99 draw time, average
 invalidation-to-draw latency, and counts over the 120 Hz and 60 Hz frame
 budgets. Commit reports as CI artifacts or feed them into a separate comparison
 step; native stack traces remain separate platform-profiler artifacts.
+The workload metadata records `pane_count` and `minimized_pane_count`, allowing
+ordinary and pane-stress reports to be distinguished without relying on their
+file names.
+
+On Linux/Wayland, release builds also emit a `Zetta diagnostic:` line when a
+UI task, terminal grid lock, or terminal snapshot construction stalls
+abnormally. The watchdog remains silent during normal
+operation and writes through standard error, so desktop-launch diagnostics can
+be collected after a freeze with:
+
+```sh
+journalctl --user _COMM=zetta --since "15 minutes ago" --no-pager
+```
+
+The Wayland event-loop termination diagnostic includes both the display and
+debug forms of the underlying error. Preserve these lines with the performance
+report when investigating a rendering stall.
 
 Tab names follow the active terminal process automatically. Press `Ctrl-Alt-R`
 or double-click a tab to set a persistent name. Submit an empty name to clear
@@ -311,8 +342,27 @@ change. Unmodified function keys are left available to terminal applications.
 
 Splits inherit the active pane's working directory and use the selected
 profile. Use `Alt-Left`, `Alt-Right`, `Alt-Up`, and `Alt-Down` to move focus, or
-click a pane. Exiting a shell removes that pane; exiting the final pane closes
-its tab.
+click a pane. Split panes have controls for maximizing or minimizing them.
+The controls appear when the pointer moves over a pane and hide again after a
+short period of pointer inactivity. Each pane receives a stable per-tab label,
+shown with those controls and retained as other panes are rearranged or closed.
+Press `Ctrl-Alt-L` or double-click that label to give the active pane a custom
+name. Submitting an empty name restores its automatic label.
+Panes created by a multi-command use their resolved Cartesian parameters as
+the automatic label. For example, `run {{dev,prod}} {{eu,us}}` produces
+`dev · eu`, `dev · us`, `prod · eu`, and `prod · us` in matching pane order.
+A manually assigned label takes precedence; clearing it restores the generated
+parameter label.
+A maximized pane is identified by a status strip below the pane and can be
+restored with its strip button or `Shift-Escape`. A shelf at the bottom of the
+tab shows the selected minimized pane's label and profile name, its position in
+the minimized list, and previous/next buttons. Click the selected item to
+restore it to its original split position.
+Use `Alt-Shift-Down` to minimize the active pane, `Alt-Shift-Left` and
+`Alt-Shift-Right` to move the highlighted selection through the minimized
+shelf, and `Alt-Shift-Up` to restore the selected pane. These actions are also
+available from the command palette. Exiting a shell removes that pane; exiting
+the final pane closes its tab.
 
 Selecting terminal text copies it to the system clipboard while preserving the
 selection. `Ctrl-C` copies an existing selection and continues to send an

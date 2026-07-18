@@ -2,8 +2,10 @@ use std::{
     cell::{RefCell, RefMut},
     hash::Hash,
     os::fd::{AsRawFd, BorrowedFd},
+    panic::Location,
     path::PathBuf,
     rc::{Rc, Weak},
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -93,6 +95,120 @@ use crate::linux::{
     },
     xdg_desktop_portal::{Event as XDPEvent, XDPEventSource},
 };
+
+const WAYLAND_MAIN_TASK_STALL_THRESHOLD: Duration = Duration::from_secs(2);
+
+struct ActiveMainTask {
+    id: u64,
+    location: &'static Location<'static>,
+    started: Instant,
+}
+
+#[derive(Default)]
+struct MainTaskWatchdogState {
+    next_id: u64,
+    active: Option<ActiveMainTask>,
+}
+
+struct MainTaskWatchdog {
+    state: Mutex<MainTaskWatchdogState>,
+}
+
+impl MainTaskWatchdog {
+    fn global() -> &'static Arc<Self> {
+        static WATCHDOG: OnceLock<Arc<MainTaskWatchdog>> = OnceLock::new();
+        WATCHDOG.get_or_init(|| {
+            let watchdog = Arc::new(MainTaskWatchdog {
+                state: Mutex::new(MainTaskWatchdogState::default()),
+            });
+            let weak = Arc::downgrade(&watchdog);
+            let _ = std::thread::Builder::new()
+                .name("wayland-watchdog".to_owned())
+                .spawn(move || {
+                    let mut reported_id = 0;
+                    loop {
+                        std::thread::sleep(Duration::from_millis(500));
+                        let Some(watchdog) = weak.upgrade() else {
+                            return;
+                        };
+                        let stalled = {
+                            let state = watchdog
+                                .state
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            state.active.as_ref().and_then(|active| {
+                                let elapsed = active.started.elapsed();
+                                (active.id != reported_id
+                                    && elapsed >= WAYLAND_MAIN_TASK_STALL_THRESHOLD)
+                                    .then_some((active.id, elapsed, active.location))
+                            })
+                        };
+                        let Some((id, elapsed, location)) = stalled else {
+                            continue;
+                        };
+                        eprintln!(
+                            "Zetta diagnostic: Wayland main task {id} stalled for {} ms at {location}",
+                            elapsed.as_millis(),
+                        );
+                        reported_id = id;
+                    }
+                });
+            watchdog
+        })
+    }
+
+    fn begin(location: &'static Location<'static>) -> MainTaskDiagnostic {
+        let watchdog = Self::global().clone();
+        let mut state = watchdog
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.next_id = state.next_id.wrapping_add(1);
+        let id = state.next_id;
+        let started = Instant::now();
+        state.active = Some(ActiveMainTask {
+            id,
+            location,
+            started,
+        });
+        drop(state);
+        MainTaskDiagnostic { watchdog, id }
+    }
+
+    fn active_summary() -> String {
+        let state = Self::global()
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match state.active.as_ref() {
+            Some(active) => format!(
+                "task={} elapsed_ms={} location={}",
+                active.id,
+                active.started.elapsed().as_millis(),
+                active.location,
+            ),
+            None => "idle".to_owned(),
+        }
+    }
+}
+
+struct MainTaskDiagnostic {
+    watchdog: Arc<MainTaskWatchdog>,
+    id: u64,
+}
+
+impl Drop for MainTaskDiagnostic {
+    fn drop(&mut self) {
+        let mut state = self
+            .watchdog
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.active.as_ref().map(|active| active.id) == Some(self.id) {
+            state.active = None;
+        }
+    }
+}
 use gpui::{
     AnyWindowHandle, Bounds, Capslock, CursorStyle, DevicePixels, DisplayId, FileDropEvent,
     ForegroundExecutor, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, ModifiersChangedEvent,
@@ -111,6 +227,80 @@ const MIN_KEYCODE: u32 = 8;
 
 const UNKNOWN_KEYBOARD_LAYOUT_NAME: SharedString = SharedString::new_static("unknown");
 const XDG_ACTIVATION_TOKEN_ENV_VAR: &str = "XDG_ACTIVATION_TOKEN";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ImeCursorRectangle {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+impl From<Bounds<Pixels>> for ImeCursorRectangle {
+    fn from(bounds: Bounds<Pixels>) -> Self {
+        Self {
+            x: bounds.origin.x.as_f32() as i32,
+            y: bounds.origin.y.as_f32() as i32,
+            width: bounds.size.width.as_f32() as i32,
+            height: bounds.size.height.as_f32() as i32,
+        }
+    }
+}
+
+trait ImeCursorRectangleSink {
+    fn set_ime_cursor_rectangle(&self, x: i32, y: i32, width: i32, height: i32);
+    fn commit_ime_state(&self);
+}
+
+impl ImeCursorRectangleSink for zwp_text_input_v3::ZwpTextInputV3 {
+    fn set_ime_cursor_rectangle(&self, x: i32, y: i32, width: i32, height: i32) {
+        self.set_cursor_rectangle(x, y, width, height);
+    }
+
+    fn commit_ime_state(&self) {
+        self.commit();
+    }
+}
+
+fn set_ime_cursor_rectangle(
+    text_input: &impl ImeCursorRectangleSink,
+    cursor_rectangle: ImeCursorRectangle,
+) {
+    text_input.set_ime_cursor_rectangle(
+        cursor_rectangle.x,
+        cursor_rectangle.y,
+        cursor_rectangle.width,
+        cursor_rectangle.height,
+    );
+}
+
+fn update_ime_cursor_rectangle(
+    text_input: &impl ImeCursorRectangleSink,
+    last_ime_cursor_rectangle: &mut Option<ImeCursorRectangle>,
+    bounds: Bounds<Pixels>,
+) {
+    let cursor_rectangle = ImeCursorRectangle::from(bounds);
+    if *last_ime_cursor_rectangle == Some(cursor_rectangle) {
+        return;
+    }
+
+    *last_ime_cursor_rectangle = Some(cursor_rectangle);
+    set_ime_cursor_rectangle(text_input, cursor_rectangle);
+    text_input.commit_ime_state();
+}
+
+fn set_ime_cursor_rectangle_after_done(
+    text_input: &impl ImeCursorRectangleSink,
+    last_ime_cursor_rectangle: &mut Option<ImeCursorRectangle>,
+    bounds: Bounds<Pixels>,
+    should_commit: bool,
+) {
+    if should_commit {
+        update_ime_cursor_rectangle(text_input, last_ime_cursor_rectangle, bounds);
+    } else {
+        set_ime_cursor_rectangle(text_input, ImeCursorRectangle::from(bounds));
+    }
+}
 
 fn take_startup_activation_token_from_environment() -> Option<String> {
     let startup_activation_token = std::env::var(XDG_ACTIVATION_TOKEN_ENV_VAR)
@@ -244,6 +434,7 @@ pub(crate) struct WaylandClientState {
     pre_edit_text: Option<String>,
     ime_pre_edit: Option<String>,
     composing: bool,
+    last_ime_cursor_rectangle: Option<ImeCursorRectangle>,
     // Surface to Window mapping
     windows: HashMap<ObjectId, WaylandWindowStatePtr>,
     // Output to scale mapping
@@ -336,19 +527,6 @@ impl WaylandClientStatePtr {
             .expect("The pointer should always be valid when dispatching in wayland")
     }
 
-    fn request_frames(&self) {
-        let windows = self
-            .get_client()
-            .borrow()
-            .windows
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        for window in windows {
-            window.request_frame();
-        }
-    }
-
     pub fn get_serial(&self, kind: SerialKind) -> u32 {
         self.0.upgrade().unwrap().borrow().serial_tracker.get(kind)
     }
@@ -362,25 +540,25 @@ impl WaylandClientStatePtr {
         let client = self.get_client();
         let mut state = client.borrow_mut();
         state.ime_enabled = Some(true);
+        state.last_ime_cursor_rectangle = None;
         let Some(text_input) = state.text_input.take() else {
             return;
         };
 
         text_input.enable();
         text_input.set_content_type(ContentHint::None, ContentPurpose::Normal);
+        let mut cursor_rectangle = None;
         if let Some(window) = state.keyboard_focused_window.clone() {
             drop(state);
             if let Some(area) = window.get_ime_area() {
-                text_input.set_cursor_rectangle(
-                    f32::from(area.origin.x) as i32,
-                    f32::from(area.origin.y) as i32,
-                    f32::from(area.size.width) as i32,
-                    f32::from(area.size.height) as i32,
-                );
+                let area = ImeCursorRectangle::from(area);
+                set_ime_cursor_rectangle(&text_input, area);
+                cursor_rectangle = Some(area);
             }
             state = client.borrow_mut();
         }
         text_input.commit();
+        state.last_ime_cursor_rectangle = cursor_rectangle;
         state.text_input = Some(text_input);
     }
 
@@ -402,19 +580,14 @@ impl WaylandClientStatePtr {
 
     pub fn update_ime_position(&self, bounds: Bounds<Pixels>) {
         let client = self.get_client();
-        let state = client.borrow_mut();
-        if state.text_input.is_none() || state.pre_edit_text.is_some() {
+        let mut state = client.borrow_mut();
+        if state.pre_edit_text.is_some() {
             return;
         }
-
-        let text_input = state.text_input.as_ref().unwrap();
-        text_input.set_cursor_rectangle(
-            bounds.origin.x.as_f32() as i32,
-            bounds.origin.y.as_f32() as i32,
-            bounds.size.width.as_f32() as i32,
-            bounds.size.height.as_f32() as i32,
-        );
-        text_input.commit();
+        let Some(text_input) = state.text_input.clone() else {
+            return;
+        };
+        update_ime_cursor_rectangle(&text_input, &mut state.last_ime_cursor_rectangle, bounds);
     }
 
     pub fn handle_keyboard_layout_change(&self) {
@@ -625,13 +798,13 @@ impl WaylandClient {
                 let handle = handle.clone();
                 move |event, _, _: &mut WaylandClientStatePtr| {
                     if let calloop::channel::Event::Msg(runnable) = event {
-                        handle.insert_idle(|client| {
+                        handle.insert_idle(|_| {
                             let location = runnable.metadata().location;
                             let spawned = runnable.metadata().spawned;
+                            let _diagnostic = MainTaskWatchdog::begin(location);
                             profiler::update_running_task(spawned, location);
                             runnable.run();
                             profiler::save_task_timing();
-                            client.request_frames();
                         });
                     }
                 }
@@ -732,6 +905,7 @@ impl WaylandClient {
             pre_edit_text: None,
             ime_pre_edit: None,
             composing: false,
+            last_ime_cursor_rectangle: None,
             outputs: HashMap::default(),
             in_progress_outputs,
             wl_outputs,
@@ -1015,13 +1189,17 @@ impl LinuxClient for WaylandClient {
             .take()
             .expect("App is already running");
 
-        event_loop
-            .run(
-                None,
-                &mut WaylandClientStatePtr(Rc::downgrade(&self.0)),
-                |_| {},
-            )
-            .log_err();
+        if let Err(error) = event_loop.run(
+            None,
+            &mut WaylandClientStatePtr(Rc::downgrade(&self.0)),
+            |_| {},
+        ) {
+            eprintln!("Zetta diagnostic: Wayland event loop terminated: {error}; debug={error:?}");
+            eprintln!(
+                "Zetta diagnostic: Wayland main task at termination: {}",
+                MainTaskWatchdog::active_summary(),
+            );
+        }
     }
 
     fn write_to_primary(&self, item: gpui::ClipboardItem) {
@@ -1841,15 +2019,13 @@ impl Dispatch<zwp_text_input_v3::ZwpTextInputV3, ()> for WaylandClientStatePtr {
                     drop(state);
                     window.handle_ime(ImeInput::SetMarkedText(text));
                     if let Some(area) = window.get_ime_area() {
-                        text_input.set_cursor_rectangle(
-                            f32::from(area.origin.x) as i32,
-                            f32::from(area.origin.y) as i32,
-                            f32::from(area.size.width) as i32,
-                            f32::from(area.size.height) as i32,
+                        let mut state = client.borrow_mut();
+                        set_ime_cursor_rectangle_after_done(
+                            text_input,
+                            &mut state.last_ime_cursor_rectangle,
+                            area,
+                            last_serial == serial,
                         );
-                        if last_serial == serial {
-                            text_input.commit();
-                        }
                     }
                 } else {
                     state.composing = false;
@@ -2680,5 +2856,95 @@ impl Dispatch<XdgDialogV1, ()> for WaylandClientStatePtr {
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::*;
+
+    #[derive(Default)]
+    struct FakeImeCursorRectangleSink {
+        cursor_rectangles: RefCell<Vec<(i32, i32, i32, i32)>>,
+        commit_count: Cell<usize>,
+    }
+
+    impl ImeCursorRectangleSink for FakeImeCursorRectangleSink {
+        fn set_ime_cursor_rectangle(&self, x: i32, y: i32, width: i32, height: i32) {
+            self.cursor_rectangles
+                .borrow_mut()
+                .push((x, y, width, height));
+        }
+
+        fn commit_ime_state(&self) {
+            self.commit_count.set(self.commit_count.get() + 1);
+        }
+    }
+
+    fn ime_cursor_bounds(x: f32) -> Bounds<Pixels> {
+        Bounds::new(point(px(x), px(20.25)), size(px(1.0), px(18.75)))
+    }
+
+    #[test]
+    fn caches_cursor_rectangle_committed_after_done() {
+        let text_input = FakeImeCursorRectangleSink::default();
+        let mut last_ime_cursor_rectangle = None;
+        let initial_bounds = ime_cursor_bounds(10.0);
+        let updated_bounds = ime_cursor_bounds(20.0);
+
+        update_ime_cursor_rectangle(&text_input, &mut last_ime_cursor_rectangle, initial_bounds);
+        set_ime_cursor_rectangle_after_done(
+            &text_input,
+            &mut last_ime_cursor_rectangle,
+            updated_bounds,
+            true,
+        );
+        update_ime_cursor_rectangle(&text_input, &mut last_ime_cursor_rectangle, updated_bounds);
+
+        assert_eq!(text_input.commit_count.get(), 2);
+        assert_eq!(text_input.cursor_rectangles.borrow().len(), 2);
+    }
+
+    #[test]
+    fn skips_unchanged_cursor_rectangle_after_done() {
+        let text_input = FakeImeCursorRectangleSink::default();
+        let mut last_ime_cursor_rectangle = None;
+        let bounds = ime_cursor_bounds(10.0);
+
+        update_ime_cursor_rectangle(&text_input, &mut last_ime_cursor_rectangle, bounds);
+        set_ime_cursor_rectangle_after_done(
+            &text_input,
+            &mut last_ime_cursor_rectangle,
+            bounds,
+            true,
+        );
+
+        assert_eq!(text_input.commit_count.get(), 1);
+        assert_eq!(text_input.cursor_rectangles.borrow().len(), 1);
+    }
+
+    #[test]
+    fn skips_cursor_rectangles_with_unchanged_protocol_coordinates() {
+        let text_input = FakeImeCursorRectangleSink::default();
+        let mut last_ime_cursor_rectangle = None;
+
+        update_ime_cursor_rectangle(
+            &text_input,
+            &mut last_ime_cursor_rectangle,
+            ime_cursor_bounds(10.25),
+        );
+        update_ime_cursor_rectangle(
+            &text_input,
+            &mut last_ime_cursor_rectangle,
+            ime_cursor_bounds(10.75),
+        );
+
+        assert_eq!(text_input.commit_count.get(), 1);
+        assert_eq!(
+            text_input.cursor_rectangles.borrow().as_slice(),
+            &[(10, 20, 1, 18)]
+        );
     }
 }

@@ -235,12 +235,20 @@ impl Zetta {
         match event.keystroke.key.as_str() {
             "enter" => {
                 let title = buffer.trim().to_string();
-                tab.custom_title = (!title.is_empty()).then_some(title);
+                let title = (!title.is_empty()).then_some(title);
+                if let Some(pane_id) = tab.renaming_pane.take() {
+                    if let Some(pane) = tab.pane_mut(pane_id) {
+                        pane.custom_label = title;
+                    }
+                } else {
+                    tab.custom_title = title;
+                }
                 tab.rename_buffer = None;
                 tab.rename_select_all = false;
                 self.focus_active(window, cx);
             }
             "escape" => {
+                tab.renaming_pane = None;
                 tab.rename_buffer = None;
                 tab.rename_select_all = false;
                 self.focus_active(window, cx);

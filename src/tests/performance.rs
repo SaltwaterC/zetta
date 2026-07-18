@@ -35,7 +35,7 @@ fn performance_report_is_portable_json() {
             .unwrap()
             .as_nanos()
     ));
-    let mut overlay = PerformanceOverlay::new(WindowId::from(7), 1);
+    let mut overlay = PerformanceOverlay::new(WindowId::from(7), 1, 64, 63);
     overlay.begin_report();
     overlay.sample();
     overlay
@@ -52,6 +52,8 @@ fn performance_report_is_portable_json() {
     assert_eq!(report["target"]["architecture"], std::env::consts::ARCH);
     assert_eq!(report["workload"]["producer_hz"], 240);
     assert_eq!(report["workload"]["rows"], 34);
+    assert_eq!(report["workload"]["pane_count"], 64);
+    assert_eq!(report["workload"]["minimized_pane_count"], 63);
     assert_eq!(report["summary"]["frame_count"], 0);
     assert!(report["samples"].is_array());
     assert_eq!(report["samples"].as_array().unwrap().len(), 1);

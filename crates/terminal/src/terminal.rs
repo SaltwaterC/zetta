@@ -43,8 +43,8 @@ use std::{
     path::{Path, PathBuf},
     process::ExitStatus,
     sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
+        Arc, Once,
+        atomic::{AtomicU8, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -882,14 +882,89 @@ impl Display for TerminalError {
 // Alacritty's grid stores line coordinates as i32 and grows history lazily.
 const DEFAULT_SCROLL_HISTORY_LINES: usize = i32::MAX as usize;
 pub const MAX_SCROLL_HISTORY_LINES: usize = i32::MAX as usize;
-// Terminal applications can emit multiple wakeups per display frame. Keep the
-// first update after a quiet period immediate, then coalesce sustained output
-// to a 60 Hz cadence to avoid redundant full-window GPU submissions.
-const TERMINAL_EVENT_BATCH_INTERVAL: Duration = Duration::from_nanos(16_666_667);
+// Preserve upstream's immediate-first-event behavior and short bounded drains. Deferring the
+// first event to a display-frame cadence couples PTY progress to rendering and can make a busy
+// terminal monopolize the foreground executor.
+const TERMINAL_EVENT_DRAIN_INTERVAL: Duration = Duration::from_millis(4);
+const MAX_TERMINAL_EVENTS_PER_BATCH: usize = 100;
+const TERMINAL_SYNC_STALL_THRESHOLD: Duration = Duration::from_secs(2);
+const TERMINAL_SYNC_IDLE: u8 = 0;
+const TERMINAL_SYNC_WAITING_FOR_GRID: u8 = 1;
+const TERMINAL_SYNC_BUILDING_CONTENT: u8 = 2;
+static TERMINAL_SYNC_WATCHDOG: Once = Once::new();
+static TERMINAL_SYNC_STARTED_AT: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+static TERMINAL_SYNC_STARTED_MS: AtomicU64 = AtomicU64::new(0);
+static TERMINAL_SYNC_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static TERMINAL_SYNC_PHASE: AtomicU8 = AtomicU8::new(TERMINAL_SYNC_IDLE);
 static NEXT_INIT_COMMAND_STARTUP_MARKER_ID: AtomicU64 = AtomicU64::new(1);
 
-fn terminal_event_batch_delay(last_update: Instant, now: Instant) -> Duration {
-    TERMINAL_EVENT_BATCH_INTERVAL.saturating_sub(now.saturating_duration_since(last_update))
+fn terminal_diagnostic_millis() -> u64 {
+    TERMINAL_SYNC_STARTED_AT
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_millis()
+        .min(u128::from(u64::MAX - 1)) as u64
+        + 1
+}
+
+fn terminal_sync_phase_name(phase: u8) -> &'static str {
+    match phase {
+        TERMINAL_SYNC_WAITING_FOR_GRID => "waiting for the terminal grid lock",
+        TERMINAL_SYNC_BUILDING_CONTENT => "building the renderable terminal snapshot",
+        _ => "idle",
+    }
+}
+
+fn start_terminal_sync_watchdog() {
+    TERMINAL_SYNC_WATCHDOG.call_once(|| {
+        let _ = std::thread::Builder::new()
+            .name("terminal-watchdog".to_owned())
+            .spawn(|| {
+                let mut reported_sequence = 0;
+                loop {
+                    std::thread::sleep(Duration::from_millis(500));
+                    let phase = TERMINAL_SYNC_PHASE.load(Ordering::Acquire);
+                    if phase == TERMINAL_SYNC_IDLE {
+                        continue;
+                    }
+                    let sequence = TERMINAL_SYNC_SEQUENCE.load(Ordering::Acquire);
+                    if sequence == reported_sequence {
+                        continue;
+                    }
+                    let started_ms = TERMINAL_SYNC_STARTED_MS.load(Ordering::Acquire);
+                    let elapsed_ms = terminal_diagnostic_millis().saturating_sub(started_ms);
+                    if elapsed_ms >= TERMINAL_SYNC_STALL_THRESHOLD.as_millis() as u64 {
+                        eprintln!(
+                            "Zetta diagnostic: terminal sync stalled for {elapsed_ms} ms while {} (sequence {sequence})",
+                            terminal_sync_phase_name(phase),
+                        );
+                        reported_sequence = sequence;
+                    }
+                }
+            });
+    });
+}
+
+struct TerminalSyncDiagnostic;
+
+impl TerminalSyncDiagnostic {
+    fn begin() -> Self {
+        start_terminal_sync_watchdog();
+        TERMINAL_SYNC_SEQUENCE.fetch_add(1, Ordering::AcqRel);
+        TERMINAL_SYNC_STARTED_MS.store(terminal_diagnostic_millis(), Ordering::Release);
+        TERMINAL_SYNC_PHASE.store(TERMINAL_SYNC_WAITING_FOR_GRID, Ordering::Release);
+        Self
+    }
+
+    fn acquired_grid(&self) {
+        TERMINAL_SYNC_PHASE.store(TERMINAL_SYNC_BUILDING_CONTENT, Ordering::Release);
+    }
+}
+
+impl Drop for TerminalSyncDiagnostic {
+    fn drop(&mut self) {
+        TERMINAL_SYNC_PHASE.store(TERMINAL_SYNC_IDLE, Ordering::Release);
+    }
 }
 
 const INIT_COMMAND_STARTUP_MARKER_PREFIX: &str = "__zed_init_command_ready_";
@@ -1341,24 +1416,21 @@ impl TerminalBuilder {
     pub fn subscribe(mut self, cx: &Context<Terminal>) -> Terminal {
         //Event loop
         self.terminal.event_loop_task = cx.spawn(async move |terminal, cx| {
-            let mut last_update = Instant::now()
-                .checked_sub(TERMINAL_EVENT_BATCH_INTERVAL)
-                .unwrap_or_else(Instant::now);
             while let Some(event) = self.events_rx.next().await {
-                let mut events = Vec::new();
-                let mut wakeup = false;
-                if matches!(event, PtyEvent::Event(TerminalBackendEvent::Wakeup)) {
-                    wakeup = true;
-                } else {
-                    events.push(event);
-                }
+                terminal.update(cx, |terminal, cx| {
+                    terminal.process_pty_event(event, cx);
+                })?;
 
-                let batch_delay = terminal_event_batch_delay(last_update, Instant::now());
-                if !batch_delay.is_zero() {
+                'drain: loop {
+                    let mut events = Vec::new();
+                    let mut wakeup = false;
                     #[cfg(any(test, feature = "test-support"))]
                     let mut timer = cx.background_executor().simulate_random_delay().fuse();
                     #[cfg(not(any(test, feature = "test-support")))]
-                    let mut timer = cx.background_executor().timer(batch_delay).fuse();
+                    let mut timer = cx
+                        .background_executor()
+                        .timer(TERMINAL_EVENT_DRAIN_INTERVAL)
+                        .fuse();
 
                     loop {
                         futures::select_biased! {
@@ -1372,7 +1444,7 @@ impl TerminalBuilder {
                                         events.push(event);
                                     }
 
-                                    if events.len() > 100 {
+                                    if events.len() >= MAX_TERMINAL_EVENTS_PER_BATCH {
                                         break;
                                     }
                                 } else {
@@ -1381,24 +1453,23 @@ impl TerminalBuilder {
                             },
                         }
                     }
-                }
 
-                if events.is_empty() && !wakeup {
+                    if events.is_empty() && !wakeup {
+                        yield_now().await;
+                        break 'drain;
+                    }
+
+                    terminal.update(cx, |this, cx| {
+                        if wakeup {
+                            this.process_event(TerminalBackendEvent::Wakeup, cx);
+                        }
+
+                        for event in events {
+                            this.process_pty_event(event, cx);
+                        }
+                    })?;
                     yield_now().await;
-                    continue;
                 }
-
-                terminal.update(cx, |this, cx| {
-                    if wakeup {
-                        this.process_event(TerminalBackendEvent::Wakeup, cx);
-                    }
-
-                    for event in events {
-                        this.process_pty_event(event, cx);
-                    }
-                })?;
-                last_update = Instant::now();
-                yield_now().await;
             }
             anyhow::Ok(())
         });
@@ -2323,8 +2394,10 @@ impl Terminal {
     }
 
     pub fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let diagnostic = TerminalSyncDiagnostic::begin();
         let term = self.term.clone();
         let mut terminal = term.lock_unfair();
+        diagnostic.acquired_grid();
         //Note that the ordering of events matters for event processing
         while let Some(e) = self.events.pop_front() {
             self.process_terminal_event(&e, &mut terminal, window, cx)
@@ -3398,31 +3471,16 @@ mod tests {
     use task::{Shell, ShellBuilder};
 
     #[test]
-    fn terminal_event_batching_is_immediate_after_quiet_period() {
-        let last_update = Instant::now();
-
+    fn terminal_sync_diagnostics_name_the_blocking_phase() {
         assert_eq!(
-            terminal_event_batch_delay(last_update, last_update + TERMINAL_EVENT_BATCH_INTERVAL),
-            Duration::ZERO
+            terminal_sync_phase_name(TERMINAL_SYNC_WAITING_FOR_GRID),
+            "waiting for the terminal grid lock"
         );
         assert_eq!(
-            terminal_event_batch_delay(
-                last_update,
-                last_update + TERMINAL_EVENT_BATCH_INTERVAL + Duration::from_millis(1)
-            ),
-            Duration::ZERO
+            terminal_sync_phase_name(TERMINAL_SYNC_BUILDING_CONTENT),
+            "building the renderable terminal snapshot"
         );
-    }
-
-    #[test]
-    fn terminal_event_batching_caps_sustained_updates() {
-        let last_update = Instant::now();
-        let elapsed = Duration::from_millis(5);
-
-        assert_eq!(
-            terminal_event_batch_delay(last_update, last_update + elapsed),
-            TERMINAL_EVENT_BATCH_INTERVAL - elapsed
-        );
+        assert_eq!(terminal_sync_phase_name(TERMINAL_SYNC_IDLE), "idle");
     }
 
     #[test]

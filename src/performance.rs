@@ -91,6 +91,8 @@ struct PerformanceReportTarget {
 struct PerformanceReportWorkload {
     producer_hz: u16,
     rows: u8,
+    pane_count: usize,
+    minimized_pane_count: usize,
 }
 
 #[derive(Serialize)]
@@ -121,10 +123,17 @@ pub(crate) struct PerformanceOverlay {
     pub(crate) metrics: PerformanceMetrics,
     pub(crate) generation: u64,
     report: Option<PerformanceReportCapture>,
+    pane_count: usize,
+    minimized_pane_count: usize,
 }
 
 impl PerformanceOverlay {
-    pub(crate) fn new(window_id: WindowId, generation: u64) -> Self {
+    pub(crate) fn new(
+        window_id: WindowId,
+        generation: u64,
+        pane_count: usize,
+        minimized_pane_count: usize,
+    ) -> Self {
         Self {
             collector: FrameTimingCollector::new(),
             window_id,
@@ -132,6 +141,8 @@ impl PerformanceOverlay {
             metrics: PerformanceMetrics::default(),
             generation,
             report: None,
+            pane_count,
+            minimized_pane_count,
         }
     }
 
@@ -198,6 +209,8 @@ impl PerformanceOverlay {
             workload: PerformanceReportWorkload {
                 producer_hz: 240,
                 rows: 34,
+                pane_count: self.pane_count,
+                minimized_pane_count: self.minimized_pane_count,
             },
             started_unix_ms: capture.started_unix_ms,
             requested_duration_ms: duration_millis(requested_duration),
