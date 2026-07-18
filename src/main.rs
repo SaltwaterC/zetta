@@ -24,8 +24,8 @@ use anyhow::{Context as _, Result};
 use command_palette::{CommandPalette, PaletteCommand, humanize_action_name};
 use config::{Config, Profile};
 use gpui::{
-    Action, Anchor, App, AppContext as _, Bounds, Context, CursorStyle, Decorations, Entity,
-    Focusable, FrameTiming, FrameTimingCollector, HitboxBehavior, InteractiveElement as _,
+    Action, Anchor, AnyElement, App, AppContext as _, Bounds, Context, CursorStyle, Decorations,
+    Entity, Focusable, FrameTiming, FrameTimingCollector, HitboxBehavior, InteractiveElement as _,
     IntoElement, KeyBinding, KeyDownEvent, MAX_BUTTONS_PER_SIDE, MouseButton, Pixels, Point,
     Render, ResizeEdge, ScrollHandle, SharedString, Size, Subscription, Tiling, TitlebarOptions,
     Window, WindowBackgroundAppearance, WindowBounds, WindowButton, WindowButtonLayout,
@@ -4329,28 +4329,40 @@ impl Render for Zetta {
             .is_some_and(|tab| tab.broadcast_input);
         let supported_controls = window.window_controls();
         let is_maximized = window.is_maximized();
+        let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
         let left_window_controls = render_window_controls(
             self.button_layout.left,
             supported_controls,
             is_maximized,
             false,
+            client_decorations,
+            cx,
         );
         let right_window_controls = render_window_controls(
             self.button_layout.right,
             supported_controls,
             is_maximized,
             true,
+            client_decorations,
+            cx,
         );
+        let title_bar_background = if cfg!(any(target_os = "linux", target_os = "freebsd"))
+            && !window.is_window_active()
+        {
+            colors.title_bar_inactive_background
+        } else {
+            colors.title_bar_background
+        };
         let title_bar = div()
             .id("zetta-title-bar")
             .window_control_area(WindowControlArea::Drag)
             .relative()
-            .h_8()
+            .h(platform_title_bar_height(window))
             .w_full()
             .flex_none()
             .flex()
             .items_center()
-            .bg(colors.title_bar_background)
+            .bg(title_bar_background)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
@@ -5121,78 +5133,192 @@ fn parse_gsettings_button_layout(output: &str) -> Option<WindowButtonLayout> {
     WindowButtonLayout::parse(layout).ok()
 }
 
+fn platform_title_bar_height(window: &Window) -> Pixels {
+    if cfg!(target_os = "windows") {
+        px(32.)
+    } else {
+        (1.75 * window.rem_size()).max(px(34.))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn render_window_controls(
+    buttons: [Option<WindowButton>; MAX_BUTTONS_PER_SIDE],
+    _supported_controls: WindowControls,
+    is_maximized: bool,
+    right_aligned: bool,
+    _client_decorations: bool,
+    cx: &App,
+) -> AnyElement {
+    if !right_aligned || buttons.iter().all(Option::is_none) {
+        return div().into_any_element();
+    }
+
+    let colors = cx.theme().colors();
+    let caption_button = |id, glyph, area, close: bool| {
+        let hover_background = if close {
+            gpui::rgba(0xe81120ff).into()
+        } else {
+            colors.ghost_element_hover
+        };
+        let active_background = if close {
+            gpui::rgba(0xe81120cc).into()
+        } else {
+            colors.ghost_element_active
+        };
+
+        h_flex()
+            .id(id)
+            .h_full()
+            .w(px(36.))
+            .flex_none()
+            .justify_center()
+            .content_center()
+            .occlude()
+            .text_size(px(10.))
+            .text_color(colors.text)
+            .hover(move |style| {
+                if close {
+                    style.bg(hover_background).text_color(gpui::white())
+                } else {
+                    style.bg(hover_background)
+                }
+            })
+            .active(move |style| {
+                if close {
+                    style
+                        .bg(active_background)
+                        .text_color(gpui::white().opacity(0.8))
+                } else {
+                    style.bg(active_background)
+                }
+            })
+            .window_control_area(area)
+            .child(glyph)
+            .into_any_element()
+    };
+
+    h_flex()
+        .id("windows-window-controls")
+        .h_full()
+        .ml_auto()
+        .flex_none()
+        .font_family("Segoe Fluent Icons")
+        .child(caption_button(
+            "minimize",
+            "\u{e921}",
+            WindowControlArea::Min,
+            false,
+        ))
+        .child(caption_button(
+            if is_maximized { "restore" } else { "maximize" },
+            if is_maximized { "\u{e923}" } else { "\u{e922}" },
+            WindowControlArea::Max,
+            false,
+        ))
+        .child(caption_button(
+            "close",
+            "\u{e8bb}",
+            WindowControlArea::Close,
+            true,
+        ))
+        .into_any_element()
+}
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn render_window_controls(
     buttons: [Option<WindowButton>; MAX_BUTTONS_PER_SIDE],
     supported_controls: WindowControls,
     is_maximized: bool,
     right_aligned: bool,
-) -> impl IntoElement {
+    client_decorations: bool,
+    cx: &App,
+) -> AnyElement {
+    if !client_decorations {
+        return div().into_any_element();
+    }
+
+    let colors = cx.theme().colors();
+    let controls = buttons.into_iter().flatten().filter_map(|button| {
+        let (icon, area, enabled) = match button {
+            WindowButton::Minimize => (
+                IconName::GenericMinimize,
+                WindowControlArea::Min,
+                supported_controls.minimize,
+            ),
+            WindowButton::Maximize => (
+                if is_maximized {
+                    IconName::GenericRestore
+                } else {
+                    IconName::GenericMaximize
+                },
+                WindowControlArea::Max,
+                supported_controls.maximize,
+            ),
+            WindowButton::Close => (IconName::GenericClose, WindowControlArea::Close, true),
+        };
+        enabled.then(|| {
+            let action_button = button;
+            h_flex()
+                .id(button.id())
+                .group("")
+                .h_5()
+                .w_5()
+                .flex_none()
+                .cursor_pointer()
+                .justify_center()
+                .content_center()
+                .rounded_2xl()
+                .hover(move |style| style.bg(colors.ghost_element_hover))
+                .active(move |style| style.bg(colors.ghost_element_hover))
+                .window_control_area(area)
+                .child(
+                    svg()
+                        .size_4()
+                        .flex_none()
+                        .path(icon.path())
+                        .text_color(colors.icon)
+                        .group_hover("", move |style| style.text_color(colors.icon_muted)),
+                )
+                .on_mouse_move(|_, _, cx| cx.stop_propagation())
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    match action_button {
+                        WindowButton::Minimize => window.minimize_window(),
+                        WindowButton::Maximize => window.zoom_window(),
+                        WindowButton::Close => window.remove_window(),
+                    }
+                })
+                .into_any_element()
+        })
+    });
+
     h_flex()
+        .id(if right_aligned {
+            "right-window-controls"
+        } else {
+            "left-window-controls"
+        })
         .h_full()
         .flex_none()
+        .gap_3()
+        .px_3()
         .when(right_aligned, |controls| controls.ml_auto())
-        .children(buttons.into_iter().flatten().filter_map(|button| {
-            match button {
-                WindowButton::Minimize if supported_controls.minimize => Some(
-                    div()
-                        .window_control_area(WindowControlArea::Min)
-                        .child(
-                            IconButton::new(button.id(), IconName::GenericMinimize)
-                                .shape(IconButtonShape::Square)
-                                .size(ButtonSize::Large)
-                                .icon_size(IconSize::Small)
-                                .aria_label("Minimize window")
-                                .tooltip(Tooltip::text("Minimize"))
-                                .on_click(|_, window, _| window.minimize_window()),
-                        )
-                        .into_any_element(),
-                ),
-                WindowButton::Maximize if supported_controls.maximize => Some(
-                    div()
-                        .window_control_area(WindowControlArea::Max)
-                        .child(
-                            IconButton::new(
-                                button.id(),
-                                if is_maximized {
-                                    IconName::GenericRestore
-                                } else {
-                                    IconName::GenericMaximize
-                                },
-                            )
-                            .shape(IconButtonShape::Square)
-                            .size(ButtonSize::Large)
-                            .icon_size(IconSize::Small)
-                            .aria_label(if is_maximized {
-                                "Restore window"
-                            } else {
-                                "Maximize window"
-                            })
-                            .tooltip(Tooltip::text(if is_maximized {
-                                "Restore"
-                            } else {
-                                "Maximize"
-                            }))
-                            .on_click(|_, window, _| window.zoom_window()),
-                        )
-                        .into_any_element(),
-                ),
-                WindowButton::Close => Some(
-                    div()
-                        .window_control_area(WindowControlArea::Close)
-                        .child(
-                            IconButton::new(button.id(), IconName::GenericClose)
-                                .shape(IconButtonShape::Square)
-                                .size(ButtonSize::Large)
-                                .icon_size(IconSize::Small)
-                                .aria_label("Close window")
-                                .tooltip(Tooltip::text("Close"))
-                                .on_click(|_, window, _| window.remove_window()),
-                        )
-                        .into_any_element(),
-                ),
-                _ => None,
-            }
-        }))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .children(controls)
+        .into_any_element()
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "freebsd")))]
+fn render_window_controls(
+    _buttons: [Option<WindowButton>; MAX_BUTTONS_PER_SIDE],
+    _supported_controls: WindowControls,
+    _is_maximized: bool,
+    _right_aligned: bool,
+    _client_decorations: bool,
+    _cx: &App,
+) -> AnyElement {
+    div().into_any_element()
 }
 
 fn client_window_frame(
