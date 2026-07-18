@@ -32,6 +32,7 @@
       "ctrl-shift-s": "zetta::SavePaneOutput",
       "ctrl-shift-p": "zetta::ToggleCommandPalette",
       "ctrl-,": "zetta::ToggleSettings",
+      "ctrl-shift-u": "zetta::ToggleSerialConsole",
       "ctrl-alt-r": "zetta::RenameTab",
       "ctrl-alt-l": "zetta::RenamePane",
       "ctrl-=": "zetta::IncreaseTerminalFontSize",

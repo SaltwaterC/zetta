@@ -105,6 +105,9 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.serial_console_key_down(event, window, cx) {
+            return;
+        }
         if self.settings_editor.is_some() {
             self.settings_key_down(event, window, cx);
             return;

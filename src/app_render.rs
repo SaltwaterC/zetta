@@ -994,6 +994,7 @@ impl Render for Zetta {
         });
 
         let settings_overlay = self.render_settings_overlay(window, cx);
+        let serial_console_overlay = self.render_serial_console_overlay(cx);
 
         let content = div()
             .key_context("Zetta")
@@ -1035,6 +1036,7 @@ impl Render for Zetta {
             .on_action(cx.listener(Self::reload_configuration))
             .on_action(cx.listener(Self::toggle_command_palette))
             .on_action(cx.listener(Self::toggle_settings))
+            .on_action(cx.listener(Self::toggle_serial_console))
             .on_action(cx.listener(Self::toggle_performance_overlay))
             .when(self.is_renaming(), |content| {
                 content.track_focus(&self.rename_focus)
@@ -1156,6 +1158,9 @@ impl Render for Zetta {
             });
         let content =
             content.when_some(settings_overlay, |content, overlay| content.child(overlay));
+        let content = content.when_some(serial_console_overlay, |content, overlay| {
+            content.child(overlay)
+        });
 
         client_window_frame(content, window, cx)
     }
