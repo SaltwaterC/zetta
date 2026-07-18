@@ -87,6 +87,7 @@ actions!(
         IncreasePaneFontSize,
         DecreasePaneFontSize,
         ResetPaneFontSize,
+        SavePaneOutput,
         SearchTabScrollback,
         ReloadConfiguration,
         ToggleCommandPalette,

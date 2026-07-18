@@ -116,6 +116,19 @@ fn terminal_spawn_notifications_are_coalesced() {
 }
 
 #[test]
+fn pane_output_save_guard_blocks_until_the_active_save_finishes() {
+    let mut in_progress = false;
+
+    assert!(begin_pane_output_save(&mut in_progress));
+    assert!(in_progress);
+    assert!(!begin_pane_output_save(&mut in_progress));
+
+    finish_pane_output_save(&mut in_progress);
+    assert!(!in_progress);
+    assert!(begin_pane_output_save(&mut in_progress));
+}
+
+#[test]
 fn bounded_launch_queue_applies_backpressure_and_preserves_order() {
     let mut queue = BoundedLaunchQueue::new(2);
     queue.extend([1, 2, 3, 4]);

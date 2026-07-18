@@ -798,6 +798,7 @@ impl Render for Zetta {
             .on_action(cx.listener(Self::increase_pane_font_size))
             .on_action(cx.listener(Self::decrease_pane_font_size))
             .on_action(cx.listener(Self::reset_pane_font_size))
+            .on_action(cx.listener(Self::save_pane_output))
             .on_action(cx.listener(Self::search_tab_scrollback))
             .on_action(cx.listener(Self::reload_configuration))
             .on_action(cx.listener(Self::toggle_command_palette))
@@ -898,6 +899,15 @@ impl Render for Zetta {
                                         window.dispatch_action(Box::new(ReloadConfiguration), cx)
                                     }),
                             ),
+                    ),
+                )
+            })
+            .when_some(self.pane_output_error.clone(), |content, error| {
+                content.child(
+                    div().px_2().py_1().child(
+                        Banner::new()
+                            .severity(Severity::Error)
+                            .child(Label::new(error).size(LabelSize::Small).line_clamp(3)),
                     ),
                 )
             })

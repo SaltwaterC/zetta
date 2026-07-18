@@ -3,6 +3,8 @@ use super::*;
 pub(crate) struct Zetta {
     pub(crate) launch_config: Config,
     pub(crate) configuration_error: Option<String>,
+    pub(crate) pane_output_error: Option<String>,
+    pub(crate) pane_output_save_in_progress: bool,
     pub(crate) tabs: Vec<Tab>,
     pub(crate) active_tab: usize,
     pub(crate) selected_profile: usize,
@@ -40,6 +42,8 @@ impl Zetta {
         let mut this = Self {
             launch_config: config.clone(),
             configuration_error,
+            pane_output_error: None,
+            pane_output_save_in_progress: false,
             tabs: Vec::new(),
             active_tab: 0,
             selected_profile: config.default_profile,
@@ -482,6 +486,65 @@ impl Zetta {
 
     pub(crate) fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
         self.close_tab_at(self.active_tab, window, cx);
+    }
+
+    pub(crate) fn save_pane_output(
+        &mut self,
+        _: &SavePaneOutput,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pane) = self.tabs.get(self.active_tab).and_then(Tab::active_pane) else {
+            return;
+        };
+        let Some(view) = pane.view.as_ref() else {
+            return;
+        };
+        let view = view.clone();
+        let is_wsl = is_wsl_shell(&pane.profile.command);
+        if !begin_pane_output_save(&mut self.pane_output_save_in_progress) {
+            return;
+        }
+
+        let terminal = view.read(cx).terminal().clone();
+        let output = terminal.read(cx).get_content_async();
+        let directory = (!is_wsl)
+            .then(|| terminal.read(cx).working_directory())
+            .flatten()
+            .or_else(|| env::current_dir().ok())
+            .unwrap_or_default();
+
+        self.pane_output_error = None;
+        let path = cx.prompt_for_new_path(&directory, Some(PANE_OUTPUT_DEFAULT_FILENAME));
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            let result: Result<()> = async {
+                let output = output.await;
+                let path = path
+                    .await
+                    .context("the save dialog closed unexpectedly")?
+                    .context("opening the save dialog")?;
+                let Some(path) = path else {
+                    return Ok(());
+                };
+                executor
+                    .spawn(async move {
+                        fs::write(&path, output)
+                            .with_context(|| format!("writing pane output to {}", path.display()))
+                    })
+                    .await
+            }
+            .await;
+            this.update(cx, |this, cx| {
+                finish_pane_output_save(&mut this.pane_output_save_in_progress);
+                this.pane_output_error = result
+                    .err()
+                    .map(|error| format!("Could not save pane output: {error:#}"));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(crate) fn split_horizontal(

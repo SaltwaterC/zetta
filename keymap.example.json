@@ -24,6 +24,7 @@
       "ctrl-shift-f": "terminal_view::SearchScrollback",
       "ctrl-alt-f": "zetta::SearchTabScrollback",
       "ctrl-alt-v": "terminal::PasteTrimmed",
+      "ctrl-shift-s": "zetta::SavePaneOutput",
       "ctrl-shift-p": "zetta::ToggleCommandPalette",
       "ctrl-,": "zetta::ToggleSettings",
       "ctrl-alt-r": "zetta::RenameTab",
