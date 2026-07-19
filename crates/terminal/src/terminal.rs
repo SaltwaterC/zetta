@@ -1320,7 +1320,7 @@ impl TerminalBuilder {
                 }
             }
 
-            let mut shell_params = match shell.clone() {
+            let shell_params = match shell.clone() {
                 Shell::System => {
                     if cfg!(windows) {
                         Some(ShellParams::new(
@@ -1339,6 +1339,8 @@ impl TerminalBuilder {
                     title_override,
                 } => Some(ShellParams::new(program, Some(args), title_override)),
             };
+            #[cfg(windows)]
+            let mut shell_params = shell_params;
             #[cfg(windows)]
             if let Some(shell_params) = shell_params.as_mut() {
                 install_windows_cwd_tracking(
