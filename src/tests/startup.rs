@@ -42,6 +42,7 @@ fn terminal_rendering_profiler_arguments_are_cross_platform() {
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,
+            tftp_command: None,
         }
     );
     assert_eq!(
@@ -53,6 +54,7 @@ fn terminal_rendering_profiler_arguments_are_cross_platform() {
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,
+            tftp_command: None,
         }
     );
 }
@@ -94,6 +96,30 @@ fn shorthand_options_match_long_options() {
     ])
     .unwrap();
     assert_eq!(shorthand, longhand);
+}
+
+#[test]
+fn tftp_subcommand_is_parsed_without_starting_the_application() {
+    let args = parse_args_from([
+        OsString::from("tftp"),
+        OsString::from("get"),
+        OsString::from("--port"),
+        OsString::from("1069"),
+        OsString::from("localhost"),
+        OsString::from("boot.bin"),
+        OsString::from("download.bin"),
+    ])
+    .unwrap();
+
+    assert_eq!(
+        args.tftp_command,
+        Some(TftpCommand::Get {
+            host: "localhost".to_owned(),
+            remote: "boot.bin".to_owned(),
+            local: PathBuf::from("download.bin"),
+            port: 1069,
+        })
+    );
 }
 
 #[test]

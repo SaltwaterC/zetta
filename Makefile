@@ -1,6 +1,7 @@
 CARGO ?= cargo
 ENV ?= env
 INSTALL ?= install
+SETCAP ?= setcap
 PREFIX ?= /usr
 DESTDIR ?=
 
@@ -13,8 +14,8 @@ APPLICATIONS_DIR := $(DATADIR)/applications
 ICON_128_DIR := $(DATADIR)/icons/hicolor/128x128/apps
 ICON_512_DIR := $(DATADIR)/icons/hicolor/512x512/apps
 
-.PHONY: build install install-binary install-assets uninstall uninstall-binary \
-	uninstall-assets refresh-desktop-caches
+.PHONY: build install install-binary install-capabilities install-assets uninstall \
+	uninstall-binary uninstall-assets refresh-desktop-caches
 
 ifeq ($(OS),Windows_NT)
 build:
@@ -25,6 +26,8 @@ install: build
 
 install-binary:
 	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Action InstallBinary
+
+install-capabilities:
 
 install-assets:
 	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Action InstallShortcut
@@ -53,10 +56,33 @@ install:
 		$(MAKE) build; \
 	fi
 	$(MAKE) install-binary
+	$(MAKE) install-capabilities
 	$(MAKE) install-assets
 
 install-binary:
 	$(INSTALL) -Dm755 target/release/zetta $(BINDIR)/zetta
+
+install-capabilities:
+	@if [ "$$(uname -s)" = "Linux" ]; then \
+		if [ -n "$(DESTDIR)" ]; then \
+			echo "Skipping cap_net_bind_service for staged install; apply it in the package install step"; \
+		elif [ "$$(id -u)" -ne 0 ]; then \
+			echo "Skipping cap_net_bind_service: rerun with sufficient privileges to enable the TFTP server" >&2; \
+		else \
+			test -x "$(BINDIR)/zetta" || { \
+				echo "$(BINDIR)/zetta is missing; run 'make install-binary' first" >&2; \
+				exit 1; \
+			}; \
+			command -v "$(SETCAP)" >/dev/null 2>&1 || { \
+				echo "$(SETCAP) is required to grant cap_net_bind_service (install libcap2-bin on Ubuntu)" >&2; \
+				exit 1; \
+			}; \
+			$(SETCAP) cap_net_bind_service=+ep "$(BINDIR)/zetta" || { \
+				echo "Could not grant cap_net_bind_service to $(BINDIR)/zetta" >&2; \
+				exit 1; \
+			}; \
+		fi; \
+	fi
 
 install-assets:
 	$(INSTALL) -Dm644 resources/linux/$(APP_ID).desktop \

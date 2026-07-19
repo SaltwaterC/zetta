@@ -148,7 +148,15 @@ sudo make install
 ```
 
 When run through `sudo`, `make install` uses the existing release artifact and
-does not invoke Cargo again. An unprivileged `make install` still builds first.
+does not invoke Cargo again. On Linux it also grants the installed binary only
+the `cap_net_bind_service` capability required for the TFTP server to bind UDP
+port 69. Ubuntu provides the required `setcap` command in `libcap2-bin`. An
+unprivileged `make install` still builds first, but cannot grant this capability;
+rerun `install-capabilities` with sufficient privileges to enable the server:
+
+```sh
+sudo make install-capabilities PREFIX="$HOME/.local"
+```
 
 To reinstall only the desktop entry and icons without rebuilding Zetta, run:
 
@@ -160,6 +168,8 @@ Use `sudo make uninstall-assets` to remove only those assets. The full
 `uninstall` target removes the binary and assets. Set `PREFIX=/usr/local` for a
 traditional local system prefix, or use `PREFIX="$HOME/.local"` for a per-user
 installation without `sudo`. `DESTDIR` is supported for staged package builds.
+Staged installs do not receive filesystem capabilities; packages must apply
+`cap_net_bind_service` in their install or post-install metadata.
 Desktop and icon caches are refreshed when the relevant utilities are available
 and `DESTDIR` is not set.
 
@@ -244,6 +254,40 @@ data bits, parity, stop bits, and software or hardware flow control can all be
 set before connecting. On Linux, placeholder legacy UART nodes are validated
 before being shown; when no usable ports are detected, the dialog reports that
 no devices were found. Closing the pane closes the serial device.
+
+Choose **Zetta: Start TFTP Server** from the command palette to start a TFTP
+server on UDP port 69. It serves files below the directory from
+which Zetta was launched and opens the server log in a new left/right pane.
+Absolute paths, parent-directory traversal, and symlinks that resolve outside
+that directory are rejected. Every server-log entry includes a human-readable
+UTC timestamp. Press `Ctrl-C` in the server pane, or close the pane, to stop the
+server and remove the pane. Binding the standard TFTP port may require
+additional privileges or firewall permission on some systems. TFTP switches to
+a dynamic UDP port after the initial request, so firewalls must also permit the
+related transfer traffic. Systems with a renamed loopback interface can allow
+local-only traffic explicitly, for example:
+
+```sh
+sudo ufw allow in on loopback0 from 127.0.0.0/8 to 127.0.0.0/8
+```
+
+Uploads may create new files below the served directory. Existing files are
+never overwritten, and incomplete uploads are removed after failed or cancelled
+transfers. TFTP has no authentication or encryption, so enable the server only
+on networks whose clients you trust.
+
+Zetta also provides a command-line TFTP client. Downloads default to the remote
+file's base name, uploads default to the local file's base name, and `--port`
+can target a non-standard server port:
+
+```sh
+zetta tftp get HOST REMOTE [LOCAL]
+zetta tftp put HOST LOCAL [REMOTE]
+zetta tftp get --port 1069 HOST REMOTE [LOCAL]
+```
+
+The client uses octet mode and negotiates block-size and transfer-size options
+when the server supports them. Run `zetta tftp --help` for the complete syntax.
 
 The settings button in the tab bar (or `Ctrl-,`) opens typed controls for the
 active configuration and keymap files. Profiles and themes use checked

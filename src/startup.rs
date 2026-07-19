@@ -17,6 +17,7 @@ pub(crate) struct StartupArgs {
     pub(crate) profile_report: Option<PathBuf>,
     pub(crate) profile_duration: Option<Duration>,
     pub(crate) profile_pane_stress: bool,
+    pub(crate) tftp_command: Option<TftpCommand>,
 }
 
 pub(crate) fn version_text() -> String {
@@ -28,13 +29,33 @@ fn is_version_argument(argument: &str) -> bool {
 }
 
 pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Result<StartupArgs> {
+    let arguments = args.into_iter().collect::<Vec<_>>();
+    if arguments.first().is_some_and(|argument| argument == "tftp") {
+        let tftp_arguments = &arguments[1..];
+        if tftp_arguments
+            .iter()
+            .any(|argument| matches!(argument.to_string_lossy().as_ref(), "--help" | "-h"))
+        {
+            println!("{}", tftp_help());
+            std::process::exit(0);
+        }
+        return Ok(StartupArgs {
+            config_path: None,
+            keymap_path: None,
+            mode: StartupMode::Application,
+            profile_report: None,
+            profile_duration: None,
+            profile_pane_stress: false,
+            tftp_command: Some(parse_tftp_args(tftp_arguments.iter().cloned())?),
+        });
+    }
     let mut config = None;
     let mut keymap = None;
     let mut mode = StartupMode::Application;
     let mut profile_report = None;
     let mut profile_duration = None;
     let mut profile_pane_stress = false;
-    let mut args = args.into_iter();
+    let mut args = arguments.into_iter();
     while let Some(argument) = args.next() {
         let argument = argument.to_string_lossy();
         if is_version_argument(&argument) {
@@ -73,7 +94,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             }
             "--help" | "-h" => {
                 println!(
-                    "Zetta terminal\n\nUsage: zetta [OPTIONS]\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile-terminal-rendering    Profile terminal rendering\n  -s, --profile-pane-stress           Use 64 panes with 63 minimized\n  -r, --profile-report PATH           Write a profiling report\n  -d, --profile-duration SECONDS      Set the profiling duration"
+                    "Zetta terminal\n\nUsage: zetta [OPTIONS]\n       zetta tftp <COMMAND> [OPTIONS]\n\nCommands:\n  tftp                                Transfer a file with TFTP\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile-terminal-rendering    Profile terminal rendering\n  -s, --profile-pane-stress           Use 64 panes with 63 minimized\n  -r, --profile-report PATH           Write a profiling report\n  -d, --profile-duration SECONDS      Set the profiling duration"
                 );
                 std::process::exit(0);
             }
@@ -107,6 +128,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
         profile_report,
         profile_duration,
         profile_pane_stress,
+        tftp_command: None,
     })
 }
 
@@ -791,6 +813,9 @@ fn run_terminal_rendering_workload() -> Result<()> {
 
 pub(crate) fn run() -> Result<()> {
     let args = parse_args()?;
+    if let Some(command) = &args.tftp_command {
+        return command.run();
+    }
     if args.mode == StartupMode::TerminalRenderingWorkload {
         return run_terminal_rendering_workload();
     }
