@@ -24,5 +24,8 @@ if not defined VSCMD_VER (
     if errorlevel 1 exit /b !errorlevel!
 )
 
-%CARGO% build --release --locked
-exit /b %errorlevel%
+%CARGO% build --release --locked --features windows-gui --bin zetta --bin zetta-gui
+if errorlevel 1 exit /b !errorlevel!
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\verify-windows-binary.ps1 -ConsoleBinaryPath target\release\zetta.exe -GuiBinaryPath target\release\zetta-gui.exe
+exit /b !errorlevel!

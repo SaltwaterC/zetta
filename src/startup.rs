@@ -49,7 +49,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 keymap = Some(args.next().context("--keymap requires a path")?.into())
             }
             "--profile-terminal-rendering" | "-p" => mode = StartupMode::TerminalRenderingProfile,
-            "--profile-pane-stress" => profile_pane_stress = true,
+            "--profile-pane-stress" | "-s" => profile_pane_stress = true,
             "--terminal-render-workload" => mode = StartupMode::TerminalRenderingWorkload,
             "--profile-report" | "-r" => {
                 profile_report = Some(
@@ -73,7 +73,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             }
             "--help" | "-h" => {
                 println!(
-                    "Zetta terminal\n\nUsage: zetta [OPTIONS]\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile-terminal-rendering    Profile terminal rendering\n      --profile-pane-stress           Use 64 panes with 63 minimized\n  -r, --profile-report PATH           Write a profiling report\n  -d, --profile-duration SECONDS      Set the profiling duration"
+                    "Zetta terminal\n\nUsage: zetta [OPTIONS]\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile-terminal-rendering    Profile terminal rendering\n  -s, --profile-pane-stress           Use 64 panes with 63 minimized\n  -r, --profile-report PATH           Write a profiling report\n  -d, --profile-duration SECONDS      Set the profiling duration"
                 );
                 std::process::exit(0);
             }
@@ -112,6 +112,42 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
 
 pub(crate) fn parse_args() -> Result<StartupArgs> {
     parse_args_from(env::args_os().skip(1))
+}
+
+#[cfg(windows)]
+fn path_with_entry_first(path: Option<&std::ffi::OsStr>, entry: &Path) -> Option<OsString> {
+    let inherited = path.map(env::split_paths).into_iter().flatten();
+    let entries = inherited.collect::<Vec<_>>();
+    let entry_text = entry.to_string_lossy();
+    if entries.iter().any(|candidate| {
+        candidate
+            .to_string_lossy()
+            .trim_end_matches(['\\', '/'])
+            .eq_ignore_ascii_case(entry_text.trim_end_matches(['\\', '/']))
+    }) {
+        return None;
+    }
+    env::join_paths(std::iter::once(entry.to_path_buf()).chain(entries)).ok()
+}
+
+#[cfg(windows)]
+pub(crate) fn native_terminal_environment() -> Vec<(String, String)> {
+    let Some(executable_directory) = env::current_exe()
+        .ok()
+        .and_then(|executable| executable.parent().map(Path::to_path_buf))
+    else {
+        return Vec::new();
+    };
+    let Some(path) = path_with_entry_first(env::var_os("PATH").as_deref(), &executable_directory)
+    else {
+        return Vec::new();
+    };
+    vec![("PATH".to_owned(), path.to_string_lossy().into_owned())]
+}
+
+#[cfg(not(windows))]
+pub(crate) fn native_terminal_environment() -> Vec<(String, String)> {
+    Vec::new()
 }
 
 pub(crate) fn load_startup_config(

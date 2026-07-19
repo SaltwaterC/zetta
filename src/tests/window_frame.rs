@@ -24,6 +24,7 @@ fn modal_close_button_follows_window_close_button_side() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn parses_quoted_gsettings_button_layout() {
     let layout = parse_gsettings_button_layout("'close,minimize,maximize:'\n").unwrap();
     assert_eq!(

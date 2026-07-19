@@ -109,10 +109,12 @@ The Windows build target locates the Visual Studio C++ toolchain with
 `vswhere.exe` and initializes its x64 build environment automatically. The
 Desktop development with C++ workload must be installed.
 
-The executable is written to `target\release\zetta.exe` with the application
-icon from `assets\icons\zetta-terminal-icon.ico` embedded as a Windows resource.
-The build also stages `conpty.dll` and `OpenConsole.exe` in the same directory;
-all three files are required at runtime.
+The console executable is written to `target\release\zetta.exe`, and the
+no-console launcher used by the Start Menu shortcut is written to
+`target\release\zetta-gui.exe`. Both have the application icon from
+`assets\icons\zetta-terminal-icon.ico` embedded as a Windows resource. The
+build also stages `conpty.dll` and `OpenConsole.exe` in the same directory; all
+four files are required at runtime.
 
 Install Zetta for the current Windows user with:
 
@@ -120,14 +122,17 @@ Install Zetta for the current Windows user with:
 make install
 ```
 
-This requires no administrator privileges. It copies the executable and its
-two ConPTY runtime files to `%LOCALAPPDATA%\Programs\Zetta` and creates
+This requires no administrator privileges. It copies both executables and the
+two ConPTY runtime files to `%LOCALAPPDATA%\Programs\Zetta`, adds that directory
+to the user `PATH`, and creates
 `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Zetta.lnk`, making Zetta
-available through Start Menu application search. The shortcut uses the icon
-embedded in the executable. Run `make uninstall` to remove the installed
-runtime and shortcut.
+available through Start Menu application search and as `zetta` in new console
+sessions. Native shells opened inside Zetta can also resolve the running
+executable directly. The shortcut launches `zetta-gui.exe`, which starts the
+console-native `zetta.exe` without opening an extra console window. Run `make
+uninstall` to remove the installed runtime, managed `PATH` entry, and shortcut.
 
-`make install-binary` updates only the installed executable. `make
+`make install-binary` updates only the installed executables. `make
 install-assets` recreates only the Start Menu shortcut and requires the binary
 to already be installed.
 
@@ -306,13 +311,13 @@ cargo run --release -- \
 ```
 
 To stress pane-management rendering while keeping the same producer, window,
-and capture settings, add `--profile-pane-stress`. This constructs a 64-pane
-layout with 63 minimized panes and leaves the profiler terminal visible:
+and capture settings, add `--profile-pane-stress` (or `-s`). This constructs a
+64-pane layout with 63 minimized panes and leaves the profiler terminal visible:
 
 ```sh
 cargo run --release -- \
   --profile-terminal-rendering \
-  --profile-pane-stress \
+  -s \
   --profile-report artifacts/zetta-pane-stress.json \
   --profile-duration 10
 ```

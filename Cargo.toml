@@ -3,11 +3,18 @@ name = "zetta"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
+default-run = "zetta"
 
 [features]
 default = ["wayland"]
 wayland = ["gpui_platform/wayland"]
 x11 = ["gpui_platform/x11"]
+windows-gui = []
+
+[[bin]]
+name = "zetta-gui"
+path = "src/bin/zetta_gui.rs"
+required-features = ["windows-gui"]
 
 [dependencies]
 anyhow = "1"

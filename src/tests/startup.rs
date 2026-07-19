@@ -1,5 +1,25 @@
 use super::*;
 
+#[cfg(windows)]
+#[test]
+fn executable_directory_is_prepended_to_native_terminal_path() {
+    let executable_directory = Path::new(r"C:\Program Files\Zetta");
+    let inherited = std::ffi::OsStr::new(r"C:\Windows\System32;C:\Tools");
+    let path = path_with_entry_first(Some(inherited), executable_directory).unwrap();
+    let entries = env::split_paths(&path).collect::<Vec<_>>();
+
+    assert_eq!(entries[0], executable_directory);
+    assert_eq!(entries[1], Path::new(r"C:\Windows\System32"));
+    assert_eq!(entries[2], Path::new(r"C:\Tools"));
+    assert!(
+        path_with_entry_first(
+            Some(path.as_os_str()),
+            Path::new(r"c:\program files\zetta\")
+        )
+        .is_none()
+    );
+}
+
 #[test]
 fn version_flags_and_output_are_defined() {
     assert!(is_version_argument("-v"));
@@ -41,6 +61,7 @@ fn terminal_rendering_profiler_arguments_are_cross_platform() {
 fn shorthand_options_match_long_options() {
     let shorthand = parse_args_from([
         OsString::from("-p"),
+        OsString::from("-s"),
         OsString::from("-r"),
         OsString::from("profile.json"),
         OsString::from("-d"),
@@ -49,6 +70,7 @@ fn shorthand_options_match_long_options() {
     .unwrap();
     let longhand = parse_args_from([
         OsString::from("--profile-terminal-rendering"),
+        OsString::from("--profile-pane-stress"),
         OsString::from("--profile-report"),
         OsString::from("profile.json"),
         OsString::from("--profile-duration"),

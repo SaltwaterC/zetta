@@ -74,19 +74,19 @@ pub(crate) fn detected_serial_devices(ports: Vec<serialport::SerialPortInfo>) ->
         .collect()
 }
 
-fn serial_port_is_present(info: &serialport::SerialPortInfo) -> bool {
+fn serial_port_is_present(_info: &serialport::SerialPortInfo) -> bool {
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::FileTypeExt as _;
 
-        let path = Path::new(&info.port_name);
+        let path = Path::new(&_info.port_name);
         let Ok(metadata) = path.metadata() else {
             return false;
         };
         if !metadata.file_type().is_char_device() {
             return false;
         }
-        if linux_legacy_serial_port(&info.port_name) {
+        if linux_legacy_serial_port(&_info.port_name) {
             return linux_tty_responds(path);
         }
     }
