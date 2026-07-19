@@ -125,6 +125,10 @@ function Install-Shortcut {
     $shortcut.IconLocation = "$installedGuiBinary,0"
     $shortcut.Description = "Zetta terminal emulator"
     $shortcut.Save()
+    & $installedBinary --register-windows-shell $ShortcutPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "Zetta failed to register its Windows shell integration (exit code $LASTEXITCODE)."
+    }
     Write-Host "Created Start Menu shortcut at $ShortcutPath"
 }
 

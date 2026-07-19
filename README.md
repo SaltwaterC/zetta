@@ -131,6 +131,9 @@ sessions. Native shells opened inside Zetta can also resolve the running
 executable directly. The shortcut launches `zetta-gui.exe`, which starts the
 console-native `zetta.exe` without opening an extra console window. Run `make
 uninstall` to remove the installed runtime, managed `PATH` entry, and shortcut.
+The shortcut also exposes the currently available profiles in its Windows Jump
+List, including when Zetta is selected in Start Menu search. Zetta refreshes
+these entries after startup and configuration reloads.
 
 `make install-binary` updates only the installed executables. `make
 install-assets` recreates only the Start Menu shortcut and requires the binary
@@ -182,6 +185,9 @@ After installing or upgrading under WSL2, close running Zetta windows and run
 Zetta creates profiles for common installed command interpreters. On Windows
 this includes Windows PowerShell, PowerShell 7, Command Prompt, and registered
 WSL distributions. Select a profile in the top bar, then open a new tab.
+Launch a particular profile directly with `zetta --profile "PROFILE"` (or
+`zetta -p "PROFILE"`). The Windows Jump List uses the same option through the
+no-console `zetta-gui.exe` launcher.
 
 Configuration is loaded from `~/.config/zetta/config.json` on Linux/macOS and
 `%APPDATA%\\Zetta\\config.json` on Windows. Use `config.example.json` as a
@@ -195,6 +201,10 @@ the Windows user profile in both cases. Later native-shell tabs and splits
 inherit the active pane's current directory. Because `wsl.exe` exposes only
 its Windows-side directory, Zetta tracks each WSL shell's Linux directory and
 uses it for same-profile tabs and splits.
+On Windows, Zetta also tracks the active filesystem directory reported by
+Windows PowerShell, PowerShell 7, and Command Prompt. Their prompt integration
+preserves the user's existing prompt while allowing new tabs, splits, and
+multi-command panes to inherit the current directory.
 
 Keyboard shortcuts use Zed's keymap format. The default shortcuts are:
 

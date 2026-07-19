@@ -38,6 +38,7 @@ fn terminal_rendering_profiler_arguments_are_cross_platform() {
         StartupArgs {
             config_path: None,
             keymap_path: None,
+            profile: None,
             mode: StartupMode::TerminalRenderingProfile,
             profile_report: None,
             profile_duration: None,
@@ -50,6 +51,7 @@ fn terminal_rendering_profiler_arguments_are_cross_platform() {
         StartupArgs {
             config_path: None,
             keymap_path: None,
+            profile: None,
             mode: StartupMode::TerminalRenderingWorkload,
             profile_report: None,
             profile_duration: None,
@@ -62,7 +64,7 @@ fn terminal_rendering_profiler_arguments_are_cross_platform() {
 #[test]
 fn shorthand_options_match_long_options() {
     let shorthand = parse_args_from([
-        OsString::from("-p"),
+        OsString::from("-P"),
         OsString::from("-s"),
         OsString::from("-r"),
         OsString::from("profile.json"),
@@ -81,6 +83,12 @@ fn shorthand_options_match_long_options() {
     .unwrap();
     assert_eq!(shorthand, longhand);
 
+    let shorthand = parse_args_from([OsString::from("-p"), OsString::from("WSL: Ubuntu")]).unwrap();
+    let longhand =
+        parse_args_from([OsString::from("--profile"), OsString::from("WSL: Ubuntu")]).unwrap();
+    assert_eq!(shorthand, longhand);
+    assert_eq!(shorthand.profile.as_deref(), Some("WSL: Ubuntu"));
+
     let shorthand = parse_args_from([
         OsString::from("-c"),
         OsString::from("config.json"),
@@ -96,6 +104,29 @@ fn shorthand_options_match_long_options() {
     ])
     .unwrap();
     assert_eq!(shorthand, longhand);
+}
+
+#[test]
+fn launch_profile_selects_an_available_profile_case_insensitively() {
+    let mut config = Config::defaults(None, None);
+    config.profiles = vec![
+        Profile {
+            name: "System".to_owned(),
+            command: Shell::System,
+            theme: None,
+        },
+        Profile {
+            name: "WSL: Ubuntu".to_owned(),
+            command: Shell::Program("wsl.exe".to_owned()),
+            theme: None,
+        },
+    ];
+
+    select_launch_profile(&mut config, Some("wsl: ubuntu")).unwrap();
+    assert_eq!(config.default_profile, 1);
+
+    let error = select_launch_profile(&mut config, Some("Missing")).unwrap_err();
+    assert!(error.to_string().contains("is not available"));
 }
 
 #[test]

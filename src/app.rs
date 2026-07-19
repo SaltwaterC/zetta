@@ -1217,6 +1217,9 @@ impl Zetta {
         }
         load_keybindings(&config.keymap_path, config.profiles.len(), cx);
 
+        #[cfg(windows)]
+        windows_integration::update_profile_jump_list(config.profiles.clone());
+
         self.selected_profile = config.default_profile;
         self.profiles = config.profiles.clone();
         self.working_directory = config.working_directory.clone();

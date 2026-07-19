@@ -48,6 +48,16 @@ ui = { path = "zed/crates/ui" }
 util = { path = "zed/crates/util" }
 zed_actions = { path = "zed/crates/zed_actions" }
 
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_Shell_PropertiesSystem",
+] }
+
 [build-dependencies]
 embed-resource = "3"
 

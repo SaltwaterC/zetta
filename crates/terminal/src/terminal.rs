@@ -727,10 +727,105 @@ pub(crate) enum TerminalBackendEvent {
 
 const REPORTED_WORKING_DIRECTORY_TITLE_PREFIX: &str = "zetta-cwd:";
 
+#[cfg(windows)]
+const POWERSHELL_CWD_TRACKER: &str = r#"$global:__ZettaOriginalPrompt = $function:prompt
+function global:prompt {
+    try {
+        $zettaDirectory = $ExecutionContext.SessionState.Path.CurrentFileSystemLocation.ProviderPath
+        [Console]::Write("$([char]27)]2;zetta-cwd:$zettaDirectory$([char]27)\")
+    } catch {}
+    if ($null -ne $global:__ZettaOriginalPrompt) {
+        & $global:__ZettaOriginalPrompt
+    } else {
+        "PS $($ExecutionContext.SessionState.Path.CurrentLocation)> "
+    }
+}"#;
+
+#[cfg(windows)]
+fn windows_shell_program_name(program: &str) -> &str {
+    program.rsplit(['/', '\\']).next().unwrap_or(program)
+}
+
+#[cfg(windows)]
+fn is_windows_shell_program(program: &str, names: &[&str]) -> bool {
+    let program = windows_shell_program_name(program);
+    names.iter().any(|name| program.eq_ignore_ascii_case(name))
+}
+
+#[cfg(windows)]
+fn powershell_has_command_arguments(arguments: &[String]) -> bool {
+    arguments.iter().any(|argument| {
+        matches!(
+            argument.to_ascii_lowercase().as_str(),
+            "-c" | "-command"
+                | "-commandwithargs"
+                | "-cwa"
+                | "-encodedarguments"
+                | "-encodedcommand"
+                | "-ec"
+                | "-f"
+                | "-file"
+        )
+    })
+}
+
+#[cfg(windows)]
+fn cmd_prompt_with_cwd_tracking(existing: Option<&str>) -> String {
+    format!(
+        "$E]2;zetta-cwd:$P$E\\{}",
+        existing
+            .filter(|prompt| !prompt.is_empty())
+            .unwrap_or("$P$G")
+    )
+}
+
+#[cfg(windows)]
+fn install_windows_cwd_tracking(
+    program: &str,
+    arguments: &mut Option<Vec<String>>,
+    environment: &mut HashMap<String, String>,
+) {
+    if is_windows_shell_program(program, &["cmd", "cmd.exe"]) {
+        let inherited_prompt = environment
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("PROMPT"))
+            .map(|(_, prompt)| prompt.clone())
+            .or_else(|| std::env::var("PROMPT").ok());
+        environment.insert(
+            "PROMPT".to_owned(),
+            cmd_prompt_with_cwd_tracking(inherited_prompt.as_deref()),
+        );
+        return;
+    }
+
+    if !is_windows_shell_program(
+        program,
+        &["powershell", "powershell.exe", "pwsh", "pwsh.exe"],
+    ) {
+        return;
+    }
+
+    let arguments = arguments.get_or_insert_default();
+    if powershell_has_command_arguments(arguments) {
+        return;
+    }
+    if !arguments
+        .iter()
+        .any(|argument| argument.eq_ignore_ascii_case("-NoExit"))
+    {
+        arguments.push("-NoExit".to_owned());
+    }
+    arguments.extend(["-Command".to_owned(), POWERSHELL_CWD_TRACKER.to_owned()]);
+}
+
 fn reported_working_directory_from_title(title: &str) -> Option<String> {
     let directory = title.strip_prefix(REPORTED_WORKING_DIRECTORY_TITLE_PREFIX)?;
-    (directory.starts_with('/') && !directory.chars().any(char::is_control))
-        .then(|| directory.to_owned())
+    if directory.chars().any(char::is_control) {
+        return None;
+    }
+    let is_unix_absolute = directory.starts_with('/');
+    let is_native_absolute = Path::new(directory).is_absolute();
+    (is_unix_absolute || is_native_absolute).then(|| directory.to_owned())
 }
 
 impl fmt::Debug for TerminalBackendEvent {
@@ -1225,7 +1320,7 @@ impl TerminalBuilder {
                 }
             }
 
-            let shell_params = match shell.clone() {
+            let mut shell_params = match shell.clone() {
                 Shell::System => {
                     if cfg!(windows) {
                         Some(ShellParams::new(
@@ -1244,6 +1339,14 @@ impl TerminalBuilder {
                     title_override,
                 } => Some(ShellParams::new(program, Some(args), title_override)),
             };
+            #[cfg(windows)]
+            if let Some(shell_params) = shell_params.as_mut() {
+                install_windows_cwd_tracking(
+                    &shell_params.program,
+                    &mut shell_params.args,
+                    &mut env,
+                );
+            }
             let terminal_title_override =
                 shell_params.as_ref().and_then(|e| e.title_override.clone());
 
@@ -2927,12 +3030,19 @@ impl Terminal {
     /// This does *not* return the working directory of the shell that runs on the
     /// remote host, in case Zed is connected to a remote host.
     fn client_side_working_directory(&self) -> Option<PathBuf> {
+        if let Some(directory) = self.reported_working_directory.as_deref() {
+            let directory = PathBuf::from(directory);
+            if directory.is_absolute() {
+                return Some(directory);
+            }
+        }
         match &self.terminal_type {
             TerminalType::Pty { info, .. } => info
                 .current
                 .read()
                 .as_ref()
-                .map(|process| process.cwd.clone()),
+                .map(|process| process.cwd.clone())
+                .filter(|directory| !directory.as_os_str().is_empty()),
             TerminalType::DisplayOnly => None,
         }
     }
@@ -3631,7 +3741,7 @@ mod tests {
     }
 
     #[test]
-    fn reported_working_directory_titles_require_safe_absolute_unix_paths() {
+    fn reported_working_directory_titles_require_safe_absolute_paths() {
         assert_eq!(
             reported_working_directory_from_title("zetta-cwd:/home/user/project"),
             Some("/home/user/project".to_owned())
@@ -3647,6 +3757,92 @@ mod tests {
         assert_eq!(
             reported_working_directory_from_title("zetta-cwd:/home/user\nproject"),
             None
+        );
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                reported_working_directory_from_title(r"zetta-cwd:C:\source\zetta"),
+                Some(r"C:\source\zetta".to_owned())
+            );
+            assert_eq!(
+                reported_working_directory_from_title(r"zetta-cwd:\\server\share\zetta"),
+                Some(r"\\server\share\zetta".to_owned())
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_powershell_shells_install_cwd_reporting() {
+        let mut arguments = None;
+        let mut environment = HashMap::default();
+        install_windows_cwd_tracking("pwsh.exe", &mut arguments, &mut environment);
+
+        assert!(environment.is_empty());
+        let arguments = arguments.unwrap();
+        assert_eq!(arguments[..2], ["-NoExit", "-Command"]);
+        assert_eq!(arguments[2], POWERSHELL_CWD_TRACKER);
+        assert!(POWERSHELL_CWD_TRACKER.contains("CurrentFileSystemLocation.ProviderPath"));
+        assert!(POWERSHELL_CWD_TRACKER.contains("__ZettaOriginalPrompt"));
+        assert!(!POWERSHELL_CWD_TRACKER.contains("-NoProfile"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_powershell_commands_are_not_rewritten() {
+        let mut arguments = Some(vec![
+            "-NoExit".to_owned(),
+            "-Command".to_owned(),
+            "Get-Date".to_owned(),
+        ]);
+        let original = arguments.clone();
+        let mut environment = HashMap::default();
+
+        install_windows_cwd_tracking("powershell.exe", &mut arguments, &mut environment);
+        assert_eq!(arguments, original);
+        assert!(environment.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_command_prompt_reports_its_dynamic_path_before_the_user_prompt() {
+        let mut arguments = None;
+        let mut environment = HashMap::default();
+        environment.insert("PROMPT".to_owned(), "$N$G".to_owned());
+        install_windows_cwd_tracking("cmd.exe", &mut arguments, &mut environment);
+
+        assert_eq!(arguments, None);
+        assert_eq!(
+            environment.get("PROMPT").map(String::as_str),
+            Some("$E]2;zetta-cwd:$P$E\\$N$G")
+        );
+        assert_eq!(
+            cmd_prompt_with_cwd_tracking(None),
+            "$E]2;zetta-cwd:$P$E\\$P$G"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_powershell_tracker_emits_the_current_filesystem_location() {
+        let directory = std::env::current_dir().unwrap();
+        let escaped_directory = directory.to_string_lossy().replace('\'', "''");
+        let script = format!(
+            "{POWERSHELL_CWD_TRACKER}\nSet-Location -LiteralPath '{escaped_directory}'\nprompt"
+        );
+        let output = std::process::Command::new("powershell.exe")
+            .args(["-NoLogo", "-NoProfile", "-Command", &script])
+            .output()
+            .unwrap();
+
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains(&format!(
+                "\u{1b}]2;zetta-cwd:{}\u{1b}\\",
+                directory.display()
+            )),
+            "PowerShell did not report its CWD: {stdout:?}"
         );
     }
 

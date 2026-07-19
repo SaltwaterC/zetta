@@ -5,6 +5,8 @@ const DEFAULT_PERFORMANCE_REPORT_DURATION: Duration = Duration::from_secs(10);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StartupMode {
     Application,
+    #[cfg(windows)]
+    RegisterWindowsShell(PathBuf),
     TerminalRenderingProfile,
     TerminalRenderingWorkload,
 }
@@ -13,6 +15,7 @@ pub(crate) enum StartupMode {
 pub(crate) struct StartupArgs {
     pub(crate) config_path: Option<PathBuf>,
     pub(crate) keymap_path: Option<PathBuf>,
+    pub(crate) profile: Option<String>,
     pub(crate) mode: StartupMode,
     pub(crate) profile_report: Option<PathBuf>,
     pub(crate) profile_duration: Option<Duration>,
@@ -42,6 +45,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
         return Ok(StartupArgs {
             config_path: None,
             keymap_path: None,
+            profile: None,
             mode: StartupMode::Application,
             profile_report: None,
             profile_duration: None,
@@ -51,6 +55,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
     }
     let mut config = None;
     let mut keymap = None;
+    let mut profile = None;
     let mut mode = StartupMode::Application;
     let mut profile_report = None;
     let mut profile_duration = None;
@@ -69,7 +74,23 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             "--keymap" | "-k" => {
                 keymap = Some(args.next().context("--keymap requires a path")?.into())
             }
-            "--profile-terminal-rendering" | "-p" => mode = StartupMode::TerminalRenderingProfile,
+            "--profile" | "-p" => {
+                profile = Some(
+                    args.next()
+                        .context("--profile requires a name")?
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            }
+            "--profile-terminal-rendering" | "-P" => mode = StartupMode::TerminalRenderingProfile,
+            #[cfg(windows)]
+            "--register-windows-shell" => {
+                mode = StartupMode::RegisterWindowsShell(
+                    args.next()
+                        .context("--register-windows-shell requires a shortcut path")?
+                        .into(),
+                )
+            }
             "--profile-pane-stress" | "-s" => profile_pane_stress = true,
             "--terminal-render-workload" => mode = StartupMode::TerminalRenderingWorkload,
             "--profile-report" | "-r" => {
@@ -94,7 +115,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             }
             "--help" | "-h" => {
                 println!(
-                    "Zetta terminal\n\nUsage: zetta [OPTIONS]\n       zetta tftp <COMMAND> [OPTIONS]\n\nCommands:\n  tftp                                Transfer a file with TFTP\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile-terminal-rendering    Profile terminal rendering\n  -s, --profile-pane-stress           Use 64 panes with 63 minimized\n  -r, --profile-report PATH           Write a profiling report\n  -d, --profile-duration SECONDS      Set the profiling duration"
+                    "Zetta terminal\n\nUsage: zetta [OPTIONS]\n       zetta tftp <COMMAND> [OPTIONS]\n\nCommands:\n  tftp                                Transfer a file with TFTP\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Launch the named profile\n  -P, --profile-terminal-rendering    Profile terminal rendering\n  -s, --profile-pane-stress           Use 64 panes with 63 minimized\n  -r, --profile-report PATH           Write a profiling report\n  -d, --profile-duration SECONDS      Set the profiling duration"
                 );
                 std::process::exit(0);
             }
@@ -104,6 +125,10 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
     anyhow::ensure!(
         mode == StartupMode::Application || (config.is_none() && keymap.is_none()),
         "profiling modes cannot be combined with --config or --keymap"
+    );
+    anyhow::ensure!(
+        profile.is_none() || mode == StartupMode::Application,
+        "--profile cannot be combined with another startup mode"
     );
     anyhow::ensure!(
         (profile_report.is_none() && profile_duration.is_none())
@@ -124,12 +149,25 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
     Ok(StartupArgs {
         config_path: config,
         keymap_path: keymap,
+        profile,
         mode,
         profile_report,
         profile_duration,
         profile_pane_stress,
         tftp_command: None,
     })
+}
+
+fn select_launch_profile(config: &mut Config, requested: Option<&str>) -> Result<()> {
+    let Some(requested) = requested else {
+        return Ok(());
+    };
+    config.default_profile = config
+        .profiles
+        .iter()
+        .position(|profile| profile.name.eq_ignore_ascii_case(requested))
+        .with_context(|| format!("profile {requested:?} is not available"))?;
+    Ok(())
 }
 
 pub(crate) fn parse_args() -> Result<StartupArgs> {
@@ -813,6 +851,12 @@ fn run_terminal_rendering_workload() -> Result<()> {
 
 pub(crate) fn run() -> Result<()> {
     let args = parse_args()?;
+    #[cfg(windows)]
+    if let StartupMode::RegisterWindowsShell(shortcut_path) = &args.mode {
+        let (config, _) =
+            load_startup_config(args.config_path.as_deref(), args.keymap_path.clone());
+        return windows_integration::register_shell_integration(shortcut_path, &config.profiles);
+    }
     if let Some(command) = &args.tftp_command {
         return command.run();
     }
@@ -827,7 +871,7 @@ pub(crate) fn run() -> Result<()> {
         .map(|(path, duration)| PerformanceReportOptions { path, duration });
     let report_requested = report_options.is_some();
     let report_status = Arc::new(Mutex::new(None));
-    let (config, configuration_error) = if profiling {
+    let (mut config, configuration_error) = if profiling {
         (
             terminal_rendering_profile_config(&env::current_exe()?),
             None,
@@ -835,6 +879,7 @@ pub(crate) fn run() -> Result<()> {
     } else {
         load_startup_config(args.config_path.as_deref(), args.keymap_path)
     };
+    select_launch_profile(&mut config, args.profile.as_deref())?;
     let keymap_path = config.keymap_path.clone();
     let profile_count = config.profiles.len();
     let http_client = Arc::new(
@@ -845,6 +890,11 @@ pub(crate) fn run() -> Result<()> {
     gpui_platform::application()
         .with_assets(ZettaAssets)
         .run(move |cx: &mut App| {
+            #[cfg(windows)]
+            {
+                cx.set_app_identity(ZETTA_APP_ID, "Zetta");
+                windows_integration::update_profile_jump_list(config.profiles.clone());
+            }
             cx.set_http_client(http_client);
             menu::init();
             zed_actions::init();

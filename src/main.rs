@@ -147,6 +147,8 @@ mod app_render;
 mod window_frame;
 use window_frame::*;
 mod startup;
+#[cfg(windows)]
+mod windows_integration;
 use startup::*;
 fn main() {
     if let Err(error) = run() {
