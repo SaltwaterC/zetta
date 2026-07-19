@@ -2,6 +2,7 @@
 
 mod command_palette;
 mod config;
+mod http_server;
 mod serial_console;
 mod settings_editor;
 mod tftp;
@@ -103,6 +104,7 @@ actions!(
         ToggleCommandPalette,
         ToggleSettings,
         ToggleSerialConsole,
+        StartHttpServer,
         StartTftpServer,
         TogglePerformanceOverlay
     ]
@@ -132,10 +134,12 @@ mod tab_search;
 use tab_search::*;
 mod settings_ui;
 mod settings_view;
+use http_server::*;
 use serial_console::*;
 use settings_ui::*;
 use tftp::*;
 mod app;
+mod http_server_ui;
 mod serial_console_ui;
 mod tftp_server_ui;
 use app::*;

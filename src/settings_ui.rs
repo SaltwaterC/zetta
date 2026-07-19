@@ -44,6 +44,7 @@ pub(crate) enum SettingsDropdown {
 pub(crate) enum NumericSetting {
     FontSize,
     ScrollHistory,
+    HttpServerPort,
 }
 
 #[derive(Clone)]
@@ -678,6 +679,20 @@ impl Zetta {
                 } else {
                     value.to_string()
                 });
+            }
+            NumericSetting::HttpServerPort => {
+                let current = configuration
+                    .http_server_port
+                    .text
+                    .trim()
+                    .parse::<u16>()
+                    .unwrap_or(DEFAULT_HTTP_PORT);
+                configuration.http_server_port = TextField::new(
+                    current
+                        .saturating_add_signed(direction as i16)
+                        .clamp(1, u16::MAX)
+                        .to_string(),
+                );
             }
         }
         editor.configuration_dirty = true;

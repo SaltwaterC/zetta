@@ -53,6 +53,23 @@ fn default_working_directory_is_the_user_home() {
     let config = Config::defaults(None, None);
     assert_eq!(config.working_directory, Some(home_dir()));
     assert!(!config.working_directory_configured);
+    assert_eq!(config.http_server_port, DEFAULT_HTTP_PORT);
+}
+
+#[test]
+fn validates_http_server_port() {
+    assert_eq!(
+        Config::parse(r#"{"http_server_port":8080}"#, None, None)
+            .unwrap()
+            .http_server_port,
+        8080
+    );
+    for value in ["0", "65536", "-1", "1.5", "\"8000\""] {
+        assert!(
+            Config::parse(&format!(r#"{{"http_server_port":{value}}}"#), None, None).is_err(),
+            "accepted invalid HTTP server port {value}"
+        );
+    }
 }
 
 #[test]

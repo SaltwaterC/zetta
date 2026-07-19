@@ -95,6 +95,7 @@ pub enum ConfigTextField {
     WorkingDirectory,
     FontSize,
     ScrollHistory,
+    HttpServerPort,
     ProfileName(usize),
     ProfileProgram(usize),
     ProfileArguments(usize),
@@ -119,6 +120,7 @@ pub struct ConfigurationForm {
     pub terminal_font_family: String,
     pub max_scroll_history_lines: TextField,
     pub inactive_pane_opacity: f32,
+    pub http_server_port: TextField,
     pub profiles: Vec<ProfileForm>,
 }
 
@@ -197,6 +199,7 @@ impl ConfigurationForm {
                 },
             ),
             inactive_pane_opacity: config.inactive_pane_opacity,
+            http_server_port: TextField::new(config.http_server_port.to_string()),
             root,
             profiles,
         })
@@ -207,6 +210,7 @@ impl ConfigurationForm {
             ConfigTextField::WorkingDirectory => Some(&mut self.working_directory),
             ConfigTextField::FontSize => Some(&mut self.terminal_font_size),
             ConfigTextField::ScrollHistory => Some(&mut self.max_scroll_history_lines),
+            ConfigTextField::HttpServerPort => Some(&mut self.http_server_port),
             ConfigTextField::ProfileName(index) => {
                 self.profiles.get_mut(index).map(|p| &mut p.name)
             }
@@ -257,6 +261,15 @@ impl ConfigurationForm {
             .parse::<f64>()
             .context("formatting inactive pane opacity")?;
         root.insert("inactive_pane_opacity".into(), json!(inactive_pane_opacity));
+        let http_server_port = self
+            .http_server_port
+            .text
+            .trim()
+            .parse::<u16>()
+            .ok()
+            .filter(|port| *port != 0)
+            .context("HTTP server port must be an integer from 1 to 65535")?;
+        root.insert("http_server_port".into(), json!(http_server_port));
         if !self.profiles.is_empty() || root.contains_key("profiles") {
             root.insert(
                 "profiles".into(),

@@ -276,6 +276,21 @@ never overwritten, and incomplete uploads are removed after failed or cancelled
 transfers. TFTP has no authentication or encryption, so enable the server only
 on networks whose clients you trust.
 
+Choose **Zetta: Start HTTP Server** to serve static files from the directory
+where Zetta was launched over TCP port 8000. For example, a client can download
+`firmware.bin` with `wget http://HOST:8000/firmware.bin`. The server supports
+read-only `GET` and `HEAD` requests, serves `index.html` when present, generates
+a browsable index for other directories, and records each request in a new
+server-log pane. Absolute paths,
+parent-directory traversal, and symlinks resolving outside the served directory
+are rejected. Press `Ctrl-C` in the server pane, or close the pane, to stop it.
+The server has no authentication or encryption, so expose it only on trusted
+networks and allow the configured TCP port through the host firewall when
+necessary.
+Set `http_server_port` in the configuration or use the **HTTP server port**
+control in Zetta's settings to bind a different TCP port. Changes apply the
+next time the server is started.
+
 Zetta also provides a command-line TFTP client. Downloads default to the remote
 file's base name, uploads default to the local file's base name, and `--port`
 can target a non-standard server port:

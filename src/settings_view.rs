@@ -91,7 +91,9 @@ impl Zetta {
             let centered = matches!(
                 input,
                 SettingsInput::Configuration(
-                    ConfigTextField::FontSize | ConfigTextField::ScrollHistory
+                    ConfigTextField::FontSize
+                        | ConfigTextField::ScrollHistory
+                        | ConfigTextField::HttpServerPort
                 )
             );
             let cursor = field.cursor.min(field.text.len());
@@ -542,6 +544,16 @@ impl Zetta {
                         "Inactive pane opacity",
                         "Dimming level as a percentage",
                         opacity_slider(configuration.inactive_pane_opacity),
+                    ),
+                    setting_row(
+                        "HTTP server port",
+                        "TCP port used when starting the static HTTP server",
+                        numeric(
+                            "settings-http-server-port",
+                            configuration.http_server_port.clone(),
+                            NumericSetting::HttpServerPort,
+                            ConfigTextField::HttpServerPort,
+                        ),
                     ),
                 ];
                 rows.push(
