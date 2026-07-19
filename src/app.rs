@@ -269,7 +269,8 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let command = if is_wsl_shell(&profile.command) {
+        let is_wsl = is_wsl_shell(&profile.command);
+        let command = if is_wsl {
             wsl_shell_with_tracking(
                 profile.command,
                 wsl_directory.as_deref(),
@@ -278,11 +279,16 @@ impl Zetta {
         } else {
             profile.command
         };
+        let environment = if is_wsl {
+            HashMap::default()
+        } else {
+            native_terminal_environment().into_iter().collect()
+        };
         let builder = TerminalBuilder::new(
             working_directory,
             None,
             command,
-            HashMap::default(),
+            environment,
             settings.cursor_shape,
             settings.alternate_scroll,
             settings.max_scroll_history_lines,
