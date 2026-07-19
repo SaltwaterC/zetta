@@ -779,6 +779,15 @@ impl Zetta {
                                 .text_color(colors.text_muted)
                                 .child(
                                     "Only declared theme JSON files are installed. Other extension features are ignored.",
+                                )
+                                .child(
+                                    div().mt_1().child(
+                                        ButtonLink::new(
+                                            "Browse the Zed themes store",
+                                            "https://zed.dev/extensions?filter=themes",
+                                        )
+                                        .label_size(LabelSize::Small),
+                                    ),
                                 ),
                         )
                         .child(

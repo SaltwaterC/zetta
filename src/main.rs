@@ -59,9 +59,9 @@ use theme::{
 };
 use theme_extensions::{InstalledThemeExtension, ThemeExtension};
 use ui::{
-    Banner, ButtonCommon as _, ButtonLike, ButtonSize, ButtonStyle, Clickable as _, Color, Icon,
-    IconButton, IconButtonShape, IconName, IconPosition, IconSize, Label, LabelSize, PopoverMenu,
-    Severity, Tooltip, prelude::*,
+    Banner, ButtonCommon as _, ButtonLike, ButtonLink, ButtonSize, ButtonStyle, Clickable as _,
+    Color, Icon, IconButton, IconButtonShape, IconName, IconPosition, IconSize, Label, LabelSize,
+    PopoverMenu, Severity, Tooltip, prelude::*,
 };
 use util::{ResultExt as _, paths::PathStyle};
 use zetta_assets::ZettaAssets;
