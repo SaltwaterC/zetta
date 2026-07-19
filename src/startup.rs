@@ -127,21 +127,32 @@ pub(crate) fn load_startup_config(
     }
 }
 
-pub(crate) fn profile_keybindings(slot: usize) -> Vec<KeyBinding> {
+pub(crate) fn profile_keybindings(
+    slot: usize,
+    keyboard_mapper: &dyn PlatformKeyboardMapper,
+) -> [KeyBinding; 1] {
     const SHIFTED_DIGITS: [&str; 9] = ["!", "@", "#", "$", "%", "^", "&", "*", "("];
     let action = OpenProfile { slot };
-    vec![
-        KeyBinding::new(
-            &format!("ctrl-{}", SHIFTED_DIGITS[slot - 1]),
-            action.clone(),
-            Some("Zetta > Terminal"),
-        ),
-        KeyBinding::new(
-            &format!("ctrl-alt-{slot}"),
-            action,
-            Some("Zetta > Terminal"),
-        ),
-    ]
+    let context = Some(
+        KeyBindingContextPredicate::parse("Zetta > Terminal")
+            .expect("built-in keybinding context must be valid")
+            .into(),
+    );
+    let binding = |keystroke: &str, action: OpenProfile| {
+        KeyBinding::load(
+            keystroke,
+            Box::new(action),
+            context.clone(),
+            true,
+            None,
+            keyboard_mapper,
+        )
+        .expect("built-in profile keystroke must be valid")
+    };
+    [binding(
+        &format!("ctrl-{}", SHIFTED_DIGITS[slot - 1]),
+        action,
+    )]
 }
 
 pub(crate) fn pane_template_keybindings() -> [KeyBinding; 2] {
@@ -455,6 +466,7 @@ pub(crate) fn validate_keymap_contents(content: &str, cx: &mut App) -> Result<()
 
 pub(crate) const RENAME_TAB_KEYBINDING: &str = "ctrl-alt-r";
 pub(crate) const RENAME_PANE_KEYBINDING: &str = "ctrl-alt-l";
+pub(crate) const CLOSE_PANE_KEYBINDING: &str = "ctrl-shift-x";
 pub(crate) const SAVE_PANE_OUTPUT_KEYBINDING: &str = "ctrl-shift-s";
 pub(crate) const SERIAL_CONSOLE_KEYBINDING: &str = "ctrl-shift-d";
 
@@ -464,6 +476,10 @@ pub(crate) fn pane_output_keybinding() -> KeyBinding {
         SavePaneOutput,
         Some("Zetta > Terminal"),
     )
+}
+
+pub(crate) fn close_pane_keybinding() -> KeyBinding {
+    KeyBinding::new(CLOSE_PANE_KEYBINDING, ClosePane, Some("Zetta > Terminal"))
 }
 
 pub(crate) fn serial_console_keybinding() -> KeyBinding {
@@ -495,6 +511,14 @@ pub(crate) fn minimized_pane_keybindings() -> [KeyBinding; 4] {
     ]
 }
 
+pub(crate) fn scrollback_page_keybindings() -> [KeyBinding; 2] {
+    const NORMAL_TERMINAL_SCREEN: &str = "Zetta > Terminal && screen == normal";
+    [
+        KeyBinding::new("pageup", ScrollPageUp, Some(NORMAL_TERMINAL_SCREEN)),
+        KeyBinding::new("pagedown", ScrollPageDown, Some(NORMAL_TERMINAL_SCREEN)),
+    ]
+}
+
 pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut App) {
     cx.clear_key_bindings();
     match KeymapFile::load_asset_allow_partial_failure(settings::DEFAULT_KEYMAP_PATH, cx) {
@@ -505,6 +529,7 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
         KeyBinding::new("ctrl-shift-t", NewTab, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-shift-n", NewWindow, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-shift-w", CloseTab, Some("Zetta > Terminal")),
+        close_pane_keybinding(),
         KeyBinding::new("ctrl-shift-o", SplitHorizontal, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-shift-e", SplitVertical, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-shift-a", SelectAll, Some("Zetta > Terminal")),
@@ -599,8 +624,13 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
         KeyBinding::new("ctrl-shift-w", CloseTab, Some("Terminal")),
     ];
     bindings.extend(minimized_pane_keybindings());
+    bindings.extend(scrollback_page_keybindings());
     bindings.extend(pane_template_keybindings());
-    bindings.extend((1..=profile_count.min(9)).flat_map(profile_keybindings));
+    let keyboard_mapper = cx.keyboard_mapper().clone();
+    bindings.extend(
+        (1..=profile_count.min(9))
+            .flat_map(|slot| profile_keybindings(slot, keyboard_mapper.as_ref())),
+    );
     cx.bind_keys(bindings);
     let Ok(content) = fs::read_to_string(path) else {
         return;
@@ -764,6 +794,11 @@ pub(crate) fn run() -> Result<()> {
             ZettaAssets.load_fonts(cx).log_err();
             apply_config_settings(&config, cx).expect("failed to apply Zetta configuration");
             load_keybindings(&keymap_path, profile_count, cx);
+            let layout_keymap_path = keymap_path.clone();
+            cx.on_keyboard_layout_change(move |cx| {
+                load_keybindings(&layout_keymap_path, profile_count, cx);
+            })
+            .detach();
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     cx.quit();

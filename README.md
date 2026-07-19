@@ -174,11 +174,12 @@ starting point. `--config PATH` and `--keymap PATH` override the defaults. If
 the configuration cannot be parsed, Zetta starts with safe defaults and shows
 the error in the window; correct the file and reload it without restarting.
 The first tab starts in the user's home directory unless `working_directory`
-is configured. A detected WSL profile uses the selected distribution's Linux
-home rather than the Windows user profile. Later native-shell tabs and splits
-inherit the active pane's current directory. Because `wsl.exe` exposes only its
-Windows-side directory, Zetta tracks each WSL shell's Linux directory and uses
-it for same-profile tabs and splits.
+is configured. Setting it to `"~"` is equivalent to leaving it unset. A detected
+WSL profile therefore uses the selected distribution's Linux home rather than
+the Windows user profile in both cases. Later native-shell tabs and splits
+inherit the active pane's current directory. Because `wsl.exe` exposes only
+its Windows-side directory, Zetta tracks each WSL shell's Linux directory and
+uses it for same-profile tabs and splits.
 
 Keyboard shortcuts use Zed's keymap format. The default shortcuts are:
 
@@ -190,6 +191,8 @@ Keyboard shortcuts use Zed's keymap format. The default shortcuts are:
 | `Ctrl-Shift-W` | Close tab |
 | `Ctrl-Shift-O` | Split active pane horizontally (top/bottom) |
 | `Ctrl-Shift-E` | Split active pane vertically (left/right) |
+| `Ctrl-Shift-X` | Close the active pane (or its tab when it is the final pane) |
+| `PageUp` / `PageDown` | Scroll back one page at the shell; pass through in alternate-screen applications |
 | `Ctrl-Shift-A` | Select all terminal text |
 | `Ctrl-Shift-Backspace` | Clear the system clipboard |
 | `Alt-Arrow` | Focus the pane in that direction |
@@ -233,7 +236,9 @@ connection dialog defaults to 115200 baud, 8 data bits, no parity, 1 stop bit,
 and no flow control (115200 8N1). Use `Tab` to move between settings, arrow keys
 to change the selected value, and `Ctrl-R`/`Cmd-R` to rescan devices. Baud rate,
 data bits, parity, stop bits, and software or hardware flow control can all be
-set before connecting. Closing the pane closes the serial device.
+set before connecting. On Linux, placeholder legacy UART nodes are validated
+before being shown; when no usable ports are detected, the dialog reports that
+no devices were found. Closing the pane closes the serial device.
 
 The settings button in the tab bar (or `Ctrl-,`) opens typed controls for the
 active configuration and keymap files. Profiles and themes use checked
@@ -351,10 +356,11 @@ change. Unmodified function keys are left available to terminal applications.
 
 Splits inherit the active pane's working directory and use the selected
 profile. Use `Alt-Left`, `Alt-Right`, `Alt-Up`, and `Alt-Down` to move focus, or
-click a pane. Split panes have controls for maximizing or minimizing them.
-The controls appear when the pointer moves over a pane and hide again after a
-short period of pointer inactivity. Each pane receives a stable per-tab label,
-shown with those controls and retained as other panes are rearranged or closed.
+click a pane. Split panes have controls for maximizing, minimizing, or closing
+them. The controls appear when the pointer moves over a pane and hide again
+after a short period of pointer inactivity. Each pane receives a stable per-tab
+label, shown with those controls and retained as other panes are rearranged or
+closed.
 Press `Ctrl-Alt-L` or double-click that label to give the active pane a custom
 name. Submitting an empty name restores its automatic label.
 Panes created by a multi-command use their resolved Cartesian parameters as
@@ -364,9 +370,10 @@ A manually assigned label takes precedence; clearing it restores the generated
 parameter label.
 A maximized pane is identified by a status strip below the pane and can be
 restored with its strip button or `Shift-Escape`. A shelf at the bottom of the
-tab shows the selected minimized pane's label and profile name, its position in
-the minimized list, and previous/next buttons. Click the selected item to
-restore it to its original split position.
+tab uses the available width to show as many complete minimized-pane entries as
+fit, including each pane's label and profile name. The selected entry is
+highlighted and its position appears at the start of the shelf. Click any
+visible entry to restore it to its original split position.
 Use `Alt-Shift-Down` to minimize the active pane, `Alt-Shift-Left` and
 `Alt-Shift-Right` to move the highlighted selection through the minimized
 shelf, and `Alt-Shift-Up` to restore the selected pane. These actions are also
@@ -426,10 +433,14 @@ theme for its background, text, icons, border, and active indicator:
 }
 ```
 
-GPUI represents shifted number-row keys by their symbols internally, so custom
-keymaps should use `ctrl-!`, `ctrl-@`, through `ctrl-(` as shown in
-`keymap.example.json`. `Ctrl-Alt-1` through `Ctrl-Alt-9` are also built-in
-fallbacks.
+GPUI represents shifted number-row keys by their US ASCII symbols internally,
+so custom keymaps should use `ctrl-!`, `ctrl-@`, through `ctrl-(` and set
+`"use_key_equivalents": true` on that keymap section, as shown in
+`keymap.example.json`. Zetta normalizes these physical keys on Linux so the
+shortcuts also work with layouts whose shifted characters differ. On Windows
+and macOS, the shortcuts follow the active platform keyboard mapping and are
+rebuilt when the layout changes. `Ctrl-Alt` number-row fallbacks are not built
+in because they collide with AltGr on layouts that use it.
 
 Zetta defaults to the bundled `One Light` theme. Set `theme` to the name of a
 bundled Zed theme and `terminal_font_size` to a value from 6 through 100 in

@@ -66,6 +66,67 @@ impl From<serialport::SerialPortInfo> for SerialDevice {
     }
 }
 
+pub(crate) fn detected_serial_devices(ports: Vec<serialport::SerialPortInfo>) -> Vec<SerialDevice> {
+    ports
+        .into_iter()
+        .filter(serial_port_is_present)
+        .map(SerialDevice::from)
+        .collect()
+}
+
+fn serial_port_is_present(info: &serialport::SerialPortInfo) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::FileTypeExt as _;
+
+        let path = Path::new(&info.port_name);
+        let Ok(metadata) = path.metadata() else {
+            return false;
+        };
+        if !metadata.file_type().is_char_device() {
+            return false;
+        }
+        if linux_legacy_serial_port(&info.port_name) {
+            return linux_tty_responds(path);
+        }
+    }
+
+    true
+}
+
+#[cfg(target_os = "linux")]
+fn linux_legacy_serial_port(port_name: &str) -> bool {
+    Path::new(port_name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("ttyS"))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_tty_responds(path: &Path) -> bool {
+    use std::fs::OpenOptions;
+    use std::mem::MaybeUninit;
+    use std::os::{fd::AsRawFd as _, unix::fs::OpenOptionsExt as _};
+
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) => {
+            // A real device can be visible but unavailable to this process.
+            // Keep it in the list so connecting reports the actionable error.
+            return error.kind() == std::io::ErrorKind::PermissionDenied
+                || error.raw_os_error() == Some(libc::EBUSY);
+        }
+    };
+    let mut attributes = MaybeUninit::<libc::termios>::uninit();
+    // SAFETY: `attributes` points to writable storage for `tcgetattr`, and the
+    // file descriptor remains valid for the duration of the call.
+    unsafe { libc::tcgetattr(file.as_raw_fd(), attributes.as_mut_ptr()) == 0 }
+}
+
 pub(crate) struct SerialConsolePrompt {
     pub(crate) devices: Vec<SerialDevice>,
     pub(crate) selected_device: usize,

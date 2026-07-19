@@ -650,11 +650,18 @@ impl Tab {
             self.maximized_pane = None;
         }
         self.minimized_panes.retain(|pane_id| *pane_id != closed);
+        let surviving = self.panes.iter().map(|pane| pane.id).collect::<Vec<_>>();
+        if !surviving.is_empty() && surviving.len() == self.minimized_panes.len() {
+            let restored = self
+                .minimized_panes
+                .pop()
+                .expect("a surviving minimized pane must be available");
+            self.activate_pane(restored);
+        }
         self.repair_minimized_selection();
         if self.panes.len() == 1 {
             self.maximized_pane = None;
         }
-        let surviving = self.panes.iter().map(|pane| pane.id).collect::<Vec<_>>();
         self.focus_history
             .retain(|pane_id| *pane_id != closed && surviving.contains(pane_id));
 

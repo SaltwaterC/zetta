@@ -634,26 +634,25 @@ fn closing_the_selected_minimized_pane_selects_a_surviving_item() {
 }
 
 #[test]
-fn closing_the_only_visible_pane_preserves_keyboard_restorable_minimized_panes() {
+fn closing_the_only_visible_pane_restores_the_most_recently_minimized_pane() {
     let mut tab = pane_management_tab();
     assert!(tab.minimize(2));
     assert!(tab.minimize(3));
+    assert!(tab.select_previous_minimized());
+    assert_eq!(tab.selected_minimized_pane, Some(2));
 
     tab.remove_pane(1);
     tab.layout = tab.layout.clone().without(1).unwrap();
     tab.restore_focus_after_close(1, tab.layout.first_pane());
 
-    assert_eq!(tab.minimized_panes, vec![2, 3]);
-    assert_eq!(tab.selected_minimized_pane, Some(3));
-    assert_eq!(tab.active_pane, 3);
-    assert_eq!(tab.visible_layout(), None);
-    assert!(tab.restore_last_minimized());
+    assert_eq!(tab.minimized_panes, vec![2]);
+    assert_eq!(tab.selected_minimized_pane, Some(2));
     assert_eq!(tab.active_pane, 3);
     assert_eq!(tab.visible_layout(), Some(PaneLayout::Pane(3)));
 }
 
 #[test]
-fn closing_the_only_visible_pane_keeps_a_sole_remaining_pane_minimized() {
+fn closing_the_only_visible_pane_restores_a_sole_minimized_pane() {
     let mut tab = pane_management_tab();
     tab.remove_pane(3);
     tab.layout = tab.layout.clone().without(3).unwrap();
@@ -664,12 +663,11 @@ fn closing_the_only_visible_pane_keeps_a_sole_remaining_pane_minimized() {
     tab.layout = tab.layout.clone().without(1).unwrap();
     tab.restore_focus_after_close(1, tab.layout.first_pane());
 
-    assert_eq!(tab.minimized_panes, vec![2]);
-    assert_eq!(tab.selected_minimized_pane, Some(2));
+    assert!(tab.minimized_panes.is_empty());
+    assert_eq!(tab.selected_minimized_pane, None);
     assert_eq!(tab.active_pane, 2);
-    assert_eq!(tab.visible_layout(), None);
-    assert!(tab.restore_last_minimized());
     assert_eq!(tab.visible_layout(), Some(PaneLayout::Pane(2)));
+    assert!(!tab.restore_last_minimized());
 }
 
 #[test]

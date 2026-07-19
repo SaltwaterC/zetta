@@ -11,6 +11,7 @@ x11 = ["gpui_platform/x11"]
 
 [dependencies]
 anyhow = "1"
+libc = "0.2"
 async-compression = { version = "0.4", features = ["gzip", "futures-io"] }
 async-tar = "0.6"
 assets = { path = "zed/crates/assets" }

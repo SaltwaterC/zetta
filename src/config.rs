@@ -125,12 +125,15 @@ impl Config {
         validate_config_fields(&root)?;
 
         if let Some(directory) = root.get("working_directory") {
-            config.working_directory = Some(expand_home(
-                directory
-                    .as_str()
-                    .context("working_directory must be a string")?,
-            ));
-            config.working_directory_configured = true;
+            let directory = directory
+                .as_str()
+                .context("working_directory must be a string")?;
+            config.working_directory = Some(expand_home(directory));
+            // An explicit home alias is equivalent to omitting the setting.
+            // This distinction matters for WSL: an actual override is a
+            // Windows-side cwd, while the default must be passed as `--cd ~`
+            // so WSL resolves the Linux user's home directory.
+            config.working_directory_configured = !matches!(directory, "~" | "~/");
         }
         if let Some(theme) = root.get("theme") {
             config.theme = Some(theme.as_str().context("theme must be a string")?.to_owned());

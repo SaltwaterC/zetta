@@ -106,6 +106,14 @@ artifact and is only necessary for release, packaging, or installation work.
 
 ## Performance profiling
 
+Every change must consider its performance impact. Before completing a change,
+carry out a performance-focused code review of the completed diff, paying
+particular attention to hot render and input paths, algorithmic scaling,
+allocations, repeated I/O or process spawning, locking, and unnecessary work.
+Record any material findings and address them when the task includes
+implementation; use profiling or benchmarks when static review is not enough
+to establish the impact.
+
 Use the built-in terminal-rendering workload for reproducible performance
 checks on Linux, macOS, and Windows. Always use an optimized build when
 recording or comparing results:

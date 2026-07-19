@@ -205,12 +205,7 @@ impl Zetta {
             let result = cx
                 .background_spawn(async move {
                     serialport::available_ports()
-                        .map(|ports| {
-                            ports
-                                .into_iter()
-                                .map(SerialDevice::from)
-                                .collect::<Vec<_>>()
-                        })
+                        .map(detected_serial_devices)
                         .context("enumerating serial devices")
                 })
                 .await;

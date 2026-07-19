@@ -30,12 +30,12 @@ use config::{Config, PaneSplitAxis, PaneSplitTemplate, Profile};
 use gpui::{
     Action, Anchor, AnyElement, App, AppContext as _, Bounds, Context, CursorStyle, Decorations,
     Entity, Focusable, FrameTiming, FrameTimingCollector, HitboxBehavior, InteractiveElement as _,
-    IntoElement, KeyBinding, KeyDownEvent, MAX_BUTTONS_PER_SIDE, MouseButton, Pixels, Point,
-    Render, ResizeEdge, ScrollHandle, SharedString, Size, Subscription, Task, Tiling,
-    TitlebarOptions, UniformListScrollHandle, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowButton, WindowButtonLayout, WindowControlArea, WindowControls, WindowDecorations,
-    WindowId, WindowOptions, actions, canvas, div, point, profiler, px, size, svg,
-    transparent_black, uniform_list,
+    IntoElement, KeyBinding, KeyBindingContextPredicate, KeyDownEvent, MAX_BUTTONS_PER_SIDE,
+    MouseButton, Pixels, PlatformKeyboardMapper, Point, Render, ResizeEdge, ScrollHandle,
+    SharedString, Size, Subscription, Task, Tiling, TitlebarOptions, UniformListScrollHandle,
+    Window, WindowBackgroundAppearance, WindowBounds, WindowButton, WindowButtonLayout,
+    WindowControlArea, WindowControls, WindowDecorations, WindowId, WindowOptions, actions, canvas,
+    container_query, div, point, profiler, px, size, svg, transparent_black, uniform_list,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -46,7 +46,8 @@ use settings_editor::{
 };
 use task::Shell;
 use terminal::{
-    Paste, PasteTrimmed, Range, Search, TerminalBuilder, terminal_settings::TerminalSettings,
+    Paste, PasteTrimmed, Range, ScrollPageDown, ScrollPageUp, Search, TerminalBuilder,
+    terminal_settings::TerminalSettings,
 };
 use terminal_view::{
     ClearClipboard, CopyAndClearSelection, DismissSearch, SearchNextMatch, SearchPreviousMatch,
@@ -75,6 +76,7 @@ actions!(
         PreviousTab,
         RenameTab,
         RenamePane,
+        ClosePane,
         SplitHorizontal,
         SplitVertical,
         FocusPaneLeft,

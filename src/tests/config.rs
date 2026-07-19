@@ -56,7 +56,7 @@ fn default_working_directory_is_the_user_home() {
 }
 
 #[test]
-fn configured_working_directory_is_marked_explicit() {
+fn configured_home_alias_is_equivalent_to_the_default_directory() {
     let config_path = env::temp_dir().join(format!(
         "zetta-working-directory-{}-{}.json",
         std::process::id(),
@@ -71,6 +71,18 @@ fn configured_working_directory_is_marked_explicit() {
 
     fs::remove_file(config_path).unwrap();
     assert_eq!(config.working_directory, Some(home_dir()));
+    assert!(!config.working_directory_configured);
+
+    let trailing_slash = Config::parse(r#"{"working_directory":"~/"}"#, None, None).unwrap();
+    assert_eq!(trailing_slash.working_directory, Some(home_dir()));
+    assert!(!trailing_slash.working_directory_configured);
+}
+
+#[test]
+fn configured_non_default_working_directory_is_marked_explicit() {
+    let config = Config::parse(r#"{"working_directory":"~/source"}"#, None, None).unwrap();
+
+    assert_eq!(config.working_directory, Some(home_dir().join("source")));
     assert!(config.working_directory_configured);
 }
 

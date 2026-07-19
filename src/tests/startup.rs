@@ -245,17 +245,16 @@ fn linux_desktop_entry_matches_app_id() {
     assert!(desktop_entry.contains(&format!("\nStartupWMClass={ZETTA_APP_ID}\n")));
 }
 
-#[cfg(target_os = "linux")]
 #[test]
-fn profile_shortcuts_match_shifted_and_fallback_chords() {
+fn profile_shortcuts_match_the_shifted_number_row() {
     const SHIFTED_DIGITS: [&str; 9] = ["!", "@", "#", "$", "%", "^", "&", "*", "("];
+    let keyboard_mapper = gpui::DummyKeyboardMapper;
     for (index, symbol) in SHIFTED_DIGITS.into_iter().enumerate() {
         let slot = index + 1;
-        let bindings = profile_keybindings(slot);
+        let bindings = profile_keybindings(slot, &keyboard_mapper);
         let shifted = gpui::Keystroke::parse(&format!("ctrl-{symbol}")).unwrap();
-        let fallback = gpui::Keystroke::parse(&format!("ctrl-alt-{slot}")).unwrap();
+        assert_eq!(bindings.len(), 1);
         assert_eq!(bindings[0].match_keystrokes(&[shifted]), Some(false));
-        assert_eq!(bindings[1].match_keystrokes(&[fallback]), Some(false));
     }
 }
 
@@ -333,6 +332,27 @@ fn wsl_ignores_the_windows_side_inherited_directory() {
         None,
         Some(PathBuf::from(r"C:\Users\stefan")),
         false,
+    );
+
+    assert_eq!(directory, None);
+    assert_eq!(wsl_directory.as_deref(), Some("~"));
+}
+
+#[test]
+fn explicitly_configured_home_alias_still_uses_the_wsl_home() {
+    let config = Config::parse(r#"{"working_directory":"~"}"#, None, None).unwrap();
+    let profile = Profile {
+        name: "WSL: Ubuntu".to_owned(),
+        command: Shell::Program("wsl.exe".to_owned()),
+        theme: None,
+    };
+
+    let (directory, wsl_directory) = launch_working_directory(
+        &profile,
+        Some(PathBuf::from(r"C:\source\zetta")),
+        None,
+        config.working_directory,
+        config.working_directory_configured,
     );
 
     assert_eq!(directory, None);
@@ -477,6 +497,16 @@ fn pane_label_uses_the_documented_shortcut() {
 }
 
 #[test]
+fn close_pane_uses_a_distinct_shortcut_from_close_tab() {
+    assert_eq!(CLOSE_PANE_KEYBINDING, "ctrl-shift-x");
+    let shortcut = gpui::Keystroke::parse(CLOSE_PANE_KEYBINDING).unwrap();
+    assert_eq!(
+        close_pane_keybinding().match_keystrokes(&[shortcut]),
+        Some(false)
+    );
+}
+
+#[test]
 fn pane_output_uses_the_standard_save_shortcut() {
     assert_eq!(SAVE_PANE_OUTPUT_KEYBINDING, "ctrl-shift-s");
     let shortcut = gpui::Keystroke::parse(SAVE_PANE_OUTPUT_KEYBINDING).unwrap();
@@ -508,5 +538,26 @@ fn minimized_pane_shortcuts_are_built_in() {
     ]) {
         let shortcut = gpui::Keystroke::parse(shortcut).unwrap();
         assert_eq!(binding.match_keystrokes(&[shortcut]), Some(false));
+    }
+}
+
+#[test]
+fn page_keys_scroll_terminal_scrollback() {
+    let bindings = scrollback_page_keybindings();
+    let mut zetta = gpui::KeyContext::default();
+    zetta.add("Zetta");
+    let mut normal_terminal = gpui::KeyContext::default();
+    normal_terminal.add("Terminal");
+    normal_terminal.set("screen", "normal");
+    let mut alternate_terminal = gpui::KeyContext::default();
+    alternate_terminal.add("Terminal");
+    alternate_terminal.set("screen", "alt");
+
+    for (binding, shortcut) in bindings.into_iter().zip(["pageup", "pagedown"]) {
+        let shortcut = gpui::Keystroke::parse(shortcut).unwrap();
+        assert_eq!(binding.match_keystrokes(&[shortcut]), Some(false));
+        let predicate = binding.predicate().unwrap();
+        assert!(predicate.eval(&[zetta.clone(), normal_terminal.clone()]));
+        assert!(!predicate.eval(&[zetta.clone(), alternate_terminal.clone()]));
     }
 }

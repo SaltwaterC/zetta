@@ -908,6 +908,30 @@ pub(super) fn log_cursor_icon_warning(message: impl std::fmt::Display) {
 }
 
 #[cfg(any(feature = "wayland", feature = "x11"))]
+fn number_row_ascii(keycode: Keycode, shift: bool) -> Option<char> {
+    const DIGITS: [char; 10] = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
+    const SHIFTED: [char; 10] = ['!', '@', '#', '$', '%', '^', '&', '*', '(', ')'];
+
+    let index = usize::try_from(keycode.raw()).ok()?.checked_sub(10)?;
+    if shift {
+        SHIFTED.get(index).copied()
+    } else {
+        DIGITS.get(index).copied()
+    }
+}
+
+#[cfg(any(feature = "wayland", feature = "x11"))]
+fn number_row_ascii_or_else(
+    keycode: Keycode,
+    shift: bool,
+    fallback: impl FnOnce() -> String,
+) -> String {
+    number_row_ascii(keycode, shift)
+        .map(|key| key.to_string())
+        .unwrap_or_else(fallback)
+}
+
+#[cfg(any(feature = "wayland", feature = "x11"))]
 fn guess_ascii(keycode: Keycode, shift: bool) -> Option<char> {
     let c = match (keycode.raw(), shift) {
         (24, _) => 'q',
@@ -971,7 +995,12 @@ pub(super) fn keystroke_from_xkb(
     let key_utf8 = state.key_get_utf8(keycode);
     let key_sym = state.key_get_one_sym(keycode);
 
-    let key = match key_sym {
+    // Keep number-row keybindings tied to their physical keys. The typed
+    // character remains layout-aware in `key_char` (for example, Shift-2 is
+    // `"` on a UK layout), while `key` uses the US ASCII equivalent expected
+    // by GPUI keymaps (`@` for that same physical key). Resolve it first so the
+    // general layout-aware path does not construct a string that is discarded.
+    let key = number_row_ascii_or_else(keycode, modifiers.shift, || match key_sym {
         Keysym::Return => "enter".to_owned(),
         Keysym::Prior => "pageup".to_owned(),
         Keysym::Next => "pagedown".to_owned(),
@@ -1064,7 +1093,7 @@ pub(super) fn keystroke_from_xkb(
                 name
             }
         }
-    };
+    });
 
     if modifiers.shift {
         // we only include the shift for upper-case letters by convention,
@@ -1227,6 +1256,41 @@ mod tests {
             zero,
             Point::new(px(5.0), px(5.1))
         ),);
+    }
+
+    #[cfg(any(feature = "wayland", feature = "x11"))]
+    #[test]
+    fn number_row_uses_layout_independent_ascii_equivalents() {
+        let unshifted = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
+        let shifted = ['!', '@', '#', '$', '%', '^', '&', '*', '(', ')'];
+
+        for (index, (unshifted, shifted)) in unshifted.into_iter().zip(shifted).enumerate() {
+            let keycode = Keycode::from(u32::try_from(index + 10).unwrap());
+            assert_eq!(number_row_ascii(keycode, false), Some(unshifted));
+            assert_eq!(number_row_ascii(keycode, true), Some(shifted));
+        }
+
+        assert_eq!(number_row_ascii(Keycode::from(9_u32), true), None);
+        assert_eq!(number_row_ascii(Keycode::from(20_u32), true), None);
+    }
+
+    #[cfg(any(feature = "wayland", feature = "x11"))]
+    #[test]
+    fn number_row_bypasses_general_key_string_resolution() {
+        let mut fallback_called = false;
+        let key = number_row_ascii_or_else(Keycode::from(11_u32), true, || {
+            fallback_called = true;
+            "layout-derived".to_owned()
+        });
+        assert_eq!(key, "@");
+        assert!(!fallback_called);
+
+        let key = number_row_ascii_or_else(Keycode::from(24_u32), false, || {
+            fallback_called = true;
+            "q".to_owned()
+        });
+        assert_eq!(key, "q");
+        assert!(fallback_called);
     }
 
     #[cfg(any(feature = "wayland", feature = "x11"))]

@@ -1,6 +1,7 @@
 [
   {
     "context": "Zetta > Terminal",
+    "use_key_equivalents": true,
     "bindings": {
       "ctrl-shift-t": "zetta::NewTab",
       "ctrl-shift-n": "zetta::NewWindow",
@@ -52,6 +53,13 @@
       "ctrl-&": ["zetta::OpenProfile", { "slot": 7 }],
       "ctrl-*": ["zetta::OpenProfile", { "slot": 8 }],
       "ctrl-(": ["zetta::OpenProfile", { "slot": 9 }]
+    }
+  },
+  {
+    "context": "Zetta > Terminal && screen == normal",
+    "bindings": {
+      "pageup": "terminal::ScrollPageUp",
+      "pagedown": "terminal::ScrollPageDown"
     }
   },
   {

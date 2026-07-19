@@ -557,6 +557,18 @@ impl Zetta {
         self.close_tab_at(self.active_tab, window, cx);
     }
 
+    pub(crate) fn close_active_pane(
+        &mut self,
+        _: &ClosePane,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            return;
+        };
+        self.close_pane(tab.id, tab.active_pane, window, cx);
+    }
+
     pub(crate) fn save_pane_output(
         &mut self,
         _: &SavePaneOutput,
@@ -1370,6 +1382,7 @@ impl Zetta {
         tab: &Tab,
         layout: &PaneLayout,
         colors: &ThemeColors,
+        error_color: gpui::Hsla,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
@@ -1398,7 +1411,7 @@ impl Zetta {
                         .size_full()
                         .p_4()
                         .bg(colors.editor_background)
-                        .text_color(cx.theme().status().error)
+                        .text_color(error_color)
                         .child("Unable to start shell")
                         .child(div().mt_2().text_sm().child(error.clone()))
                         .into_any_element(),
@@ -1447,9 +1460,12 @@ impl Zetta {
                         |pane| {
                             let maximize_handle = cx.entity().downgrade();
                             let minimize_handle = cx.entity().downgrade();
+                            let close_handle = cx.entity().downgrade();
                             let rename_handle = cx.entity().downgrade();
+                            let tab_id = tab.id;
                             let maximize_pane_id = *pane_id;
                             let minimize_pane_id = *pane_id;
+                            let close_pane_id = *pane_id;
                             let rename_pane_id = *pane_id;
                             let pane_label_tooltip =
                                 format!("{pane_label}\nDouble-click to label this pane");
@@ -1496,16 +1512,43 @@ impl Zetta {
                                             .child(
                                                 Label::new(pane_label)
                                                     .size(LabelSize::Small)
-                                                    .color(Color::Muted),
+                                                    .color(Color::Custom(colors.text_muted)),
                                             ),
+                                    )
+                                    .child(
+                                        IconButton::new(
+                                            ("minimize-terminal-pane", *pane_id as usize),
+                                            IconName::Dash,
+                                        )
+                                        .style(ButtonStyle::Transparent)
+                                        .size(ButtonSize::Compact)
+                                        .icon_size(IconSize::XSmall)
+                                        .icon_color(Color::Custom(colors.icon))
+                                        .aria_label("Minimize pane")
+                                        .tooltip(Tooltip::text("Minimize pane"))
+                                        .on_click(
+                                            move |_, window, cx| {
+                                                minimize_handle
+                                                    .update(cx, |this, cx| {
+                                                        this.minimize_pane_by_id(
+                                                            minimize_pane_id,
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    })
+                                                    .ok();
+                                            },
+                                        ),
                                     )
                                     .child(
                                         IconButton::new(
                                             ("maximize-terminal-pane", *pane_id as usize),
                                             IconName::Maximize,
                                         )
+                                        .style(ButtonStyle::Transparent)
                                         .size(ButtonSize::Compact)
                                         .icon_size(IconSize::XSmall)
+                                        .icon_color(Color::Custom(colors.icon))
                                         .aria_label("Maximize pane")
                                         .tooltip(Tooltip::text("Maximize pane (Shift-Escape)"))
                                         .on_click(
@@ -1524,19 +1567,22 @@ impl Zetta {
                                     )
                                     .child(
                                         IconButton::new(
-                                            ("minimize-terminal-pane", *pane_id as usize),
-                                            IconName::Dash,
+                                            ("close-terminal-pane", *pane_id as usize),
+                                            IconName::Close,
                                         )
+                                        .style(ButtonStyle::Transparent)
                                         .size(ButtonSize::Compact)
                                         .icon_size(IconSize::XSmall)
-                                        .aria_label("Minimize pane")
-                                        .tooltip(Tooltip::text("Minimize pane"))
+                                        .icon_color(Color::Custom(colors.icon))
+                                        .aria_label("Close pane")
+                                        .tooltip(Tooltip::text("Close pane (Ctrl-Shift-X)"))
                                         .on_click(
                                             move |_, window, cx| {
-                                                minimize_handle
+                                                close_handle
                                                     .update(cx, |this, cx| {
-                                                        this.minimize_pane_by_id(
-                                                            minimize_pane_id,
+                                                        this.close_pane(
+                                                            tab_id,
+                                                            close_pane_id,
                                                             window,
                                                             cx,
                                                         );
@@ -1566,8 +1612,8 @@ impl Zetta {
                 })
                 .gap_px()
                 .bg(colors.border)
-                .child(self.render_pane_layout(tab, first, colors, window, cx))
-                .child(self.render_pane_layout(tab, second, colors, window, cx))
+                .child(self.render_pane_layout(tab, first, colors, error_color, window, cx))
+                .child(self.render_pane_layout(tab, second, colors, error_color, window, cx))
                 .into_any_element(),
         }
     }
