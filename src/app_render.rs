@@ -1225,6 +1225,7 @@ impl Render for Zetta {
             .on_action(cx.listener(Self::toggle_command_palette))
             .on_action(cx.listener(Self::toggle_settings))
             .on_action(cx.listener(Self::toggle_serial_console))
+            .on_action(cx.listener(Self::start_tftp_server))
             .on_action(cx.listener(Self::toggle_performance_overlay))
             .when(self.is_renaming(), |content| {
                 content.track_focus(&self.rename_focus)

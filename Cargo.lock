@@ -10100,6 +10100,7 @@ dependencies = [
  "terminal_view",
  "theme",
  "theme_settings",
+ "time",
  "toml 0.8.23",
  "ui",
  "util",

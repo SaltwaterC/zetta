@@ -4,6 +4,7 @@ mod command_palette;
 mod config;
 mod serial_console;
 mod settings_editor;
+mod tftp;
 mod theme_extensions;
 mod zetta_assets;
 
@@ -102,6 +103,7 @@ actions!(
         ToggleCommandPalette,
         ToggleSettings,
         ToggleSerialConsole,
+        StartTftpServer,
         TogglePerformanceOverlay
     ]
 );
@@ -132,8 +134,10 @@ mod settings_ui;
 mod settings_view;
 use serial_console::*;
 use settings_ui::*;
+use tftp::*;
 mod app;
 mod serial_console_ui;
+mod tftp_server_ui;
 use app::*;
 mod app_render;
 mod window_frame;
