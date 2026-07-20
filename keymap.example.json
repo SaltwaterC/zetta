@@ -58,13 +58,6 @@
     }
   },
   {
-    "context": "Zetta > Terminal && screen == normal",
-    "bindings": {
-      "pageup": "terminal::ScrollPageUp",
-      "pagedown": "terminal::ScrollPageDown"
-    }
-  },
-  {
     "context": "Zetta > Terminal && selection",
     "bindings": {
       "ctrl-c": "terminal_view::CopyAndClearSelection"

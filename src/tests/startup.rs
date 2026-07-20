@@ -658,24 +658,3 @@ fn minimized_pane_shortcuts_are_built_in() {
         assert_eq!(binding.match_keystrokes(&[shortcut]), Some(false));
     }
 }
-
-#[test]
-fn page_keys_scroll_terminal_scrollback() {
-    let bindings = scrollback_page_keybindings();
-    let mut zetta = gpui::KeyContext::default();
-    zetta.add("Zetta");
-    let mut normal_terminal = gpui::KeyContext::default();
-    normal_terminal.add("Terminal");
-    normal_terminal.set("screen", "normal");
-    let mut alternate_terminal = gpui::KeyContext::default();
-    alternate_terminal.add("Terminal");
-    alternate_terminal.set("screen", "alt");
-
-    for (binding, shortcut) in bindings.into_iter().zip(["pageup", "pagedown"]) {
-        let shortcut = gpui::Keystroke::parse(shortcut).unwrap();
-        assert_eq!(binding.match_keystrokes(&[shortcut]), Some(false));
-        let predicate = binding.predicate().unwrap();
-        assert!(predicate.eval(&[zetta.clone(), normal_terminal.clone()]));
-        assert!(!predicate.eval(&[zetta.clone(), alternate_terminal.clone()]));
-    }
-}

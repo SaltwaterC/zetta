@@ -645,14 +645,6 @@ pub(crate) fn minimized_pane_keybindings() -> [KeyBinding; 4] {
     ]
 }
 
-pub(crate) fn scrollback_page_keybindings() -> [KeyBinding; 2] {
-    const NORMAL_TERMINAL_SCREEN: &str = "Zetta > Terminal && screen == normal";
-    [
-        KeyBinding::new("pageup", ScrollPageUp, Some(NORMAL_TERMINAL_SCREEN)),
-        KeyBinding::new("pagedown", ScrollPageDown, Some(NORMAL_TERMINAL_SCREEN)),
-    ]
-}
-
 pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut App) {
     cx.clear_key_bindings();
     match KeymapFile::load_asset_allow_partial_failure(settings::DEFAULT_KEYMAP_PATH, cx) {
@@ -760,7 +752,6 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
         KeyBinding::new("ctrl-shift-w", CloseTab, Some("Terminal")),
     ];
     bindings.extend(minimized_pane_keybindings());
-    bindings.extend(scrollback_page_keybindings());
     bindings.extend(pane_template_keybindings());
     let keyboard_mapper = cx.keyboard_mapper().clone();
     bindings.extend(

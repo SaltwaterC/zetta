@@ -219,7 +219,8 @@ Keyboard shortcuts use Zed's keymap format. The default shortcuts are:
 | `Ctrl-Shift-O` | Split active pane horizontally (top/bottom) |
 | `Ctrl-Shift-E` | Split active pane vertically (left/right) |
 | `Ctrl-Shift-X` | Close the active pane (or its tab when it is the final pane) |
-| `PageUp` / `PageDown` | Scroll back one page at the shell; pass through in alternate-screen applications |
+| `PageUp` / `PageDown` | Send page navigation to the foreground program |
+| `Shift-PageUp` / `Shift-PageDown` | Scroll terminal history by one page |
 | `Ctrl-Shift-A` | Select all terminal text |
 | `Ctrl-Shift-Backspace` | Clear the system clipboard |
 | `Alt-Arrow` | Focus the pane in that direction |
@@ -505,10 +506,11 @@ selection and a middle click pastes from PRIMARY, falling back to the system
 clipboard when PRIMARY is unavailable or empty. On other platforms, a middle
 click pastes from the system clipboard.
 
-These bindings are built into Zetta; `keymap.example.json` mirrors them as a
+The default bindings combine Zed's terminal keymap with Zetta-specific
+shortcuts. `keymap.example.json` mirrors the Zetta-specific bindings as a
 starting point for overrides and is not loaded automatically. Place overrides
 in `keymap.json` and keep the `Zetta > Terminal` context so they take precedence
-over Zed's terminal bindings. Key names accept both `pageup`/`pagedown` and the
+over the terminal defaults. Key names accept both `pageup`/`pagedown` and the
 common `page-up`/`page-down` spellings.
 
 Press `Ctrl-Shift-R` after editing `config.json`, `keymap.json`, or files in the
