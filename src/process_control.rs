@@ -14,7 +14,7 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 #[cfg(windows)]
-use std::os::windows::net::{UnixListener, UnixStream};
+use uds_windows::{UnixListener, UnixStream};
 
 use anyhow::{Context as _, Result};
 use futures::channel::mpsc::UnboundedSender;

@@ -35,39 +35,43 @@ fn request_paths_cannot_escape_the_served_directory() {
     let root = tempfile::tempdir().unwrap();
     fs::write(root.path().join("firmware.bin"), b"firmware").unwrap();
     fs::write(root.path().join("index.html"), b"index").unwrap();
+    let root = fs::canonicalize(root.path()).unwrap();
 
     assert_eq!(
-        resolve_request_path(root.path(), "/firmware.bin?download=1").unwrap(),
-        ResolvedContent::File(fs::canonicalize(root.path().join("firmware.bin")).unwrap())
+        resolve_request_path(&root, "/firmware.bin?download=1").unwrap(),
+        ResolvedContent::File(root.join("firmware.bin"))
     );
     assert_eq!(
-        resolve_request_path(root.path(), "/").unwrap(),
-        ResolvedContent::File(fs::canonicalize(root.path().join("index.html")).unwrap())
+        resolve_request_path(&root, "/").unwrap(),
+        ResolvedContent::File(root.join("index.html"))
     );
     assert_eq!(
-        resolve_request_path(root.path(), "/../outside.bin"),
+        resolve_request_path(&root, "/../outside.bin"),
         Err(ResolveError::Forbidden)
     );
     assert_eq!(
-        resolve_request_path(root.path(), "/%2e%2e/outside.bin"),
+        resolve_request_path(&root, "/%2e%2e/outside.bin"),
         Err(ResolveError::Forbidden)
     );
 }
 
 #[test]
 fn directory_indexes_escape_labels_and_encode_links() {
+    assert_eq!(html_escape("<notes>"), "&lt;notes&gt;");
+
     let root = tempfile::tempdir().unwrap();
     fs::write(root.path().join("firmware image.bin"), b"firmware").unwrap();
-    fs::write(root.path().join("<notes>.txt"), b"notes").unwrap();
+    fs::write(root.path().join("notes & 'ideas'.txt"), b"notes").unwrap();
+    let canonical_root = fs::canonicalize(root.path()).unwrap();
 
     assert_eq!(
-        resolve_request_path(root.path(), "/").unwrap(),
-        ResolvedContent::Directory(fs::canonicalize(root.path()).unwrap())
+        resolve_request_path(&canonical_root, "/").unwrap(),
+        ResolvedContent::Directory(canonical_root)
     );
     let index = directory_index(root.path(), "/").unwrap();
     assert!(index.contains("href=\"/firmware%20image.bin\""));
-    assert!(index.contains("&lt;notes&gt;.txt"));
-    assert!(!index.contains("><notes>.txt<"));
+    assert!(index.contains("notes &amp; &#39;ideas&#39;.txt"));
+    assert!(!index.contains(">notes & 'ideas'.txt<"));
     assert!(index.lines().any(|line| {
         line == "<li><a href=\"/firmware%20image.bin\">firmware image.bin</a></li>"
     }));

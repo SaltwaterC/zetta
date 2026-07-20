@@ -130,33 +130,35 @@ fn duplicate_active_requests_share_one_transfer() {
 
 #[test]
 fn server_paths_cannot_escape_the_served_directory() {
-    let root = tempfile::tempdir().unwrap();
-    fs::write(root.path().join("inside.bin"), b"inside").unwrap();
+    let tempdir = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(tempdir.path()).unwrap();
+    fs::write(root.join("inside.bin"), b"inside").unwrap();
     assert_eq!(
-        safe_server_path(root.path(), "inside.bin").unwrap(),
-        fs::canonicalize(root.path().join("inside.bin")).unwrap()
+        safe_server_path(&root, "inside.bin").unwrap(),
+        fs::canonicalize(root.join("inside.bin")).unwrap()
     );
-    assert!(safe_server_path(root.path(), "../outside.bin").is_err());
-    assert!(safe_server_path(root.path(), "/outside.bin").is_err());
+    assert!(safe_server_path(&root, "../outside.bin").is_err());
+    assert!(safe_server_path(&root, "/outside.bin").is_err());
 }
 
 #[test]
 fn incomplete_uploads_are_removed_and_completed_uploads_are_preserved() {
-    let root = tempfile::tempdir().unwrap();
-    let partial_path = root.path().join("partial.bin");
+    let tempdir = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(tempdir.path()).unwrap();
+    let partial_path = root.join("partial.bin");
     {
-        let mut upload = PendingUpload::create(root.path(), "partial.bin").unwrap();
+        let mut upload = PendingUpload::create(&root, "partial.bin").unwrap();
         upload.write_all(b"partial").unwrap();
     }
     assert!(!partial_path.exists());
 
-    let complete_path = root.path().join("complete.bin");
-    let mut upload = PendingUpload::create(root.path(), "complete.bin").unwrap();
+    let complete_path = root.join("complete.bin");
+    let mut upload = PendingUpload::create(&root, "complete.bin").unwrap();
     upload.write_all(b"complete").unwrap();
     upload.finish().unwrap();
     assert_eq!(fs::read(complete_path).unwrap(), b"complete");
-    assert!(PendingUpload::create(root.path(), "complete.bin").is_err());
-    assert!(PendingUpload::create(root.path(), "../outside.bin").is_err());
+    assert!(PendingUpload::create(&root, "complete.bin").is_err());
+    assert!(PendingUpload::create(&root, "../outside.bin").is_err());
 }
 
 fn localhost_udp_available() -> bool {

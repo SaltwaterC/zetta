@@ -10143,6 +10143,7 @@ dependencies = [
  "theme_settings",
  "time",
  "toml 0.8.23",
+ "uds_windows",
  "ui",
  "util",
  "windows 0.61.3",
