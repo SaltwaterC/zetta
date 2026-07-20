@@ -150,7 +150,8 @@ struct ZettaProcessState {
     background_session_entries: Arc<[ProcessBackgroundSessionEntry]>,
     config: Config,
     configuration_error: Option<String>,
-    _control_server: ProcessControlServer,
+    control_server: ProcessControlServer,
+    _quit_subscription: Subscription,
 }
 
 impl Global for ZettaProcessState {}

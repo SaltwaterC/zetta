@@ -1964,7 +1964,7 @@ impl Zetta {
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Err(
                 "performance overlay was not enabled before report capture".to_owned(),
             ));
-            cx.quit();
+            quit_zetta_process(cx);
             return;
         };
         overlay.begin_report();
@@ -1984,7 +1984,7 @@ impl Zetta {
             *status
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(result);
-            cx.update(|cx| cx.quit());
+            cx.update(quit_zetta_process);
         })
         .detach();
     }

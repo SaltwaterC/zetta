@@ -949,7 +949,7 @@ pub(crate) fn prune_empty_dormant_runners(cx: &mut App) {
         process.runners.remove(&runner_id);
     }
     if should_quit_after_window_closed(process.windows.len(), process.dormant.len()) {
-        cx.quit();
+        quit_zetta_process(cx);
     }
 }
 
@@ -959,6 +959,13 @@ fn should_quit_after_window_closed(window_count: usize, dormant_runner_count: us
 
 fn zetta_quit_mode() -> gpui::QuitMode {
     gpui::QuitMode::Explicit
+}
+
+pub(crate) fn quit_zetta_process(cx: &mut App) {
+    cx.global::<ZettaProcessState>()
+        .control_server
+        .begin_shutdown();
+    cx.quit();
 }
 
 fn open_dormant_or_new_window(cx: &mut App) -> Result<()> {
@@ -1024,7 +1031,7 @@ fn handle_zetta_window_closed(cx: &mut App, window_id: WindowId) {
     }
     let process = cx.global::<ZettaProcessState>();
     if should_quit_after_window_closed(process.windows.len(), process.dormant.len()) {
-        cx.quit();
+        quit_zetta_process(cx);
     }
 }
 
@@ -1145,6 +1152,14 @@ pub(crate) fn run() -> Result<()> {
             let (control_tx, mut control_rx) = futures::channel::mpsc::unbounded();
             let control_server = ProcessControlServer::start(control_tx)
                 .expect("failed to start Zetta process control");
+            let quit_subscription = cx.on_app_quit(|cx| {
+                if cx.has_global::<ZettaProcessState>() {
+                    cx.global::<ZettaProcessState>()
+                        .control_server
+                        .begin_shutdown();
+                }
+                async {}
+            });
             cx.set_global(ZettaProcessState {
                 windows: HashMap::new(),
                 dormant: Vec::new(),
@@ -1152,17 +1167,28 @@ pub(crate) fn run() -> Result<()> {
                 background_session_entries: Arc::from([]),
                 config: config.clone(),
                 configuration_error: configuration_error.clone(),
-                _control_server: control_server,
+                control_server,
+                _quit_subscription: quit_subscription,
             });
             cx.spawn(async move |cx| {
                 while let Some(ProcessControlCommand::OpenWindow { completion }) =
                     control_rx.next().await
                 {
-                    let opened = cx.update(|cx| match open_dormant_or_new_window(cx) {
-                        Ok(()) => true,
-                        Err(error) => {
-                            eprintln!("Could not open the requested Zetta window: {error:#}");
-                            false
+                    let opened = cx.update(|cx| {
+                        if !cx
+                            .global::<ZettaProcessState>()
+                            .control_server
+                            .is_accepting()
+                        {
+                            return false;
+                        }
+
+                        match open_dormant_or_new_window(cx) {
+                            Ok(()) => true,
+                            Err(error) => {
+                                eprintln!("Could not open the requested Zetta window: {error:#}");
+                                false
+                            }
                         }
                     });
                     let _ = completion.send(opened);

@@ -59,3 +59,24 @@ fn control_client_continues_startup_when_window_open_is_rejected() {
     completion.send(false).unwrap();
     assert!(!client.join().unwrap());
 }
+
+#[test]
+fn shutdown_rejects_an_in_flight_window_handoff() {
+    let directory = tempfile::tempdir().unwrap();
+    let endpoint_path = directory.path().join("control.json");
+    let (commands, mut received) = futures::channel::mpsc::unbounded();
+    let server = ProcessControlServer::start_at(commands, endpoint_path.clone()).unwrap();
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&fs::read(&endpoint_path).unwrap()).unwrap();
+
+    let client = thread::spawn(move || send_open_window_request(&endpoint).unwrap());
+    let command = futures::executor::block_on(received.next()).unwrap();
+    let ProcessControlCommand::OpenWindow {
+        completion: _completion,
+    } = command;
+    server.begin_shutdown();
+
+    assert!(!client.join().unwrap());
+    assert!(!endpoint_path.exists());
+    assert!(!server.is_accepting());
+}

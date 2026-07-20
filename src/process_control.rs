@@ -5,10 +5,10 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc::{Sender, channel},
+        mpsc::{Receiver, RecvTimeoutError, Sender, channel},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[cfg(unix)]
@@ -24,6 +24,7 @@ use sysinfo::{Pid, ProcessesToUpdate, System};
 const CONTROL_VERSION: u32 = 2;
 const MAX_CONTROL_MESSAGE_BYTES: usize = 4096;
 const CONTROL_COMPLETION_TIMEOUT: Duration = Duration::from_secs(2);
+const CONTROL_COMPLETION_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const CONTROL_CLIENT_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub(crate) enum ProcessControlCommand {
@@ -106,12 +107,11 @@ impl ProcessControlServer {
                             commands
                                 .unbounded_send(ProcessControlCommand::OpenWindow { completion })
                                 .is_ok()
-                                && completed
-                                    .recv_timeout(CONTROL_COMPLETION_TIMEOUT)
-                                    .unwrap_or(false)
+                                && wait_for_control_completion(&completed, &stopping_for_thread)
                         }
                         None => false,
                     };
+                    let accepted = accepted && !stopping_for_thread.load(Ordering::Acquire);
                     let status = if accepted { "ok" } else { "rejected" };
                     let _ = write_message(
                         &mut stream,
@@ -128,6 +128,40 @@ impl ProcessControlServer {
             stopping,
             thread: Some(thread),
         })
+    }
+
+    pub(crate) fn is_accepting(&self) -> bool {
+        !self.stopping.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn begin_shutdown(&self) {
+        if self.stopping.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        // Stop advertising this process before GPUI begins shutting down. A new
+        // launch must start its own application instead of handing off to a
+        // process that can no longer keep the requested window alive.
+        let _ = fs::remove_file(&self.endpoint_path);
+        let _ = UnixStream::connect(&self.socket_path);
+        let _ = fs::remove_file(&self.socket_path);
+    }
+}
+
+fn wait_for_control_completion(completed: &Receiver<bool>, stopping: &AtomicBool) -> bool {
+    let deadline = Instant::now() + CONTROL_COMPLETION_TIMEOUT;
+    loop {
+        if stopping.load(Ordering::Acquire) {
+            return false;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        match completed.recv_timeout(remaining.min(CONTROL_COMPLETION_POLL_INTERVAL)) {
+            Ok(accepted) => return accepted && !stopping.load(Ordering::Acquire),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return false,
+        }
     }
 }
 
@@ -148,8 +182,7 @@ fn decode_control_request(request: &ControlRequest, token: &str) -> Option<Contr
 
 impl Drop for ProcessControlServer {
     fn drop(&mut self) {
-        self.stopping.store(true, Ordering::Release);
-        let _ = UnixStream::connect(&self.socket_path);
+        self.begin_shutdown();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
