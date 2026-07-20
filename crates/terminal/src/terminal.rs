@@ -40,6 +40,7 @@ use std::{
     cmp::{self, min},
     fmt::{self, Display, Formatter},
     io::{Read, Write},
+    mem,
     ops::{BitOr, BitOrAssign, Deref, Range as StdRange},
     path::{Path, PathBuf},
     process::ExitStatus,
@@ -687,7 +688,10 @@ pub enum MaybeNavigationTarget {
 
 #[derive(Clone)]
 enum InternalEvent {
-    Resize(TerminalBounds),
+    Resize {
+        bounds: TerminalBounds,
+        reflow: bool,
+    },
     Clear,
     // FocusNextMatch,
     Scroll(Scroll),
@@ -1172,6 +1176,7 @@ impl TerminalBuilder {
             matches: Arc::new(Vec::new()),
             content_dirty: true,
             content_revision: 0,
+            reflow_on_next_resize: true,
 
             selection_head: None,
             breadcrumb_text: String::new(),
@@ -1492,6 +1497,7 @@ impl TerminalBuilder {
                 matches: Arc::new(Vec::new()),
                 content_dirty: true,
                 content_revision: 0,
+                reflow_on_next_resize: true,
 
                 selection_head: None,
                 breadcrumb_text: String::new(),
@@ -1676,6 +1682,7 @@ pub struct Terminal {
     pub last_content: Content,
     content_dirty: bool,
     content_revision: u64,
+    reflow_on_next_resize: bool,
     pub selection_head: Option<Point>,
 
     pub breadcrumb_text: String,
@@ -1878,7 +1885,10 @@ impl Terminal {
     ) {
         self.content_dirty = true;
         match event {
-            &InternalEvent::Resize(new_bounds) => {
+            &InternalEvent::Resize {
+                bounds: new_bounds,
+                reflow,
+            } => {
                 let new_bounds = normalize_terminal_bounds(new_bounds);
                 trace!("Resizing: new_bounds={new_bounds:?}");
 
@@ -1888,7 +1898,7 @@ impl Terminal {
                     pty_tx.resize(new_bounds);
                 }
 
-                resize(term, new_bounds);
+                resize(term, new_bounds, reflow);
                 // If there are matches we need to emit a wake up event to
                 // invalidate the matches and recalculate their locations
                 // in the new terminal layout
@@ -2235,6 +2245,7 @@ impl Terminal {
     ///Resize the terminal and the PTY.
     pub fn set_size(&mut self, new_bounds: TerminalBounds) {
         let new_bounds = normalize_terminal_bounds(new_bounds);
+        let reflow = mem::replace(&mut self.reflow_on_next_resize, true);
 
         let old_bounds = self.last_content.terminal_bounds;
         self.last_content.terminal_bounds = new_bounds;
@@ -2251,9 +2262,23 @@ impl Terminal {
         }
 
         match self.events.back_mut() {
-            Some(InternalEvent::Resize(pending_bounds)) => *pending_bounds = new_bounds,
-            _ => self.events.push_back(InternalEvent::Resize(new_bounds)),
+            Some(InternalEvent::Resize {
+                bounds: pending_bounds,
+                reflow: pending_reflow,
+            }) => {
+                *pending_bounds = new_bounds;
+                *pending_reflow &= reflow;
+            }
+            _ => self.events.push_back(InternalEvent::Resize {
+                bounds: new_bounds,
+                reflow,
+            }),
         }
+    }
+
+    /// Truncate instead of reflowing the primary grid during the next layout-driven resize.
+    pub fn truncate_on_next_resize(&mut self) {
+        self.reflow_on_next_resize = false;
     }
 
     /// Write input to the interactive backend, if applicable.
@@ -4755,7 +4780,39 @@ mod tests {
         terminal.set_size(grid_changed);
         assert!(matches!(
             terminal.events.back(),
-            Some(InternalEvent::Resize(_))
+            Some(InternalEvent::Resize { .. })
+        ));
+    }
+
+    #[gpui::test]
+    async fn test_layout_resize_can_disable_reflow_once(cx: &mut TestAppContext) {
+        let builder = cx.update(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::Block,
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+        });
+        let mut terminal = builder.terminal;
+        let mut resized = terminal.last_content.terminal_bounds;
+        resized.bounds.size.width += resized.cell_width;
+
+        terminal.truncate_on_next_resize();
+        terminal.set_size(resized);
+        assert!(matches!(
+            terminal.events.back(),
+            Some(InternalEvent::Resize { reflow: false, .. })
+        ));
+
+        terminal.events.clear();
+        resized.bounds.size.width += resized.cell_width;
+        terminal.set_size(resized);
+        assert!(matches!(
+            terminal.events.back(),
+            Some(InternalEvent::Resize { reflow: true, .. })
         ));
     }
 

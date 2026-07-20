@@ -1,6 +1,70 @@
 use super::*;
 
 #[test]
+fn two_pane_layout_rotates_between_axes() {
+    let mut layout = PaneLayout::Split {
+        axis: SplitAxis::Horizontal,
+        first: Box::new(PaneLayout::Pane(1)),
+        second: Box::new(PaneLayout::Pane(2)),
+    };
+
+    assert!(layout.rotate_two_pane_split());
+    assert_eq!(
+        layout,
+        PaneLayout::Split {
+            axis: SplitAxis::Vertical,
+            first: Box::new(PaneLayout::Pane(1)),
+            second: Box::new(PaneLayout::Pane(2)),
+        }
+    );
+    assert!(layout.rotate_two_pane_split());
+    assert_eq!(
+        layout,
+        PaneLayout::Split {
+            axis: SplitAxis::Horizontal,
+            first: Box::new(PaneLayout::Pane(1)),
+            second: Box::new(PaneLayout::Pane(2)),
+        }
+    );
+}
+
+#[test]
+fn non_two_pane_layouts_do_not_rotate() {
+    let mut single = PaneLayout::Pane(1);
+    let mut three_right = PaneLayout::Split {
+        axis: SplitAxis::Vertical,
+        first: Box::new(PaneLayout::Pane(1)),
+        second: Box::new(PaneLayout::Split {
+            axis: SplitAxis::Horizontal,
+            first: Box::new(PaneLayout::Pane(2)),
+            second: Box::new(PaneLayout::Pane(3)),
+        }),
+    };
+    let mut three_left = PaneLayout::Split {
+        axis: SplitAxis::Vertical,
+        first: Box::new(PaneLayout::Split {
+            axis: SplitAxis::Horizontal,
+            first: Box::new(PaneLayout::Pane(1)),
+            second: Box::new(PaneLayout::Pane(2)),
+        }),
+        second: Box::new(PaneLayout::Pane(3)),
+    };
+    let mut quarters = PaneLayout::tiled(&[1, 2, 3, 4]).unwrap();
+    let original_three_right = three_right.clone();
+    let original_three_left = three_left.clone();
+    let original_quarters = quarters.clone();
+
+    assert!(!single.rotate_two_pane_split());
+    assert!(!three_right.rotate_two_pane_split());
+    assert!(!three_left.rotate_two_pane_split());
+    assert!(!quarters.rotate_two_pane_split());
+    assert_eq!(single, PaneLayout::Pane(1));
+    assert_eq!(three_right, original_three_right);
+    assert_eq!(three_left, original_three_left);
+    assert_eq!(quarters, original_quarters);
+}
+
+#[test]
 fn pane_template_replaces_only_the_target_leaf() {
     let template = PaneSplitTemplate::Split {
         axis: PaneSplitAxis::Horizontal,

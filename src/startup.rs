@@ -604,6 +604,7 @@ pub(crate) const CLOSE_PANE_KEYBINDING: &str = "ctrl-shift-x";
 pub(crate) const SAVE_PANE_OUTPUT_KEYBINDING: &str = "ctrl-shift-s";
 pub(crate) const SERIAL_CONSOLE_KEYBINDING: &str = "ctrl-shift-d";
 pub(crate) const AUTO_BACKGROUND_TAB_KEYBINDING: &str = "alt-shift-p";
+pub(crate) const ROTATE_PANE_LAYOUT_KEYBINDING: &str = "alt-shift-r";
 
 pub(crate) fn pane_output_keybinding() -> KeyBinding {
     KeyBinding::new(
@@ -629,6 +630,14 @@ pub(crate) fn auto_background_tab_keybinding() -> KeyBinding {
     KeyBinding::new(
         AUTO_BACKGROUND_TAB_KEYBINDING,
         ToggleAutoBackgroundTab,
+        Some("Zetta > Terminal"),
+    )
+}
+
+pub(crate) fn rotate_pane_layout_keybinding() -> KeyBinding {
+    KeyBinding::new(
+        ROTATE_PANE_LAYOUT_KEYBINDING,
+        RotatePaneLayout,
         Some("Zetta > Terminal"),
     )
 }
@@ -670,6 +679,7 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
         close_pane_keybinding(),
         KeyBinding::new("ctrl-shift-o", SplitHorizontal, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-shift-e", SplitVertical, Some("Zetta > Terminal")),
+        rotate_pane_layout_keybinding(),
         KeyBinding::new("ctrl-shift-a", SelectAll, Some("Zetta > Terminal")),
         KeyBinding::new(
             "ctrl-shift-backspace",

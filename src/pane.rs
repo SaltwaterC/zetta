@@ -236,6 +236,25 @@ pub(crate) fn background_pane_layout(layout: &PaneLayout) -> BackgroundPaneLayou
 }
 
 impl PaneLayout {
+    pub(crate) fn rotate_two_pane_split(&mut self) -> bool {
+        let Self::Split {
+            axis,
+            first,
+            second,
+        } = self
+        else {
+            return false;
+        };
+        if !matches!(first.as_ref(), Self::Pane(_)) || !matches!(second.as_ref(), Self::Pane(_)) {
+            return false;
+        }
+        *axis = match axis {
+            SplitAxis::Horizontal => SplitAxis::Vertical,
+            SplitAxis::Vertical => SplitAxis::Horizontal,
+        };
+        true
+    }
+
     fn remap_pane_ids(&mut self, pane_ids: &HashMap<u64, u64>) {
         match self {
             Self::Pane(pane_id) => *pane_id = pane_ids[pane_id],

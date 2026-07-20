@@ -11,6 +11,7 @@
       "alt-shift-p": "zetta::ToggleAutoBackgroundTab",
       "ctrl-shift-o": "zetta::SplitHorizontal",
       "ctrl-shift-e": "zetta::SplitVertical",
+      "alt-shift-r": "zetta::RotatePaneLayout",
       "alt-shift-o": ["zetta::ApplyPaneSplitTemplate", { "name": "three-right" }],
       "alt-shift-e": ["zetta::ApplyPaneSplitTemplate", { "name": "quarters" }],
       "ctrl-shift-a": "terminal_view::SelectAll",

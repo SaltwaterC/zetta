@@ -615,6 +615,16 @@ fn pane_label_uses_the_documented_shortcut() {
 }
 
 #[test]
+fn pane_layout_rotation_uses_the_requested_shortcut() {
+    assert_eq!(ROTATE_PANE_LAYOUT_KEYBINDING, "alt-shift-r");
+    let shortcut = gpui::Keystroke::parse(ROTATE_PANE_LAYOUT_KEYBINDING).unwrap();
+    assert_eq!(
+        rotate_pane_layout_keybinding().match_keystrokes(&[shortcut]),
+        Some(false)
+    );
+}
+
+#[test]
 fn close_pane_uses_a_distinct_shortcut_from_close_tab() {
     assert_eq!(CLOSE_PANE_KEYBINDING, "ctrl-shift-x");
     let shortcut = gpui::Keystroke::parse(CLOSE_PANE_KEYBINDING).unwrap();

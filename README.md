@@ -218,6 +218,7 @@ Keyboard shortcuts use Zed's keymap format. The default shortcuts are:
 | `Alt-Shift-A` | Reconnect the most recently detached tab |
 | `Ctrl-Shift-O` | Split active pane horizontally (top/bottom) |
 | `Ctrl-Shift-E` | Split active pane vertically (left/right) |
+| `Alt-Shift-R` | Rotate a two-pane layout between horizontal and vertical |
 | `Ctrl-Shift-X` | Close the active pane (or its tab when it is the final pane) |
 | `PageUp` / `PageDown` | Send page navigation to the foreground program |
 | `Shift-PageUp` / `Shift-PageDown` | Scroll terminal history by one page |

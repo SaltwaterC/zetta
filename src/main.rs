@@ -98,6 +98,7 @@ actions!(
         ClosePane,
         SplitHorizontal,
         SplitVertical,
+        RotatePaneLayout,
         FocusPaneLeft,
         FocusPaneRight,
         FocusPaneUp,

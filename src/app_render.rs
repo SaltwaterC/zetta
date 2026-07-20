@@ -1300,6 +1300,7 @@ impl Render for Zetta {
             .on_action(cx.listener(Self::rename_pane))
             .on_action(cx.listener(Self::split_horizontal))
             .on_action(cx.listener(Self::split_vertical))
+            .on_action(cx.listener(Self::rotate_pane_layout))
             .on_action(cx.listener(Self::apply_pane_split_template))
             .on_action(cx.listener(Self::focus_pane_left))
             .on_action(cx.listener(Self::focus_pane_right))

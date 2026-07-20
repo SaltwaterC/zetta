@@ -1472,6 +1472,24 @@ impl Zetta {
         self.split_active_pane(SplitAxis::Vertical, window, cx);
     }
 
+    pub(crate) fn rotate_pane_layout(
+        &mut self,
+        _: &RotatePaneLayout,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            return;
+        };
+        if !tab.layout.rotate_two_pane_split() {
+            return;
+        }
+        for terminal in tab.panes.iter().filter_map(|pane| pane.terminal.as_ref()) {
+            terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
+        }
+        cx.notify();
+    }
+
     pub(crate) fn apply_pane_split_template(
         &mut self,
         action: &ApplyPaneSplitTemplate,

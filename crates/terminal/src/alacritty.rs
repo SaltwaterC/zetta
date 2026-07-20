@@ -2,7 +2,7 @@
 use std::num::NonZeroU32;
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
-use std::{borrow::Cow, io, ops::RangeInclusive, path::PathBuf, sync::Arc};
+use std::{borrow::Cow, io, mem, ops::RangeInclusive, path::PathBuf, sync::Arc};
 
 mod hyperlinks;
 
@@ -213,8 +213,26 @@ pub(super) fn spawn_event_loop(
     })
 }
 
-pub(super) fn resize(term: &mut AlacrittyTerm, bounds: TerminalBounds) {
+pub(super) fn resize(term: &mut AlacrittyTerm, bounds: TerminalBounds, reflow: bool) {
+    if reflow || term.mode().contains(TermMode::ALT_SCREEN) {
+        term.resize(bounds);
+        return;
+    }
+
+    // Alacritty always reflows the primary grid. For discrete layout changes this can move a
+    // live multi-line shell prompt before the shell handles SIGWINCH, so its redraw uses a stale
+    // cursor-relative line and leaves duplicated prompt fragments behind. Resize the primary
+    // grid without reflow, while still letting Term::resize update its inactive grid, tab stops,
+    // selection, scroll region, and damage state.
+    let old_lines = term.screen_lines();
+    let old_columns = term.columns();
+    let mut placeholder = Grid::new(old_lines, old_columns, 0);
+    placeholder.cursor = term.grid().cursor.clone();
+    placeholder.saved_cursor = term.grid().saved_cursor.clone();
+    let mut grid = mem::replace(term.grid_mut(), placeholder);
+    grid.resize(false, bounds.num_lines(), bounds.num_columns());
     term.resize(bounds);
+    *term.grid_mut() = grid;
 }
 
 pub(super) fn display_offset(term: &AlacrittyTerm) -> usize {
@@ -1078,6 +1096,33 @@ mod tests {
         assert!(alacritty_modes.contains(TermMode::SGR_MOUSE));
         assert!(alacritty_modes.contains(TermMode::VI));
         assert!(!alacritty_modes.contains(TermMode::MOUSE_REPORT_CLICK));
+    }
+
+    #[test]
+    fn non_reflow_resize_truncates_primary_grid_lines() {
+        let initial_bounds = TerminalBounds::new(
+            px(10.),
+            px(10.),
+            gpui::bounds(gpui::point(px(0.), px(0.)), gpui::size(px(40.), px(20.))),
+        );
+        let resized_bounds = TerminalBounds::new(
+            px(10.),
+            px(10.),
+            gpui::bounds(gpui::point(px(0.), px(0.)), gpui::size(px(20.), px(20.))),
+        );
+        let (events_tx, _) = futures::channel::mpsc::unbounded();
+        let mut term = Term::new(Config::default(), &initial_bounds, ZedListener(events_tx));
+        for (column, character) in ['a', 'b', 'c', 'd'].into_iter().enumerate() {
+            term.grid_mut()[Line(0)][Column(column)].c = character;
+        }
+
+        resize(&mut term, resized_bounds, false);
+
+        assert_eq!(term.columns(), 2);
+        assert_eq!(term.grid()[Line(0)][Column(0)].c, 'a');
+        assert_eq!(term.grid()[Line(0)][Column(1)].c, 'b');
+        assert_eq!(term.grid()[Line(1)][Column(0)].c, ' ');
+        assert_eq!(term.grid()[Line(1)][Column(1)].c, ' ');
     }
 
     #[test]
