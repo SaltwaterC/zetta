@@ -146,6 +146,7 @@ impl Zetta {
                 generated_label: Some(expansion.label.clone()),
                 custom_label: None,
                 profile: profile.clone(),
+                terminal: None,
                 view: None,
                 error: None,
                 wsl_cwd_file: wsl_cwd_file.clone(),

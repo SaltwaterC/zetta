@@ -32,6 +32,45 @@ fn version_flags_and_output_are_defined() {
 }
 
 #[test]
+fn sessions_subcommand_supports_human_and_json_output() {
+    let human = parse_args_from([OsString::from("sessions")]).unwrap();
+    assert_eq!(
+        human.mode,
+        StartupMode::ListBackgroundSessions { json: false }
+    );
+
+    let json = parse_args_from([OsString::from("sessions"), OsString::from("--json")]).unwrap();
+    assert_eq!(
+        json.mode,
+        StartupMode::ListBackgroundSessions { json: true }
+    );
+    assert!(parse_args_from([OsString::from("sessions"), OsString::from("--unknown")]).is_err());
+}
+
+#[test]
+fn only_plain_application_launches_handoff_to_the_session_runner() {
+    let plain = parse_args_from(Vec::<OsString>::new()).unwrap();
+    let profile = parse_args_from([OsString::from("--profile"), OsString::from("System")]).unwrap();
+    let sessions = parse_args_from([OsString::from("sessions")]).unwrap();
+
+    assert!(should_handoff_to_existing_process(&plain));
+    assert!(!should_handoff_to_existing_process(&profile));
+    assert!(!should_handoff_to_existing_process(&sessions));
+}
+
+#[test]
+fn process_quits_only_without_windows_or_dormant_session_runners() {
+    assert!(should_quit_after_window_closed(0, 0));
+    assert!(!should_quit_after_window_closed(0, 1));
+    assert!(!should_quit_after_window_closed(1, 0));
+}
+
+#[test]
+fn application_shutdown_is_managed_by_the_session_runner() {
+    assert_eq!(zetta_quit_mode(), gpui::QuitMode::Explicit);
+}
+
+#[test]
 fn terminal_rendering_profiler_arguments_are_cross_platform() {
     assert_eq!(
         parse_args_from([OsString::from("--profile-terminal-rendering")]).unwrap(),
@@ -572,7 +611,7 @@ fn tab_rename_does_not_capture_an_unmodified_function_key() {
 
 #[test]
 fn pane_label_uses_the_documented_shortcut() {
-    assert_eq!(RENAME_PANE_KEYBINDING, "ctrl-alt-l");
+    assert_eq!(RENAME_PANE_KEYBINDING, "alt-shift-l");
 }
 
 #[test]

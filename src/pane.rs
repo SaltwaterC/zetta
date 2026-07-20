@@ -66,6 +66,7 @@ pub(crate) struct TerminalPane {
     pub(crate) generated_label: Option<String>,
     pub(crate) custom_label: Option<String>,
     pub(crate) profile: Profile,
+    pub(crate) terminal: Option<Entity<Terminal>>,
     pub(crate) view: Option<Entity<TerminalView>>,
     pub(crate) error: Option<String>,
     pub(crate) wsl_cwd_file: Option<PathBuf>,
@@ -165,9 +166,8 @@ impl TerminalPane {
     }
 
     pub(crate) fn wsl_working_directory(&self, cx: &App) -> Option<String> {
-        if let Some(directory) = self.view.as_ref().and_then(|view| {
-            view.read(cx)
-                .terminal()
+        if let Some(directory) = self.terminal.as_ref().and_then(|terminal| {
+            terminal
                 .read(cx)
                 .reported_working_directory()
                 .map(str::to_owned)
@@ -214,6 +214,25 @@ pub(crate) enum PaneLayout {
         first: Box<PaneLayout>,
         second: Box<PaneLayout>,
     },
+}
+
+pub(crate) fn background_pane_layout(layout: &PaneLayout) -> BackgroundPaneLayout {
+    match layout {
+        PaneLayout::Pane(pane_id) => BackgroundPaneLayout::Pane { pane_id: *pane_id },
+        PaneLayout::Split {
+            axis,
+            first,
+            second,
+        } => BackgroundPaneLayout::Split {
+            axis: match axis {
+                SplitAxis::Horizontal => "horizontal",
+                SplitAxis::Vertical => "vertical",
+            }
+            .to_owned(),
+            first: Box::new(background_pane_layout(first)),
+            second: Box::new(background_pane_layout(second)),
+        },
+    }
 }
 
 impl PaneLayout {

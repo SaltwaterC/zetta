@@ -51,6 +51,7 @@ impl Render for Zetta {
             .tabs
             .get(self.active_tab)
             .is_some_and(|tab| tab.broadcast_input);
+        let background_session_count = self.background_sessions.len();
         let supported_controls = window.window_controls();
         let is_maximized = window.is_maximized();
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
@@ -352,6 +353,73 @@ impl Render for Zetta {
                     menu
                 }))
             });
+
+        let reconnect_menu_entries = if background_session_count > 1 {
+            self.background_session_picker_entries.clone()
+        } else {
+            Vec::new()
+        };
+        let reconnect_menu_handle = handle.clone();
+        let reconnect_menu = PopoverMenu::new("reconnect-session-menu")
+            .with_handle(self.reconnect_menu_handle.clone())
+            .trigger_with_tooltip(
+                IconButton::new("reconnect-session", IconName::RotateCw)
+                    .shape(IconButtonShape::Wide)
+                    .size(ButtonSize::Large)
+                    .width(px(32.))
+                    .icon_size(IconSize::Small)
+                    .aria_label("Choose background session to reconnect"),
+                Tooltip::text(format!(
+                    "Choose background session to reconnect ({background_session_count}) (Alt-Shift-A)"
+                )),
+            )
+            .anchor(Anchor::TopRight)
+            .menu(move |window, cx| {
+                let entries = reconnect_menu_entries.clone();
+                let menu_handle = reconnect_menu_handle.clone();
+                Some(ui::ContextMenu::build(window, cx, move |mut menu, _, _| {
+                    for (session_id, title, details) in &entries {
+                        let session_id = *session_id;
+                        let title = title.clone();
+                        let details = details.clone();
+                        let handle = menu_handle.clone();
+                        menu = menu.custom_entry(
+                            move |_, _| {
+                                v_flex()
+                                    .gap_0p5()
+                                    .child(Label::new(title.clone()))
+                                    .child(
+                                        Label::new(details.clone())
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted),
+                                    )
+                                    .into_any_element()
+                            },
+                            move |window, cx| {
+                                handle
+                                    .update(cx, |this, cx| {
+                                        this.reconnect_background_session(session_id, window, cx)
+                                    })
+                                    .ok();
+                            },
+                        );
+                    }
+                    menu
+                }))
+            });
+        let reconnect_control = if background_session_count == 1 {
+            IconButton::new("reconnect-session", IconName::RotateCw)
+                .shape(IconButtonShape::Wide)
+                .size(ButtonSize::Large)
+                .width(px(32.))
+                .icon_size(IconSize::Small)
+                .aria_label("Reconnect background session")
+                .tooltip(Tooltip::text("Reconnect background session (Alt-Shift-A)"))
+                .on_click(|_, window, cx| window.dispatch_action(Box::new(ReconnectSession), cx))
+                .into_any_element()
+        } else {
+            reconnect_menu.into_any_element()
+        };
 
         let body = match self.tabs.get(self.active_tab) {
             Some(tab) => {
@@ -1194,6 +1262,8 @@ impl Render for Zetta {
             .on_action(cx.listener(Self::new_window))
             .on_action(cx.listener(Self::open_profile))
             .on_action(cx.listener(Self::close_tab))
+            .on_action(cx.listener(Self::detach_tab))
+            .on_action(cx.listener(Self::reconnect_session))
             .on_action(cx.listener(Self::close_active_pane))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
@@ -1274,7 +1344,24 @@ impl Render for Zetta {
                                         window.dispatch_action(Box::new(NewTab), cx)
                                     }),
                             )
-                            .child(profile_menu),
+                            .child(profile_menu)
+                            .child(
+                                IconButton::new("detach-tab", IconName::Archive)
+                                    .shape(IconButtonShape::Wide)
+                                    .size(ButtonSize::Large)
+                                    .width(px(32.))
+                                    .icon_size(IconSize::Small)
+                                    .aria_label("Detach tab")
+                                    .tooltip(Tooltip::text(
+                                        "Detach tab to background (Alt-Shift-D)",
+                                    ))
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(Box::new(DetachTab), cx)
+                                    }),
+                            )
+                            .when(background_session_count > 0, |controls| {
+                                controls.child(reconnect_control)
+                            }),
                     )
                     .child(
                         IconButton::new("toggle-broadcast-input", IconName::Keyboard)

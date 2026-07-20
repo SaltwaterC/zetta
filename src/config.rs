@@ -599,7 +599,7 @@ fn command_exists(program: &str) -> bool {
     })
 }
 
-fn platform_config_dir() -> PathBuf {
+pub(crate) fn platform_config_dir() -> PathBuf {
     if cfg!(windows) {
         env::var_os("APPDATA")
             .map(PathBuf::from)

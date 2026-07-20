@@ -5,6 +5,9 @@ const DEFAULT_PERFORMANCE_REPORT_DURATION: Duration = Duration::from_secs(10);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StartupMode {
     Application,
+    ListBackgroundSessions {
+        json: bool,
+    },
     #[cfg(windows)]
     RegisterWindowsShell(PathBuf),
     TerminalRenderingProfile,
@@ -33,6 +36,34 @@ fn is_version_argument(argument: &str) -> bool {
 
 pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Result<StartupArgs> {
     let arguments = args.into_iter().collect::<Vec<_>>();
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "sessions")
+    {
+        let mut json = false;
+        for argument in &arguments[1..] {
+            match argument.to_string_lossy().as_ref() {
+                "--json" => json = true,
+                "--help" | "-h" => {
+                    println!(
+                        "List detached Zetta sessions\n\nUsage: zetta sessions [--json]\n\nOptions:\n  --json  Print machine-readable JSON"
+                    );
+                    std::process::exit(0);
+                }
+                unknown => anyhow::bail!("unknown sessions argument {unknown:?}"),
+            }
+        }
+        return Ok(StartupArgs {
+            config_path: None,
+            keymap_path: None,
+            profile: None,
+            mode: StartupMode::ListBackgroundSessions { json },
+            profile_report: None,
+            profile_duration: None,
+            profile_pane_stress: false,
+            tftp_command: None,
+        });
+    }
     if arguments.first().is_some_and(|argument| argument == "tftp") {
         let tftp_arguments = &arguments[1..];
         if tftp_arguments
@@ -115,7 +146,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             }
             "--help" | "-h" => {
                 println!(
-                    "Zetta terminal\n\nUsage: zetta [OPTIONS]\n       zetta tftp <COMMAND> [OPTIONS]\n\nCommands:\n  tftp                                Transfer a file with TFTP\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Launch the named profile\n  -P, --profile-terminal-rendering    Profile terminal rendering\n  -s, --profile-pane-stress           Use 64 panes with 63 minimized\n  -r, --profile-report PATH           Write a profiling report\n  -d, --profile-duration SECONDS      Set the profiling duration"
+                    "Zetta terminal\n\nUsage: zetta [OPTIONS]\n       zetta sessions [--json]\n       zetta tftp <COMMAND> [OPTIONS]\n\nCommands:\n  sessions                            List detached background sessions\n  tftp                                Transfer a file with TFTP\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Launch the named profile\n  -P, --profile-terminal-rendering    Profile terminal rendering\n  -s, --profile-pane-stress           Use 64 panes with 63 minimized\n  -r, --profile-report PATH           Write a profiling report\n  -d, --profile-duration SECONDS      Set the profiling duration"
                 );
                 std::process::exit(0);
             }
@@ -172,6 +203,13 @@ fn select_launch_profile(config: &mut Config, requested: Option<&str>) -> Result
 
 pub(crate) fn parse_args() -> Result<StartupArgs> {
     parse_args_from(env::args_os().skip(1))
+}
+
+fn should_handoff_to_existing_process(args: &StartupArgs) -> bool {
+    args.mode == StartupMode::Application
+        && args.config_path.is_none()
+        && args.keymap_path.is_none()
+        && args.profile.is_none()
 }
 
 #[cfg(windows)]
@@ -561,7 +599,7 @@ pub(crate) fn validate_keymap_contents(content: &str, cx: &mut App) -> Result<()
 }
 
 pub(crate) const RENAME_TAB_KEYBINDING: &str = "ctrl-alt-r";
-pub(crate) const RENAME_PANE_KEYBINDING: &str = "ctrl-alt-l";
+pub(crate) const RENAME_PANE_KEYBINDING: &str = "alt-shift-l";
 pub(crate) const CLOSE_PANE_KEYBINDING: &str = "ctrl-shift-x";
 pub(crate) const SAVE_PANE_OUTPUT_KEYBINDING: &str = "ctrl-shift-s";
 pub(crate) const SERIAL_CONSOLE_KEYBINDING: &str = "ctrl-shift-d";
@@ -625,6 +663,8 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
         KeyBinding::new("ctrl-shift-t", NewTab, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-shift-n", NewWindow, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-shift-w", CloseTab, Some("Zetta > Terminal")),
+        KeyBinding::new("alt-shift-d", DetachTab, Some("Zetta > Terminal")),
+        KeyBinding::new("alt-shift-a", ReconnectSession, Some("Zetta > Terminal")),
         close_pane_keybinding(),
         KeyBinding::new("ctrl-shift-o", SplitHorizontal, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-shift-e", SplitVertical, Some("Zetta > Terminal")),
@@ -758,44 +798,120 @@ pub(crate) fn open_zetta_window(
     profile_pane_stress: bool,
     cx: &mut App,
 ) -> Result<()> {
-    let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
-    cx.open_window(
-        WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(px(520.), px(320.))),
-            app_id: Some(ZETTA_APP_ID.to_owned()),
-            titlebar: Some(TitlebarOptions {
-                title: Some("Zetta".into()),
-                appears_transparent: true,
-                traffic_light_position: Some(point(px(9.), px(9.))),
-            }),
-            app_owns_titlebar_drag: true,
-            window_background: WindowBackgroundAppearance::Transparent,
-            window_decorations: Some(WindowDecorations::Client),
-            ..Default::default()
-        },
-        move |window, cx| {
-            window.set_window_title("Zetta");
-            let zetta = cx.new(|cx| Zetta::new(config, configuration_error, window, cx));
-            if profile_pane_stress {
-                zetta.update(cx, |zetta, cx| zetta.configure_pane_profile_stress(cx));
-            }
-            if enable_performance_overlay {
-                zetta.update(cx, |zetta, cx| {
-                    zetta.toggle_performance_overlay(&TogglePerformanceOverlay, window, cx)
-                });
-            }
-            if let Some((options, status)) = performance_report {
-                zetta.update(cx, |zetta, cx| {
-                    zetta.start_performance_report(options, status, cx)
-                });
-            }
-            zetta
-        },
-    )
+    let options = zetta_window_options(cx);
+    cx.open_window(options, move |window, cx| {
+        window.set_window_title("Zetta");
+        let zetta = cx.new(|cx| Zetta::new(config, configuration_error, window, cx));
+        track_zetta_window(&zetta, window, cx);
+        if profile_pane_stress {
+            zetta.update(cx, |zetta, cx| zetta.configure_pane_profile_stress(cx));
+        }
+        if enable_performance_overlay {
+            zetta.update(cx, |zetta, cx| {
+                zetta.toggle_performance_overlay(&TogglePerformanceOverlay, window, cx)
+            });
+        }
+        if let Some((options, status)) = performance_report {
+            zetta.update(cx, |zetta, cx| {
+                zetta.start_performance_report(options, status, cx)
+            });
+        }
+        zetta
+    })
     .context("opening Zetta window")?;
     cx.activate(true);
     Ok(())
+}
+
+fn zetta_window_options(cx: &App) -> WindowOptions {
+    let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
+    WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_min_size: Some(size(px(520.), px(320.))),
+        app_id: Some(ZETTA_APP_ID.to_owned()),
+        titlebar: Some(TitlebarOptions {
+            title: Some("Zetta".into()),
+            appears_transparent: true,
+            traffic_light_position: Some(point(px(9.), px(9.))),
+        }),
+        app_owns_titlebar_drag: true,
+        window_background: WindowBackgroundAppearance::Transparent,
+        window_decorations: Some(WindowDecorations::Client),
+        ..Default::default()
+    }
+}
+
+fn track_zetta_window(zetta: &Entity<Zetta>, window: &Window, cx: &mut App) {
+    if cx.has_global::<ZettaProcessState>() {
+        let process = cx.global_mut::<ZettaProcessState>();
+        process
+            .windows
+            .insert(window.window_handle().window_id(), zetta.clone());
+    }
+}
+
+fn should_quit_after_window_closed(window_count: usize, dormant_runner_count: usize) -> bool {
+    window_count == 0 && dormant_runner_count == 0
+}
+
+fn zetta_quit_mode() -> gpui::QuitMode {
+    gpui::QuitMode::Explicit
+}
+
+fn open_dormant_or_new_window(cx: &mut App) -> Result<()> {
+    let (existing, dormant, config, configuration_error) = {
+        let process = cx.global_mut::<ZettaProcessState>();
+        (
+            process
+                .windows
+                .iter()
+                .next()
+                .map(|(window_id, entity)| (*window_id, entity.clone())),
+            process.dormant.pop(),
+            process.config.clone(),
+            process.configuration_error.clone(),
+        )
+    };
+    if let Some((window_id, _)) = existing {
+        gpui::WindowHandle::<Zetta>::new(window_id).update(cx, |zetta, window, cx| {
+            zetta.resume_hidden_window(window, cx)
+        })?;
+        cx.activate(true);
+        return Ok(());
+    }
+    if let Some(zetta) = dormant {
+        let zetta_for_window = zetta.clone();
+        cx.open_window(zetta_window_options(cx), move |window, cx| {
+            window.set_window_title("Zetta");
+            zetta_for_window.update(cx, |zetta, cx| zetta.attach_to_reopened_window(window, cx));
+            track_zetta_window(&zetta_for_window, window, cx);
+            zetta_for_window
+        })?;
+        cx.activate(true);
+        Ok(())
+    } else {
+        open_zetta_window(config, configuration_error, false, None, false, cx)
+    }
+}
+
+fn handle_zetta_window_closed(cx: &mut App, window_id: WindowId) {
+    let entity = cx
+        .global_mut::<ZettaProcessState>()
+        .windows
+        .remove(&window_id);
+    if let Some(entity) = entity {
+        let has_background_sessions = !entity.read(cx).background_sessions.is_empty();
+        if has_background_sessions {
+            entity.update(cx, |zetta, cx| {
+                zetta.prepare_for_background_window_close(cx)
+            });
+            cx.global_mut::<ZettaProcessState>().dormant.push(entity);
+        }
+    }
+    let process = cx.global::<ZettaProcessState>();
+    if should_quit_after_window_closed(process.windows.len(), process.dormant.len()) {
+        cx.quit();
+    }
 }
 
 fn terminal_rendering_profile_config(executable: &Path) -> Config {
@@ -851,6 +967,12 @@ fn run_terminal_rendering_workload() -> Result<()> {
 
 pub(crate) fn run() -> Result<()> {
     let args = parse_args()?;
+    if let StartupMode::ListBackgroundSessions { json } = &args.mode {
+        return print_session_catalogs(*json);
+    }
+    if should_handoff_to_existing_process(&args) && request_existing_process_window()? {
+        return Ok(());
+    }
     #[cfg(windows)]
     if let StartupMode::RegisterWindowsShell(shortcut_path) = &args.mode {
         let (config, _) =
@@ -888,6 +1010,7 @@ pub(crate) fn run() -> Result<()> {
     );
     let report_status_for_app = report_status.clone();
     gpui_platform::application()
+        .with_quit_mode(zetta_quit_mode())
         .with_assets(ZettaAssets)
         .run(move |cx: &mut App| {
             #[cfg(windows)]
@@ -905,17 +1028,28 @@ pub(crate) fn run() -> Result<()> {
             ZettaAssets.load_fonts(cx).log_err();
             apply_config_settings(&config, cx).expect("failed to apply Zetta configuration");
             load_keybindings(&keymap_path, profile_count, cx);
+            let (control_tx, mut control_rx) = futures::channel::mpsc::unbounded();
+            let control_server = ProcessControlServer::start(control_tx)
+                .expect("failed to start Zetta process control");
+            cx.set_global(ZettaProcessState {
+                windows: HashMap::new(),
+                dormant: Vec::new(),
+                config: config.clone(),
+                configuration_error: configuration_error.clone(),
+                _control_server: control_server,
+            });
+            cx.spawn(async move |cx| {
+                while let Some(ProcessControlCommand::OpenWindow) = control_rx.next().await {
+                    cx.update(|cx| open_dormant_or_new_window(cx).log_err());
+                }
+            })
+            .detach();
             let layout_keymap_path = keymap_path.clone();
             cx.on_keyboard_layout_change(move |cx| {
                 load_keybindings(&layout_keymap_path, profile_count, cx);
             })
             .detach();
-            cx.on_window_closed(|cx, _| {
-                if cx.windows().is_empty() {
-                    cx.quit();
-                }
-            })
-            .detach();
+            cx.on_window_closed(handle_zetta_window_closed).detach();
 
             open_zetta_window(
                 config,

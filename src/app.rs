@@ -1,6 +1,22 @@
 use super::*;
 
 const PANE_CONTROLS_IDLE_DELAY: Duration = Duration::from_millis(1200);
+const BACKGROUND_PROCESS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReconnectRequest {
+    None,
+    Immediate(usize),
+    Choose,
+}
+
+fn reconnect_request(session_count: usize) -> ReconnectRequest {
+    match session_count {
+        0 => ReconnectRequest::None,
+        1 => ReconnectRequest::Immediate(0),
+        _ => ReconnectRequest::Choose,
+    }
+}
 
 fn pane_controls_hide_delay(last_motion: Instant, now: Instant) -> Option<Duration> {
     let elapsed = now.saturating_duration_since(last_motion);
@@ -14,6 +30,12 @@ pub(crate) struct Zetta {
     pub(crate) pane_output_error: Option<String>,
     pub(crate) pane_output_save_in_progress: bool,
     pub(crate) tabs: Vec<Tab>,
+    pub(crate) background_sessions: BackgroundSessionRunner<Tab>,
+    pub(crate) background_observed_panes: HashSet<u64>,
+    pub(crate) background_exited_panes: HashSet<u64>,
+    pub(crate) background_process_refresh_running: bool,
+    pub(crate) background_session_picker_entries: Vec<(u64, String, String)>,
+    pub(crate) reconnect_menu_handle: PopoverMenuHandle<ui::ContextMenu>,
     pub(crate) active_tab: usize,
     pub(crate) selected_profile: usize,
     pub(crate) profiles: Vec<Profile>,
@@ -47,6 +69,52 @@ pub(crate) struct Zetta {
 }
 
 impl Zetta {
+    pub(crate) fn prepare_for_background_window_close(&mut self, cx: &mut Context<Self>) {
+        self.tabs.clear();
+        self.active_tab = 0;
+        self.command_palette = None;
+        self.multi_command = None;
+        self.settings_editor = None;
+        self.serial_console = None;
+        self.tab_search = None;
+        cx.notify();
+    }
+
+    pub(crate) fn attach_to_reopened_window(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.button_layout = system_window_button_layout(cx);
+        self._subscriptions
+            .push(cx.observe_button_layout_changed(window, |this, _, cx| {
+                this.button_layout = system_window_button_layout(cx);
+                cx.notify();
+            }));
+        self._subscriptions
+            .push(cx.observe_window_activation(window, |this, window, cx| {
+                if window.is_window_active()
+                    && !this.is_renaming()
+                    && this.command_palette.is_none()
+                    && this.multi_command.is_none()
+                    && this.serial_console.is_none()
+                    && this.tab_search.is_none()
+                {
+                    this.focus_active(window, cx);
+                }
+            }));
+        if self.tabs.is_empty() {
+            self.open_tab(window, cx);
+        }
+    }
+
+    pub(crate) fn resume_hidden_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tabs.is_empty() {
+            self.open_tab(window, cx);
+        }
+        cx.notify();
+    }
+
     pub(crate) fn configure_pane_profile_stress(&mut self, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get_mut(self.active_tab) else {
             return;
@@ -65,6 +133,7 @@ impl Zetta {
                 generated_label: Some(format!("Stress {:02}", pane_ids.len() + 1)),
                 custom_label: None,
                 profile: profile.clone(),
+                terminal: None,
                 view: None,
                 error: None,
                 wsl_cwd_file: None,
@@ -93,6 +162,12 @@ impl Zetta {
             pane_output_error: None,
             pane_output_save_in_progress: false,
             tabs: Vec::new(),
+            background_sessions: BackgroundSessionRunner::default(),
+            background_observed_panes: HashSet::new(),
+            background_exited_panes: HashSet::new(),
+            background_process_refresh_running: false,
+            background_session_picker_entries: Vec::new(),
+            reconnect_menu_handle: PopoverMenuHandle::default(),
             active_tab: 0,
             selected_profile: config.default_profile,
             profiles: config.profiles,
@@ -175,6 +250,7 @@ impl Zetta {
                 generated_label: None,
                 custom_label: None,
                 profile: profile.clone(),
+                terminal: None,
                 view: None,
                 error: None,
                 wsl_cwd_file: wsl_cwd_file.clone(),
@@ -309,7 +385,12 @@ impl Zetta {
                     this.update_in(cx, |this, window, cx| {
                         let terminal = cx.new(|cx| builder.subscribe(cx));
                         let view = cx.new(|cx| {
-                            TerminalView::new_with_theme(terminal, terminal_theme, window, cx)
+                            TerminalView::new_with_theme(
+                                terminal.clone(),
+                                terminal_theme,
+                                window,
+                                cx,
+                            )
                         });
                         cx.subscribe_in(
                             &view,
@@ -349,6 +430,7 @@ impl Zetta {
                             .and_then(|index| this.tabs.get_mut(index))
                             .and_then(|tab| tab.pane_mut(pane_id))
                         {
+                            pane.terminal = Some(terminal.clone());
                             pane.view = Some(view.clone());
                             if let Some(command) = pane.pending_command.take() {
                                 view.update(cx, |view, cx| {
@@ -357,6 +439,24 @@ impl Zetta {
                                         cx,
                                     )
                                 });
+                            }
+                        } else {
+                            let stored_in_background = {
+                                let pane = this
+                                    .background_sessions
+                                    .iter_mut()
+                                    .find(|tab| tab.id == tab_id)
+                                    .and_then(|tab| tab.pane_mut(pane_id));
+                                if let Some(pane) = pane {
+                                    pane.terminal = Some(terminal.clone());
+                                    true
+                                } else {
+                                    false
+                                }
+                            };
+                            if stored_in_background {
+                                this.observe_background_terminal(pane_id, terminal, cx);
+                                this.publish_background_session_catalog(cx);
                             }
                         }
                         if should_focus {
@@ -508,6 +608,7 @@ impl Zetta {
             generated_label: None,
             custom_label: None,
             profile: profile.clone(),
+            terminal: None,
             view: None,
             error: None,
             wsl_cwd_file: wsl_cwd_file.clone(),
@@ -561,6 +662,363 @@ impl Zetta {
 
     pub(crate) fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
         self.close_tab_at(self.active_tab, window, cx);
+    }
+
+    pub(crate) fn detach_tab(
+        &mut self,
+        _: &DetachTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_tab >= self.tabs.len() {
+            return;
+        }
+        if self.tab_search.is_some() {
+            self.dismiss_tab_search(window, cx);
+        }
+
+        let mut tab = self.tabs.remove(self.active_tab);
+        tab.rename_buffer = None;
+        tab.renaming_pane = None;
+        for pane in &mut tab.panes {
+            pane.view = None;
+        }
+        let terminals = tab
+            .panes
+            .iter()
+            .filter_map(|pane| Some((pane.id, pane.terminal.clone()?)))
+            .collect::<Vec<_>>();
+        self.background_sessions.detach(tab);
+        for (pane_id, terminal) in terminals {
+            self.observe_background_terminal(pane_id, terminal.clone(), cx);
+            terminal.update(cx, Terminal::refresh_foreground_process);
+        }
+        self.schedule_background_process_refresh(cx);
+        self.publish_background_session_catalog(cx);
+
+        if self.tabs.is_empty() {
+            self.active_tab = 0;
+            self.open_tab(window, cx);
+        } else {
+            self.active_tab = self.active_tab.min(self.tabs.len() - 1);
+            self.focus_active(window, cx);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn reconnect_session(
+        &mut self,
+        _: &ReconnectSession,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match reconnect_request(self.background_sessions.len()) {
+            ReconnectRequest::None => {}
+            ReconnectRequest::Immediate(index) => {
+                self.reconnect_background_session_at(index, window, cx)
+            }
+            ReconnectRequest::Choose => self.reconnect_menu_handle.show(window, cx),
+        }
+    }
+
+    pub(crate) fn reconnect_background_session(
+        &mut self,
+        session_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self
+            .background_sessions
+            .iter()
+            .position(|tab| tab.id == session_id)
+        else {
+            return;
+        };
+        self.reconnect_background_session_at(index, window, cx);
+    }
+
+    fn reconnect_background_session_at(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.background_sessions.reconnect_at(index) else {
+            return;
+        };
+        self.publish_background_session_catalog(cx);
+        let tab_id = tab.id;
+        let panes = tab
+            .panes
+            .iter()
+            .filter_map(|pane| {
+                Some((
+                    pane.id,
+                    pane.terminal.clone()?,
+                    resolve_profile_theme(&pane.profile, cx),
+                ))
+            })
+            .collect::<Vec<_>>();
+        self.tabs.push(tab);
+        self.active_tab = self.tabs.len() - 1;
+
+        for (pane_id, terminal, terminal_theme) in panes {
+            match terminal_theme {
+                Ok(theme) => {
+                    let view =
+                        cx.new(|cx| TerminalView::new_with_theme(terminal, theme, window, cx));
+                    self.connect_terminal_view(tab_id, pane_id, view, window, cx);
+                }
+                Err(error) => {
+                    if let Some(pane) = self.tabs[self.active_tab].pane_mut(pane_id) {
+                        pane.error = Some(format!("Could not reattach terminal view: {error:#}"));
+                    }
+                }
+            }
+        }
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    fn picker_entries_from_summaries(
+        sessions: &[BackgroundSessionSummary],
+    ) -> Vec<(u64, String, String)> {
+        sessions
+            .iter()
+            .rev()
+            .map(|session| {
+                let mut applications = Vec::new();
+                for pane in &session.panes {
+                    if !applications.contains(&pane.application) {
+                        applications.push(pane.application.clone());
+                    }
+                }
+                let pane_count = session.panes.len();
+                let mut details = format!(
+                    "Session {} · {pane_count} pane{}",
+                    session.id,
+                    if pane_count == 1 { "" } else { "s" }
+                );
+                if !applications.is_empty() {
+                    details.push_str(" · ");
+                    details.push_str(&applications.join(", "));
+                }
+                (session.id, session.title.clone(), details)
+            })
+            .collect()
+    }
+
+    fn observe_background_terminal(
+        &mut self,
+        pane_id: u64,
+        terminal: Entity<Terminal>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.background_observed_panes.insert(pane_id) {
+            return;
+        }
+        cx.subscribe(
+            &terminal,
+            move |this, _, event: &TerminalEvent, cx| match event {
+                TerminalEvent::TitleChanged => this.publish_background_session_catalog(cx),
+                TerminalEvent::CloseTerminal => {
+                    this.background_exited_panes.insert(pane_id);
+                    this.publish_background_session_catalog(cx);
+                }
+                _ => {}
+            },
+        )
+        .detach();
+    }
+
+    fn schedule_background_process_refresh(&mut self, cx: &mut Context<Self>) {
+        if self.background_process_refresh_running || self.background_sessions.is_empty() {
+            return;
+        }
+        self.background_process_refresh_running = true;
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            loop {
+                executor.timer(BACKGROUND_PROCESS_REFRESH_INTERVAL).await;
+                let keep_refreshing = this
+                    .update(cx, |this, cx| {
+                        if this.background_sessions.is_empty() {
+                            this.background_process_refresh_running = false;
+                            return false;
+                        }
+                        for terminal in this
+                            .background_sessions
+                            .iter()
+                            .flat_map(|tab| &tab.panes)
+                            .filter_map(|pane| pane.terminal.clone())
+                        {
+                            terminal.update(cx, Terminal::refresh_foreground_process);
+                        }
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep_refreshing {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn publish_background_session_catalog(&mut self, cx: &App) {
+        let sessions = self
+            .background_sessions
+            .iter()
+            .map(|tab| self.background_session_summary(tab, cx))
+            .collect::<Vec<_>>();
+        self.background_session_picker_entries = Self::picker_entries_from_summaries(&sessions);
+        if let Err(error) = self.background_sessions.publish(sessions) {
+            eprintln!("Could not publish background session catalog: {error:#}");
+        }
+    }
+
+    fn background_session_summary(&self, tab: &Tab, cx: &App) -> BackgroundSessionSummary {
+        let title = self.background_session_title(tab, cx);
+        let panes = tab
+            .panes
+            .iter()
+            .map(|pane| {
+                let (terminal_title, foreground_command, working_directory) = pane
+                    .terminal
+                    .as_ref()
+                    .map(|terminal| {
+                        let terminal = terminal.read(cx);
+                        (
+                            Some(terminal.title(false)),
+                            terminal.foreground_process_command_line(),
+                            terminal.working_directory(),
+                        )
+                    })
+                    .unwrap_or_default();
+                let state = if pane.error.is_some() {
+                    BackgroundPaneState::Failed
+                } else if self.background_exited_panes.contains(&pane.id) {
+                    BackgroundPaneState::Exited
+                } else if pane.terminal.is_some() {
+                    BackgroundPaneState::Running
+                } else {
+                    BackgroundPaneState::Starting
+                };
+                let (program, arguments) = pane.profile.command.program_and_args();
+                let configured_command = std::iter::once(program)
+                    .chain(arguments.iter().cloned())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let application = application_from_command_line(foreground_command.as_deref())
+                    .unwrap_or_else(|| {
+                        pane.generated_label
+                            .as_deref()
+                            .and_then(|label| {
+                                if label.starts_with("HTTP: ") {
+                                    Some("Zetta HTTP server")
+                                } else if label.starts_with("TFTP: ") {
+                                    Some("Zetta TFTP server")
+                                } else if label.starts_with("Serial: ") {
+                                    Some("Serial console")
+                                } else {
+                                    None
+                                }
+                            })
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| pane.profile.command.program_and_args().0)
+                    });
+                BackgroundPaneSummary {
+                    id: pane.id,
+                    label: pane.label(),
+                    profile: pane.profile.name.clone(),
+                    configured_command,
+                    application,
+                    foreground_command,
+                    terminal_title,
+                    working_directory,
+                    state,
+                }
+            })
+            .collect();
+        BackgroundSessionSummary {
+            id: tab.id,
+            title,
+            active_pane: tab.active_pane,
+            layout: background_pane_layout(&tab.layout),
+            panes,
+        }
+    }
+
+    fn background_session_title(&self, tab: &Tab, cx: &App) -> String {
+        tab.custom_title.clone().unwrap_or_else(|| {
+            tab.active_pane()
+                .and_then(|pane| pane.terminal.as_ref())
+                .map(|terminal| terminal.read(cx).title(false))
+                .unwrap_or_else(|| format!("Tab {}", tab.id))
+        })
+    }
+
+    fn connect_terminal_view(
+        &mut self,
+        tab_id: u64,
+        pane_id: u64,
+        view: Entity<TerminalView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let pane_label = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .and_then(|tab| tab.pane(pane_id))
+            .and_then(|pane| pane.generated_label.as_deref());
+        let is_http_server = pane_label.is_some_and(|label| label.starts_with("HTTP: "));
+        let is_tftp_server = pane_label.is_some_and(|label| label.starts_with("TFTP: "));
+        cx.subscribe_in(
+            &view,
+            window,
+            move |this, _, event, window, cx| match event {
+                TerminalViewEvent::Close => this.close_pane(tab_id, pane_id, window, cx),
+                TerminalViewEvent::TitleChanged => cx.notify(),
+                TerminalViewEvent::Input(input)
+                    if (is_http_server
+                        && crate::http_server_ui::http_input_stops_server(input))
+                        || (is_tftp_server
+                            && crate::tftp_server_ui::tftp_input_stops_server(input)) =>
+                {
+                    this.close_pane(tab_id, pane_id, window, cx);
+                }
+                TerminalViewEvent::Input(input) => {
+                    this.broadcast_input(tab_id, pane_id, input, cx);
+                }
+            },
+        )
+        .detach();
+        let focus_handle = view.focus_handle(cx);
+        cx.on_focus(&focus_handle, window, move |this, _, cx| {
+            if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                tab.activate_pane(pane_id);
+                cx.notify();
+            }
+        })
+        .detach();
+        let emit_input_events = is_http_server
+            || is_tftp_server
+            || self
+                .tabs
+                .iter()
+                .find(|tab| tab.id == tab_id)
+                .is_some_and(|tab| tab.broadcast_input);
+        view.update(cx, |view, _| view.set_emit_input_events(emit_input_events));
+        if let Some(pane) = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id == tab_id)
+            .and_then(|tab| tab.pane_mut(pane_id))
+        {
+            pane.view = Some(view);
+            pane.error = None;
+        }
     }
 
     pub(crate) fn close_active_pane(
@@ -737,6 +1195,7 @@ impl Zetta {
                 generated_label: None,
                 custom_label: None,
                 profile: profile.clone(),
+                terminal: None,
                 view: None,
                 error: None,
                 wsl_cwd_file: wsl_cwd_file.clone(),

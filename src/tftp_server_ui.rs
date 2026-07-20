@@ -1,6 +1,6 @@
 use super::*;
 
-fn tftp_input_stops_server(input: &TerminalInput) -> bool {
+pub(crate) fn tftp_input_stops_server(input: &TerminalInput) -> bool {
     match input {
         TerminalInput::Keystroke(keystroke)
             if keystroke.key.eq_ignore_ascii_case("c")
@@ -104,6 +104,7 @@ impl Zetta {
             generated_label: Some(label),
             custom_label: None,
             profile,
+            terminal: None,
             view: None,
             error: None,
             wsl_cwd_file: None,
@@ -148,6 +149,7 @@ impl Zetta {
         })
         .detach();
         if let Some(pane) = self.tabs[self.active_tab].pane_mut(pane_id) {
+            pane.terminal = Some(view.read(cx).terminal().clone());
             pane.view = Some(view.clone());
         }
         view.focus_handle(cx).focus(window, cx);

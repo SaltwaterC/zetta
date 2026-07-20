@@ -1,8 +1,10 @@
 #![cfg_attr(windows, windows_subsystem = "console")]
 
+mod background_sessions;
 mod command_palette;
 mod config;
 mod http_server;
+mod process_control;
 mod serial_console;
 mod settings_editor;
 mod tftp;
@@ -27,17 +29,26 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
+use background_sessions::{
+    BackgroundPaneLayout, BackgroundPaneState, BackgroundPaneSummary, BackgroundSessionRunner,
+    BackgroundSessionSummary, application_from_command_line, print_session_catalogs,
+};
 use command_palette::{CommandPalette, PaletteCommand, humanize_action_name};
 use config::{Config, PaneSplitAxis, PaneSplitTemplate, Profile};
+use futures::StreamExt as _;
 use gpui::{
     Action, Anchor, AnyElement, App, AppContext as _, Bounds, Context, CursorStyle, Decorations,
-    Entity, Focusable, FrameTiming, FrameTimingCollector, HitboxBehavior, InteractiveElement as _,
-    IntoElement, KeyBinding, KeyBindingContextPredicate, KeyDownEvent, MAX_BUTTONS_PER_SIDE,
-    MouseButton, Pixels, PlatformKeyboardMapper, Point, Render, ResizeEdge, ScrollHandle,
-    SharedString, Size, Subscription, Task, Tiling, TitlebarOptions, UniformListScrollHandle,
-    Window, WindowBackgroundAppearance, WindowBounds, WindowButton, WindowButtonLayout,
-    WindowControlArea, WindowControls, WindowDecorations, WindowId, WindowOptions, actions, canvas,
-    container_query, div, point, profiler, px, size, svg, transparent_black, uniform_list,
+    Entity, Focusable, FrameTiming, FrameTimingCollector, Global, HitboxBehavior,
+    InteractiveElement as _, IntoElement, KeyBinding, KeyBindingContextPredicate, KeyDownEvent,
+    MAX_BUTTONS_PER_SIDE, MouseButton, Pixels, PlatformKeyboardMapper, Point, Render, ResizeEdge,
+    ScrollHandle, SharedString, Size, Subscription, Task, Tiling, TitlebarOptions,
+    UniformListScrollHandle, Window, WindowBackgroundAppearance, WindowBounds, WindowButton,
+    WindowButtonLayout, WindowControlArea, WindowControls, WindowDecorations, WindowId,
+    WindowOptions, actions, canvas, container_query, div, point, profiler, px, size, svg,
+    transparent_black, uniform_list,
+};
+use process_control::{
+    ProcessControlCommand, ProcessControlServer, request_existing_process_window,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -48,8 +59,8 @@ use settings_editor::{
 };
 use task::Shell;
 use terminal::{
-    Paste, PasteTrimmed, Range, ScrollPageDown, ScrollPageUp, Search, TerminalBuilder,
-    terminal_settings::TerminalSettings,
+    Event as TerminalEvent, Paste, PasteTrimmed, Range, ScrollPageDown, ScrollPageUp, Search,
+    Terminal, TerminalBuilder, terminal_settings::TerminalSettings,
 };
 use terminal_view::{
     ClearClipboard, CopyAndClearSelection, DismissSearch, SearchNextMatch, SearchPreviousMatch,
@@ -63,7 +74,7 @@ use theme_extensions::{InstalledThemeExtension, ThemeExtension};
 use ui::{
     Banner, ButtonCommon as _, ButtonLike, ButtonLink, ButtonSize, ButtonStyle, Clickable as _,
     Color, Icon, IconButton, IconButtonShape, IconName, IconPosition, IconSize, Label, LabelSize,
-    PopoverMenu, Severity, Tooltip, prelude::*,
+    PopoverMenu, PopoverMenuHandle, Severity, Tooltip, prelude::*,
 };
 use util::{ResultExt as _, paths::PathStyle};
 use zetta_assets::ZettaAssets;
@@ -74,6 +85,8 @@ actions!(
         NewTab,
         NewWindow,
         CloseTab,
+        DetachTab,
+        ReconnectSession,
         NextTab,
         PreviousTab,
         RenameTab,
@@ -122,6 +135,17 @@ static PERFORMANCE_OWNS_FRAME_TRACING: AtomicBool = AtomicBool::new(false);
 const PERFORMANCE_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 const FRAME_BUDGET_120_HZ: Duration = Duration::from_nanos(8_333_333);
 const FRAME_BUDGET_60_HZ: Duration = Duration::from_nanos(16_666_667);
+
+struct ZettaProcessState {
+    windows: HashMap<WindowId, Entity<Zetta>>,
+    dormant: Vec<Entity<Zetta>>,
+    config: Config,
+    configuration_error: Option<String>,
+    _control_server: ProcessControlServer,
+}
+
+impl Global for ZettaProcessState {}
+
 mod pane;
 use pane::*;
 mod multi_command;

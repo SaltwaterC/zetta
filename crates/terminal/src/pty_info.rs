@@ -226,7 +226,9 @@ impl PtyProcessInfo {
             let current = this.load();
             let has_changed = match (previous.as_ref(), current.as_ref()) {
                 (None, None) => false,
-                (Some(prev), Some(now)) => prev.cwd != now.cwd || prev.name != now.name,
+                (Some(prev), Some(now)) => {
+                    prev.cwd != now.cwd || prev.name != now.name || prev.argv != now.argv
+                }
                 _ => true,
             };
             if has_changed {

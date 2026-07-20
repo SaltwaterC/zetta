@@ -359,6 +359,7 @@ impl Zetta {
             generated_label: Some(label.clone()),
             custom_label: None,
             profile,
+            terminal: None,
             view: None,
             error: None,
             wsl_cwd_file: None,
@@ -409,6 +410,7 @@ impl Zetta {
         })
         .detach();
         if let Some(pane) = self.tabs[self.active_tab].pane_mut(pane_id) {
+            pane.terminal = Some(view.read(cx).terminal().clone());
             pane.view = Some(view.clone());
         }
         view.focus_handle(cx).focus(window, cx);

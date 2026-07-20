@@ -214,6 +214,8 @@ Keyboard shortcuts use Zed's keymap format. The default shortcuts are:
 | `Ctrl-Shift-N` | New window |
 | `Ctrl-Shift-1` ... `Ctrl-Shift-9` | New tab with profile 1 ... 9 |
 | `Ctrl-Shift-W` | Close tab |
+| `Alt-Shift-D` | Detach the active tab into the background |
+| `Alt-Shift-A` | Reconnect the most recently detached tab |
 | `Ctrl-Shift-O` | Split active pane horizontally (top/bottom) |
 | `Ctrl-Shift-E` | Split active pane vertically (left/right) |
 | `Ctrl-Shift-X` | Close the active pane (or its tab when it is the final pane) |
@@ -237,7 +239,7 @@ Keyboard shortcuts use Zed's keymap format. The default shortcuts are:
 | `Ctrl-,` | Open the configuration and keymap editor |
 | `Ctrl-Shift-D` | Select a serial device and open its console in a new pane |
 | `Ctrl-Alt-R` | Rename active tab |
-| `Ctrl-Alt-L` | Label active pane; submit an empty label to restore its automatic label |
+| `Alt-Shift-L` | Label active pane; submit an empty label to restore its automatic label |
 | `Ctrl-=` / `Ctrl-+` | Increase font size globally |
 | `Ctrl--` | Decrease font size globally |
 | `Ctrl-0` | Reset font size globally |
@@ -254,6 +256,42 @@ pane are also sent to every other open pane in that tab.
 The command palette lists the actions available in the focused terminal and
 Zetta window, including their effective keyboard shortcuts. Type to filter,
 use the arrow keys to select a command, and press `Enter` to run it.
+
+### Background sessions
+
+Use `Alt-Shift-D` or the archive button beside the new-tab button to detach the
+active tab. Its terminal views are destroyed, but a lightweight background
+runner retains the live terminal processes and scrollback. The complete tab
+model stays intact, including nested pane splits, active-pane history,
+minimized and maximized panes, broadcast-input state, and custom labels.
+
+Use `Alt-Shift-A` or the reconnect button to restore a sole background session
+immediately. With multiple background sessions, either control opens the session
+picker. Choose by title, ID, pane count, and foreground applications using the
+arrow keys and `Enter` or the pointer. Detaching the final visible tab opens a
+fresh tab so the window remains usable.
+
+Inspect detached sessions from a shell without opening another Zetta window:
+
+```sh
+zetta sessions
+zetta sessions --json
+```
+
+The human-readable listing includes a stable `process:runner:session` ID, the
+saved split layout, active pane, profile and configured launch command for every
+pane, its live foreground application and full command line, terminal title,
+working directory, and whether it is starting, running, exited, or failed.
+`--json` returns the same catalog as structured, versioned JSON for scripts and
+future remote-session tooling.
+
+When the last Zetta window closes, any detached sessions keep the original
+process running as a non-rendering session runner. Visible tabs are closed and
+do not become background sessions implicitly. Launching plain `zetta` again
+contacts that runner over an authenticated loopback control channel, reopens
+its window, and makes the preserved sessions available through the reconnect
+action. Once all background sessions are reconnected or closed, closing the
+last window terminates Zetta normally.
 
 Use `Ctrl-Shift-D` (or **Zetta: Toggle Serial Console** in the command palette)
 to enumerate serial devices and connect one in a new left/right split. The
@@ -435,7 +473,7 @@ them. The controls appear when the pointer moves over a pane and hide again
 after a short period of pointer inactivity. Each pane receives a stable per-tab
 label, shown with those controls and retained as other panes are rearranged or
 closed.
-Press `Ctrl-Alt-L` or double-click that label to give the active pane a custom
+Press `Alt-Shift-L` or double-click that label to give the active pane a custom
 name. Submitting an empty name restores its automatic label.
 Panes created by a multi-command use their resolved Cartesian parameters as
 the automatic label. For example, `run {{dev,prod}} {{eu,us}}` produces

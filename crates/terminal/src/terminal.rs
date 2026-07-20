@@ -3025,6 +3025,27 @@ impl Terminal {
         }
     }
 
+    /// Returns the full argument vector of the foreground process, if one is known.
+    pub fn foreground_process_command_line(&self) -> Option<Vec<String>> {
+        match &self.terminal_type {
+            TerminalType::Pty { info, .. } => info.current.read().as_ref().map(|process| {
+                if process.argv.is_empty() {
+                    vec![process.name.clone()]
+                } else {
+                    process.argv.clone()
+                }
+            }),
+            TerminalType::DisplayOnly => None,
+        }
+    }
+
+    /// Refreshes cached foreground process metadata without requiring a rendered view.
+    pub fn refresh_foreground_process(&mut self, cx: &mut Context<Self>) {
+        if let TerminalType::Pty { info, .. } = &self.terminal_type {
+            info.emit_title_changed_if_changed(cx);
+        }
+    }
+
     /// Returns the working directory of the process that's connected to the PTY.
     /// That means it returns the working directory of the local shell or program
     /// that's running inside the terminal.
@@ -4388,6 +4409,10 @@ mod tests {
                 .await;
 
         assert_foreground_process_command_eventually(&terminal, "sleep", cx).await;
+        let command_line = terminal
+            .update(cx, |terminal, _| terminal.foreground_process_command_line())
+            .expect("foreground process should expose its argument vector");
+        assert_eq!(command_line.last().map(String::as_str), Some("1"));
 
         assert!(
             completion_rx.recv().await.is_ok(),
