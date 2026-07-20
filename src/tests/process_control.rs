@@ -1,38 +1,34 @@
 use super::*;
 
+fn request(token: &str, command: &str) -> ControlRequest {
+    ControlRequest {
+        token: token.to_owned(),
+        command: command.to_owned(),
+    }
+}
+
 #[test]
 fn control_requests_require_the_endpoint_token() {
-    let accepted = serde_json::to_vec(&ControlRequest {
-        token: "correct".to_owned(),
-        command: "open_window".to_owned(),
-    })
-    .unwrap();
-    let rejected = serde_json::to_vec(&ControlRequest {
-        token: "wrong".to_owned(),
-        command: "open_window".to_owned(),
-    })
-    .unwrap();
-
     assert_eq!(
-        decode_control_request(&accepted, "correct"),
+        decode_control_request(&request("correct", "open_window"), "correct"),
         Some(ProcessControlCommand::OpenWindow)
     );
-    assert_eq!(decode_control_request(&rejected, "correct"), None);
+    assert_eq!(
+        decode_control_request(&request("wrong", "open_window"), "correct"),
+        None
+    );
 }
 
 #[test]
 fn unknown_control_commands_are_rejected() {
-    let request = serde_json::to_vec(&ControlRequest {
-        token: "token".to_owned(),
-        command: "delete_sessions".to_owned(),
-    })
-    .unwrap();
-
-    assert_eq!(decode_control_request(&request, "token"), None);
+    assert_eq!(
+        decode_control_request(&request("token", "delete_sessions"), "token"),
+        None
+    );
 }
 
 #[test]
-fn control_server_delivers_an_authenticated_open_request() {
+fn control_server_delivers_a_token_authenticated_open_request() {
     let directory = tempfile::tempdir().unwrap();
     let endpoint_path = directory.path().join("control.json");
     let (commands, mut received) = futures::channel::mpsc::unbounded();

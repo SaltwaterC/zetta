@@ -18,11 +18,13 @@ required-features = ["windows-gui"]
 
 [dependencies]
 anyhow = "1"
+argon2 = "0.5"
 libc = "0.2"
 async-compression = { version = "0.4", features = ["gzip", "futures-io"] }
 async-tar = "0.6"
 assets = { path = "zed/crates/assets" }
 futures = "0.3"
+getrandom = "0.3"
 gpui = { path = "zed/crates/gpui" }
 gpui_platform = { path = "crates/gpui_platform" }
 menu = { path = "zed/crates/menu" }
@@ -47,6 +49,7 @@ theme_settings = { path = "zed/crates/theme_settings" }
 toml = "0.8"
 ui = { path = "zed/crates/ui" }
 util = { path = "zed/crates/util" }
+zeroize = "1"
 zed_actions = { path = "zed/crates/zed_actions" }
 
 [target.'cfg(windows)'.dependencies]

@@ -1,15 +1,21 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use anyhow::{Context as _, Result};
+use argon2::{
+    Argon2, PasswordHash, PasswordHasher as _, PasswordVerifier as _, password_hash::SaltString,
+};
 use serde::{Deserialize, Serialize};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 
 static NEXT_RUNNER_ID: AtomicU64 = AtomicU64::new(1);
-const CATALOG_VERSION: u32 = 2;
+const CATALOG_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct BackgroundSessionCatalog {
@@ -23,6 +29,7 @@ pub(crate) struct BackgroundSessionCatalog {
 pub(crate) struct BackgroundSessionSummary {
     pub(crate) id: u64,
     pub(crate) title: String,
+    pub(crate) authentication_required: bool,
     pub(crate) active_pane: u64,
     pub(crate) layout: BackgroundPaneLayout,
     pub(crate) panes: Vec<BackgroundPaneSummary>,
@@ -164,8 +171,56 @@ impl Drop for SessionCatalogPublisher {
 /// This deliberately has no GPUI or platform dependency. A future local daemon or
 /// remote transport can own the same runner without also owning window state.
 pub(crate) struct BackgroundSessionRunner<T> {
-    sessions: Vec<T>,
+    sessions: Vec<DetachedSession<T>>,
     catalog: SessionCatalogPublisher,
+}
+
+struct DetachedSession<T> {
+    value: T,
+    authentication: Option<SessionAuthentication>,
+}
+
+#[derive(Clone)]
+pub(crate) struct SessionAuthentication {
+    verifier: Arc<str>,
+}
+
+impl SessionAuthentication {
+    pub(crate) fn create(secret: &str) -> Result<Self> {
+        anyhow::ensure!(
+            !secret.is_empty(),
+            "session authentication must not be empty"
+        );
+        let mut salt = [0; 16];
+        getrandom::fill(&mut salt).context("generating session authentication salt")?;
+        let salt = SaltString::encode_b64(&salt)
+            .map_err(|error| anyhow::anyhow!("encoding session authentication salt: {error}"))?;
+        let verifier = Argon2::default()
+            .hash_password(secret.as_bytes(), &salt)
+            .map_err(|error| anyhow::anyhow!("hashing session authentication: {error}"))?
+            .to_string()
+            .into();
+        Ok(Self { verifier })
+    }
+
+    pub(crate) fn verify(&self, secret: &str) -> bool {
+        PasswordHash::new(&self.verifier)
+            .ok()
+            .is_some_and(|verifier| {
+                Argon2::default()
+                    .verify_password(secret.as_bytes(), &verifier)
+                    .is_ok()
+            })
+    }
+
+    pub(crate) fn is_same_verifier(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.verifier, &other.verifier)
+    }
+
+    #[cfg(test)]
+    fn encoded(&self) -> &str {
+        &self.verifier
+    }
 }
 
 impl<T> Default for BackgroundSessionRunner<T> {
@@ -178,14 +233,26 @@ impl<T> Default for BackgroundSessionRunner<T> {
 }
 
 impl<T> BackgroundSessionRunner<T> {
-    pub(crate) fn detach(&mut self, session: T) {
-        self.sessions.push(session);
+    pub(crate) fn runner_id(&self) -> u64 {
+        runner_id_from_path(&self.catalog.path).unwrap_or_default()
+    }
+
+    pub(crate) fn detach(&mut self, session: T, authentication: Option<SessionAuthentication>) {
+        self.sessions.push(DetachedSession {
+            value: session,
+            authentication,
+        });
     }
 
     pub(crate) fn reconnect_at(&mut self, index: usize) -> Option<T> {
-        (index < self.sessions.len()).then(|| self.sessions.remove(index))
+        (index < self.sessions.len()).then(|| self.sessions.remove(index).value)
     }
 
+    pub(crate) fn authentication_at(&self, index: usize) -> Option<&SessionAuthentication> {
+        self.sessions.get(index)?.authentication.as_ref()
+    }
+
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.sessions.len()
     }
@@ -195,11 +262,11 @@ impl<T> BackgroundSessionRunner<T> {
     }
 
     pub(crate) fn iter(&self) -> impl DoubleEndedIterator<Item = &T> {
-        self.sessions.iter()
+        self.sessions.iter().map(|session| &session.value)
     }
 
     pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
-        self.sessions.iter_mut()
+        self.sessions.iter_mut().map(|session| &mut session.value)
     }
 
     pub(crate) fn publish(&mut self, sessions: Vec<BackgroundSessionSummary>) -> Result<()> {
@@ -207,9 +274,24 @@ impl<T> BackgroundSessionRunner<T> {
             version: CATALOG_VERSION,
             process_id: std::process::id(),
             runner_id: runner_id_from_path(&self.catalog.path).unwrap_or_default(),
-            sessions,
+            sessions: sessions
+                .into_iter()
+                .map(BackgroundSessionSummary::for_public_catalog)
+                .collect(),
         };
         self.catalog.publish(&catalog)
+    }
+}
+
+impl BackgroundSessionSummary {
+    fn for_public_catalog(mut self) -> Self {
+        if self.authentication_required {
+            self.title = "Protected session".to_owned();
+            self.active_pane = 0;
+            self.layout = BackgroundPaneLayout::Pane { pane_id: 0 };
+            self.panes.clear();
+        }
+        self
     }
 }
 
@@ -293,14 +375,22 @@ pub(crate) fn print_session_catalogs(json: bool) -> Result<()> {
     for catalog in catalogs {
         for session in catalog.sessions {
             println!(
-                "\n{}:{}:{}  {}  ({} pane{})",
+                "\n{}:{}:{}  {}  ({} pane{}{})",
                 catalog.process_id,
                 catalog.runner_id,
                 session.id,
                 display_text(&session.title),
                 session.panes.len(),
-                if session.panes.len() == 1 { "" } else { "s" }
+                if session.panes.len() == 1 { "" } else { "s" },
+                if session.authentication_required {
+                    ", protected"
+                } else {
+                    ""
+                }
             );
+            if session.authentication_required {
+                continue;
+            }
             println!("  layout: {}", display_layout(&session.layout));
             for pane in session.panes {
                 let active = if pane.id == session.active_pane {

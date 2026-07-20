@@ -269,8 +269,10 @@ minimized and maximized panes, broadcast-input state, and custom labels.
 Use `Alt-Shift-A` or the reconnect button to restore a sole background session
 immediately. With multiple background sessions, either control opens the session
 picker. Choose by title, ID, pane count, and foreground applications using the
-arrow keys and `Enter` or the pointer. Detaching the final visible tab opens a
-fresh tab so the window remains usable.
+arrow keys and `Enter` or the pointer. The picker includes sessions detached from
+every Zetta window in the current process, so a session can be detached in one
+window and attached in another. Detaching the final visible tab opens a fresh tab
+so the window remains usable.
 
 Inspect detached sessions from a shell without opening another Zetta window:
 
@@ -289,10 +291,20 @@ future remote-session tooling.
 When the last Zetta window closes, any detached sessions keep the original
 process running as a non-rendering session runner. Visible tabs are closed and
 do not become background sessions implicitly. Launching plain `zetta` again
-contacts that runner over an authenticated loopback control channel, reopens
+contacts that runner over an authenticated local AF_UNIX control socket, reopens
 its window, and makes the preserved sessions available through the reconnect
 action. Once all background sessions are reconnected or closed, closing the
 last window terminates Zetta normally.
+
+When detaching a tab, choose either **No authentication** or enter and confirm a
+secret for that session. Authentication is per session: ordinary detached tabs
+continue to reconnect immediately, while protected tabs prompt for their secret.
+Zetta stores a uniquely salted Argon2id verifier only in the live session runner;
+neither the secret nor its verifier is written to `config.json`, the control JSON,
+or the session catalog. Catalog entries for protected sessions are redacted to a
+stable ID and protection flag, so commands, titles, and working directories are
+not exposed and editing catalog or configuration files cannot replace the live
+verifier. Argon2id hashing and verification run away from the UI thread.
 
 Use `Ctrl-Shift-D` (or **Zetta: Toggle Serial Console** in the command palette)
 to enumerate serial devices and connect one in a new left/right split. The

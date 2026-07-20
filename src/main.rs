@@ -6,6 +6,7 @@ mod config;
 mod http_server;
 mod process_control;
 mod serial_console;
+mod session_auth_ui;
 mod settings_editor;
 mod tftp;
 mod theme_extensions;
@@ -31,7 +32,8 @@ use std::{
 use anyhow::{Context as _, Result};
 use background_sessions::{
     BackgroundPaneLayout, BackgroundPaneState, BackgroundPaneSummary, BackgroundSessionRunner,
-    BackgroundSessionSummary, application_from_command_line, print_session_catalogs,
+    BackgroundSessionSummary, SessionAuthentication, application_from_command_line,
+    print_session_catalogs,
 };
 use command_palette::{CommandPalette, PaletteCommand, humanize_action_name};
 use config::{Config, PaneSplitAxis, PaneSplitTemplate, Profile};
@@ -52,6 +54,7 @@ use process_control::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use session_auth_ui::SessionAuthenticationPrompt;
 use settings::{KeymapFile, KeymapFileLoadResult, Settings as _};
 use settings_editor::{
     BindingForm, ConfigTextField, ConfigurationForm, KeymapForm, KeymapSectionForm,
@@ -72,9 +75,9 @@ use theme::{
 };
 use theme_extensions::{InstalledThemeExtension, ThemeExtension};
 use ui::{
-    Banner, ButtonCommon as _, ButtonLike, ButtonLink, ButtonSize, ButtonStyle, Clickable as _,
-    Color, Icon, IconButton, IconButtonShape, IconName, IconPosition, IconSize, Label, LabelSize,
-    PopoverMenu, PopoverMenuHandle, Severity, Tooltip, prelude::*,
+    Banner, Button, ButtonCommon as _, ButtonLike, ButtonLink, ButtonSize, ButtonStyle,
+    Clickable as _, Color, Icon, IconButton, IconButtonShape, IconName, IconPosition, IconSize,
+    Label, LabelSize, PopoverMenu, PopoverMenuHandle, Severity, Tooltip, prelude::*,
 };
 use util::{ResultExt as _, paths::PathStyle};
 use zetta_assets::ZettaAssets;
@@ -136,9 +139,13 @@ const PERFORMANCE_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 const FRAME_BUDGET_120_HZ: Duration = Duration::from_nanos(8_333_333);
 const FRAME_BUDGET_60_HZ: Duration = Duration::from_nanos(16_666_667);
 
+type ProcessBackgroundSessionEntry = (u64, u64, String, String);
+
 struct ZettaProcessState {
     windows: HashMap<WindowId, Entity<Zetta>>,
     dormant: Vec<Entity<Zetta>>,
+    runners: HashMap<u64, Entity<Zetta>>,
+    background_session_entries: Arc<[ProcessBackgroundSessionEntry]>,
     config: Config,
     configuration_error: Option<String>,
     _control_server: ProcessControlServer,

@@ -236,6 +236,16 @@ pub(crate) fn background_pane_layout(layout: &PaneLayout) -> BackgroundPaneLayou
 }
 
 impl PaneLayout {
+    fn remap_pane_ids(&mut self, pane_ids: &HashMap<u64, u64>) {
+        match self {
+            Self::Pane(pane_id) => *pane_id = pane_ids[pane_id],
+            Self::Split { first, second, .. } => {
+                first.remap_pane_ids(pane_ids);
+                second.remap_pane_ids(pane_ids);
+            }
+        }
+    }
+
     pub(crate) fn tiled(pane_ids: &[u64]) -> Option<Self> {
         fn build(pane_ids: &[u64], axis: SplitAxis) -> PaneLayout {
             if let [pane_id] = pane_ids {
@@ -467,6 +477,46 @@ pub(crate) struct Tab {
 }
 
 impl Tab {
+    pub(crate) fn reassign_ids(&mut self, tab_id: u64, next_pane_id: &mut u64) {
+        self.id = tab_id;
+        let pane_ids = self
+            .panes
+            .iter_mut()
+            .map(|pane| {
+                let old_id = pane.id;
+                pane.id = *next_pane_id;
+                *next_pane_id += 1;
+                (old_id, pane.id)
+            })
+            .collect::<HashMap<_, _>>();
+        self.pane_indices = self
+            .panes
+            .iter()
+            .enumerate()
+            .map(|(index, pane)| (pane.id, index))
+            .collect();
+        self.layout.remap_pane_ids(&pane_ids);
+        self.active_pane = pane_ids[&self.active_pane];
+        self.focus_history = self
+            .focus_history
+            .iter()
+            .filter_map(|pane_id| pane_ids.get(pane_id).copied())
+            .collect();
+        self.maximized_pane = self
+            .maximized_pane
+            .and_then(|pane_id| pane_ids.get(&pane_id).copied());
+        self.minimized_panes = self
+            .minimized_panes
+            .iter()
+            .filter_map(|pane_id| pane_ids.get(pane_id).copied())
+            .collect();
+        self.selected_minimized_pane = self
+            .selected_minimized_pane
+            .and_then(|pane_id| pane_ids.get(&pane_id).copied());
+        self.renaming_pane = None;
+        self.rename_buffer = None;
+    }
+
     pub(crate) fn displayed_pane_label(&self, id: u64) -> Option<String> {
         let pane = self.pane(id)?;
         if self.renaming_pane != Some(id) {

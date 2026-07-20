@@ -516,6 +516,41 @@ fn pane_management_tab() -> Tab {
 }
 
 #[test]
+fn transferred_tabs_receive_target_window_ids_consistently() {
+    let mut tab = pane_management_tab();
+    tab.maximized_pane = Some(2);
+    tab.minimized_panes = vec![1, 3];
+    tab.selected_minimized_pane = Some(3);
+    let mut next_pane_id = 20;
+
+    tab.reassign_ids(10, &mut next_pane_id);
+
+    assert_eq!(tab.id, 10);
+    assert_eq!(next_pane_id, 23);
+    assert_eq!(
+        tab.panes.iter().map(|pane| pane.id).collect::<Vec<_>>(),
+        [20, 21, 22]
+    );
+    assert_eq!(tab.active_pane, 21);
+    assert_eq!(tab.focus_history, [20, 22, 21]);
+    assert_eq!(tab.maximized_pane, Some(21));
+    assert_eq!(tab.minimized_panes, [20, 22]);
+    assert_eq!(tab.selected_minimized_pane, Some(22));
+    assert_eq!(
+        tab.layout,
+        PaneLayout::Split {
+            axis: SplitAxis::Vertical,
+            first: Box::new(PaneLayout::Pane(20)),
+            second: Box::new(PaneLayout::Split {
+                axis: SplitAxis::Horizontal,
+                first: Box::new(PaneLayout::Pane(21)),
+                second: Box::new(PaneLayout::Pane(22)),
+            }),
+        }
+    );
+}
+
+#[test]
 fn maximizing_and_restoring_preserves_the_original_layout() {
     let mut tab = pane_management_tab();
     let original = tab.layout.clone();

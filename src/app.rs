@@ -36,6 +36,9 @@ pub(crate) struct Zetta {
     pub(crate) background_process_refresh_running: bool,
     pub(crate) background_session_picker_entries: Vec<(u64, String, String)>,
     pub(crate) reconnect_menu_handle: PopoverMenuHandle<ui::ContextMenu>,
+    pub(crate) session_authentication_focus: gpui::FocusHandle,
+    pub(crate) session_authentication: Option<SessionAuthenticationPrompt>,
+    pub(crate) session_authentication_generation: u64,
     pub(crate) active_tab: usize,
     pub(crate) selected_profile: usize,
     pub(crate) profiles: Vec<Profile>,
@@ -76,6 +79,7 @@ impl Zetta {
         self.multi_command = None;
         self.settings_editor = None;
         self.serial_console = None;
+        self.session_authentication = None;
         self.tab_search = None;
         cx.notify();
     }
@@ -98,6 +102,7 @@ impl Zetta {
                     && this.command_palette.is_none()
                     && this.multi_command.is_none()
                     && this.serial_console.is_none()
+                    && this.session_authentication.is_none()
                     && this.tab_search.is_none()
                 {
                     this.focus_active(window, cx);
@@ -168,6 +173,9 @@ impl Zetta {
             background_process_refresh_running: false,
             background_session_picker_entries: Vec::new(),
             reconnect_menu_handle: PopoverMenuHandle::default(),
+            session_authentication_focus: cx.focus_handle(),
+            session_authentication: None,
+            session_authentication_generation: 0,
             active_tab: 0,
             selected_profile: config.default_profile,
             profiles: config.profiles,
@@ -208,6 +216,7 @@ impl Zetta {
                         && this.command_palette.is_none()
                         && this.multi_command.is_none()
                         && this.serial_console.is_none()
+                        && this.session_authentication.is_none()
                         && this.tab_search.is_none()
                     {
                         this.focus_active(window, cx);
@@ -673,6 +682,20 @@ impl Zetta {
         if self.active_tab >= self.tabs.len() {
             return;
         }
+        self.prompt_to_detach_session(self.tabs[self.active_tab].id, window, cx);
+    }
+
+    pub(crate) fn detach_tab_by_id(
+        &mut self,
+        tab_id: u64,
+        authentication: Option<SessionAuthentication>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            return;
+        };
+        self.active_tab = index;
         if self.tab_search.is_some() {
             self.dismiss_tab_search(window, cx);
         }
@@ -688,7 +711,7 @@ impl Zetta {
             .iter()
             .filter_map(|pane| Some((pane.id, pane.terminal.clone()?)))
             .collect::<Vec<_>>();
-        self.background_sessions.detach(tab);
+        self.background_sessions.detach(tab, authentication);
         for (pane_id, terminal) in terminals {
             self.observe_background_terminal(pane_id, terminal.clone(), cx);
             terminal.update(cx, Terminal::refresh_foreground_process);
@@ -712,10 +735,12 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match reconnect_request(self.background_sessions.len()) {
+        let entries = self.process_background_session_picker_entries(cx);
+        match reconnect_request(entries.len()) {
             ReconnectRequest::None => {}
             ReconnectRequest::Immediate(index) => {
-                self.reconnect_background_session_at(index, window, cx)
+                let (runner_id, session_id, _, _) = &entries[index];
+                self.reconnect_process_background_session(*runner_id, *session_id, window, cx);
             }
             ReconnectRequest::Choose => self.reconnect_menu_handle.show(window, cx),
         }
@@ -723,10 +748,52 @@ impl Zetta {
 
     pub(crate) fn reconnect_background_session(
         &mut self,
+        runner_id: u64,
         session_id: u64,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.reconnect_process_background_session(runner_id, session_id, window, cx);
+    }
+
+    fn reconnect_process_background_session(
+        &mut self,
+        runner_id: u64,
+        session_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if runner_id != self.background_sessions.runner_id() {
+            let Some(source) = zetta_for_runner(runner_id, cx) else {
+                return;
+            };
+            if !source
+                .read(cx)
+                .background_session_is_transferable(session_id)
+            {
+                self.pane_output_error = Some(
+                    "That background session is still starting. Try attaching it again shortly."
+                        .to_owned(),
+                );
+                cx.notify();
+                return;
+            }
+            let verifier = source
+                .read(cx)
+                .background_session_authentication(session_id);
+            if verifier.is_some() {
+                self.prompt_to_reconnect_session(runner_id, session_id, window, cx);
+                return;
+            }
+            let tab = source.update(cx, |source, cx| {
+                source.take_background_session_by_id(session_id, None, cx)
+            });
+            if let Some(tab) = tab {
+                prune_empty_dormant_runners(cx);
+                self.attach_reconnected_tab(tab, true, window, cx);
+            }
+            return;
+        }
         let Some(index) = self
             .background_sessions
             .iter()
@@ -734,19 +801,127 @@ impl Zetta {
         else {
             return;
         };
-        self.reconnect_background_session_at(index, window, cx);
+        let Some(tab) = self.background_sessions.iter().nth(index) else {
+            return;
+        };
+        if self.background_sessions.authentication_at(index).is_some() {
+            self.prompt_to_reconnect_session(runner_id, tab.id, window, cx);
+            return;
+        }
+        let session_id = tab.id;
+        if let Some(tab) = self.take_background_session_by_id(session_id, None, cx) {
+            self.attach_reconnected_tab(tab, false, window, cx);
+        }
     }
 
-    fn reconnect_background_session_at(
+    pub(crate) fn background_session_authentication(
+        &self,
+        session_id: u64,
+    ) -> Option<SessionAuthentication> {
+        let index = self
+            .background_sessions
+            .iter()
+            .position(|tab| tab.id == session_id)?;
+        self.background_sessions.authentication_at(index).cloned()
+    }
+
+    fn background_session_is_transferable(&self, session_id: u64) -> bool {
+        self.background_sessions
+            .iter()
+            .find(|tab| tab.id == session_id)
+            .is_some_and(|tab| {
+                tab.panes
+                    .iter()
+                    .all(|pane| pane.terminal.is_some() || pane.error.is_some())
+            })
+    }
+
+    pub(crate) fn process_background_session_authentication(
+        &self,
+        runner_id: u64,
+        session_id: u64,
+        cx: &App,
+    ) -> Option<SessionAuthentication> {
+        if runner_id == self.background_sessions.runner_id() {
+            return self.background_session_authentication(session_id);
+        }
+        zetta_for_runner(runner_id, cx)?
+            .read(cx)
+            .background_session_authentication(session_id)
+    }
+
+    pub(crate) fn complete_authenticated_reconnect(
         &mut self,
-        index: usize,
+        runner_id: u64,
+        session_id: u64,
+        authorization: &SessionAuthentication,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab) = self.background_sessions.reconnect_at(index) else {
-            return;
+        let tab = if runner_id == self.background_sessions.runner_id() {
+            self.take_background_session_by_id(session_id, Some(authorization), cx)
+        } else {
+            let Some(source) = zetta_for_runner(runner_id, cx) else {
+                return;
+            };
+            if !source
+                .read(cx)
+                .background_session_is_transferable(session_id)
+            {
+                self.pane_output_error = Some(
+                    "That background session is still starting. Try attaching it again shortly."
+                        .to_owned(),
+                );
+                cx.notify();
+                return;
+            }
+            let tab = source.update(cx, |source, cx| {
+                source.take_background_session_by_id(session_id, Some(authorization), cx)
+            });
+            prune_empty_dormant_runners(cx);
+            tab
         };
+        if let Some(tab) = tab {
+            let transferred = runner_id != self.background_sessions.runner_id();
+            self.attach_reconnected_tab(tab, transferred, window, cx);
+        }
+    }
+
+    pub(crate) fn take_background_session_by_id(
+        &mut self,
+        session_id: u64,
+        authorization: Option<&SessionAuthentication>,
+        cx: &mut Context<Self>,
+    ) -> Option<Tab> {
+        let index = self
+            .background_sessions
+            .iter()
+            .position(|tab| tab.id == session_id)?;
+        match (
+            self.background_sessions.authentication_at(index),
+            authorization,
+        ) {
+            (None, None) => {}
+            (Some(expected), Some(supplied)) if expected.is_same_verifier(supplied) => {}
+            _ => return None,
+        }
+        let tab = self.background_sessions.reconnect_at(index)?;
         self.publish_background_session_catalog(cx);
+        Some(tab)
+    }
+
+    pub(crate) fn attach_reconnected_tab(
+        &mut self,
+        mut tab: Tab,
+        transferred: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if transferred {
+            let tab_id = self.next_tab_id;
+            self.next_tab_id += 1;
+            tab.reassign_ids(tab_id, &mut self.next_pane_id);
+        }
         let tab_id = tab.id;
         let panes = tab
             .panes
@@ -780,6 +955,26 @@ impl Zetta {
         cx.notify();
     }
 
+    pub(crate) fn process_background_session_picker_entries(
+        &self,
+        cx: &App,
+    ) -> Arc<[ProcessBackgroundSessionEntry]> {
+        if cx.has_global::<ZettaProcessState>() {
+            return cx
+                .global::<ZettaProcessState>()
+                .background_session_entries
+                .clone();
+        }
+        let runner_id = self.background_sessions.runner_id();
+        self.background_session_picker_entries
+            .iter()
+            .map(|(session_id, title, details)| {
+                (runner_id, *session_id, title.clone(), details.clone())
+            })
+            .collect::<Vec<_>>()
+            .into()
+    }
+
     fn picker_entries_from_summaries(
         sessions: &[BackgroundSessionSummary],
     ) -> Vec<(u64, String, String)> {
@@ -787,6 +982,13 @@ impl Zetta {
             .iter()
             .rev()
             .map(|session| {
+                if session.authentication_required {
+                    return (
+                        session.id,
+                        "Protected session".to_owned(),
+                        format!("Session {} · protected", session.id),
+                    );
+                }
                 let mut applications = Vec::new();
                 for pane in &session.panes {
                     if !applications.contains(&pane.application) {
@@ -865,19 +1067,32 @@ impl Zetta {
         .detach();
     }
 
-    fn publish_background_session_catalog(&mut self, cx: &App) {
+    fn publish_background_session_catalog(&mut self, cx: &mut Context<Self>) {
         let sessions = self
             .background_sessions
             .iter()
-            .map(|tab| self.background_session_summary(tab, cx))
+            .enumerate()
+            .map(|(index, tab)| {
+                self.background_session_summary(
+                    tab,
+                    self.background_sessions.authentication_at(index).is_some(),
+                    cx,
+                )
+            })
             .collect::<Vec<_>>();
         self.background_session_picker_entries = Self::picker_entries_from_summaries(&sessions);
         if let Err(error) = self.background_sessions.publish(sessions) {
             eprintln!("Could not publish background session catalog: {error:#}");
         }
+        cx.defer(refresh_process_background_sessions);
     }
 
-    fn background_session_summary(&self, tab: &Tab, cx: &App) -> BackgroundSessionSummary {
+    fn background_session_summary(
+        &self,
+        tab: &Tab,
+        authentication_required: bool,
+        cx: &App,
+    ) -> BackgroundSessionSummary {
         let title = self.background_session_title(tab, cx);
         let panes = tab
             .panes
@@ -943,6 +1158,7 @@ impl Zetta {
         BackgroundSessionSummary {
             id: tab.id,
             title,
+            authentication_required,
             active_pane: tab.active_pane,
             layout: background_pane_layout(&tab.layout),
             panes,
