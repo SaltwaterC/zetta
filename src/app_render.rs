@@ -364,8 +364,8 @@ impl Render for Zetta {
                             move |window, cx| {
                                 handle
                                     .update(cx, |this, cx| {
-                                        this.selected_profile = index;
-                                        this.open_tab(window, cx);
+                                        let profile = this.profiles[index].clone();
+                                        this.open_tab_with_profile(profile, window, cx);
                                     })
                                     .ok();
                             },

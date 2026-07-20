@@ -56,6 +56,16 @@ fn pane_controls_hide_delay(last_motion: Instant, now: Instant) -> Option<Durati
     (!remaining.is_zero()).then_some(remaining)
 }
 
+fn new_tab_profile(
+    active_profile: Option<&Profile>,
+    profiles: &[Profile],
+    default_profile: usize,
+) -> Option<Profile> {
+    active_profile
+        .cloned()
+        .or_else(|| profiles.get(default_profile).cloned())
+}
+
 pub(crate) struct Zetta {
     pub(crate) launch_config: Config,
     pub(crate) configuration_error: Option<String>,
@@ -71,7 +81,6 @@ pub(crate) struct Zetta {
     pub(crate) session_authentication: Option<SessionAuthenticationPrompt>,
     pub(crate) session_authentication_generation: u64,
     pub(crate) active_tab: usize,
-    pub(crate) selected_profile: usize,
     pub(crate) profiles: Vec<Profile>,
     pub(crate) working_directory: Option<PathBuf>,
     pub(crate) next_tab_id: u64,
@@ -217,7 +226,6 @@ impl Zetta {
             session_authentication: None,
             session_authentication_generation: 0,
             active_tab: 0,
-            selected_profile: config.default_profile,
             profiles: config.profiles,
             working_directory: config.working_directory,
             next_tab_id: 1,
@@ -270,7 +278,23 @@ impl Zetta {
     }
 
     pub(crate) fn open_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let profile = self.profiles[self.selected_profile].clone();
+        let active_profile = self.tabs.get(self.active_tab).and_then(Tab::active_profile);
+        let Some(profile) = new_tab_profile(
+            active_profile,
+            &self.profiles,
+            self.launch_config.default_profile,
+        ) else {
+            return;
+        };
+        self.open_tab_with_profile(profile, window, cx);
+    }
+
+    pub(crate) fn open_tab_with_profile(
+        &mut self,
+        profile: Profile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let active_pane = self.tabs.get(self.active_tab).and_then(Tab::active_pane);
         let inherited_working_directory = active_pane
             .filter(|pane| !is_wsl_shell(&pane.profile.command))
@@ -750,8 +774,8 @@ impl Zetta {
         if index >= self.profiles.len() {
             return;
         }
-        self.selected_profile = index;
-        self.open_tab(window, cx);
+        let profile = self.profiles[index].clone();
+        self.open_tab_with_profile(profile, window, cx);
     }
 
     pub(crate) fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -2059,7 +2083,6 @@ impl Zetta {
         #[cfg(windows)]
         windows_integration::update_profile_jump_list(config.profiles.clone());
 
-        self.selected_profile = config.default_profile;
         self.profiles = config.profiles.clone();
         self.working_directory = config.working_directory.clone();
         self.launch_config = config;

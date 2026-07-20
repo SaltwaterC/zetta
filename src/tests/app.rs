@@ -36,6 +36,42 @@ fn exited_terminal_is_not_backgrounded_by_the_tab_pin() {
 }
 
 #[test]
+fn new_tab_inherits_the_active_profile_after_an_explicit_profile_tab_closes() {
+    let system = Profile {
+        name: "System".to_owned(),
+        command: Shell::System,
+        theme: None,
+    };
+    let alternate = Profile {
+        name: "Alternate".to_owned(),
+        command: Shell::Program("alternate-shell".to_owned()),
+        theme: None,
+    };
+
+    let profile = new_tab_profile(Some(&system), &[system.clone(), alternate], 0).unwrap();
+
+    assert_eq!(profile.name, "System");
+}
+
+#[test]
+fn first_tab_uses_the_configured_default_profile() {
+    let system = Profile {
+        name: "System".to_owned(),
+        command: Shell::System,
+        theme: None,
+    };
+    let alternate = Profile {
+        name: "Alternate".to_owned(),
+        command: Shell::Program("alternate-shell".to_owned()),
+        theme: None,
+    };
+
+    let profile = new_tab_profile(None, &[system, alternate], 1).unwrap();
+
+    assert_eq!(profile.name, "Alternate");
+}
+
+#[test]
 fn background_session_is_reaped_after_its_final_pane_exits() {
     let profile = Profile {
         name: "System".to_owned(),
