@@ -59,8 +59,8 @@ use settings_editor::{
 };
 use task::Shell;
 use terminal::{
-    Event as TerminalEvent, Paste, PasteTrimmed, Range, ScrollPageDown, ScrollPageUp, Search,
-    Terminal, TerminalBuilder, terminal_settings::TerminalSettings,
+    Event as TerminalEvent, Paste, PasteTrimmed, Range, Search, Terminal, TerminalBuilder,
+    terminal_settings::TerminalSettings,
 };
 use terminal_view::{
     ClearClipboard, CopyAndClearSelection, DismissSearch, SearchNextMatch, SearchPreviousMatch,
