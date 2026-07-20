@@ -476,7 +476,7 @@ impl Zetta {
                                 } else if configure_auto_background {
                                     "Choose the authentication required when this tab is reattached. Press Enter with both fields empty for no authentication."
                                 } else {
-                                    "Press Enter with both fields empty for no authentication, or enter and confirm a secret."
+                                    "Leave both fields blank and press Enter to detach without authentication. Otherwise, enter and confirm a secret."
                                 }),
                         )
                         .child(
