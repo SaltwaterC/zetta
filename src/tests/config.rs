@@ -73,6 +73,17 @@ fn validates_http_server_port() {
 }
 
 #[test]
+fn session_authentication_is_not_a_mutable_global_configuration_value() {
+    let error =
+        Config::parse(r#"{"session_authentication":"replacement"}"#, None, None).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("unrecognized configuration field")
+    );
+}
+
+#[test]
 fn configured_home_alias_is_equivalent_to_the_default_directory() {
     let config_path = env::temp_dir().join(format!(
         "zetta-working-directory-{}-{}.json",

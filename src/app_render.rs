@@ -51,7 +51,8 @@ impl Render for Zetta {
             .tabs
             .get(self.active_tab)
             .is_some_and(|tab| tab.broadcast_input);
-        let background_session_count = self.background_sessions.len();
+        let process_background_sessions = self.process_background_session_picker_entries(cx);
+        let background_session_count = process_background_sessions.len();
         let supported_controls = window.window_controls();
         let is_maximized = window.is_maximized();
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
@@ -355,7 +356,7 @@ impl Render for Zetta {
             });
 
         let reconnect_menu_entries = if background_session_count > 1 {
-            self.background_session_picker_entries.clone()
+            process_background_sessions.to_vec()
         } else {
             Vec::new()
         };
@@ -378,7 +379,8 @@ impl Render for Zetta {
                 let entries = reconnect_menu_entries.clone();
                 let menu_handle = reconnect_menu_handle.clone();
                 Some(ui::ContextMenu::build(window, cx, move |mut menu, _, _| {
-                    for (session_id, title, details) in &entries {
+                    for (runner_id, session_id, title, details) in &entries {
+                        let runner_id = *runner_id;
                         let session_id = *session_id;
                         let title = title.clone();
                         let details = details.clone();
@@ -398,7 +400,12 @@ impl Render for Zetta {
                             move |window, cx| {
                                 handle
                                     .update(cx, |this, cx| {
-                                        this.reconnect_background_session(session_id, window, cx)
+                                        this.reconnect_background_session(
+                                            runner_id,
+                                            session_id,
+                                            window,
+                                            cx,
+                                        )
                                     })
                                     .ok();
                             },
@@ -1250,6 +1257,7 @@ impl Render for Zetta {
 
         let settings_overlay = self.render_settings_overlay(window, cx);
         let serial_console_overlay = self.render_serial_console_overlay(cx);
+        let session_authentication_overlay = self.render_session_authentication_overlay(cx);
 
         let content = div()
             .key_context("Zetta")
@@ -1436,6 +1444,9 @@ impl Render for Zetta {
         let content =
             content.when_some(settings_overlay, |content, overlay| content.child(overlay));
         let content = content.when_some(serial_console_overlay, |content, overlay| {
+            content.child(overlay)
+        });
+        let content = content.when_some(session_authentication_overlay, |content, overlay| {
             content.child(overlay)
         });
 

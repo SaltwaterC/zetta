@@ -834,10 +834,82 @@ fn zetta_window_options(cx: &App) -> WindowOptions {
 
 fn track_zetta_window(zetta: &Entity<Zetta>, window: &Window, cx: &mut App) {
     if cx.has_global::<ZettaProcessState>() {
+        let runner_id = zetta.read(cx).background_sessions.runner_id();
         let process = cx.global_mut::<ZettaProcessState>();
         process
             .windows
             .insert(window.window_handle().window_id(), zetta.clone());
+        process.runners.insert(runner_id, zetta.clone());
+    }
+}
+
+pub(crate) fn process_zetta_entities(cx: &App) -> Vec<Entity<Zetta>> {
+    if !cx.has_global::<ZettaProcessState>() {
+        return Vec::new();
+    }
+    let process = cx.global::<ZettaProcessState>();
+    process
+        .windows
+        .values()
+        .chain(process.dormant.iter())
+        .cloned()
+        .collect()
+}
+
+pub(crate) fn zetta_for_runner(runner_id: u64, cx: &App) -> Option<Entity<Zetta>> {
+    if !cx.has_global::<ZettaProcessState>() {
+        return None;
+    }
+    cx.global::<ZettaProcessState>()
+        .runners
+        .get(&runner_id)
+        .cloned()
+}
+
+pub(crate) fn refresh_process_background_sessions(cx: &mut App) {
+    let entities = process_zetta_entities(cx);
+    let mut entries = Vec::new();
+    for zetta in &entities {
+        let zetta = zetta.read(cx);
+        let runner_id = zetta.background_sessions.runner_id();
+        entries.extend(zetta.background_session_picker_entries.iter().map(
+            |(session_id, title, details)| (runner_id, *session_id, title.clone(), details.clone()),
+        ));
+    }
+    if cx.has_global::<ZettaProcessState>() {
+        cx.global_mut::<ZettaProcessState>()
+            .background_session_entries = entries.into();
+    }
+    for zetta in entities {
+        zetta.update(cx, |_, cx| cx.notify());
+    }
+}
+
+pub(crate) fn prune_empty_dormant_runners(cx: &mut App) {
+    if !cx.has_global::<ZettaProcessState>() {
+        return;
+    }
+    let dormant = std::mem::take(&mut cx.global_mut::<ZettaProcessState>().dormant);
+    let mut retained = Vec::with_capacity(dormant.len());
+    let mut removed_runner_ids = Vec::new();
+    for zetta in dormant {
+        let (is_empty, runner_id) = {
+            let state = zetta.read(cx);
+            (
+                state.background_sessions.is_empty(),
+                state.background_sessions.runner_id(),
+            )
+        };
+        if is_empty {
+            removed_runner_ids.push(runner_id);
+        } else {
+            retained.push(zetta);
+        }
+    }
+    let process = cx.global_mut::<ZettaProcessState>();
+    process.dormant = retained;
+    for runner_id in removed_runner_ids {
+        process.runners.remove(&runner_id);
     }
 }
 
@@ -891,12 +963,22 @@ fn handle_zetta_window_closed(cx: &mut App, window_id: WindowId) {
         .windows
         .remove(&window_id);
     if let Some(entity) = entity {
-        let has_background_sessions = !entity.read(cx).background_sessions.is_empty();
+        let (has_background_sessions, runner_id) = {
+            let entity_state = entity.read(cx);
+            (
+                !entity_state.background_sessions.is_empty(),
+                entity_state.background_sessions.runner_id(),
+            )
+        };
         if has_background_sessions {
             entity.update(cx, |zetta, cx| {
                 zetta.prepare_for_background_window_close(cx)
             });
             cx.global_mut::<ZettaProcessState>().dormant.push(entity);
+        } else {
+            cx.global_mut::<ZettaProcessState>()
+                .runners
+                .remove(&runner_id);
         }
     }
     let process = cx.global::<ZettaProcessState>();
@@ -1025,6 +1107,8 @@ pub(crate) fn run() -> Result<()> {
             cx.set_global(ZettaProcessState {
                 windows: HashMap::new(),
                 dormant: Vec::new(),
+                runners: HashMap::new(),
+                background_session_entries: Arc::from([]),
                 config: config.clone(),
                 configuration_error: configuration_error.clone(),
                 _control_server: control_server,

@@ -1,22 +1,27 @@
 use std::{
     fs,
-    io::{Read as _, Write as _},
-    net::{SocketAddr, TcpListener, TcpStream},
-    path::PathBuf,
+    io::{BufRead as _, BufReader, Read as _, Write as _},
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
     thread,
-    time::{Duration, SystemTime},
+    time::Duration,
 };
+
+#[cfg(unix)]
+use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(windows)]
+use std::os::windows::net::{UnixListener, UnixStream};
 
 use anyhow::{Context as _, Result};
 use futures::channel::mpsc::UnboundedSender;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 
-const CONTROL_VERSION: u32 = 1;
+const CONTROL_VERSION: u32 = 2;
+const MAX_CONTROL_MESSAGE_BYTES: usize = 4096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProcessControlCommand {
@@ -27,7 +32,7 @@ pub(crate) enum ProcessControlCommand {
 struct ControlEndpoint {
     version: u32,
     process_id: u32,
-    address: SocketAddr,
+    socket_path: PathBuf,
     token: String,
 }
 
@@ -37,9 +42,14 @@ struct ControlRequest {
     command: String,
 }
 
+#[derive(Serialize, Deserialize)]
+struct ControlResponse {
+    status: String,
+}
+
 pub(crate) struct ProcessControlServer {
     endpoint_path: PathBuf,
-    address: SocketAddr,
+    socket_path: PathBuf,
     stopping: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -53,22 +63,19 @@ impl ProcessControlServer {
         commands: UnboundedSender<ProcessControlCommand>,
         endpoint_path: PathBuf,
     ) -> Result<Self> {
-        let listener = TcpListener::bind(("127.0.0.1", 0))
+        let parent = endpoint_path
+            .parent()
+            .context("control endpoint has no parent")?;
+        fs::create_dir_all(parent)?;
+        let socket_path = control_socket_path(&endpoint_path);
+        remove_socket_if_present(&socket_path)?;
+        let listener = UnixListener::bind(&socket_path)
             .context("binding the Zetta process control listener")?;
-        let address = listener.local_addr()?;
-        let token = format!(
-            "{:x}-{:x}-{:x}",
-            std::process::id(),
-            address.port(),
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        );
+        let token = random_hex(32).context("generating the Zetta process control token")?;
         let endpoint = ControlEndpoint {
             version: CONTROL_VERSION,
             process_id: std::process::id(),
-            address,
+            socket_path: socket_path.clone(),
             token: token.clone(),
         };
         write_endpoint(&endpoint_path, &endpoint)?;
@@ -85,31 +92,34 @@ impl ProcessControlServer {
                         continue;
                     };
                     let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
-                    let mut request = Vec::new();
-                    if std::io::Read::by_ref(&mut stream)
-                        .take(4096)
-                        .read_to_end(&mut request)
-                        .is_err()
-                    {
-                        continue;
-                    }
-                    let accepted = decode_control_request(&request, &token)
+                    let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+                    let accepted = handle_control_request(&mut stream, &token)
                         .is_some_and(|command| commands.unbounded_send(command).is_ok());
-                    let _ = stream.write_all(if accepted { b"ok" } else { b"rejected" });
+                    let status = if accepted { "ok" } else { "rejected" };
+                    let _ = write_message(
+                        &mut stream,
+                        &ControlResponse {
+                            status: status.to_owned(),
+                        },
+                    );
                 }
             })
             .context("starting the Zetta process control thread")?;
         Ok(Self {
             endpoint_path,
-            address,
+            socket_path,
             stopping,
             thread: Some(thread),
         })
     }
 }
 
-fn decode_control_request(request: &[u8], token: &str) -> Option<ProcessControlCommand> {
-    let request = serde_json::from_slice::<ControlRequest>(request).ok()?;
+fn handle_control_request(stream: &mut UnixStream, token: &str) -> Option<ProcessControlCommand> {
+    let request = read_message::<ControlRequest>(stream).ok()?;
+    decode_control_request(&request, token)
+}
+
+fn decode_control_request(request: &ControlRequest, token: &str) -> Option<ProcessControlCommand> {
     if request.token != token {
         return None;
     }
@@ -122,11 +132,12 @@ fn decode_control_request(request: &[u8], token: &str) -> Option<ProcessControlC
 impl Drop for ProcessControlServer {
     fn drop(&mut self) {
         self.stopping.store(true, Ordering::Release);
-        let _ = TcpStream::connect_timeout(&self.address, Duration::from_millis(100));
+        let _ = UnixStream::connect(&self.socket_path);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
         let _ = fs::remove_file(&self.endpoint_path);
+        let _ = fs::remove_file(&self.socket_path);
     }
 }
 
@@ -155,6 +166,7 @@ pub(crate) fn request_existing_process_window() -> Result<bool> {
         };
         if !process_is_running(endpoint.process_id) {
             let _ = fs::remove_file(path);
+            let _ = fs::remove_file(endpoint.socket_path);
             continue;
         }
         if send_open_window_request(&endpoint).unwrap_or(false) {
@@ -165,16 +177,52 @@ pub(crate) fn request_existing_process_window() -> Result<bool> {
 }
 
 fn send_open_window_request(endpoint: &ControlEndpoint) -> Result<bool> {
-    let mut stream = TcpStream::connect_timeout(&endpoint.address, Duration::from_millis(300))?;
+    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
     stream.set_read_timeout(Some(Duration::from_millis(500)))?;
-    stream.write_all(&serde_json::to_vec(&ControlRequest {
-        token: endpoint.token.clone(),
-        command: "open_window".to_owned(),
-    })?)?;
-    stream.shutdown(std::net::Shutdown::Write)?;
-    let mut response = String::new();
-    stream.read_to_string(&mut response)?;
-    Ok(response == "ok")
+    stream.set_write_timeout(Some(Duration::from_millis(500)))?;
+    write_message(
+        &mut stream,
+        &ControlRequest {
+            token: endpoint.token.clone(),
+            command: "open_window".to_owned(),
+        },
+    )?;
+    let response = read_message::<ControlResponse>(&mut stream)?;
+    Ok(response.status == "ok")
+}
+
+fn read_message<T: DeserializeOwned>(stream: &mut UnixStream) -> Result<T> {
+    let mut bytes = Vec::new();
+    let mut reader = BufReader::new(stream).take((MAX_CONTROL_MESSAGE_BYTES + 1) as u64);
+    reader.read_until(b'\n', &mut bytes)?;
+    anyhow::ensure!(
+        bytes.last() == Some(&b'\n'),
+        "process control message is too long or incomplete"
+    );
+    bytes.pop();
+    serde_json::from_slice(&bytes).context("parsing process control message")
+}
+
+fn write_message(stream: &mut UnixStream, message: &impl Serialize) -> Result<()> {
+    serde_json::to_writer(&mut *stream, message)?;
+    stream.write_all(b"\n")?;
+    Ok(())
+}
+
+fn random_hex(byte_count: usize) -> Result<String> {
+    let mut bytes = vec![0; byte_count];
+    getrandom::fill(&mut bytes)?;
+    Ok(encode_hex(&bytes))
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0xf) as usize] as char);
+    }
+    encoded
 }
 
 fn process_is_running(process_id: u32) -> bool {
@@ -188,7 +236,21 @@ fn control_endpoint_path(process_id: u32) -> PathBuf {
     crate::background_sessions::session_catalog_dir().join(format!("control-{process_id}.json"))
 }
 
-fn write_endpoint(path: &PathBuf, endpoint: &ControlEndpoint) -> Result<()> {
+fn control_socket_path(endpoint_path: &Path) -> PathBuf {
+    endpoint_path.with_extension("sock")
+}
+
+fn remove_socket_if_present(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            Err(error).with_context(|| format!("removing stale socket {}", path.display()))
+        }
+    }
+}
+
+fn write_endpoint(path: &Path, endpoint: &ControlEndpoint) -> Result<()> {
     let parent = path.parent().context("control endpoint has no parent")?;
     fs::create_dir_all(parent)?;
     let temporary = path.with_extension("json.tmp");
