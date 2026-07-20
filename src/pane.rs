@@ -457,6 +457,22 @@ impl PaneLayout {
     }
 }
 
+pub(crate) enum TabClosePolicy {
+    Close,
+    Background {
+        authentication: Option<SessionAuthentication>,
+    },
+}
+
+impl TabClosePolicy {
+    pub(crate) fn background_authentication(&self) -> Option<Option<SessionAuthentication>> {
+        match self {
+            Self::Close => None,
+            Self::Background { authentication } => Some(authentication.clone()),
+        }
+    }
+}
+
 pub(crate) struct Tab {
     pub(crate) id: u64,
     pub(crate) panes: Vec<TerminalPane>,
@@ -469,6 +485,7 @@ pub(crate) struct Tab {
     pub(crate) minimized_panes: Vec<u64>,
     pub(crate) selected_minimized_pane: Option<u64>,
     pub(crate) broadcast_input: bool,
+    pub(crate) close_policy: TabClosePolicy,
     pub(crate) custom_title: Option<String>,
     pub(crate) renaming_pane: Option<u64>,
     pub(crate) rename_buffer: Option<String>,

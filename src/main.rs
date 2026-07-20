@@ -89,6 +89,7 @@ actions!(
         NewWindow,
         CloseTab,
         DetachTab,
+        ToggleAutoBackgroundTab,
         ReconnectSession,
         NextTab,
         PreviousTab,

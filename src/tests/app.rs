@@ -26,6 +26,63 @@ fn reconnect_is_immediate_only_for_one_background_session() {
 }
 
 #[test]
+fn exited_terminal_is_not_backgrounded_by_the_tab_pin() {
+    let pinned = TabClosePolicy::Background {
+        authentication: None,
+    };
+
+    assert!(background_authentication_for_close(&pinned, true).is_some());
+    assert!(background_authentication_for_close(&pinned, false).is_none());
+}
+
+#[test]
+fn background_session_is_reaped_after_its_final_pane_exits() {
+    let profile = Profile {
+        name: "System".to_owned(),
+        command: Shell::System,
+        theme: None,
+    };
+    let tab = Tab {
+        id: 1,
+        panes: vec![TerminalPane {
+            id: 3,
+            label_number: 1,
+            generated_label: None,
+            custom_label: None,
+            profile,
+            terminal: None,
+            view: None,
+            error: None,
+            wsl_cwd_file: None,
+            pending_command: None,
+        }],
+        pane_indices: HashMap::from([(3, 0)]),
+        next_pane_label: 2,
+        layout: PaneLayout::Pane(3),
+        active_pane: 3,
+        focus_history: vec![3],
+        maximized_pane: None,
+        minimized_panes: Vec::new(),
+        selected_minimized_pane: None,
+        broadcast_input: false,
+        close_policy: TabClosePolicy::Close,
+        custom_title: None,
+        renaming_pane: None,
+        rename_buffer: None,
+        rename_cursor: 0,
+        rename_select_all: false,
+    };
+    let mut sessions = BackgroundSessionRunner::default();
+    sessions.detach(tab, None);
+
+    assert_eq!(
+        remove_exited_background_pane(&mut sessions, 3),
+        Some(vec![3])
+    );
+    assert!(sessions.is_empty());
+}
+
+#[test]
 fn protected_sessions_are_redacted_in_the_reconnect_picker() {
     let entries = Zetta::picker_entries_from_summaries(&[BackgroundSessionSummary {
         id: 42,

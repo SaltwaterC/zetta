@@ -235,6 +235,7 @@ fn tab_pane_index_resolves_panes_without_scanning() {
         minimized_panes: Vec::new(),
         selected_minimized_pane: None,
         broadcast_input: false,
+        close_policy: TabClosePolicy::Close,
         custom_title: None,
         renaming_pane: None,
         rename_buffer: None,
@@ -351,6 +352,7 @@ fn split_profile_comes_from_the_active_pane() {
         minimized_panes: Vec::new(),
         selected_minimized_pane: None,
         broadcast_input: false,
+        close_policy: TabClosePolicy::Close,
         custom_title: None,
         renaming_pane: None,
         rename_buffer: None,
@@ -394,6 +396,7 @@ fn closing_active_pane_restores_previous_focus() {
         minimized_panes: Vec::new(),
         selected_minimized_pane: None,
         broadcast_input: false,
+        close_policy: TabClosePolicy::Close,
         custom_title: None,
         renaming_pane: None,
         rename_buffer: None,
@@ -439,6 +442,7 @@ fn closing_inactive_pane_preserves_focus() {
         minimized_panes: Vec::new(),
         selected_minimized_pane: None,
         broadcast_input: false,
+        close_policy: TabClosePolicy::Close,
         custom_title: None,
         renaming_pane: None,
         rename_buffer: None,
@@ -507,6 +511,7 @@ fn pane_management_tab() -> Tab {
         minimized_panes: Vec::new(),
         selected_minimized_pane: None,
         broadcast_input: false,
+        close_policy: TabClosePolicy::Close,
         custom_title: None,
         renaming_pane: None,
         rename_buffer: None,
@@ -548,6 +553,28 @@ fn transferred_tabs_receive_target_window_ids_consistently() {
             }),
         }
     );
+}
+
+#[test]
+fn tab_close_policy_distinguishes_close_from_unprotected_backgrounding() {
+    assert!(TabClosePolicy::Close.background_authentication().is_none());
+    assert!(
+        TabClosePolicy::Background {
+            authentication: None,
+        }
+        .background_authentication()
+        .is_some_and(|authentication| authentication.is_none())
+    );
+
+    let authentication = SessionAuthentication::create("correct horse battery staple").unwrap();
+    let selected = TabClosePolicy::Background {
+        authentication: Some(authentication),
+    }
+    .background_authentication()
+    .flatten()
+    .unwrap();
+    assert!(selected.verify("correct horse battery staple"));
+    assert!(!selected.verify("wrong"));
 }
 
 #[test]

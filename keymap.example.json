@@ -8,6 +8,7 @@
       "ctrl-shift-w": "zetta::CloseTab",
       "alt-shift-d": "zetta::DetachTab",
       "alt-shift-a": "zetta::ReconnectSession",
+      "alt-shift-p": "zetta::ToggleAutoBackgroundTab",
       "ctrl-shift-o": "zetta::SplitHorizontal",
       "ctrl-shift-e": "zetta::SplitVertical",
       "alt-shift-o": ["zetta::ApplyPaneSplitTemplate", { "name": "three-right" }],

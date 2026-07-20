@@ -5,6 +5,7 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
+        mpsc::{Sender, channel},
     },
     thread,
     time::Duration,
@@ -22,9 +23,15 @@ use sysinfo::{Pid, ProcessesToUpdate, System};
 
 const CONTROL_VERSION: u32 = 2;
 const MAX_CONTROL_MESSAGE_BYTES: usize = 4096;
+const CONTROL_COMPLETION_TIMEOUT: Duration = Duration::from_secs(2);
+const CONTROL_CLIENT_TIMEOUT: Duration = Duration::from_secs(3);
+
+pub(crate) enum ProcessControlCommand {
+    OpenWindow { completion: Sender<bool> },
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ProcessControlCommand {
+enum ControlRequestCommand {
     OpenWindow,
 }
 
@@ -93,8 +100,18 @@ impl ProcessControlServer {
                     };
                     let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
                     let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
-                    let accepted = handle_control_request(&mut stream, &token)
-                        .is_some_and(|command| commands.unbounded_send(command).is_ok());
+                    let accepted = match handle_control_request(&mut stream, &token) {
+                        Some(ControlRequestCommand::OpenWindow) => {
+                            let (completion, completed) = channel();
+                            commands
+                                .unbounded_send(ProcessControlCommand::OpenWindow { completion })
+                                .is_ok()
+                                && completed
+                                    .recv_timeout(CONTROL_COMPLETION_TIMEOUT)
+                                    .unwrap_or(false)
+                        }
+                        None => false,
+                    };
                     let status = if accepted { "ok" } else { "rejected" };
                     let _ = write_message(
                         &mut stream,
@@ -114,17 +131,17 @@ impl ProcessControlServer {
     }
 }
 
-fn handle_control_request(stream: &mut UnixStream, token: &str) -> Option<ProcessControlCommand> {
+fn handle_control_request(stream: &mut UnixStream, token: &str) -> Option<ControlRequestCommand> {
     let request = read_message::<ControlRequest>(stream).ok()?;
     decode_control_request(&request, token)
 }
 
-fn decode_control_request(request: &ControlRequest, token: &str) -> Option<ProcessControlCommand> {
+fn decode_control_request(request: &ControlRequest, token: &str) -> Option<ControlRequestCommand> {
     if request.token != token {
         return None;
     }
     match request.command.as_str() {
-        "open_window" => Some(ProcessControlCommand::OpenWindow),
+        "open_window" => Some(ControlRequestCommand::OpenWindow),
         _ => None,
     }
 }
@@ -178,8 +195,8 @@ pub(crate) fn request_existing_process_window() -> Result<bool> {
 
 fn send_open_window_request(endpoint: &ControlEndpoint) -> Result<bool> {
     let mut stream = UnixStream::connect(&endpoint.socket_path)?;
-    stream.set_read_timeout(Some(Duration::from_millis(500)))?;
-    stream.set_write_timeout(Some(Duration::from_millis(500)))?;
+    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
     write_message(
         &mut stream,
         &ControlRequest {

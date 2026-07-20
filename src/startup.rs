@@ -603,6 +603,7 @@ pub(crate) const RENAME_PANE_KEYBINDING: &str = "alt-shift-l";
 pub(crate) const CLOSE_PANE_KEYBINDING: &str = "ctrl-shift-x";
 pub(crate) const SAVE_PANE_OUTPUT_KEYBINDING: &str = "ctrl-shift-s";
 pub(crate) const SERIAL_CONSOLE_KEYBINDING: &str = "ctrl-shift-d";
+pub(crate) const AUTO_BACKGROUND_TAB_KEYBINDING: &str = "alt-shift-p";
 
 pub(crate) fn pane_output_keybinding() -> KeyBinding {
     KeyBinding::new(
@@ -620,6 +621,14 @@ pub(crate) fn serial_console_keybinding() -> KeyBinding {
     KeyBinding::new(
         SERIAL_CONSOLE_KEYBINDING,
         ToggleSerialConsole,
+        Some("Zetta > Terminal"),
+    )
+}
+
+pub(crate) fn auto_background_tab_keybinding() -> KeyBinding {
+    KeyBinding::new(
+        AUTO_BACKGROUND_TAB_KEYBINDING,
+        ToggleAutoBackgroundTab,
         Some("Zetta > Terminal"),
     )
 }
@@ -657,6 +666,7 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
         KeyBinding::new("ctrl-shift-w", CloseTab, Some("Zetta > Terminal")),
         KeyBinding::new("alt-shift-d", DetachTab, Some("Zetta > Terminal")),
         KeyBinding::new("alt-shift-a", ReconnectSession, Some("Zetta > Terminal")),
+        auto_background_tab_keybinding(),
         close_pane_keybinding(),
         KeyBinding::new("ctrl-shift-o", SplitHorizontal, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-shift-e", SplitVertical, Some("Zetta > Terminal")),
@@ -794,6 +804,7 @@ pub(crate) fn open_zetta_window(
         window.set_window_title("Zetta");
         let zetta = cx.new(|cx| Zetta::new(config, configuration_error, window, cx));
         track_zetta_window(&zetta, window, cx);
+        prepare_background_tabs_before_window_close(&zetta, window, cx);
         if profile_pane_stress {
             zetta.update(cx, |zetta, cx| zetta.configure_pane_profile_stress(cx));
         }
@@ -841,6 +852,22 @@ fn track_zetta_window(zetta: &Entity<Zetta>, window: &Window, cx: &mut App) {
             .insert(window.window_handle().window_id(), zetta.clone());
         process.runners.insert(runner_id, zetta.clone());
     }
+}
+
+fn prepare_background_tabs_before_window_close(
+    zetta: &Entity<Zetta>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let zetta = zetta.downgrade();
+    window.on_window_should_close(cx, move |_, cx| {
+        zetta
+            .update(cx, |zetta, cx| {
+                zetta.prepare_for_background_window_close(cx)
+            })
+            .ok();
+        true
+    });
 }
 
 pub(crate) fn process_zetta_entities(cx: &App) -> Vec<Entity<Zetta>> {
@@ -911,6 +938,9 @@ pub(crate) fn prune_empty_dormant_runners(cx: &mut App) {
     for runner_id in removed_runner_ids {
         process.runners.remove(&runner_id);
     }
+    if should_quit_after_window_closed(process.windows.len(), process.dormant.len()) {
+        cx.quit();
+    }
 }
 
 fn should_quit_after_window_closed(window_count: usize, dormant_runner_count: usize) -> bool {
@@ -948,6 +978,7 @@ fn open_dormant_or_new_window(cx: &mut App) -> Result<()> {
             window.set_window_title("Zetta");
             zetta_for_window.update(cx, |zetta, cx| zetta.attach_to_reopened_window(window, cx));
             track_zetta_window(&zetta_for_window, window, cx);
+            prepare_background_tabs_before_window_close(&zetta_for_window, window, cx);
             zetta_for_window
         })?;
         cx.activate(true);
@@ -963,6 +994,9 @@ fn handle_zetta_window_closed(cx: &mut App, window_id: WindowId) {
         .windows
         .remove(&window_id);
     if let Some(entity) = entity {
+        entity.update(cx, |zetta, cx| {
+            zetta.prepare_for_background_window_close(cx)
+        });
         let (has_background_sessions, runner_id) = {
             let entity_state = entity.read(cx);
             (
@@ -971,9 +1005,6 @@ fn handle_zetta_window_closed(cx: &mut App, window_id: WindowId) {
             )
         };
         if has_background_sessions {
-            entity.update(cx, |zetta, cx| {
-                zetta.prepare_for_background_window_close(cx)
-            });
             cx.global_mut::<ZettaProcessState>().dormant.push(entity);
         } else {
             cx.global_mut::<ZettaProcessState>()
@@ -1114,8 +1145,17 @@ pub(crate) fn run() -> Result<()> {
                 _control_server: control_server,
             });
             cx.spawn(async move |cx| {
-                while let Some(ProcessControlCommand::OpenWindow) = control_rx.next().await {
-                    cx.update(|cx| open_dormant_or_new_window(cx).log_err());
+                while let Some(ProcessControlCommand::OpenWindow { completion }) =
+                    control_rx.next().await
+                {
+                    let opened = cx.update(|cx| match open_dormant_or_new_window(cx) {
+                        Ok(()) => true,
+                        Err(error) => {
+                            eprintln!("Could not open the requested Zetta window: {error:#}");
+                            false
+                        }
+                    });
+                    let _ = completion.send(opened);
                 }
             })
             .detach();

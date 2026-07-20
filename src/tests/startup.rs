@@ -646,6 +646,16 @@ fn serial_console_avoids_the_linux_unicode_input_shortcut() {
 }
 
 #[test]
+fn auto_background_tab_uses_the_documented_shortcut() {
+    assert_eq!(AUTO_BACKGROUND_TAB_KEYBINDING, "alt-shift-p");
+    let shortcut = gpui::Keystroke::parse(AUTO_BACKGROUND_TAB_KEYBINDING).unwrap();
+    assert_eq!(
+        auto_background_tab_keybinding().match_keystrokes(std::slice::from_ref(&shortcut)),
+        Some(false)
+    );
+}
+
+#[test]
 fn minimized_pane_shortcuts_are_built_in() {
     let bindings = minimized_pane_keybindings();
     for (binding, shortcut) in bindings.into_iter().zip([

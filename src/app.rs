@@ -18,6 +18,38 @@ fn reconnect_request(session_count: usize) -> ReconnectRequest {
     }
 }
 
+fn background_authentication_for_close(
+    policy: &TabClosePolicy,
+    background_if_pinned: bool,
+) -> Option<Option<SessionAuthentication>> {
+    if background_if_pinned {
+        policy.background_authentication()
+    } else {
+        None
+    }
+}
+
+fn remove_exited_background_pane(
+    sessions: &mut BackgroundSessionRunner<Tab>,
+    pane_id: u64,
+) -> Option<Vec<u64>> {
+    let session_index = sessions
+        .iter()
+        .position(|tab| tab.pane(pane_id).is_some())?;
+    let pane_count = sessions.iter().nth(session_index)?.panes.len();
+    if pane_count == 1 {
+        let tab = sessions.reconnect_at(session_index)?;
+        return Some(tab.panes.into_iter().map(|pane| pane.id).collect());
+    }
+
+    let tab = sessions.iter_mut().nth(session_index)?;
+    let layout = tab.layout.clone().without(pane_id)?;
+    tab.remove_pane(pane_id);
+    tab.layout = layout;
+    tab.restore_focus_after_close(pane_id, tab.layout.first_pane());
+    Some(vec![pane_id])
+}
+
 fn pane_controls_hide_delay(last_motion: Instant, now: Instant) -> Option<Duration> {
     let elapsed = now.saturating_duration_since(last_motion);
     let remaining = PANE_CONTROLS_IDLE_DELAY.checked_sub(elapsed)?;
@@ -32,7 +64,6 @@ pub(crate) struct Zetta {
     pub(crate) tabs: Vec<Tab>,
     pub(crate) background_sessions: BackgroundSessionRunner<Tab>,
     pub(crate) background_observed_panes: HashSet<u64>,
-    pub(crate) background_exited_panes: HashSet<u64>,
     pub(crate) background_process_refresh_running: bool,
     pub(crate) background_session_picker_entries: Vec<(u64, String, String)>,
     pub(crate) reconnect_menu_handle: PopoverMenuHandle<ui::ContextMenu>,
@@ -73,7 +104,17 @@ pub(crate) struct Zetta {
 
 impl Zetta {
     pub(crate) fn prepare_for_background_window_close(&mut self, cx: &mut Context<Self>) {
-        self.tabs.clear();
+        let tabs = std::mem::take(&mut self.tabs);
+        let mut preserved_any = false;
+        for tab in tabs {
+            if let Some(authentication) = tab.close_policy.background_authentication() {
+                self.store_background_tab(tab, authentication, cx);
+                preserved_any = true;
+            }
+        }
+        if preserved_any {
+            self.finish_background_session_change(cx);
+        }
         self.active_tab = 0;
         self.command_palette = None;
         self.multi_command = None;
@@ -169,7 +210,6 @@ impl Zetta {
             tabs: Vec::new(),
             background_sessions: BackgroundSessionRunner::default(),
             background_observed_panes: HashSet::new(),
-            background_exited_panes: HashSet::new(),
             background_process_refresh_running: false,
             background_session_picker_entries: Vec::new(),
             reconnect_menu_handle: PopoverMenuHandle::default(),
@@ -274,6 +314,7 @@ impl Zetta {
             minimized_panes: Vec::new(),
             selected_minimized_pane: None,
             broadcast_input: false,
+            close_policy: TabClosePolicy::Close,
             custom_title: None,
             renaming_pane: None,
             rename_buffer: None,
@@ -406,7 +447,7 @@ impl Zetta {
                             window,
                             move |this, _, event, window, cx| match event {
                                 TerminalViewEvent::Close => {
-                                    this.close_pane(tab_id, pane_id, window, cx);
+                                    this.terminal_closed(tab_id, pane_id, window, cx);
                                 }
                                 TerminalViewEvent::TitleChanged => {
                                     cx.notify();
@@ -522,7 +563,30 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.close_tab_at_with_policy(index, true, window, cx);
+    }
+
+    fn close_tab_at_with_policy(
+        &mut self,
+        index: usize,
+        background_if_pinned: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if index >= self.tabs.len() {
+            return;
+        }
+        let background_authentication = background_authentication_for_close(
+            &self.tabs[index].close_policy,
+            background_if_pinned,
+        );
+        if let Some(authentication) = background_authentication {
+            self.move_tab_to_background(index, authentication, cx);
+            if self.tabs.is_empty() {
+                window.remove_window();
+            } else {
+                self.focus_active(window, cx);
+            }
             return;
         }
         self.tabs.remove(index);
@@ -545,6 +609,27 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.close_pane_with_policy(tab_id, pane_id, true, window, cx);
+    }
+
+    fn terminal_closed(
+        &mut self,
+        tab_id: u64,
+        pane_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_pane_with_policy(tab_id, pane_id, false, window, cx);
+    }
+
+    fn close_pane_with_policy(
+        &mut self,
+        tab_id: u64,
+        pane_id: u64,
+        background_if_last_pane: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(tab_index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
             return;
         };
@@ -556,14 +641,14 @@ impl Zetta {
             return;
         }
         if self.tabs[tab_index].panes.len() == 1 {
-            self.close_tab_at(tab_index, window, cx);
+            self.close_tab_at_with_policy(tab_index, background_if_last_pane, window, cx);
             return;
         }
 
         let tab = &mut self.tabs[tab_index];
         tab.remove_pane(pane_id);
         let Some(layout) = tab.layout.clone().without(pane_id) else {
-            self.close_tab_at(tab_index, window, cx);
+            self.close_tab_at_with_policy(tab_index, background_if_last_pane, window, cx);
             return;
         };
         tab.layout = layout;
@@ -682,7 +767,31 @@ impl Zetta {
         if self.active_tab >= self.tabs.len() {
             return;
         }
-        self.prompt_to_detach_session(self.tabs[self.active_tab].id, window, cx);
+        let tab = &self.tabs[self.active_tab];
+        if let Some(authentication) = tab.close_policy.background_authentication() {
+            let tab_id = tab.id;
+            self.detach_tab_by_id(tab_id, authentication, window, cx);
+        } else {
+            self.prompt_to_detach_session(tab.id, window, cx);
+        }
+    }
+
+    pub(crate) fn toggle_auto_background_tab(
+        &mut self,
+        _: &ToggleAutoBackgroundTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            return;
+        };
+        let tab_id = tab.id;
+        if matches!(tab.close_policy, TabClosePolicy::Background { .. }) {
+            self.tabs[self.active_tab].close_policy = TabClosePolicy::Close;
+            cx.notify();
+        } else {
+            self.prompt_to_configure_auto_background(tab_id, window, cx);
+        }
     }
 
     pub(crate) fn detach_tab_by_id(
@@ -699,8 +808,39 @@ impl Zetta {
         if self.tab_search.is_some() {
             self.dismiss_tab_search(window, cx);
         }
+        self.move_tab_to_background(self.active_tab, authentication, cx);
 
-        let mut tab = self.tabs.remove(self.active_tab);
+        if self.tabs.is_empty() {
+            self.active_tab = 0;
+            self.open_tab(window, cx);
+        } else {
+            self.focus_active(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn move_tab_to_background(
+        &mut self,
+        index: usize,
+        authentication: Option<SessionAuthentication>,
+        cx: &mut Context<Self>,
+    ) {
+        let tab = self.tabs.remove(index);
+        if index < self.active_tab {
+            self.active_tab -= 1;
+        } else if self.active_tab >= self.tabs.len() && !self.tabs.is_empty() {
+            self.active_tab = self.tabs.len() - 1;
+        }
+        self.store_background_tab(tab, authentication, cx);
+        self.finish_background_session_change(cx);
+    }
+
+    fn store_background_tab(
+        &mut self,
+        mut tab: Tab,
+        authentication: Option<SessionAuthentication>,
+        cx: &mut Context<Self>,
+    ) {
         tab.rename_buffer = None;
         tab.renaming_pane = None;
         for pane in &mut tab.panes {
@@ -716,17 +856,11 @@ impl Zetta {
             self.observe_background_terminal(pane_id, terminal.clone(), cx);
             terminal.update(cx, Terminal::refresh_foreground_process);
         }
+    }
+
+    fn finish_background_session_change(&mut self, cx: &mut Context<Self>) {
         self.schedule_background_process_refresh(cx);
         self.publish_background_session_catalog(cx);
-
-        if self.tabs.is_empty() {
-            self.active_tab = 0;
-            self.open_tab(window, cx);
-        } else {
-            self.active_tab = self.active_tab.min(self.tabs.len() - 1);
-            self.focus_active(window, cx);
-            cx.notify();
-        }
     }
 
     pub(crate) fn reconnect_session(
@@ -1024,13 +1158,27 @@ impl Zetta {
             move |this, _, event: &TerminalEvent, cx| match event {
                 TerminalEvent::TitleChanged => this.publish_background_session_catalog(cx),
                 TerminalEvent::CloseTerminal => {
-                    this.background_exited_panes.insert(pane_id);
-                    this.publish_background_session_catalog(cx);
+                    this.reap_background_pane(pane_id, cx);
                 }
                 _ => {}
             },
         )
         .detach();
+    }
+
+    fn reap_background_pane(&mut self, pane_id: u64, cx: &mut Context<Self>) {
+        let Some(removed_pane_ids) =
+            remove_exited_background_pane(&mut self.background_sessions, pane_id)
+        else {
+            return;
+        };
+        for pane_id in removed_pane_ids {
+            self.background_observed_panes.remove(&pane_id);
+        }
+        self.publish_background_session_catalog(cx);
+        if self.background_sessions.is_empty() {
+            cx.defer(prune_empty_dormant_runners);
+        }
     }
 
     fn schedule_background_process_refresh(&mut self, cx: &mut Context<Self>) {
@@ -1112,8 +1260,6 @@ impl Zetta {
                     .unwrap_or_default();
                 let state = if pane.error.is_some() {
                     BackgroundPaneState::Failed
-                } else if self.background_exited_panes.contains(&pane.id) {
-                    BackgroundPaneState::Exited
                 } else if pane.terminal.is_some() {
                     BackgroundPaneState::Running
                 } else {
@@ -1194,7 +1340,7 @@ impl Zetta {
             &view,
             window,
             move |this, _, event, window, cx| match event {
-                TerminalViewEvent::Close => this.close_pane(tab_id, pane_id, window, cx),
+                TerminalViewEvent::Close => this.terminal_closed(tab_id, pane_id, window, cx),
                 TerminalViewEvent::TitleChanged => cx.notify(),
                 TerminalViewEvent::Input(input)
                     if (is_http_server
@@ -1202,7 +1348,7 @@ impl Zetta {
                         || (is_tftp_server
                             && crate::tftp_server_ui::tftp_input_stops_server(input)) =>
                 {
-                    this.close_pane(tab_id, pane_id, window, cx);
+                    this.terminal_closed(tab_id, pane_id, window, cx);
                 }
                 TerminalViewEvent::Input(input) => {
                     this.broadcast_input(tab_id, pane_id, input, cx);

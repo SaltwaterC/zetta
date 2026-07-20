@@ -51,6 +51,14 @@ impl Render for Zetta {
             .tabs
             .get(self.active_tab)
             .is_some_and(|tab| tab.broadcast_input);
+        let (auto_background_tab, auto_background_protected) = self
+            .tabs
+            .get(self.active_tab)
+            .map(|tab| match &tab.close_policy {
+                TabClosePolicy::Background { authentication } => (true, authentication.is_some()),
+                TabClosePolicy::Close => (false, false),
+            })
+            .unwrap_or_default();
         let process_background_sessions = self.process_background_session_picker_entries(cx);
         let background_session_count = process_background_sessions.len();
         let supported_controls = window.window_controls();
@@ -197,6 +205,18 @@ impl Render for Zetta {
                 let content = h_flex()
                     .min_w_0()
                     .gap_1()
+                    .when(
+                        matches!(tab.close_policy, TabClosePolicy::Background { .. }),
+                        |content| {
+                            content.child(
+                                svg()
+                                    .path(IconName::Pin.path())
+                                    .size(px(12.))
+                                    .flex_none()
+                                    .text_color(tab_icon),
+                            )
+                        },
+                    )
                     .child(
                         svg()
                             .path(IconName::Terminal.path())
@@ -1271,6 +1291,7 @@ impl Render for Zetta {
             .on_action(cx.listener(Self::open_profile))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::detach_tab))
+            .on_action(cx.listener(Self::toggle_auto_background_tab))
             .on_action(cx.listener(Self::reconnect_session))
             .on_action(cx.listener(Self::close_active_pane))
             .on_action(cx.listener(Self::next_tab))
@@ -1353,6 +1374,30 @@ impl Render for Zetta {
                                     }),
                             )
                             .child(profile_menu)
+                            .child(
+                                IconButton::new("auto-background-tab", IconName::Pin)
+                                    .shape(IconButtonShape::Wide)
+                                    .size(ButtonSize::Large)
+                                    .width(px(32.))
+                                    .icon_size(IconSize::Small)
+                                    .toggle_state(auto_background_tab)
+                                    .aria_label("Keep this tab running after close")
+                                    .tooltip(Tooltip::text(if auto_background_tab {
+                                        if auto_background_protected {
+                                            "Keep running after close is on · authentication required (Alt-Shift-P)"
+                                        } else {
+                                            "Keep running after close is on · no authentication (Alt-Shift-P)"
+                                        }
+                                    } else {
+                                        "Keep this tab running after the tab or window is closed (Alt-Shift-P)"
+                                    }))
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(
+                                            Box::new(ToggleAutoBackgroundTab),
+                                            cx,
+                                        )
+                                    }),
+                            )
                             .child(
                                 IconButton::new("detach-tab", IconName::Archive)
                                     .shape(IconButtonShape::Wide)

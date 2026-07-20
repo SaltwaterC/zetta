@@ -4,6 +4,7 @@ use zeroize::{Zeroize as _, Zeroizing};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SessionAuthenticationPromptMode {
     Detach { tab_id: u64 },
+    ConfigureAutoBackground { tab_id: u64 },
     Reconnect { runner_id: u64, session_id: u64 },
 }
 
@@ -101,6 +102,21 @@ impl Zetta {
         cx.notify();
     }
 
+    pub(crate) fn prompt_to_configure_auto_background(
+        &mut self,
+        tab_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.session_authentication_generation =
+            self.session_authentication_generation.wrapping_add(1);
+        self.session_authentication = Some(SessionAuthenticationPrompt::new(
+            SessionAuthenticationPromptMode::ConfigureAutoBackground { tab_id },
+        ));
+        self.session_authentication_focus.focus(window, cx);
+        cx.notify();
+    }
+
     fn dismiss_session_authentication(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.session_authentication = None;
         self.session_authentication_generation =
@@ -109,22 +125,43 @@ impl Zetta {
         cx.notify();
     }
 
-    pub(crate) fn detach_without_authentication(
+    pub(crate) fn continue_without_session_authentication(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(SessionAuthenticationPrompt {
-            mode: SessionAuthenticationPromptMode::Detach { tab_id },
-            working: false,
-            ..
-        }) = self.session_authentication.as_ref()
+        let Some(prompt) = self
+            .session_authentication
+            .as_ref()
+            .filter(|prompt| !prompt.working)
         else {
             return;
         };
-        let tab_id = *tab_id;
+        let mode = prompt.mode;
         self.session_authentication = None;
-        self.detach_tab_by_id(tab_id, None, window, cx);
+        match mode {
+            SessionAuthenticationPromptMode::Detach { tab_id } => {
+                self.detach_tab_by_id(tab_id, None, window, cx)
+            }
+            SessionAuthenticationPromptMode::ConfigureAutoBackground { tab_id } => {
+                self.set_auto_background(tab_id, None, window, cx)
+            }
+            SessionAuthenticationPromptMode::Reconnect { .. } => {}
+        }
+    }
+
+    fn set_auto_background(
+        &mut self,
+        tab_id: u64,
+        authentication: Option<SessionAuthentication>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+            tab.close_policy = TabClosePolicy::Background { authentication };
+        }
+        self.focus_active(window, cx);
+        cx.notify();
     }
 
     pub(crate) fn submit_session_authentication(
@@ -141,10 +178,11 @@ impl Zetta {
         let mode = prompt.mode;
         let secret = Zeroizing::new(prompt.secret.text.clone());
         match mode {
-            SessionAuthenticationPromptMode::Detach { .. } => {
+            SessionAuthenticationPromptMode::Detach { .. }
+            | SessionAuthenticationPromptMode::ConfigureAutoBackground { .. } => {
                 match detach_authentication_choice(&secret, &prompt.confirmation.text) {
                     DetachAuthenticationChoice::Unprotected => {
-                        self.detach_without_authentication(window, cx);
+                        self.continue_without_session_authentication(window, cx);
                         return;
                     }
                     DetachAuthenticationChoice::Protected => {}
@@ -168,7 +206,8 @@ impl Zetta {
         prompt.error = None;
         let generation = self.session_authentication_generation;
         let verifier = match mode {
-            SessionAuthenticationPromptMode::Detach { .. } => None,
+            SessionAuthenticationPromptMode::Detach { .. }
+            | SessionAuthenticationPromptMode::ConfigureAutoBackground { .. } => None,
             SessionAuthenticationPromptMode::Reconnect {
                 runner_id,
                 session_id,
@@ -178,7 +217,8 @@ impl Zetta {
             let result = cx
                 .background_spawn(async move {
                     match mode {
-                        SessionAuthenticationPromptMode::Detach { .. } => {
+                        SessionAuthenticationPromptMode::Detach { .. }
+                        | SessionAuthenticationPromptMode::ConfigureAutoBackground { .. } => {
                             SessionAuthentication::create(&secret).map(Some)
                         }
                         SessionAuthenticationPromptMode::Reconnect { .. } => verifier
@@ -198,6 +238,13 @@ impl Zetta {
                     ) => {
                         this.session_authentication = None;
                         this.detach_tab_by_id(tab_id, Some(authentication), window, cx);
+                    }
+                    (
+                        SessionAuthenticationPromptMode::ConfigureAutoBackground { tab_id },
+                        Ok(Some(authentication)),
+                    ) => {
+                        this.session_authentication = None;
+                        this.set_auto_background(tab_id, Some(authentication), window, cx);
                     }
                     (
                         SessionAuthenticationPromptMode::Reconnect {
@@ -257,7 +304,12 @@ impl Zetta {
         match event.keystroke.key.as_str() {
             "escape" => self.dismiss_session_authentication(window, cx),
             "enter" => self.submit_session_authentication(window, cx),
-            "tab" if matches!(prompt.mode, SessionAuthenticationPromptMode::Detach { .. }) => {
+            "tab"
+                if !matches!(
+                    prompt.mode,
+                    SessionAuthenticationPromptMode::Reconnect { .. }
+                ) =>
+            {
                 prompt.field = match prompt.field {
                     SessionAuthenticationField::Secret => SessionAuthenticationField::Confirmation,
                     SessionAuthenticationField::Confirmation => SessionAuthenticationField::Secret,
@@ -373,8 +425,12 @@ impl Zetta {
             prompt.mode,
             SessionAuthenticationPromptMode::Reconnect { .. }
         );
+        let configure_auto_background = matches!(
+            prompt.mode,
+            SessionAuthenticationPromptMode::ConfigureAutoBackground { .. }
+        );
         let submit_handle = handle.clone();
-        let detach_handle = handle.clone();
+        let without_authentication_handle = handle.clone();
         let cancel_handle = handle.clone();
         Some(
             div()
@@ -404,6 +460,8 @@ impl Zetta {
                         .child(
                             Label::new(if reconnect {
                                 "Authenticate protected session"
+                            } else if configure_auto_background {
+                                "Keep tab running after close"
                             } else {
                                 "Detach session"
                             })
@@ -415,6 +473,8 @@ impl Zetta {
                                 .text_color(colors.text_muted)
                                 .child(if reconnect {
                                     "Enter the secret chosen when this session was detached."
+                                } else if configure_auto_background {
+                                    "Choose the authentication required when this tab is reattached. Press Enter with both fields empty for no authentication."
                                 } else {
                                     "Press Enter with both fields empty for no authentication, or enter and confirm a secret."
                                 }),
@@ -472,16 +532,16 @@ impl Zetta {
                                 .when(!reconnect, |buttons| {
                                     buttons.child(
                                         Button::new(
-                                            "detach-without-authentication",
+                                            "continue-without-session-authentication",
                                             "No authentication",
                                         )
                                         .style(ButtonStyle::Outlined)
                                         .disabled(prompt.working)
                                         .on_click(
                                             move |_, window, cx| {
-                                                detach_handle
+                                                without_authentication_handle
                                                     .update(cx, |this, cx| {
-                                                        this.detach_without_authentication(
+                                                        this.continue_without_session_authentication(
                                                             window, cx,
                                                         )
                                                     })
@@ -495,6 +555,8 @@ impl Zetta {
                                         "submit-session-authentication",
                                         if reconnect {
                                             "Authenticate"
+                                        } else if configure_auto_background {
+                                            "Protect and enable"
                                         } else {
                                             "Protect and detach"
                                         },

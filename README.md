@@ -306,6 +306,15 @@ stable ID and protection flag, so commands, titles, and working directories are
 not exposed and editing catalog or configuration files cannot replace the live
 verifier. Argon2id hashing and verification run away from the UI thread.
 
+Use `Alt-Shift-P`, the pin toggle in the tab bar, or **Zetta: Toggle Auto
+Background Tab** in the command palette to keep an individual tab running if
+that tab or its Zetta window is closed. Enabling the toggle requires choosing
+the reattachment authentication immediately: select **No authentication**, or
+enter and confirm a secret to create the tab's in-memory Argon2id verifier.
+Pinned tabs show a pin in their tab label and move to the background automatically
+on close; unpinned tabs
+retain the normal close behavior.
+
 Use `Ctrl-Shift-D` (or **Zetta: Toggle Serial Console** in the command palette)
 to enumerate serial devices and connect one in a new left/right split. The
 connection dialog defaults to 115200 baud, 8 data bits, no parity, 1 stop bit,
