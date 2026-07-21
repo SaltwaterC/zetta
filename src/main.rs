@@ -6,6 +6,7 @@ mod config;
 mod http_server;
 mod process_control;
 mod serial_console;
+mod server_ui;
 mod session_auth_ui;
 mod settings_editor;
 mod tftp;
