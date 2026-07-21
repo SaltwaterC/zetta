@@ -14,8 +14,11 @@ APPLICATIONS_DIR := $(DATADIR)/applications
 ICON_128_DIR := $(DATADIR)/icons/hicolor/128x128/apps
 ICON_512_DIR := $(DATADIR)/icons/hicolor/512x512/apps
 
-.PHONY: build install install-binary install-capabilities install-assets uninstall \
+.PHONY: build test install install-binary install-capabilities install-assets uninstall \
 	uninstall-binary uninstall-assets refresh-desktop-caches
+
+test:
+	$(CARGO) test --locked
 
 ifeq ($(OS),Windows_NT)
 build:

@@ -85,6 +85,7 @@ fn configuration_form_round_trip_uses_typed_values_and_profiles() {
     form.terminal_font_size.text = "16".to_owned();
     form.max_scroll_history_lines.text = "123456789".to_owned();
     form.inactive_pane_opacity = 0.65;
+    form.pane_controls_position = PaneControlsPosition::Left;
     form.http_server_port.text = "8080".to_owned();
     form.profiles
         .iter_mut()
@@ -101,6 +102,7 @@ fn configuration_form_round_trip_uses_typed_values_and_profiles() {
     assert_eq!(output["terminal_font_size"], 16.);
     assert_eq!(output["max_scroll_history_lines"], 123_456_789);
     assert_eq!(output["inactive_pane_opacity"], 0.65);
+    assert_eq!(output["pane_controls_position"], "left");
     assert_eq!(output["http_server_port"], 8080);
     assert_eq!(output["profiles"][0]["args"], json!(["-l", "-i"]));
 }

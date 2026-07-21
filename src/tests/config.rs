@@ -54,6 +54,28 @@ fn default_working_directory_is_the_user_home() {
     assert_eq!(config.working_directory, Some(home_dir()));
     assert!(!config.working_directory_configured);
     assert_eq!(config.http_server_port, DEFAULT_HTTP_PORT);
+    assert_eq!(config.pane_controls_position, PaneControlsPosition::Right);
+}
+
+#[test]
+fn validates_pane_controls_position() {
+    assert_eq!(
+        Config::parse(r#"{"pane_controls_position":"left"}"#, None, None)
+            .unwrap()
+            .pane_controls_position,
+        PaneControlsPosition::Left
+    );
+    for value in [r#""top""#, "true", "null"] {
+        assert!(
+            Config::parse(
+                &format!(r#"{{"pane_controls_position":{value}}}"#),
+                None,
+                None
+            )
+            .is_err(),
+            "accepted invalid pane controls position {value}"
+        );
+    }
 }
 
 #[test]

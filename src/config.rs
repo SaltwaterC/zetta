@@ -19,6 +19,29 @@ const DEFAULT_TERMINAL_FONT_FAMILY: &str = "MesloLGS NF";
 const DEFAULT_MAX_SCROLL_HISTORY_LINES: usize = MAX_SCROLL_HISTORY_LINES;
 const DEFAULT_INACTIVE_PANE_OPACITY: f32 = 0.8;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PaneControlsPosition {
+    Left,
+    #[default]
+    Right,
+}
+
+impl PaneControlsPosition {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Right => "right",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Left => "Left",
+            Self::Right => "Right",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PaneSplitTemplate {
     Pane,
@@ -71,6 +94,7 @@ pub struct Config {
     pub terminal_font_family: String,
     pub max_scroll_history_lines: usize,
     pub inactive_pane_opacity: f32,
+    pub pane_controls_position: PaneControlsPosition,
     pub http_server_port: u16,
     pub pane_split_templates: HashMap<String, PaneSplitTemplate>,
 }
@@ -94,6 +118,7 @@ impl Config {
             terminal_font_family: DEFAULT_TERMINAL_FONT_FAMILY.to_owned(),
             max_scroll_history_lines: DEFAULT_MAX_SCROLL_HISTORY_LINES,
             inactive_pane_opacity: DEFAULT_INACTIVE_PANE_OPACITY,
+            pane_controls_position: PaneControlsPosition::default(),
             http_server_port: DEFAULT_HTTP_PORT,
             pane_split_templates: default_pane_split_templates(),
         }
@@ -168,6 +193,16 @@ impl Config {
         if let Some(opacity) = root.get("inactive_pane_opacity") {
             config.inactive_pane_opacity = parse_inactive_pane_opacity(opacity)?;
         }
+        if let Some(position) = root.get("pane_controls_position") {
+            config.pane_controls_position = match position
+                .as_str()
+                .context("pane_controls_position must be \"left\" or \"right\"")?
+            {
+                "left" => PaneControlsPosition::Left,
+                "right" => PaneControlsPosition::Right,
+                _ => anyhow::bail!("pane_controls_position must be \"left\" or \"right\""),
+            };
+        }
         if let Some(port) = root.get("http_server_port") {
             let port = port
                 .as_u64()
@@ -225,6 +260,7 @@ fn validate_config_fields(root: &Value) -> Result<()> {
         "terminal_font_family",
         "max_scroll_history_lines",
         "inactive_pane_opacity",
+        "pane_controls_position",
         "http_server_port",
         "pane_split_templates",
         "profiles",

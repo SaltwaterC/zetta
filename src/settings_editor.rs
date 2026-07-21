@@ -3,7 +3,7 @@ use std::{fs, io, path::Path};
 use anyhow::{Context as _, Result};
 use serde_json::{Map, Value, json};
 
-use crate::config::Config;
+use crate::config::{Config, PaneControlsPosition};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsPage {
@@ -120,6 +120,7 @@ pub struct ConfigurationForm {
     pub terminal_font_family: String,
     pub max_scroll_history_lines: TextField,
     pub inactive_pane_opacity: f32,
+    pub pane_controls_position: PaneControlsPosition,
     pub http_server_port: TextField,
     pub profiles: Vec<ProfileForm>,
 }
@@ -199,6 +200,7 @@ impl ConfigurationForm {
                 },
             ),
             inactive_pane_opacity: config.inactive_pane_opacity,
+            pane_controls_position: config.pane_controls_position,
             http_server_port: TextField::new(config.http_server_port.to_string()),
             root,
             profiles,
@@ -261,6 +263,10 @@ impl ConfigurationForm {
             .parse::<f64>()
             .context("formatting inactive pane opacity")?;
         root.insert("inactive_pane_opacity".into(), json!(inactive_pane_opacity));
+        root.insert(
+            "pane_controls_position".into(),
+            json!(self.pane_controls_position.as_str()),
+        );
         let http_server_port = self
             .http_server_port
             .text

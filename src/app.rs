@@ -2344,8 +2344,22 @@ impl Zetta {
                                 div()
                                     .absolute()
                                     .top(px(4.))
-                                    .right(px(4.))
+                                    .when(
+                                        self.launch_config.pane_controls_position
+                                            == PaneControlsPosition::Left,
+                                        |controls| controls.left(px(4.)),
+                                    )
+                                    .when(
+                                        self.launch_config.pane_controls_position
+                                            == PaneControlsPosition::Right,
+                                        |controls| controls.right(px(4.)),
+                                    )
                                     .flex()
+                                    .when(
+                                        self.launch_config.pane_controls_position
+                                            == PaneControlsPosition::Left,
+                                        |controls| controls.flex_row_reverse(),
+                                    )
                                     .items_center()
                                     .gap_1()
                                     .child(
@@ -2387,54 +2401,58 @@ impl Zetta {
                                             ),
                                     )
                                     .child(
-                                        IconButton::new(
-                                            ("minimize-terminal-pane", *pane_id as usize),
-                                            IconName::Dash,
-                                        )
-                                        .style(ButtonStyle::Transparent)
-                                        .size(ButtonSize::Compact)
-                                        .icon_size(IconSize::XSmall)
-                                        .icon_color(Color::Custom(colors.icon))
-                                        .aria_label("Minimize pane")
-                                        .tooltip(Tooltip::text("Minimize pane"))
-                                        .on_click(
-                                            move |_, window, cx| {
-                                                minimize_handle
-                                                    .update(cx, |this, cx| {
-                                                        this.minimize_pane_by_id(
-                                                            minimize_pane_id,
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    })
-                                                    .ok();
-                                            },
-                                        ),
-                                    )
-                                    .child(
-                                        IconButton::new(
-                                            ("maximize-terminal-pane", *pane_id as usize),
-                                            IconName::Maximize,
-                                        )
-                                        .style(ButtonStyle::Transparent)
-                                        .size(ButtonSize::Compact)
-                                        .icon_size(IconSize::XSmall)
-                                        .icon_color(Color::Custom(colors.icon))
-                                        .aria_label("Maximize pane")
-                                        .tooltip(Tooltip::text("Maximize pane (Shift-Escape)"))
-                                        .on_click(
-                                            move |_, window, cx| {
-                                                maximize_handle
-                                                    .update(cx, |this, cx| {
-                                                        this.toggle_maximize_pane_by_id(
-                                                            maximize_pane_id,
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    })
-                                                    .ok();
-                                            },
-                                        ),
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .child(
+                                                IconButton::new(
+                                                    ("minimize-terminal-pane", *pane_id as usize),
+                                                    IconName::Dash,
+                                                )
+                                                .style(ButtonStyle::Transparent)
+                                                .size(ButtonSize::Compact)
+                                                .icon_size(IconSize::XSmall)
+                                                .icon_color(Color::Custom(colors.icon))
+                                                .aria_label("Minimize pane")
+                                                .tooltip(Tooltip::text("Minimize pane"))
+                                                .on_click(move |_, window, cx| {
+                                                    minimize_handle
+                                                        .update(cx, |this, cx| {
+                                                            this.minimize_pane_by_id(
+                                                                minimize_pane_id,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        })
+                                                        .ok();
+                                                }),
+                                            )
+                                            .child(
+                                                IconButton::new(
+                                                    ("maximize-terminal-pane", *pane_id as usize),
+                                                    IconName::Maximize,
+                                                )
+                                                .style(ButtonStyle::Transparent)
+                                                .size(ButtonSize::Compact)
+                                                .icon_size(IconSize::XSmall)
+                                                .icon_color(Color::Custom(colors.icon))
+                                                .aria_label("Maximize pane")
+                                                .tooltip(Tooltip::text(
+                                                    "Maximize pane (Shift-Escape)",
+                                                ))
+                                                .on_click(move |_, window, cx| {
+                                                    maximize_handle
+                                                        .update(cx, |this, cx| {
+                                                            this.toggle_maximize_pane_by_id(
+                                                                maximize_pane_id,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        })
+                                                        .ok();
+                                                }),
+                                            ),
                                     )
                                     .child(
                                         IconButton::new(

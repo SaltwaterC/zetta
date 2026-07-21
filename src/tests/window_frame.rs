@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn modal_close_button_follows_window_close_button_side() {
+fn auxiliary_close_buttons_follow_window_close_button_side() {
     let left = WindowButtonLayout {
         left: [Some(WindowButton::Close), None, None],
         right: [
