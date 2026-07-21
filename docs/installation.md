@@ -25,6 +25,41 @@ build:
 sudo apt install libfontconfig-dev libxkbcommon-dev libxkbcommon-x11-dev
 ```
 
+## macOS build and runtime requirements
+
+macOS builds require CMake and the full Xcode installation. Install CMake with
+Homebrew or otherwise ensure that `cmake` is available on `PATH`:
+
+```sh
+brew install cmake
+```
+
+Select the full Xcode developer directory rather than the standalone Command
+Line Tools directory, then accept the Xcode license if prompted:
+
+```sh
+sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
+sudo xcodebuild -license
+```
+
+GPUI requires Xcode's Metal compiler. Confirm that the selected developer
+directory provides it before building:
+
+```sh
+xcrun --find metal
+```
+
+The graphical application also requires a Metal-capable GPU at runtime. This
+is separate from the Metal compiler requirement above: installing Xcode makes
+the compiler available but does not provide a Metal device. Virtual machines
+must expose a Metal-compatible GPU to the guest; otherwise Zetta's CLI
+commands work, but the graphical application exits during GPUI startup. Check
+the reported display and Metal support with:
+
+```sh
+system_profiler SPDisplaysDataType
+```
+
 ## Windows
 
 Build a release executable from PowerShell with Chocolatey's GNU Make:
