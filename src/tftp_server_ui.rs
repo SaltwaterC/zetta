@@ -34,7 +34,7 @@ impl Zetta {
             cx.notify();
             return;
         }
-        let root = match env::current_dir().context("reading the current working directory") {
+        let root = match self.active_server_root(cx) {
             Ok(root) => root,
             Err(error) => {
                 self.configuration_error = Some(format!("Could not start TFTP server: {error:#}"));
@@ -44,7 +44,10 @@ impl Zetta {
         };
         cx.spawn(async move |this, cx| {
             let result = cx
-                .background_spawn(async move { start_server(&root, DEFAULT_TFTP_PORT) })
+                .background_spawn(async move {
+                    let root = root.resolve()?;
+                    start_server(&root, DEFAULT_TFTP_PORT)
+                })
                 .await;
             this.update_in(cx, |this, window, cx| match result {
                 Ok(server) => this.open_tftp_server_pane(server, window, cx),

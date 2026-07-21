@@ -34,7 +34,7 @@ impl Zetta {
             cx.notify();
             return;
         }
-        let root = match env::current_dir().context("reading the current working directory") {
+        let root = match self.active_server_root(cx) {
             Ok(root) => root,
             Err(error) => {
                 self.configuration_error = Some(format!("Could not start HTTP server: {error:#}"));
@@ -45,7 +45,10 @@ impl Zetta {
         let port = self.launch_config.http_server_port;
         cx.spawn(async move |this, cx| {
             let result = cx
-                .background_spawn(async move { start_http_server(&root, port) })
+                .background_spawn(async move {
+                    let root = root.resolve()?;
+                    start_http_server(&root, port)
+                })
                 .await;
             this.update_in(cx, |this, window, cx| match result {
                 Ok(server) => this.open_http_server_pane(server, window, cx),

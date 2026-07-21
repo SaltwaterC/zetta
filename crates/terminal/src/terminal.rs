@@ -731,7 +731,7 @@ pub(crate) enum TerminalBackendEvent {
 
 const REPORTED_WORKING_DIRECTORY_TITLE_PREFIX: &str = "zetta-cwd:";
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 const POWERSHELL_CWD_TRACKER: &str = r#"$global:__ZettaOriginalPrompt = $function:prompt
 function global:prompt {
     try {
@@ -744,6 +744,29 @@ function global:prompt {
         "PS $($ExecutionContext.SessionState.Path.CurrentLocation)> "
     }
 }"#;
+
+#[cfg(any(windows, test))]
+fn visible_process_argv(argv: &[String]) -> &[String] {
+    let Some(command_index) = argv.len().checked_sub(2) else {
+        return argv;
+    };
+    if !argv[command_index].eq_ignore_ascii_case("-Command")
+        || argv[command_index + 1] != POWERSHELL_CWD_TRACKER
+    {
+        return argv;
+    }
+
+    let visible_end = command_index
+        .checked_sub(1)
+        .filter(|index| *index > 0 && argv[*index].eq_ignore_ascii_case("-NoExit"))
+        .unwrap_or(command_index);
+    &argv[..visible_end]
+}
+
+#[cfg(not(any(windows, test)))]
+fn visible_process_argv(argv: &[String]) -> &[String] {
+    argv
+}
 
 #[cfg(windows)]
 fn windows_shell_program_name(program: &str) -> &str {
@@ -3057,7 +3080,7 @@ impl Terminal {
                 if process.argv.is_empty() {
                     vec![process.name.clone()]
                 } else {
-                    process.argv.clone()
+                    visible_process_argv(&process.argv).to_vec()
                 }
             }),
             TerminalType::DisplayOnly => None,
@@ -3115,7 +3138,7 @@ impl Terminal {
                         .read()
                         .as_ref()
                         .map(|fpi| {
-                            let argv = fpi.argv.as_slice();
+                            let argv = visible_process_argv(&fpi.argv);
                             let process_name = format!(
                                 "{}{}",
                                 fpi.name,
@@ -3833,6 +3856,31 @@ mod tests {
         assert!(POWERSHELL_CWD_TRACKER.contains("CurrentFileSystemLocation.ProviderPath"));
         assert!(POWERSHELL_CWD_TRACKER.contains("__ZettaOriginalPrompt"));
         assert!(!POWERSHELL_CWD_TRACKER.contains("-NoProfile"));
+    }
+
+    #[test]
+    fn powershell_cwd_tracker_is_hidden_from_process_metadata() {
+        let argv = vec![
+            "pwsh.exe".to_owned(),
+            "-NoLogo".to_owned(),
+            "-NoExit".to_owned(),
+            "-Command".to_owned(),
+            POWERSHELL_CWD_TRACKER.to_owned(),
+        ];
+
+        assert_eq!(visible_process_argv(&argv), ["pwsh.exe", "-NoLogo"]);
+    }
+
+    #[test]
+    fn user_powershell_commands_remain_visible_in_process_metadata() {
+        let argv = vec![
+            "pwsh.exe".to_owned(),
+            "-NoExit".to_owned(),
+            "-Command".to_owned(),
+            "Get-Date".to_owned(),
+        ];
+
+        assert_eq!(visible_process_argv(&argv), argv);
     }
 
     #[cfg(windows)]
