@@ -34,6 +34,7 @@ pub(crate) fn adjacent_profile_draft_field(
 pub(crate) enum SettingsDropdown {
     DefaultProfile,
     Theme,
+    PaneControlsPosition,
     ProfileTheme(usize),
     ProfileDraftTheme,
     BindingAction(usize, usize),
@@ -576,6 +577,13 @@ impl Zetta {
                 editor.configuration.default_profile = value;
             }
             SettingsDropdown::Theme => editor.configuration.theme = value,
+            SettingsDropdown::PaneControlsPosition => {
+                editor.configuration.pane_controls_position = if value == "Left" {
+                    PaneControlsPosition::Left
+                } else {
+                    PaneControlsPosition::Right
+                };
+            }
             SettingsDropdown::ProfileTheme(index) => {
                 if let Some(profile) = editor.configuration.profiles.get_mut(index) {
                     profile.theme = (value != "Use application theme").then_some(value);

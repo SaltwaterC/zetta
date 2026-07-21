@@ -457,6 +457,14 @@ impl Zetta {
                     window,
                     cx,
                 );
+                let pane_controls_position = dropdown(
+                    "settings-pane-controls-position".to_owned(),
+                    configuration.pane_controls_position.label().to_owned(),
+                    vec!["Right".to_owned(), "Left".to_owned()].into(),
+                    SettingsDropdown::PaneControlsPosition,
+                    window,
+                    cx,
+                );
                 let current_font = configuration.terminal_font_family.clone();
                 let picker_handle = handle.clone();
                 let font_family = h_flex()
@@ -544,6 +552,11 @@ impl Zetta {
                         "Inactive pane opacity",
                         "Dimming level as a percentage",
                         opacity_slider(configuration.inactive_pane_opacity),
+                    ),
+                    setting_row(
+                        "Pane controls position",
+                        "Keep pane overlay controls on the right or move them to the left",
+                        pane_controls_position,
                     ),
                     setting_row(
                         "HTTP server port",

@@ -115,6 +115,7 @@ appearance settings include:
   "terminal_font_size": 14,
   "terminal_font_family": "MesloLGS NF",
   "inactive_pane_opacity": 0.8,
+  "pane_controls_position": "right",
   "max_scroll_history_lines": 2147483647
 }
 ```
@@ -122,6 +123,11 @@ appearance settings include:
 `terminal_font_size` accepts values from 6 through 100.
 `terminal_font_family` accepts bundled and system-installed fonts.
 `inactive_pane_opacity` accepts values from 0 through 1 and defaults to 0.8.
+`pane_controls_position` accepts `"left"` or `"right"` and defaults to
+`"right"`. It controls the pane overlay buttons independently of the system
+window-button layout so they do not move over a left-aligned prompt unless you
+choose that placement explicitly. Tab close buttons do follow the system
+window-button side.
 
 `max_scroll_history_lines` defaults to the Alacritty engine's signed
 line-coordinate ceiling of 2,147,483,647 lines, which is effectively unlimited

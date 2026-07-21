@@ -64,6 +64,7 @@ impl Render for Zetta {
         let supported_controls = window.window_controls();
         let is_maximized = window.is_maximized();
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
+        let tab_close_button_on_left = window_close_button_on_left(self.button_layout);
         let left_window_controls = render_window_controls(
             self.button_layout.left,
             supported_controls,
@@ -252,6 +253,7 @@ impl Render for Zetta {
                     .flex_shrink_1()
                     .px_2()
                     .flex()
+                    .when(tab_close_button_on_left, |tab| tab.flex_row_reverse())
                     .items_center()
                     .gap_1()
                     .border_r_1()

@@ -36,7 +36,7 @@ use background_sessions::{
     print_session_catalogs,
 };
 use command_palette::{CommandPalette, PaletteCommand, humanize_action_name};
-use config::{Config, PaneSplitAxis, PaneSplitTemplate, Profile};
+use config::{Config, PaneControlsPosition, PaneSplitAxis, PaneSplitTemplate, Profile};
 use futures::StreamExt as _;
 use gpui::{
     Action, Anchor, AnyElement, App, AppContext as _, Bounds, Context, CursorStyle, Decorations,
