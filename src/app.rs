@@ -2,6 +2,7 @@ use super::*;
 
 const PANE_CONTROLS_IDLE_DELAY: Duration = Duration::from_millis(1200);
 const BACKGROUND_PROCESS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+const PERFORMANCE_PANE_STRESS_COUNT: usize = 4;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ReconnectRequest {
@@ -170,22 +171,34 @@ impl Zetta {
         cx.notify();
     }
 
-    pub(crate) fn configure_pane_profile_stress(&mut self, cx: &mut Context<Self>) {
-        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+    pub(crate) fn configure_pane_profile_stress(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.get(self.active_tab) else {
             return;
         };
         let active_pane_id = tab.active_pane;
+        let tab_id = tab.id;
         let Some(profile) = tab.active_profile().cloned() else {
             return;
         };
         let mut pane_ids = vec![active_pane_id];
-        while pane_ids.len() < MAX_PANES_PER_TAB {
+        let mut added_pane_ids = Vec::with_capacity(PERFORMANCE_PANE_STRESS_COUNT - 1);
+        while pane_ids.len() < PERFORMANCE_PANE_STRESS_COUNT {
             let pane_id = self.next_pane_id;
             self.next_pane_id += 1;
+            pane_ids.push(pane_id);
+            added_pane_ids.push(pane_id);
+        }
+
+        let tab = &mut self.tabs[self.active_tab];
+        for (index, pane_id) in added_pane_ids.iter().copied().enumerate() {
             tab.push_pane(TerminalPane {
                 id: pane_id,
                 label_number: 0,
-                generated_label: Some(format!("Stress {:02}", pane_ids.len() + 1)),
+                generated_label: Some(format!("Stress {:02}", index + 2)),
                 custom_label: None,
                 profile: profile.clone(),
                 terminal: None,
@@ -194,13 +207,26 @@ impl Zetta {
                 wsl_cwd_file: None,
                 pending_command: None,
             });
-            pane_ids.push(pane_id);
         }
         tab.layout = PaneLayout::tiled(&pane_ids).expect("a stress profile has panes");
-        tab.minimized_panes = pane_ids.into_iter().skip(1).collect();
-        tab.selected_minimized_pane = tab.minimized_panes.last().copied();
+        tab.minimized_panes.clear();
+        tab.selected_minimized_pane = None;
         tab.maximized_pane = None;
         tab.activate_pane(active_pane_id);
+
+        let working_directory = self.working_directory.clone();
+        for pane_id in added_pane_ids {
+            self.spawn_terminal(
+                tab_id,
+                pane_id,
+                profile.clone(),
+                working_directory.clone(),
+                None,
+                None,
+                window,
+                cx,
+            );
+        }
         cx.notify();
     }
 
@@ -1991,6 +2017,7 @@ impl Zetta {
             quit_zetta_process(cx);
             return;
         };
+        overlay.workload = options.workload;
         overlay.begin_report();
 
         let executor = cx.background_executor().clone();

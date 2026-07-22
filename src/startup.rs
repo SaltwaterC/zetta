@@ -12,6 +12,8 @@ pub(crate) enum StartupMode {
     RegisterWindowsShell(PathBuf),
     TerminalRenderingProfile,
     TerminalRenderingWorkload,
+    TerminalCheckerboardWorkload,
+    TerminalSparseUpdateWorkload,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -23,6 +25,8 @@ pub(crate) struct StartupArgs {
     pub(crate) profile_report: Option<PathBuf>,
     pub(crate) profile_duration: Option<Duration>,
     pub(crate) profile_pane_stress: bool,
+    pub(crate) profile_background_stress: bool,
+    pub(crate) profile_sparse_updates: bool,
     pub(crate) tftp_command: Option<TftpCommand>,
 }
 
@@ -61,6 +65,8 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,
+            profile_background_stress: false,
+            profile_sparse_updates: false,
             tftp_command: None,
         });
     }
@@ -81,6 +87,8 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,
+            profile_background_stress: false,
+            profile_sparse_updates: false,
             tftp_command: Some(parse_tftp_args(tftp_arguments.iter().cloned())?),
         });
     }
@@ -91,6 +99,8 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
     let mut profile_report = None;
     let mut profile_duration = None;
     let mut profile_pane_stress = false;
+    let mut profile_background_stress = false;
+    let mut profile_sparse_updates = false;
     let mut args = arguments.into_iter();
     while let Some(argument) = args.next() {
         let argument = argument.to_string_lossy();
@@ -123,7 +133,11 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 )
             }
             "--profile-pane-stress" | "-s" => profile_pane_stress = true,
+            "--profile-background-stress" | "-b" => profile_background_stress = true,
+            "--profile-sparse-updates" | "-u" => profile_sparse_updates = true,
             "--terminal-render-workload" => mode = StartupMode::TerminalRenderingWorkload,
+            "--terminal-checkerboard-workload" => mode = StartupMode::TerminalCheckerboardWorkload,
+            "--terminal-sparse-update-workload" => mode = StartupMode::TerminalSparseUpdateWorkload,
             "--profile-report" | "-r" => {
                 profile_report = Some(
                     args.next()
@@ -146,7 +160,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             }
             "--help" | "-h" => {
                 println!(
-                    "Zetta terminal\n\nUsage: zetta [OPTIONS]\n       zetta sessions [--json]\n       zetta tftp <COMMAND> [OPTIONS]\n\nCommands:\n  sessions                            List detached background sessions\n  tftp                                Transfer a file with TFTP\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Launch the named profile\n  -P, --profile-terminal-rendering    Profile terminal rendering\n  -s, --profile-pane-stress           Use 64 panes with 63 minimized\n  -r, --profile-report PATH           Write a profiling report\n  -d, --profile-duration SECONDS      Set the profiling duration"
+                    "Zetta terminal\n\nUsage: zetta [OPTIONS]\n       zetta sessions [--json]\n       zetta tftp <COMMAND> [OPTIONS]\n\nCommands:\n  sessions                            List detached background sessions\n  tftp                                Transfer a file with TFTP\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Launch the named profile\n  -P, --profile-terminal-rendering    Profile terminal rendering\n  -s, --profile-pane-stress           Use four visible producer panes\n  -b, --profile-background-stress     Render alternating cell backgrounds\n  -u, --profile-sparse-updates        Update a dense terminal at 40 Hz\n  -r, --profile-report PATH           Write a profiling report\n  -d, --profile-duration SECONDS      Set the profiling duration"
                 );
                 std::process::exit(0);
             }
@@ -174,6 +188,18 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
         !profile_pane_stress || mode == StartupMode::TerminalRenderingProfile,
         "--profile-pane-stress requires --profile-terminal-rendering"
     );
+    anyhow::ensure!(
+        !profile_background_stress || mode == StartupMode::TerminalRenderingProfile,
+        "--profile-background-stress requires --profile-terminal-rendering"
+    );
+    anyhow::ensure!(
+        !profile_sparse_updates || mode == StartupMode::TerminalRenderingProfile,
+        "--profile-sparse-updates requires --profile-terminal-rendering"
+    );
+    anyhow::ensure!(
+        !(profile_background_stress && profile_sparse_updates),
+        "--profile-background-stress and --profile-sparse-updates cannot be combined"
+    );
     if profile_report.is_some() && profile_duration.is_none() {
         profile_duration = Some(DEFAULT_PERFORMANCE_REPORT_DURATION);
     }
@@ -185,6 +211,8 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
         profile_report,
         profile_duration,
         profile_pane_stress,
+        profile_background_stress,
+        profile_sparse_updates,
         tftp_command: None,
     })
 }
@@ -816,7 +844,9 @@ pub(crate) fn open_zetta_window(
         track_zetta_window(&zetta, window, cx);
         prepare_background_tabs_before_window_close(&zetta, window, cx);
         if profile_pane_stress {
-            zetta.update(cx, |zetta, cx| zetta.configure_pane_profile_stress(cx));
+            zetta.update(cx, |zetta, cx| {
+                zetta.configure_pane_profile_stress(window, cx)
+            });
         }
         if enable_performance_overlay {
             zetta.update(cx, |zetta, cx| {
@@ -1035,13 +1065,18 @@ fn handle_zetta_window_closed(cx: &mut App, window_id: WindowId) {
     }
 }
 
-fn terminal_rendering_profile_config(executable: &Path) -> Config {
+fn terminal_rendering_profile_config(executable: &Path, workload: PerformanceWorkload) -> Config {
     let mut config = Config::defaults(None, None);
+    let workload_argument = match workload {
+        PerformanceWorkload::Standard => "--terminal-render-workload",
+        PerformanceWorkload::CheckerboardBackground => "--terminal-checkerboard-workload",
+        PerformanceWorkload::SparseUpdates => "--terminal-sparse-update-workload",
+    };
     config.profiles = vec![Profile {
         name: "Terminal rendering profiler".to_owned(),
         command: Shell::WithArguments {
             program: executable.to_string_lossy().into_owned(),
-            args: vec!["--terminal-render-workload".to_owned()],
+            args: vec![workload_argument.to_owned()],
             title_override: Some("Terminal rendering profiler".to_owned()),
         },
         theme: None,
@@ -1050,20 +1085,64 @@ fn terminal_rendering_profile_config(executable: &Path) -> Config {
     config
 }
 
-fn run_terminal_rendering_workload() -> Result<()> {
+fn checkerboard_background(row: usize, column: usize, frame: u64) -> u8 {
+    if (row + column + frame as usize).is_multiple_of(2) {
+        41
+    } else {
+        44
+    }
+}
+
+fn run_terminal_rendering_workload(workload: PerformanceWorkload) -> Result<()> {
     const FRAME_INTERVAL: Duration = Duration::from_nanos(4_166_667);
+    const SPARSE_UPDATE_INTERVAL: Duration = Duration::from_millis(25);
     const ROW: &str = "0123456789 abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ │─╭╮╰╯ ✓ rendered cell workload";
 
     let stdout = std::io::stdout();
     let mut output = std::io::BufWriter::new(stdout.lock());
     output.write_all(b"\x1b[2J\x1b[?25l")?;
+    if workload == PerformanceWorkload::SparseUpdates {
+        output.write_all(
+            b"\x1b[H\x1b[1;36mZetta sparse terminal update profiler\x1b[0m\r\n\
+              40 Hz producer updating only this status line\r\n\
+              Dense unchanged content below models a full-screen TUI.\r\n\r\n",
+        )?;
+        for row in 0..34 {
+            writeln!(output, "{row:02} {ROW}\r")?;
+        }
+        output.flush()?;
+    }
     let mut frame = 0_u64;
     let mut next_frame = Instant::now();
     loop {
+        if workload == PerformanceWorkload::SparseUpdates {
+            let spinner = ['|', '/', '-', '\\'][(frame as usize) % 4];
+            write!(
+                output,
+                "\x1b[2;1H40 Hz sparse producer · processing {spinner} · frame {frame:010}"
+            )?;
+            output.flush()?;
+            frame = frame.wrapping_add(1);
+
+            next_frame += SPARSE_UPDATE_INTERVAL;
+            let now = Instant::now();
+            if next_frame > now {
+                std::thread::sleep(next_frame - now);
+            } else {
+                next_frame = now;
+            }
+            continue;
+        }
+
+        let workload_description = match workload {
+            PerformanceWorkload::Standard => "text and line-drawing cells",
+            PerformanceWorkload::CheckerboardBackground => "alternating cell backgrounds",
+            PerformanceWorkload::SparseUpdates => unreachable!(),
+        };
         if write!(
             output,
             "\x1b[H\x1b[1;36mZetta terminal rendering profiler\x1b[0m\r\n\
-             240 Hz producer · frame {frame:010}\r\n\
+             240 Hz producer · {workload_description} · frame {frame:010}\r\n\
              This deterministic workload is identical on Linux, macOS, and Windows.\r\n\r\n"
         )
         .is_err()
@@ -1071,7 +1150,20 @@ fn run_terminal_rendering_workload() -> Result<()> {
             return Ok(());
         }
         for row in 0..34 {
-            writeln!(output, "{row:02} {ROW} {frame:010}\r")?;
+            match workload {
+                PerformanceWorkload::Standard => {
+                    writeln!(output, "{row:02} {ROW} {frame:010}\r")?;
+                }
+                PerformanceWorkload::CheckerboardBackground => {
+                    write!(output, "{row:02} ")?;
+                    for column in 0..96 {
+                        let background = checkerboard_background(row, column, frame);
+                        write!(output, "\x1b[{background}m ")?;
+                    }
+                    write!(output, "\x1b[0m\r\n")?;
+                }
+                PerformanceWorkload::SparseUpdates => unreachable!(),
+            }
         }
         output.flush()?;
         frame = frame.wrapping_add(1);
@@ -1104,19 +1196,44 @@ pub(crate) fn run() -> Result<()> {
         return command.run();
     }
     if args.mode == StartupMode::TerminalRenderingWorkload {
-        return run_terminal_rendering_workload();
+        return run_terminal_rendering_workload(PerformanceWorkload::Standard);
+    }
+    if args.mode == StartupMode::TerminalCheckerboardWorkload {
+        return run_terminal_rendering_workload(PerformanceWorkload::CheckerboardBackground);
+    }
+    if args.mode == StartupMode::TerminalSparseUpdateWorkload {
+        return run_terminal_rendering_workload(PerformanceWorkload::SparseUpdates);
     }
 
     let profiling = args.mode == StartupMode::TerminalRenderingProfile;
     let report_options = args
         .profile_report
         .zip(args.profile_duration)
-        .map(|(path, duration)| PerformanceReportOptions { path, duration });
+        .map(|(path, duration)| PerformanceReportOptions {
+            path,
+            duration,
+            workload: if args.profile_background_stress {
+                PerformanceWorkload::CheckerboardBackground
+            } else if args.profile_sparse_updates {
+                PerformanceWorkload::SparseUpdates
+            } else {
+                PerformanceWorkload::Standard
+            },
+        });
     let report_requested = report_options.is_some();
     let report_status = Arc::new(Mutex::new(None));
     let (mut config, configuration_error) = if profiling {
         (
-            terminal_rendering_profile_config(&env::current_exe()?),
+            terminal_rendering_profile_config(
+                &env::current_exe()?,
+                if args.profile_background_stress {
+                    PerformanceWorkload::CheckerboardBackground
+                } else if args.profile_sparse_updates {
+                    PerformanceWorkload::SparseUpdates
+                } else {
+                    PerformanceWorkload::Standard
+                },
+            ),
             None,
         )
     } else {

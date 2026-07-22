@@ -82,6 +82,8 @@ fn terminal_rendering_profiler_arguments_are_cross_platform() {
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,
+            profile_background_stress: false,
+            profile_sparse_updates: false,
             tftp_command: None,
         }
     );
@@ -95,8 +97,16 @@ fn terminal_rendering_profiler_arguments_are_cross_platform() {
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,
+            profile_background_stress: false,
+            profile_sparse_updates: false,
             tftp_command: None,
         }
+    );
+    assert_eq!(
+        parse_args_from([OsString::from("--terminal-checkerboard-workload")])
+            .unwrap()
+            .mode,
+        StartupMode::TerminalCheckerboardWorkload
     );
 }
 
@@ -105,6 +115,7 @@ fn shorthand_options_match_long_options() {
     let shorthand = parse_args_from([
         OsString::from("-P"),
         OsString::from("-s"),
+        OsString::from("-b"),
         OsString::from("-r"),
         OsString::from("profile.json"),
         OsString::from("-d"),
@@ -114,10 +125,19 @@ fn shorthand_options_match_long_options() {
     let longhand = parse_args_from([
         OsString::from("--profile-terminal-rendering"),
         OsString::from("--profile-pane-stress"),
+        OsString::from("--profile-background-stress"),
         OsString::from("--profile-report"),
         OsString::from("profile.json"),
         OsString::from("--profile-duration"),
         OsString::from("2.5"),
+    ])
+    .unwrap();
+    assert_eq!(shorthand, longhand);
+
+    let shorthand = parse_args_from([OsString::from("-P"), OsString::from("-u")]).unwrap();
+    let longhand = parse_args_from([
+        OsString::from("--profile-terminal-rendering"),
+        OsString::from("--profile-sparse-updates"),
     ])
     .unwrap();
     assert_eq!(shorthand, longhand);
@@ -226,6 +246,48 @@ fn pane_stress_requires_and_records_profiler_mode() {
 }
 
 #[test]
+fn background_stress_requires_and_records_profiler_mode() {
+    let args = parse_args_from([
+        OsString::from("--profile-terminal-rendering"),
+        OsString::from("--profile-background-stress"),
+    ])
+    .unwrap();
+    assert!(args.profile_background_stress);
+
+    let error = parse_args_from([OsString::from("--profile-background-stress")]).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("requires --profile-terminal-rendering")
+    );
+}
+
+#[test]
+fn sparse_updates_require_and_record_profiler_mode() {
+    let args = parse_args_from([
+        OsString::from("--profile-terminal-rendering"),
+        OsString::from("--profile-sparse-updates"),
+    ])
+    .unwrap();
+    assert!(args.profile_sparse_updates);
+
+    let error = parse_args_from([OsString::from("--profile-sparse-updates")]).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("requires --profile-terminal-rendering")
+    );
+
+    let error = parse_args_from([
+        OsString::from("--profile-terminal-rendering"),
+        OsString::from("--profile-background-stress"),
+        OsString::from("--profile-sparse-updates"),
+    ])
+    .unwrap_err();
+    assert!(error.to_string().contains("cannot be combined"));
+}
+
+#[test]
 fn terminal_rendering_report_accepts_fractional_duration() {
     let args = parse_args_from([
         OsString::from("--profile-terminal-rendering"),
@@ -280,7 +342,7 @@ fn terminal_rendering_profiler_launches_the_current_executable() {
     } else {
         "/usr/local/bin/zetta"
     });
-    let config = terminal_rendering_profile_config(executable);
+    let config = terminal_rendering_profile_config(executable, PerformanceWorkload::Standard);
 
     assert_eq!(config.profiles.len(), 1);
     assert_eq!(config.default_profile, 0);
@@ -289,6 +351,53 @@ fn terminal_rendering_profiler_launches_the_current_executable() {
         Shell::WithArguments {
             program: executable.to_string_lossy().into_owned(),
             args: vec!["--terminal-render-workload".to_owned()],
+            title_override: Some("Terminal rendering profiler".to_owned()),
+        }
+    );
+}
+
+#[test]
+fn checkerboard_profiler_launches_the_background_workload() {
+    let executable = Path::new("/path/to/zetta");
+    let config =
+        terminal_rendering_profile_config(executable, PerformanceWorkload::CheckerboardBackground);
+
+    assert_eq!(
+        config.profiles[0].command,
+        Shell::WithArguments {
+            program: executable.to_string_lossy().into_owned(),
+            args: vec!["--terminal-checkerboard-workload".to_owned()],
+            title_override: Some("Terminal rendering profiler".to_owned()),
+        }
+    );
+}
+
+#[test]
+fn checkerboard_background_changes_every_cell_on_each_frame() {
+    assert_ne!(
+        checkerboard_background(0, 0, 0),
+        checkerboard_background(0, 0, 1)
+    );
+    assert_ne!(
+        checkerboard_background(0, 0, 0),
+        checkerboard_background(0, 1, 0)
+    );
+    assert_eq!(
+        checkerboard_background(0, 0, 0),
+        checkerboard_background(0, 0, 2)
+    );
+}
+
+#[test]
+fn sparse_update_profiler_launches_the_sparse_workload() {
+    let executable = Path::new("/path/to/zetta");
+    let config = terminal_rendering_profile_config(executable, PerformanceWorkload::SparseUpdates);
+
+    assert_eq!(
+        config.profiles[0].command,
+        Shell::WithArguments {
+            program: executable.to_string_lossy().into_owned(),
+            args: vec!["--terminal-sparse-update-workload".to_owned()],
             title_override: Some("Terminal rendering profiler".to_owned()),
         }
     );

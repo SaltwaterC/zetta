@@ -86,9 +86,9 @@ hardware-rendered baseline.
 
 ## Pane stress workload
 
-Add `--profile-pane-stress` or `-s` to exercise pane-management rendering while
-retaining the same producer, window, and capture settings. This creates 64
-panes, minimizes 63, and leaves the profiler terminal visible:
+Add `--profile-pane-stress` or `-s` to exercise multi-pane terminal rendering
+while retaining the same producer, window, and capture settings. This creates
+four visible panes, each running the deterministic producer:
 
 ```sh
 cargo run --release -- \
@@ -99,7 +99,48 @@ cargo run --release -- \
 ```
 
 Report metadata records `pane_count` and `minimized_pane_count`, distinguishing
-ordinary and pane-stress runs without relying on file names.
+ordinary and pane-stress runs without relying on file names. Because every pane
+owns a PTY, parser, terminal grid, and rendered view, this mode measures actual
+multi-terminal scaling rather than only pane-layout metadata.
+
+## Background stress workload
+
+Add `--profile-background-stress` or `-b` to replace the text workload with a
+synthetic red-and-blue checkerboard made from alternating cell backgrounds.
+Every cell switches between the two colors on each producer frame:
+
+```sh
+cargo run --release -- \
+  --profile-terminal-rendering \
+  -b \
+  --profile-report artifacts/zetta-background-stress.json \
+  --profile-duration 10
+```
+
+This isolates terminal background-region collection, merging, and quad
+painting while retaining the same 240 Hz producer and report format. Reports
+record `workload.pattern` as either `standard` or `checkerboard_background`, so
+the two workloads cannot be compared accidentally. The checkerboard is an
+intentionally adverse case: no adjacent cells share a color, so every visible
+colored cell requires its own paint quad.
+
+## Sparse-update workload
+
+Add `--profile-sparse-updates` or `-u` to populate a dense terminal once and
+then change only a short status line at 40 Hz:
+
+```sh
+cargo run --release -- \
+  --profile-terminal-rendering \
+  -u \
+  --profile-report artifacts/zetta-sparse-updates.json \
+  --profile-duration 10
+```
+
+This models full-screen TUIs with an animated spinner or streaming status line.
+It exposes the cost of rebuilding and painting mostly unchanged terminal
+content without conflating that cost with high PTY throughput. Reports record
+`workload.pattern` as `sparse_updates` and `producer_hz` as `40`.
 
 ## Linux and Wayland diagnostics
 

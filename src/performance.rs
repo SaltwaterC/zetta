@@ -63,6 +63,25 @@ impl PerformanceMetrics {
 pub(crate) struct PerformanceReportOptions {
     pub(crate) path: PathBuf,
     pub(crate) duration: Duration,
+    pub(crate) workload: PerformanceWorkload,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PerformanceWorkload {
+    #[default]
+    Standard,
+    CheckerboardBackground,
+    SparseUpdates,
+}
+
+impl PerformanceWorkload {
+    pub(crate) fn producer_hz(self) -> u16 {
+        match self {
+            Self::Standard | Self::CheckerboardBackground => 240,
+            Self::SparseUpdates => 40,
+        }
+    }
 }
 
 pub(crate) type PerformanceReportStatus = Arc<Mutex<Option<std::result::Result<(), String>>>>;
@@ -89,6 +108,7 @@ struct PerformanceReportTarget {
 
 #[derive(Serialize)]
 struct PerformanceReportWorkload {
+    pattern: PerformanceWorkload,
     producer_hz: u16,
     rows: u8,
     pane_count: usize,
@@ -125,6 +145,7 @@ pub(crate) struct PerformanceOverlay {
     report: Option<PerformanceReportCapture>,
     pane_count: usize,
     minimized_pane_count: usize,
+    pub(crate) workload: PerformanceWorkload,
 }
 
 impl PerformanceOverlay {
@@ -143,6 +164,7 @@ impl PerformanceOverlay {
             report: None,
             pane_count,
             minimized_pane_count,
+            workload: PerformanceWorkload::default(),
         }
     }
 
@@ -195,7 +217,7 @@ impl PerformanceOverlay {
             .context("performance report was not started")?;
         let elapsed = capture.started_at.elapsed();
         let report = PerformanceReport {
-            schema_version: 1,
+            schema_version: 2,
             zetta_version: env!("CARGO_PKG_VERSION"),
             build_profile: if cfg!(debug_assertions) {
                 "debug"
@@ -207,7 +229,8 @@ impl PerformanceOverlay {
                 architecture: std::env::consts::ARCH,
             },
             workload: PerformanceReportWorkload {
-                producer_hz: 240,
+                pattern: self.workload,
+                producer_hz: self.workload.producer_hz(),
                 rows: 34,
                 pane_count: self.pane_count,
                 minimized_pane_count: self.minimized_pane_count,
