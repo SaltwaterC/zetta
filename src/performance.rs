@@ -1,4 +1,57 @@
 use super::*;
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+struct PerformanceCpuMetrics {
+    process_cpu_time_ms: u64,
+    average_core_utilization_percent: f64,
+    average_machine_utilization_percent: f64,
+}
+
+impl PerformanceCpuMetrics {
+    fn from_interval(
+        process_cpu_time_ms: u64,
+        elapsed: Duration,
+        logical_cpu_count: usize,
+    ) -> Self {
+        if elapsed.is_zero() || logical_cpu_count == 0 {
+            return Self::default();
+        }
+        let average_core_utilization_percent =
+            process_cpu_time_ms as f64 / elapsed.as_secs_f64() / 10.0;
+        Self {
+            process_cpu_time_ms,
+            average_core_utilization_percent,
+            average_machine_utilization_percent: average_core_utilization_percent
+                / logical_cpu_count as f64,
+        }
+    }
+}
+
+struct ProcessCpuClock {
+    system: System,
+    pid: sysinfo::Pid,
+}
+
+impl ProcessCpuClock {
+    fn new() -> Option<Self> {
+        Some(Self {
+            system: System::new(),
+            pid: sysinfo::get_current_pid().ok()?,
+        })
+    }
+
+    fn read_millis(&mut self) -> Option<u64> {
+        self.system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[self.pid]),
+            true,
+            ProcessRefreshKind::nothing().with_cpu(),
+        );
+        self.system
+            .process(self.pid)
+            .map(|process| process.accumulated_cpu_time())
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 pub(crate) struct PerformanceMetrics {
@@ -91,11 +144,15 @@ struct PerformanceReportSample {
     elapsed_ms: u64,
     frame_count: usize,
     metrics: PerformanceMetrics,
+    cpu: Option<PerformanceCpuMetrics>,
 }
 
 struct PerformanceReportCapture {
     started_at: Instant,
     started_unix_ms: u128,
+    cpu_clock: Option<ProcessCpuClock>,
+    started_process_cpu_ms: Option<u64>,
+    sampled_process_cpu_ms: Option<u64>,
     timings: Vec<FrameTiming>,
     samples: Vec<PerformanceReportSample>,
 }
@@ -104,6 +161,7 @@ struct PerformanceReportCapture {
 struct PerformanceReportTarget {
     os: &'static str,
     architecture: &'static str,
+    logical_cpu_count: usize,
 }
 
 #[derive(Serialize)]
@@ -119,6 +177,7 @@ struct PerformanceReportWorkload {
 struct PerformanceReportSummary {
     frame_count: usize,
     metrics: PerformanceMetrics,
+    cpu: Option<PerformanceCpuMetrics>,
 }
 
 #[derive(Serialize)]
@@ -170,6 +229,8 @@ impl PerformanceOverlay {
 
     pub(crate) fn begin_report(&mut self) {
         self.collector = FrameTimingCollector::new();
+        let mut cpu_clock = ProcessCpuClock::new();
+        let started_process_cpu_ms = cpu_clock.as_mut().and_then(ProcessCpuClock::read_millis);
         self.sampled_at = Instant::now();
         self.report = Some(PerformanceReportCapture {
             started_at: self.sampled_at,
@@ -177,26 +238,48 @@ impl PerformanceOverlay {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis(),
+            cpu_clock,
+            started_process_cpu_ms,
+            sampled_process_cpu_ms: started_process_cpu_ms,
             timings: Vec::new(),
             samples: Vec::new(),
         });
     }
 
     pub(crate) fn sample(&mut self) {
+        let process_cpu_ms = self
+            .report
+            .as_mut()
+            .and_then(|report| report.cpu_clock.as_mut())
+            .and_then(ProcessCpuClock::read_millis);
         let now = Instant::now();
+        let sample_elapsed = now - self.sampled_at;
         let timings = self
             .collector
             .collect_unseen()
             .into_iter()
             .filter(|timing| timing.window_id == self.window_id)
             .collect::<Vec<_>>();
-        self.metrics = PerformanceMetrics::from_timings(&timings, now - self.sampled_at);
+        self.metrics = PerformanceMetrics::from_timings(&timings, sample_elapsed);
         self.sampled_at = now;
         if let Some(report) = self.report.as_mut() {
+            let cpu =
+                report
+                    .sampled_process_cpu_ms
+                    .zip(process_cpu_ms)
+                    .map(|(previous, current)| {
+                        PerformanceCpuMetrics::from_interval(
+                            current.saturating_sub(previous),
+                            sample_elapsed,
+                            logical_cpu_count(),
+                        )
+                    });
+            report.sampled_process_cpu_ms = process_cpu_ms;
             report.samples.push(PerformanceReportSample {
                 elapsed_ms: duration_millis(now - report.started_at),
                 frame_count: timings.len(),
                 metrics: self.metrics,
+                cpu,
             });
             report.timings.extend(timings);
         }
@@ -211,13 +294,28 @@ impl PerformanceOverlay {
         if needs_final_sample {
             self.sample();
         }
-        let capture = self
+        let mut capture = self
             .report
             .take()
             .context("performance report was not started")?;
+        let finished_process_cpu_ms = capture
+            .cpu_clock
+            .as_mut()
+            .and_then(ProcessCpuClock::read_millis);
         let elapsed = capture.started_at.elapsed();
+        let logical_cpu_count = logical_cpu_count();
+        let summary_cpu = capture
+            .started_process_cpu_ms
+            .zip(finished_process_cpu_ms)
+            .map(|(started, finished)| {
+                PerformanceCpuMetrics::from_interval(
+                    finished.saturating_sub(started),
+                    elapsed,
+                    logical_cpu_count,
+                )
+            });
         let report = PerformanceReport {
-            schema_version: 2,
+            schema_version: 3,
             zetta_version: env!("CARGO_PKG_VERSION"),
             build_profile: if cfg!(debug_assertions) {
                 "debug"
@@ -227,6 +325,7 @@ impl PerformanceOverlay {
             target: PerformanceReportTarget {
                 os: std::env::consts::OS,
                 architecture: std::env::consts::ARCH,
+                logical_cpu_count,
             },
             workload: PerformanceReportWorkload {
                 pattern: self.workload,
@@ -242,6 +341,7 @@ impl PerformanceOverlay {
             summary: PerformanceReportSummary {
                 frame_count: capture.timings.len(),
                 metrics: PerformanceMetrics::from_timings(&capture.timings, elapsed),
+                cpu: summary_cpu,
             },
             samples: capture.samples,
         };
@@ -260,6 +360,12 @@ impl PerformanceOverlay {
 
 fn duration_millis(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn logical_cpu_count() -> usize {
+    std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
 }
 
 #[cfg(test)]

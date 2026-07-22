@@ -95,11 +95,22 @@ adjust line-continuation syntax when splitting the command.
 Reports use a versioned JSON schema and include:
 
 - Zetta version, build profile, operating system, and architecture
+- logical CPU count and process CPU time for the hosting Zetta process
+- average CPU utilization as a percentage of one logical core and of total
+  machine capacity, both for each sample and for the complete run
 - workload settings and requested and actual elapsed time
 - per-second samples and total frame count
 - draw FPS and average/p50/p95/p99 draw time
 - average invalidation-to-draw latency
 - counts exceeding the 120 Hz and 60 Hz frame budgets
+
+`average_core_utilization_percent` uses 100% to mean one logical core. It is
+the preferred value for comparing systems because it does not inherit the
+different normalization used by Linux and Windows process monitors.
+`average_machine_utilization_percent` divides that value by the reported
+logical CPU count and is comparable to whole-machine-normalized tools such as
+Windows Task Manager. CPU measurements cover only the hosting Zetta process;
+the separate deterministic workload producer is excluded.
 
 Preserve reports as CI artifacts or feed them into a separate comparison step.
 Keep native stack traces as separate platform-profiler artifacts. Compare only

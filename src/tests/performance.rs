@@ -45,19 +45,25 @@ fn performance_report_is_portable_json() {
     let report: serde_json::Value =
         serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
     fs::remove_file(report_path).unwrap();
-    assert_eq!(report["schema_version"], 2);
+    assert_eq!(report["schema_version"], 3);
     assert_eq!(report["zetta_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(report["requested_duration_ms"], 10_000);
     assert_eq!(report["target"]["os"], std::env::consts::OS);
     assert_eq!(report["target"]["architecture"], std::env::consts::ARCH);
+    assert_eq!(report["target"]["logical_cpu_count"], logical_cpu_count());
     assert_eq!(report["workload"]["producer_hz"], 240);
     assert_eq!(report["workload"]["pattern"], "standard");
     assert_eq!(report["workload"]["rows"], 34);
     assert_eq!(report["workload"]["pane_count"], 64);
     assert_eq!(report["workload"]["minimized_pane_count"], 63);
     assert_eq!(report["summary"]["frame_count"], 0);
+    assert!(report["summary"]["cpu"].is_object());
+    assert!(report["summary"]["cpu"]["process_cpu_time_ms"].is_number());
+    assert!(report["summary"]["cpu"]["average_core_utilization_percent"].is_number());
+    assert!(report["summary"]["cpu"]["average_machine_utilization_percent"].is_number());
     assert!(report["samples"].is_array());
     assert_eq!(report["samples"].as_array().unwrap().len(), 1);
+    assert!(report["samples"][0]["cpu"].is_object());
 }
 
 #[test]
@@ -76,4 +82,13 @@ fn performance_workloads_report_their_actual_producer_rate() {
         240
     );
     assert_eq!(PerformanceWorkload::SparseUpdates.producer_hz(), 40);
+}
+
+#[test]
+fn cpu_metrics_use_portable_core_and_machine_normalization() {
+    let metrics = PerformanceCpuMetrics::from_interval(500, Duration::from_secs(2), 8);
+
+    assert_eq!(metrics.process_cpu_time_ms, 500);
+    assert!((metrics.average_core_utilization_percent - 25.0).abs() < f64::EPSILON);
+    assert!((metrics.average_machine_utilization_percent - 3.125).abs() < f64::EPSILON);
 }
