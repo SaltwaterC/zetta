@@ -84,6 +84,7 @@ fn terminal_rendering_profiler_arguments_are_cross_platform() {
             profile_pane_stress: false,
             profile_background_stress: false,
             profile_sparse_updates: false,
+            profile_external_terminal: false,
             tftp_command: None,
         }
     );
@@ -99,6 +100,7 @@ fn terminal_rendering_profiler_arguments_are_cross_platform() {
             profile_pane_stress: false,
             profile_background_stress: false,
             profile_sparse_updates: false,
+            profile_external_terminal: false,
             tftp_command: None,
         }
     );
@@ -134,10 +136,20 @@ fn shorthand_options_match_long_options() {
     .unwrap();
     assert_eq!(shorthand, longhand);
 
-    let shorthand = parse_args_from([OsString::from("-P"), OsString::from("-u")]).unwrap();
+    let shorthand = parse_args_from([
+        OsString::from("-P"),
+        OsString::from("-u"),
+        OsString::from("-x"),
+        OsString::from("-d"),
+        OsString::from("2.5"),
+    ])
+    .unwrap();
     let longhand = parse_args_from([
         OsString::from("--profile-terminal-rendering"),
         OsString::from("--profile-sparse-updates"),
+        OsString::from("--profile-external-terminal"),
+        OsString::from("--profile-duration"),
+        OsString::from("2.5"),
     ])
     .unwrap();
     assert_eq!(shorthand, longhand);
@@ -282,6 +294,59 @@ fn sparse_updates_require_and_record_profiler_mode() {
         OsString::from("--profile-terminal-rendering"),
         OsString::from("--profile-background-stress"),
         OsString::from("--profile-sparse-updates"),
+    ])
+    .unwrap_err();
+    assert!(error.to_string().contains("cannot be combined"));
+}
+
+#[test]
+fn external_terminal_mode_requires_a_bounded_compatible_workload() {
+    let args = parse_args_from([
+        OsString::from("--profile-terminal-rendering"),
+        OsString::from("--profile-external-terminal"),
+        OsString::from("--profile-duration"),
+        OsString::from("2.5"),
+    ])
+    .unwrap();
+    assert!(args.profile_external_terminal);
+    assert_eq!(args.profile_duration, Some(Duration::from_secs_f64(2.5)));
+
+    let error = parse_args_from([
+        OsString::from("--profile-external-terminal"),
+        OsString::from("--profile-duration"),
+        OsString::from("1"),
+    ])
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("requires --profile-terminal-rendering")
+    );
+
+    let error = parse_args_from([
+        OsString::from("--profile-terminal-rendering"),
+        OsString::from("--profile-external-terminal"),
+    ])
+    .unwrap_err();
+    assert!(error.to_string().contains("requires --profile-duration"));
+
+    let error = parse_args_from([
+        OsString::from("--profile-terminal-rendering"),
+        OsString::from("--profile-external-terminal"),
+        OsString::from("--profile-duration"),
+        OsString::from("1"),
+        OsString::from("--profile-report"),
+        OsString::from("profile.json"),
+    ])
+    .unwrap_err();
+    assert!(error.to_string().contains("cannot be combined"));
+
+    let error = parse_args_from([
+        OsString::from("--profile-terminal-rendering"),
+        OsString::from("--profile-external-terminal"),
+        OsString::from("--profile-duration"),
+        OsString::from("1"),
+        OsString::from("--profile-pane-stress"),
     ])
     .unwrap_err();
     assert!(error.to_string().contains("cannot be combined"));

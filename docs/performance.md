@@ -42,6 +42,29 @@ attach the platform profiler while the workload runs: `perf` on Linux,
 Instruments or `sample` on macOS, and Windows Performance Recorder/Analyzer on
 Windows.
 
+## Comparing other terminal emulators
+
+Add `--profile-external-terminal` or `-x` to run only the deterministic
+producer in the terminal that invoked Zetta, without opening a Zetta window.
+Build once, then run the same optimized binary inside every terminal emulator:
+
+```sh
+cargo build --release
+target/release/zetta -P -x -d 10
+target/release/zetta -P -x -b -d 10
+target/release/zetta -P -x -u -d 10
+```
+
+The commands run the standard 240 Hz grid, changing checkerboard, and 40 Hz
+sparse-update workloads respectively. External mode requires an explicit
+duration and restores terminal colors and cursor visibility when it exits.
+
+Measure the hosting terminal emulator with the platform profiler or process
+monitor during each run. Zetta cannot collect another application's frame
+callbacks, so external mode cannot be combined with `--profile-report`.
+Likewise, `--profile-pane-stress` remains Zetta-specific because an application
+cannot create native panes in an unrelated terminal emulator.
+
 ## Automated reports
 
 Run for ten seconds, write a portable JSON report, and exit:
@@ -61,10 +84,10 @@ cargo run --release -- \
   --profile-duration 30
 ```
 
-Providing a report path defaults to ten seconds. `--profile-duration` requires
-a report path. Zetta creates missing parent directories, writes the report, and
-exits. Closing the window early or failing to write the report returns a
-non-zero status.
+Providing a report path defaults to ten seconds. Outside external-terminal
+mode, `--profile-duration` requires a report path. Zetta creates missing parent
+directories, writes the report, and exits. Closing the window early or failing
+to write the report returns a non-zero status.
 
 The arguments are the same in PowerShell, Command Prompt, and Unix shells;
 adjust line-continuation syntax when splitting the command.
