@@ -635,7 +635,16 @@ impl Tab {
     }
 
     pub(crate) fn toggle_maximize(&mut self, pane_id: u64) -> bool {
-        if self.panes.len() < 2 || self.pane(pane_id).is_none() {
+        if self.pane(pane_id).is_none() {
+            return false;
+        }
+        let pane_was_minimized = self.minimized_panes.contains(&pane_id);
+        let visible_pane_count = self
+            .panes
+            .len()
+            .saturating_sub(self.minimized_panes.len())
+            .saturating_add(usize::from(pane_was_minimized));
+        if self.maximized_pane != Some(pane_id) && visible_pane_count < 2 {
             return false;
         }
         self.minimized_panes.retain(|id| *id != pane_id);

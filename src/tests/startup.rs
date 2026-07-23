@@ -799,8 +799,8 @@ fn pane_layout_rotation_uses_the_requested_shortcut() {
 }
 
 #[test]
-fn close_pane_uses_a_distinct_shortcut_from_close_tab() {
-    assert_eq!(CLOSE_PANE_KEYBINDING, "ctrl-shift-x");
+fn close_pane_uses_the_pane_control_modifiers() {
+    assert_eq!(CLOSE_PANE_KEYBINDING, "alt-shift-x");
     let shortcut = gpui::Keystroke::parse(CLOSE_PANE_KEYBINDING).unwrap();
     assert_eq!(
         close_pane_keybinding().match_keystrokes(&[shortcut]),

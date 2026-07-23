@@ -2442,7 +2442,9 @@ impl Zetta {
                                                 .icon_size(IconSize::XSmall)
                                                 .icon_color(Color::Custom(colors.icon))
                                                 .aria_label("Minimize pane")
-                                                .tooltip(Tooltip::text("Minimize pane"))
+                                                .tooltip(Tooltip::text(
+                                                    "Minimize pane (Alt-Shift-Down)",
+                                                ))
                                                 .on_click(move |_, window, cx| {
                                                     minimize_handle
                                                         .update(cx, |this, cx| {
@@ -2491,7 +2493,7 @@ impl Zetta {
                                         .icon_size(IconSize::XSmall)
                                         .icon_color(Color::Custom(colors.icon))
                                         .aria_label("Close pane")
-                                        .tooltip(Tooltip::text("Close pane (Ctrl-Shift-X)"))
+                                        .tooltip(Tooltip::text("Close pane (Alt-Shift-X)"))
                                         .on_click(
                                             move |_, window, cx| {
                                                 close_handle

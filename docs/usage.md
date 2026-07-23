@@ -156,12 +156,15 @@ filter, use the arrow keys to select a command, and press `Enter` to run it.
 | `Ctrl-Shift-O` | Split active pane horizontally (top/bottom) |
 | `Ctrl-Shift-E` | Split active pane vertically (left/right) |
 | `Alt-Shift-R` | Rotate a two-pane layout |
-| `Ctrl-Shift-X` | Close the active pane or its final tab |
+| `Alt-Shift-X` | Close the active pane or its final tab |
 | `PageUp` / `PageDown` | Send page navigation to the foreground program |
 | `Shift-PageUp` / `Shift-PageDown` | Scroll history by one page |
 | `Ctrl-Shift-A` | Select all terminal text |
 | `Ctrl-Shift-Backspace` | Clear the system clipboard |
 | `Alt-Arrow` | Focus the pane in that direction |
+| `Alt-Shift-Down` | Minimize the active pane |
+| `Alt-Shift-Left` / `Alt-Shift-Right` | Select the previous / next minimized pane |
+| `Alt-Shift-Up` | Restore the selected minimized pane |
 | `Shift-Escape` | Maximize or restore the active pane |
 | `Ctrl-Shift-I` | Toggle input broadcasting in the active tab |
 | `Ctrl-Tab` / `Ctrl-Shift-Tab` | Next / previous tab |

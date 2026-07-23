@@ -565,7 +565,7 @@ impl Render for Zetta {
                                             .icon_color(Color::Custom(tab_colors.icon))
                                             .aria_label("Close pane")
                                             .tooltip(Tooltip::text(
-                                                "Close pane (Ctrl-Shift-X)",
+                                                "Close pane (Alt-Shift-X)",
                                             ))
                                             .on_click(move |_, window, cx| {
                                                 close_handle
@@ -799,7 +799,7 @@ impl Render for Zetta {
                                         .icon_color(Color::Custom(tab_colors.icon))
                                         .aria_label("Close minimized pane")
                                         .tooltip(Tooltip::text(
-                                            "Close selected minimized pane (Ctrl-Shift-X when active)",
+                                            "Close selected minimized pane (Alt-Shift-X when active)",
                                         ))
                                         .on_click(move |_, window, cx| {
                                             close_handle

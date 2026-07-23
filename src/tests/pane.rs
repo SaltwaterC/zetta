@@ -656,6 +656,19 @@ fn maximizing_and_restoring_preserves_the_original_layout() {
 }
 
 #[test]
+fn maximizing_the_only_visible_pane_is_a_no_op() {
+    let mut tab = pane_management_tab();
+
+    assert!(tab.minimize(2));
+    assert!(tab.minimize(3));
+    assert_eq!(tab.visible_layout(), Some(PaneLayout::Pane(1)));
+
+    assert!(!tab.toggle_maximize(1));
+    assert_eq!(tab.maximized_pane, None);
+    assert_eq!(tab.visible_layout(), Some(PaneLayout::Pane(1)));
+}
+
+#[test]
 fn pane_labels_remain_stable_and_are_not_reused() {
     let mut tab = pane_management_tab();
 

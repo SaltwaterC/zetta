@@ -650,7 +650,7 @@ pub(crate) fn validate_keymap_contents(content: &str, cx: &mut App) -> Result<()
 
 pub(crate) const RENAME_TAB_KEYBINDING: &str = "ctrl-alt-r";
 pub(crate) const RENAME_PANE_KEYBINDING: &str = "alt-shift-l";
-pub(crate) const CLOSE_PANE_KEYBINDING: &str = "ctrl-shift-x";
+pub(crate) const CLOSE_PANE_KEYBINDING: &str = "alt-shift-x";
 pub(crate) const SAVE_PANE_OUTPUT_KEYBINDING: &str = "ctrl-shift-s";
 pub(crate) const SERIAL_CONSOLE_KEYBINDING: &str = "ctrl-shift-d";
 pub(crate) const AUTO_BACKGROUND_TAB_KEYBINDING: &str = "alt-shift-p";
