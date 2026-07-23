@@ -1,7 +1,7 @@
 mod terminal_element;
 mod terminal_scrollbar;
 
-use std::{cmp, ops::Range as StdRange, sync::Arc, time::Duration};
+use std::{cmp, ops::Range as StdRange, path::PathBuf, sync::Arc, time::Duration};
 
 use gpui::{
     Action, AnyElement, App, AppContext as _, ClipboardItem, Context, DismissEvent, Entity,
@@ -27,6 +27,7 @@ use ui::{
     prelude::*,
     scrollbars::{self, ScrollbarVisibility},
 };
+use util::paths::PathWithPosition;
 
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -328,7 +329,12 @@ impl TerminalView {
                     cx.notify();
                 }
                 Event::Open(MaybeNavigationTarget::Url(url)) => cx.open_url(url),
-                Event::Open(MaybeNavigationTarget::PathLike(_)) => {}
+                Event::Open(MaybeNavigationTarget::PathLike(target)) => {
+                    match local_path_open_action(target) {
+                        LocalPathOpenAction::OpenDirectory(path) => cx.open_with_system(&path),
+                        LocalPathOpenAction::RevealFile(path) => cx.reveal_path(&path),
+                    }
+                }
             },
         );
 
@@ -1263,12 +1269,42 @@ fn trim_paste_text(text: &str) -> &str {
     text.trim()
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum LocalPathOpenAction {
+    OpenDirectory(PathBuf),
+    RevealFile(PathBuf),
+}
+
+fn local_path_open_action(target: &terminal::PathLikeTarget) -> LocalPathOpenAction {
+    let path = resolve_local_path(target);
+    if path.is_dir() {
+        LocalPathOpenAction::OpenDirectory(path)
+    } else {
+        LocalPathOpenAction::RevealFile(path)
+    }
+}
+
+fn resolve_local_path(target: &terminal::PathLikeTarget) -> PathBuf {
+    let path = PathWithPosition::parse_str(&target.maybe_path).path;
+    if path.is_absolute() {
+        path
+    } else if let Some(terminal_dir) = &target.terminal_dir {
+        terminal_dir.join(path)
+    } else {
+        path
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        enabled_input_event, navigated_match_index, next_char_boundary, previous_char_boundary,
-        search_request_is_current, trim_paste_text,
+        LocalPathOpenAction, enabled_input_event, local_path_open_action, navigated_match_index,
+        next_char_boundary, previous_char_boundary, resolve_local_path, search_request_is_current,
+        trim_paste_text,
     };
+    use gpui::Modifiers;
+    use std::path::PathBuf;
+    use terminal::{PathLikeTarget, is_hyperlink_modifier};
 
     #[test]
     fn trimmed_paste_removes_only_outer_whitespace() {
@@ -1308,5 +1344,66 @@ mod tests {
         });
         assert!(event.is_none());
         assert_eq!(builds.get(), 0);
+    }
+
+    #[test]
+    fn relative_file_links_are_resolved_from_the_terminal_directory() {
+        let terminal_dir = std::env::temp_dir().join("zetta-link-test");
+        let target = PathLikeTarget {
+            maybe_path: "src/main.rs:12:4".to_owned(),
+            terminal_dir: Some(terminal_dir.clone()),
+        };
+
+        assert_eq!(
+            resolve_local_path(&target),
+            terminal_dir.join("src").join("main.rs")
+        );
+    }
+
+    #[test]
+    fn absolute_file_links_do_not_use_the_terminal_directory() {
+        let absolute_path = std::env::temp_dir().join("zetta-absolute-link.rs");
+        let target = PathLikeTarget {
+            maybe_path: absolute_path.to_string_lossy().into_owned(),
+            terminal_dir: Some(PathBuf::from("ignored")),
+        };
+
+        assert_eq!(resolve_local_path(&target), absolute_path);
+    }
+
+    #[test]
+    fn directory_links_open_the_directory() {
+        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let target = PathLikeTarget {
+            maybe_path: directory.to_string_lossy().into_owned(),
+            terminal_dir: None,
+        };
+
+        assert_eq!(
+            local_path_open_action(&target),
+            LocalPathOpenAction::OpenDirectory(directory)
+        );
+    }
+
+    #[test]
+    fn file_links_are_revealed_in_their_parent_directory() {
+        let file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/standalone.rs");
+        let target = PathLikeTarget {
+            maybe_path: file.to_string_lossy().into_owned(),
+            terminal_dir: None,
+        };
+
+        assert_eq!(
+            local_path_open_action(&target),
+            LocalPathOpenAction::RevealFile(file)
+        );
+    }
+
+    #[test]
+    fn control_is_a_hyperlink_modifier_on_every_platform() {
+        assert!(is_hyperlink_modifier(&Modifiers {
+            control: true,
+            ..Default::default()
+        }));
     }
 }

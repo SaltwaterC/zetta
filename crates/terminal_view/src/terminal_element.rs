@@ -14,7 +14,7 @@ use std::time::Instant;
 use terminal::{
     Cell, Color, Content, CursorShape, IndexedCell, Modes, NamedColor, Point, Range, Terminal,
     TerminalBounds, is_app_chosen_exact_color as terminal_is_app_chosen_exact_color,
-    is_default_background_color, terminal_settings::TerminalSettings,
+    is_default_background_color, is_hyperlink_modifier, terminal_settings::TerminalSettings,
 };
 use theme::{ActiveTheme, Theme};
 use theme_settings::ThemeSettings;
@@ -1185,7 +1185,7 @@ impl Element for TerminalElement {
                         terminal.set_size(dimensions);
                         terminal.sync(window, cx);
 
-                        if window.modifiers().secondary()
+                        if is_hyperlink_modifier(&window.modifiers())
                             && bounds.contains(&window.mouse_position())
                             && self.terminal_view.read(cx).hover.is_some()
                         {
@@ -1468,7 +1468,7 @@ impl Element for TerminalElement {
                 &layout.content_mode,
                 window,
             );
-            if window.modifiers().secondary()
+            if is_hyperlink_modifier(&window.modifiers())
                 && bounds.contains(&window.mouse_position())
                 && self.terminal_view.read(cx).hover.is_some()
             {

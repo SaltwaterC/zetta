@@ -686,6 +686,14 @@ pub enum MaybeNavigationTarget {
     PathLike(PathLikeTarget),
 }
 
+/// Whether the modifiers should activate a terminal hyperlink.
+///
+/// Control-click is supported on every platform. Command-click remains
+/// supported on macOS as the platform-standard equivalent.
+pub fn is_hyperlink_modifier(modifiers: &Modifiers) -> bool {
+    modifiers.control || modifiers.secondary()
+}
+
 #[derive(Clone)]
 enum InternalEvent {
     Resize {
@@ -2579,7 +2587,7 @@ impl Terminal {
             .terminal_bounds
             .bounds
             .contains(&window.mouse_position())
-            && modifiers.secondary()
+            && is_hyperlink_modifier(modifiers)
         {
             self.refresh_hovered_word(window);
         }
@@ -2711,7 +2719,7 @@ impl Terminal {
 
     fn schedule_find_hyperlink(&mut self, modifiers: Modifiers, position: GpuiPoint<Pixels>) {
         if self.selection_phase == SelectionPhase::Selecting
-            || !modifiers.secondary()
+            || !is_hyperlink_modifier(&modifiers)
             || !self.last_content.terminal_bounds.bounds.contains(&position)
         {
             self.last_content.last_hovered_word = None;
@@ -2831,7 +2839,7 @@ impl Terminal {
         );
 
         if e.button == MouseButton::Left
-            && e.modifiers.secondary()
+            && is_hyperlink_modifier(&e.modifiers)
             && (TerminalSettings::get_global(cx).open_links_in_mouse_mode
                 || !self.mouse_mode(e.modifiers.shift))
         {
@@ -2960,7 +2968,7 @@ impl Terminal {
                     .and_then(|cell| cell.hyperlink())
                 {
                     cx.open_url(link.uri());
-                } else if e.modifiers.secondary() {
+                } else if is_hyperlink_modifier(&e.modifiers) {
                     self.events
                         .push_back(InternalEvent::FindHyperlink(position, true));
                 }
@@ -4255,7 +4263,10 @@ mod tests {
         let mouse_down = MouseDownEvent {
             button: MouseButton::Left,
             position,
-            modifiers: Modifiers::secondary_key(),
+            modifiers: Modifiers {
+                control: true,
+                ..Default::default()
+            },
             click_count: 1,
             first_mouse: true,
         };
@@ -4271,7 +4282,10 @@ mod tests {
         let drag_event = MouseMoveEvent {
             position,
             pressed_button: Some(MouseButton::Left),
-            modifiers: Modifiers::secondary_key(),
+            modifiers: Modifiers {
+                control: true,
+                ..Default::default()
+            },
         };
         terminal.mouse_drag(&drag_event, terminal_bounds, cx);
     }
@@ -4284,7 +4298,10 @@ mod tests {
         let mouse_up = MouseUpEvent {
             button: MouseButton::Left,
             position,
-            modifiers: Modifiers::secondary_key(),
+            modifiers: Modifiers {
+                control: true,
+                ..Default::default()
+            },
             click_count: 1,
         };
         terminal.mouse_up(&mouse_up, cx);
