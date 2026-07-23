@@ -1285,7 +1285,7 @@ fn local_path_open_action(target: &terminal::PathLikeTarget) -> LocalPathOpenAct
 }
 
 fn resolve_local_path(target: &terminal::PathLikeTarget) -> PathBuf {
-    let path = PathWithPosition::parse_str(&target.maybe_path).path;
+    let path = normalize_local_path(PathWithPosition::parse_str(&target.maybe_path).path);
     if path.is_absolute() {
         path
     } else if let Some(terminal_dir) = &target.terminal_dir {
@@ -1295,12 +1295,27 @@ fn resolve_local_path(target: &terminal::PathLikeTarget) -> PathBuf {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn normalize_local_path(path: PathBuf) -> PathBuf {
+    normalize_windows_path(path)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn normalize_local_path(path: PathBuf) -> PathBuf {
+    path
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn normalize_windows_path(path: PathBuf) -> PathBuf {
+    PathBuf::from(path.to_string_lossy().replace('/', "\\"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         LocalPathOpenAction, enabled_input_event, local_path_open_action, navigated_match_index,
-        next_char_boundary, previous_char_boundary, resolve_local_path, search_request_is_current,
-        trim_paste_text,
+        next_char_boundary, normalize_windows_path, previous_char_boundary, resolve_local_path,
+        search_request_is_current, trim_paste_text,
     };
     use gpui::Modifiers;
     use std::path::PathBuf;
@@ -1369,6 +1384,16 @@ mod tests {
         };
 
         assert_eq!(resolve_local_path(&target), absolute_path);
+    }
+
+    #[test]
+    fn mixed_windows_path_separators_are_normalized_for_the_shell() {
+        assert_eq!(
+            normalize_windows_path(PathBuf::from(
+                r"C:\Users\saltw\source\repos\zetta/README.md"
+            )),
+            PathBuf::from(r"C:\Users\saltw\source\repos\zetta\README.md")
+        );
     }
 
     #[test]
