@@ -1307,7 +1307,22 @@ fn normalize_local_path(path: PathBuf) -> PathBuf {
 
 #[cfg(any(target_os = "windows", test))]
 fn normalize_windows_path(path: PathBuf) -> PathBuf {
-    PathBuf::from(path.to_string_lossy().replace('/', "\\"))
+    let mut path = path.to_string_lossy().replace('/', "\\");
+    if path.starts_with(r"\\.\") {
+        return PathBuf::from(path);
+    }
+    while path.contains("\\.\\") {
+        path = path.replace("\\.\\", "\\");
+    }
+    while let Some(remainder) = path.strip_prefix(".\\") {
+        path = remainder.to_owned();
+    }
+    if path == "." {
+        path.clear();
+    } else if path.ends_with("\\.") {
+        path.pop();
+    }
+    PathBuf::from(path)
 }
 
 #[cfg(test)]
@@ -1393,6 +1408,24 @@ mod tests {
                 r"C:\Users\saltw\source\repos\zetta/README.md"
             )),
             PathBuf::from(r"C:\Users\saltw\source\repos\zetta\README.md")
+        );
+    }
+
+    #[test]
+    fn windows_current_directory_components_are_removed_for_the_shell() {
+        assert_eq!(
+            normalize_windows_path(PathBuf::from(
+                r"C:\Users\saltw\source\repos\zetta/.\README.md"
+            )),
+            PathBuf::from(r"C:\Users\saltw\source\repos\zetta\README.md")
+        );
+        assert_eq!(
+            normalize_windows_path(PathBuf::from(r".\.\README.md")),
+            PathBuf::from("README.md")
+        );
+        assert_eq!(
+            normalize_windows_path(PathBuf::from(r"\\.\COM1")),
+            PathBuf::from(r"\\.\COM1")
         );
     }
 
