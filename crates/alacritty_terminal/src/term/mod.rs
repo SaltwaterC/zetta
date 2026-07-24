@@ -1,8 +1,8 @@
 //! Exports the `Term` type which is a high-level API for the Grid.
 
 use std::ops::{Index, IndexMut, Range};
-use std::sync::Arc;
-use std::{cmp, mem, ptr, slice, str};
+use std::sync::{Arc, OnceLock, mpsc};
+use std::{cmp, mem, ptr, slice, str, thread, time::Duration};
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -10,11 +10,11 @@ use serde::{Deserialize, Serialize};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as Base64;
 use bitflags::bitflags;
-use log::{debug, trace};
+use log::{debug, trace, warn};
 use unicode_width::UnicodeWidthChar;
 
 use crate::event::{Event, EventListener};
-use crate::grid::{Dimensions, Grid, GridIterator, Scroll};
+use crate::grid::{DetachedRows, Dimensions, Grid, GridIterator, Scroll};
 use crate::index::{self, Boundary, Column, Direction, Line, Point, Side};
 use crate::selection::{Selection, SelectionRange, SelectionType};
 use crate::term::cell::{Cell, Flags, LineLength};
@@ -49,6 +49,39 @@ const KEYBOARD_MODE_STACK_MAX_DEPTH: usize = TITLE_STACK_MAX_DEPTH;
 
 /// Default tab interval, corresponding to terminfo `it` value.
 const INITIAL_TABSTOPS: usize = 8;
+
+type DetachedHistory = DetachedRows<Cell>;
+static HISTORY_RECLAIMER: OnceLock<Option<mpsc::Sender<DetachedHistory>>> = OnceLock::new();
+const HISTORY_RECLAIM_PAUSE: Duration = Duration::from_millis(1);
+
+fn defer_history_drop(history: DetachedHistory) {
+    if history.is_empty() {
+        return;
+    }
+
+    let sender = HISTORY_RECLAIMER.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel::<DetachedHistory>();
+        match thread::Builder::new().name("terminal-history-reclaimer".into()).spawn(move || {
+            while let Ok(mut history) = receiver.recv() {
+                while history.reclaim_next_chunk() {
+                    thread::sleep(HISTORY_RECLAIM_PAUSE);
+                }
+            }
+        }) {
+            Ok(_) => Some(sender),
+            Err(error) => {
+                warn!("failed to start terminal history reclaimer: {error}");
+                None
+            },
+        }
+    });
+
+    if let Some(sender) = sender
+        && let Err(error) = sender.send(history)
+    {
+        drop(error.0);
+    }
+}
 
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -214,6 +247,7 @@ impl Iterator for TermDamageIterator<'_> {
 }
 
 /// State of the terminal damage.
+#[derive(Clone)]
 struct TermDamageState {
     /// Hint whether terminal should be damaged entirely regardless of the actual damage changes.
     full: bool,
@@ -265,6 +299,7 @@ impl TermDamageState {
     }
 }
 
+#[derive(Clone)]
 pub struct Term<T> {
     /// Terminal focus controlling the cursor shape.
     pub is_focused: bool,
@@ -327,6 +362,13 @@ pub struct Term<T> {
 
     /// Config directly for the terminal.
     config: Config,
+}
+
+impl<T> Drop for Term<T> {
+    fn drop(&mut self) {
+        defer_history_drop(self.grid.take_history());
+        defer_history_drop(self.inactive_grid.take_history());
+    }
 }
 
 /// Configuration options for the [`Term`].
@@ -1803,7 +1845,7 @@ impl<T: EventListener> Handler for Term<T> {
                 self.selection = None;
             },
             ansi::ClearMode::Saved if self.history_size() > 0 => {
-                self.grid.clear_history();
+                defer_history_drop(self.grid.take_history());
 
                 self.vi_mode_cursor.point.line =
                     self.vi_mode_cursor.point.line.grid_clamp(self, Boundary::Cursor);
@@ -2316,6 +2358,7 @@ pub enum ClipboardType {
     Selection,
 }
 
+#[derive(Clone)]
 struct TabStops {
     tabs: Vec<bool>,
 }

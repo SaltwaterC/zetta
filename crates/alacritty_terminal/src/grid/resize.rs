@@ -99,6 +99,12 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
     /// Grow number of columns in each row, reflowing if necessary.
     fn grow_columns(&mut self, reflow: bool, columns: usize) {
+        if !reflow {
+            self.columns = columns;
+            self.raw.resize_columns_without_reflow(columns);
+            return;
+        }
+
         // Check if a row needs to be wrapped.
         let should_reflow = |row: &Row<T>| -> bool {
             let len = Column(row.len());
@@ -244,6 +250,14 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
     /// Shrink number of columns in each row, reflowing if necessary.
     fn shrink_columns(&mut self, reflow: bool, columns: usize) {
         self.columns = columns;
+
+        if !reflow {
+            self.raw.resize_columns_without_reflow(columns);
+            self.cursor.point.column = min(self.cursor.point.column, Column(columns - 1));
+            self.saved_cursor.point.column =
+                min(self.saved_cursor.point.column, Column(columns - 1));
+            return;
+        }
 
         // Remove the linewrap special case, by moving the cursor outside of the grid.
         if self.cursor.input_needs_wrap && reflow {

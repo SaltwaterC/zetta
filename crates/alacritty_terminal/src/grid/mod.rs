@@ -19,7 +19,22 @@ mod tests;
 pub use self::row::Row;
 use self::storage::Storage;
 
-pub trait GridCell: Sized {
+/// Rows detached from a live terminal grid for deferred destruction.
+pub(crate) struct DetachedRows<T> {
+    storage: Storage<T>,
+}
+
+impl<T: Clone> DetachedRows<T> {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.storage.len() == 0
+    }
+
+    pub(crate) fn reclaim_next_chunk(&mut self) -> bool {
+        self.storage.reclaim_next_chunk()
+    }
+}
+
+pub trait GridCell: Sized + Clone {
     /// Check if the cell contains any content.
     fn is_empty(&self) -> bool;
 
@@ -352,7 +367,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
     }
 }
 
-impl<T> Grid<T> {
+impl<T: Clone> Grid<T> {
     /// Reset a visible region within the grid.
     pub fn reset_region<D, R: RangeBounds<Line>>(&mut self, bounds: R)
     where
@@ -388,6 +403,12 @@ impl<T> Grid<T> {
         self.display_offset = 0;
     }
 
+    #[inline]
+    pub(crate) fn take_history(&mut self) -> DetachedRows<T> {
+        self.display_offset = 0;
+        DetachedRows { storage: self.raw.take_history() }
+    }
+
     /// This is used only for initializing after loading ref-tests.
     #[inline]
     pub fn initialize_all(&mut self)
@@ -412,6 +433,15 @@ impl<T> Grid<T> {
     pub fn iter_from(&self, point: Point) -> GridIterator<'_, T> {
         let end = Point::new(self.bottommost_line(), self.last_column());
         GridIterator { grid: self, point, end }
+    }
+
+    /// Stable identity for the backing allocation of a row.
+    ///
+    /// Equal identities allow read-only consumers to reuse derived data for deduplicated
+    /// scrollback rows. The identity is valid only while this grid is alive.
+    #[inline]
+    pub fn row_storage_id(&self, line: Line) -> usize {
+        self.raw.row_storage_id(line)
     }
 
     /// Iterate over all visible cells.
@@ -459,7 +489,7 @@ impl<T> Index<Line> for Grid<T> {
     }
 }
 
-impl<T> IndexMut<Line> for Grid<T> {
+impl<T: Clone> IndexMut<Line> for Grid<T> {
     #[inline]
     fn index_mut(&mut self, index: Line) -> &mut Row<T> {
         &mut self.raw[index]
@@ -475,7 +505,7 @@ impl<T> Index<Point> for Grid<T> {
     }
 }
 
-impl<T> IndexMut<Point> for Grid<T> {
+impl<T: Clone> IndexMut<Point> for Grid<T> {
     #[inline]
     fn index_mut(&mut self, point: Point) -> &mut T {
         &mut self[point.line][point.column]

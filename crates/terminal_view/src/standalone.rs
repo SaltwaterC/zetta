@@ -210,6 +210,8 @@ pub struct TerminalView {
     search_query: Option<String>,
     search_active_match: Option<usize>,
     search_generation: u64,
+    search_matches_limited: bool,
+    search_total_matches: usize,
     search_task: Option<Task<()>>,
     search_select_all: bool,
     search_cursor: usize,
@@ -249,6 +251,8 @@ impl TerminalView {
     pub fn clear_search(&mut self, cx: &mut Context<Self>) {
         self.search_query = None;
         self.search_generation = self.search_generation.wrapping_add(1);
+        self.search_matches_limited = false;
+        self.search_total_matches = 0;
         self.search_active_match = None;
         self.search_select_all = false;
         self.search_cursor = 0;
@@ -347,6 +351,8 @@ impl TerminalView {
             search_query: None,
             search_active_match: None,
             search_generation: 0,
+            search_matches_limited: false,
+            search_total_matches: 0,
             search_task: None,
             search_select_all: false,
             search_cursor: 0,
@@ -571,6 +577,8 @@ impl TerminalView {
             return;
         }
         self.search_generation = self.search_generation.wrapping_add(1);
+        self.search_matches_limited = false;
+        self.search_total_matches = 0;
         self.search_active_match = None;
         self.search_select_all = false;
         self.search_cursor = 0;
@@ -642,6 +650,8 @@ impl TerminalView {
         };
         self.search_generation = self.search_generation.wrapping_add(1);
         let generation = self.search_generation;
+        self.search_matches_limited = false;
+        self.search_total_matches = 0;
         if query.is_empty() {
             self.search_active_match = None;
             self.terminal.update(cx, |terminal, _| {
@@ -650,7 +660,7 @@ impl TerminalView {
             cx.notify();
             return;
         }
-        let Some(search) = Search::new(&regex::escape(&query)) else {
+        let Some(search) = Search::new_literal(&query) else {
             return;
         };
         let terminal = self.terminal.clone();
@@ -672,7 +682,7 @@ impl TerminalView {
             else {
                 return;
             };
-            let matches = search_task.await;
+            let result = search_task.await;
             this.update(cx, |this, cx| {
                 if !search_request_is_current(
                     generation,
@@ -682,10 +692,12 @@ impl TerminalView {
                 ) {
                     return;
                 }
-                let active_match = matches.len().checked_sub(1);
+                let active_match = result.ranges.len().checked_sub(1);
                 this.search_active_match = active_match;
+                this.search_matches_limited = result.limit_reached;
+                this.search_total_matches = result.total_count;
                 this.terminal.update(cx, |terminal, _| {
-                    terminal.matches = Arc::new(matches);
+                    terminal.matches = Arc::new(result.ranges);
                     if let Some(index) = active_match {
                         terminal.activate_match(index);
                     }
@@ -1066,10 +1078,20 @@ impl Render for TerminalView {
         let theme = self.theme.clone().unwrap_or_else(|| cx.theme().clone());
         let search_overlay = self.search_query.as_ref().map(|query| {
             let match_count = self.terminal.read(cx).matches.len();
-            let status = self
-                .search_active_match
-                .map(|index| format!("{} / {}", index + 1, match_count))
-                .unwrap_or_else(|| format!("0 / {match_count}"));
+            let status = if self.search_matches_limited {
+                let position = self
+                    .search_active_match
+                    .map(|index| (index + 1).to_string())
+                    .unwrap_or_else(|| "0".to_owned());
+                format!(
+                    "{position} / {match_count} shown · {} matches",
+                    self.search_total_matches
+                )
+            } else {
+                self.search_active_match
+                    .map(|index| format!("{} / {}", index + 1, self.search_total_matches))
+                    .unwrap_or_else(|| format!("0 / {}", self.search_total_matches))
+            };
             let cursor = self.search_cursor.min(query.len());
             let (query_before, query_after) = query.split_at(cursor);
             let query_before = query_before.to_owned();

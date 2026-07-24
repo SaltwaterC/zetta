@@ -14,6 +14,8 @@ pub(crate) struct TabSearch {
     pub(crate) generation: u64,
     pub(crate) matches: Vec<TabSearchMatch>,
     pub(crate) active_match: Option<usize>,
+    pub(crate) limit_reached: bool,
+    pub(crate) total_count: usize,
     pub(crate) task: Option<Task<()>>,
 }
 
@@ -26,6 +28,10 @@ pub(crate) fn tab_search_request_is_current(
     search.is_some_and(|search| {
         search.tab_id == tab_id && search.generation == generation && search.query == query
     })
+}
+
+pub(crate) fn tab_search_targets_tab(search: Option<&TabSearch>, tab_id: u64) -> bool {
+    search.is_some_and(|search| search.tab_id == tab_id)
 }
 
 impl Zetta {
@@ -57,6 +63,8 @@ impl Zetta {
                 generation: 0,
                 matches: Vec::new(),
                 active_match: None,
+                limit_reached: false,
+                total_count: 0,
                 task: None,
             });
             self.refresh_tab_search(cx);
@@ -91,6 +99,15 @@ impl Zetta {
         cx.notify();
     }
 
+    pub(crate) fn cancel_tab_search_for_tab(&mut self, tab_id: u64, cx: &mut Context<Self>) {
+        if !tab_search_targets_tab(self.tab_search.as_ref(), tab_id) {
+            return;
+        }
+        let search = self.tab_search.take().expect("targeted search must exist");
+        self.clear_tab_search_matches(search.tab_id, cx);
+        cx.notify();
+    }
+
     pub(crate) fn refresh_tab_search(&mut self, cx: &mut Context<Self>) {
         let Some(search_state) = self.tab_search.as_mut() else {
             return;
@@ -99,6 +116,8 @@ impl Zetta {
         search_state.generation = search_state.generation.wrapping_add(1);
         search_state.matches.clear();
         search_state.active_match = None;
+        search_state.limit_reached = false;
+        search_state.total_count = 0;
         let tab_id = search_state.tab_id;
         let query = search_state.query.clone();
         let generation = search_state.generation;
@@ -124,7 +143,7 @@ impl Zetta {
             cx.notify();
             return;
         }
-        let Some(pattern) = Search::new(&regex::escape(&query)) else {
+        let Some(pattern) = Search::new_literal(&query) else {
             return;
         };
         let executor = cx.background_executor().clone();
@@ -157,8 +176,8 @@ impl Zetta {
             };
             let mut results = Vec::with_capacity(tasks.len());
             for (pane_id, terminal, task) in tasks {
-                let matches: Vec<Range> = task.await;
-                results.push((pane_id, terminal, matches));
+                let result = task.await;
+                results.push((pane_id, terminal, result));
             }
             this.update(cx, |this, cx| {
                 let valid = tab_search_request_is_current(
@@ -172,9 +191,13 @@ impl Zetta {
                 }
 
                 let mut aggregated = Vec::new();
-                for (pane_id, terminal, matches) in results {
-                    let match_count = matches.len();
-                    terminal.update(cx, |terminal, _| terminal.matches = Arc::new(matches));
+                let mut limit_reached = false;
+                let mut total_count = 0usize;
+                for (pane_id, terminal, result) in results {
+                    let match_count = result.ranges.len();
+                    limit_reached |= result.limit_reached;
+                    total_count = total_count.saturating_add(result.total_count);
+                    terminal.update(cx, |terminal, _| terminal.matches = Arc::new(result.ranges));
                     aggregated.extend((0..match_count).map(|match_index| TabSearchMatch {
                         pane_id,
                         match_index,
@@ -184,6 +207,8 @@ impl Zetta {
                 if let Some(search) = this.tab_search.as_mut() {
                     search.matches = aggregated;
                     search.active_match = active_match;
+                    search.limit_reached = limit_reached;
+                    search.total_count = total_count;
                 }
                 if let Some(index) = active_match {
                     this.activate_tab_search_match(index, cx);

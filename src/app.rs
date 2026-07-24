@@ -82,6 +82,7 @@ pub(crate) struct Zetta {
     pub(crate) session_authentication: Option<SessionAuthenticationPrompt>,
     pub(crate) session_authentication_generation: u64,
     pub(crate) active_tab: usize,
+    pub(crate) visible_terminals: Vec<Entity<Terminal>>,
     pub(crate) profiles: Vec<Profile>,
     pub(crate) working_directory: Option<PathBuf>,
     pub(crate) next_tab_id: u64,
@@ -252,6 +253,7 @@ impl Zetta {
             session_authentication: None,
             session_authentication_generation: 0,
             active_tab: 0,
+            visible_terminals: Vec::new(),
             profiles: config.profiles,
             working_directory: config.working_directory,
             next_tab_id: 1,
@@ -372,6 +374,14 @@ impl Zetta {
             rename_select_all: false,
         });
         self.active_tab = self.tabs.len() - 1;
+
+        // Stop the previously active terminal from driving the foreground executor before
+        // starting the asynchronous PTY setup. Waiting for that setup to finish before the next
+        // render leaves high-volume output fully active during the entire tab-spawn operation.
+        for terminal in std::mem::take(&mut self.visible_terminals) {
+            terminal.update(cx, |terminal, cx| terminal.set_ui_visible(false, cx));
+        }
+        cx.notify();
 
         self.spawn_terminal(
             tab_id,
@@ -626,6 +636,8 @@ impl Zetta {
         if index >= self.tabs.len() {
             return;
         }
+        let tab_id = self.tabs[index].id;
+        self.cancel_tab_search_for_tab(tab_id, cx);
         let background_authentication = background_authentication_for_close(
             &self.tabs[index].close_policy,
             background_if_pinned,
@@ -648,6 +660,15 @@ impl Zetta {
             self.active_tab -= 1;
         } else if self.active_tab >= self.tabs.len() {
             self.active_tab = self.tabs.len() - 1;
+        }
+        // Returning to a tab can change its pane bounds during the first paint. Keep that
+        // visibility transition from synchronously reflowing its complete retained history.
+        for terminal in self.tabs[self.active_tab]
+            .panes
+            .iter()
+            .filter_map(|pane| pane.terminal.clone())
+        {
+            terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
         }
         self.focus_active(window, cx);
     }
@@ -695,6 +716,21 @@ impl Zetta {
             return;
         }
 
+        // Closing a pane changes the dimensions of the survivors. Reflowing millions of retained
+        // scrollback rows synchronously during the next paint can freeze the entire application.
+        // A layout-driven resize only needs to truncate/grow rows; the shells redraw their live
+        // prompts after receiving SIGWINCH.
+        let surviving_terminals = self.tabs[tab_index]
+            .panes
+            .iter()
+            .filter(|pane| pane.id != pane_id)
+            .filter_map(|pane| pane.terminal.clone())
+            .collect::<Vec<_>>();
+        for terminal in surviving_terminals {
+            terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
+        }
+
+        self.cancel_tab_search_for_tab(tab_id, cx);
         let tab = &mut self.tabs[tab_index];
         tab.remove_pane(pane_id);
         let Some(layout) = tab.layout.clone().without(pane_id) else {
@@ -737,9 +773,24 @@ impl Zetta {
             self.working_directory.clone(),
             self.launch_config.working_directory_configured,
         );
+        let terminals_resized_by_split = matches!(axis, SplitAxis::Vertical)
+            .then(|| {
+                tab.panes
+                    .iter()
+                    .filter_map(|pane| pane.terminal.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let pane_id = self.next_pane_id;
         self.next_pane_id += 1;
         let wsl_cwd_file = wsl_cwd_tracking_file(&profile, pane_id);
+
+        // A vertical split changes terminal widths. Reflowing a large retained buffer during the
+        // next paint blocks the UI before the new pane can appear. Preserve logical rows for this
+        // layout-driven resize; each shell will redraw its live prompt after SIGWINCH.
+        for terminal in terminals_resized_by_split {
+            terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
+        }
 
         let tab = &mut self.tabs[self.active_tab];
         tab.maximized_pane = None;
@@ -1378,6 +1429,13 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let visible = self
+            .tabs
+            .get(self.active_tab)
+            .is_some_and(|tab| tab.id == tab_id && tab.pane_is_visible(pane_id));
+        let terminal = view.read(cx).terminal().clone();
+        terminal.update(cx, |terminal, cx| terminal.set_ui_visible(visible, cx));
+
         let pane_label = self
             .tabs
             .iter()

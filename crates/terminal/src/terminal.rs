@@ -33,6 +33,7 @@ use theme::{ActiveTheme, Theme};
 use urlencoding;
 use util::{ResultExt as _, paths::PathStyle, truncate_and_trailoff};
 
+use alacritty_terminal::grid::Dimensions as _;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::{
@@ -59,7 +60,8 @@ pub use vte::ansi::{Color, NamedColor, Rgb};
 use gpui::{
     App, AppContext as _, BackgroundExecutor, Bounds, ClipboardItem, Context, EventEmitter, Hsla,
     Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Point as GpuiPoint, Rgba, ScrollWheelEvent, Size, Task, TouchPhase, Window, actions, black, px,
+    Point as GpuiPoint, Priority, Rgba, ScrollWheelEvent, Size, Task, TouchPhase, Window, actions,
+    black, px,
 };
 
 #[cfg(not(windows))]
@@ -67,13 +69,14 @@ use crate::alacritty::current_child_signal_mask;
 use crate::alacritty::{
     AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittySearch, AlacrittyTerm,
     AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, PtySender, RegexSearches,
-    append_text_to_term, apply_config, clear_saved_screen, content_text, display_offset,
-    display_only_term_config, find_from_terminal_point, full_content_range, last_non_empty_lines,
-    make_content, new_term, open_pty, pty_options, pty_term_config, resize, screen_lines,
-    scroll_display, scroll_to_point, search_matches, selection_text, set_default_cursor_style,
-    set_selection as set_term_selection, shrink_to_used, spawn_event_loop,
-    toggle_vi_mode as toggle_term_vi_mode, total_lines, update_selection as update_term_selection,
-    update_selection_to_vi_cursor, update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
+    ScrollbackSearch, WakeupGate, ZedListener, append_text_to_term, apply_config,
+    clear_saved_screen, content_text, display_offset, display_only_term_config,
+    find_from_terminal_point, full_content_range, last_non_empty_lines, make_content, new_term,
+    open_pty, pty_options, pty_term_config, resize, screen_lines, scroll_display, scroll_to_point,
+    selection_text, set_default_cursor_style, set_selection as set_term_selection, shrink_to_used,
+    spawn_event_loop, toggle_vi_mode as toggle_term_vi_mode, total_lines,
+    update_selection as update_term_selection, update_selection_to_vi_cursor,
+    update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
 };
 use crate::mappings::colors::to_vte_rgb;
 use crate::mappings::keys::to_esc_str;
@@ -127,6 +130,13 @@ enum ViMotion {
 #[derive(Clone, Debug)]
 pub struct Search {
     search: AlacrittySearch,
+    literal: Option<String>,
+}
+
+pub struct SearchMatches {
+    pub ranges: Vec<Range>,
+    pub total_count: usize,
+    pub limit_reached: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1020,6 +1030,10 @@ pub const MAX_SCROLL_HISTORY_LINES: usize = i32::MAX as usize;
 // terminal monopolize the foreground executor.
 const TERMINAL_EVENT_DRAIN_INTERVAL: Duration = Duration::from_millis(4);
 const MAX_TERMINAL_EVENTS_PER_BATCH: usize = 100;
+// Reflow cost scales with every retained cell and runs synchronously during paint. Above this
+// budget, preserve logical rows during width changes so dragging a window cannot monopolize the
+// UI thread for a large scrollback buffer.
+const MAX_SYNCHRONOUS_REFLOW_CELLS: usize = 1_000_000;
 const TERMINAL_SYNC_STALL_THRESHOLD: Duration = Duration::from_secs(2);
 const TERMINAL_SYNC_IDLE: u8 = 0;
 const TERMINAL_SYNC_WAITING_FOR_GRID: u8 = 1;
@@ -1028,8 +1042,18 @@ static TERMINAL_SYNC_WATCHDOG: Once = Once::new();
 static TERMINAL_SYNC_STARTED_AT: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 static TERMINAL_SYNC_STARTED_MS: AtomicU64 = AtomicU64::new(0);
 static TERMINAL_SYNC_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+const SEARCH_CHUNK_LINES: usize = 2_048;
+// Rendering thousands of highlighted terminal ranges monopolizes the UI thread
+// and prevents subsequent query keystrokes from being handled. This is a
+// highlight/navigation cap, not a minimum-query-length restriction: selective
+// queries still scan the complete snapshot and report their exact match count.
+const MAX_SEARCH_MATCHES: usize = 256;
 static TERMINAL_SYNC_PHASE: AtomicU8 = AtomicU8::new(TERMINAL_SYNC_IDLE);
 static NEXT_INIT_COMMAND_STARTUP_MARKER_ID: AtomicU64 = AtomicU64::new(1);
+
+fn synchronous_reflow_is_bounded(history_lines: usize, columns: usize) -> bool {
+    history_lines.saturating_mul(columns) <= MAX_SYNCHRONOUS_REFLOW_CELLS
+}
 
 fn terminal_diagnostic_millis() -> u64 {
     TERMINAL_SYNC_STARTED_AT
@@ -1180,12 +1204,9 @@ impl TerminalBuilder {
         let config = display_only_term_config(scrolling_history, cursor_shape);
 
         let (events_tx, events_rx) = unbounded();
-        let term = new_term(
-            &config,
-            terminal_bounds,
-            events_tx.clone(),
-            alternate_scroll,
-        );
+        let wakeup_gate = WakeupGate::new();
+        let listener = ZedListener::new(events_tx.clone(), wakeup_gate.clone());
+        let term = new_term(&config, terminal_bounds, listener, alternate_scroll);
 
         let terminal = Terminal {
             task: None,
@@ -1194,6 +1215,7 @@ impl TerminalBuilder {
             byte_stream: None,
             completion_tx: None,
             term,
+            wakeup_gate,
             term_config: config,
             output_processor: Processor::<StdSyncHandler>::new(),
             title_override: None,
@@ -1284,6 +1306,7 @@ impl TerminalBuilder {
             writer,
             builder.terminal.term.clone(),
             builder.events_tx.clone(),
+            builder.terminal.wakeup_gate.clone(),
         ));
         builder
     }
@@ -1420,11 +1443,13 @@ impl TerminalBuilder {
             //TODO: Remove with a bounded sender which can be dispatched on &self
             let (events_tx, events_rx) = unbounded();
             let builder_events_tx = events_tx.clone();
+            let wakeup_gate = WakeupGate::new();
+            let listener = ZedListener::new(events_tx.clone(), wakeup_gate.clone());
             //Set up the terminal...
             let term = new_term(
                 &config,
                 TerminalBounds::default(),
-                events_tx.clone(),
+                listener.clone(),
                 alternate_scroll,
             );
 
@@ -1446,6 +1471,7 @@ impl TerminalBuilder {
                     working_directory.clone(),
                     term.clone(),
                     events_tx,
+                    wakeup_gate.clone(),
                     &background_executor,
                 ) {
                     Ok(subprocess) => subprocess,
@@ -1499,7 +1525,7 @@ impl TerminalBuilder {
 
                 //And connect them together
                 let pty_tx =
-                    spawn_event_loop(term.clone(), events_tx, pty, pty_options.drain_on_exit)?;
+                    spawn_event_loop(term.clone(), listener, pty, pty_options.drain_on_exit)?;
 
                 (
                     TerminalType::Pty {
@@ -1518,6 +1544,7 @@ impl TerminalBuilder {
                 byte_stream: None,
                 completion_tx,
                 term,
+                wakeup_gate,
                 term_config: config,
                 output_processor: Processor::<StdSyncHandler>::new(),
                 title_override: terminal_title_override,
@@ -1701,6 +1728,7 @@ pub struct Terminal {
     byte_stream: Option<ByteStreamHandle>,
     completion_tx: Option<Sender<Option<ExitStatus>>>,
     term: Arc<AlacrittyTermLock>,
+    wakeup_gate: WakeupGate,
     term_config: AlacrittyTermConfig,
     output_processor: Processor<StdSyncHandler>,
     events: VecDeque<InternalEvent>,
@@ -1800,6 +1828,18 @@ const FIND_HYPERLINK_THROTTLE_PX: Pixels = px(5.0);
 const SELECTION_DRAG_THRESHOLD: f64 = 2.0;
 
 impl Terminal {
+    /// Enable UI wakeups while this terminal is visible.
+    ///
+    /// PTY parsing and scrollback collection continue while disabled; only the high-frequency
+    /// foreground notifications are suppressed. Re-enabling emits one consolidated wakeup so
+    /// the next render catches up with all background output.
+    pub fn set_ui_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        let was_visible = self.wakeup_gate.set_enabled(visible);
+        if visible && !was_visible {
+            self.process_event(TerminalBackendEvent::Wakeup, cx);
+        }
+    }
+
     pub fn set_reported_theme(&mut self, theme: Option<Arc<Theme>>) {
         self.reported_theme = theme;
     }
@@ -1929,6 +1969,8 @@ impl Terminal {
                     pty_tx.resize(new_bounds);
                 }
 
+                let reflow =
+                    reflow && synchronous_reflow_is_bounded(term.history_size(), term.columns());
                 resize(term, new_bounds, reflow);
                 // If there are matches we need to emit a wake up event to
                 // invalidate the matches and recalculate their locations
@@ -3050,11 +3092,24 @@ impl Terminal {
         }
     }
 
-    pub fn find_matches(&self, searcher: Search, cx: &Context<Self>) -> Task<Vec<Range>> {
-        let term = self.term.clone();
-        cx.background_spawn(async move {
-            let term = term.lock();
-            search_matches(&term, searcher)
+    pub fn find_matches(&self, searcher: Search, cx: &Context<Self>) -> Task<SearchMatches> {
+        // Storage rows are copy-on-write, so this only clones the small chunk index while
+        // preserving an immutable view of the query's scrollback. Searching the snapshot keeps
+        // the live PTY/render lock free for input and drawing.
+        let term = self.term.lock().clone();
+        let executor = cx.background_executor().clone();
+        executor.spawn_with_priority(Priority::Low, async move {
+            let mut search = ScrollbackSearch::new(&term, searcher);
+            loop {
+                let finished = search.advance(&term, SEARCH_CHUNK_LINES, MAX_SEARCH_MATCHES);
+                if finished {
+                    return search.finish();
+                }
+                // Dropping the owning GPUI task (for example when the query or tab closes)
+                // cancels between chunks. The search runs at low priority against an immutable
+                // snapshot, so no live terminal lock needs an artificial scheduling delay.
+                yield_now().await;
+            }
         })
     }
 
@@ -3413,6 +3468,7 @@ fn spawn_byte_stream(
     mut writer: Box<dyn Write + Send>,
     term: Arc<AlacrittyTermLock>,
     events_tx: futures::channel::mpsc::UnboundedSender<PtyEvent>,
+    wakeup_gate: WakeupGate,
 ) -> ByteStreamHandle {
     let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let reader_stopped = stopped.clone();
@@ -3437,9 +3493,11 @@ fn spawn_byte_stream(
                         let mut terminal = term.lock();
                         processor.advance(&mut *terminal, message.as_bytes());
                         drop(terminal);
-                        reader_events
-                            .unbounded_send(PtyEvent::Event(TerminalBackendEvent::Wakeup))
-                            .ok();
+                        if wakeup_gate.is_enabled() {
+                            reader_events
+                                .unbounded_send(PtyEvent::Event(TerminalBackendEvent::Wakeup))
+                                .ok();
+                        }
                         break;
                     }
                     Ok(count) => {
@@ -3448,9 +3506,11 @@ fn spawn_byte_stream(
                         let mut terminal = term.lock();
                         processor.advance(&mut *terminal, &converted);
                         drop(terminal);
-                        reader_events
-                            .unbounded_send(PtyEvent::Event(TerminalBackendEvent::Wakeup))
-                            .ok();
+                        if wakeup_gate.is_enabled() {
+                            reader_events
+                                .unbounded_send(PtyEvent::Event(TerminalBackendEvent::Wakeup))
+                                .ok();
+                        }
                     }
                 }
             }
@@ -3498,6 +3558,7 @@ fn spawn_task_subprocess(
     working_directory: Option<PathBuf>,
     term: Arc<AlacrittyTermLock>,
     events_tx: futures::channel::mpsc::UnboundedSender<PtyEvent>,
+    wakeup_gate: WakeupGate,
     executor: &BackgroundExecutor,
 ) -> Result<SubprocessHandle> {
     use futures::io::AsyncReadExt as _;
@@ -3526,6 +3587,7 @@ fn spawn_task_subprocess(
             let pump = |reader: Option<BoxedReader>| {
                 let term = term.clone();
                 let events_tx = events_tx.clone();
+                let wakeup_gate = wakeup_gate.clone();
                 async move {
                     let Some(mut reader) = reader else { return };
                     let mut processor = Processor::<StdSyncHandler>::new();
@@ -3545,9 +3607,13 @@ fn spawn_task_subprocess(
                                     let mut term = term.lock();
                                     processor.advance(&mut *term, &converted);
                                 }
-                                events_tx
-                                    .unbounded_send(PtyEvent::Event(TerminalBackendEvent::Wakeup))
-                                    .ok();
+                                if wakeup_gate.is_enabled() {
+                                    events_tx
+                                        .unbounded_send(PtyEvent::Event(
+                                            TerminalBackendEvent::Wakeup,
+                                        ))
+                                        .ok();
+                                }
                             }
                         }
                     }
@@ -4879,6 +4945,13 @@ mod tests {
             terminal.events.back(),
             Some(InternalEvent::Resize { reflow: true, .. })
         ));
+    }
+
+    #[test]
+    fn synchronous_history_reflow_has_a_cell_budget() {
+        assert!(synchronous_reflow_is_bounded(10_000, 100));
+        assert!(!synchronous_reflow_is_bounded(10_001, 100));
+        assert!(!synchronous_reflow_is_bounded(usize::MAX, 2));
     }
 
     #[gpui::test]

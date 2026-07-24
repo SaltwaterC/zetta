@@ -1241,7 +1241,7 @@ fn regex_search_for_query(query: &SearchQuery) -> Option<Search> {
         }
         Search::new(str)
     } else {
-        Search::new(&regex::escape(str))
+        Search::new_literal(str)
     }
 }
 
@@ -2035,8 +2035,10 @@ impl SearchableItem for TerminalView {
         cx: &mut Context<Self>,
     ) -> Task<Vec<Self::Match>> {
         if let Some(s) = regex_search_for_query(&query) {
-            self.terminal()
-                .update(cx, |term, cx| term.find_matches(s, cx))
+            let task = self
+                .terminal()
+                .update(cx, |term, cx| term.find_matches(s, cx));
+            cx.background_spawn(async move { task.await.ranges })
         } else {
             Task::ready(vec![])
         }

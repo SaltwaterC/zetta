@@ -44,6 +44,40 @@ fn resolve_visible_minimized_panes<T>(
 
 impl Render for Zetta {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Hidden terminals keep parsing PTY output and retaining scrollback, but they must not
+        // continually enqueue work on the foreground executor. A newly visible terminal emits
+        // one consolidated wakeup to render everything produced while it was hidden.
+        let visible_terminals = self
+            .tabs
+            .get(self.active_tab)
+            .into_iter()
+            .flat_map(|tab| {
+                tab.panes.iter().filter_map(|pane| {
+                    tab.pane_is_visible(pane.id)
+                        .then(|| pane.terminal.clone())
+                        .flatten()
+                })
+            })
+            .collect::<Vec<_>>();
+        for terminal in &self.visible_terminals {
+            if !visible_terminals
+                .iter()
+                .any(|visible| visible.entity_id() == terminal.entity_id())
+            {
+                terminal.update(cx, |terminal, cx| terminal.set_ui_visible(false, cx));
+            }
+        }
+        for terminal in &visible_terminals {
+            if !self
+                .visible_terminals
+                .iter()
+                .any(|visible| visible.entity_id() == terminal.entity_id())
+            {
+                terminal.update(cx, |terminal, cx| terminal.set_ui_visible(true, cx));
+            }
+        }
+        self.visible_terminals = visible_terminals;
+
         let colors = cx.theme().colors().clone();
         let error_color = cx.theme().status().error;
         let handle = cx.entity().downgrade();
@@ -882,10 +916,22 @@ impl Render for Zetta {
             let before = before.to_owned();
             let after = after.to_owned();
             let selected = search.select_all;
-            let status = search
-                .active_match
-                .map(|index| format!("{} / {}", index + 1, search.matches.len()))
-                .unwrap_or_else(|| format!("0 / {}", search.matches.len()));
+            let retained_match_count = search.matches.len();
+            let status = if search.limit_reached {
+                let position = search
+                    .active_match
+                    .map(|index| (index + 1).to_string())
+                    .unwrap_or_else(|| "0".to_owned());
+                format!(
+                    "{position} / {retained_match_count} shown · {} matches",
+                    search.total_count
+                )
+            } else {
+                search
+                    .active_match
+                    .map(|index| format!("{} / {}", index + 1, search.total_count))
+                    .unwrap_or_else(|| format!("0 / {}", search.total_count))
+            };
 
             div()
                 .absolute()

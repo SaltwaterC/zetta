@@ -2,7 +2,18 @@
 use std::num::NonZeroU32;
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
-use std::{borrow::Cow, io, mem, ops::RangeInclusive, path::PathBuf, sync::Arc};
+use std::{
+    borrow::Cow,
+    io, mem,
+    ops::RangeInclusive,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+    time::Duration,
+};
 
 mod hyperlinks;
 
@@ -18,8 +29,8 @@ use alacritty_terminal::{
     sync::FairMutex,
     term::{
         Config, Osc52, RenderableCursor, Term, TermMode,
-        cell::{Cell as AlacCell, Flags, Hyperlink as AlacHyperlink},
-        search::{Match, RegexIter, RegexSearch},
+        cell::{Cell as AlacCell, Flags, Hyperlink as AlacHyperlink, LineLength},
+        search::{RegexIter, RegexSearch},
     },
     tty,
     vi_mode::{ViModeCursor, ViMotion as AlacViMotion},
@@ -53,8 +64,39 @@ pub(super) type AlacrittyCell = AlacCell;
 pub(super) type AlacrittyGridIterator<'a> = GridIterator<'a, AlacCell>;
 pub(super) type AlacrittyHyperlink = AlacHyperlink;
 
+const HIDDEN_TERMINAL_READ_PAUSE: Duration = Duration::from_millis(8);
+
 #[derive(Clone)]
-pub(super) struct ZedListener(UnboundedSender<PtyEvent>);
+pub(super) struct WakeupGate(Arc<AtomicBool>);
+
+impl WakeupGate {
+    pub(super) fn new() -> Self {
+        Self(Arc::new(AtomicBool::new(true)))
+    }
+
+    pub(super) fn set_enabled(&self, enabled: bool) -> bool {
+        self.0.swap(enabled, Ordering::AcqRel)
+    }
+
+    pub(super) fn is_enabled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct ZedListener {
+    events_tx: UnboundedSender<PtyEvent>,
+    wakeup_gate: WakeupGate,
+}
+
+impl ZedListener {
+    pub(super) fn new(events_tx: UnboundedSender<PtyEvent>, wakeup_gate: WakeupGate) -> Self {
+        Self {
+            events_tx,
+            wakeup_gate,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub(super) struct AlacrittySearch {
@@ -185,10 +227,10 @@ pub(super) fn open_pty(
 pub(super) fn new_term(
     config: &AlacrittyTermConfig,
     bounds: TerminalBounds,
-    events_tx: UnboundedSender<PtyEvent>,
+    listener: ZedListener,
     alternate_scroll: AlternateScroll,
 ) -> Arc<AlacrittyTermLock> {
-    let mut term = Term::new(config.clone(), &bounds, ZedListener(events_tx));
+    let mut term = Term::new(config.clone(), &bounds, listener);
 
     if let AlternateScroll::Off = alternate_scroll {
         term.unset_private_mode(PrivateMode::Named(NamedPrivateMode::AlternateScroll));
@@ -199,11 +241,11 @@ pub(super) fn new_term(
 
 pub(super) fn spawn_event_loop(
     term: Arc<AlacrittyTermLock>,
-    events_tx: UnboundedSender<PtyEvent>,
+    listener: ZedListener,
     pty: AlacrittyPty,
     drain_on_exit: bool,
 ) -> Result<PtySender> {
-    let event_loop = EventLoop::new(term, ZedListener(events_tx), pty, drain_on_exit, false)
+    let event_loop = EventLoop::new(term, listener, pty, drain_on_exit, false)
         .context("failed to create event loop")?;
     let pty_tx = event_loop.channel();
     let _io_thread = event_loop.spawn();
@@ -340,7 +382,16 @@ impl From<AlacTermEvent> for TerminalBackendEvent {
 
 impl EventListener for ZedListener {
     fn send_event(&self, event: AlacTermEvent) {
-        self.0.unbounded_send(PtyEvent::Event(event.into())).ok();
+        if matches!(event, AlacTermEvent::Wakeup) && !self.wakeup_gate.is_enabled() {
+            // Apply backpressure between read batches once a terminal is hidden. Without this,
+            // a benchmark-producing background tab can monopolize a CPU core and the allocator
+            // even though none of its redraws reach the UI.
+            thread::sleep(HIDDEN_TERMINAL_READ_PAUSE);
+            return;
+        }
+        self.events_tx
+            .unbounded_send(PtyEvent::Event(event.into()))
+            .ok();
     }
 }
 
@@ -385,11 +436,18 @@ impl Search {
             search: AlacrittySearch {
                 search: RegexSearch::new(search).ok()?,
             },
+            literal: None,
         })
     }
 
-    fn into_alacritty(self) -> RegexSearch {
-        self.search.search
+    pub fn new_literal(search: &str) -> Option<Self> {
+        let mut result = Self::new(&regex::escape(search))?;
+        result.literal = (!search.is_empty() && search.is_ascii()).then(|| search.to_owned());
+        Some(result)
+    }
+
+    fn into_alacritty(self) -> (RegexSearch, Option<String>) {
+        (self.search.search, self.literal)
     }
 }
 
@@ -1024,27 +1082,372 @@ pub(super) unsafe fn append_text_to_term(term: &mut Term<ZedListener>, text_line
     }
 }
 
-pub(super) fn search_matches(term: &AlacrittyTerm, searcher: Search) -> Vec<Range> {
-    let mut searcher = searcher.into_alacritty();
-    all_search_matches(term, &mut searcher)
-        .map(Range::from_alacritty)
-        .collect()
+pub(super) struct ScrollbackSearch {
+    searcher: RegexSearch,
+    literal: Option<LiteralSearch>,
+    next_line: Line,
+    oldest_line: Line,
+    newest_line: Line,
+    matches: Vec<Range>,
+    total_count: usize,
 }
 
-fn all_search_matches<'a, T>(
-    term: &'a Term<T>,
-    regex: &'a mut RegexSearch,
-) -> impl Iterator<Item = Match> + 'a {
-    let start = AlacPoint::new(term.grid().topmost_line(), Column(0));
-    let end = AlacPoint::new(term.grid().bottommost_line(), term.grid().last_column());
-    RegexIter::new(start, end, AlacDirection::Right, term, regex)
+struct LiteralSearch {
+    query: Vec<char>,
+    case_insensitive: bool,
+    scratch: Vec<(char, AlacPoint)>,
+    cached_row_id: Option<usize>,
+    cached_row_matches: Vec<(Column, Column)>,
+    #[cfg(test)]
+    physical_rows_scanned: usize,
+}
+
+impl LiteralSearch {
+    fn new(query: String) -> Self {
+        let case_insensitive = !query
+            .chars()
+            .any(|character| character.is_ascii_uppercase());
+        Self {
+            query: query.chars().collect(),
+            case_insensitive,
+            scratch: Vec::new(),
+            cached_row_id: None,
+            cached_row_matches: Vec::new(),
+            #[cfg(test)]
+            physical_rows_scanned: 0,
+        }
+    }
+
+    fn characters_equal(&self, left: char, right: char) -> bool {
+        left == right
+            || (self.case_insensitive
+                && left.is_ascii()
+                && right.is_ascii()
+                && left.eq_ignore_ascii_case(&right))
+    }
+
+    /// Search complete logical lines from newest to oldest.
+    fn advance(
+        &mut self,
+        term: &AlacrittyTerm,
+        newest_line: Line,
+        oldest_line: Line,
+        matches: &mut Vec<Range>,
+        total_count: &mut usize,
+        match_limit: usize,
+    ) {
+        let grid = term.grid();
+        let last_column = grid.last_column();
+        let mut logical_newest = newest_line;
+
+        while logical_newest >= oldest_line {
+            let mut logical_oldest = logical_newest;
+            while logical_oldest > oldest_line
+                && grid[Line(logical_oldest.0 - 1)][last_column]
+                    .flags
+                    .contains(Flags::WRAPLINE)
+            {
+                logical_oldest.0 -= 1;
+            }
+
+            if logical_oldest == logical_newest {
+                self.append_physical_row_matches(
+                    term,
+                    logical_newest,
+                    matches,
+                    total_count,
+                    match_limit,
+                );
+                logical_newest.0 -= 1;
+                continue;
+            }
+
+            self.scratch.clear();
+            for line in logical_oldest.0..=logical_newest.0 {
+                let line = Line(line);
+                let row = &grid[line];
+                for column in 0..row.line_length().0 {
+                    let column = Column(column);
+                    let cell = &row[column];
+                    if cell
+                        .flags
+                        .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                    {
+                        continue;
+                    }
+                    self.scratch.push((cell.c, AlacPoint::new(line, column)));
+                }
+            }
+
+            if self.scratch.len() >= self.query.len() {
+                for start in (0..=self.scratch.len() - self.query.len()).rev() {
+                    if self.query.iter().enumerate().all(|(offset, expected)| {
+                        self.characters_equal(self.scratch[start + offset].0, *expected)
+                    }) {
+                        *total_count = total_count.saturating_add(1);
+                        if matches.len() < match_limit {
+                            let start_point = self.scratch[start].1;
+                            let end_point = self.scratch[start + self.query.len() - 1].1;
+                            matches.push(Range::from_alacritty(start_point..=end_point));
+                        }
+                    }
+                }
+            }
+
+            logical_newest = Line(logical_oldest.0 - 1);
+        }
+    }
+
+    fn append_physical_row_matches(
+        &mut self,
+        term: &AlacrittyTerm,
+        line: Line,
+        matches: &mut Vec<Range>,
+        total_count: &mut usize,
+        match_limit: usize,
+    ) {
+        let grid = term.grid();
+        let row_id = grid.row_storage_id(line);
+        if self.cached_row_id != Some(row_id) {
+            #[cfg(test)]
+            {
+                self.physical_rows_scanned += 1;
+            }
+            self.cached_row_id = Some(row_id);
+            self.cached_row_matches.clear();
+            self.scratch.clear();
+
+            let row = &grid[line];
+            for column in 0..row.line_length().0 {
+                let column = Column(column);
+                let cell = &row[column];
+                if cell
+                    .flags
+                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                {
+                    continue;
+                }
+                self.scratch.push((cell.c, AlacPoint::new(line, column)));
+            }
+
+            if self.scratch.len() >= self.query.len() {
+                for start in (0..=self.scratch.len() - self.query.len()).rev() {
+                    if self.query.iter().enumerate().all(|(offset, expected)| {
+                        self.characters_equal(self.scratch[start + offset].0, *expected)
+                    }) {
+                        self.cached_row_matches.push((
+                            self.scratch[start].1.column,
+                            self.scratch[start + self.query.len() - 1].1.column,
+                        ));
+                    }
+                }
+            }
+        }
+
+        for (start, end) in &self.cached_row_matches {
+            *total_count = total_count.saturating_add(1);
+            if matches.len() < match_limit {
+                matches.push(Range::from_alacritty(
+                    AlacPoint::new(line, *start)..=AlacPoint::new(line, *end),
+                ));
+            }
+        }
+    }
+}
+
+impl ScrollbackSearch {
+    pub(super) fn new(term: &AlacrittyTerm, searcher: Search) -> Self {
+        let (searcher, literal) = searcher.into_alacritty();
+        Self {
+            searcher,
+            literal: literal.map(LiteralSearch::new),
+            next_line: term.grid().bottommost_line(),
+            oldest_line: term.grid().topmost_line(),
+            newest_line: term.grid().bottommost_line(),
+            matches: Vec::new(),
+            total_count: 0,
+        }
+    }
+
+    /// Search a bounded number of physical rows, starting with the newest output.
+    ///
+    /// Chunk boundaries include the start of a logical line when it is nearby. Extremely long
+    /// wrapped lines are split after one additional chunk budget to keep lock time bounded.
+    pub(super) fn advance(
+        &mut self,
+        term: &AlacrittyTerm,
+        chunk_lines: usize,
+        match_limit: usize,
+    ) -> bool {
+        if self.next_line < self.oldest_line {
+            return true;
+        }
+
+        let current_oldest = term.grid().topmost_line();
+        let current_newest = term.grid().bottommost_line();
+        if current_oldest != self.oldest_line || current_newest != self.newest_line {
+            // History was cleared, grew, or resized between lock slices. Previously collected
+            // coordinates no longer identify the same cells, so restart from the current grid.
+            self.next_line = current_newest;
+            self.oldest_line = current_oldest;
+            self.newest_line = current_newest;
+            self.matches.clear();
+            self.total_count = 0;
+        }
+
+        let candidate = Line(
+            self.next_line
+                .0
+                .saturating_sub(chunk_lines.saturating_sub(1) as i32)
+                .max(self.oldest_line.0),
+        );
+        let extension_limit = Line(
+            candidate
+                .0
+                .saturating_sub(chunk_lines as i32)
+                .max(self.oldest_line.0),
+        );
+        let last_column = term.grid().last_column();
+        let mut chunk_end_line = candidate;
+        while chunk_end_line > extension_limit
+            && term.grid()[Line(chunk_end_line.0 - 1)][last_column]
+                .flags
+                .contains(Flags::WRAPLINE)
+        {
+            chunk_end_line.0 -= 1;
+        }
+        let chunk_end = AlacPoint::new(chunk_end_line, Column(0));
+        let chunk_start = AlacPoint::new(self.next_line, term.grid().last_column());
+        if let Some(literal) = &mut self.literal {
+            literal.advance(
+                term,
+                self.next_line,
+                chunk_end_line,
+                &mut self.matches,
+                &mut self.total_count,
+                match_limit,
+            );
+        } else {
+            let matches = RegexIter::new(
+                chunk_start,
+                chunk_end,
+                AlacDirection::Left,
+                term,
+                &mut self.searcher,
+            );
+            for range in matches {
+                self.total_count = self.total_count.saturating_add(1);
+                if self.matches.len() < match_limit {
+                    self.matches.push(Range::from_alacritty(range));
+                }
+            }
+        }
+        self.next_line = Line(chunk_end.line.0 - 1);
+
+        self.next_line < self.oldest_line
+    }
+
+    pub(super) fn finish(mut self) -> crate::SearchMatches {
+        // Leftward searches produce newest-first results, while the terminal selection and
+        // navigation APIs expect the original oldest-first ordering.
+        self.matches.reverse();
+        crate::SearchMatches {
+            limit_reached: self.total_count > self.matches.len(),
+            total_count: self.total_count,
+            ranges: self.matches,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use gpui::px;
     use std::sync::Arc;
 
     use super::*;
+
+    #[test]
+    fn disabled_wakeup_gate_suppresses_wakeups_without_suppressing_other_events() {
+        let (events_tx, mut events_rx) = futures::channel::mpsc::unbounded();
+        let wakeup_gate = WakeupGate::new();
+        let listener = ZedListener::new(events_tx, wakeup_gate.clone());
+        wakeup_gate.set_enabled(false);
+
+        listener.send_event(AlacTermEvent::Wakeup);
+        listener.send_event(AlacTermEvent::Bell);
+
+        assert!(matches!(
+            events_rx.try_recv(),
+            Ok(PtyEvent::Event(TerminalBackendEvent::Bell))
+        ));
+        assert!(events_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn scrollback_search_yields_between_chunks_and_limits_to_newest_matches() {
+        let bounds = TerminalBounds::new(
+            px(10.),
+            px(10.),
+            gpui::bounds(gpui::point(px(0.), px(0.)), gpui::size(px(40.), px(40.))),
+        );
+        let (events_tx, _) = futures::channel::mpsc::unbounded();
+        let listener = ZedListener::new(events_tx, WakeupGate::new());
+        let mut term = Term::new(Config::default(), &bounds, listener);
+        for line in 0..4 {
+            term.grid_mut()[Line(line)][Column(0)].c = 'x';
+        }
+
+        let mut search = ScrollbackSearch::new(&term, Search::new("x").unwrap());
+        let mut chunks = 1;
+        while !search.advance(&term, 1, 2) {
+            chunks += 1;
+        }
+        let result = search.finish();
+
+        assert!(chunks > 1);
+        assert!(result.limit_reached);
+        assert_eq!(result.ranges.len(), 2);
+        assert_eq!(result.total_count, 4);
+        assert_eq!(result.ranges[0].start().line, 2);
+        assert_eq!(result.ranges[1].start().line, 3);
+    }
+
+    #[test]
+    fn scrollback_search_narrows_from_capped_character_matches_to_exact_word_matches() {
+        let bounds = TerminalBounds::new(
+            px(10.),
+            px(10.),
+            gpui::bounds(gpui::point(px(0.), px(0.)), gpui::size(px(800.), px(40.))),
+        );
+        let (events_tx, _) = futures::channel::mpsc::unbounded();
+        let listener = ZedListener::new(events_tx, WakeupGate::new());
+        let mut term = Term::new(Config::default(), &bounds, listener);
+        for _ in 0..101 {
+            for character in "zzzz Zetta benchmark output".chars() {
+                term.input(character);
+            }
+            term.newline();
+            term.grid_mut().cursor.point.column = Column(0);
+        }
+
+        let mut broad = ScrollbackSearch::new(&term, Search::new_literal("z").unwrap());
+        while !broad.advance(&term, 7, crate::MAX_SEARCH_MATCHES) {}
+        let broad = broad.finish();
+        assert!(broad.limit_reached);
+        assert_eq!(broad.ranges.len(), crate::MAX_SEARCH_MATCHES);
+        assert_eq!(broad.total_count, 505);
+
+        let mut narrow = ScrollbackSearch::new(&term, Search::new_literal("zetta").unwrap());
+        while !narrow.advance(&term, 7, crate::MAX_SEARCH_MATCHES) {}
+        assert!(
+            narrow.literal.as_ref().unwrap().physical_rows_scanned < 10,
+            "deduplicated physical rows should reuse literal search results"
+        );
+        let narrow = narrow.finish();
+        assert!(!narrow.limit_reached);
+        assert_eq!(narrow.total_count, 101);
+        assert_eq!(narrow.ranges.len(), 101);
+    }
 
     #[test]
     fn terminal_hyperlink_from_alacritty_keeps_alacritty_storage() {
@@ -1111,7 +1514,8 @@ mod tests {
             gpui::bounds(gpui::point(px(0.), px(0.)), gpui::size(px(20.), px(20.))),
         );
         let (events_tx, _) = futures::channel::mpsc::unbounded();
-        let mut term = Term::new(Config::default(), &initial_bounds, ZedListener(events_tx));
+        let listener = ZedListener::new(events_tx, WakeupGate::new());
+        let mut term = Term::new(Config::default(), &initial_bounds, listener);
         for (column, character) in ['a', 'b', 'c', 'd'].into_iter().enumerate() {
             term.grid_mut()[Line(0)][Column(column)].c = character;
         }

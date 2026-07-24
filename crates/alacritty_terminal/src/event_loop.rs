@@ -162,6 +162,11 @@ where
             }
         }
 
+        // Release the terminal before notifying the UI. Event listeners are permitted to apply
+        // backpressure to hidden terminals, which must never extend the live grid lock duration.
+        drop(terminal);
+        drop(_terminal_lease);
+
         // Queue terminal redraw unless all processed bytes were synchronized.
         if state.parser.sync_bytes_count() < processed && processed > 0 {
             self.event_proxy.send_event(Event::Wakeup);
