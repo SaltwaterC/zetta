@@ -2559,7 +2559,46 @@ mod tests {
     use crate::selection::{Selection, SelectionType};
     use crate::term::cell::{Cell, Flags};
     use crate::term::test::TermSize;
-    use crate::vte::ansi::{self, CharsetIndex, Handler, StandardCharset};
+    use crate::vte::ansi::{
+        self, CharsetIndex, Handler, Processor, StandardCharset, StdSyncHandler,
+    };
+
+    #[test]
+    #[ignore = "manual optimized-build throughput check"]
+    fn plain_text_output_throughput_benchmark() {
+        const PAYLOAD_BYTES: usize = 10 * 1024 * 1024;
+        const LINE_BYTES: usize = 80;
+        const TEXT: &[u8] = b"0123456789 abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+        let payload = (0..PAYLOAD_BYTES)
+            .map(|index| {
+                let column = index % LINE_BYTES;
+                if column == LINE_BYTES - 2 {
+                    b'\r'
+                } else if column == LINE_BYTES - 1 {
+                    b'\n'
+                } else {
+                    TEXT[column % TEXT.len()]
+                }
+            })
+            .collect::<Vec<_>>();
+        let size = TermSize::new(98, 50);
+        let config = Config { scrolling_history: i32::MAX as usize, ..Config::default() };
+        let mut term = Term::new(config, &size, VoidListener);
+        let mut processor = Processor::<StdSyncHandler>::new();
+
+        let started_at = std::time::Instant::now();
+        processor.advance(&mut term, &payload);
+        let elapsed = started_at.elapsed();
+        let throughput = payload.len() as f64 / (1024.0 * 1024.0) / elapsed.as_secs_f64();
+
+        eprintln!(
+            "parsed {:.3} MiB in {:.3} s ({throughput:.3} MiB/s)",
+            payload.len() as f64 / (1024.0 * 1024.0),
+            elapsed.as_secs_f64(),
+        );
+        assert!(term.history_size() > 130_000);
+    }
 
     #[test]
     fn scroll_display_page_up() {

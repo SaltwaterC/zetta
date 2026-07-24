@@ -3093,9 +3093,9 @@ impl Terminal {
     }
 
     pub fn find_matches(&self, searcher: Search, cx: &Context<Self>) -> Task<SearchMatches> {
-        // Storage rows are copy-on-write, so this only clones the small chunk index while
-        // preserving an immutable view of the query's scrollback. Searching the snapshot keeps
-        // the live PTY/render lock free for input and drawing.
+        // Snapshotting copies only the bounded directly mutable live prefix and shares sealed
+        // immutable history chunks. Searching that snapshot keeps the live PTY/render lock free
+        // for input and drawing.
         let term = self.term.lock().clone();
         let executor = cx.background_executor().clone();
         executor.spawn_with_priority(Priority::Low, async move {

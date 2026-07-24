@@ -187,8 +187,13 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         };
     }
 
+    fn scroll_history_growth(&self, count: usize) -> usize {
+        min(count, self.max_scroll_limit - self.history_size())
+    }
+
+    #[cfg(test)]
     fn increase_scroll_limit(&mut self, count: usize) {
-        let count = min(count, self.max_scroll_limit - self.history_size());
+        let count = self.scroll_history_growth(count);
         if count != 0 {
             self.raw.initialize(count, self.columns);
         }
@@ -285,8 +290,10 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
         // Only rotate the entire history if the active region starts at the top.
         if region.start == 0 {
-            // Create scrollback for the new lines.
-            self.increase_scroll_limit(positions);
+            // Move complete rows through the directly mutable live ring, archiving only the
+            // bounded recent-history overflow.
+            let growth = self.scroll_history_growth(positions);
+            self.raw.scroll_up(positions, growth, self.columns);
 
             // Swap the lines fixed at the top to their target positions after rotation.
             //
@@ -299,9 +306,6 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             for i in (0..region.start.0).rev().map(Line::from) {
                 self.raw.swap(i, i + positions);
             }
-
-            // Rotate the entire line buffer upward.
-            self.raw.rotate(-(positions as isize));
 
             // Swap the fixed lines at the bottom back into position.
             let screen_lines = self.screen_lines() as i32;

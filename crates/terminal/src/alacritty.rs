@@ -1439,9 +1439,12 @@ mod tests {
 
         let mut narrow = ScrollbackSearch::new(&term, Search::new_literal("zetta").unwrap());
         while !narrow.advance(&term, 7, crate::MAX_SEARCH_MATCHES) {}
+        let physical_rows_scanned = narrow.literal.as_ref().unwrap().physical_rows_scanned;
         assert!(
-            narrow.literal.as_ref().unwrap().physical_rows_scanned < 10,
-            "deduplicated physical rows should reuse literal search results"
+            physical_rows_scanned <= term.total_lines(),
+            "the bounded directly mutable history prefix should be scanned only once, scanned \
+             {physical_rows_scanned} physical rows for {} retained rows",
+            term.total_lines()
         );
         let narrow = narrow.finish();
         assert!(!narrow.limit_reached);

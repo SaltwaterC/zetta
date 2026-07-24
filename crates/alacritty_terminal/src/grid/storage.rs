@@ -8,339 +8,213 @@ use serde::{Deserialize, Serialize};
 use super::Row;
 use crate::index::Line;
 
-// Keep copy-on-write mutations and deferred destruction bounded tightly enough
-// that one shared chunk cannot create a noticeable allocator or lock-time spike.
-const ROW_CHUNK_SIZE: usize = 256;
-
-/// A chunked double-ended row buffer.
+/// Recent history retained with the visible grid in directly mutable storage.
 ///
-/// Only the first and last chunk can be partially populated, so indexing stays
-/// constant-time without one contiguous allocation for every retained row.
+/// Search snapshots copy this bounded prefix, while older sealed chunks are shared. Keeping this
+/// reasonably small bounds search-start latency without putting copy-on-write checks in the
+/// per-character input path.
+const LIVE_HISTORY_ROWS: usize = 1_024;
+const ARCHIVE_CHUNK_ROWS: usize = 256;
+
+/// An immutable block of older history.
+///
+/// Uniform chunks preserve the memory benefit of the previous per-row deduplication without
+/// comparing rows or touching reference counts for every character written to the live grid.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-struct RowBuffer<T> {
-    chunks: VecDeque<Arc<VecDeque<Arc<Row<T>>>>>,
-    len: usize,
+enum ArchivedRows<T> {
+    Uniform { row: Arc<Row<T>>, len: usize },
+    Dense(Vec<Row<T>>),
 }
 
-impl<T> Default for RowBuffer<T> {
-    fn default() -> Self {
-        Self { chunks: VecDeque::new(), len: 0 }
-    }
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+struct ArchivedChunk<T> {
+    rows: ArchivedRows<T>,
 }
 
-impl<T: PartialEq> PartialEq for RowBuffer<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.len == other.len
-            && self
-                .chunks
-                .iter()
-                .flat_map(|chunk| chunk.iter())
-                .eq(other.chunks.iter().flat_map(|chunk| chunk.iter()))
-    }
-}
-
-impl<T> RowBuffer<T> {
-    fn position(&self, index: usize) -> (usize, usize) {
-        debug_assert!(index < self.len);
-        let first_len = self.chunks.front().map_or(0, |chunk| chunk.len());
-        if index < first_len {
-            (0, index)
-        } else {
-            let index = index - first_len;
-            (1 + index / ROW_CHUNK_SIZE, index % ROW_CHUNK_SIZE)
+impl<T> ArchivedChunk<T> {
+    fn len(&self) -> usize {
+        match &self.rows {
+            ArchivedRows::Uniform { len, .. } => *len,
+            ArchivedRows::Dense(rows) => rows.len(),
         }
     }
 
-    fn len(&self) -> usize {
-        self.len
-    }
-
-    fn row_storage_id(&self, index: usize) -> usize {
-        let (chunk, row) = self.position(index);
-        Arc::as_ptr(&self.chunks[chunk][row]) as usize
+    fn row(&self, index: usize) -> &Row<T> {
+        match &self.rows {
+            ArchivedRows::Uniform { row, len } => {
+                debug_assert!(index < *len);
+                row
+            },
+            ArchivedRows::Dense(rows) => &rows[index],
+        }
     }
 }
 
-impl<T: Clone> RowBuffer<T> {
-    /// Apply a mutation to every row while retaining consecutive row sharing.
-    ///
-    /// Large terminal workloads frequently contain millions of references to the same
-    /// consecutive row. Materializing those rows before a non-reflowing resize both destroys
-    /// that compression and can stall the UI thread for seconds.
-    fn map_rows_preserving_sharing(&mut self, mut map: impl FnMut(&mut Row<T>)) {
-        let mut previous_source = None;
-        let mut previous_replacement: Option<Arc<Row<T>>> = None;
-        let mut previous_uniform_chunk: Option<(usize, usize, Arc<VecDeque<Arc<Row<T>>>>)> = None;
-        let mut previous_source_chunk: Option<(
-            usize,
-            usize,
-            Arc<Row<T>>,
-            Arc<VecDeque<Arc<Row<T>>>>,
-        )> = None;
+impl<T: Clone> ArchivedChunk<T> {
+    fn row_mut(&mut self, index: usize) -> &mut Row<T> {
+        if let ArchivedRows::Uniform { row, len } = &self.rows {
+            let rows = vec![(**row).clone(); *len];
+            self.rows = ArchivedRows::Dense(rows);
+        }
 
-        for chunk in &mut self.chunks {
-            let source_chunk = Arc::as_ptr(chunk) as usize;
-            if let Some((source, last_row_source, last_row_replacement, replacement)) =
-                &previous_source_chunk
-                && *source == source_chunk
-            {
-                *chunk = replacement.clone();
-                previous_source = Some(*last_row_source);
-                previous_replacement = Some(last_row_replacement.clone());
-                continue;
-            }
+        match &mut self.rows {
+            ArchivedRows::Dense(rows) => &mut rows[index],
+            ArchivedRows::Uniform { .. } => unreachable!(),
+        }
+    }
 
-            let first = chunk.front().unwrap();
-            let first_source = Arc::as_ptr(first) as usize;
-            let uniform = chunk.iter().all(|row| Arc::ptr_eq(first, row));
-            if uniform {
-                if let Some((source, len, replacement)) = &previous_uniform_chunk
-                    && *source == first_source
-                    && *len == chunk.len()
-                {
-                    *chunk = replacement.clone();
-                    previous_source = Some(first_source);
-                    previous_replacement = replacement.front().cloned();
-                    previous_source_chunk = Some((
-                        source_chunk,
-                        first_source,
-                        replacement.back().unwrap().clone(),
-                        replacement.clone(),
-                    ));
-                    continue;
-                }
+    fn truncate_oldest(&mut self, count: usize) {
+        debug_assert!(count <= self.len());
+        match &mut self.rows {
+            ArchivedRows::Uniform { len, .. } => *len -= count,
+            ArchivedRows::Dense(rows) => rows.truncate(rows.len() - count),
+        }
+    }
 
-                let replacement = if previous_source == Some(first_source) {
-                    previous_replacement.as_ref().unwrap().clone()
-                } else {
-                    let mut replacement = (**first).clone();
-                    map(&mut replacement);
-                    Arc::new(replacement)
-                };
-                let replacement_chunk = Arc::new(
-                    std::iter::repeat_n(replacement.clone(), chunk.len()).collect::<VecDeque<_>>(),
-                );
-                *chunk = replacement_chunk.clone();
-                previous_source = Some(first_source);
-                previous_replacement = Some(replacement);
-                previous_uniform_chunk = Some((first_source, chunk.len(), replacement_chunk));
-                previous_source_chunk = Some((
-                    source_chunk,
-                    first_source,
-                    chunk.back().unwrap().clone(),
-                    chunk.clone(),
-                ));
-                continue;
-            }
+    fn pop_oldest(&mut self) -> Row<T> {
+        match &mut self.rows {
+            ArchivedRows::Uniform { row, len } => {
+                *len -= 1;
+                (**row).clone()
+            },
+            ArchivedRows::Dense(rows) => rows.pop().unwrap(),
+        }
+    }
 
-            previous_uniform_chunk = None;
-            for row in Arc::make_mut(chunk) {
+    fn map_rows(
+        &mut self,
+        map: &mut impl FnMut(&mut Row<T>),
+        previous_uniform: &mut Option<(usize, Arc<Row<T>>)>,
+    ) {
+        match &mut self.rows {
+            ArchivedRows::Uniform { row, .. } => {
                 let source = Arc::as_ptr(row) as usize;
-                if previous_source == Some(source) {
-                    *row = previous_replacement.as_ref().unwrap().clone();
-                    continue;
+                if let Some((previous_source, replacement)) = previous_uniform
+                    && *previous_source == source
+                {
+                    *row = replacement.clone();
+                    return;
                 }
 
                 let mut replacement = (**row).clone();
                 map(&mut replacement);
                 let replacement = Arc::new(replacement);
                 *row = replacement.clone();
-                previous_source = Some(source);
-                previous_replacement = Some(replacement);
-            }
-            previous_source_chunk = Some((
-                source_chunk,
-                previous_source.unwrap(),
-                previous_replacement.as_ref().unwrap().clone(),
-                chunk.clone(),
-            ));
+                *previous_uniform = Some((source, replacement));
+            },
+            ArchivedRows::Dense(rows) => {
+                *previous_uniform = None;
+                for row in rows {
+                    map(row);
+                }
+            },
         }
-    }
-
-    fn push_back(&mut self, row: Arc<Row<T>>) {
-        if self.chunks.back().is_none_or(|chunk| chunk.len() == ROW_CHUNK_SIZE) {
-            self.chunks.push_back(Arc::new(VecDeque::with_capacity(ROW_CHUNK_SIZE)));
-        }
-        Arc::make_mut(self.chunks.back_mut().unwrap()).push_back(row);
-        self.len += 1;
-    }
-
-    fn push_front(&mut self, row: Arc<Row<T>>) {
-        if self.chunks.front().is_none_or(|chunk| chunk.len() == ROW_CHUNK_SIZE) {
-            self.chunks.push_front(Arc::new(VecDeque::with_capacity(ROW_CHUNK_SIZE)));
-        }
-        Arc::make_mut(self.chunks.front_mut().unwrap()).push_front(row);
-        self.len += 1;
-    }
-
-    fn pop_back(&mut self) -> Option<Arc<Row<T>>> {
-        let row = Arc::make_mut(self.chunks.back_mut()?).pop_back()?;
-        if self.chunks.back().is_some_and(|chunk| chunk.is_empty()) {
-            self.chunks.pop_back();
-        }
-        self.len -= 1;
-        Some(row)
-    }
-
-    fn pop_front(&mut self) -> Option<Arc<Row<T>>> {
-        let row = Arc::make_mut(self.chunks.front_mut()?).pop_front()?;
-        if self.chunks.front().is_some_and(|chunk| chunk.is_empty()) {
-            self.chunks.pop_front();
-        }
-        self.len -= 1;
-        Some(row)
-    }
-
-    fn rotate_left(&mut self, count: usize) {
-        for _ in 0..count {
-            let row = self.pop_front().unwrap();
-            self.push_back(row);
-        }
-    }
-
-    fn rotate_right(&mut self, count: usize) {
-        for _ in 0..count {
-            let row = self.pop_back().unwrap();
-            self.push_front(row);
-        }
-    }
-
-    fn truncate(&mut self, len: usize) {
-        while self.len > len {
-            self.pop_back();
-        }
-    }
-
-    fn split_off(&mut self, at: usize) -> Self {
-        assert!(at <= self.len);
-        if at == self.len {
-            return Self::default();
-        }
-        if at == 0 {
-            return std::mem::take(self);
-        }
-
-        let tail_len = self.len - at;
-        let (chunk_index, row_index) = self.position(at);
-        let mut tail_chunks = if row_index == 0 {
-            self.chunks.split_off(chunk_index)
-        } else {
-            let mut tail_chunks = self.chunks.split_off(chunk_index + 1);
-            let boundary_tail = Arc::make_mut(self.chunks.back_mut().unwrap()).split_off(row_index);
-            tail_chunks.push_front(Arc::new(boundary_tail));
-            tail_chunks
-        };
-        tail_chunks.retain(|chunk| !chunk.is_empty());
-        self.len = at;
-
-        Self { chunks: tail_chunks, len: tail_len }
-    }
-
-    fn pop_back_chunk(&mut self) -> Option<Arc<VecDeque<Arc<Row<T>>>>> {
-        let chunk = self.chunks.pop_back()?;
-        self.len -= chunk.len();
-        Some(chunk)
-    }
-
-    fn from_rows(rows: Vec<Row<T>>) -> Self {
-        let mut buffer = Self::default();
-        for row in rows {
-            buffer.push_back(Arc::new(row));
-        }
-        buffer
     }
 
     fn into_rows(self) -> Vec<Row<T>> {
-        let mut rows = Vec::with_capacity(self.len);
-        for chunk in self.chunks {
-            match Arc::try_unwrap(chunk) {
-                Ok(chunk) => rows.extend(
-                    chunk
-                        .into_iter()
-                        .map(|row| Arc::try_unwrap(row).unwrap_or_else(|row| (*row).clone())),
-                ),
-                Err(chunk) => rows.extend(chunk.iter().map(|row| (**row).clone())),
-            }
+        match self.rows {
+            ArchivedRows::Uniform { row, len } => vec![(*row).clone(); len],
+            ArchivedRows::Dense(rows) => rows,
         }
-        rows
-    }
-
-    fn shared_row(&self, index: usize) -> Arc<Row<T>> {
-        let (chunk, row) = self.position(index);
-        self.chunks[chunk][row].clone()
-    }
-
-    fn replace_shared_row(&mut self, index: usize, replacement: Arc<Row<T>>) {
-        let (chunk, row) = self.position(index);
-        Arc::make_mut(&mut self.chunks[chunk])[row] = replacement;
     }
 }
 
-impl<T> Index<usize> for RowBuffer<T> {
-    type Output = Row<T>;
+impl<T: Clone + PartialEq> ArchivedChunk<T> {
+    fn seal(rows: Vec<Row<T>>, adjacent_uniform_row: Option<&Arc<Row<T>>>) -> Self {
+        debug_assert!(!rows.is_empty());
+        let is_uniform = rows[1..].iter().all(|row| row == &rows[0]);
+        let rows = if is_uniform {
+            let len = rows.len();
+            let row = rows.into_iter().next().unwrap();
+            let row = adjacent_uniform_row
+                .filter(|candidate| candidate.as_ref() == &row)
+                .cloned()
+                .unwrap_or_else(|| Arc::new(row));
+            ArchivedRows::Uniform { row, len }
+        } else {
+            ArchivedRows::Dense(rows)
+        };
+        Self { rows }
+    }
 
-    fn index(&self, index: usize) -> &Self::Output {
-        let (chunk, row) = self.position(index);
-        &self.chunks[chunk][row]
+    fn uniform_row(&self) -> Option<&Arc<Row<T>>> {
+        match &self.rows {
+            ArchivedRows::Uniform { row, .. } => Some(row),
+            ArchivedRows::Dense(_) => None,
+        }
     }
 }
 
-impl<T: Clone> IndexMut<usize> for RowBuffer<T> {
-    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        let (chunk, row) = self.position(index);
-        Arc::make_mut(&mut Arc::make_mut(&mut self.chunks[chunk])[row])
-    }
-}
-
-/// A chunked row deque optimized for incremental scrollback growth.
+/// Tiered terminal row storage.
 ///
-/// Rows are ordered from the bottom of the visible grid toward the oldest
-/// retained history. Moving one line into scrollback rotates one row from the
-/// back to the front. Growing history appends only the rows immediately needed,
-/// avoiding a full-buffer rezero, contiguous-buffer relocation, or bulk
-/// initialization of future rows.
+/// The visible grid and a bounded recent-history prefix are ordinary owned rows. Older completed
+/// rows are sealed into immutable chunks, which makes complete search snapshots cheap while
+/// preserving direct mutable access for terminal output.
+///
+/// Rows use Alacritty's bottom-to-top order:
+///
+/// 1. `live` contains the viewport followed by recent history.
+/// 2. `archive_head` contains the not-yet-sealed history prefix.
+/// 3. `archive_chunks` contains sealed history from newest to oldest.
+/// 4. `pending` contains rows appended at the oldest end by resize/ref-test operations.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Storage<T> {
-    inner: RowBuffer<T>,
-
-    /// Number of visible lines.
+    live: VecDeque<Row<T>>,
+    archive_head: VecDeque<Row<T>>,
+    archive_chunks: VecDeque<Arc<ArchivedChunk<T>>>,
+    archived_lines: usize,
+    pending: VecDeque<Row<T>>,
     visible_lines: usize,
-
-    /// Most recently retained history row, used to share identical consecutive output.
-    #[cfg_attr(feature = "serde", serde(skip))]
-    history_row_candidate: Option<Arc<Row<T>>>,
-
-    /// Shared default row used when growing the scrollback ring.
-    #[cfg_attr(feature = "serde", serde(skip))]
-    blank_row: Option<Arc<Row<T>>>,
 }
 
 impl<T: PartialEq> PartialEq for Storage<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.inner == other.inner
+        self.visible_lines == other.visible_lines
+            && self.len() == other.len()
+            && (0..self.len()).all(|index| self.row_at(index) == other.row_at(index))
     }
 }
 
 impl<T> Storage<T> {
     #[inline]
     pub fn len(&self) -> usize {
-        self.inner.len()
+        self.live.len() + self.archive_head.len() + self.archived_lines + self.pending.len()
     }
 
-    /// Compute the row index for an Alacritty line coordinate.
     #[inline]
     fn compute_index(&self, requested: Line) -> usize {
         debug_assert!(requested.0 < self.visible_lines as i32);
-
         let index = -(requested - self.visible_lines).0 as usize - 1;
-        debug_assert!(index < self.inner.len());
+        debug_assert!(index < self.len());
         index
     }
 
+    fn row_at(&self, mut index: usize) -> &Row<T> {
+        if index < self.live.len() {
+            return &self.live[index];
+        }
+        index -= self.live.len();
+
+        if index < self.archive_head.len() {
+            return &self.archive_head[index];
+        }
+        index -= self.archive_head.len();
+
+        if index < self.archived_lines {
+            let chunk_index = index / ARCHIVE_CHUNK_ROWS;
+            let row_index = index % ARCHIVE_CHUNK_ROWS;
+            return self.archive_chunks[chunk_index].row(row_index);
+        }
+        index -= self.archived_lines;
+
+        &self.pending[index]
+    }
+
     pub(crate) fn row_storage_id(&self, requested: Line) -> usize {
-        self.inner.row_storage_id(self.compute_index(requested))
+        self.row_at(self.compute_index(requested)) as *const Row<T> as usize
     }
 }
 
@@ -350,12 +224,36 @@ impl<T: Clone> Storage<T> {
     where
         T: Default,
     {
-        let mut inner = RowBuffer::default();
-        for _ in 0..visible_lines {
-            inner.push_back(Arc::new(Row::new(columns)));
+        let live = (0..visible_lines).map(|_| Row::new(columns)).collect();
+        Storage {
+            live,
+            archive_head: VecDeque::new(),
+            archive_chunks: VecDeque::new(),
+            archived_lines: 0,
+            pending: VecDeque::new(),
+            visible_lines,
         }
+    }
 
-        Storage { inner, visible_lines, history_row_candidate: None, blank_row: None }
+    fn row_at_mut(&mut self, mut index: usize) -> &mut Row<T> {
+        if index < self.live.len() {
+            return &mut self.live[index];
+        }
+        index -= self.live.len();
+
+        if index < self.archive_head.len() {
+            return &mut self.archive_head[index];
+        }
+        index -= self.archive_head.len();
+
+        if index < self.archived_lines {
+            let chunk_index = index / ARCHIVE_CHUNK_ROWS;
+            let row_index = index % ARCHIVE_CHUNK_ROWS;
+            return Arc::make_mut(&mut self.archive_chunks[chunk_index]).row_mut(row_index);
+        }
+        index -= self.archived_lines;
+
+        &mut self.pending[index]
     }
 
     /// Increase the number of visible lines in the buffer.
@@ -379,65 +277,114 @@ impl<T: Clone> Storage<T> {
     }
 
     /// Remove the oldest lines from the buffer.
-    #[inline]
-    pub fn shrink_lines(&mut self, shrinkage: usize) {
-        self.inner.truncate(self.inner.len() - shrinkage);
+    pub fn shrink_lines(&mut self, mut shrinkage: usize) {
+        let pending = shrinkage.min(self.pending.len());
+        self.pending.truncate(self.pending.len() - pending);
+        shrinkage -= pending;
+
+        while shrinkage != 0 {
+            let Some(chunk) = self.archive_chunks.back_mut() else {
+                break;
+            };
+            let count = shrinkage.min(chunk.len());
+            if count == chunk.len() {
+                self.archive_chunks.pop_back();
+            } else {
+                Arc::make_mut(chunk).truncate_oldest(count);
+            }
+            self.archived_lines -= count;
+            shrinkage -= count;
+        }
+
+        let head = shrinkage.min(self.archive_head.len());
+        self.archive_head.truncate(self.archive_head.len() - head);
+        shrinkage -= head;
+
+        self.live.truncate(self.live.len() - shrinkage);
     }
 
     /// Detach all history rows without destroying their cell allocations.
     #[inline]
     pub fn take_history(&mut self) -> Self {
-        let history = self.inner.split_off(self.visible_lines);
-        Self {
-            inner: history,
+        let history_live = self.live.split_off(self.visible_lines);
+        let history = Self {
+            live: history_live,
+            archive_head: std::mem::take(&mut self.archive_head),
+            archive_chunks: std::mem::take(&mut self.archive_chunks),
+            archived_lines: std::mem::take(&mut self.archived_lines),
+            pending: std::mem::take(&mut self.pending),
             visible_lines: 0,
-            history_row_candidate: self.history_row_candidate.take(),
-            blank_row: None,
-        }
+        };
+        history
     }
 
-    /// Resize every retained row without expanding shared scrollback rows.
+    /// Resize every retained row, cloning only archive chunks held by an active snapshot.
     pub(crate) fn resize_columns_without_reflow(&mut self, columns: usize)
     where
         T: Default + crate::grid::GridCell,
     {
-        self.inner.map_rows_preserving_sharing(|row| {
+        let mut resize = |row: &mut Row<T>| {
             if row.len() < columns {
                 row.grow(columns);
             } else {
                 row.shrink(columns);
             }
-        });
-        self.history_row_candidate = None;
-        self.blank_row = None;
+        };
+
+        for row in &mut self.live {
+            resize(row);
+        }
+        for row in &mut self.archive_head {
+            resize(row);
+        }
+        let mut previous_uniform = None;
+        for chunk in &mut self.archive_chunks {
+            Arc::make_mut(chunk).map_rows(&mut resize, &mut previous_uniform);
+        }
+        for row in &mut self.pending {
+            resize(row);
+        }
     }
 
-    /// Destroy at most one allocation chunk, returning whether work was performed.
+    /// Destroy at most one bounded allocation group.
     pub fn reclaim_next_chunk(&mut self) -> bool {
-        let Some(chunk) = self.inner.pop_back_chunk() else {
-            return false;
-        };
-        drop(chunk);
-        true
+        if !self.pending.is_empty() {
+            let keep = self.pending.len().saturating_sub(ARCHIVE_CHUNK_ROWS);
+            self.pending.truncate(keep);
+            return true;
+        }
+        if let Some(chunk) = self.archive_chunks.pop_back() {
+            self.archived_lines -= chunk.len();
+            return true;
+        }
+        if !self.archive_head.is_empty() {
+            let keep = self.archive_head.len().saturating_sub(ARCHIVE_CHUNK_ROWS);
+            self.archive_head.truncate(keep);
+            return true;
+        }
+        if !self.live.is_empty() {
+            let keep = self.live.len().saturating_sub(ARCHIVE_CHUNK_ROWS);
+            self.live.truncate(keep);
+            return true;
+        }
+        false
     }
 
     /// Release capacity which is no longer used by retained rows.
     #[inline]
     pub fn truncate(&mut self) {
-        // Chunked storage retains at most two partially filled chunks, so
-        // there is no large invisible row cache to release.
+        self.live.shrink_to_fit();
+        self.archive_head.shrink_to_fit();
+        self.pending.shrink_to_fit();
     }
 
-    /// Add newly retained rows without preinitializing future scrollback.
+    /// Append rows at the oldest end. Normal terminal scrolling uses [`Self::scroll_up`].
     #[inline]
     pub fn initialize(&mut self, additional_rows: usize, columns: usize)
     where
         T: Default,
     {
-        let blank_row = self.blank_row.get_or_insert_with(|| Arc::new(Row::new(columns))).clone();
-        for _ in 0..additional_rows {
-            self.inner.push_back(blank_row.clone());
-        }
+        self.pending.extend((0..additional_rows).map(|_| Row::new(columns)));
     }
 
     #[inline]
@@ -448,73 +395,173 @@ impl<T: Clone> Storage<T> {
             return;
         }
 
-        // No chunk mutation occurs while these pointers are live, and distinct
-        // indices guarantee that the rows do not alias.
+        // Distinct logical indices cannot alias. Archived uniform chunks are expanded by
+        // `row_at_mut` before either pointer is returned.
         unsafe {
-            let a = &mut self.inner[a] as *mut Row<T>;
-            let b = &mut self.inner[b] as *mut Row<T>;
+            let a = self.row_at_mut(a) as *mut Row<T>;
+            let b = self.row_at_mut(b) as *mut Row<T>;
             std::ptr::swap(a, b);
         }
     }
 
-    /// Rotate the grid, moving all lines up/down in history.
-    #[inline]
+    /// Fast path for moving complete viewport rows into history.
+    pub fn scroll_up(&mut self, positions: usize, growth: usize, columns: usize)
+    where
+        T: Default + PartialEq,
+    {
+        debug_assert!(growth <= positions);
+        for index in 0..positions {
+            let row = if index < growth {
+                Row::new(columns)
+            } else {
+                self.pop_oldest().unwrap_or_else(|| Row::new(columns))
+            };
+            self.live.push_front(row);
+        }
+        self.archive_live_excess();
+    }
+
+    /// Rotate the complete logical buffer. This is not used by the normal output scroll path.
     pub fn rotate(&mut self, count: isize)
     where
         T: PartialEq,
     {
-        debug_assert!(count.unsigned_abs() <= self.inner.len());
-
-        if count >= 0 {
-            self.inner.rotate_left(count as usize);
+        debug_assert!(count.unsigned_abs() <= self.len());
+        if count > 0 {
+            self.rotate_down(count as usize);
         } else {
-            let count = count.unsigned_abs();
-            self.inner.rotate_right(count);
-            self.deduplicate_new_history_rows(count);
+            for _ in 0..count.unsigned_abs() {
+                let row = self.pop_oldest().unwrap();
+                self.live.push_front(row);
+                self.archive_live_excess();
+            }
         }
     }
 
     /// Rotate all existing lines down in history.
-    #[inline]
-    pub fn rotate_down(&mut self, count: usize) {
-        self.inner.rotate_left(count);
-    }
-
-    /// Replace all raw rows.
-    #[inline]
-    pub fn replace_inner(&mut self, rows: Vec<Row<T>>) {
-        self.inner = RowBuffer::from_rows(rows);
-        self.history_row_candidate = None;
-        self.blank_row = None;
-    }
-
-    /// Remove and return all rows in bottom-to-top order.
-    #[inline]
-    pub fn take_all(&mut self) -> Vec<Row<T>> {
-        self.history_row_candidate = None;
-        self.blank_row = None;
-        std::mem::take(&mut self.inner).into_rows()
-    }
-
-    fn deduplicate_new_history_rows(&mut self, count: usize)
+    pub fn rotate_down(&mut self, count: usize)
     where
         T: PartialEq,
     {
-        let end = (self.visible_lines + count).min(self.inner.len());
-        for index in self.visible_lines..end {
-            let row = self.inner.shared_row(index);
-            if self
-                .history_row_candidate
-                .as_ref()
-                .is_some_and(|candidate| candidate.as_ref() == row.as_ref())
-            {
-                self.inner.replace_shared_row(
-                    index,
-                    self.history_row_candidate.as_ref().unwrap().clone(),
-                );
-            } else {
-                self.history_row_candidate = Some(row);
+        debug_assert!(count <= self.len());
+        for _ in 0..count {
+            let row = self.live.pop_front().unwrap();
+            self.pending.push_back(row);
+            let live_target = self.len().min(self.visible_lines.saturating_add(LIVE_HISTORY_ROWS));
+            while self.live.len() < live_target {
+                let row = self.pop_newest_after_live().unwrap();
+                self.live.push_back(row);
             }
+        }
+    }
+
+    /// Replace all raw rows.
+    pub fn replace_inner(&mut self, rows: Vec<Row<T>>)
+    where
+        T: PartialEq,
+    {
+        self.live.clear();
+        self.archive_head.clear();
+        self.archive_chunks.clear();
+        self.archived_lines = 0;
+        self.pending.clear();
+
+        let live_len = rows.len().min(self.visible_lines.saturating_add(LIVE_HISTORY_ROWS));
+        let mut rows = rows.into_iter();
+        self.live.extend(rows.by_ref().take(live_len));
+        let archived = rows.collect::<Vec<_>>();
+        self.rebuild_archive(archived);
+    }
+
+    /// Remove and return all rows in bottom-to-top order.
+    pub fn take_all(&mut self) -> Vec<Row<T>> {
+        let mut rows = Vec::with_capacity(self.len());
+        rows.extend(std::mem::take(&mut self.live));
+        rows.extend(std::mem::take(&mut self.archive_head));
+        for chunk in std::mem::take(&mut self.archive_chunks) {
+            let chunk = Arc::try_unwrap(chunk).unwrap_or_else(|chunk| (*chunk).clone()).into_rows();
+            rows.extend(chunk);
+        }
+        self.archived_lines = 0;
+        rows.extend(std::mem::take(&mut self.pending));
+        rows
+    }
+
+    fn pop_oldest(&mut self) -> Option<Row<T>> {
+        if let Some(row) = self.pending.pop_back() {
+            return Some(row);
+        }
+
+        if let Some(chunk) = self.archive_chunks.back_mut() {
+            let row = Arc::make_mut(chunk).pop_oldest();
+            self.archived_lines -= 1;
+            if chunk.len() == 0 {
+                self.archive_chunks.pop_back();
+            }
+            return Some(row);
+        }
+
+        self.archive_head.pop_back().or_else(|| self.live.pop_back())
+    }
+
+    fn pop_newest_after_live(&mut self) -> Option<Row<T>> {
+        if let Some(row) = self.archive_head.pop_front() {
+            return Some(row);
+        }
+
+        if let Some(chunk) = self.archive_chunks.pop_front() {
+            self.archived_lines -= chunk.len();
+            let chunk = Arc::try_unwrap(chunk).unwrap_or_else(|chunk| (*chunk).clone());
+            let mut rows = VecDeque::from(chunk.into_rows());
+            let row = rows.pop_front().unwrap();
+            debug_assert!(self.archive_head.is_empty());
+            self.archive_head = rows;
+            return Some(row);
+        }
+
+        self.pending.pop_front()
+    }
+
+    fn archive_live_excess(&mut self)
+    where
+        T: PartialEq,
+    {
+        let live_limit = self.visible_lines.saturating_add(LIVE_HISTORY_ROWS);
+        while self.live.len() > live_limit {
+            self.archive_head.push_front(self.live.pop_back().unwrap());
+        }
+
+        while self.archive_head.len() >= ARCHIVE_CHUNK_ROWS {
+            let keep = self.archive_head.len() - ARCHIVE_CHUNK_ROWS;
+            let rows = self.archive_head.split_off(keep).into();
+            let adjacent = self.archive_chunks.front().and_then(|chunk| chunk.uniform_row());
+            let chunk = ArchivedChunk::seal(rows, adjacent);
+            self.archive_chunks.push_front(Arc::new(chunk));
+            self.archived_lines += ARCHIVE_CHUNK_ROWS;
+        }
+    }
+
+    fn rebuild_archive(&mut self, rows: Vec<Row<T>>)
+    where
+        T: PartialEq,
+    {
+        if rows.is_empty() {
+            return;
+        }
+
+        let head_len = rows.len() % ARCHIVE_CHUNK_ROWS;
+        let mut rows = rows.into_iter();
+        self.archive_head.extend(rows.by_ref().take(head_len));
+        loop {
+            let chunk = rows.by_ref().take(ARCHIVE_CHUNK_ROWS).collect::<Vec<_>>();
+            if chunk.is_empty() {
+                break;
+            }
+            debug_assert_eq!(chunk.len(), ARCHIVE_CHUNK_ROWS);
+            let adjacent = self.archive_chunks.back().and_then(|chunk| chunk.uniform_row());
+            let chunk = ArchivedChunk::seal(chunk, adjacent);
+            self.archive_chunks.push_back(Arc::new(chunk));
+            self.archived_lines += ARCHIVE_CHUNK_ROWS;
         }
     }
 }
@@ -524,7 +571,7 @@ impl<T> Index<Line> for Storage<T> {
 
     #[inline]
     fn index(&self, index: Line) -> &Self::Output {
-        &self.inner[self.compute_index(index)]
+        self.row_at(self.compute_index(index))
     }
 }
 
@@ -532,7 +579,7 @@ impl<T: Clone> IndexMut<Line> for Storage<T> {
     #[inline]
     fn index_mut(&mut self, index: Line) -> &mut Self::Output {
         let index = self.compute_index(index);
-        &mut self.inner[index]
+        self.row_at_mut(index)
     }
 }
 
@@ -562,107 +609,77 @@ mod tests {
     }
 
     #[test]
-    fn with_capacity_initializes_only_visible_rows() {
-        let storage = Storage::<char>::with_capacity(3, 1);
-
-        assert_eq!(storage.inner.len(), 3);
-        assert_eq!(storage.visible_lines, 3);
-    }
-
-    #[test]
-    fn cloned_storage_preserves_an_immutable_snapshot_after_live_mutation() {
+    fn live_rows_are_directly_mutable_and_snapshots_copy_only_the_live_prefix() {
         let mut storage = Storage::<char>::with_capacity(3, 1);
         storage[Line(0)][Column(0)] = 'a';
         let snapshot = storage.clone();
+        let snapshot_id = snapshot.row_storage_id(Line(0));
 
         storage[Line(0)][Column(0)] = 'b';
 
         assert_eq!(storage[Line(0)][Column(0)], 'b');
         assert_eq!(snapshot[Line(0)][Column(0)], 'a');
+        assert_ne!(storage.row_storage_id(Line(0)), snapshot_id);
     }
 
     #[test]
-    fn consecutive_identical_history_rows_share_cell_storage() {
-        let mut storage = Storage::<char>::with_capacity(2, 2);
-        storage[Line(0)][Column(0)] = 'x';
-        storage.initialize(1, 2);
-        storage.rotate(-1);
-
-        storage[Line(0)][Column(0)] = 'x';
-        storage.initialize(1, 2);
-        storage.rotate(-1);
-
-        let newest_history = storage.inner.shared_row(storage.visible_lines);
-        let older_history = storage.inner.shared_row(storage.visible_lines + 1);
-        assert!(Arc::ptr_eq(&newest_history, &older_history));
-
-        storage[Line(-1)][Column(0)] = 'y';
-        assert_eq!(storage[Line(-1)][Column(0)], 'y');
-        assert_eq!(storage[Line(-2)][Column(0)], 'x');
-    }
-
-    #[test]
-    fn repeated_output_retains_one_row_allocation_per_run() {
+    fn old_history_is_sealed_and_shared_by_snapshots() {
         let mut storage = Storage::<char>::with_capacity(1, 2);
-        for _ in 0..10_000 {
+        for _ in 0..(LIVE_HISTORY_ROWS + 2 * ARCHIVE_CHUNK_ROWS) {
             storage[Line(0)][Column(0)] = 'x';
-            storage.initialize(1, 2);
-            storage.rotate(-1);
+            storage.scroll_up(1, 1, 2);
         }
+        let archived_line = Line(-((LIVE_HISTORY_ROWS + 1) as i32));
+        let older_archived_line = Line(-((LIVE_HISTORY_ROWS + ARCHIVE_CHUNK_ROWS + 1) as i32));
+        let snapshot = storage.clone();
 
-        let first = storage.inner.shared_row(storage.visible_lines);
-        assert!(
-            (storage.visible_lines..storage.len())
-                .all(|index| Arc::ptr_eq(&first, &storage.inner.shared_row(index)))
+        assert_eq!(storage.row_storage_id(archived_line), snapshot.row_storage_id(archived_line));
+        assert_eq!(
+            storage.row_storage_id(archived_line),
+            storage.row_storage_id(older_archived_line),
+            "adjacent uniform chunks should share one archived row"
+        );
+        assert_eq!(storage.archive_chunks.len(), 2);
+        assert!(matches!(storage.archive_chunks[0].rows, ArchivedRows::Uniform { .. }));
+    }
+
+    #[test]
+    fn resizing_archived_uniform_chunks_preserves_sharing_and_snapshots() {
+        let mut storage = Storage::<char>::with_capacity(1, 2);
+        for _ in 0..(LIVE_HISTORY_ROWS + 2 * ARCHIVE_CHUNK_ROWS) {
+            storage[Line(0)][Column(0)] = 'x';
+            storage.scroll_up(1, 1, 2);
+        }
+        let snapshot = storage.clone();
+        let archived_line = Line(-((LIVE_HISTORY_ROWS + 1) as i32));
+        let older_archived_line = Line(-((LIVE_HISTORY_ROWS + ARCHIVE_CHUNK_ROWS + 1) as i32));
+
+        storage.resize_columns_without_reflow(3);
+
+        assert_eq!(storage[archived_line].len(), 3);
+        assert_eq!(snapshot[archived_line].len(), 2);
+        assert_eq!(
+            storage.row_storage_id(archived_line),
+            storage.row_storage_id(older_archived_line)
         );
     }
 
     #[test]
-    fn bulk_row_mapping_preserves_sharing_across_chunks() {
-        let shared = Arc::new(filled_row('x'));
-        let mut rows = RowBuffer::default();
-        for _ in 0..(ROW_CHUNK_SIZE * 3 + 1) {
-            rows.push_back(shared.clone());
-        }
-
-        let mut mapped_rows = 0;
-        rows.map_rows_preserving_sharing(|row| {
-            mapped_rows += 1;
-            row.grow(3);
-        });
-        assert_eq!(mapped_rows, 1);
-
-        let first = rows.shared_row(0);
-        assert_eq!(first.len(), 3);
-        assert!(
-            (1..rows.len()).all(|index| Arc::ptr_eq(&first, &rows.shared_row(index))),
-            "mapping expanded shared rows into separate allocations"
-        );
-        assert!(Arc::ptr_eq(&rows.chunks[0], &rows.chunks[1]));
-        assert!(Arc::ptr_eq(&rows.chunks[1], &rows.chunks[2]));
-
-        let mut remapped_rows = 0;
-        rows.map_rows_preserving_sharing(|row| {
-            remapped_rows += 1;
-            row.grow(4);
-        });
-        assert_eq!(remapped_rows, 1);
-        assert_eq!(rows.shared_row(0).len(), 4);
-    }
-
-    #[test]
-    fn indexing_maps_visible_and_history_lines() {
+    fn indexing_maps_visible_live_and_archived_lines() {
         let mut storage = Storage::<char>::with_capacity(3, 1);
-        storage[Line(0)] = filled_row('0');
-        storage[Line(1)] = filled_row('1');
-        storage[Line(2)] = filled_row('2');
-        storage.initialize(1, 1);
-        storage[Line(-1)] = filled_row('h');
+        for index in 0..(LIVE_HISTORY_ROWS + ARCHIVE_CHUNK_ROWS + 4) {
+            storage[Line(0)][Column(0)] =
+                char::from_u32((index % 26) as u32 + u32::from(b'a')).unwrap();
+            storage.scroll_up(1, 1, 1);
+        }
 
-        assert_eq!(storage[Line(2)], filled_row('2'));
-        assert_eq!(storage[Line(1)], filled_row('1'));
-        assert_eq!(storage[Line(0)], filled_row('0'));
-        assert_eq!(storage[Line(-1)], filled_row('h'));
+        assert_eq!(storage.len(), 3 + LIVE_HISTORY_ROWS + ARCHIVE_CHUNK_ROWS + 4);
+        assert_eq!(storage[Line(2)][Column(0)], '\0');
+        assert_eq!(storage[Line(-1)][Column(0)], 'j');
+        assert_eq!(
+            storage[Line(-((LIVE_HISTORY_ROWS + ARCHIVE_CHUNK_ROWS) as i32))][Column(0)],
+            'e'
+        );
     }
 
     #[test]
@@ -671,131 +688,58 @@ mod tests {
         storage[Line(0)] = filled_row('0');
         storage[Line(1)] = filled_row('1');
         storage[Line(2)] = filled_row('2');
-        storage.initialize(2, 1);
-        storage[Line(-1)] = filled_row('a');
-        storage[Line(-2)] = filled_row('b');
+        for _ in 0..(LIVE_HISTORY_ROWS + ARCHIVE_CHUNK_ROWS) {
+            storage.scroll_up(1, 1, 1);
+        }
 
         let history = storage.take_history();
 
         assert_eq!(storage.len(), 3);
-        assert_eq!(storage[Line(0)], filled_row('0'));
-        assert_eq!(storage[Line(1)], filled_row('1'));
-        assert_eq!(storage[Line(2)], filled_row('2'));
-        assert_eq!(history.len(), 2);
+        assert_eq!(history.len(), LIVE_HISTORY_ROWS + ARCHIVE_CHUNK_ROWS);
     }
 
     #[test]
-    fn reclaiming_history_is_incremental_by_storage_chunk() {
+    fn reclaiming_history_is_incremental_by_bounded_chunk() {
         let mut storage = Storage::<char>::with_capacity(1, 1);
-        storage.initialize(ROW_CHUNK_SIZE + 1, 1);
+        for _ in 0..(LIVE_HISTORY_ROWS + ARCHIVE_CHUNK_ROWS + 1) {
+            storage.scroll_up(1, 1, 1);
+        }
         let mut history = storage.take_history();
+        let before = history.len();
 
         assert!(history.reclaim_next_chunk());
-        assert!(history.len() > 0);
-        assert!(history.reclaim_next_chunk());
-        assert_eq!(history.len(), 0);
-        assert!(!history.reclaim_next_chunk());
+        assert!(before - history.len() <= ARCHIVE_CHUNK_ROWS);
     }
 
     #[test]
-    #[should_panic]
-    #[cfg(debug_assertions)]
-    fn indexing_above_inner_len() {
-        let storage = Storage::<char>::with_capacity(1, 1);
-        let _ = &storage[Line(-1)];
+    fn shrinking_drops_oldest_rows_across_archive_boundaries() {
+        let mut storage = Storage::<char>::with_capacity(1, 1);
+        for index in 0..(LIVE_HISTORY_ROWS + ARCHIVE_CHUNK_ROWS + 10) {
+            storage[Line(0)][Column(0)] =
+                char::from_u32((index % 26) as u32 + u32::from(b'a')).unwrap();
+            storage.scroll_up(1, 1, 1);
+        }
+
+        storage.shrink_lines(ARCHIVE_CHUNK_ROWS + 5);
+
+        assert_eq!(storage.len(), 1 + LIVE_HISTORY_ROWS + 5);
+        assert_eq!(storage[Line(-((LIVE_HISTORY_ROWS + 5) as i32))][Column(0)], 'b');
     }
 
     #[test]
-    fn rotating_up_moves_the_top_row_into_history() {
-        let mut storage = labeled_storage();
-        storage.initialize(1, 1);
-        storage.rotate(-1);
+    fn rotating_down_pulls_rows_from_the_archive_without_materializing_all_history() {
+        let mut storage = Storage::<char>::with_capacity(1, 1);
+        for index in 0..(LIVE_HISTORY_ROWS + 2 * ARCHIVE_CHUNK_ROWS) {
+            storage[Line(0)][Column(0)] =
+                char::from_u32((index % 26) as u32 + u32::from(b'a')).unwrap();
+            storage.scroll_up(1, 1, 1);
+        }
+        let mut expected = storage.clone().take_all();
+        expected.rotate_left(1);
 
-        assert_eq!(storage[Line(2)], filled_row('\0'));
-        assert_eq!(storage[Line(1)], filled_row('2'));
-        assert_eq!(storage[Line(0)], filled_row('1'));
-        assert_eq!(storage[Line(-1)], filled_row('0'));
-    }
-
-    #[test]
-    fn opposite_rotations_restore_row_order() {
-        let mut storage = labeled_storage();
-        let original = storage.clone();
-
-        storage.rotate(2);
-        storage.rotate(-2);
         storage.rotate_down(1);
-        storage.rotate(-1);
 
-        assert_eq!(storage, original);
-    }
-
-    #[test]
-    fn growing_visible_lines_appends_only_requested_rows() {
-        let mut storage = labeled_storage();
-        storage.grow_visible_lines(4);
-
-        assert_eq!(storage.len(), 4);
-        assert_eq!(storage.visible_lines, 4);
-        assert_eq!(storage[Line(3)], filled_row('2'));
-        assert_eq!(storage[Line(0)], filled_row('\0'));
-    }
-
-    #[test]
-    fn shrinking_drops_oldest_rows_immediately() {
-        let mut storage = labeled_storage();
-        storage.initialize(2, 1);
-        storage[Line(-1)] = filled_row('a');
-        storage[Line(-2)] = filled_row('b');
-
-        storage.shrink_lines(2);
-
-        assert_eq!(storage.len(), 3);
-        assert_eq!(storage[Line(0)], filled_row('0'));
-    }
-
-    #[test]
-    fn shrinking_and_growing_visible_lines_preserves_remaining_rows() {
-        let mut storage = labeled_storage();
-        storage.shrink_visible_lines(2);
-        assert_eq!(storage.len(), 2);
-        assert_eq!(storage[Line(1)], filled_row('2'));
-        assert_eq!(storage[Line(0)], filled_row('1'));
-
-        storage.grow_visible_lines(3);
-        assert_eq!(storage.len(), 3);
-        assert_eq!(storage[Line(2)], filled_row('2'));
-        assert_eq!(storage[Line(1)], filled_row('1'));
-        assert_eq!(storage[Line(0)], filled_row('\0'));
-    }
-
-    #[test]
-    fn initialize_does_not_preallocate_rows() {
-        let mut storage = Storage::<char>::with_capacity(24, 1);
-
-        for expected in 25..=100_000 {
-            storage.initialize(1, 1);
-            assert_eq!(storage.len(), expected);
-            assert_eq!(storage.inner.len(), expected);
-        }
-
-        assert_eq!(storage.inner.chunks.len(), 100_000_usize.div_ceil(ROW_CHUNK_SIZE));
-        assert!(storage.inner.chunks.iter().all(|chunk| chunk.len() <= ROW_CHUNK_SIZE));
-    }
-
-    #[test]
-    fn rotations_across_chunk_boundaries_preserve_every_row() {
-        let mut storage = Storage::<char>::with_capacity(24, 1);
-        storage.initialize(3 * ROW_CHUNK_SIZE, 1);
-        for index in 0..storage.len() {
-            storage.inner[index][Column(0)] = char::from_u32((index % 95 + 32) as u32).unwrap();
-        }
-        let original = storage.clone();
-
-        storage.rotate(-(ROW_CHUNK_SIZE as isize + 17));
-        storage.rotate(ROW_CHUNK_SIZE as isize + 17);
-
-        assert_eq!(storage, original);
+        assert_eq!(storage.take_all(), expected);
     }
 
     #[test]
@@ -804,13 +748,10 @@ mod tests {
         storage.rotate(-1);
 
         let rows = storage.take_all();
-        assert_eq!(storage.inner.len(), 0);
         assert_eq!(rows, vec![filled_row('0'), filled_row('2'), filled_row('1')]);
 
-        storage.replace_inner(rows);
-        assert_eq!(storage.len(), 3);
-        assert_eq!(storage[Line(2)], filled_row('0'));
-        assert_eq!(storage[Line(0)], filled_row('1'));
+        storage.replace_inner(rows.clone());
+        assert_eq!(storage.take_all(), rows);
     }
 
     fn labeled_storage() -> Storage<char> {
