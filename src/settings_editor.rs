@@ -350,6 +350,17 @@ impl BindingForm {
             .as_str()
             .map(str::to_owned)
     }
+
+    pub fn action_usize_parameter(&self, name: &str) -> Option<usize> {
+        self.action
+            .as_array()?
+            .get(1)?
+            .as_object()?
+            .get(name)?
+            .as_u64()?
+            .try_into()
+            .ok()
+    }
 }
 
 #[derive(Clone, Debug)]

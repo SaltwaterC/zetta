@@ -13,7 +13,7 @@ zetta --profile "PROFILE"
 zetta -p "PROFILE"
 ```
 
-Tab names follow the active terminal process. Press `Ctrl-Alt-R` or double-click
+Tab names follow the active terminal process. Press `Ctrl-Shift-R` or double-click
 a tab to set a persistent name. Submit an empty name to resume automatic naming.
 Tabs retain a fixed width as their names change.
 
@@ -26,7 +26,7 @@ exiting the final pane closes the tab.
 Pane controls appear when the pointer moves over a pane and hide after a short
 period of inactivity. They can maximize, minimize, or close the pane. Each pane
 also has a stable per-tab label that remains as panes are rearranged or closed.
-Press `Alt-Shift-L` or double-click the label to assign a custom name; submit an
+Press `Alt-Shift-R` or double-click the label to assign a custom name; submit an
 empty name to restore its automatic label.
 
 A maximized pane has a status strip below it. Restore it from that strip or
@@ -130,11 +130,11 @@ event; it is not a paste gesture.
 
 ## Search
 
-`Ctrl-Shift-F` searches the active pane's scrollback. `Enter` and `F3` select
+`Alt-Shift-F` searches the active pane's scrollback. `Enter` and `F3` select
 the next match, `Shift-Enter` and `Shift-F3` select the previous match, and
 `Escape` closes search. In terminal vi mode, `/` also opens scrollback search.
 
-`Ctrl-Alt-F` searches every pane in the active tab. It highlights all matches
+`Ctrl-Shift-F` searches every pane in the active tab. It highlights all matches
 and activates the pane containing the current result as you navigate.
 
 ## Command palette
@@ -151,15 +151,16 @@ filter, use the arrow keys to select a command, and press `Enter` to run it.
 | `Ctrl-Shift-N` | New window |
 | `Ctrl-Shift-1` … `Ctrl-Shift-9` | New tab with profile 1 … 9 |
 | `Ctrl-Shift-W` | Close tab |
-| `Alt-Shift-D` | Detach the active tab into the background |
-| `Alt-Shift-A` | Reconnect the most recently detached tab |
+| `Ctrl-Shift-D` | Detach the active tab into the background |
+| `Ctrl-Shift-B` | Toggle automatic backgrounding for the active tab |
+| `Ctrl-Shift-A` | Reconnect the most recently detached tab |
 | `Ctrl-Shift-O` | Split active pane horizontally (top/bottom) |
 | `Ctrl-Shift-E` | Split active pane vertically (left/right) |
-| `Alt-Shift-R` | Rotate a two-pane layout |
+| `Alt-Shift-L` | Rotate a two-pane layout |
 | `Alt-Shift-X` | Close the active pane or its final tab |
 | `PageUp` / `PageDown` | Send page navigation to the foreground program |
 | `Shift-PageUp` / `Shift-PageDown` | Scroll history by one page |
-| `Ctrl-Shift-A` | Select all terminal text |
+| `Alt-Shift-A` | Select all terminal text |
 | `Ctrl-Shift-Backspace` | Clear the system clipboard |
 | `Alt-Arrow` | Focus the pane in that direction |
 | `Alt-Shift-Down` | Minimize the active pane |
@@ -171,22 +172,22 @@ filter, use the arrow keys to select a command, and press `Enter` to run it.
 | `Ctrl-PageUp` / `Ctrl-PageDown` | Next / previous tab |
 | `Ctrl-C` | Copy selected text or send interrupt |
 | `Ctrl-V` | Paste |
-| `Ctrl-Shift-F` | Search the active pane's scrollback |
-| `Ctrl-Alt-F` | Search scrollback across the active tab |
+| `Alt-Shift-F` | Search the active pane's scrollback |
+| `Ctrl-Shift-F` | Search scrollback across the active tab |
 | `Ctrl-Alt-V` | Paste with surrounding whitespace trimmed |
-| `Ctrl-Shift-S` | Save the active pane's complete output |
+| `Alt-Shift-S` | Save the active pane's complete output |
 | `Ctrl-Shift-P` | Open the command palette |
 | `Ctrl-,` | Open the configuration and keymap editor |
-| `Ctrl-Shift-D` | Open a serial console in a new pane |
-| `Ctrl-Alt-R` | Rename the active tab |
-| `Alt-Shift-L` | Label the active pane |
+| `Ctrl-Shift-S` | Open a serial console in a new pane |
+| `Ctrl-Shift-R` | Rename the active tab |
+| `Alt-Shift-R` | Label the active pane |
 | `Ctrl-=` / `Ctrl-+` | Increase font size globally |
 | `Ctrl--` | Decrease font size globally |
 | `Ctrl-0` | Reset font size globally |
-| `Ctrl-Alt-=` / `Ctrl-Alt-+` | Increase active pane font size |
-| `Ctrl-Alt--` | Decrease active pane font size |
-| `Ctrl-Alt-0` | Reset active pane font size |
-| `Ctrl-Shift-R` | Reload configuration, keymap, and themes |
+| `Alt-Shift-=` / `Alt-Shift-+` | Increase active pane font size |
+| `Alt-Shift--` | Decrease active pane font size |
+| `Alt-Shift-0` | Reset active pane font size |
+| `Ctrl-Alt-R` | Reload configuration, keymap, and themes |
 | `Ctrl-Shift-F12` | Toggle the performance overlay |
 
 Unmodified function keys remain available to terminal applications.

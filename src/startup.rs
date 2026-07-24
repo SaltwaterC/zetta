@@ -388,6 +388,27 @@ pub(crate) fn pane_template_keybindings() -> [KeyBinding; 2] {
     ]
 }
 
+pub(crate) fn pane_font_size_keybindings() -> [KeyBinding; 4] {
+    [
+        KeyBinding::new(
+            "alt-shift-=",
+            IncreasePaneFontSize,
+            Some("Zetta > Terminal"),
+        ),
+        KeyBinding::new(
+            "alt-shift-+",
+            IncreasePaneFontSize,
+            Some("Zetta > Terminal"),
+        ),
+        KeyBinding::new(
+            "alt-shift--",
+            DecreasePaneFontSize,
+            Some("Zetta > Terminal"),
+        ),
+        KeyBinding::new("alt-shift-0", ResetPaneFontSize, Some("Zetta > Terminal")),
+    ]
+}
+
 pub(crate) fn profile_shortcut_label(slot: usize) -> Option<String> {
     (1..=9)
         .contains(&slot)
@@ -678,13 +699,17 @@ pub(crate) fn validate_keymap_contents(content: &str, cx: &mut App) -> Result<()
     }
 }
 
-pub(crate) const RENAME_TAB_KEYBINDING: &str = "ctrl-alt-r";
-pub(crate) const RENAME_PANE_KEYBINDING: &str = "alt-shift-l";
+pub(crate) const RENAME_TAB_KEYBINDING: &str = "ctrl-shift-r";
+pub(crate) const RELOAD_CONFIGURATION_KEYBINDING: &str = "ctrl-alt-r";
+pub(crate) const RENAME_PANE_KEYBINDING: &str = "alt-shift-r";
 pub(crate) const CLOSE_PANE_KEYBINDING: &str = "alt-shift-x";
-pub(crate) const SAVE_PANE_OUTPUT_KEYBINDING: &str = "ctrl-shift-s";
-pub(crate) const SERIAL_CONSOLE_KEYBINDING: &str = "ctrl-shift-d";
-pub(crate) const AUTO_BACKGROUND_TAB_KEYBINDING: &str = "alt-shift-p";
-pub(crate) const ROTATE_PANE_LAYOUT_KEYBINDING: &str = "alt-shift-r";
+pub(crate) const SAVE_PANE_OUTPUT_KEYBINDING: &str = "alt-shift-s";
+pub(crate) const SELECT_ALL_KEYBINDING: &str = "alt-shift-a";
+pub(crate) const RECONNECT_SESSION_KEYBINDING: &str = "ctrl-shift-a";
+pub(crate) const DETACH_TAB_KEYBINDING: &str = "ctrl-shift-d";
+pub(crate) const SERIAL_CONSOLE_KEYBINDING: &str = "ctrl-shift-s";
+pub(crate) const AUTO_BACKGROUND_TAB_KEYBINDING: &str = "ctrl-shift-b";
+pub(crate) const ROTATE_PANE_LAYOUT_KEYBINDING: &str = "alt-shift-l";
 
 pub(crate) fn pane_output_keybinding() -> KeyBinding {
     KeyBinding::new(
@@ -692,6 +717,22 @@ pub(crate) fn pane_output_keybinding() -> KeyBinding {
         SavePaneOutput,
         Some("Zetta > Terminal"),
     )
+}
+
+pub(crate) fn select_all_keybinding() -> KeyBinding {
+    KeyBinding::new(SELECT_ALL_KEYBINDING, SelectAll, Some("Zetta > Terminal"))
+}
+
+pub(crate) fn reconnect_session_keybinding() -> KeyBinding {
+    KeyBinding::new(
+        RECONNECT_SESSION_KEYBINDING,
+        ReconnectSession,
+        Some("Zetta > Terminal"),
+    )
+}
+
+pub(crate) fn detach_tab_keybinding() -> KeyBinding {
+    KeyBinding::new(DETACH_TAB_KEYBINDING, DetachTab, Some("Zetta > Terminal"))
 }
 
 pub(crate) fn close_pane_keybinding() -> KeyBinding {
@@ -753,14 +794,14 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
         KeyBinding::new("ctrl-shift-t", NewTab, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-shift-n", NewWindow, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-shift-w", CloseTab, Some("Zetta > Terminal")),
-        KeyBinding::new("alt-shift-d", DetachTab, Some("Zetta > Terminal")),
-        KeyBinding::new("alt-shift-a", ReconnectSession, Some("Zetta > Terminal")),
+        detach_tab_keybinding(),
+        reconnect_session_keybinding(),
         auto_background_tab_keybinding(),
         close_pane_keybinding(),
         KeyBinding::new("ctrl-shift-o", SplitHorizontal, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-shift-e", SplitVertical, Some("Zetta > Terminal")),
         rotate_pane_layout_keybinding(),
-        KeyBinding::new("ctrl-shift-a", SelectAll, Some("Zetta > Terminal")),
+        select_all_keybinding(),
         KeyBinding::new(
             "ctrl-shift-backspace",
             ClearClipboard,
@@ -787,8 +828,12 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
             Some("Zetta > Terminal && selection"),
         ),
         KeyBinding::new("ctrl-v", Paste, Some("Zetta > Terminal")),
-        KeyBinding::new("ctrl-shift-f", SearchScrollback, Some("Zetta > Terminal")),
-        KeyBinding::new("ctrl-alt-f", SearchTabScrollback, Some("Zetta > Terminal")),
+        KeyBinding::new("alt-shift-f", SearchScrollback, Some("Zetta > Terminal")),
+        KeyBinding::new(
+            "ctrl-shift-f",
+            SearchTabScrollback,
+            Some("Zetta > Terminal"),
+        ),
         KeyBinding::new(
             "enter",
             SearchNextMatch,
@@ -834,12 +879,8 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
         KeyBinding::new("ctrl-+", IncreaseTerminalFontSize, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl--", DecreaseTerminalFontSize, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-0", ResetTerminalFontSize, Some("Zetta > Terminal")),
-        KeyBinding::new("ctrl-alt-=", IncreasePaneFontSize, Some("Zetta > Terminal")),
-        KeyBinding::new("ctrl-alt-+", IncreasePaneFontSize, Some("Zetta > Terminal")),
-        KeyBinding::new("ctrl-alt--", DecreasePaneFontSize, Some("Zetta > Terminal")),
-        KeyBinding::new("ctrl-alt-0", ResetPaneFontSize, Some("Zetta > Terminal")),
         KeyBinding::new(
-            "ctrl-shift-r",
+            RELOAD_CONFIGURATION_KEYBINDING,
             ReloadConfiguration,
             Some("Zetta > Terminal"),
         ),
@@ -853,6 +894,7 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
     ];
     bindings.extend(minimized_pane_keybindings());
     bindings.extend(pane_template_keybindings());
+    bindings.extend(pane_font_size_keybindings());
     let keyboard_mapper = cx.keyboard_mapper().clone();
     bindings.extend(
         (1..=profile_count.min(9))

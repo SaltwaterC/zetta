@@ -10,6 +10,7 @@ use std::{
     fs::File,
     io::Read as _,
     os::fd::{AsFd, AsRawFd},
+    os::unix::ffi::OsStringExt as _,
     time::Duration,
 };
 
@@ -45,6 +46,60 @@ pub(crate) const KEYRING_LABEL: &str = "zed-github-account";
 #[cfg(any(feature = "wayland", feature = "x11"))]
 const FILE_PICKER_PORTAL_MISSING: &str =
     "Couldn't open file picker due to missing xdg-desktop-portal implementation.";
+
+#[cfg(any(feature = "wayland", feature = "x11"))]
+fn zenity_save_filename_arg(directory: &Path, suggested_name: Option<&str>) -> OsString {
+    let initial_path = suggested_name
+        .map(|suggested_name| directory.join(suggested_name))
+        .unwrap_or_else(|| directory.to_owned());
+    let mut argument = OsString::from("--filename=");
+    argument.push(initial_path);
+    argument
+}
+
+#[cfg(any(feature = "wayland", feature = "x11"))]
+fn prompt_for_new_path_with_zenity(
+    directory: &Path,
+    suggested_name: Option<&str>,
+    portal_error: &anyhow::Error,
+) -> Result<Option<PathBuf>> {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the portal fallback runs on a background executor"
+    )]
+    let mut output = new_std_command("zenity")
+        .arg("--file-selection")
+        .arg("--save")
+        .arg("--title=Save File")
+        .arg(zenity_save_filename_arg(directory, suggested_name))
+        .output()
+        .with_context(|| {
+            format!("the file chooser portal failed ({portal_error:#}); invoking Zenity")
+        })?;
+
+    if output.status.success() {
+        while output
+            .stdout
+            .last()
+            .is_some_and(|byte| matches!(byte, b'\n' | b'\r'))
+        {
+            output.stdout.pop();
+        }
+        return Ok(
+            (!output.stdout.is_empty()).then(|| PathBuf::from(OsString::from_vec(output.stdout)))
+        );
+    }
+    if output.status.code() == Some(1) {
+        return Ok(None);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    anyhow::bail!(
+        "the file chooser portal failed ({portal_error:#}); Zenity failed with {}: {}",
+        output.status,
+        stderr.trim()
+    )
+}
 
 pub(crate) trait LinuxClient {
     fn compositor_name(&self) -> &'static str;
@@ -460,6 +515,8 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
 
         #[cfg(any(feature = "wayland", feature = "x11"))]
         let identifier = self.inner.window_identifier();
+        #[cfg(any(feature = "wayland", feature = "x11"))]
+        let background_executor = self.background_executor();
 
         #[cfg(any(feature = "wayland", feature = "x11"))]
         self.foreground_executor()
@@ -473,23 +530,32 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
                             .identifier(identifier.await)
                             .modal(true)
                             .title("Save File")
-                            .current_folder(directory)
+                            .current_folder(&directory)
                             .expect("pathbuf should not be nul terminated");
 
-                    if let Some(suggested_name) = suggested_name {
-                        request_builder = request_builder.current_name(suggested_name.as_str());
+                    if let Some(suggested_name) = suggested_name.as_deref() {
+                        request_builder = request_builder.current_name(suggested_name);
                     }
 
                     let request = match request_builder.send().await {
                         Ok(request) => request,
                         Err(err) => {
-                            let result = match err {
+                            let portal_error = match err {
                                 ashpd::Error::PortalNotFound(_) => {
                                     anyhow!(FILE_PICKER_PORTAL_MISSING)
                                 }
                                 err => err.into(),
                             };
-                            let _ = done_tx.send(Err(result));
+                            background_executor
+                                .spawn(async move {
+                                    let result = prompt_for_new_path_with_zenity(
+                                        &directory,
+                                        suggested_name.as_deref(),
+                                        &portal_error,
+                                    );
+                                    let _ = done_tx.send(result);
+                                })
+                                .detach();
                             return;
                         }
                     };
@@ -1239,6 +1305,15 @@ pub(super) fn compositor_gpu_hint_from_dev_t(dev: u64) -> Option<gpui_wgpu::Comp
 mod tests {
     use super::*;
     use gpui::{Point, px};
+
+    #[cfg(any(feature = "wayland", feature = "x11"))]
+    #[test]
+    fn zenity_save_fallback_uses_the_suggested_path() {
+        assert_eq!(
+            zenity_save_filename_arg(Path::new("/home/user"), Some("terminal-output.txt")),
+            OsString::from("--filename=/home/user/terminal-output.txt")
+        );
+    }
 
     #[test]
     fn test_is_within_click_distance() {

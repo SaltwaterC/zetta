@@ -431,7 +431,7 @@ impl Zetta {
         let content = match editor.page {
             SettingsPage::Configuration => {
                 let configuration = &editor.configuration;
-                let mut profile_names = editor.profile_names.clone();
+                let mut profile_names = editor.profile_names.to_vec();
                 profile_names.extend(
                     configuration
                         .profiles
@@ -1085,6 +1085,21 @@ impl Zetta {
                                 cx,
                             )
                         });
+                        let profile = binding.action_usize_parameter("slot").map(|slot| {
+                            let name = editor
+                                .profile_names
+                                .get(slot.saturating_sub(1))
+                                .cloned()
+                                .unwrap_or_else(|| format!("Profile {slot}"));
+                            dropdown(
+                                format!("settings-binding-{section_index}-{binding_index}-profile"),
+                                name,
+                                editor.profile_names.clone(),
+                                SettingsDropdown::BindingProfile(section_index, binding_index),
+                                window,
+                                cx,
+                            )
+                        });
                         let remove_handle = handle.clone();
                         bindings.push(
                             h_flex()
@@ -1110,6 +1125,9 @@ impl Zetta {
                                 .child(div().min_w_0().flex_1().child(action))
                                 .when_some(template, |row, template| {
                                     row.child(div().w(px(180.)).flex_none().child(template))
+                                })
+                                .when_some(profile, |row, profile| {
+                                    row.child(div().w(px(180.)).flex_none().child(profile))
                                 })
                                 .child(
                                     IconButton::new(

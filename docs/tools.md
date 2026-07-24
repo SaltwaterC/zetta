@@ -6,7 +6,7 @@ expose them only on networks whose clients you trust.
 
 ## Serial console
 
-Press `Ctrl-Shift-D` or choose **Zetta: Toggle Serial Console** from the command
+Press `Ctrl-Shift-S` or choose **Zetta: Toggle Serial Console** from the command
 palette to enumerate serial devices and connect one in a new left/right split.
 
 The dialog defaults to 115200 baud, 8 data bits, no parity, 1 stop bit, and no

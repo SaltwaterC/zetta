@@ -6,7 +6,7 @@ the same process and can survive after the last window closes.
 
 ## Detach and reconnect
 
-Use `Alt-Shift-D` or the archive button beside the new-tab button to detach the
+Use `Ctrl-Shift-D` or the archive button beside the new-tab button to detach the
 active tab. Its rendered terminal views are destroyed, while a lightweight
 background runner retains the live processes, scrollback, and complete tab
 model, including:
@@ -16,7 +16,7 @@ model, including:
 - broadcast-input state
 - pane and tab labels
 
-Use `Alt-Shift-A` or the reconnect button to restore the only detached session
+Use `Ctrl-Shift-A` or the reconnect button to restore the only detached session
 immediately. When multiple sessions exist, the same control opens a picker.
 Select by title, ID, pane count, or foreground application with the arrow keys
 and `Enter`, or use the pointer.
@@ -68,7 +68,7 @@ verifier. Hashing and verification run away from the UI thread.
 
 ## Automatically background a tab
 
-Use `Alt-Shift-P`, the pin toggle in the tab bar, or **Zetta: Toggle Auto
+Use `Ctrl-Shift-B`, the pin toggle in the tab bar, or **Zetta: Toggle Auto
 Background Tab** in the command palette to keep a tab running when the tab or
 its window closes.
 

@@ -15,7 +15,7 @@ The keymap is `keymap.json` in the same platform-specific directory. Use
 `--config PATH` and `--keymap PATH` to override these locations.
 
 If configuration cannot be parsed, Zetta starts with safe defaults and shows
-the error in the window. Correct the file and press `Ctrl-Shift-R` to reload
+the error in the window. Correct the file and press `Ctrl-Alt-R` to reload
 configuration, keymaps, and user themes without restarting. Existing sessions
 and their scrollback are retained.
 

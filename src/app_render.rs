@@ -427,7 +427,7 @@ impl Render for Zetta {
                     .icon_size(IconSize::Small)
                     .aria_label("Choose background session to reconnect"),
                 Tooltip::text(format!(
-                    "Choose background session to reconnect ({background_session_count}) (Alt-Shift-A)"
+                    "Choose background session to reconnect ({background_session_count}) (Ctrl-Shift-A)"
                 )),
             )
             .anchor(Anchor::TopRight)
@@ -477,7 +477,7 @@ impl Render for Zetta {
                 .width(px(32.))
                 .icon_size(IconSize::Small)
                 .aria_label("Reconnect background session")
-                .tooltip(Tooltip::text("Reconnect background session (Alt-Shift-A)"))
+                .tooltip(Tooltip::text("Reconnect background session (Ctrl-Shift-A)"))
                 .on_click(|_, window, cx| window.dispatch_action(Box::new(ReconnectSession), cx))
                 .into_any_element()
         } else {
@@ -1433,12 +1433,12 @@ impl Render for Zetta {
                                     .aria_label("Keep this tab running after close")
                                     .tooltip(Tooltip::text(if auto_background_tab {
                                         if auto_background_protected {
-                                            "Keep running after close is on · authentication required (Alt-Shift-P)"
+                                            "Keep running after close is on · authentication required (Ctrl-Shift-B)"
                                         } else {
-                                            "Keep running after close is on · no authentication (Alt-Shift-P)"
+                                            "Keep running after close is on · no authentication (Ctrl-Shift-B)"
                                         }
                                     } else {
-                                        "Keep this tab running after the tab or window is closed (Alt-Shift-P)"
+                                        "Keep this tab running after the tab or window is closed (Ctrl-Shift-B)"
                                     }))
                                     .on_click(|_, window, cx| {
                                         window.dispatch_action(
@@ -1455,7 +1455,7 @@ impl Render for Zetta {
                                     .icon_size(IconSize::Small)
                                     .aria_label("Detach tab")
                                     .tooltip(Tooltip::text(
-                                        "Detach tab to background (Alt-Shift-D)",
+                                        "Detach tab to background (Ctrl-Shift-D)",
                                     ))
                                     .on_click(|_, window, cx| {
                                         window.dispatch_action(Box::new(DetachTab), cx)

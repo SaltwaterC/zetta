@@ -39,6 +39,7 @@ pub(crate) enum SettingsDropdown {
     ProfileDraftTheme,
     BindingAction(usize, usize),
     BindingTemplate(usize, usize),
+    BindingProfile(usize, usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,7 +54,7 @@ pub(crate) struct SettingsEditor {
     pub(crate) page: SettingsPage,
     pub(crate) configuration: ConfigurationForm,
     pub(crate) keymap: KeymapForm,
-    pub(crate) profile_names: Vec<String>,
+    pub(crate) profile_names: Arc<[String]>,
     pub(crate) themes: Arc<[String]>,
     pub(crate) theme_extension_query: TextField,
     pub(crate) theme_extensions: Vec<ThemeExtension>,
@@ -172,6 +173,13 @@ impl Zetta {
             actions.push(ApplyPaneSplitTemplate::name_for_type().to_owned());
             actions.sort();
         }
+        if !actions
+            .iter()
+            .any(|action| action == OpenProfile::name_for_type())
+        {
+            actions.push(OpenProfile::name_for_type().to_owned());
+            actions.sort();
+        }
         let mut pane_template_names = self
             .launch_config
             .pane_split_templates
@@ -201,7 +209,8 @@ impl Zetta {
                 .profiles
                 .iter()
                 .map(|profile| profile.name.clone())
-                .collect(),
+                .collect::<Vec<_>>()
+                .into(),
             themes: themes.into(),
             theme_extension_query: TextField::default(),
             theme_extensions: Vec::new(),
@@ -612,6 +621,8 @@ impl Zetta {
                                     .unwrap_or_default()
                             }
                         ])
+                    } else if value == OpenProfile::name_for_type() {
+                        serde_json::json!([value, { "slot": 1 }])
                     } else {
                         serde_json::Value::String(value)
                     };
@@ -628,6 +639,27 @@ impl Zetta {
                     .and_then(serde_json::Value::as_object_mut)
                 {
                     arguments.insert("name".to_owned(), serde_json::Value::String(value));
+                }
+            }
+            SettingsDropdown::BindingProfile(section, binding) => {
+                let Some(slot) = editor
+                    .profile_names
+                    .iter()
+                    .position(|profile| profile == &value)
+                    .map(|index| index + 1)
+                else {
+                    return;
+                };
+                if let Some(arguments) = editor
+                    .keymap
+                    .sections
+                    .get_mut(section)
+                    .and_then(|section| section.bindings.get_mut(binding))
+                    .and_then(|binding| binding.action.as_array_mut())
+                    .and_then(|action| action.get_mut(1))
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    arguments.insert("slot".to_owned(), serde_json::json!(slot));
                 }
             }
         }

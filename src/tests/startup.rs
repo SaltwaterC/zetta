@@ -793,19 +793,20 @@ fn normalizes_hyphenated_page_key_names() {
 }
 
 #[test]
-fn tab_rename_does_not_capture_an_unmodified_function_key() {
-    assert!(RENAME_TAB_KEYBINDING.contains('-'));
-    assert_ne!(RENAME_TAB_KEYBINDING, "f2");
+fn tab_rename_and_configuration_reload_shortcuts_are_swapped() {
+    assert_eq!(RENAME_TAB_KEYBINDING, "ctrl-shift-r");
+    assert_eq!(RELOAD_CONFIGURATION_KEYBINDING, "ctrl-alt-r");
+    assert_ne!(RENAME_TAB_KEYBINDING, RELOAD_CONFIGURATION_KEYBINDING);
 }
 
 #[test]
 fn pane_label_uses_the_documented_shortcut() {
-    assert_eq!(RENAME_PANE_KEYBINDING, "alt-shift-l");
+    assert_eq!(RENAME_PANE_KEYBINDING, "alt-shift-r");
 }
 
 #[test]
 fn pane_layout_rotation_uses_the_requested_shortcut() {
-    assert_eq!(ROTATE_PANE_LAYOUT_KEYBINDING, "alt-shift-r");
+    assert_eq!(ROTATE_PANE_LAYOUT_KEYBINDING, "alt-shift-l");
     let shortcut = gpui::Keystroke::parse(ROTATE_PANE_LAYOUT_KEYBINDING).unwrap();
     assert_eq!(
         rotate_pane_layout_keybinding().match_keystrokes(&[shortcut]),
@@ -825,7 +826,7 @@ fn close_pane_uses_the_pane_control_modifiers() {
 
 #[test]
 fn pane_output_uses_the_standard_save_shortcut() {
-    assert_eq!(SAVE_PANE_OUTPUT_KEYBINDING, "ctrl-shift-s");
+    assert_eq!(SAVE_PANE_OUTPUT_KEYBINDING, "alt-shift-s");
     let shortcut = gpui::Keystroke::parse(SAVE_PANE_OUTPUT_KEYBINDING).unwrap();
     assert_eq!(
         pane_output_keybinding().match_keystrokes(&[shortcut]),
@@ -834,8 +835,39 @@ fn pane_output_uses_the_standard_save_shortcut() {
 }
 
 #[test]
+fn select_all_and_reconnect_use_scope_based_shortcuts() {
+    assert_eq!(SELECT_ALL_KEYBINDING, "alt-shift-a");
+    assert_eq!(RECONNECT_SESSION_KEYBINDING, "ctrl-shift-a");
+    assert_ne!(SELECT_ALL_KEYBINDING, RECONNECT_SESSION_KEYBINDING);
+
+    let select_all = gpui::Keystroke::parse(SELECT_ALL_KEYBINDING).unwrap();
+    assert_eq!(
+        select_all_keybinding().match_keystrokes(&[select_all]),
+        Some(false)
+    );
+    let reconnect = gpui::Keystroke::parse(RECONNECT_SESSION_KEYBINDING).unwrap();
+    assert_eq!(
+        reconnect_session_keybinding().match_keystrokes(&[reconnect]),
+        Some(false)
+    );
+}
+
+#[test]
+fn pane_font_size_shortcuts_use_pane_control_modifiers() {
+    let bindings = pane_font_size_keybindings();
+    for (binding, shortcut) in
+        bindings
+            .into_iter()
+            .zip(["alt-shift-=", "alt-shift-+", "alt-shift--", "alt-shift-0"])
+    {
+        let shortcut = gpui::Keystroke::parse(shortcut).unwrap();
+        assert_eq!(binding.match_keystrokes(&[shortcut]), Some(false));
+    }
+}
+
+#[test]
 fn serial_console_avoids_the_linux_unicode_input_shortcut() {
-    assert_eq!(SERIAL_CONSOLE_KEYBINDING, "ctrl-shift-d");
+    assert_eq!(SERIAL_CONSOLE_KEYBINDING, "ctrl-shift-s");
     assert_ne!(SERIAL_CONSOLE_KEYBINDING, "ctrl-shift-u");
     let shortcut = gpui::Keystroke::parse(SERIAL_CONSOLE_KEYBINDING).unwrap();
     assert_eq!(
@@ -846,10 +878,20 @@ fn serial_console_avoids_the_linux_unicode_input_shortcut() {
 
 #[test]
 fn auto_background_tab_uses_the_documented_shortcut() {
-    assert_eq!(AUTO_BACKGROUND_TAB_KEYBINDING, "alt-shift-p");
+    assert_eq!(AUTO_BACKGROUND_TAB_KEYBINDING, "ctrl-shift-b");
     let shortcut = gpui::Keystroke::parse(AUTO_BACKGROUND_TAB_KEYBINDING).unwrap();
     assert_eq!(
         auto_background_tab_keybinding().match_keystrokes(std::slice::from_ref(&shortcut)),
+        Some(false)
+    );
+}
+
+#[test]
+fn detach_tab_uses_the_tab_scoped_shortcut() {
+    assert_eq!(DETACH_TAB_KEYBINDING, "ctrl-shift-d");
+    let shortcut = gpui::Keystroke::parse(DETACH_TAB_KEYBINDING).unwrap();
+    assert_eq!(
+        detach_tab_keybinding().match_keystrokes(&[shortcut]),
         Some(false)
     );
 }

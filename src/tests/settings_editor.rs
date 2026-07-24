@@ -39,6 +39,16 @@ fn binding_form_exposes_string_action_parameters() {
 }
 
 #[test]
+fn binding_form_exposes_numeric_action_parameters() {
+    let binding = BindingForm {
+        keystroke: TextField::new("ctrl-!"),
+        action: json!(["zetta::OpenProfile", { "slot": 1 }]),
+    };
+
+    assert_eq!(binding.action_usize_parameter("slot"), Some(1));
+}
+
+#[test]
 fn missing_keymap_starts_with_the_structured_template() {
     let path = std::env::temp_dir().join(format!(
         "zetta-missing-keymap-{}-{}.json",
