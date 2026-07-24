@@ -18,7 +18,7 @@ doctest = false
 
 [dependencies]
 async-channel = "2.5.0"
-alacritty_terminal = { git = "https://github.com/zed-industries/alacritty", rev = "4c129667ce56611becdc82de6e28218c80e2e88f" }
+alacritty_terminal = { path = "../alacritty_terminal" }
 anyhow = "1.0.86"
 collections = { path = "../../zed/crates/collections", version = "0.1.0" }
 futures = "0.3.32"

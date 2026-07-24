@@ -48,6 +48,21 @@ fn sessions_subcommand_supports_human_and_json_output() {
 }
 
 #[test]
+fn output_benchmark_subcommand_bypasses_application_startup() {
+    let args = parse_args_from([OsString::from("benchmark-output")]).unwrap();
+
+    assert_eq!(args.mode, StartupMode::OutputBenchmark);
+    assert!(!should_handoff_to_existing_process(&args));
+    assert!(
+        parse_args_from([
+            OsString::from("benchmark-output"),
+            OsString::from("--unknown"),
+        ])
+        .is_err()
+    );
+}
+
+#[test]
 fn only_plain_application_launches_handoff_to_the_session_runner() {
     let plain = parse_args_from(Vec::<OsString>::new()).unwrap();
     let profile = parse_args_from([OsString::from("--profile"), OsString::from("System")]).unwrap();

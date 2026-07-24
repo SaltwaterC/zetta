@@ -5,6 +5,42 @@ workloads, machine-readable reports, and platform diagnostics.
 
 Always use an optimized build when recording or comparing measurements.
 
+## Output throughput benchmark
+
+Use the output benchmark to compare how quickly terminal emulators consume the
+same text stream:
+
+```sh
+cargo build --release
+target/release/zetta benchmark-output
+```
+
+The command writes exactly 10 MiB of deterministic, printable ASCII text to
+standard output in 128 KiB blocks, flushes it, and then prints the elapsed time
+and throughput to standard error. Payload construction is excluded from the
+measurement, and the measured standard-output stream contains no timing
+metadata.
+
+Run the same optimized binary and command inside each terminal emulator. The
+result measures the time for the process to write and flush the payload,
+including terminal or PTY backpressure, like timing `cat` on a 10 MiB text
+file. It does not measure when the terminal finishes presenting the last frame
+on the GPU. Avoid redirecting standard output when comparing terminal
+emulators, because that measures the redirected destination instead.
+
+For a scrollback-scaling check, run the benchmark repeatedly in the same pane:
+
+```sh
+for run in 1 2 3 4 5 6 7 8 9 10; do
+  target/release/zetta benchmark-output
+done
+```
+
+Compare both the individual results and their trend. A fresh pane provides the
+cold-history baseline; repeated runs reveal ingestion or rendering work that
+grows with retained scrollback. Use the equivalent loop syntax in PowerShell
+or Command Prompt on Windows.
+
 ## Performance overlay
 
 Press `Ctrl-Shift-F12` to toggle the overlay. It reports:

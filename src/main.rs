@@ -162,6 +162,8 @@ use pane::*;
 mod multi_command;
 use multi_command::*;
 mod multi_command_ui;
+mod output_benchmark;
+use output_benchmark::*;
 mod performance;
 use performance::*;
 mod command_palette_ui;
