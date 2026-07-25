@@ -99,6 +99,12 @@ impl EventedReadWrite for Pty {
     }
 
     #[inline]
+    fn rearm_read(&mut self) -> io::Result<()> {
+        self.conout.rearm();
+        Ok(())
+    }
+
+    #[inline]
     fn reader(&mut self) -> &mut Self::Reader {
         &mut self.conout
     }

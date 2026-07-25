@@ -4521,6 +4521,44 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[gpui::test]
+    #[ignore = "manual optimized-build ConPTY throughput check"]
+    async fn windows_pty_output_throughput_benchmark(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let executable = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/release/zetta.exe")
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            Path::new(&executable).is_file(),
+            "build target/release/zetta.exe before running this benchmark"
+        );
+
+        let started_at = Instant::now();
+        let (terminal, completion_rx) =
+            build_test_terminal_with_arguments(cx, executable, vec!["benchmark-output".to_owned()])
+                .await;
+        let status = completion_rx.recv().await.unwrap();
+        let elapsed = started_at.elapsed();
+
+        eprintln!(
+            "ConPTY benchmark completed in {:.3} s",
+            elapsed.as_secs_f64()
+        );
+        assert_eq!(status, Some(ExitStatus::default()));
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "ConPTY output took {:.3} s",
+            elapsed.as_secs_f64()
+        );
+        let history_size = terminal.update(cx, |terminal, _| terminal.term.lock().history_size());
+        assert!(
+            history_size > 100_000,
+            "expected the complete benchmark payload in scrollback, got {history_size} lines"
+        );
+    }
+
     #[gpui::test]
     async fn test_async_content_snapshot_captures_complete_output(cx: &mut TestAppContext) {
         cx.executor().allow_parking();

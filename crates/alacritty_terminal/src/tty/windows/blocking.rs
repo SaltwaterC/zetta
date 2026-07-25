@@ -127,6 +127,14 @@ impl<R: Read + Send + 'static> UnblockedReader<R> {
             Poll::Ready(n) => n,
         }
     }
+
+    /// Register the IOCP notification for the next byte without consuming it.
+    pub fn rearm(&mut self) {
+        let waker = Waker::from(self.interest.clone());
+        if matches!(self.pipe.poll(&mut Context::from_waker(&waker)), Poll::Ready(true)) {
+            Wake::wake_by_ref(&self.interest);
+        }
+    }
 }
 
 impl<R: Read + Send + 'static> Read for UnblockedReader<R> {

@@ -394,6 +394,13 @@ mod test {
     }
 
     #[test]
+    fn test_ctrl_j_newline() {
+        let ctrl_j = Keystroke::parse("ctrl-j").unwrap();
+
+        assert_eq!(to_esc_str(&ctrl_j, Modes::NONE, false), Some("\x0a".into()));
+    }
+
+    #[test]
     fn test_modifier_code_calc() {
         //   Code     Modifiers
         // ---------+---------------------------

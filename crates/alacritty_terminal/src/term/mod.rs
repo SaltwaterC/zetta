@@ -2573,13 +2573,7 @@ mod tests {
         let payload = (0..PAYLOAD_BYTES)
             .map(|index| {
                 let column = index % LINE_BYTES;
-                if column == LINE_BYTES - 2 {
-                    b'\r'
-                } else if column == LINE_BYTES - 1 {
-                    b'\n'
-                } else {
-                    TEXT[column % TEXT.len()]
-                }
+                if column == LINE_BYTES - 1 { b'\n' } else { TEXT[column % TEXT.len()] }
             })
             .collect::<Vec<_>>();
         let size = TermSize::new(98, 50);
@@ -2588,7 +2582,9 @@ mod tests {
         let mut processor = Processor::<StdSyncHandler>::new();
 
         let started_at = std::time::Instant::now();
-        processor.advance(&mut term, &payload);
+        for chunk in payload.chunks(4 * 1024) {
+            processor.advance(&mut term, chunk);
+        }
         let elapsed = started_at.elapsed();
         let throughput = payload.len() as f64 / (1024.0 * 1024.0) / elapsed.as_secs_f64();
 

@@ -77,6 +77,14 @@ pub trait EventedReadWrite {
     fn reregister(&mut self, _: &Arc<Poller>, _: Event, _: PollMode) -> io::Result<()>;
     fn deregister(&mut self, _: &Arc<Poller>) -> io::Result<()>;
 
+    /// Re-arm a level-triggered read after a deliberately bounded read batch.
+    ///
+    /// Native polling backends remain readable automatically. Adaptors backed by an in-memory
+    /// pipe can override this to register a wakeup for newly buffered bytes.
+    fn rearm_read(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
     fn reader(&mut self) -> &mut Self::Reader;
     fn writer(&mut self) -> &mut Self::Writer;
 }

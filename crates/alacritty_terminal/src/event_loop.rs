@@ -114,7 +114,7 @@ where
         let mut processed = 0;
 
         // Reserve the next terminal lock for PTY reading.
-        let _terminal_lease = Some(self.terminal.lease());
+        let terminal_lease = Some(self.terminal.lease());
         let mut terminal = None;
 
         loop {
@@ -135,7 +135,7 @@ where
             }
 
             // Attempt to lock the terminal.
-            let terminal = match &mut terminal {
+            let terminal_guard = match &mut terminal {
                 Some(terminal) => terminal,
                 None => terminal.insert(match self.terminal.try_lock_unfair() {
                     // Force block if we are at the buffer size limit.
@@ -151,7 +151,7 @@ where
             }
 
             // Parse the incoming bytes.
-            state.parser.advance(&mut **terminal, &buf[..unprocessed]);
+            state.parser.advance(&mut **terminal_guard, &buf[..unprocessed]);
 
             processed += unprocessed;
             unprocessed = 0;
@@ -165,7 +165,7 @@ where
         // Release the terminal before notifying the UI. Event listeners are permitted to apply
         // backpressure to hidden terminals, which must never extend the live grid lock duration.
         drop(terminal);
-        drop(_terminal_lease);
+        drop(terminal_lease);
 
         // Queue terminal redraw unless all processed bytes were synchronized.
         if state.parser.sync_bytes_count() < processed && processed > 0 {
@@ -296,6 +296,13 @@ where
                                     }
 
                                     error!("Error reading from PTY in event loop: {err}");
+                                    break 'event_loop;
+                                }
+
+                                // Adaptors backed by an in-memory pipe must explicitly register
+                                // the next wake after this deliberately bounded read batch.
+                                if let Err(err) = self.pty.rearm_read() {
+                                    error!("Error re-arming PTY read interest: {err}");
                                     break 'event_loop;
                                 }
                             }
