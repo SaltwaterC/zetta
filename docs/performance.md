@@ -15,18 +15,24 @@ cargo build --release
 target/release/zetta benchmark-output
 ```
 
-The command writes exactly 10 MiB of deterministic, printable ASCII text to
-standard output in 128 KiB blocks, flushes it, and then prints the elapsed time
-and throughput to standard error. Payload construction is excluded from the
-measurement, and the measured standard-output stream contains no timing
-metadata.
+The command writes 10 MiB by default. Set another output size in MiB with
+`--size` or `-s`:
+
+```sh
+target/release/zetta benchmark-output --size 100
+```
+
+The deterministic, printable ASCII text is written to standard output in
+128 KiB blocks, flushed, and then the elapsed time and throughput are printed
+to standard error. Payload construction is excluded from the measurement, and
+the measured standard-output stream contains no timing metadata.
 
 Run the same optimized binary and command inside each terminal emulator. The
 result measures the time for the process to write and flush the payload,
-including terminal or PTY backpressure, like timing `cat` on a 10 MiB text
-file. It does not measure when the terminal finishes presenting the last frame
-on the GPU. Avoid redirecting standard output when comparing terminal
-emulators, because that measures the redirected destination instead.
+including terminal or PTY backpressure, like timing `cat` on an equivalently
+sized text file. It does not measure when the terminal finishes presenting the
+last frame on the GPU. Avoid redirecting standard output when comparing
+terminal emulators, because that measures the redirected destination instead.
 
 For a scrollback-scaling check, run the benchmark repeatedly in the same pane:
 

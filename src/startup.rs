@@ -5,7 +5,9 @@ const DEFAULT_PERFORMANCE_REPORT_DURATION: Duration = Duration::from_secs(10);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StartupMode {
     Application,
-    OutputBenchmark,
+    OutputBenchmark {
+        size_mib: usize,
+    },
     ListBackgroundSessions {
         json: bool,
     },
@@ -46,13 +48,30 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
         .first()
         .is_some_and(|argument| argument == "benchmark-output")
     {
-        if let Some(argument) = arguments.get(1) {
+        let mut size_mib = None;
+        let mut benchmark_arguments = arguments[1..].iter();
+        while let Some(argument) = benchmark_arguments.next() {
             match argument.to_string_lossy().as_ref() {
                 "--help" | "-h" => {
                     println!(
-                        "Benchmark terminal output throughput\n\nUsage: zetta benchmark-output\n\nWrites exactly 10 MiB of deterministic text to standard output and prints the elapsed time to standard error."
+                        "Benchmark terminal output throughput\n\nUsage: zetta benchmark-output [--size MIB]\n\nWrites deterministic text to standard output and prints the elapsed time to standard error.\n\nOptions:\n  -s, --size MIB  Set the output size in MiB [default: 10]\n  -h, --help      Print help"
                     );
                     std::process::exit(0);
+                }
+                "--size" | "-s" => {
+                    anyhow::ensure!(size_mib.is_none(), "--size may only be specified once");
+                    let value = benchmark_arguments
+                        .next()
+                        .context("--size requires a number of MiB")?
+                        .to_string_lossy()
+                        .parse::<usize>()
+                        .context("--size must be a whole number of MiB")?;
+                    anyhow::ensure!(value > 0, "--size must be greater than zero");
+                    anyhow::ensure!(
+                        value.checked_mul(MIB_BYTES).is_some(),
+                        "--size is too large"
+                    );
+                    size_mib = Some(value);
                 }
                 unknown => anyhow::bail!("unknown benchmark-output argument {unknown:?}"),
             }
@@ -61,7 +80,9 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             config_path: None,
             keymap_path: None,
             profile: None,
-            mode: StartupMode::OutputBenchmark,
+            mode: StartupMode::OutputBenchmark {
+                size_mib: size_mib.unwrap_or(DEFAULT_OUTPUT_BENCHMARK_MIB),
+            },
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,
@@ -195,7 +216,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             }
             "--help" | "-h" => {
                 println!(
-                    "Zetta terminal\n\nUsage: zetta [OPTIONS]\n       zetta benchmark-output\n       zetta sessions [--json]\n       zetta tftp <COMMAND> [OPTIONS]\n\nCommands:\n  benchmark-output                    Write and time a 10 MiB text payload\n  sessions                            List detached background sessions\n  tftp                                Transfer a file with TFTP\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Launch the named profile\n  -P, --profile-terminal-rendering    Profile terminal rendering\n  -s, --profile-pane-stress           Use four visible producer panes\n  -b, --profile-background-stress     Render alternating cell backgrounds\n  -u, --profile-sparse-updates        Update a dense terminal at 40 Hz\n  -x, --profile-external-terminal     Run the workload in the current terminal\n  -r, --profile-report PATH           Write a profiling report\n  -d, --profile-duration SECONDS      Set the profiling duration"
+                    "Zetta terminal\n\nUsage: zetta [OPTIONS]\n       zetta benchmark-output [--size MIB]\n       zetta sessions [--json]\n       zetta tftp <COMMAND> [OPTIONS]\n\nCommands:\n  benchmark-output                    Write and time a text payload (default: 10 MiB)\n  sessions                            List detached background sessions\n  tftp                                Transfer a file with TFTP\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Launch the named profile\n  -P, --profile-terminal-rendering    Profile terminal rendering\n  -s, --profile-pane-stress           Use four visible producer panes\n  -b, --profile-background-stress     Render alternating cell backgrounds\n  -u, --profile-sparse-updates        Update a dense terminal at 40 Hz\n  -x, --profile-external-terminal     Run the workload in the current terminal\n  -r, --profile-report PATH           Write a profiling report\n  -d, --profile-duration SECONDS      Set the profiling duration"
                 );
                 std::process::exit(0);
             }
@@ -1305,8 +1326,8 @@ fn selected_performance_workload(args: &StartupArgs) -> PerformanceWorkload {
 
 pub(crate) fn run() -> Result<()> {
     let args = parse_args()?;
-    if args.mode == StartupMode::OutputBenchmark {
-        return run_output_benchmark();
+    if let StartupMode::OutputBenchmark { size_mib } = &args.mode {
+        return run_output_benchmark(*size_mib);
     }
     if let StartupMode::ListBackgroundSessions { json } = &args.mode {
         return print_session_catalogs(*json);

@@ -5,7 +5,8 @@ use std::{
 
 use anyhow::{Context as _, Result};
 
-pub(crate) const OUTPUT_BENCHMARK_BYTES: usize = 10 * 1024 * 1024;
+pub(crate) const DEFAULT_OUTPUT_BENCHMARK_MIB: usize = 10;
+pub(crate) const MIB_BYTES: usize = 1024 * 1024;
 const OUTPUT_BENCHMARK_WRITE_BYTES: usize = 128 * 1024;
 const OUTPUT_BENCHMARK_LINE_BYTES: usize = 80;
 const OUTPUT_BENCHMARK_TEXT: &[u8] =
@@ -23,10 +24,10 @@ impl OutputBenchmarkResult {
     }
 }
 
-fn output_benchmark_payload() -> Vec<u8> {
-    (0..OUTPUT_BENCHMARK_BYTES)
+fn output_benchmark_payload(start_column: usize, bytes: usize) -> Vec<u8> {
+    (0..bytes)
         .map(|index| {
-            let column = index % OUTPUT_BENCHMARK_LINE_BYTES;
+            let column = (start_column + index) % OUTPUT_BENCHMARK_LINE_BYTES;
             if column == OUTPUT_BENCHMARK_LINE_BYTES - 1 {
                 b'\n'
             } else {
@@ -38,22 +39,43 @@ fn output_benchmark_payload() -> Vec<u8> {
 
 pub(crate) fn write_output_benchmark(
     output: &mut impl io::Write,
+    bytes: usize,
 ) -> io::Result<OutputBenchmarkResult> {
-    let payload = output_benchmark_payload();
+    let mut payloads = Vec::new();
+    let mut start_column = 0;
+    loop {
+        payloads.push(output_benchmark_payload(
+            start_column,
+            OUTPUT_BENCHMARK_WRITE_BYTES,
+        ));
+        start_column = (start_column + OUTPUT_BENCHMARK_WRITE_BYTES) % OUTPUT_BENCHMARK_LINE_BYTES;
+        if start_column == 0 {
+            break;
+        }
+    }
+
     let started_at = Instant::now();
-    for chunk in payload.chunks(OUTPUT_BENCHMARK_WRITE_BYTES) {
-        output.write_all(chunk)?;
+    let mut remaining = bytes;
+    let mut payload_index = 0;
+    while remaining > 0 {
+        let payload = &payloads[payload_index];
+        output.write_all(&payload[..remaining.min(payload.len())])?;
+        remaining = remaining.saturating_sub(payload.len());
+        payload_index = (payload_index + 1) % payloads.len();
     }
     output.flush()?;
     Ok(OutputBenchmarkResult {
-        bytes: payload.len(),
+        bytes,
         elapsed: started_at.elapsed(),
     })
 }
 
-pub(crate) fn run_output_benchmark() -> Result<()> {
+pub(crate) fn run_output_benchmark(size_mib: usize) -> Result<()> {
+    let bytes = size_mib
+        .checked_mul(MIB_BYTES)
+        .context("benchmark output size is too large")?;
     let stdout = io::stdout();
-    let result = write_output_benchmark(&mut stdout.lock())
+    let result = write_output_benchmark(&mut stdout.lock(), bytes)
         .context("writing the output benchmark payload")?;
     eprintln!(
         "Zetta output benchmark: {:.3} MiB in {:.3} s ({:.3} MiB/s)",

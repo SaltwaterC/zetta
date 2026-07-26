@@ -32,22 +32,26 @@ impl io::Write for InspectingWriter {
 }
 
 #[test]
-fn output_benchmark_writes_exactly_ten_mib_of_deterministic_text() {
+fn output_benchmark_writes_requested_amount_of_deterministic_text() {
     let mut output = InspectingWriter::default();
-    let result = write_output_benchmark(&mut output).unwrap();
+    let bytes = MIB_BYTES;
+    let result = write_output_benchmark(&mut output, bytes).unwrap();
 
-    assert_eq!(result.bytes, OUTPUT_BENCHMARK_BYTES);
-    assert_eq!(output.bytes, OUTPUT_BENCHMARK_BYTES);
-    assert_eq!(
-        output.newlines,
-        OUTPUT_BENCHMARK_BYTES / OUTPUT_BENCHMARK_LINE_BYTES
-    );
+    assert_eq!(result.bytes, bytes);
+    assert_eq!(output.bytes, bytes);
+    assert_eq!(output.newlines, bytes / OUTPUT_BENCHMARK_LINE_BYTES);
     assert_eq!(output.invalid_bytes, 0);
     assert_eq!(output.flushes, 1);
 }
 
 #[test]
-fn output_benchmark_uses_complete_lines() {
-    assert_eq!(OUTPUT_BENCHMARK_BYTES % OUTPUT_BENCHMARK_LINE_BYTES, 0);
-    assert_eq!(output_benchmark_payload().last().copied(), Some(b'\n'));
+fn default_output_benchmark_uses_complete_lines() {
+    let bytes = DEFAULT_OUTPUT_BENCHMARK_MIB * MIB_BYTES;
+    assert_eq!(bytes % OUTPUT_BENCHMARK_LINE_BYTES, 0);
+    assert_eq!(
+        output_benchmark_payload(OUTPUT_BENCHMARK_LINE_BYTES - 1, 1)
+            .last()
+            .copied(),
+        Some(b'\n')
+    );
 }

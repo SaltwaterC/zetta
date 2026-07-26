@@ -51,8 +51,46 @@ fn sessions_subcommand_supports_human_and_json_output() {
 fn output_benchmark_subcommand_bypasses_application_startup() {
     let args = parse_args_from([OsString::from("benchmark-output")]).unwrap();
 
-    assert_eq!(args.mode, StartupMode::OutputBenchmark);
+    assert_eq!(
+        args.mode,
+        StartupMode::OutputBenchmark {
+            size_mib: DEFAULT_OUTPUT_BENCHMARK_MIB
+        }
+    );
     assert!(!should_handoff_to_existing_process(&args));
+
+    let sized = parse_args_from([
+        OsString::from("benchmark-output"),
+        OsString::from("--size"),
+        OsString::from("64"),
+    ])
+    .unwrap();
+    assert_eq!(sized.mode, StartupMode::OutputBenchmark { size_mib: 64 });
+
+    let short_sized = parse_args_from([
+        OsString::from("benchmark-output"),
+        OsString::from("-s"),
+        OsString::from("32"),
+    ])
+    .unwrap();
+    assert_eq!(
+        short_sized.mode,
+        StartupMode::OutputBenchmark { size_mib: 32 }
+    );
+
+    for invalid in ["0", "1.5", "not-a-number"] {
+        assert!(
+            parse_args_from([
+                OsString::from("benchmark-output"),
+                OsString::from("--size"),
+                OsString::from(invalid),
+            ])
+            .is_err()
+        );
+    }
+    assert!(
+        parse_args_from([OsString::from("benchmark-output"), OsString::from("--size"),]).is_err()
+    );
     assert!(
         parse_args_from([
             OsString::from("benchmark-output"),
