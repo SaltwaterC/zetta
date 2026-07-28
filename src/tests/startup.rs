@@ -968,14 +968,46 @@ fn application_menu_shortcut_is_available_on_windows_and_linux() {
     let binding = application_menu_keybinding();
     if cfg!(any(target_os = "windows", target_os = "linux")) {
         let shortcut = gpui::Keystroke::parse(APPLICATION_MENU_KEYBINDING).unwrap();
-        assert_eq!(
+        let binding =
+            binding.expect("Windows and Linux should bind Alt+Space to the application menu");
+        assert_eq!(binding.match_keystrokes(&[shortcut]), Some(false));
+        assert!(
             binding
-                .expect("Windows and Linux should bind Alt+Space to the application menu")
-                .match_keystrokes(&[shortcut]),
-            Some(false)
+                .predicate()
+                .expect("application menu shortcut should be scoped to Zetta")
+                .depth_of(&[
+                    gpui::KeyContext::parse("Zetta").unwrap(),
+                    gpui::KeyContext::parse("Terminal").unwrap(),
+                ])
+                .is_some()
         );
     } else {
         assert!(binding.is_none());
+    }
+}
+
+#[test]
+fn application_menu_navigation_shortcuts_apply_while_a_menu_is_focused() {
+    let shortcuts = ["left", "right"];
+    for (binding, shortcut) in application_menu_navigation_keybindings()
+        .into_iter()
+        .zip(shortcuts)
+    {
+        assert_eq!(
+            binding.match_keystrokes(&[gpui::Keystroke::parse(shortcut).unwrap()]),
+            Some(false)
+        );
+        assert!(
+            binding
+                .predicate()
+                .expect("application menu navigation should be scoped to menus")
+                .depth_of(&[
+                    gpui::KeyContext::parse("Zetta").unwrap(),
+                    gpui::KeyContext::parse("Terminal").unwrap(),
+                    gpui::KeyContext::parse("menu").unwrap(),
+                ])
+                .is_some()
+        );
     }
 }
 

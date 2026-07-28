@@ -65,6 +65,11 @@ pub(crate) fn to_esc_str(
         ("backspace", TerminalModifiers::Ctrl) => Some("\x08"),
         ("backspace", TerminalModifiers::Alt) => Some("\x1b\x7f"),
         ("backspace", TerminalModifiers::Shift) => Some("\x7f"),
+        // `space` is GPUI's symbolic key name. It must be encoded as the
+        // space character, not the letters in that name, when sent as Meta.
+        ("space", TerminalModifiers::Alt) if !cfg!(target_os = "macos") || option_as_meta => {
+            Some("\x1b ")
+        }
         ("space", TerminalModifiers::Ctrl) => Some("\x00"),
         ("home", TerminalModifiers::None) if mode.contains(Modes::APP_CURSOR) => Some("\x1bOH"),
         ("home", TerminalModifiers::None) if !mode.contains(Modes::APP_CURSOR) => Some("\x1b[H"),
@@ -378,6 +383,14 @@ mod test {
                 format!("\x1b{}", key)
             );
         }
+    }
+
+    #[test]
+    fn alt_space_is_encoded_as_meta_space() {
+        assert_eq!(
+            to_esc_str(&Keystroke::parse("alt-space").unwrap(), Modes::NONE, true),
+            Some("\x1b ".into())
+        );
     }
 
     #[test]

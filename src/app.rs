@@ -11,6 +11,23 @@ enum ReconnectRequest {
     Choose,
 }
 
+#[derive(Clone, Copy)]
+enum ApplicationMenuDirection {
+    Left,
+    Right,
+}
+
+fn adjacent_application_menu_index(
+    menu_count: usize,
+    current_index: usize,
+    direction: ApplicationMenuDirection,
+) -> usize {
+    match direction {
+        ApplicationMenuDirection::Left => current_index.checked_sub(1).unwrap_or(menu_count - 1),
+        ApplicationMenuDirection::Right => (current_index + 1) % menu_count,
+    }
+}
+
 fn reconnect_request(session_count: usize) -> ReconnectRequest {
     match session_count {
         0 => ReconnectRequest::None,
@@ -78,6 +95,7 @@ pub(crate) struct Zetta {
     pub(crate) background_process_refresh_running: bool,
     pub(crate) background_session_picker_entries: Vec<(u64, String, String)>,
     pub(crate) application_menu_handle: PopoverMenuHandle<ui::ContextMenu>,
+    pub(crate) profile_menu_handle: PopoverMenuHandle<ui::ContextMenu>,
     pub(crate) reconnect_menu_handle: PopoverMenuHandle<ui::ContextMenu>,
     pub(crate) session_authentication_focus: gpui::FocusHandle,
     pub(crate) session_authentication: Option<SessionAuthenticationPrompt>,
@@ -251,6 +269,7 @@ impl Zetta {
             background_process_refresh_running: false,
             background_session_picker_entries: Vec::new(),
             application_menu_handle: PopoverMenuHandle::default(),
+            profile_menu_handle: PopoverMenuHandle::default(),
             reconnect_menu_handle: PopoverMenuHandle::default(),
             session_authentication_focus: cx.focus_handle(),
             session_authentication: None,
@@ -1045,6 +1064,51 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         self.application_menu_handle.show(window, cx);
+    }
+
+    fn title_bar_menu_handles(&self) -> [PopoverMenuHandle<ui::ContextMenu>; 2] {
+        [
+            self.application_menu_handle.clone(),
+            self.profile_menu_handle.clone(),
+        ]
+    }
+
+    fn navigate_application_menus(
+        &mut self,
+        direction: ApplicationMenuDirection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Keep the navigable menus in title-bar order. Adding a new top-level
+        // menu only requires adding its handle here.
+        let handles = self.title_bar_menu_handles();
+        let Some(current_index) = handles.iter().position(PopoverMenuHandle::is_deployed) else {
+            cx.propagate();
+            return;
+        };
+        let next_index = adjacent_application_menu_index(handles.len(), current_index, direction);
+
+        handles[current_index].hide(cx);
+        let next_handle = handles[next_index].clone();
+        cx.defer_in(window, move |_, window, cx| next_handle.show(window, cx));
+    }
+
+    pub(crate) fn activate_application_menu_left(
+        &mut self,
+        _: &ActivateApplicationMenuLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.navigate_application_menus(ApplicationMenuDirection::Left, window, cx);
+    }
+
+    pub(crate) fn activate_application_menu_right(
+        &mut self,
+        _: &ActivateApplicationMenuRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.navigate_application_menus(ApplicationMenuDirection::Right, window, cx);
     }
 
     pub(crate) fn reconnect_background_session(

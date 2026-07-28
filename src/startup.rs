@@ -789,9 +789,19 @@ pub(crate) fn application_menu_keybinding() -> Option<KeyBinding> {
         KeyBinding::new(
             APPLICATION_MENU_KEYBINDING,
             OpenApplicationMenu,
-            Some("Zetta > Terminal"),
+            // The menu is an application-level control. Binding it at the Zetta
+            // context keeps it available even when the focused terminal view does
+            // not contribute its `Terminal` key context.
+            Some("Zetta"),
         )
     })
+}
+
+pub(crate) fn application_menu_navigation_keybindings() -> [KeyBinding; 2] {
+    [
+        KeyBinding::new("left", ActivateApplicationMenuLeft, Some("Zetta > menu")),
+        KeyBinding::new("right", ActivateApplicationMenuRight, Some("Zetta > menu")),
+    ]
 }
 
 pub(crate) fn detach_tab_keybinding() -> KeyBinding {
@@ -974,6 +984,7 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
         KeyBinding::new("ctrl-shift-w", CloseTab, Some("Terminal")),
     ];
     bindings.extend(application_menu_keybinding());
+    bindings.extend(application_menu_navigation_keybindings());
     bindings.extend(minimized_pane_keybindings());
     bindings.extend(pane_template_keybindings());
     bindings.extend(pane_font_size_keybindings());

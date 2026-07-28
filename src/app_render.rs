@@ -307,6 +307,7 @@ impl Render for Zetta {
         let default_profile = self.launch_config.default_profile;
         let profile_menu_handle = handle.clone();
         let profile_menu = PopoverMenu::new("new-tab-profile-menu")
+            .with_handle(self.profile_menu_handle.clone())
             .trigger_with_tooltip(
                 Button::new(
                     "new-tab-profile-menu-trigger",
@@ -1530,6 +1531,8 @@ impl Render for Zetta {
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::new_window))
             .on_action(cx.listener(Self::open_application_menu))
+            .on_action(cx.listener(Self::activate_application_menu_left))
+            .on_action(cx.listener(Self::activate_application_menu_right))
             .on_action(cx.listener(Self::open_profile))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::close_window))
