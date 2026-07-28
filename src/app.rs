@@ -234,6 +234,7 @@ impl Zetta {
     pub(crate) fn new(
         config: Config,
         configuration_error: Option<String>,
+        initial_profile: Option<Profile>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -301,7 +302,11 @@ impl Zetta {
             ],
         };
         this.load_multi_command_catalog(cx);
-        this.open_tab(window, cx);
+        if let Some(profile) = initial_profile {
+            this.open_tab_with_profile(profile, window, cx);
+        } else {
+            this.open_tab(window, cx);
+        }
         this
     }
 
@@ -831,6 +836,7 @@ impl Zetta {
         open_zetta_window(
             self.launch_config.clone(),
             self.configuration_error.clone(),
+            None,
             false,
             None,
             false,

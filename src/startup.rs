@@ -290,16 +290,17 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
     })
 }
 
-fn select_launch_profile(config: &mut Config, requested: Option<&str>) -> Result<()> {
+fn select_launch_profile(config: &Config, requested: Option<&str>) -> Result<Option<Profile>> {
     let Some(requested) = requested else {
-        return Ok(());
+        return Ok(None);
     };
-    config.default_profile = config
+    config
         .profiles
         .iter()
-        .position(|profile| profile.name.eq_ignore_ascii_case(requested))
-        .with_context(|| format!("profile {requested:?} is not available"))?;
-    Ok(())
+        .find(|profile| profile.name.eq_ignore_ascii_case(requested))
+        .cloned()
+        .map(Some)
+        .with_context(|| format!("profile {requested:?} is not available"))
 }
 
 pub(crate) fn parse_args() -> Result<StartupArgs> {
@@ -947,6 +948,7 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
 pub(crate) fn open_zetta_window(
     config: Config,
     configuration_error: Option<String>,
+    initial_profile: Option<Profile>,
     enable_performance_overlay: bool,
     performance_report: Option<(PerformanceReportOptions, PerformanceReportStatus)>,
     profile_pane_stress: bool,
@@ -955,7 +957,8 @@ pub(crate) fn open_zetta_window(
     let options = zetta_window_options(cx);
     cx.open_window(options, move |window, cx| {
         window.set_window_title("Zetta");
-        let zetta = cx.new(|cx| Zetta::new(config, configuration_error, window, cx));
+        let zetta =
+            cx.new(|cx| Zetta::new(config, configuration_error, initial_profile, window, cx));
         track_zetta_window(&zetta, window, cx);
         prepare_background_tabs_before_window_close(&zetta, window, cx);
         if profile_pane_stress {
@@ -1146,7 +1149,7 @@ fn open_dormant_or_new_window(cx: &mut App) -> Result<()> {
         cx.activate(true);
         Ok(())
     } else {
-        open_zetta_window(config, configuration_error, false, None, false, cx)
+        open_zetta_window(config, configuration_error, None, false, None, false, cx)
     }
 }
 
@@ -1369,7 +1372,7 @@ pub(crate) fn run() -> Result<()> {
         });
     let report_requested = report_options.is_some();
     let report_status = Arc::new(Mutex::new(None));
-    let (mut config, configuration_error) = if profiling {
+    let (config, configuration_error) = if profiling {
         (
             terminal_rendering_profile_config(&env::current_exe()?, workload),
             None,
@@ -1377,7 +1380,7 @@ pub(crate) fn run() -> Result<()> {
     } else {
         load_startup_config(args.config_path.as_deref(), args.keymap_path)
     };
-    select_launch_profile(&mut config, args.profile.as_deref())?;
+    let initial_profile = select_launch_profile(&config, args.profile.as_deref())?;
     let keymap_path = config.keymap_path.clone();
     let profile_count = config.profiles.len();
     let http_client = Arc::new(
@@ -1460,6 +1463,7 @@ pub(crate) fn run() -> Result<()> {
             open_zetta_window(
                 config,
                 configuration_error,
+                initial_profile,
                 profiling,
                 report_options.map(|options| (options, report_status_for_app)),
                 args.profile_pane_stress,

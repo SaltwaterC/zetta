@@ -231,7 +231,7 @@ fn shorthand_options_match_long_options() {
 }
 
 #[test]
-fn launch_profile_selects_an_available_profile_case_insensitively() {
+fn launch_profile_selects_an_available_profile_without_changing_the_configured_default() {
     let mut config = Config::defaults(None, None);
     config.profiles = vec![
         Profile {
@@ -246,10 +246,13 @@ fn launch_profile_selects_an_available_profile_case_insensitively() {
         },
     ];
 
-    select_launch_profile(&mut config, Some("wsl: ubuntu")).unwrap();
-    assert_eq!(config.default_profile, 1);
+    let profile = select_launch_profile(&config, Some("wsl: ubuntu"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(profile.name, "WSL: Ubuntu");
+    assert_eq!(config.default_profile, 0);
 
-    let error = select_launch_profile(&mut config, Some("Missing")).unwrap_err();
+    let error = select_launch_profile(&config, Some("Missing")).unwrap_err();
     assert!(error.to_string().contains("is not available"));
 }
 
