@@ -46,6 +46,7 @@ pub(crate) enum SettingsDropdown {
 pub(crate) enum NumericSetting {
     FontSize,
     ScrollHistory,
+    #[cfg(feature = "http-server")]
     HttpServerPort,
 }
 
@@ -162,6 +163,7 @@ impl Zetta {
         let mut actions = window
             .available_actions(cx)
             .into_iter()
+            .filter(|action| action_is_enabled_in_build(action.name()))
             .map(|action| action.name().to_owned())
             .collect::<Vec<_>>();
         actions.sort();
@@ -750,13 +752,14 @@ impl Zetta {
                     value.to_string()
                 });
             }
+            #[cfg(feature = "http-server")]
             NumericSetting::HttpServerPort => {
                 let current = configuration
                     .http_server_port
                     .text
                     .trim()
                     .parse::<u16>()
-                    .unwrap_or(DEFAULT_HTTP_PORT);
+                    .unwrap_or(config::DEFAULT_HTTP_PORT);
                 configuration.http_server_port = TextField::new(
                     current
                         .saturating_add_signed(direction as i16)

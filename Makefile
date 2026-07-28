@@ -4,6 +4,36 @@ INSTALL ?= install
 SETCAP ?= setcap
 PREFIX ?= /usr
 DESTDIR ?=
+SERIAL ?= 1
+HTTP ?= 1
+TFTP ?= 1
+TFTP_SERVER ?= $(TFTP)
+TFTP_CLIENT ?= $(TFTP)
+X11 ?= 0
+
+# Set any of SERIAL, HTTP, TFTP, TFTP_SERVER, or TFTP_CLIENT to 0, false,
+# no, or off to omit that tool from the built binary. TFTP is a convenient
+# shorthand for disabling both the server and client.
+# Set X11=1 to include the X11 backend alongside the default Wayland backend.
+tool_enabled = $(if $(filter 0 false no off,$(strip $(1))),,1)
+BUILD_FEATURES := wayland
+ifneq ($(call tool_enabled,$(SERIAL)),)
+BUILD_FEATURES += serial-console
+endif
+ifneq ($(call tool_enabled,$(HTTP)),)
+BUILD_FEATURES += http-server
+endif
+ifneq ($(call tool_enabled,$(TFTP_SERVER)),)
+BUILD_FEATURES += tftp-server
+endif
+ifneq ($(call tool_enabled,$(TFTP_CLIENT)),)
+BUILD_FEATURES += tftp-client
+endif
+ifneq ($(call tool_enabled,$(X11)),)
+BUILD_FEATURES += x11
+endif
+
+export SERIAL HTTP TFTP TFTP_SERVER TFTP_CLIENT X11
 
 export CARGO
 
@@ -18,7 +48,7 @@ ICON_512_DIR := $(DATADIR)/icons/hicolor/512x512/apps
 	uninstall-binary uninstall-assets refresh-desktop-caches
 
 test:
-	$(CARGO) test --locked
+	$(CARGO) test --locked --no-default-features --features "$(BUILD_FEATURES)"
 
 ifeq ($(OS),Windows_NT)
 build:
@@ -47,7 +77,7 @@ uninstall-assets:
 refresh-desktop-caches:
 else
 build:
-	$(ENV) -u DESTDIR $(CARGO) build --release --locked
+	$(ENV) -u DESTDIR $(CARGO) build --release --locked --no-default-features --features "$(BUILD_FEATURES)"
 
 install:
 	@if [ "$$(id -u)" -eq 0 ]; then \
@@ -66,7 +96,7 @@ install-binary:
 	$(INSTALL) -Dm755 target/release/zetta $(BINDIR)/zetta
 
 install-capabilities:
-	@if [ "$$(uname -s)" = "Linux" ]; then \
+	@if [ "$$(uname -s)" = "Linux" ] && [ -n "$(call tool_enabled,$(TFTP_SERVER))" ]; then \
 		if [ -n "$(DESTDIR)" ]; then \
 			echo "Skipping cap_net_bind_service for staged install; apply it in the package install step"; \
 		elif [ "$$(id -u)" -ne 0 ]; then \

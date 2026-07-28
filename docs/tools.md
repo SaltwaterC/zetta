@@ -4,6 +4,12 @@ Zetta includes serial-console support, static HTTP and TFTP servers, and a
 command-line TFTP client. The servers have no authentication or encryption;
 expose them only on networks whose clients you trust.
 
+These components are enabled in normal builds. Distribution builds can omit
+them with `make build SERIAL=0 HTTP=0 TFTP=0`; `TFTP_SERVER=0` and
+`TFTP_CLIENT=0` select the two TFTP components separately. See the
+[installation guide](installation.md#linux-desktop-integration) for the full
+set of accepted flag values.
+
 ## Serial console
 
 Press `Ctrl-Shift-S` or choose **Zetta: Toggle Serial Console** from the command

@@ -115,8 +115,11 @@ pub(crate) struct Zetta {
     pub(crate) multi_command_launches: BoundedLaunchQueue<QueuedTerminalLaunch>,
     pub(crate) settings_focus: gpui::FocusHandle,
     pub(crate) settings_editor: Option<SettingsEditor>,
+    #[cfg(feature = "serial-console")]
     pub(crate) serial_console_focus: gpui::FocusHandle,
+    #[cfg(feature = "serial-console")]
     pub(crate) serial_console: Option<SerialConsolePrompt>,
+    #[cfg(feature = "serial-console")]
     pub(crate) serial_console_generation: u64,
     pub(crate) tab_search_focus: gpui::FocusHandle,
     pub(crate) tab_search: Option<TabSearch>,
@@ -133,6 +136,17 @@ pub(crate) struct Zetta {
 }
 
 impl Zetta {
+    fn serial_console_is_open(&self) -> bool {
+        #[cfg(feature = "serial-console")]
+        {
+            self.serial_console.is_some()
+        }
+        #[cfg(not(feature = "serial-console"))]
+        {
+            false
+        }
+    }
+
     pub(crate) fn prepare_for_background_window_close(&mut self, cx: &mut Context<Self>) {
         let tabs = std::mem::take(&mut self.tabs);
         let mut preserved_any = false;
@@ -149,7 +163,10 @@ impl Zetta {
         self.command_palette = None;
         self.multi_command = None;
         self.settings_editor = None;
-        self.serial_console = None;
+        #[cfg(feature = "serial-console")]
+        {
+            self.serial_console = None;
+        }
         self.session_authentication = None;
         self.tab_search = None;
         cx.notify();
@@ -172,7 +189,7 @@ impl Zetta {
                     && !this.is_renaming()
                     && this.command_palette.is_none()
                     && this.multi_command.is_none()
-                    && this.serial_console.is_none()
+                    && !this.serial_console_is_open()
                     && this.session_authentication.is_none()
                     && this.tab_search.is_none()
                 {
@@ -289,8 +306,11 @@ impl Zetta {
             multi_command_launches: BoundedLaunchQueue::new(MAX_CONCURRENT_MULTI_COMMAND_SPAWNS),
             settings_focus: cx.focus_handle(),
             settings_editor: None,
+            #[cfg(feature = "serial-console")]
             serial_console_focus: cx.focus_handle(),
+            #[cfg(feature = "serial-console")]
             serial_console: None,
+            #[cfg(feature = "serial-console")]
             serial_console_generation: 0,
             tab_search_focus: cx.focus_handle(),
             tab_search: None,
@@ -313,7 +333,7 @@ impl Zetta {
                         && !this.is_renaming()
                         && this.command_palette.is_none()
                         && this.multi_command.is_none()
-                        && this.serial_console.is_none()
+                        && !this.serial_console_is_open()
                         && this.session_authentication.is_none()
                         && this.tab_search.is_none()
                     {
@@ -1572,8 +1592,10 @@ impl Zetta {
             .find(|tab| tab.id == tab_id)
             .and_then(|tab| tab.pane(pane_id))
             .and_then(|pane| pane.generated_label.as_deref());
-        let is_http_server = pane_label.is_some_and(|label| label.starts_with("HTTP: "));
-        let is_tftp_server = pane_label.is_some_and(|label| label.starts_with("TFTP: "));
+        let is_http_server = cfg!(feature = "http-server")
+            && pane_label.is_some_and(|label| label.starts_with("HTTP: "));
+        let is_tftp_server = cfg!(feature = "tftp-server")
+            && pane_label.is_some_and(|label| label.starts_with("TFTP: "));
         cx.subscribe_in(
             &view,
             window,
@@ -1581,10 +1603,7 @@ impl Zetta {
                 TerminalViewEvent::Close => this.terminal_closed(tab_id, pane_id, window, cx),
                 TerminalViewEvent::TitleChanged => cx.notify(),
                 TerminalViewEvent::Input(input)
-                    if (is_http_server
-                        && crate::http_server_ui::http_input_stops_server(input))
-                        || (is_tftp_server
-                            && crate::tftp_server_ui::tftp_input_stops_server(input)) =>
+                    if server_input_stops_server(input, is_http_server, is_tftp_server) =>
                 {
                     this.terminal_closed(tab_id, pane_id, window, cx);
                 }
@@ -2781,6 +2800,63 @@ impl Zetta {
             }
         }
     }
+}
+
+#[cfg(not(feature = "serial-console"))]
+impl Zetta {
+    pub(crate) fn toggle_serial_console(
+        &mut self,
+        _: &ToggleSerialConsole,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.configuration_error = Some("Serial console support is disabled in this build".into());
+        cx.notify();
+    }
+}
+
+#[cfg(not(feature = "http-server"))]
+impl Zetta {
+    pub(crate) fn start_http_server(
+        &mut self,
+        _: &StartHttpServer,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.configuration_error = Some("HTTP server support is disabled in this build".into());
+        cx.notify();
+    }
+}
+
+#[cfg(not(feature = "tftp-server"))]
+impl Zetta {
+    pub(crate) fn start_tftp_server(
+        &mut self,
+        _: &StartTftpServer,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.configuration_error = Some("TFTP server support is disabled in this build".into());
+        cx.notify();
+    }
+}
+
+#[inline]
+fn server_input_stops_server(
+    input: &TerminalInput,
+    is_http_server: bool,
+    is_tftp_server: bool,
+) -> bool {
+    let _ = (input, is_http_server, is_tftp_server);
+    #[cfg(feature = "http-server")]
+    if is_http_server && crate::http_server_ui::http_input_stops_server(input) {
+        return true;
+    }
+    #[cfg(feature = "tftp-server")]
+    if is_tftp_server && crate::tftp_server_ui::tftp_input_stops_server(input) {
+        return true;
+    }
+    false
 }
 
 #[derive(Clone, Copy, Default)]

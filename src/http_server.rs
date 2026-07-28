@@ -15,7 +15,6 @@ use std::{
 use anyhow::{Context as _, Result};
 use time::{OffsetDateTime, macros::format_description};
 
-pub(crate) const DEFAULT_HTTP_PORT: u16 = 8000;
 const SERVER_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(5);
 const LOG_POLL_INTERVAL: Duration = Duration::from_millis(100);

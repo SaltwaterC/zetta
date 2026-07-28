@@ -27,6 +27,7 @@ impl Zetta {
         let mut commands = window
             .available_actions(cx)
             .into_iter()
+            .filter(|action| action_is_enabled_in_build(action.name()))
             .filter(|action| action.name() != ToggleCommandPalette.name())
             .filter(|action| action.name() != ApplyPaneSplitTemplate::name_for_type())
             .map(|action| {
@@ -108,6 +109,7 @@ impl Zetta {
         if self.session_authentication_key_down(event, window, cx) {
             return;
         }
+        #[cfg(feature = "serial-console")]
         if self.serial_console_key_down(event, window, cx) {
             return;
         }

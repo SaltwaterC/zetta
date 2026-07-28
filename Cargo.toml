@@ -6,10 +6,14 @@ license = "GPL-3.0-or-later"
 default-run = "zetta"
 
 [features]
-default = ["wayland"]
+default = ["wayland", "serial-console", "http-server", "tftp-server", "tftp-client"]
 wayland = ["gpui_platform/wayland"]
 x11 = ["gpui_platform/x11"]
 windows-gui = []
+serial-console = ["dep:serialport"]
+http-server = []
+tftp-server = []
+tftp-client = []
 
 [[bin]]
 name = "zetta-gui"
@@ -37,7 +41,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sysinfo = "0.37"
 regex = "1.11"
-serialport = { version = "4.9", default-features = false }
+serialport = { version = "4.9", default-features = false, optional = true }
 settings = { path = "zed/crates/settings" }
 task = { path = "zed/crates/task" }
 terminal = { path = "crates/terminal" }

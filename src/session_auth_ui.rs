@@ -73,7 +73,10 @@ impl Zetta {
         self.multi_command = None;
         self.tab_search = None;
         self.settings_editor = None;
-        self.serial_console = None;
+        #[cfg(feature = "serial-console")]
+        {
+            self.serial_console = None;
+        }
         self.session_authentication_generation =
             self.session_authentication_generation.wrapping_add(1);
         self.session_authentication = Some(SessionAuthenticationPrompt::new(

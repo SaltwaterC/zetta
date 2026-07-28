@@ -1,5 +1,26 @@
 use super::*;
 
+#[cfg(not(feature = "tftp-client"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TftpCommand;
+
+#[cfg(not(feature = "tftp-client"))]
+impl TftpCommand {
+    pub(crate) fn run(&self) -> Result<()> {
+        anyhow::bail!("TFTP support is disabled in this build")
+    }
+}
+
+#[cfg(not(feature = "tftp-client"))]
+pub(crate) fn tftp_help() -> &'static str {
+    "TFTP support is disabled in this build"
+}
+
+#[cfg(not(feature = "tftp-client"))]
+pub(crate) fn parse_tftp_args(_: impl IntoIterator<Item = OsString>) -> Result<TftpCommand> {
+    anyhow::bail!("TFTP support is disabled in this build")
+}
+
 const DEFAULT_PERFORMANCE_REPORT_DURATION: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,6 +58,38 @@ pub(crate) struct StartupArgs {
 
 pub(crate) fn version_text() -> String {
     format!("Zetta {}", env!("CARGO_PKG_VERSION"))
+}
+
+pub(crate) fn help_text(profiles: &[Profile]) -> String {
+    let mut features = vec!["Terminal emulator"];
+    #[cfg(feature = "serial-console")]
+    features.push("Serial console");
+    #[cfg(feature = "http-server")]
+    features.push("HTTP server");
+    #[cfg(feature = "tftp-server")]
+    features.push("TFTP server");
+    #[cfg(feature = "tftp-client")]
+    features.push("TFTP client");
+
+    let tftp_usage = if cfg!(feature = "tftp-client") {
+        "\n       zetta tftp <COMMAND>"
+    } else {
+        ""
+    };
+    let tftp_command = if cfg!(feature = "tftp-client") {
+        "\n  tftp                                Transfer a file with TFTP"
+    } else {
+        ""
+    };
+    let profiles = profiles
+        .iter()
+        .map(|profile| profile.name.as_str())
+        .collect::<Vec<_>>()
+        .join("\n  ");
+    format!(
+        "Zetta Terminal\n\nUsage: zetta [OPTIONS]\n       zetta benchmark [OPTIONS]\n       zetta benchmark-output [OPTIONS]\n       zetta sessions [--json]{tftp_usage}\n\nCommands:\n  benchmark                           Profile terminal rendering\n  benchmark-output                    Write and time a text payload (default: 10 MiB)\n  sessions                            List detached background sessions{tftp_command}\n\nBuilt-in features:\n  {}\n\nProfiles accepted by --profile NAME (case-insensitive):\n  {profiles}\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Select one of the profiles listed above",
+        features.join("\n  "),
+    )
 }
 
 fn is_version_argument(argument: &str) -> bool {
@@ -168,6 +221,18 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             tftp_command: Some(parse_tftp_args(tftp_arguments.iter().cloned())?),
         });
     }
+    if arguments
+        .iter()
+        .any(|argument| matches!(argument.to_string_lossy().as_ref(), "--help" | "-h"))
+    {
+        let config_path = arguments
+            .windows(2)
+            .find(|arguments| matches!(arguments[0].to_string_lossy().as_ref(), "--config" | "-c"))
+            .map(|arguments| PathBuf::from(&arguments[1]));
+        let (config, _) = load_startup_config(config_path.as_deref(), None);
+        println!("{}", help_text(&config.profiles));
+        std::process::exit(0);
+    }
     let mut config = None;
     let mut keymap = None;
     let mut profile = None;
@@ -205,12 +270,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                         .into(),
                 )
             }
-            "--help" | "-h" => {
-                println!(
-                    "Zetta terminal\n\nUsage: zetta [OPTIONS]\n       zetta benchmark [OPTIONS]\n       zetta benchmark-output [OPTIONS]\n       zetta sessions [--json]\n       zetta tftp <COMMAND> [OPTIONS]\n\nCommands:\n  benchmark                           Profile terminal rendering\n  benchmark-output                    Write and time a text payload (default: 10 MiB)\n  sessions                            List detached background sessions\n  tftp                                Transfer a file with TFTP\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Launch the named profile"
-                );
-                std::process::exit(0);
-            }
+            "--help" | "-h" => unreachable!("help arguments return before parsing options"),
             unknown => anyhow::bail!("unknown argument {unknown:?}"),
         }
     }
@@ -328,7 +388,15 @@ fn select_launch_profile(config: &Config, requested: Option<&str>) -> Result<Opt
         .find(|profile| profile.name.eq_ignore_ascii_case(requested))
         .cloned()
         .map(Some)
-        .with_context(|| format!("profile {requested:?} is not available"))
+        .with_context(|| {
+            let available = config
+                .profiles
+                .iter()
+                .map(|profile| profile.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("profile {requested:?} is not available; available profiles: {available}")
+        })
 }
 
 pub(crate) fn parse_args() -> Result<StartupArgs> {
@@ -759,6 +827,7 @@ pub(crate) const RECONNECT_SESSION_KEYBINDING: &str = "ctrl-shift-a";
 pub(crate) const DETACH_TAB_KEYBINDING: &str = "ctrl-shift-d";
 pub(crate) const CLOSE_WINDOW_KEYBINDING: &str = "ctrl-shift-q";
 pub(crate) const CLOSE_ALL_WINDOWS_KEYBINDING: &str = "ctrl-shift-x";
+#[cfg(feature = "serial-console")]
 pub(crate) const SERIAL_CONSOLE_KEYBINDING: &str = "ctrl-shift-s";
 pub(crate) const AUTO_BACKGROUND_TAB_KEYBINDING: &str = "ctrl-shift-b";
 pub(crate) const ROTATE_PANE_LAYOUT_KEYBINDING: &str = "alt-shift-l";
@@ -828,6 +897,7 @@ pub(crate) fn close_pane_keybinding() -> KeyBinding {
     KeyBinding::new(CLOSE_PANE_KEYBINDING, ClosePane, Some("Zetta > Terminal"))
 }
 
+#[cfg(feature = "serial-console")]
 pub(crate) fn serial_console_keybinding() -> KeyBinding {
     KeyBinding::new(
         SERIAL_CONSOLE_KEYBINDING,
@@ -963,7 +1033,6 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
             Some("Zetta > Terminal"),
         ),
         KeyBinding::new("ctrl-,", ToggleSettings, Some("Zetta > Terminal")),
-        serial_console_keybinding(),
         KeyBinding::new(RENAME_TAB_KEYBINDING, RenameTab, Some("Zetta > Terminal")),
         KeyBinding::new(RENAME_PANE_KEYBINDING, RenamePane, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-=", IncreaseTerminalFontSize, Some("Zetta > Terminal")),
@@ -983,6 +1052,8 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
         // Override Zed's inherited `pane::CloseActiveItem` binding in terminal focus.
         KeyBinding::new("ctrl-shift-w", CloseTab, Some("Terminal")),
     ];
+    #[cfg(feature = "serial-console")]
+    bindings.push(serial_console_keybinding());
     bindings.extend(application_menu_keybinding());
     bindings.extend(application_menu_navigation_keybindings());
     bindings.extend(minimized_pane_keybindings());

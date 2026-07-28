@@ -32,6 +32,54 @@ fn version_flags_and_output_are_defined() {
 }
 
 #[test]
+fn help_text_uses_title_case_and_lists_built_in_features() {
+    let profiles = [
+        Profile {
+            name: "System".to_owned(),
+            command: Shell::System,
+            theme: None,
+        },
+        Profile {
+            name: "Operations".to_owned(),
+            command: Shell::Program("zsh".to_owned()),
+            theme: None,
+        },
+    ];
+    let help = help_text(&profiles);
+    assert!(help.starts_with("Zetta Terminal\n"));
+    assert!(help.contains("Built-in features:\n  Terminal emulator"));
+    assert!(help.contains("Profiles accepted by --profile NAME (case-insensitive):"));
+    assert!(help.contains("  System\n  Operations"));
+    assert!(help.contains("Select one of the profiles listed above"));
+
+    #[cfg(feature = "serial-console")]
+    assert!(help.contains("Serial console"));
+    #[cfg(not(feature = "serial-console"))]
+    assert!(!help.contains("Serial console"));
+
+    #[cfg(feature = "http-server")]
+    assert!(help.contains("HTTP server"));
+    #[cfg(not(feature = "http-server"))]
+    assert!(!help.contains("HTTP server"));
+
+    #[cfg(feature = "tftp-server")]
+    assert!(help.contains("TFTP server"));
+    #[cfg(not(feature = "tftp-server"))]
+    assert!(!help.contains("TFTP server"));
+
+    #[cfg(feature = "tftp-client")]
+    {
+        assert!(help.contains("TFTP client"));
+        assert!(help.contains("zetta tftp <COMMAND>"));
+    }
+    #[cfg(not(feature = "tftp-client"))]
+    {
+        assert!(!help.contains("TFTP client"));
+        assert!(!help.contains("zetta tftp <COMMAND>"));
+    }
+}
+
+#[test]
 fn sessions_subcommand_supports_human_and_json_output() {
     let human = parse_args_from([OsString::from("sessions")]).unwrap();
     assert_eq!(
@@ -316,8 +364,14 @@ fn launch_profile_selects_an_available_profile_without_changing_the_configured_d
 
     let error = select_launch_profile(&config, Some("Missing")).unwrap_err();
     assert!(error.to_string().contains("is not available"));
+    assert!(
+        error
+            .to_string()
+            .contains("available profiles: System, WSL: Ubuntu")
+    );
 }
 
+#[cfg(feature = "tftp-client")]
 #[test]
 fn tftp_subcommand_is_parsed_without_starting_the_application() {
     let args = parse_args_from([
@@ -1024,6 +1078,7 @@ fn pane_font_size_shortcuts_use_pane_control_modifiers() {
     }
 }
 
+#[cfg(feature = "serial-console")]
 #[test]
 fn serial_console_avoids_the_linux_unicode_input_shortcut() {
     assert_eq!(SERIAL_CONSOLE_KEYBINDING, "ctrl-shift-s");

@@ -13,11 +13,10 @@ use serde_json::Value;
 use task::Shell;
 use terminal::MAX_SCROLL_HISTORY_LINES;
 
-use crate::http_server::DEFAULT_HTTP_PORT;
-
 const DEFAULT_TERMINAL_FONT_FAMILY: &str = "MesloLGS NF";
 const DEFAULT_MAX_SCROLL_HISTORY_LINES: usize = MAX_SCROLL_HISTORY_LINES;
 const DEFAULT_INACTIVE_PANE_OPACITY: f32 = 0.8;
+pub(crate) const DEFAULT_HTTP_PORT: u16 = 8000;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PaneControlsPosition {

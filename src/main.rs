@@ -3,12 +3,16 @@
 mod background_sessions;
 mod command_palette;
 mod config;
+#[cfg(feature = "http-server")]
 mod http_server;
 mod process_control;
+#[cfg(feature = "serial-console")]
 mod serial_console;
+#[cfg(any(feature = "http-server", feature = "tftp-server"))]
 mod server_ui;
 mod session_auth_ui;
 mod settings_editor;
+#[cfg(any(feature = "tftp-server", feature = "tftp-client"))]
 mod tftp;
 mod theme_extensions;
 mod zetta_assets;
@@ -136,6 +140,15 @@ actions!(
     ]
 );
 
+fn action_is_enabled_in_build(name: &str) -> bool {
+    match name {
+        name if name == ToggleSerialConsole.name() => cfg!(feature = "serial-console"),
+        name if name == StartHttpServer.name() => cfg!(feature = "http-server"),
+        name if name == StartTftpServer.name() => cfg!(feature = "tftp-server"),
+        _ => true,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
 #[action(namespace = zetta)]
 #[serde(deny_unknown_fields)]
@@ -178,13 +191,19 @@ mod tab_search;
 use tab_search::*;
 mod settings_ui;
 mod settings_view;
+#[cfg(feature = "http-server")]
 use http_server::*;
+#[cfg(feature = "serial-console")]
 use serial_console::*;
 use settings_ui::*;
+#[cfg(any(feature = "tftp-server", feature = "tftp-client"))]
 use tftp::*;
 mod app;
+#[cfg(feature = "http-server")]
 mod http_server_ui;
+#[cfg(feature = "serial-console")]
 mod serial_console_ui;
+#[cfg(feature = "tftp-server")]
 mod tftp_server_ui;
 use app::*;
 mod app_render;

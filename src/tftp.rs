@@ -34,6 +34,7 @@ const OP_ACK: u16 = 4;
 const OP_ERROR: u16 = 5;
 const OP_OACK: u16 = 6;
 
+#[cfg(feature = "tftp-client")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TftpCommand {
     Get {
@@ -50,6 +51,7 @@ pub(crate) enum TftpCommand {
     },
 }
 
+#[cfg(feature = "tftp-client")]
 impl TftpCommand {
     pub(crate) fn run(&self) -> Result<()> {
         match self {
@@ -76,10 +78,12 @@ impl TftpCommand {
     }
 }
 
+#[cfg(feature = "tftp-client")]
 pub(crate) fn tftp_help() -> &'static str {
     "Zetta TFTP client\n\nUsage:\n  zetta tftp get [--port PORT] HOST REMOTE [LOCAL]\n  zetta tftp put [--port PORT] HOST LOCAL [REMOTE]\n\nCommands:\n  get    Download REMOTE, optionally naming the LOCAL output file\n  put    Upload LOCAL, optionally naming the REMOTE file\n\nOptions:\n  -p, --port PORT    Server port (default: 69)\n  -h, --help         Print help"
 }
 
+#[cfg(feature = "tftp-client")]
 pub(crate) fn parse_tftp_args(
     args: impl IntoIterator<Item = std::ffi::OsString>,
 ) -> Result<TftpCommand> {
@@ -161,6 +165,7 @@ pub(crate) fn parse_tftp_args(
     }
 }
 
+#[cfg(feature = "tftp-client")]
 fn utf8_argument(argument: &std::ffi::OsStr, name: &str) -> Result<String> {
     argument
         .to_str()
@@ -168,6 +173,7 @@ fn utf8_argument(argument: &std::ffi::OsStr, name: &str) -> Result<String> {
         .with_context(|| format!("{name} must be valid UTF-8"))
 }
 
+#[cfg(feature = "tftp-server")]
 pub(crate) struct OpenTftpServer {
     pub(crate) reader: Box<dyn Read + Send>,
     pub(crate) writer: Box<dyn Write + Send>,
@@ -175,6 +181,7 @@ pub(crate) struct OpenTftpServer {
     pub(crate) root: PathBuf,
 }
 
+#[cfg(feature = "tftp-server")]
 pub(crate) fn start_server(root: &Path, port: u16) -> Result<OpenTftpServer> {
     let root = fs::canonicalize(root)
         .with_context(|| format!("resolving TFTP server root {}", root.display()))?;
@@ -204,12 +211,14 @@ pub(crate) fn start_server(root: &Path, port: u16) -> Result<OpenTftpServer> {
     })
 }
 
+#[cfg(feature = "tftp-server")]
 struct LogReader {
     receiver: Receiver<Vec<u8>>,
     pending: Vec<u8>,
     offset: usize,
 }
 
+#[cfg(feature = "tftp-server")]
 impl Read for LogReader {
     fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
         if output.is_empty() {
@@ -237,10 +246,12 @@ impl Read for LogReader {
     }
 }
 
+#[cfg(feature = "tftp-server")]
 struct ServerControl {
     active: Arc<AtomicBool>,
 }
 
+#[cfg(feature = "tftp-server")]
 impl Write for ServerControl {
     fn write(&mut self, input: &[u8]) -> io::Result<usize> {
         Ok(input.len())
@@ -251,6 +262,7 @@ impl Write for ServerControl {
     }
 }
 
+#[cfg(feature = "tftp-server")]
 impl Drop for ServerControl {
     fn drop(&mut self) {
         self.active.store(false, Ordering::Release);
@@ -258,6 +270,7 @@ impl Drop for ServerControl {
 }
 
 #[derive(Debug)]
+#[cfg(feature = "tftp-server")]
 struct Request {
     write: bool,
     filename: String,
@@ -266,18 +279,21 @@ struct Request {
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[cfg(feature = "tftp-server")]
 struct RequestKey {
     peer: SocketAddr,
     write: bool,
     filename: String,
 }
 
+#[cfg(feature = "tftp-server")]
 struct TransferGuard {
     count: Arc<AtomicUsize>,
     active_requests: Arc<Mutex<HashSet<RequestKey>>>,
     request: RequestKey,
 }
 
+#[cfg(feature = "tftp-server")]
 impl Drop for TransferGuard {
     fn drop(&mut self) {
         self.count.fetch_sub(1, Ordering::Relaxed);
@@ -285,6 +301,7 @@ impl Drop for TransferGuard {
     }
 }
 
+#[cfg(feature = "tftp-server")]
 fn register_active_request(
     active_requests: &Mutex<HashSet<RequestKey>>,
     request: &RequestKey,
@@ -295,6 +312,7 @@ fn register_active_request(
         .insert(request.clone())
 }
 
+#[cfg(feature = "tftp-server")]
 fn remove_active_request(active_requests: &Mutex<HashSet<RequestKey>>, request: &RequestKey) {
     active_requests
         .lock()
@@ -302,6 +320,7 @@ fn remove_active_request(active_requests: &Mutex<HashSet<RequestKey>>, request: 
         .remove(request);
 }
 
+#[cfg(feature = "tftp-server")]
 fn server_loop(socket: UdpSocket, root: PathBuf, active: Arc<AtomicBool>, logs: Sender<Vec<u8>>) {
     log_line(&logs, "Zetta TFTP server".to_owned());
     log_line(&logs, format!("Serving {}", root.display()));
@@ -425,10 +444,12 @@ fn server_loop(socket: UdpSocket, root: PathBuf, active: Arc<AtomicBool>, logs: 
     }
 }
 
+#[cfg(feature = "tftp-server")]
 fn log_line(logs: &Sender<Vec<u8>>, message: String) {
     let _ = logs.send(format_log_line(&message, OffsetDateTime::now_utc()).into_bytes());
 }
 
+#[cfg(feature = "tftp-server")]
 fn format_log_line(message: &str, timestamp: OffsetDateTime) -> String {
     let timestamp = timestamp
         .format(format_description!(
@@ -441,6 +462,7 @@ fn format_log_line(message: &str, timestamp: OffsetDateTime) -> String {
     )
 }
 
+#[cfg(feature = "tftp-server")]
 fn parse_request(packet: &[u8]) -> std::result::Result<Request, String> {
     if packet.len() < 4 {
         return Err("request is too short".to_owned());
@@ -489,6 +511,7 @@ fn zero_terminated_fields(mut bytes: &[u8]) -> std::result::Result<Vec<&[u8]>, S
     Ok(fields)
 }
 
+#[cfg(feature = "tftp-server")]
 fn safe_server_path(root: &Path, filename: &str) -> Result<PathBuf> {
     let relative = Path::new(filename);
     anyhow::ensure!(!relative.is_absolute(), "absolute paths are not served");
@@ -508,12 +531,14 @@ fn safe_server_path(root: &Path, filename: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+#[cfg(feature = "tftp-server")]
 struct PendingUpload {
     file: Option<File>,
     path: PathBuf,
     complete: bool,
 }
 
+#[cfg(feature = "tftp-server")]
 impl PendingUpload {
     fn create(root: &Path, filename: &str) -> Result<Self> {
         let relative = Path::new(filename);
@@ -569,6 +594,7 @@ impl PendingUpload {
     }
 }
 
+#[cfg(feature = "tftp-server")]
 impl Drop for PendingUpload {
     fn drop(&mut self) {
         if !self.complete {
@@ -578,6 +604,7 @@ impl Drop for PendingUpload {
     }
 }
 
+#[cfg(feature = "tftp-server")]
 fn serve_read_request(
     root: &Path,
     peer: SocketAddr,
@@ -616,6 +643,7 @@ fn serve_read_request(
     Ok(total)
 }
 
+#[cfg(feature = "tftp-server")]
 fn serve_write_request(
     root: &Path,
     peer: SocketAddr,
@@ -674,6 +702,7 @@ fn serve_write_request(
     }
 }
 
+#[cfg(feature = "tftp-server")]
 fn negotiated_options(
     options: &[(String, String)],
     file_size: u64,
@@ -697,6 +726,7 @@ fn negotiated_options(
     (block_size, acknowledged)
 }
 
+#[cfg(feature = "tftp-server")]
 fn negotiated_write_options(
     options: &[(String, String)],
 ) -> (usize, Option<u64>, Vec<(String, String)>) {
@@ -725,6 +755,7 @@ fn negotiated_write_options(
     (block_size, transfer_size, acknowledged)
 }
 
+#[cfg(any(feature = "tftp-server", feature = "tftp-client"))]
 fn transfer_socket(peer_ip: IpAddr) -> io::Result<UdpSocket> {
     match peer_ip {
         IpAddr::V4(_) => UdpSocket::bind(("0.0.0.0", 0)),
@@ -732,6 +763,7 @@ fn transfer_socket(peer_ip: IpAddr) -> io::Result<UdpSocket> {
     }
 }
 
+#[cfg(feature = "tftp-server")]
 fn send_with_ack(
     socket: &UdpSocket,
     peer: SocketAddr,
@@ -771,6 +803,7 @@ fn send_with_ack(
     anyhow::bail!("transfer timed out waiting for ACK {expected_block}")
 }
 
+#[cfg(feature = "tftp-server")]
 fn receive_data_after_response(
     socket: &UdpSocket,
     peer: SocketAddr,
@@ -813,6 +846,7 @@ fn receive_data_after_response(
     anyhow::bail!("transfer timed out waiting for DATA {expected_block}")
 }
 
+#[cfg(feature = "tftp-server")]
 fn dally_after_final_ack(
     socket: &UdpSocket,
     peer: SocketAddr,
@@ -846,6 +880,7 @@ fn dally_after_final_ack(
     }
 }
 
+#[cfg(feature = "tftp-client")]
 fn download(host: &str, port: u16, remote: &str, local: &Path) -> Result<()> {
     let server = resolve_server(host, port)?;
     let socket = transfer_socket(server.ip())?;
@@ -880,6 +915,7 @@ fn download(host: &str, port: u16, remote: &str, local: &Path) -> Result<()> {
     }
 }
 
+#[cfg(feature = "tftp-client")]
 fn upload(host: &str, port: u16, local: &Path, remote: &str) -> Result<()> {
     let mut input =
         File::open(local).with_context(|| format!("opening local file {}", local.display()))?;
@@ -922,6 +958,7 @@ fn upload(host: &str, port: u16, local: &Path, remote: &str) -> Result<()> {
     }
 }
 
+#[cfg(feature = "tftp-client")]
 fn resolve_server(host: &str, port: u16) -> Result<SocketAddr> {
     (host, port)
         .to_socket_addrs()
@@ -930,6 +967,7 @@ fn resolve_server(host: &str, port: u16) -> Result<SocketAddr> {
         .with_context(|| format!("no address found for TFTP server {host}"))
 }
 
+#[cfg(feature = "tftp-client")]
 fn initial_response(
     socket: &UdpSocket,
     server: SocketAddr,
@@ -960,6 +998,7 @@ fn initial_response(
     anyhow::bail!("TFTP server did not respond")
 }
 
+#[cfg(feature = "tftp-client")]
 fn receive_from_peer(
     socket: &UdpSocket,
     peer: SocketAddr,
@@ -1116,6 +1155,6 @@ fn parsed_block_size(packet: &[u8]) -> Option<usize> {
     None
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tftp-client"))]
 #[path = "tests/tftp.rs"]
 mod tests;

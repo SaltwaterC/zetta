@@ -95,6 +95,7 @@ pub enum ConfigTextField {
     WorkingDirectory,
     FontSize,
     ScrollHistory,
+    #[cfg(feature = "http-server")]
     HttpServerPort,
     ProfileName(usize),
     ProfileProgram(usize),
@@ -121,6 +122,7 @@ pub struct ConfigurationForm {
     pub max_scroll_history_lines: TextField,
     pub inactive_pane_opacity: f32,
     pub pane_controls_position: PaneControlsPosition,
+    #[cfg(feature = "http-server")]
     pub http_server_port: TextField,
     pub profiles: Vec<ProfileForm>,
 }
@@ -201,6 +203,7 @@ impl ConfigurationForm {
             ),
             inactive_pane_opacity: config.inactive_pane_opacity,
             pane_controls_position: config.pane_controls_position,
+            #[cfg(feature = "http-server")]
             http_server_port: TextField::new(config.http_server_port.to_string()),
             root,
             profiles,
@@ -212,6 +215,7 @@ impl ConfigurationForm {
             ConfigTextField::WorkingDirectory => Some(&mut self.working_directory),
             ConfigTextField::FontSize => Some(&mut self.terminal_font_size),
             ConfigTextField::ScrollHistory => Some(&mut self.max_scroll_history_lines),
+            #[cfg(feature = "http-server")]
             ConfigTextField::HttpServerPort => Some(&mut self.http_server_port),
             ConfigTextField::ProfileName(index) => {
                 self.profiles.get_mut(index).map(|p| &mut p.name)
@@ -267,15 +271,18 @@ impl ConfigurationForm {
             "pane_controls_position".into(),
             json!(self.pane_controls_position.as_str()),
         );
-        let http_server_port = self
-            .http_server_port
-            .text
-            .trim()
-            .parse::<u16>()
-            .ok()
-            .filter(|port| *port != 0)
-            .context("HTTP server port must be an integer from 1 to 65535")?;
-        root.insert("http_server_port".into(), json!(http_server_port));
+        #[cfg(feature = "http-server")]
+        {
+            let http_server_port = self
+                .http_server_port
+                .text
+                .trim()
+                .parse::<u16>()
+                .ok()
+                .filter(|port| *port != 0)
+                .context("HTTP server port must be an integer from 1 to 65535")?;
+            root.insert("http_server_port".into(), json!(http_server_port));
+        }
         if !self.profiles.is_empty() || root.contains_key("profiles") {
             root.insert(
                 "profiles".into(),

@@ -16,8 +16,8 @@ a stripped executable.
 
 ## Linux build requirements
 
-Linux defaults to Wayland. Build with `cargo run --features x11` to include the
-X11 backend as well. GPUI currently links both xkbcommon libraries on Linux, so
+Linux defaults to Wayland. Build with `make build X11=1` to include the X11
+backend as well. GPUI currently links both xkbcommon libraries on Linux, so
 Debian and Ubuntu builds require these packages even for the default Wayland
 build:
 
@@ -113,6 +113,26 @@ install the release binary, desktop entry, and icons under `/usr` with:
 make build
 sudo make install
 ```
+
+To build a restricted binary, pass build flags to both the build and install
+steps. `SERIAL`, `HTTP`, `TFTP`, `TFTP_SERVER`, and `TFTP_CLIENT` accept `0`,
+`false`, `no`, and `off`. `TFTP=0` disables both TFTP components; the server
+and client switches can be used independently:
+
+```sh
+make build SERIAL=0 HTTP=0 TFTP=0
+sudo make install SERIAL=0 HTTP=0 TFTP=0
+
+# Keep only the TFTP client.
+make build TFTP_SERVER=0
+
+# Include X11 support alongside the default Wayland backend.
+make build X11=1
+```
+
+Disabled tools are omitted from the command palette, default keybindings, and
+their implementation is not compiled into the binary. A build without the
+TFTP server does not request `cap_net_bind_service` during installation.
 
 When invoked through `sudo`, `make install` uses the existing release artifact
 and does not run Cargo again. It grants the binary only the

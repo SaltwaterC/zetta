@@ -31,9 +31,15 @@ git submodule update --init
 cargo run
 ```
 
-Linux defaults to Wayland. Use `cargo run --features x11` to include the X11
-backend. Linux system dependencies and platform-specific build and desktop
+Linux defaults to Wayland. Use `make build X11=1` to include the X11 backend
+as well. Linux system dependencies and platform-specific build and desktop
 installation instructions are in the [installation guide](docs/installation.md).
+
+Corporate or otherwise restricted deployments can omit the serial console and
+network tools at build time. For example, `make build SERIAL=0 HTTP=0 TFTP=0`
+produces a terminal-only build. `TFTP_SERVER=0` and `TFTP_CLIENT=0` control the
+two TFTP components independently. The flags also accept `false`, `no`, or
+`off`.
 
 ## Multi-command prompt
 

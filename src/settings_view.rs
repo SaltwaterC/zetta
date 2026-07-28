@@ -91,11 +91,21 @@ impl Zetta {
             let centered = matches!(
                 input,
                 SettingsInput::Configuration(
-                    ConfigTextField::FontSize
-                        | ConfigTextField::ScrollHistory
-                        | ConfigTextField::HttpServerPort
+                    ConfigTextField::FontSize | ConfigTextField::ScrollHistory
                 )
-            );
+            ) || {
+                #[cfg(feature = "http-server")]
+                {
+                    matches!(
+                        input,
+                        SettingsInput::Configuration(ConfigTextField::HttpServerPort)
+                    )
+                }
+                #[cfg(not(feature = "http-server"))]
+                {
+                    false
+                }
+            };
             let cursor = field.cursor.min(field.text.len());
             let (before, after) = field.text.split_at(cursor);
             let input_handle = handle.clone();
@@ -558,17 +568,18 @@ impl Zetta {
                         "Keep pane overlay controls on the right or move them to the left",
                         pane_controls_position,
                     ),
-                    setting_row(
-                        "HTTP server port",
-                        "TCP port used when starting the static HTTP server",
-                        numeric(
-                            "settings-http-server-port",
-                            configuration.http_server_port.clone(),
-                            NumericSetting::HttpServerPort,
-                            ConfigTextField::HttpServerPort,
-                        ),
-                    ),
                 ];
+                #[cfg(feature = "http-server")]
+                rows.push(setting_row(
+                    "HTTP server port",
+                    "TCP port used when starting the static HTTP server",
+                    numeric(
+                        "settings-http-server-port",
+                        configuration.http_server_port.clone(),
+                        NumericSetting::HttpServerPort,
+                        ConfigTextField::HttpServerPort,
+                    ),
+                ));
                 rows.push(
                     div()
                         .pt_4()

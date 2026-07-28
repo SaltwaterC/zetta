@@ -1565,7 +1565,10 @@ impl Render for Zetta {
         });
 
         let settings_overlay = self.render_settings_overlay(window, cx);
+        #[cfg(feature = "serial-console")]
         let serial_console_overlay = self.render_serial_console_overlay(cx);
+        #[cfg(not(feature = "serial-console"))]
+        let serial_console_overlay: Option<gpui::AnyElement> = None;
         let session_authentication_overlay = self.render_session_authentication_overlay(cx);
 
         let content = div()
