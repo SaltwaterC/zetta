@@ -94,6 +94,12 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
     }
     if arguments
         .first()
+        .is_some_and(|argument| argument == "benchmark")
+    {
+        return parse_benchmark_args(&arguments[1..]);
+    }
+    if arguments
+        .first()
         .is_some_and(|argument| argument == "sessions")
     {
         let mut json = false;
@@ -149,13 +155,10 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
     let mut config = None;
     let mut keymap = None;
     let mut profile = None;
+    #[cfg(windows)]
     let mut mode = StartupMode::Application;
-    let mut profile_report = None;
-    let mut profile_duration = None;
-    let mut profile_pane_stress = false;
-    let mut profile_background_stress = false;
-    let mut profile_sparse_updates = false;
-    let mut profile_external_terminal = false;
+    #[cfg(not(windows))]
+    let mode = StartupMode::Application;
     let mut args = arguments.into_iter();
     while let Some(argument) = args.next() {
         let argument = argument.to_string_lossy();
@@ -178,7 +181,6 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                         .into_owned(),
                 )
             }
-            "--profile-terminal-rendering" | "-P" => mode = StartupMode::TerminalRenderingProfile,
             #[cfg(windows)]
             "--register-windows-shell" => {
                 mode = StartupMode::RegisterWindowsShell(
@@ -187,6 +189,45 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                         .into(),
                 )
             }
+            "--help" | "-h" => {
+                println!(
+                    "Zetta terminal\n\nUsage: zetta [OPTIONS]\n       zetta benchmark [OPTIONS]\n       zetta benchmark-output [--size MIB]\n       zetta sessions [--json]\n       zetta tftp <COMMAND> [OPTIONS]\n\nCommands:\n  benchmark                           Profile terminal rendering\n  benchmark-output                    Write and time a text payload (default: 10 MiB)\n  sessions                            List detached background sessions\n  tftp                                Transfer a file with TFTP\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Launch the named profile"
+                );
+                std::process::exit(0);
+            }
+            unknown => anyhow::bail!("unknown argument {unknown:?}"),
+        }
+    }
+    anyhow::ensure!(
+        profile.is_none() || mode == StartupMode::Application,
+        "--profile cannot be combined with another startup mode"
+    );
+    Ok(StartupArgs {
+        config_path: config,
+        keymap_path: keymap,
+        profile,
+        mode,
+        profile_report: None,
+        profile_duration: None,
+        profile_pane_stress: false,
+        profile_background_stress: false,
+        profile_sparse_updates: false,
+        profile_external_terminal: false,
+        tftp_command: None,
+    })
+}
+
+fn parse_benchmark_args(arguments: &[OsString]) -> Result<StartupArgs> {
+    let mut mode = StartupMode::TerminalRenderingProfile;
+    let mut profile_report = None;
+    let mut profile_duration = None;
+    let mut profile_pane_stress = false;
+    let mut profile_background_stress = false;
+    let mut profile_sparse_updates = false;
+    let mut profile_external_terminal = false;
+    let mut args = arguments.iter();
+    while let Some(argument) = args.next() {
+        match argument.to_string_lossy().as_ref() {
             "--profile-pane-stress" | "-s" => profile_pane_stress = true,
             "--profile-background-stress" | "-b" => profile_background_stress = true,
             "--profile-sparse-updates" | "-u" => profile_sparse_updates = true,
@@ -216,25 +257,13 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             }
             "--help" | "-h" => {
                 println!(
-                    "Zetta terminal\n\nUsage: zetta [OPTIONS]\n       zetta benchmark-output [--size MIB]\n       zetta sessions [--json]\n       zetta tftp <COMMAND> [OPTIONS]\n\nCommands:\n  benchmark-output                    Write and time a text payload (default: 10 MiB)\n  sessions                            List detached background sessions\n  tftp                                Transfer a file with TFTP\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Launch the named profile\n  -P, --profile-terminal-rendering    Profile terminal rendering\n  -s, --profile-pane-stress           Use four visible producer panes\n  -b, --profile-background-stress     Render alternating cell backgrounds\n  -u, --profile-sparse-updates        Update a dense terminal at 40 Hz\n  -x, --profile-external-terminal     Run the workload in the current terminal\n  -r, --profile-report PATH           Write a profiling report\n  -d, --profile-duration SECONDS      Set the profiling duration"
+                    "Benchmark terminal rendering\n\nUsage: zetta benchmark [OPTIONS]\n\nOptions:\n  -s, --profile-pane-stress           Use four visible producer panes\n  -b, --profile-background-stress     Render alternating cell backgrounds\n  -u, --profile-sparse-updates        Update a dense terminal at 40 Hz\n  -x, --profile-external-terminal     Run the workload in the current terminal\n  -r, --profile-report PATH           Write a profiling report\n  -d, --profile-duration SECONDS      Set the profiling duration\n  -h, --help                          Print help"
                 );
                 std::process::exit(0);
             }
-            unknown => anyhow::bail!("unknown argument {unknown:?}"),
+            unknown => anyhow::bail!("unknown benchmark argument {unknown:?}"),
         }
     }
-    anyhow::ensure!(
-        mode == StartupMode::Application || (config.is_none() && keymap.is_none()),
-        "profiling modes cannot be combined with --config or --keymap"
-    );
-    anyhow::ensure!(
-        profile.is_none() || mode == StartupMode::Application,
-        "--profile cannot be combined with another startup mode"
-    );
-    anyhow::ensure!(
-        !profile_external_terminal || mode == StartupMode::TerminalRenderingProfile,
-        "--profile-external-terminal requires --profile-terminal-rendering"
-    );
     anyhow::ensure!(
         !(profile_external_terminal && profile_report.is_some()),
         "--profile-external-terminal cannot be combined with --profile-report"
@@ -248,25 +277,8 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
         "--profile-external-terminal requires --profile-duration"
     );
     anyhow::ensure!(
-        (profile_report.is_none() && profile_duration.is_none())
-            || mode == StartupMode::TerminalRenderingProfile,
-        "--profile-report and --profile-duration require --profile-terminal-rendering"
-    );
-    anyhow::ensure!(
         profile_duration.is_none() || profile_report.is_some() || profile_external_terminal,
         "--profile-duration requires --profile-report or --profile-external-terminal"
-    );
-    anyhow::ensure!(
-        !profile_pane_stress || mode == StartupMode::TerminalRenderingProfile,
-        "--profile-pane-stress requires --profile-terminal-rendering"
-    );
-    anyhow::ensure!(
-        !profile_background_stress || mode == StartupMode::TerminalRenderingProfile,
-        "--profile-background-stress requires --profile-terminal-rendering"
-    );
-    anyhow::ensure!(
-        !profile_sparse_updates || mode == StartupMode::TerminalRenderingProfile,
-        "--profile-sparse-updates requires --profile-terminal-rendering"
     );
     anyhow::ensure!(
         !(profile_background_stress && profile_sparse_updates),
@@ -276,9 +288,9 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
         profile_duration = Some(DEFAULT_PERFORMANCE_REPORT_DURATION);
     }
     Ok(StartupArgs {
-        config_path: config,
-        keymap_path: keymap,
-        profile,
+        config_path: None,
+        keymap_path: None,
+        profile: None,
         mode,
         profile_report,
         profile_duration,
@@ -1194,7 +1206,7 @@ fn terminal_rendering_profile_config(executable: &Path, workload: PerformanceWor
         name: "Terminal rendering profiler".to_owned(),
         command: Shell::WithArguments {
             program: executable.to_string_lossy().into_owned(),
-            args: vec![workload_argument.to_owned()],
+            args: vec!["benchmark".to_owned(), workload_argument.to_owned()],
             title_override: Some("Terminal rendering profiler".to_owned()),
         },
         theme: None,

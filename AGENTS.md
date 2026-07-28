@@ -120,17 +120,17 @@ recording or comparing results:
 
 ```sh
 cargo run --release -- \
-  --profile-terminal-rendering \
+  benchmark \
   --profile-report artifacts/zetta-performance.json \
   --profile-duration 10
 ```
 
-`--profile-report` enables an automated timed run and defaults to ten seconds
+`zetta benchmark --profile-report` enables an automated timed run and defaults to ten seconds
 when `--profile-duration` is omitted. The command creates missing report parent
 directories, writes versioned JSON, and exits. Treat a non-zero exit status or
 a missing report as a failed performance run. Preserve the JSON as a CI
 artifact and compare like-for-like release builds, workload settings, and
-platforms. Use the live `--profile-terminal-rendering` mode without report
+platforms. Use the live `zetta benchmark` mode without report
 arguments for interactive investigation.
 
 Automated runs require a graphical session and the platform's normal GPU

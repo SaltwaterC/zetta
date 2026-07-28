@@ -64,13 +64,13 @@ FPS. This is not the monitor refresh rate or GPU presentation latency.
 Launch the built-in workload:
 
 ```sh
-zetta --profile-terminal-rendering
+zetta benchmark
 ```
 
 From the repository, use an optimized build:
 
 ```sh
-cargo run --release -- --profile-terminal-rendering
+cargo run --release -- benchmark
 ```
 
 The mode starts a deterministic 240 Hz full-grid producer and enables the
@@ -92,9 +92,9 @@ Build once, then run the same optimized binary inside every terminal emulator:
 
 ```sh
 cargo build --release
-target/release/zetta -P -x -d 10
-target/release/zetta -P -x -b -d 10
-target/release/zetta -P -x -u -d 10
+target/release/zetta benchmark -x -d 10
+target/release/zetta benchmark -x -b -d 10
+target/release/zetta benchmark -x -u -d 10
 ```
 
 The commands run the standard 240 Hz grid, changing checkerboard, and 40 Hz
@@ -112,7 +112,7 @@ cannot create native panes in an unrelated terminal emulator.
 Run for ten seconds, write a portable JSON report, and exit:
 
 ```sh
-zetta --profile-terminal-rendering \
+zetta benchmark \
   --profile-report artifacts/zetta-performance.json
 ```
 
@@ -121,7 +121,7 @@ Set another duration, including fractional seconds, with
 
 ```sh
 cargo run --release -- \
-  --profile-terminal-rendering \
+  benchmark \
   --profile-report artifacts/zetta-performance.json \
   --profile-duration 30
 ```
@@ -168,7 +168,7 @@ four visible panes, each running the deterministic producer:
 
 ```sh
 cargo run --release -- \
-  --profile-terminal-rendering \
+  benchmark \
   -s \
   --profile-report artifacts/zetta-pane-stress.json \
   --profile-duration 10
@@ -187,7 +187,7 @@ Every cell switches between the two colors on each producer frame:
 
 ```sh
 cargo run --release -- \
-  --profile-terminal-rendering \
+  benchmark \
   -b \
   --profile-report artifacts/zetta-background-stress.json \
   --profile-duration 10
@@ -207,7 +207,7 @@ then change only a short status line at 40 Hz:
 
 ```sh
 cargo run --release -- \
-  --profile-terminal-rendering \
+  benchmark \
   -u \
   --profile-report artifacts/zetta-sparse-updates.json \
   --profile-duration 10

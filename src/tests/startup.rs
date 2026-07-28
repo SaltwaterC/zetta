@@ -124,9 +124,9 @@ fn application_shutdown_is_managed_by_the_session_runner() {
 }
 
 #[test]
-fn terminal_rendering_profiler_arguments_are_cross_platform() {
+fn benchmark_subcommand_arguments_are_cross_platform() {
     assert_eq!(
-        parse_args_from([OsString::from("--profile-terminal-rendering")]).unwrap(),
+        parse_args_from([OsString::from("benchmark")]).unwrap(),
         StartupArgs {
             config_path: None,
             keymap_path: None,
@@ -142,7 +142,11 @@ fn terminal_rendering_profiler_arguments_are_cross_platform() {
         }
     );
     assert_eq!(
-        parse_args_from([OsString::from("--terminal-render-workload")]).unwrap(),
+        parse_args_from([
+            OsString::from("benchmark"),
+            OsString::from("--terminal-render-workload"),
+        ])
+        .unwrap(),
         StartupArgs {
             config_path: None,
             keymap_path: None,
@@ -158,9 +162,12 @@ fn terminal_rendering_profiler_arguments_are_cross_platform() {
         }
     );
     assert_eq!(
-        parse_args_from([OsString::from("--terminal-checkerboard-workload")])
-            .unwrap()
-            .mode,
+        parse_args_from([
+            OsString::from("benchmark"),
+            OsString::from("--terminal-checkerboard-workload"),
+        ])
+        .unwrap()
+        .mode,
         StartupMode::TerminalCheckerboardWorkload
     );
 }
@@ -168,7 +175,7 @@ fn terminal_rendering_profiler_arguments_are_cross_platform() {
 #[test]
 fn shorthand_options_match_long_options() {
     let shorthand = parse_args_from([
-        OsString::from("-P"),
+        OsString::from("benchmark"),
         OsString::from("-s"),
         OsString::from("-b"),
         OsString::from("-r"),
@@ -178,7 +185,7 @@ fn shorthand_options_match_long_options() {
     ])
     .unwrap();
     let longhand = parse_args_from([
-        OsString::from("--profile-terminal-rendering"),
+        OsString::from("benchmark"),
         OsString::from("--profile-pane-stress"),
         OsString::from("--profile-background-stress"),
         OsString::from("--profile-report"),
@@ -190,7 +197,7 @@ fn shorthand_options_match_long_options() {
     assert_eq!(shorthand, longhand);
 
     let shorthand = parse_args_from([
-        OsString::from("-P"),
+        OsString::from("benchmark"),
         OsString::from("-u"),
         OsString::from("-x"),
         OsString::from("-d"),
@@ -198,7 +205,7 @@ fn shorthand_options_match_long_options() {
     ])
     .unwrap();
     let longhand = parse_args_from([
-        OsString::from("--profile-terminal-rendering"),
+        OsString::from("benchmark"),
         OsString::from("--profile-sparse-updates"),
         OsString::from("--profile-external-terminal"),
         OsString::from("--profile-duration"),
@@ -283,7 +290,7 @@ fn tftp_subcommand_is_parsed_without_starting_the_application() {
 #[test]
 fn terminal_rendering_report_defaults_to_ten_seconds() {
     let args = parse_args_from([
-        OsString::from("--profile-terminal-rendering"),
+        OsString::from("benchmark"),
         OsString::from("--profile-report"),
         OsString::from("profile.json"),
     ])
@@ -297,57 +304,42 @@ fn terminal_rendering_report_defaults_to_ten_seconds() {
 }
 
 #[test]
-fn pane_stress_requires_and_records_profiler_mode() {
+fn pane_stress_is_a_benchmark_option() {
     let args = parse_args_from([
-        OsString::from("--profile-terminal-rendering"),
+        OsString::from("benchmark"),
         OsString::from("--profile-pane-stress"),
     ])
     .unwrap();
     assert!(args.profile_pane_stress);
 
-    let error = parse_args_from([OsString::from("--profile-pane-stress")]).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("requires --profile-terminal-rendering")
-    );
+    assert!(parse_args_from([OsString::from("--profile-pane-stress")]).is_err());
 }
 
 #[test]
-fn background_stress_requires_and_records_profiler_mode() {
+fn background_stress_is_a_benchmark_option() {
     let args = parse_args_from([
-        OsString::from("--profile-terminal-rendering"),
+        OsString::from("benchmark"),
         OsString::from("--profile-background-stress"),
     ])
     .unwrap();
     assert!(args.profile_background_stress);
 
-    let error = parse_args_from([OsString::from("--profile-background-stress")]).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("requires --profile-terminal-rendering")
-    );
+    assert!(parse_args_from([OsString::from("--profile-background-stress")]).is_err());
 }
 
 #[test]
-fn sparse_updates_require_and_record_profiler_mode() {
+fn sparse_updates_are_a_benchmark_option() {
     let args = parse_args_from([
-        OsString::from("--profile-terminal-rendering"),
+        OsString::from("benchmark"),
         OsString::from("--profile-sparse-updates"),
     ])
     .unwrap();
     assert!(args.profile_sparse_updates);
 
-    let error = parse_args_from([OsString::from("--profile-sparse-updates")]).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("requires --profile-terminal-rendering")
-    );
+    assert!(parse_args_from([OsString::from("--profile-sparse-updates")]).is_err());
 
     let error = parse_args_from([
-        OsString::from("--profile-terminal-rendering"),
+        OsString::from("benchmark"),
         OsString::from("--profile-background-stress"),
         OsString::from("--profile-sparse-updates"),
     ])
@@ -358,7 +350,7 @@ fn sparse_updates_require_and_record_profiler_mode() {
 #[test]
 fn external_terminal_mode_requires_a_bounded_compatible_workload() {
     let args = parse_args_from([
-        OsString::from("--profile-terminal-rendering"),
+        OsString::from("benchmark"),
         OsString::from("--profile-external-terminal"),
         OsString::from("--profile-duration"),
         OsString::from("2.5"),
@@ -367,27 +359,24 @@ fn external_terminal_mode_requires_a_bounded_compatible_workload() {
     assert!(args.profile_external_terminal);
     assert_eq!(args.profile_duration, Some(Duration::from_secs_f64(2.5)));
 
-    let error = parse_args_from([
-        OsString::from("--profile-external-terminal"),
-        OsString::from("--profile-duration"),
-        OsString::from("1"),
-    ])
-    .unwrap_err();
     assert!(
-        error
-            .to_string()
-            .contains("requires --profile-terminal-rendering")
+        parse_args_from([
+            OsString::from("--profile-external-terminal"),
+            OsString::from("--profile-duration"),
+            OsString::from("1"),
+        ])
+        .is_err()
     );
 
     let error = parse_args_from([
-        OsString::from("--profile-terminal-rendering"),
+        OsString::from("benchmark"),
         OsString::from("--profile-external-terminal"),
     ])
     .unwrap_err();
     assert!(error.to_string().contains("requires --profile-duration"));
 
     let error = parse_args_from([
-        OsString::from("--profile-terminal-rendering"),
+        OsString::from("benchmark"),
         OsString::from("--profile-external-terminal"),
         OsString::from("--profile-duration"),
         OsString::from("1"),
@@ -398,7 +387,7 @@ fn external_terminal_mode_requires_a_bounded_compatible_workload() {
     assert!(error.to_string().contains("cannot be combined"));
 
     let error = parse_args_from([
-        OsString::from("--profile-terminal-rendering"),
+        OsString::from("benchmark"),
         OsString::from("--profile-external-terminal"),
         OsString::from("--profile-duration"),
         OsString::from("1"),
@@ -411,7 +400,7 @@ fn external_terminal_mode_requires_a_bounded_compatible_workload() {
 #[test]
 fn terminal_rendering_report_accepts_fractional_duration() {
     let args = parse_args_from([
-        OsString::from("--profile-terminal-rendering"),
+        OsString::from("benchmark"),
         OsString::from("--profile-report"),
         OsString::from("profile.json"),
         OsString::from("--profile-duration"),
@@ -423,20 +412,17 @@ fn terminal_rendering_report_accepts_fractional_duration() {
 }
 
 #[test]
-fn terminal_rendering_report_options_require_profiler_mode() {
-    let error = parse_args_from([
-        OsString::from("--profile-report"),
-        OsString::from("profile.json"),
-    ])
-    .unwrap_err();
+fn terminal_rendering_report_options_require_a_benchmark_subcommand() {
     assert!(
-        error
-            .to_string()
-            .contains("require --profile-terminal-rendering")
+        parse_args_from([
+            OsString::from("--profile-report"),
+            OsString::from("profile.json"),
+        ])
+        .is_err()
     );
 
     let error = parse_args_from([
-        OsString::from("--profile-terminal-rendering"),
+        OsString::from("benchmark"),
         OsString::from("--profile-duration"),
         OsString::from("1"),
     ])
@@ -445,15 +431,15 @@ fn terminal_rendering_report_options_require_profiler_mode() {
 }
 
 #[test]
-fn terminal_rendering_profiler_rejects_user_configuration() {
+fn benchmark_subcommand_rejects_application_options() {
     let error = parse_args_from([
-        OsString::from("--profile-terminal-rendering"),
+        OsString::from("benchmark"),
         OsString::from("--config"),
         OsString::from("config.json"),
     ])
     .unwrap_err();
 
-    assert!(error.to_string().contains("cannot be combined"));
+    assert!(error.to_string().contains("unknown benchmark argument"));
 }
 
 #[test]
@@ -471,7 +457,10 @@ fn terminal_rendering_profiler_launches_the_current_executable() {
         config.profiles[0].command,
         Shell::WithArguments {
             program: executable.to_string_lossy().into_owned(),
-            args: vec!["--terminal-render-workload".to_owned()],
+            args: vec![
+                "benchmark".to_owned(),
+                "--terminal-render-workload".to_owned(),
+            ],
             title_override: Some("Terminal rendering profiler".to_owned()),
         }
     );
@@ -487,7 +476,10 @@ fn checkerboard_profiler_launches_the_background_workload() {
         config.profiles[0].command,
         Shell::WithArguments {
             program: executable.to_string_lossy().into_owned(),
-            args: vec!["--terminal-checkerboard-workload".to_owned()],
+            args: vec![
+                "benchmark".to_owned(),
+                "--terminal-checkerboard-workload".to_owned(),
+            ],
             title_override: Some("Terminal rendering profiler".to_owned()),
         }
     );
@@ -518,7 +510,10 @@ fn sparse_update_profiler_launches_the_sparse_workload() {
         config.profiles[0].command,
         Shell::WithArguments {
             program: executable.to_string_lossy().into_owned(),
-            args: vec!["--terminal-sparse-update-workload".to_owned()],
+            args: vec![
+                "benchmark".to_owned(),
+                "--terminal-sparse-update-workload".to_owned(),
+            ],
             title_override: Some("Terminal rendering profiler".to_owned()),
         }
     );
