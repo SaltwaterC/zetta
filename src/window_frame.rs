@@ -2,6 +2,10 @@ use super::*;
 
 pub(crate) const RESIZE_HANDLE: Pixels = px(10.);
 
+const fn custom_window_border_enabled() -> bool {
+    !cfg!(target_os = "windows")
+}
+
 pub(crate) fn window_close_button_on_left(layout: WindowButtonLayout) -> bool {
     if layout.left.contains(&Some(WindowButton::Close)) {
         true
@@ -279,7 +283,9 @@ pub(crate) fn client_window_frame(
         .map(|frame| match decorations {
             Decorations::Server => frame,
             Decorations::Client { .. } => frame
-                .rounded_client_corners(tiling)
+                .when(custom_window_border_enabled(), |frame| {
+                    frame.rounded_client_corners(tiling)
+                })
                 .when(!tiling.top, |frame| frame.pt(RESIZE_HANDLE))
                 .when(!tiling.bottom, |frame| frame.pb(RESIZE_HANDLE))
                 .when(!tiling.left, |frame| frame.pl(RESIZE_HANDLE))
@@ -296,9 +302,12 @@ pub(crate) fn client_window_frame(
             div()
                 .size_full()
                 .overflow_hidden()
-                .border_1()
-                .border_color(cx.theme().colors().border)
-                .rounded_client_corners(tiling)
+                .when(custom_window_border_enabled(), |content| {
+                    content
+                        .border_1()
+                        .border_color(cx.theme().colors().border)
+                        .rounded_client_corners(tiling)
+                })
                 .child(content),
         )
         .when(matches!(decorations, Decorations::Client { .. }), |frame| {

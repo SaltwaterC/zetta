@@ -24,6 +24,11 @@ fn auxiliary_close_buttons_follow_window_close_button_side() {
 }
 
 #[test]
+fn custom_window_border_matches_platform_conventions() {
+    assert_eq!(custom_window_border_enabled(), !cfg!(target_os = "windows"));
+}
+
+#[test]
 #[cfg(target_os = "linux")]
 fn parses_quoted_gsettings_button_layout() {
     let layout = parse_gsettings_button_layout("'close,minimize,maximize:'\n").unwrap();
