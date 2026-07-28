@@ -712,6 +712,19 @@ mod tests {
     }
 
     #[test]
+    fn detached_history_reclaims_every_retained_row() {
+        let mut storage = Storage::<char>::with_capacity(1, 1);
+        for _ in 0..(LIVE_HISTORY_ROWS + ARCHIVE_CHUNK_ROWS + 1) {
+            storage.scroll_up(1, 1, 1);
+        }
+        let mut history = storage.take_history();
+
+        while history.reclaim_next_chunk() {}
+
+        assert_eq!(history.len(), 0);
+    }
+
+    #[test]
     fn shrinking_drops_oldest_rows_across_archive_boundaries() {
         let mut storage = Storage::<char>::with_capacity(1, 1);
         for index in 0..(LIVE_HISTORY_ROWS + ARCHIVE_CHUNK_ROWS + 10) {

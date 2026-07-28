@@ -35,13 +35,56 @@ impl io::Write for InspectingWriter {
 fn output_benchmark_writes_requested_amount_of_deterministic_text() {
     let mut output = InspectingWriter::default();
     let bytes = MIB_BYTES;
-    let result = write_output_benchmark(&mut output, bytes).unwrap();
+    let result =
+        write_output_benchmark(&mut output, bytes, OutputBenchmarkType::RepeatedLines).unwrap();
 
     assert_eq!(result.bytes, bytes);
+    assert_eq!(result.output_type, OutputBenchmarkType::RepeatedLines);
     assert_eq!(output.bytes, bytes);
     assert_eq!(output.newlines, bytes / OUTPUT_BENCHMARK_LINE_BYTES);
     assert_eq!(output.invalid_bytes, 0);
     assert_eq!(output.flushes, 1);
+}
+
+#[test]
+fn unique_output_benchmark_writes_deterministic_non_repeating_lines() {
+    let bytes = OUTPUT_BENCHMARK_LINE_BYTES * 4;
+    let first = unique_output_benchmark_payload(bytes);
+    let second = unique_output_benchmark_payload(bytes);
+    let lines = first
+        .split_inclusive(|byte| *byte == b'\n')
+        .collect::<Vec<_>>();
+
+    assert_eq!(first, second);
+    assert_eq!(lines.len(), 4);
+    assert!(
+        lines
+            .iter()
+            .all(|line| line.len() == OUTPUT_BENCHMARK_LINE_BYTES)
+    );
+    assert!(lines.windows(2).all(|pair| pair[0] != pair[1]));
+    assert!(lines.iter().all(|line| line.last() == Some(&b'\n')));
+}
+
+#[test]
+fn unique_output_benchmark_reports_its_selected_type() {
+    let mut output = Vec::new();
+    let result = write_output_benchmark(&mut output, 1, OutputBenchmarkType::UniqueLines).unwrap();
+
+    assert_eq!(result.output_type, OutputBenchmarkType::UniqueLines);
+    assert_eq!(output, b"l");
+}
+
+#[test]
+fn terminal_size_summary_includes_columns_and_rows() {
+    assert_eq!(
+        terminal_size_summary(Some(TerminalSize {
+            columns: 120,
+            rows: 40,
+        })),
+        "120 columns x 40 rows"
+    );
+    assert_eq!(terminal_size_summary(None), "terminal size unavailable");
 }
 
 #[test]

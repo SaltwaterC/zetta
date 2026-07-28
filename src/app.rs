@@ -657,6 +657,7 @@ impl Zetta {
             return;
         }
         self.tabs.remove(index);
+        self.retain_open_visible_terminals();
         if self.tabs.is_empty() {
             window.remove_window();
             return;
@@ -736,16 +737,37 @@ impl Zetta {
         }
 
         self.cancel_tab_search_for_tab(tab_id, cx);
-        let tab = &mut self.tabs[tab_index];
-        tab.remove_pane(pane_id);
-        let Some(layout) = tab.layout.clone().without(pane_id) else {
+        let layout = {
+            let tab = &mut self.tabs[tab_index];
+            tab.remove_pane(pane_id);
+            tab.layout.clone().without(pane_id)
+        };
+        self.retain_open_visible_terminals();
+        let Some(layout) = layout else {
             self.close_tab_at_with_policy(tab_index, background_if_last_pane, window, cx);
             return;
         };
+        let tab = &mut self.tabs[tab_index];
         tab.layout = layout;
         tab.restore_focus_after_close(pane_id, tab.layout.first_pane());
         self.active_tab = tab_index;
         self.focus_active(window, cx);
+    }
+
+    /// Release render-cache references to terminals removed from a tab or pane immediately.
+    ///
+    /// Rendering normally refreshes this cache on the next frame, but retaining a closed
+    /// terminal until then also retains its scrollback and delays its background reclamation.
+    fn retain_open_visible_terminals(&mut self) {
+        let open_terminals = self
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.panes.iter())
+            .filter_map(|pane| pane.terminal.as_ref())
+            .map(Entity::entity_id)
+            .collect::<HashSet<_>>();
+        self.visible_terminals
+            .retain(|terminal| open_terminals.contains(&terminal.entity_id()));
     }
 
     pub(crate) fn split_active_pane(

@@ -7,6 +7,7 @@ pub(crate) enum StartupMode {
     Application,
     OutputBenchmark {
         size_mib: usize,
+        output_type: OutputBenchmarkType,
     },
     ListBackgroundSessions {
         json: bool,
@@ -49,12 +50,13 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
         .is_some_and(|argument| argument == "benchmark-output")
     {
         let mut size_mib = None;
+        let mut output_type = OutputBenchmarkType::RepeatedLines;
         let mut benchmark_arguments = arguments[1..].iter();
         while let Some(argument) = benchmark_arguments.next() {
             match argument.to_string_lossy().as_ref() {
                 "--help" | "-h" => {
                     println!(
-                        "Benchmark terminal output throughput\n\nUsage: zetta benchmark-output [--size MIB]\n\nWrites deterministic text to standard output and prints the elapsed time to standard error.\n\nOptions:\n  -s, --size MIB  Set the output size in MiB [default: 10]\n  -h, --help      Print help"
+                        "Benchmark terminal output throughput\n\nUsage: zetta benchmark-output [OPTIONS]\n\nWrites deterministic text to standard output and prints the elapsed time to standard error.\n\nOptions:\n  -s, --size MIB                 Set the output size in MiB [default: 10]\n  -t, --output-type TYPE         Select repeated or unique lines [default: repeated]\n  -h, --help                     Print help"
                     );
                     std::process::exit(0);
                 }
@@ -73,6 +75,19 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                     );
                     size_mib = Some(value);
                 }
+                "--output-type" | "-t" => {
+                    let value = benchmark_arguments
+                        .next()
+                        .context("--output-type requires repeated or unique")?
+                        .to_string_lossy();
+                    output_type = match value.as_ref() {
+                        "repeated" => OutputBenchmarkType::RepeatedLines,
+                        "unique" => OutputBenchmarkType::UniqueLines,
+                        _ => anyhow::bail!(
+                            "--output-type must be either repeated or unique, got {value:?}"
+                        ),
+                    };
+                }
                 unknown => anyhow::bail!("unknown benchmark-output argument {unknown:?}"),
             }
         }
@@ -82,6 +97,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             profile: None,
             mode: StartupMode::OutputBenchmark {
                 size_mib: size_mib.unwrap_or(DEFAULT_OUTPUT_BENCHMARK_MIB),
+                output_type,
             },
             profile_report: None,
             profile_duration: None,
@@ -191,7 +207,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             }
             "--help" | "-h" => {
                 println!(
-                    "Zetta terminal\n\nUsage: zetta [OPTIONS]\n       zetta benchmark [OPTIONS]\n       zetta benchmark-output [--size MIB]\n       zetta sessions [--json]\n       zetta tftp <COMMAND> [OPTIONS]\n\nCommands:\n  benchmark                           Profile terminal rendering\n  benchmark-output                    Write and time a text payload (default: 10 MiB)\n  sessions                            List detached background sessions\n  tftp                                Transfer a file with TFTP\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Launch the named profile"
+                    "Zetta terminal\n\nUsage: zetta [OPTIONS]\n       zetta benchmark [OPTIONS]\n       zetta benchmark-output [OPTIONS]\n       zetta sessions [--json]\n       zetta tftp <COMMAND> [OPTIONS]\n\nCommands:\n  benchmark                           Profile terminal rendering\n  benchmark-output                    Write and time a text payload (default: 10 MiB)\n  sessions                            List detached background sessions\n  tftp                                Transfer a file with TFTP\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Launch the named profile"
                 );
                 std::process::exit(0);
             }
@@ -1341,8 +1357,12 @@ fn selected_performance_workload(args: &StartupArgs) -> PerformanceWorkload {
 
 pub(crate) fn run() -> Result<()> {
     let args = parse_args()?;
-    if let StartupMode::OutputBenchmark { size_mib } = &args.mode {
-        return run_output_benchmark(*size_mib);
+    if let StartupMode::OutputBenchmark {
+        size_mib,
+        output_type,
+    } = &args.mode
+    {
+        return run_output_benchmark(*size_mib, *output_type);
     }
     if let StartupMode::ListBackgroundSessions { json } = &args.mode {
         return print_session_catalogs(*json);

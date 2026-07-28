@@ -54,7 +54,8 @@ fn output_benchmark_subcommand_bypasses_application_startup() {
     assert_eq!(
         args.mode,
         StartupMode::OutputBenchmark {
-            size_mib: DEFAULT_OUTPUT_BENCHMARK_MIB
+            size_mib: DEFAULT_OUTPUT_BENCHMARK_MIB,
+            output_type: OutputBenchmarkType::RepeatedLines,
         }
     );
     assert!(!should_handoff_to_existing_process(&args));
@@ -65,7 +66,13 @@ fn output_benchmark_subcommand_bypasses_application_startup() {
         OsString::from("64"),
     ])
     .unwrap();
-    assert_eq!(sized.mode, StartupMode::OutputBenchmark { size_mib: 64 });
+    assert_eq!(
+        sized.mode,
+        StartupMode::OutputBenchmark {
+            size_mib: 64,
+            output_type: OutputBenchmarkType::RepeatedLines,
+        }
+    );
 
     let short_sized = parse_args_from([
         OsString::from("benchmark-output"),
@@ -75,7 +82,38 @@ fn output_benchmark_subcommand_bypasses_application_startup() {
     .unwrap();
     assert_eq!(
         short_sized.mode,
-        StartupMode::OutputBenchmark { size_mib: 32 }
+        StartupMode::OutputBenchmark {
+            size_mib: 32,
+            output_type: OutputBenchmarkType::RepeatedLines,
+        }
+    );
+
+    let unique = parse_args_from([
+        OsString::from("benchmark-output"),
+        OsString::from("--output-type"),
+        OsString::from("unique"),
+    ])
+    .unwrap();
+    assert_eq!(
+        unique.mode,
+        StartupMode::OutputBenchmark {
+            size_mib: DEFAULT_OUTPUT_BENCHMARK_MIB,
+            output_type: OutputBenchmarkType::UniqueLines,
+        }
+    );
+
+    let short_unique = parse_args_from([
+        OsString::from("benchmark-output"),
+        OsString::from("-t"),
+        OsString::from("unique"),
+    ])
+    .unwrap();
+    assert_eq!(
+        short_unique.mode,
+        StartupMode::OutputBenchmark {
+            size_mib: DEFAULT_OUTPUT_BENCHMARK_MIB,
+            output_type: OutputBenchmarkType::UniqueLines,
+        }
     );
 
     for invalid in ["0", "1.5", "not-a-number"] {
@@ -95,6 +133,23 @@ fn output_benchmark_subcommand_bypasses_application_startup() {
         parse_args_from([
             OsString::from("benchmark-output"),
             OsString::from("--unknown"),
+        ])
+        .is_err()
+    );
+    for invalid in ["different", ""] {
+        assert!(
+            parse_args_from([
+                OsString::from("benchmark-output"),
+                OsString::from("--output-type"),
+                OsString::from(invalid),
+            ])
+            .is_err()
+        );
+    }
+    assert!(
+        parse_args_from([
+            OsString::from("benchmark-output"),
+            OsString::from("--output-type"),
         ])
         .is_err()
     );

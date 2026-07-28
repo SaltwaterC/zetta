@@ -15,17 +15,26 @@ cargo build --release
 target/release/zetta benchmark-output
 ```
 
-The command writes 10 MiB by default. Set another output size in MiB with
-`--size` or `-s`:
+The command writes 10 MiB of repeated lines by default. Set another output
+size in MiB with `--size` or `-s`:
 
 ```sh
 target/release/zetta benchmark-output --size 100
 ```
 
+Use `--output-type unique` (or `-t unique`) to write deterministic lines that never repeat.
+This is the worst-case workload for scrollback history archival, where repeated
+lines may otherwise be compacted efficiently:
+
+```sh
+target/release/zetta benchmark-output --output-type unique --size 100
+```
+
 The deterministic, printable ASCII text is written to standard output in
 128 KiB blocks, flushed, and then the elapsed time and throughput are printed
-to standard error. Payload construction is excluded from the measurement, and
-the measured standard-output stream contains no timing metadata.
+to standard error. The result identifies the output type and detected terminal
+size in columns × rows. Payload construction is excluded from the measurement,
+and the measured standard-output stream contains no timing metadata.
 
 Run the same optimized binary and command inside each terminal emulator. The
 result measures the time for the process to write and flush the payload,
@@ -44,8 +53,10 @@ done
 
 Compare both the individual results and their trend. A fresh pane provides the
 cold-history baseline; repeated runs reveal ingestion or rendering work that
-grows with retained scrollback. Use the equivalent loop syntax in PowerShell
-or Command Prompt on Windows.
+grows with retained scrollback. Window size materially affects throughput,
+especially for unique lines and history archival, so compare only results that
+report the same terminal columns and rows. Use the equivalent loop syntax in
+PowerShell or Command Prompt on Windows.
 
 ## Performance overlay
 

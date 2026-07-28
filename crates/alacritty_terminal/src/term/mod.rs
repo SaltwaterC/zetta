@@ -2,7 +2,7 @@
 
 use std::ops::{Index, IndexMut, Range};
 use std::sync::{Arc, OnceLock, mpsc};
-use std::{cmp, mem, ptr, slice, str, thread, time::Duration};
+use std::{cmp, mem, ptr, slice, str, thread};
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -52,7 +52,40 @@ const INITIAL_TABSTOPS: usize = 8;
 
 type DetachedHistory = DetachedRows<Cell>;
 static HISTORY_RECLAIMER: OnceLock<Option<mpsc::Sender<DetachedHistory>>> = OnceLock::new();
-const HISTORY_RECLAIM_PAUSE: Duration = Duration::from_millis(1);
+const HISTORY_RECLAIM_BATCHES_BEFORE_YIELD: usize = 32;
+const HISTORY_RECLAIM_BATCHES_BEFORE_HEAP_RELEASE: usize = 128;
+
+/// Return freed heap pages to the OS after history is reclaimed on a background thread.
+///
+/// Linux's allocator can retain pages in the arena that allocated terminal rows even after a
+/// different thread has dropped those rows. Without trimming, a cleared unique scrollback can
+/// remain resident until process exit despite no longer being reachable.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn release_unused_heap_pages() {
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn release_unused_heap_pages() {}
+
+fn reclaim_history(mut history: DetachedHistory) {
+    let mut reclaimed_batches = 0;
+    while history.reclaim_next_chunk() {
+        reclaimed_batches += 1;
+        if reclaimed_batches % HISTORY_RECLAIM_BATCHES_BEFORE_YIELD == 0 {
+            // Reclamation is intentionally off the UI thread. Yield occasionally so a large
+            // cleared scrollback does not monopolize a CPU, without retaining each 256-row
+            // allocation group for a timer tick.
+            thread::yield_now();
+        }
+        if reclaimed_batches % HISTORY_RECLAIM_BATCHES_BEFORE_HEAP_RELEASE == 0 {
+            release_unused_heap_pages();
+        }
+    }
+    release_unused_heap_pages();
+}
 
 fn defer_history_drop(history: DetachedHistory) {
     if history.is_empty() {
@@ -62,10 +95,8 @@ fn defer_history_drop(history: DetachedHistory) {
     let sender = HISTORY_RECLAIMER.get_or_init(|| {
         let (sender, receiver) = mpsc::channel::<DetachedHistory>();
         match thread::Builder::new().name("terminal-history-reclaimer".into()).spawn(move || {
-            while let Ok(mut history) = receiver.recv() {
-                while history.reclaim_next_chunk() {
-                    thread::sleep(HISTORY_RECLAIM_PAUSE);
-                }
+            while let Ok(history) = receiver.recv() {
+                reclaim_history(history);
             }
         }) {
             Ok(_) => Some(sender),
