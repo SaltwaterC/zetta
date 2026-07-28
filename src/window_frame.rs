@@ -1,6 +1,15 @@
 use super::*;
 
-pub(crate) const RESIZE_HANDLE: Pixels = px(10.);
+const LINUX_RESIZE_HANDLE: Pixels = px(16.);
+const OTHER_RESIZE_HANDLE: Pixels = px(10.);
+
+const fn resize_handle_width() -> Pixels {
+    if cfg!(any(target_os = "linux", target_os = "freebsd")) {
+        LINUX_RESIZE_HANDLE
+    } else {
+        OTHER_RESIZE_HANDLE
+    }
+}
 
 const fn custom_window_border_enabled() -> bool {
     !cfg!(target_os = "windows")
@@ -272,8 +281,9 @@ pub(crate) fn client_window_frame(
         Decorations::Server => Tiling::default(),
         Decorations::Client { tiling } => tiling,
     };
+    let resize_handle = resize_handle_width();
     if matches!(decorations, Decorations::Client { .. }) {
-        window.set_client_inset(RESIZE_HANDLE);
+        window.set_client_inset(resize_handle);
     }
 
     div()
@@ -286,10 +296,10 @@ pub(crate) fn client_window_frame(
                 .when(custom_window_border_enabled(), |frame| {
                     frame.rounded_client_corners(tiling)
                 })
-                .when(!tiling.top, |frame| frame.pt(RESIZE_HANDLE))
-                .when(!tiling.bottom, |frame| frame.pb(RESIZE_HANDLE))
-                .when(!tiling.left, |frame| frame.pl(RESIZE_HANDLE))
-                .when(!tiling.right, |frame| frame.pr(RESIZE_HANDLE))
+                .when(!tiling.top, |frame| frame.pt(resize_handle))
+                .when(!tiling.bottom, |frame| frame.pb(resize_handle))
+                .when(!tiling.left, |frame| frame.pl(resize_handle))
+                .when(!tiling.right, |frame| frame.pr(resize_handle))
                 .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                     let size = window.window_bounds().get_bounds().size;
                     if let Some(edge) = resize_edge(event.position, size, tiling) {
@@ -354,11 +364,12 @@ pub(crate) fn resize_edge(
     window_size: Size<Pixels>,
     tiling: Tiling,
 ) -> Option<ResizeEdge> {
-    let corner = RESIZE_HANDLE * 2.;
-    let left = position.x < corner;
-    let right = position.x > window_size.width - corner;
-    let top = position.y < corner;
-    let bottom = position.y > window_size.height - corner;
+    let resize_handle = resize_handle_width();
+    let corner = resize_handle * 2.;
+    let left = position.x <= corner;
+    let right = position.x >= window_size.width - corner;
+    let top = position.y <= corner;
+    let bottom = position.y >= window_size.height - corner;
 
     if top && left && !tiling.top && !tiling.left {
         Some(ResizeEdge::TopLeft)
@@ -368,13 +379,13 @@ pub(crate) fn resize_edge(
         Some(ResizeEdge::BottomLeft)
     } else if bottom && right && !tiling.bottom && !tiling.right {
         Some(ResizeEdge::BottomRight)
-    } else if position.y < RESIZE_HANDLE && !tiling.top {
+    } else if position.y <= resize_handle && !tiling.top {
         Some(ResizeEdge::Top)
-    } else if position.y > window_size.height - RESIZE_HANDLE && !tiling.bottom {
+    } else if position.y >= window_size.height - resize_handle && !tiling.bottom {
         Some(ResizeEdge::Bottom)
-    } else if position.x < RESIZE_HANDLE && !tiling.left {
+    } else if position.x <= resize_handle && !tiling.left {
         Some(ResizeEdge::Left)
-    } else if position.x > window_size.width - RESIZE_HANDLE && !tiling.right {
+    } else if position.x >= window_size.width - resize_handle && !tiling.right {
         Some(ResizeEdge::Right)
     } else {
         None

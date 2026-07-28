@@ -757,6 +757,8 @@ pub(crate) const SAVE_PANE_OUTPUT_KEYBINDING: &str = "alt-shift-s";
 pub(crate) const SELECT_ALL_KEYBINDING: &str = "alt-shift-a";
 pub(crate) const RECONNECT_SESSION_KEYBINDING: &str = "ctrl-shift-a";
 pub(crate) const DETACH_TAB_KEYBINDING: &str = "ctrl-shift-d";
+pub(crate) const CLOSE_WINDOW_KEYBINDING: &str = "ctrl-shift-q";
+pub(crate) const CLOSE_ALL_WINDOWS_KEYBINDING: &str = "ctrl-shift-x";
 pub(crate) const SERIAL_CONSOLE_KEYBINDING: &str = "ctrl-shift-s";
 pub(crate) const AUTO_BACKGROUND_TAB_KEYBINDING: &str = "ctrl-shift-b";
 pub(crate) const ROTATE_PANE_LAYOUT_KEYBINDING: &str = "alt-shift-l";
@@ -783,6 +785,22 @@ pub(crate) fn reconnect_session_keybinding() -> KeyBinding {
 
 pub(crate) fn detach_tab_keybinding() -> KeyBinding {
     KeyBinding::new(DETACH_TAB_KEYBINDING, DetachTab, Some("Zetta > Terminal"))
+}
+
+pub(crate) fn close_window_keybinding() -> KeyBinding {
+    KeyBinding::new(
+        CLOSE_WINDOW_KEYBINDING,
+        CloseWindow,
+        Some("Zetta > Terminal"),
+    )
+}
+
+pub(crate) fn close_all_windows_keybinding() -> KeyBinding {
+    KeyBinding::new(
+        CLOSE_ALL_WINDOWS_KEYBINDING,
+        CloseAllWindows,
+        Some("Zetta > Terminal"),
+    )
 }
 
 pub(crate) fn close_pane_keybinding() -> KeyBinding {
@@ -844,6 +862,8 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
         KeyBinding::new("ctrl-shift-t", NewTab, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-shift-n", NewWindow, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-shift-w", CloseTab, Some("Zetta > Terminal")),
+        close_window_keybinding(),
+        close_all_windows_keybinding(),
         detach_tab_keybinding(),
         reconnect_session_keybinding(),
         auto_background_tab_keybinding(),

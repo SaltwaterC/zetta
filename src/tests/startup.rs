@@ -916,6 +916,26 @@ fn close_pane_uses_the_pane_control_modifiers() {
 }
 
 #[test]
+fn close_all_windows_uses_the_documented_shortcut() {
+    assert_eq!(CLOSE_ALL_WINDOWS_KEYBINDING, "ctrl-shift-x");
+    let shortcut = gpui::Keystroke::parse(CLOSE_ALL_WINDOWS_KEYBINDING).unwrap();
+    assert_eq!(
+        close_all_windows_keybinding().match_keystrokes(&[shortcut]),
+        Some(false)
+    );
+}
+
+#[test]
+fn close_window_uses_the_documented_shortcut() {
+    assert_eq!(CLOSE_WINDOW_KEYBINDING, "ctrl-shift-q");
+    let shortcut = gpui::Keystroke::parse(CLOSE_WINDOW_KEYBINDING).unwrap();
+    assert_eq!(
+        close_window_keybinding().match_keystrokes(&[shortcut]),
+        Some(false)
+    );
+}
+
+#[test]
 fn pane_output_uses_the_standard_save_shortcut() {
     assert_eq!(SAVE_PANE_OUTPUT_KEYBINDING, "alt-shift-s");
     let shortcut = gpui::Keystroke::parse(SAVE_PANE_OUTPUT_KEYBINDING).unwrap();

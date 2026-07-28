@@ -523,6 +523,36 @@ impl Zetta {
         cx.notify();
     }
 
+    pub(crate) fn open_settings_page(
+        &mut self,
+        page: SettingsPage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings_editor.is_none() {
+            self.toggle_settings(&ToggleSettings, window, cx);
+        }
+        self.select_settings_page(page, window, cx);
+    }
+
+    pub(crate) fn open_themes(
+        &mut self,
+        _: &OpenThemes,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_settings_page(SettingsPage::Themes, window, cx);
+    }
+
+    pub(crate) fn open_keymap(
+        &mut self,
+        _: &OpenKeymap,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_settings_page(SettingsPage::Keymap, window, cx);
+    }
+
     pub(crate) fn focus_settings_input(
         &mut self,
         input: SettingsInput,

@@ -1,6 +1,14 @@
 use super::*;
 
 #[test]
+fn title_bar_controls_hide_labels_before_they_crowd_the_window() {
+    assert!(!title_bar_shows_control_labels(px(719.), false));
+    assert!(title_bar_shows_control_labels(px(720.), false));
+    assert!(!title_bar_shows_control_labels(px(799.), true));
+    assert!(title_bar_shows_control_labels(px(800.), true));
+}
+
+#[test]
 fn minimized_shelf_capacity_fits_only_complete_entries() {
     assert_eq!(minimized_pane_capacity(px(0.), 4), 1);
     assert_eq!(minimized_pane_capacity(px(180.), 4), 1);

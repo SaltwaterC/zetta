@@ -887,6 +887,33 @@ impl Zetta {
         self.close_tab_at(self.active_tab, window, cx);
     }
 
+    pub(crate) fn close_window(
+        &mut self,
+        _: &CloseWindow,
+        window: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        window.remove_window();
+    }
+
+    pub(crate) fn close_all_windows(
+        &mut self,
+        _: &CloseAllWindows,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current_window_id = window.window_handle().window_id();
+        for window_handle in cx.windows() {
+            if window_handle.window_id() == current_window_id {
+                window.remove_window();
+            } else {
+                window_handle
+                    .update(cx, |_, window, _| window.remove_window())
+                    .log_err();
+            }
+        }
+    }
+
     pub(crate) fn detach_tab(
         &mut self,
         _: &DetachTab,

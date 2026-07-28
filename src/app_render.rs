@@ -2,6 +2,17 @@ use super::*;
 
 const MINIMIZED_PANE_ENTRY_MIN_WIDTH: Pixels = px(180.);
 const MINIMIZED_PANE_ENTRY_GAP: Pixels = px(4.);
+const TITLE_BAR_CONTROL_LABEL_MIN_WIDTH: Pixels = px(720.);
+const TITLE_BAR_RECONNECT_LABEL_MIN_WIDTH: Pixels = px(800.);
+
+fn title_bar_shows_control_labels(viewport_width: Pixels, has_reconnect_control: bool) -> bool {
+    viewport_width
+        >= if has_reconnect_control {
+            TITLE_BAR_RECONNECT_LABEL_MIN_WIDTH
+        } else {
+            TITLE_BAR_CONTROL_LABEL_MIN_WIDTH
+        }
+}
 
 fn minimized_pane_capacity(available_width: Pixels, pane_count: usize) -> usize {
     if pane_count == 0 {
@@ -122,57 +133,6 @@ impl Render for Zetta {
         } else {
             colors.title_bar_background
         };
-        let title_bar = div()
-            .id("zetta-title-bar")
-            .window_control_area(WindowControlArea::Drag)
-            .relative()
-            .h(platform_title_bar_height(window))
-            .w_full()
-            .flex_none()
-            .flex()
-            .items_center()
-            .bg(title_bar_background)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    this.titlebar_dragging = true;
-                    this.focus_active(window, cx);
-                }),
-            )
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    this.titlebar_dragging = false;
-                    this.focus_active(window, cx);
-                }),
-            )
-            .on_mouse_down_out(cx.listener(|this, _, _, _| this.titlebar_dragging = false))
-            .on_mouse_move(cx.listener(|this, _, window, _| {
-                if this.titlebar_dragging {
-                    this.titlebar_dragging = false;
-                    window.start_window_move();
-                }
-            }))
-            .on_click(|event, window, _| {
-                if event.click_count() == 2 {
-                    if cfg!(target_os = "macos") {
-                        window.titlebar_double_click();
-                    } else {
-                        window.zoom_window();
-                    }
-                }
-            })
-            .child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(Label::new("Zetta").size(LabelSize::Small)),
-            )
-            .child(left_window_controls)
-            .child(right_window_controls);
         let tabs = self
             .tabs
             .iter()
@@ -339,17 +299,27 @@ impl Render for Zetta {
             })
             .collect::<Vec<_>>();
 
+        let show_title_bar_control_labels = title_bar_shows_control_labels(
+            window.viewport_size().width,
+            background_session_count > 0,
+        );
         let profile_menu_profiles = self.profiles.clone();
         let default_profile = self.launch_config.default_profile;
         let profile_menu_handle = handle.clone();
         let profile_menu = PopoverMenu::new("new-tab-profile-menu")
             .trigger_with_tooltip(
-                IconButton::new("new-tab-profile-menu-trigger", IconName::ChevronDown)
-                    .shape(IconButtonShape::Wide)
-                    .size(ButtonSize::Large)
-                    .width(px(32.))
-                    .icon_size(IconSize::Small)
-                    .aria_label("New tab profile"),
+                Button::new(
+                    "new-tab-profile-menu-trigger",
+                    if show_title_bar_control_labels {
+                        "Profile"
+                    } else {
+                        ""
+                    },
+                )
+                .start_icon(Icon::new(IconName::ChevronDown).size(IconSize::Small))
+                .style(ButtonStyle::Subtle)
+                .size(ButtonSize::Large)
+                .aria_label("New tab profile"),
                 Tooltip::text("New tab profile"),
             )
             .anchor(Anchor::TopRight)
@@ -420,11 +390,17 @@ impl Render for Zetta {
         let reconnect_menu = PopoverMenu::new("reconnect-session-menu")
             .with_handle(self.reconnect_menu_handle.clone())
             .trigger_with_tooltip(
-                IconButton::new("reconnect-session", IconName::RotateCw)
-                    .shape(IconButtonShape::Wide)
+                Button::new(
+                    "reconnect-session",
+                    if show_title_bar_control_labels {
+                        "Reconnect"
+                    } else {
+                        ""
+                    },
+                )
+                    .start_icon(Icon::new(IconName::RotateCw).size(IconSize::Small))
+                    .style(ButtonStyle::Subtle)
                     .size(ButtonSize::Large)
-                    .width(px(32.))
-                    .icon_size(IconSize::Small)
                     .aria_label("Choose background session to reconnect"),
                 Tooltip::text(format!(
                     "Choose background session to reconnect ({background_session_count}) (Ctrl-Shift-A)"
@@ -471,18 +447,206 @@ impl Render for Zetta {
                 }))
             });
         let reconnect_control = if background_session_count == 1 {
-            IconButton::new("reconnect-session", IconName::RotateCw)
-                .shape(IconButtonShape::Wide)
-                .size(ButtonSize::Large)
-                .width(px(32.))
-                .icon_size(IconSize::Small)
-                .aria_label("Reconnect background session")
-                .tooltip(Tooltip::text("Reconnect background session (Ctrl-Shift-A)"))
-                .on_click(|_, window, cx| window.dispatch_action(Box::new(ReconnectSession), cx))
-                .into_any_element()
+            Button::new(
+                "reconnect-session",
+                if show_title_bar_control_labels {
+                    "Reconnect"
+                } else {
+                    ""
+                },
+            )
+            .start_icon(Icon::new(IconName::RotateCw).size(IconSize::Small))
+            .style(ButtonStyle::Subtle)
+            .size(ButtonSize::Large)
+            .aria_label("Reconnect background session")
+            .tooltip(Tooltip::text("Reconnect background session (Ctrl-Shift-A)"))
+            .on_click(|_, window, cx| window.dispatch_action(Box::new(ReconnectSession), cx))
+            .into_any_element()
         } else {
             reconnect_menu.into_any_element()
         };
+
+        let application_menu = PopoverMenu::new("application-menu")
+            .trigger_with_tooltip(
+                Button::new(
+                    "application-menu-trigger",
+                    if show_title_bar_control_labels {
+                        "Menu"
+                    } else {
+                        ""
+                    },
+                )
+                .start_icon(Icon::new(IconName::Menu).size(IconSize::Small))
+                .style(ButtonStyle::Subtle)
+                .size(ButtonSize::Large)
+                .aria_label("Application menu"),
+                Tooltip::text("Open application menu"),
+            )
+            .anchor(Anchor::TopLeft)
+            .menu(move |window, cx| {
+                Some(ui::ContextMenu::build(
+                    window,
+                    cx,
+                    move |menu, window, cx| {
+                        let menu = menu
+                            .when_some(window.focused(cx), |menu, focused| menu.context(focused));
+                        menu.action("New Tab", Box::new(NewTab))
+                            .action("New Window", Box::new(NewWindow))
+                            .separator()
+                            .action("Open Settings", Box::new(ToggleSettings))
+                            .action("Open Themes", Box::new(OpenThemes))
+                            .action("Open Keymap", Box::new(OpenKeymap))
+                            .separator()
+                            .action("Close Tab", Box::new(CloseTab))
+                            .action("Close Window", Box::new(CloseWindow))
+                            .action("Close All Windows", Box::new(CloseAllWindows))
+                    },
+                ))
+            });
+
+        let title_bar = div()
+            .id("zetta-title-bar")
+            .window_control_area(WindowControlArea::Drag)
+            .relative()
+            .h(platform_title_bar_height(window))
+            .w_full()
+            .flex_none()
+            .flex()
+            .items_center()
+            .bg(title_bar_background)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.titlebar_dragging = true;
+                    this.focus_active(window, cx);
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.titlebar_dragging = false;
+                    this.focus_active(window, cx);
+                }),
+            )
+            .on_mouse_down_out(cx.listener(|this, _, _, _| this.titlebar_dragging = false))
+            .on_mouse_move(cx.listener(|this, _, window, _| {
+                if this.titlebar_dragging {
+                    this.titlebar_dragging = false;
+                    window.start_window_move();
+                }
+            }))
+            .on_click(|event, window, _| {
+                if event.click_count() == 2 {
+                    if cfg!(target_os = "macos") {
+                        window.titlebar_double_click();
+                    } else {
+                        window.zoom_window();
+                    }
+                }
+            })
+            .child(left_window_controls)
+            .child(
+                h_flex()
+                    .id("title-bar-controls")
+                    .min_w_0()
+                    .flex_none()
+                    .gap_1()
+                    // The traffic lights are native controls even with a client title bar.
+                    .when(cfg!(target_os = "macos"), |controls| controls.ml(px(72.)))
+                    .child(application_menu)
+                    .child(profile_menu)
+                    .child(
+                        Button::new(
+                            "auto-background-tab",
+                            if show_title_bar_control_labels {
+                                "Keep running"
+                            } else {
+                                ""
+                            },
+                        )
+                        .start_icon(Icon::new(IconName::Pin).size(IconSize::Small))
+                        .style(ButtonStyle::Subtle)
+                        .size(ButtonSize::Large)
+                        .toggle_state(auto_background_tab)
+                        .aria_label("Keep this tab running after close")
+                        .tooltip(Tooltip::text(if auto_background_tab {
+                            if auto_background_protected {
+                                "Keep running after close is on · authentication required (Ctrl-Shift-B)"
+                            } else {
+                                "Keep running after close is on · no authentication (Ctrl-Shift-B)"
+                            }
+                        } else {
+                            "Keep this tab running after the tab or window is closed (Ctrl-Shift-B)"
+                        }))
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(ToggleAutoBackgroundTab), cx)
+                        }),
+                    )
+                    .child(
+                        Button::new(
+                            "detach-tab",
+                            if show_title_bar_control_labels {
+                                "Detach"
+                            } else {
+                                ""
+                            },
+                        )
+                        .start_icon(Icon::new(IconName::Archive).size(IconSize::Small))
+                        .style(ButtonStyle::Subtle)
+                        .size(ButtonSize::Large)
+                        .aria_label("Detach tab")
+                        .tooltip(Tooltip::text("Detach tab to background (Ctrl-Shift-D)"))
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(DetachTab), cx)
+                        }),
+                    )
+                    .when(background_session_count > 0, |controls| {
+                        controls.child(reconnect_control)
+                    })
+                    .child(
+                        Button::new(
+                            "toggle-broadcast-input",
+                            if show_title_bar_control_labels {
+                                "Broadcast"
+                            } else {
+                                ""
+                            },
+                        )
+                        .start_icon(Icon::new(IconName::Keyboard).size(IconSize::Small))
+                        .style(ButtonStyle::Subtle)
+                        .size(ButtonSize::Large)
+                        .toggle_state(broadcast_input)
+                        .aria_label("Broadcast input to all panes")
+                        .tooltip(Tooltip::text(if broadcast_input {
+                            "Broadcast input is on (Ctrl-Shift-I)"
+                        } else {
+                            "Broadcast input to all panes (Ctrl-Shift-I)"
+                        }))
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(ToggleBroadcastInput), cx)
+                        }),
+                    )
+                    .child(
+                        Button::new(
+                            "open-settings",
+                            if show_title_bar_control_labels {
+                                "Settings"
+                            } else {
+                                ""
+                            },
+                        )
+                        .start_icon(Icon::new(IconName::Settings).size(IconSize::Small))
+                        .style(ButtonStyle::Subtle)
+                        .size(ButtonSize::Large)
+                        .aria_label("Open settings")
+                        .tooltip(Tooltip::text("Open settings (Ctrl+,)"))
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(ToggleSettings), cx)
+                        }),
+                    ),
+            )
+            .child(div().min_w_0().flex_1())
+            .child(right_window_controls);
 
         let body = match self.tabs.get(self.active_tab) {
             Some(tab) => {
@@ -1360,6 +1524,10 @@ impl Render for Zetta {
             .on_action(cx.listener(Self::new_window))
             .on_action(cx.listener(Self::open_profile))
             .on_action(cx.listener(Self::close_tab))
+            .on_action(cx.listener(Self::close_window))
+            .on_action(cx.listener(Self::close_all_windows))
+            .on_action(cx.listener(Self::open_themes))
+            .on_action(cx.listener(Self::open_keymap))
             .on_action(cx.listener(Self::detach_tab))
             .on_action(cx.listener(Self::toggle_auto_background_tab))
             .on_action(cx.listener(Self::reconnect_session))
@@ -1443,80 +1611,8 @@ impl Render for Zetta {
                                     .on_click(|_, window, cx| {
                                         window.dispatch_action(Box::new(NewTab), cx)
                                     }),
-                            )
-                            .child(profile_menu)
-                            .child(
-                                IconButton::new("auto-background-tab", IconName::Pin)
-                                    .shape(IconButtonShape::Wide)
-                                    .size(ButtonSize::Large)
-                                    .width(px(32.))
-                                    .icon_size(IconSize::Small)
-                                    .toggle_state(auto_background_tab)
-                                    .aria_label("Keep this tab running after close")
-                                    .tooltip(Tooltip::text(if auto_background_tab {
-                                        if auto_background_protected {
-                                            "Keep running after close is on · authentication required (Ctrl-Shift-B)"
-                                        } else {
-                                            "Keep running after close is on · no authentication (Ctrl-Shift-B)"
-                                        }
-                                    } else {
-                                        "Keep this tab running after the tab or window is closed (Ctrl-Shift-B)"
-                                    }))
-                                    .on_click(|_, window, cx| {
-                                        window.dispatch_action(
-                                            Box::new(ToggleAutoBackgroundTab),
-                                            cx,
-                                        )
-                                    }),
-                            )
-                            .child(
-                                IconButton::new("detach-tab", IconName::Archive)
-                                    .shape(IconButtonShape::Wide)
-                                    .size(ButtonSize::Large)
-                                    .width(px(32.))
-                                    .icon_size(IconSize::Small)
-                                    .aria_label("Detach tab")
-                                    .tooltip(Tooltip::text(
-                                        "Detach tab to background (Ctrl-Shift-D)",
-                                    ))
-                                    .on_click(|_, window, cx| {
-                                        window.dispatch_action(Box::new(DetachTab), cx)
-                                    }),
-                            )
-                            .when(background_session_count > 0, |controls| {
-                                controls.child(reconnect_control)
-                            }),
-                    )
-                    .child(
-                        IconButton::new("toggle-broadcast-input", IconName::Keyboard)
-                            .shape(IconButtonShape::Wide)
-                            .size(ButtonSize::Large)
-                            .width(px(32.))
-                            .icon_size(IconSize::Small)
-                            .toggle_state(broadcast_input)
-                            .aria_label("Broadcast input to all panes")
-                            .tooltip(Tooltip::text(if broadcast_input {
-                                "Broadcast input is on (Ctrl-Shift-I)"
-                            } else {
-                                "Broadcast input to all panes (Ctrl-Shift-I)"
-                            }))
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(ToggleBroadcastInput), cx)
-                            }),
-                    )
-                    .child(
-                        IconButton::new("open-settings", IconName::Settings)
-                            .shape(IconButtonShape::Wide)
-                            .size(ButtonSize::Large)
-                            .width(px(32.))
-                            .icon_size(IconSize::Small)
-                            .aria_label("Open settings")
-                            .tooltip(Tooltip::text("Open settings (Ctrl+,)"))
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(ToggleSettings), cx)
-                            }),
-                    )
-                    .child(div().min_w_0().flex_1()),
+                            ),
+                    ),
             )
             .when_some(self.configuration_error.clone(), |content, error| {
                 content.child(
