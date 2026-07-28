@@ -2,8 +2,9 @@
 
 use std::io::prelude::*;
 use std::marker::PhantomData;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
+use std::time::{Duration, Instant};
 use std::{io, thread};
 
 use piper::{Reader, Writer, pipe};
@@ -11,6 +12,13 @@ use polling::os::iocp::{CompletionPacket, PollerIocpExt};
 use polling::{Event, PollMode, Poller};
 
 use crate::thread::spawn_named;
+
+const CONPTY_READ_BATCH_SIZE: usize = crate::event_loop::READ_BUFFER_SIZE;
+
+struct BatchState {
+    generation: Mutex<u64>,
+    ready: Condvar,
+}
 
 struct Registration {
     interest: Mutex<Option<Interest>>,
@@ -45,6 +53,9 @@ pub struct UnblockedReader<R> {
     /// Is this the first time registering?
     first_register: bool,
 
+    /// Notification used to coalesce small kernel reads before parsing.
+    batch: Arc<BatchState>,
+
     /// We logically own the reader, but we don't actually use it.
     _reader: PhantomData<R>,
 }
@@ -58,46 +69,36 @@ impl<R: Read + Send + 'static> UnblockedReader<R> {
             interest: Mutex::<Option<Interest>>::new(None),
             end: PipeEnd::Reader,
         });
+        let batch = Arc::new(BatchState { generation: Mutex::new(0), ready: Condvar::new() });
 
         // Spawn the reader thread.
+        let reader_batch = batch.clone();
         spawn_named("alacritty-tty-reader-thread", move || {
             let waker = Waker::from(Arc::new(ThreadWaker(thread::current())));
             let mut context = Context::from_waker(&waker);
 
             loop {
-                // Read from the reader into the pipe.
                 match writer.poll_fill(&mut context, &mut source) {
-                    Poll::Ready(Ok(0)) => {
-                        // Either the pipe is closed or the reader is at its EOF.
-                        // In any case, we are done.
-                        return;
-                    },
-
+                    Poll::Ready(Ok(0)) => return,
                     Poll::Ready(Ok(_)) => {
-                        // Keep reading.
+                        let mut generation = reader_batch.generation.lock().unwrap();
+                        *generation = generation.wrapping_add(1);
+                        reader_batch.ready.notify_all();
                         continue;
                     },
-
-                    Poll::Ready(Err(e)) if e.kind() == io::ErrorKind::Interrupted => {
-                        // We were interrupted; continue.
+                    Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::Interrupted => {
                         continue;
                     },
-
-                    Poll::Ready(Err(e)) => {
-                        log::error!("error writing to pipe: {}", e);
+                    Poll::Ready(Err(error)) => {
+                        log::error!("error writing to pipe: {error}");
                         return;
                     },
-
-                    Poll::Pending => {
-                        // We are now waiting on the other end to advance. Park the
-                        // thread until they do.
-                        thread::park();
-                    },
+                    Poll::Pending => thread::park(),
                 }
             }
         });
 
-        Self { interest, pipe: reader, first_register: true, _reader: PhantomData }
+        Self { interest, pipe: reader, first_register: true, batch, _reader: PhantomData }
     }
 
     /// Register interest in the reader.
@@ -120,6 +121,29 @@ impl<R: Read + Send + 'static> UnblockedReader<R> {
 
     /// Try to read from the reader.
     pub fn try_read(&mut self, buf: &mut [u8]) -> usize {
+        if !self.pipe.is_empty() && self.pipe.len() < CONPTY_READ_BATCH_SIZE {
+            let deadline = Instant::now() + Duration::from_millis(2);
+            let mut generation = self.batch.generation.lock().unwrap();
+            while self.pipe.len() < CONPTY_READ_BATCH_SIZE {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                let current_generation = *generation;
+                let (next_generation, timeout) = self
+                    .batch
+                    .ready
+                    .wait_timeout_while(generation, remaining, |generation| {
+                        *generation == current_generation
+                    })
+                    .unwrap();
+                generation = next_generation;
+                if timeout.timed_out() {
+                    break;
+                }
+            }
+        }
+
         let waker = Waker::from(self.interest.clone());
 
         match self.pipe.poll_drain_bytes(&mut Context::from_waker(&waker), buf) {

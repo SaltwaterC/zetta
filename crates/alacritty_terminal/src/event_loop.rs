@@ -110,6 +110,10 @@ where
     where
         X: Write,
     {
+        #[cfg(windows)]
+        {
+            state.profile.read_batches += 1;
+        }
         let mut unprocessed = 0;
         let mut processed = 0;
 
@@ -119,10 +123,20 @@ where
 
         loop {
             // Read from the PTY.
+            #[cfg(windows)]
+            {
+                state.profile.read_calls += 1;
+            }
             match self.pty.reader().read(&mut buf[unprocessed..]) {
                 // This is received on Windows/macOS when no more data is readable from the PTY.
                 Ok(0) if unprocessed == 0 => break,
-                Ok(got) => unprocessed += got,
+                Ok(got) => {
+                    #[cfg(windows)]
+                    {
+                        state.profile.bytes += got as u64;
+                    }
+                    unprocessed += got;
+                },
                 Err(err) => match err.kind() {
                     ErrorKind::Interrupted | ErrorKind::WouldBlock => {
                         // Go back to mio if we're caught up on parsing and the PTY would block.
@@ -151,7 +165,14 @@ where
             }
 
             // Parse the incoming bytes.
+            #[cfg(windows)]
+            let parse_started = Instant::now();
             state.parser.advance(&mut **terminal_guard, &buf[..unprocessed]);
+            #[cfg(windows)]
+            {
+                state.profile.parse_ns += parse_started.elapsed().as_nanos();
+                state.profile.parse_calls += 1;
+            }
 
             processed += unprocessed;
             unprocessed = 0;
@@ -331,6 +352,19 @@ where
             // The evented instances are not dropped here so deregister them explicitly.
             let _ = self.pty.deregister(&self.poll);
 
+            #[cfg(windows)]
+            if let Ok(path) = std::env::var("ZETTA_PTY_PROFILE_REPORT") {
+                let report = format!(
+                    "bytes={}\nread_batches={}\nread_calls={}\nparse_calls={}\nparse_ns={}\n",
+                    state.profile.bytes,
+                    state.profile.read_batches,
+                    state.profile.read_calls,
+                    state.profile.parse_calls,
+                    state.profile.parse_ns,
+                );
+                let _ = std::fs::write(path, report);
+            }
+
             (self, state)
         })
     }
@@ -414,6 +448,18 @@ pub struct State {
     write_list: VecDeque<Cow<'static, [u8]>>,
     writing: Option<Writing>,
     parser: ansi::Processor,
+    #[cfg(windows)]
+    profile: PtyProfile,
+}
+
+#[cfg(windows)]
+#[derive(Default)]
+struct PtyProfile {
+    bytes: u64,
+    read_batches: u64,
+    read_calls: u64,
+    parse_calls: u64,
+    parse_ns: u128,
 }
 
 impl State {
