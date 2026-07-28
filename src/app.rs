@@ -2470,8 +2470,32 @@ impl Zetta {
         colors: &ThemeColors,
         error_color: gpui::Hsla,
         window: &Window,
+        owns_window_bottom: bool,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        self.render_pane_layout_with_edges(
+            tab,
+            layout,
+            colors,
+            error_color,
+            window,
+            PaneWindowEdges::all().with_bottom(owns_window_bottom),
+            cx,
+        )
+    }
+
+    fn render_pane_layout_with_edges(
+        &self,
+        tab: &Tab,
+        layout: &PaneLayout,
+        colors: &ThemeColors,
+        error_color: gpui::Hsla,
+        window: &Window,
+        edges: PaneWindowEdges,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let transparent_client_window = cfg!(any(target_os = "linux", target_os = "freebsd"))
+            && matches!(window.window_decorations(), Decorations::Client { .. });
         match layout {
             PaneLayout::Pane(pane_id) => {
                 let Some(pane) = tab.pane(*pane_id) else {
@@ -2492,7 +2516,13 @@ impl Zetta {
                         })
                 }) || (pane.view.is_none() && tab.active_pane == *pane_id);
                 let content = match (&pane.view, &pane.error) {
-                    (Some(view), _) => div().size_full().child(view.clone()).into_any_element(),
+                    (Some(view), _) => {
+                        let corner_radii = edges.client_corner_radii(window);
+                        view.update(cx, |view, cx| {
+                            view.set_window_corner_radii(corner_radii, cx)
+                        });
+                        div().size_full().child(view.clone()).into_any_element()
+                    }
                     (_, Some(error)) => div()
                         .size_full()
                         .p_4()
@@ -2529,7 +2559,7 @@ impl Zetta {
                     .flex_grow_1()
                     .flex_basis(gpui::relative(0.))
                     .overflow_hidden()
-                    .bg(gpui::black())
+                    .when(!transparent_client_window, |pane| pane.bg(gpui::black()))
                     .child(
                         div()
                             .size_full()
@@ -2706,21 +2736,118 @@ impl Zetta {
                 axis,
                 first,
                 second,
-            } => div()
-                .size_full()
-                .min_w_0()
-                .min_h_0()
-                .flex_grow_1()
-                .flex_basis(gpui::relative(0.))
-                .flex()
-                .when(matches!(axis, SplitAxis::Horizontal), |split| {
-                    split.flex_col()
-                })
-                .gap_px()
-                .bg(colors.border)
-                .child(self.render_pane_layout(tab, first, colors, error_color, window, cx))
-                .child(self.render_pane_layout(tab, second, colors, error_color, window, cx))
-                .into_any_element(),
+            } => {
+                // This background fills the one-pixel pane separator. It also
+                // sits behind both terminal surfaces, so it must share their
+                // outer bottom corners instead of leaking through them.
+                let corner_radii = edges.client_corner_radii(window);
+                div()
+                    .size_full()
+                    .min_w_0()
+                    .min_h_0()
+                    .flex_grow_1()
+                    .flex_basis(gpui::relative(0.))
+                    .flex()
+                    .when(matches!(axis, SplitAxis::Horizontal), |split| {
+                        split.flex_col()
+                    })
+                    .gap_px()
+                    .bg(colors.border)
+                    .when(corner_radii.bottom_left > Pixels::ZERO, |split| {
+                        split.rounded_bl(corner_radii.bottom_left)
+                    })
+                    .when(corner_radii.bottom_right > Pixels::ZERO, |split| {
+                        split.rounded_br(corner_radii.bottom_right)
+                    })
+                    .child(self.render_pane_layout_with_edges(
+                        tab,
+                        first,
+                        colors,
+                        error_color,
+                        window,
+                        edges.first(*axis),
+                        cx,
+                    ))
+                    .child(self.render_pane_layout_with_edges(
+                        tab,
+                        second,
+                        colors,
+                        error_color,
+                        window,
+                        edges.second(*axis),
+                        cx,
+                    ))
+                    .into_any_element()
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct PaneWindowEdges {
+    right: bool,
+    bottom: bool,
+    left: bool,
+}
+
+impl PaneWindowEdges {
+    const fn all() -> Self {
+        Self {
+            right: true,
+            bottom: true,
+            left: true,
+        }
+    }
+
+    const fn with_bottom(mut self, bottom: bool) -> Self {
+        self.bottom = bottom;
+        self
+    }
+
+    fn first(self, axis: SplitAxis) -> Self {
+        match axis {
+            SplitAxis::Horizontal => Self {
+                bottom: false,
+                ..self
+            },
+            SplitAxis::Vertical => Self {
+                right: false,
+                ..self
+            },
+        }
+    }
+
+    fn second(self, axis: SplitAxis) -> Self {
+        match axis {
+            SplitAxis::Horizontal => self,
+            SplitAxis::Vertical => Self {
+                left: false,
+                ..self
+            },
+        }
+    }
+
+    fn client_corner_radii(self, window: &Window) -> gpui::Corners<Pixels> {
+        if !cfg!(any(target_os = "linux", target_os = "freebsd")) {
+            return gpui::Corners::default();
+        }
+        let Decorations::Client { tiling } = window.window_decorations() else {
+            return gpui::Corners::default();
+        };
+        let radius = theme::CLIENT_SIDE_DECORATION_ROUNDING - px(1.);
+
+        // The title and tab bars own the top window corners. A terminal pane
+        // can only meet the client frame at the bottom, so applying top radii
+        // here creates an internal gap above a pane (and in split layouts).
+        gpui::Corners {
+            top_left: Pixels::ZERO,
+            top_right: Pixels::ZERO,
+            bottom_right: (self.bottom && self.right && !tiling.bottom && !tiling.right)
+                .then_some(radius)
+                .unwrap_or_default(),
+            bottom_left: (self.bottom && self.left && !tiling.bottom && !tiling.left)
+                .then_some(radius)
+                .unwrap_or_default(),
         }
     }
 }

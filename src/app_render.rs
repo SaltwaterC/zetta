@@ -108,7 +108,27 @@ impl Render for Zetta {
         let background_session_count = process_background_sessions.len();
         let supported_controls = window.window_controls();
         let is_maximized = window.is_maximized();
-        let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
+        let (client_decorations, tiling) = match window.window_decorations() {
+            Decorations::Client { tiling } => (true, tiling),
+            Decorations::Server => (false, Tiling::default()),
+        };
+        let rounded_top_left = cfg!(any(target_os = "linux", target_os = "freebsd"))
+            && client_decorations
+            && !tiling.top
+            && !tiling.left;
+        let rounded_top_right = cfg!(any(target_os = "linux", target_os = "freebsd"))
+            && client_decorations
+            && !tiling.top
+            && !tiling.right;
+        let rounded_bottom_left = cfg!(any(target_os = "linux", target_os = "freebsd"))
+            && client_decorations
+            && !tiling.bottom
+            && !tiling.left;
+        let rounded_bottom_right = cfg!(any(target_os = "linux", target_os = "freebsd"))
+            && client_decorations
+            && !tiling.bottom
+            && !tiling.right;
+        let bottom_corner_radius = theme::CLIENT_SIDE_DECORATION_ROUNDING - px(1.);
         let tab_close_button_on_left = window_close_button_on_left(self.button_layout);
         let left_window_controls = render_window_controls(
             self.button_layout.left,
@@ -520,6 +540,12 @@ impl Render for Zetta {
             .flex()
             .items_center()
             .bg(title_bar_background)
+            .when(rounded_top_left, |title_bar| {
+                title_bar.rounded_tl(theme::CLIENT_SIDE_DECORATION_ROUNDING - px(1.))
+            })
+            .when(rounded_top_right, |title_bar| {
+                title_bar.rounded_tr(theme::CLIENT_SIDE_DECORATION_ROUNDING - px(1.))
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
@@ -688,6 +714,10 @@ impl Render for Zetta {
                     .get(minimized_index)
                     .copied()
                     .map(|pane_id| (pane_id, minimized_index, minimized_count));
+                let panes_own_window_bottom = maximized_pane.is_none() && minimized_shelf.is_none();
+                let maximized_bar_owns_window_bottom =
+                    maximized_pane.is_some() && minimized_shelf.is_none();
+                let minimized_shelf_owns_window_bottom = minimized_shelf.is_some();
                 let content = layout
                     .as_ref()
                     .map(|layout| {
@@ -697,6 +727,7 @@ impl Render for Zetta {
                             &tab_colors,
                             tab_error_color,
                             window,
+                            panes_own_window_bottom,
                             cx,
                         )
                     })
@@ -723,6 +754,14 @@ impl Render for Zetta {
                                 .bg(tab_colors.status_bar_background)
                                 .border_t_1()
                                 .border_color(tab_colors.border)
+                                .when(
+                                    maximized_bar_owns_window_bottom && rounded_bottom_left,
+                                    |bar| bar.rounded_bl(bottom_corner_radius),
+                                )
+                                .when(
+                                    maximized_bar_owns_window_bottom && rounded_bottom_right,
+                                    |bar| bar.rounded_br(bottom_corner_radius),
+                                )
                                 .child(
                                     h_flex()
                                         .gap_2()
@@ -830,6 +869,14 @@ impl Render for Zetta {
                                 .bg(tab_colors.status_bar_background)
                                 .border_t_1()
                                 .border_color(tab_colors.border)
+                                .when(
+                                    minimized_shelf_owns_window_bottom && rounded_bottom_left,
+                                    |shelf| shelf.rounded_bl(bottom_corner_radius),
+                                )
+                                .when(
+                                    minimized_shelf_owns_window_bottom && rounded_bottom_right,
+                                    |shelf| shelf.rounded_br(bottom_corner_radius),
+                                )
                                 .child(
                                     div()
                                         .id("minimized-panes-status")
@@ -1527,7 +1574,10 @@ impl Render for Zetta {
             .relative()
             .flex()
             .flex_col()
-            .bg(colors.editor_background)
+            .when(
+                !cfg!(any(target_os = "linux", target_os = "freebsd")),
+                |content| content.bg(colors.editor_background),
+            )
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::new_window))
             .on_action(cx.listener(Self::open_application_menu))

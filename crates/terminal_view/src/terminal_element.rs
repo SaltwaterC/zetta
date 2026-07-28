@@ -1,12 +1,12 @@
 use gpui::{
     AbsoluteLength, AnyElement, App, AvailableSpace, BorderStyle, Bounds, ContentMask, Context,
-    DispatchPhase, Element, ElementId, Entity, FocusHandle, Font, FontFeatures, FontStyle,
+    DispatchPhase, Edges, Element, ElementId, Entity, FocusHandle, Font, FontFeatures, FontStyle,
     FontWeight, GlobalElementId, HighlightStyle, Hitbox, Hsla, InputHandler, InteractiveElement,
     Interactivity, IntoElement, LayoutId, Length, ModifiersChangedEvent, MouseButton,
     MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint, ShapedLine,
     StatefulInteractiveElement, StrikethroughStyle, Styled, TextAlign, TextRun, TextStyle,
-    UTF16Selection, UnderlineStyle, WhiteSpace, Window, div, fill, outline, point, px, relative,
-    size,
+    UTF16Selection, UnderlineStyle, WhiteSpace, Window, div, fill, outline, point, px, quad,
+    relative, size, transparent_black,
 };
 use itertools::Itertools;
 use settings::Settings;
@@ -1444,7 +1444,15 @@ impl Element for TerminalElement {
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             let scroll_top = self.terminal_view.read(cx).scroll_top;
 
-            window.paint_quad(fill(bounds, layout.background_color));
+            let corner_radii = self.terminal_view.read(cx).window_corner_radii;
+            window.paint_quad(quad(
+                bounds,
+                corner_radii,
+                layout.background_color,
+                Edges::default(),
+                transparent_black(),
+                BorderStyle::default(),
+            ));
             let origin = layout.dimensions.bounds.origin - GpuiPoint::new(px(0.), scroll_top);
             let scale_factor = window.scale_factor();
             let snap_px = |value: Pixels| {

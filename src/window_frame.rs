@@ -1,15 +1,8 @@
 use super::*;
 
-const LINUX_RESIZE_HANDLE: Pixels = px(16.);
-const OTHER_RESIZE_HANDLE: Pixels = px(10.);
-
-const fn resize_handle_width() -> Pixels {
-    if cfg!(any(target_os = "linux", target_os = "freebsd")) {
-        LINUX_RESIZE_HANDLE
-    } else {
-        OTHER_RESIZE_HANDLE
-    }
-}
+const BORDER_SIZE: Pixels = px(1.);
+/// The client-decoration inset used for rounded corners and the compositor shadow.
+const CLIENT_FRAME_INSET: Pixels = px(10.);
 
 const fn custom_window_border_enabled() -> bool {
     !cfg!(target_os = "windows")
@@ -281,9 +274,9 @@ pub(crate) fn client_window_frame(
         Decorations::Server => Tiling::default(),
         Decorations::Client { tiling } => tiling,
     };
-    let resize_handle = resize_handle_width();
-    if matches!(decorations, Decorations::Client { .. }) {
-        window.set_client_inset(resize_handle);
+    match decorations {
+        Decorations::Client { .. } => window.set_client_inset(CLIENT_FRAME_INSET),
+        Decorations::Server => window.set_client_inset(px(0.)),
     }
 
     div()
@@ -296,10 +289,10 @@ pub(crate) fn client_window_frame(
                 .when(custom_window_border_enabled(), |frame| {
                     frame.rounded_client_corners(tiling)
                 })
-                .when(!tiling.top, |frame| frame.pt(resize_handle))
-                .when(!tiling.bottom, |frame| frame.pb(resize_handle))
-                .when(!tiling.left, |frame| frame.pl(resize_handle))
-                .when(!tiling.right, |frame| frame.pr(resize_handle))
+                .when(!tiling.top, |frame| frame.pt(CLIENT_FRAME_INSET))
+                .when(!tiling.bottom, |frame| frame.pb(CLIENT_FRAME_INSET))
+                .when(!tiling.left, |frame| frame.pl(CLIENT_FRAME_INSET))
+                .when(!tiling.right, |frame| frame.pr(CLIENT_FRAME_INSET))
                 .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                     let size = window.window_bounds().get_bounds().size;
                     if let Some(edge) = resize_edge(event.position, size, tiling) {
@@ -310,14 +303,38 @@ pub(crate) fn client_window_frame(
         })
         .child(
             div()
-                .size_full()
-                .overflow_hidden()
-                .when(custom_window_border_enabled(), |content| {
-                    content
-                        .border_1()
-                        .border_color(cx.theme().colors().border)
-                        .rounded_client_corners(tiling)
+                .cursor(CursorStyle::Arrow)
+                .map(|content| match decorations {
+                    Decorations::Server => content,
+                    Decorations::Client { .. } => {
+                        content.when(custom_window_border_enabled(), |content| {
+                            content
+                                .border_color(cx.theme().colors().border)
+                                .rounded_client_corners(tiling)
+                                .when(!tiling.top, |content| content.border_t(BORDER_SIZE))
+                                .when(!tiling.bottom, |content| content.border_b(BORDER_SIZE))
+                                .when(!tiling.left, |content| content.border_l(BORDER_SIZE))
+                                .when(!tiling.right, |content| content.border_r(BORDER_SIZE))
+                                .when(!tiling.is_tiled(), |content| {
+                                    content.shadow(vec![
+                                        gpui::BoxShadow::new(
+                                            px(0.),
+                                            px(0.),
+                                            gpui::Hsla {
+                                                h: 0.,
+                                                s: 0.,
+                                                l: 0.,
+                                                a: 0.4,
+                                            },
+                                        )
+                                        .blur_radius(CLIENT_FRAME_INSET / 2.),
+                                    ])
+                                })
+                        })
+                    }
                 })
+                .on_mouse_move(|_, _, cx| cx.stop_propagation())
+                .size_full()
                 .child(content),
         )
         .when(matches!(decorations, Decorations::Client { .. }), |frame| {
@@ -364,28 +381,49 @@ pub(crate) fn resize_edge(
     window_size: Size<Pixels>,
     tiling: Tiling,
 ) -> Option<ResizeEdge> {
-    let resize_handle = resize_handle_width();
-    let corner = resize_handle * 2.;
-    let left = position.x <= corner;
-    let right = position.x >= window_size.width - corner;
-    let top = position.y <= corner;
-    let bottom = position.y >= window_size.height - corner;
+    let resize_bounds = Bounds::new(Point::default(), window_size).inset(CLIENT_FRAME_INSET * 1.5);
+    if resize_bounds.contains(&position) {
+        return None;
+    }
 
-    if top && left && !tiling.top && !tiling.left {
+    let corner_size = size(CLIENT_FRAME_INSET * 1.5, CLIENT_FRAME_INSET * 1.5);
+    let top_left = Bounds::new(Point::default(), corner_size);
+    if !tiling.top && top_left.contains(&position) {
         Some(ResizeEdge::TopLeft)
-    } else if top && right && !tiling.top && !tiling.right {
+    } else if !tiling.top
+        && Bounds::new(
+            point(window_size.width - corner_size.width, px(0.)),
+            corner_size,
+        )
+        .contains(&position)
+    {
         Some(ResizeEdge::TopRight)
-    } else if bottom && left && !tiling.bottom && !tiling.left {
+    } else if !tiling.bottom
+        && Bounds::new(
+            point(px(0.), window_size.height - corner_size.height),
+            corner_size,
+        )
+        .contains(&position)
+    {
         Some(ResizeEdge::BottomLeft)
-    } else if bottom && right && !tiling.bottom && !tiling.right {
+    } else if !tiling.bottom
+        && Bounds::new(
+            point(
+                window_size.width - corner_size.width,
+                window_size.height - corner_size.height,
+            ),
+            corner_size,
+        )
+        .contains(&position)
+    {
         Some(ResizeEdge::BottomRight)
-    } else if position.y <= resize_handle && !tiling.top {
+    } else if !tiling.top && position.y < CLIENT_FRAME_INSET {
         Some(ResizeEdge::Top)
-    } else if position.y >= window_size.height - resize_handle && !tiling.bottom {
+    } else if !tiling.bottom && position.y > window_size.height - CLIENT_FRAME_INSET {
         Some(ResizeEdge::Bottom)
-    } else if position.x <= resize_handle && !tiling.left {
+    } else if !tiling.left && position.x < CLIENT_FRAME_INSET {
         Some(ResizeEdge::Left)
-    } else if position.x >= window_size.width - resize_handle && !tiling.right {
+    } else if !tiling.right && position.x > window_size.width - CLIENT_FRAME_INSET {
         Some(ResizeEdge::Right)
     } else {
         None

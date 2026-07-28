@@ -4,10 +4,10 @@ mod terminal_scrollbar;
 use std::{cmp, ops::Range as StdRange, path::PathBuf, sync::Arc, time::Duration};
 
 use gpui::{
-    Action, AnyElement, App, AppContext as _, ClipboardItem, Context, DismissEvent, Entity,
-    EventEmitter, FocusHandle, Focusable, KeyContext, KeyDownEvent, Keystroke, MouseButton,
-    MouseDownEvent, Pixels, Point, Render, ScrollWheelEvent, Subscription, Task, Window, actions,
-    anchored, deferred, div, px,
+    Action, AnyElement, App, AppContext as _, ClipboardItem, Context, Corners, Decorations,
+    DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, KeyContext, KeyDownEvent,
+    Keystroke, MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollWheelEvent, Subscription,
+    Task, Window, actions, anchored, deferred, div, px,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -228,6 +228,7 @@ pub struct TerminalView {
     scroll_handle: TerminalScrollHandle,
     pub(crate) ime_state: Option<ImeState>,
     context_menu: Option<(Entity<ContextMenu>, Point<Pixels>, Subscription)>,
+    pub(crate) window_corner_radii: Corners<Pixels>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -368,6 +369,7 @@ impl TerminalView {
             scroll_top: Pixels::ZERO,
             ime_state: None,
             context_menu: None,
+            window_corner_radii: Corners::default(),
             _subscriptions: vec![
                 focus_in,
                 focus_out,
@@ -385,6 +387,17 @@ impl TerminalView {
 
     pub fn set_emit_input_events(&mut self, enabled: bool) {
         self.emit_input_events = enabled;
+    }
+
+    pub fn set_window_corner_radii(
+        &mut self,
+        corner_radii: Corners<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.window_corner_radii != corner_radii {
+            self.window_corner_radii = corner_radii;
+            cx.notify();
+        }
     }
 
     pub fn set_theme(&mut self, theme: Option<Arc<Theme>>, cx: &mut Context<Self>) {
@@ -1060,6 +1073,12 @@ impl ScrollbarVisibility for TerminalScrollbarSettings {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The terminal element paints the two outer bottom corners itself.
+        // Keep the wrapper background for ordinary panes, including all panes
+        // above a split, so they retain their normal opaque surface.
+        let needs_wrapper_background = !cfg!(any(target_os = "linux", target_os = "freebsd"))
+            || !matches!(window.window_decorations(), Decorations::Client { .. })
+            || self.window_corner_radii == Corners::default();
         self.scroll_handle.update(self.terminal.read(cx));
         if let Some(offset) = self.scroll_handle.future_display_offset.take() {
             self.terminal.update(cx, |terminal, _| {
@@ -1215,7 +1234,9 @@ impl Render for TerminalView {
                 div()
                     .id("terminal-view-container")
                     .size_full()
-                    .bg(theme.colors().editor_background)
+                    .when(needs_wrapper_background, |container| {
+                        container.bg(theme.colors().editor_background)
+                    })
                     .child(
                         TerminalElement::new(
                             self.terminal.clone(),

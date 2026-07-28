@@ -168,3 +168,19 @@ fn protected_sessions_are_redacted_in_the_reconnect_picker() {
         )]
     );
 }
+
+#[test]
+fn pane_window_edges_follow_split_direction() {
+    let edges = PaneWindowEdges::all();
+    assert!(!edges.with_bottom(false).bottom);
+
+    let top = edges.first(SplitAxis::Horizontal);
+    let bottom = edges.second(SplitAxis::Horizontal);
+    assert!(top.left && top.right && !top.bottom);
+    assert!(bottom.left && bottom.right && bottom.bottom);
+
+    let left = edges.first(SplitAxis::Vertical);
+    let right = edges.second(SplitAxis::Vertical);
+    assert!(left.left && left.bottom && !left.right);
+    assert!(!right.left && right.bottom && right.right);
+}

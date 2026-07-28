@@ -46,7 +46,6 @@ fn parses_quoted_gsettings_button_layout() {
 #[test]
 fn resize_handles_cover_edges_and_respect_tiling() {
     let window = size(px(800.), px(600.));
-    let resize_handle = resize_handle_width();
     let untiled = Tiling::default();
     assert_eq!(
         resize_edge(point(px(1.), px(1.)), window, untiled),
@@ -57,11 +56,19 @@ fn resize_handles_cover_edges_and_respect_tiling() {
         Some(ResizeEdge::Right)
     );
     assert_eq!(
-        resize_edge(point(resize_handle, px(300.)), window, untiled),
+        resize_edge(
+            point(CLIENT_FRAME_INSET - px(1.), px(300.)),
+            window,
+            untiled
+        ),
         Some(ResizeEdge::Left)
     );
     assert_eq!(
-        resize_edge(point(resize_handle + px(1.), px(300.)), window, untiled),
+        resize_edge(
+            point(CLIENT_FRAME_INSET + px(1.), px(300.)),
+            window,
+            untiled
+        ),
         None
     );
     assert_eq!(
@@ -75,6 +82,17 @@ fn resize_handles_cover_edges_and_respect_tiling() {
     };
     assert_eq!(
         resize_edge(point(px(1.), px(300.)), window, tiled_left),
+        None
+    );
+
+    let maximized = Tiling::tiled();
+    assert_eq!(resize_edge(point(px(1.), px(1.)), window, maximized), None);
+    assert_eq!(
+        resize_edge(point(px(400.), px(1.)), window, maximized),
+        None
+    );
+    assert_eq!(
+        resize_edge(point(px(799.), px(599.)), window, maximized),
         None
     );
 }
