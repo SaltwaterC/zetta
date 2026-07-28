@@ -496,6 +496,9 @@ impl Render for Zetta {
                             pane_id,
                             tab.displayed_pane_label(pane_id)
                                 .unwrap_or_else(|| pane.label()),
+                            tab.renaming_pane == Some(pane_id)
+                                && tab.rename_select_all
+                                && tab.rename_buffer.is_some(),
                         )
                     })
                 });
@@ -533,7 +536,7 @@ impl Render for Zetta {
                     .flex()
                     .flex_col()
                     .child(div().min_h_0().flex_1().child(content))
-                    .when_some(maximized_pane, |body, (pane_id, pane_label)| {
+                    .when_some(maximized_pane, |body, (pane_id, pane_label, pane_label_selected)| {
                         let restore_handle = handle.clone();
                         let close_handle = handle.clone();
                         let tab_id = tab.id;
@@ -557,9 +560,28 @@ impl Render for Zetta {
                                                 .color(Color::Custom(tab_colors.text_accent)),
                                         )
                                         .child(
-                                            Label::new(format!("{pane_label} maximized"))
-                                                .size(LabelSize::Small)
-                                                .color(Color::Custom(tab_colors.text_muted)),
+                                            h_flex()
+                                                .gap_1()
+                                                .child(
+                                                    div()
+                                                        .px_1()
+                                                        .rounded_sm()
+                                                        .when(pane_label_selected, |label| {
+                                                            label.bg(tab_colors.element_selected)
+                                                        })
+                                                        .child(
+                                                            Label::new(pane_label)
+                                                                .size(LabelSize::Small)
+                                                                .color(Color::Custom(
+                                                                    tab_colors.text_muted,
+                                                                )),
+                                                        ),
+                                                )
+                                                .child(
+                                                    Label::new("maximized")
+                                                        .size(LabelSize::Small)
+                                                        .color(Color::Custom(tab_colors.text_muted)),
+                                                ),
                                         ),
                                 )
                                 .child(
