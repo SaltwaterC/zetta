@@ -964,6 +964,22 @@ fn select_all_and_reconnect_use_scope_based_shortcuts() {
 }
 
 #[test]
+fn application_menu_shortcut_is_available_on_windows_and_linux() {
+    let binding = application_menu_keybinding();
+    if cfg!(any(target_os = "windows", target_os = "linux")) {
+        let shortcut = gpui::Keystroke::parse(APPLICATION_MENU_KEYBINDING).unwrap();
+        assert_eq!(
+            binding
+                .expect("Windows and Linux should bind Alt+Space to the application menu")
+                .match_keystrokes(&[shortcut]),
+            Some(false)
+        );
+    } else {
+        assert!(binding.is_none());
+    }
+}
+
+#[test]
 fn pane_font_size_shortcuts_use_pane_control_modifiers() {
     let bindings = pane_font_size_keybindings();
     for (binding, shortcut) in

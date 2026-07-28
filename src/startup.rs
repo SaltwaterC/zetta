@@ -762,6 +762,7 @@ pub(crate) const CLOSE_ALL_WINDOWS_KEYBINDING: &str = "ctrl-shift-x";
 pub(crate) const SERIAL_CONSOLE_KEYBINDING: &str = "ctrl-shift-s";
 pub(crate) const AUTO_BACKGROUND_TAB_KEYBINDING: &str = "ctrl-shift-b";
 pub(crate) const ROTATE_PANE_LAYOUT_KEYBINDING: &str = "alt-shift-l";
+pub(crate) const APPLICATION_MENU_KEYBINDING: &str = "alt-space";
 
 pub(crate) fn pane_output_keybinding() -> KeyBinding {
     KeyBinding::new(
@@ -781,6 +782,16 @@ pub(crate) fn reconnect_session_keybinding() -> KeyBinding {
         ReconnectSession,
         Some("Zetta > Terminal"),
     )
+}
+
+pub(crate) fn application_menu_keybinding() -> Option<KeyBinding> {
+    cfg!(any(target_os = "windows", target_os = "linux")).then(|| {
+        KeyBinding::new(
+            APPLICATION_MENU_KEYBINDING,
+            OpenApplicationMenu,
+            Some("Zetta > Terminal"),
+        )
+    })
 }
 
 pub(crate) fn detach_tab_keybinding() -> KeyBinding {
@@ -962,6 +973,7 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
         // Override Zed's inherited `pane::CloseActiveItem` binding in terminal focus.
         KeyBinding::new("ctrl-shift-w", CloseTab, Some("Terminal")),
     ];
+    bindings.extend(application_menu_keybinding());
     bindings.extend(minimized_pane_keybindings());
     bindings.extend(pane_template_keybindings());
     bindings.extend(pane_font_size_keybindings());

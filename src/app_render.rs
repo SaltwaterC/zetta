@@ -467,6 +467,7 @@ impl Render for Zetta {
         };
 
         let application_menu = PopoverMenu::new("application-menu")
+            .with_handle(self.application_menu_handle.clone())
             .trigger_with_tooltip(
                 Button::new(
                     "application-menu-trigger",
@@ -480,7 +481,11 @@ impl Render for Zetta {
                 .style(ButtonStyle::Subtle)
                 .size(ButtonSize::Large)
                 .aria_label("Application menu"),
-                Tooltip::text("Open application menu"),
+                Tooltip::text(if cfg!(any(target_os = "windows", target_os = "linux")) {
+                    "Open application menu (Alt+Space)"
+                } else {
+                    "Open application menu"
+                }),
             )
             .anchor(Anchor::TopLeft)
             .menu(move |window, cx| {
@@ -548,6 +553,8 @@ impl Render for Zetta {
             .child(
                 h_flex()
                     .id("title-bar-controls")
+                    // Keep application controls out of the draggable native title-bar region.
+                    .occlude()
                     .min_w_0()
                     .flex_none()
                     .gap_1()
@@ -1522,6 +1529,7 @@ impl Render for Zetta {
             .bg(colors.editor_background)
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::new_window))
+            .on_action(cx.listener(Self::open_application_menu))
             .on_action(cx.listener(Self::open_profile))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::close_window))

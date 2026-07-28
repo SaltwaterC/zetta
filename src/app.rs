@@ -77,6 +77,7 @@ pub(crate) struct Zetta {
     pub(crate) background_observed_panes: HashSet<u64>,
     pub(crate) background_process_refresh_running: bool,
     pub(crate) background_session_picker_entries: Vec<(u64, String, String)>,
+    pub(crate) application_menu_handle: PopoverMenuHandle<ui::ContextMenu>,
     pub(crate) reconnect_menu_handle: PopoverMenuHandle<ui::ContextMenu>,
     pub(crate) session_authentication_focus: gpui::FocusHandle,
     pub(crate) session_authentication: Option<SessionAuthenticationPrompt>,
@@ -249,6 +250,7 @@ impl Zetta {
             background_observed_panes: HashSet::new(),
             background_process_refresh_running: false,
             background_session_picker_entries: Vec::new(),
+            application_menu_handle: PopoverMenuHandle::default(),
             reconnect_menu_handle: PopoverMenuHandle::default(),
             session_authentication_focus: cx.focus_handle(),
             session_authentication: None,
@@ -1034,6 +1036,15 @@ impl Zetta {
             }
             ReconnectRequest::Choose => self.reconnect_menu_handle.show(window, cx),
         }
+    }
+
+    pub(crate) fn open_application_menu(
+        &mut self,
+        _: &OpenApplicationMenu,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.application_menu_handle.show(window, cx);
     }
 
     pub(crate) fn reconnect_background_session(

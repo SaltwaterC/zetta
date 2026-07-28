@@ -88,6 +88,7 @@ actions!(
     [
         NewTab,
         NewWindow,
+        OpenApplicationMenu,
         CloseTab,
         CloseWindow,
         CloseAllWindows,
