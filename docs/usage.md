@@ -98,6 +98,23 @@ Each is available by name in the command palette. Add bindings like these to
 }
 ```
 
+The directional split actions are also available in the command palette.
+`zetta::SplitHorizontalDown` and `zetta::SplitVerticalRight` have the default
+shortcuts below; `zetta::SplitHorizontalUp` and `zetta::SplitVerticalLeft` are
+unbound by default. Add custom bindings when needed:
+
+```json
+[
+  {
+    "context": "Zetta > Terminal",
+    "bindings": {
+      "ctrl-alt-shift-up": "zetta::SplitHorizontalUp",
+      "ctrl-alt-shift-left": "zetta::SplitVerticalLeft"
+    }
+  }
+]
+```
+
 Templates are recursive. `"pane"` is a leaf, `vertical` places two children
 side by side, and `horizontal` stacks two children. Define named templates in
 `config.json`:
@@ -163,8 +180,8 @@ filter, use the arrow keys to select a command, and press `Enter` to run it.
 | `Ctrl-Shift-D` | Detach the active tab into the background |
 | `Ctrl-Shift-B` | Toggle automatic backgrounding for the active tab |
 | `Ctrl-Shift-A` | Reconnect the most recently detached tab |
-| `Ctrl-Shift-O` | Split active pane horizontally (top/bottom) |
-| `Ctrl-Shift-E` | Split active pane vertically (left/right) |
+| `Ctrl-Shift-O` | Split active pane horizontally, adding a pane below |
+| `Ctrl-Shift-E` | Split active pane vertically, adding a pane on the right |
 | `Alt-Shift-L` | Rotate a two-pane layout |
 | `Alt-Shift-X` | Close the active pane or its final tab |
 | `PageUp` / `PageDown` | Send page navigation to the foreground program |

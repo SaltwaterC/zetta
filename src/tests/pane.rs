@@ -337,9 +337,9 @@ fn tab_pane_index_resolves_panes_without_scanning() {
 #[test]
 fn nested_pane_layouts_split_and_collapse() {
     let mut layout = PaneLayout::Pane(1);
-    assert!(layout.split(1, SplitAxis::Horizontal, 2));
-    assert!(layout.split(2, SplitAxis::Vertical, 3));
-    assert!(!layout.split(99, SplitAxis::Vertical, 4));
+    assert!(layout.split(1, SplitAxis::Horizontal, 2, SplitPosition::After));
+    assert!(layout.split(2, SplitAxis::Vertical, 3, SplitPosition::After));
+    assert!(!layout.split(99, SplitAxis::Vertical, 4, SplitPosition::After));
 
     let layout = layout.without(2).unwrap();
     assert_eq!(
@@ -348,6 +348,27 @@ fn nested_pane_layouts_split_and_collapse() {
             axis: SplitAxis::Horizontal,
             first: Box::new(PaneLayout::Pane(1)),
             second: Box::new(PaneLayout::Pane(3)),
+        }
+    );
+}
+
+#[test]
+fn pane_layouts_can_insert_new_panes_before_the_active_pane() {
+    let mut layout = PaneLayout::Pane(1);
+
+    assert!(layout.split(1, SplitAxis::Vertical, 2, SplitPosition::Before));
+    assert!(layout.split(1, SplitAxis::Horizontal, 3, SplitPosition::Before));
+
+    assert_eq!(
+        layout,
+        PaneLayout::Split {
+            axis: SplitAxis::Vertical,
+            first: Box::new(PaneLayout::Pane(2)),
+            second: Box::new(PaneLayout::Split {
+                axis: SplitAxis::Horizontal,
+                first: Box::new(PaneLayout::Pane(3)),
+                second: Box::new(PaneLayout::Pane(1)),
+            }),
         }
     );
 }
@@ -529,9 +550,9 @@ fn closing_inactive_pane_preserves_focus() {
 #[test]
 fn directional_focus_moves_between_quarter_panes() {
     let mut layout = PaneLayout::Pane(1);
-    assert!(layout.split(1, SplitAxis::Horizontal, 2));
-    assert!(layout.split(1, SplitAxis::Vertical, 3));
-    assert!(layout.split(2, SplitAxis::Vertical, 4));
+    assert!(layout.split(1, SplitAxis::Horizontal, 2, SplitPosition::After));
+    assert!(layout.split(1, SplitAxis::Vertical, 3, SplitPosition::After));
+    assert!(layout.split(2, SplitAxis::Vertical, 4, SplitPosition::After));
 
     assert_eq!(layout.adjacent_pane(1, PaneDirection::Right), Some(3));
     assert_eq!(layout.adjacent_pane(1, PaneDirection::Down), Some(2));

@@ -839,6 +839,7 @@ impl Zetta {
     pub(crate) fn split_active_pane(
         &mut self,
         axis: SplitAxis,
+        position: SplitPosition,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -887,7 +888,7 @@ impl Zetta {
 
         let tab = &mut self.tabs[self.active_tab];
         tab.maximized_pane = None;
-        if !tab.layout.split(active_pane_id, axis, pane_id) {
+        if !tab.layout.split(active_pane_id, axis, pane_id, position) {
             return;
         }
         tab.push_pane(TerminalPane {
@@ -1760,22 +1761,40 @@ impl Zetta {
         .detach();
     }
 
-    pub(crate) fn split_horizontal(
+    pub(crate) fn split_horizontal_down(
         &mut self,
-        _: &SplitHorizontal,
+        _: &SplitHorizontalDown,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.split_active_pane(SplitAxis::Horizontal, window, cx);
+        self.split_active_pane(SplitAxis::Horizontal, SplitPosition::After, window, cx);
     }
 
-    pub(crate) fn split_vertical(
+    pub(crate) fn split_horizontal_up(
         &mut self,
-        _: &SplitVertical,
+        _: &SplitHorizontalUp,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.split_active_pane(SplitAxis::Vertical, window, cx);
+        self.split_active_pane(SplitAxis::Horizontal, SplitPosition::Before, window, cx);
+    }
+
+    pub(crate) fn split_vertical_right(
+        &mut self,
+        _: &SplitVerticalRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.split_active_pane(SplitAxis::Vertical, SplitPosition::After, window, cx);
+    }
+
+    pub(crate) fn split_vertical_left(
+        &mut self,
+        _: &SplitVerticalLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.split_active_pane(SplitAxis::Vertical, SplitPosition::Before, window, cx);
     }
 
     pub(crate) fn rotate_pane_layout(

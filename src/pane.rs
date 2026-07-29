@@ -194,6 +194,12 @@ pub(crate) enum SplitAxis {
 }
 
 #[derive(Clone, Copy)]
+pub(crate) enum SplitPosition {
+    Before,
+    After,
+}
+
+#[derive(Clone, Copy)]
 pub(crate) enum PaneDirection {
     Left,
     Right,
@@ -293,19 +299,30 @@ impl PaneLayout {
         (!pane_ids.is_empty()).then(|| build(pane_ids, SplitAxis::Vertical))
     }
 
-    pub(crate) fn split(&mut self, target: u64, axis: SplitAxis, new_pane: u64) -> bool {
+    pub(crate) fn split(
+        &mut self,
+        target: u64,
+        axis: SplitAxis,
+        new_pane: u64,
+        position: SplitPosition,
+    ) -> bool {
         match self {
             Self::Pane(id) if *id == target => {
+                let (first, second) = match position {
+                    SplitPosition::Before => (new_pane, target),
+                    SplitPosition::After => (target, new_pane),
+                };
                 *self = Self::Split {
                     axis,
-                    first: Box::new(Self::Pane(target)),
-                    second: Box::new(Self::Pane(new_pane)),
+                    first: Box::new(Self::Pane(first)),
+                    second: Box::new(Self::Pane(second)),
                 };
                 true
             }
             Self::Pane(_) => false,
             Self::Split { first, second, .. } => {
-                first.split(target, axis, new_pane) || second.split(target, axis, new_pane)
+                first.split(target, axis, new_pane, position)
+                    || second.split(target, axis, new_pane, position)
             }
         }
     }

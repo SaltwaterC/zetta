@@ -96,10 +96,12 @@ impl Zetta {
 
         let tab = &mut self.tabs[self.active_tab];
         tab.maximized_pane = None;
-        if !tab
-            .layout
-            .split(active_pane_id, SplitAxis::Vertical, pane_id)
-        {
+        if !tab.layout.split(
+            active_pane_id,
+            SplitAxis::Vertical,
+            pane_id,
+            SplitPosition::After,
+        ) {
             return;
         }
         tab.push_pane(TerminalPane {

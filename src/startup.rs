@@ -1024,8 +1024,12 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
         reconnect_session_keybinding(),
         auto_background_tab_keybinding(),
         close_pane_keybinding(),
-        KeyBinding::new("ctrl-shift-o", SplitHorizontal, Some("Zetta > Terminal")),
-        KeyBinding::new("ctrl-shift-e", SplitVertical, Some("Zetta > Terminal")),
+        KeyBinding::new(
+            "ctrl-shift-o",
+            SplitHorizontalDown,
+            Some("Zetta > Terminal"),
+        ),
+        KeyBinding::new("ctrl-shift-e", SplitVerticalRight, Some("Zetta > Terminal")),
         rotate_pane_layout_keybinding(),
         select_all_keybinding(),
         KeyBinding::new(
