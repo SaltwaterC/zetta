@@ -173,10 +173,13 @@ impl Zetta {
                         _cx: &mut Context<Self>|
          -> gpui::AnyElement {
             let menu_handle = handle.clone();
-            let selected = label.clone();
-            let is_binding_action = matches!(selection, SettingsDropdown::BindingAction(_, _));
+            let focused = editor.focused_control == Some(SettingsControl::Dropdown(selection));
+            let open = editor.open_dropdown == Some(selection);
+            let active_index = editor.dropdown_index.min(options.len().saturating_sub(1));
             let trigger = ButtonLike::new(id.clone())
                 .style(ButtonStyle::Outlined)
+                .toggle_state(focused)
+                .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
                 .full_width()
                 .child(
                     h_flex()
@@ -184,107 +187,113 @@ impl Zetta {
                         .justify_between()
                         .child(Label::new(label))
                         .child(Icon::new(IconName::ChevronDown).size(IconSize::XSmall)),
-                );
-            PopoverMenu::new(format!("{id}-popover"))
-                .full_width(true)
-                .trigger(trigger)
-                .anchor(Anchor::TopLeft)
-                .menu(move |window, cx| {
-                    let options = options.clone();
-                    let selected = selected.clone();
-                    let menu_handle = menu_handle.clone();
-                    Some(ui::ContextMenu::build(window, cx, move |mut menu, _, _| {
-                        for option in options.iter() {
-                            let value = option.clone();
-                            let option_label = option.clone();
-                            let toggled = option_label == selected;
-                            let handle = menu_handle.clone();
-                            if is_binding_action {
-                                let rendered_label = option_label.clone();
-                                menu = menu.custom_entry(
-                                    move |_, _| {
-                                        h_flex()
-                                            .gap_2()
-                                            .whitespace_nowrap()
-                                            .child(
-                                                div()
-                                                    .w(px(16.))
-                                                    .flex_none()
-                                                    .text_center()
-                                                    .child(if toggled { "✓" } else { "" }),
-                                            )
-                                            .child(Label::new(rendered_label.clone()))
-                                            .into_any_element()
-                                    },
-                                    move |_, cx| {
-                                        handle
-                                            .update(cx, |this, cx| {
-                                                this.set_settings_dropdown(
-                                                    selection,
-                                                    value.clone(),
-                                                    cx,
-                                                )
-                                            })
-                                            .ok();
-                                    },
-                                );
-                            } else {
-                                menu = menu.toggleable_entry(
-                                    option_label,
-                                    toggled,
-                                    IconPosition::Start,
-                                    None,
-                                    move |_, cx| {
-                                        handle
-                                            .update(cx, |this, cx| {
-                                                this.set_settings_dropdown(
-                                                    selection,
-                                                    value.clone(),
-                                                    cx,
-                                                )
-                                            })
-                                            .ok();
-                                    },
-                                );
-                            }
-                        }
-                        menu
-                    }))
+                )
+                .on_click(move |_, window, cx| {
+                    menu_handle
+                        .update(cx, |this, cx| {
+                            this.focus_settings_control(
+                                SettingsControl::Dropdown(selection),
+                                window,
+                                cx,
+                            );
+                            this.open_settings_dropdown(selection, cx);
+                        })
+                        .ok();
+                });
+            let option_handle = handle.clone();
+            let option_rows = options
+                .iter()
+                .enumerate()
+                .map(|(index, option)| {
+                    let value = option.clone();
+                    let selected = index == active_index;
+                    let handle = option_handle.clone();
+                    div()
+                        .id(format!("{id}-option-{index}"))
+                        .px_2()
+                        .py_1()
+                        .rounded(px(3.))
+                        .cursor_pointer()
+                        .when(selected, |row| row.bg(colors.element_selected))
+                        .hover(|style| style.bg(colors.element_hover))
+                        .child(option.clone())
+                        .on_click(move |_, _, cx| {
+                            handle
+                                .update(cx, |this, cx| {
+                                    this.set_settings_dropdown(selection, value.clone(), cx);
+                                    if let Some(editor) = this.settings_editor.as_mut() {
+                                        editor.open_dropdown = None;
+                                    }
+                                    cx.notify();
+                                })
+                                .ok();
+                        })
+                })
+                .collect::<Vec<_>>();
+            div()
+                .relative()
+                .flex()
+                .flex_col()
+                .child(trigger)
+                .when(open, |dropdown| {
+                    dropdown.child(
+                        div()
+                            .id(format!("{id}-options"))
+                            .mt_1()
+                            .max_h(px(260.))
+                            .overflow_y_scroll()
+                            .track_scroll(&editor.dropdown_scroll)
+                            .p_1()
+                            .rounded(px(4.))
+                            .border_1()
+                            .border_color(colors.border_focused)
+                            .bg(colors.elevated_surface_background)
+                            .children(option_rows),
+                    )
                 })
                 .into_any_element()
         };
 
-        let setting_row =
-            |label: &'static str, description: &'static str, control: gpui::AnyElement| {
-                h_flex()
-                    .w_full()
-                    .min_h(px(54.))
-                    .py_2()
-                    .gap_4()
-                    .justify_between()
-                    .border_b_1()
-                    .border_color(colors.border_variant)
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .child(div().text_sm().text_color(colors.text).child(label))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(colors.text_muted)
-                                    .child(description),
-                            ),
-                    )
-                    .child(div().w(px(330.)).flex_none().child(control))
-                    .into_any_element()
-            };
+        let setting_row = |label: &'static str,
+                           description: &'static str,
+                           focused: bool,
+                           control: gpui::AnyElement| {
+            h_flex()
+                .w_full()
+                .min_h(px(54.))
+                .px_2()
+                .py_2()
+                .gap_4()
+                .justify_between()
+                .border_b_1()
+                .border_color(if focused {
+                    colors.border_focused
+                } else {
+                    colors.border_variant
+                })
+                .when(focused, |row| row.bg(colors.element_selected))
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .child(div().text_sm().text_color(colors.text).child(label))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(colors.text_muted)
+                                .child(description),
+                        ),
+                )
+                .child(div().w(px(330.)).flex_none().child(control))
+                .into_any_element()
+        };
 
         let numeric = |id: &'static str,
                        field: TextField,
                        setting: NumericSetting,
                        input: ConfigTextField|
          -> gpui::AnyElement {
+            let focused = editor.focused_control == Some(SettingsControl::Numeric(setting));
             let decrease_down = handle.clone();
             let decrease_up = handle.clone();
             let decrease_out = handle.clone();
@@ -297,7 +306,11 @@ impl Zetta {
                 .w_full()
                 .rounded(px(4.))
                 .border_1()
-                .border_color(colors.border)
+                .border_color(if focused {
+                    colors.border_focused
+                } else {
+                    colors.border
+                })
                 .bg(colors.editor_background)
                 .child(
                     div()
@@ -362,6 +375,7 @@ impl Zetta {
         };
         let opacity_slider = |opacity: f32| -> gpui::AnyElement {
             let selected = (opacity.clamp(0., 1.) * 20.).round() as usize;
+            let focused = editor.focused_control == Some(SettingsControl::Opacity);
             let stops = (0usize..=20)
                 .map(|step| {
                     let slider_handle = handle.clone();
@@ -389,6 +403,13 @@ impl Zetta {
             h_flex()
                 .w_full()
                 .gap_3()
+                .rounded(px(4.))
+                .border_1()
+                .border_color(if focused {
+                    colors.border_focused
+                } else {
+                    colors.border
+                })
                 .child(
                     div()
                         .relative()
@@ -486,7 +507,13 @@ impl Zetta {
                     .justify_between()
                     .rounded(px(4.))
                     .border_1()
-                    .border_color(colors.border)
+                    .border_color(
+                        if editor.focused_control == Some(SettingsControl::FontPicker) {
+                            colors.border_focused
+                        } else {
+                            colors.border
+                        },
+                    )
                     .bg(colors.editor_background)
                     .cursor_pointer()
                     .hover(|style| style.bg(colors.element_hover))
@@ -521,12 +548,22 @@ impl Zetta {
                     setting_row(
                         "Default profile",
                         "Profile selected when Zetta starts",
+                        editor.focused_control
+                            == Some(SettingsControl::Dropdown(SettingsDropdown::DefaultProfile)),
                         default_profile,
                     ),
-                    setting_row("Theme", "Application color theme", theme),
+                    setting_row(
+                        "Theme",
+                        "Application color theme",
+                        editor.focused_control
+                            == Some(SettingsControl::Dropdown(SettingsDropdown::Theme)),
+                        theme,
+                    ),
                     setting_row(
                         "Terminal font size",
                         "Point size from 6 through 100",
+                        editor.focused_control
+                            == Some(SettingsControl::Numeric(NumericSetting::FontSize)),
                         numeric(
                             "settings-font-size",
                             configuration.terminal_font_size.clone(),
@@ -537,11 +574,16 @@ impl Zetta {
                     setting_row(
                         "Terminal font family",
                         "Search bundled and system-installed font families",
+                        editor.focused_control == Some(SettingsControl::FontPicker),
                         font_family,
                     ),
                     setting_row(
                         "Working directory",
                         "Initial directory; ~ expands to your home directory",
+                        editor.focused_control
+                            == Some(SettingsControl::Input(SettingsInput::Configuration(
+                                ConfigTextField::WorkingDirectory,
+                            ))),
                         text_input(
                             "settings-working-directory".to_owned(),
                             configuration.working_directory.clone(),
@@ -551,6 +593,8 @@ impl Zetta {
                     setting_row(
                         "Scrollback history",
                         "Enter 0 through Max; steppers accelerate across the range",
+                        editor.focused_control
+                            == Some(SettingsControl::Numeric(NumericSetting::ScrollHistory)),
                         numeric(
                             "settings-scroll-history",
                             configuration.max_scroll_history_lines.clone(),
@@ -561,11 +605,16 @@ impl Zetta {
                     setting_row(
                         "Inactive pane opacity",
                         "Dimming level as a percentage",
+                        editor.focused_control == Some(SettingsControl::Opacity),
                         opacity_slider(configuration.inactive_pane_opacity),
                     ),
                     setting_row(
                         "Pane controls position",
                         "Keep pane overlay controls on the right or move them to the left",
+                        editor.focused_control
+                            == Some(SettingsControl::Dropdown(
+                                SettingsDropdown::PaneControlsPosition,
+                            )),
                         pane_controls_position,
                     ),
                 ];
@@ -573,6 +622,8 @@ impl Zetta {
                 rows.push(setting_row(
                     "HTTP server port",
                     "TCP port used when starting the static HTTP server",
+                    editor.focused_control
+                        == Some(SettingsControl::Numeric(NumericSetting::HttpServerPort)),
                     numeric(
                         "settings-http-server-port",
                         configuration.http_server_port.clone(),
@@ -590,6 +641,23 @@ impl Zetta {
                         .into_any_element(),
                 );
                 for (index, profile) in configuration.profiles.iter().enumerate() {
+                    let profile_focused = editor.focused_control
+                        == Some(SettingsControl::Dropdown(SettingsDropdown::ProfileTheme(
+                            index,
+                        )))
+                        || editor.focused_control
+                            == Some(SettingsControl::Input(SettingsInput::Configuration(
+                                ConfigTextField::ProfileName(index),
+                            )))
+                        || editor.focused_control
+                            == Some(SettingsControl::Input(SettingsInput::Configuration(
+                                ConfigTextField::ProfileProgram(index),
+                            )))
+                        || editor.focused_control
+                            == Some(SettingsControl::Input(SettingsInput::Configuration(
+                                ConfigTextField::ProfileArguments(index),
+                            )))
+                        || editor.focused_control == Some(SettingsControl::RemoveProfile(index));
                     let mut theme_options = vec!["Use application theme".to_owned()];
                     theme_options.extend(editor.themes.iter().cloned());
                     let profile_theme = profile
@@ -612,8 +680,16 @@ impl Zetta {
                             .justify_between()
                             .rounded(px(6.))
                             .border_1()
-                            .border_color(colors.border)
-                            .bg(colors.editor_background)
+                            .border_color(if profile_focused {
+                                colors.border_focused
+                            } else {
+                                colors.border
+                            })
+                            .bg(if profile_focused {
+                                colors.element_selected
+                            } else {
+                                colors.editor_background
+                            })
                             .child(
                                 div()
                                     .min_w_0()
@@ -640,8 +716,16 @@ impl Zetta {
                             .mb_2()
                             .rounded(px(6.))
                             .border_1()
-                            .border_color(colors.border)
-                            .bg(colors.editor_background)
+                            .border_color(if profile_focused {
+                                colors.border_focused
+                            } else {
+                                colors.border
+                            })
+                            .bg(if profile_focused {
+                                colors.element_selected
+                            } else {
+                                colors.editor_background
+                            })
                             .child(
                                 h_flex()
                                     .items_end()
@@ -671,6 +755,13 @@ impl Zetta {
                                             IconName::Trash,
                                         )
                                         .icon_size(IconSize::Small)
+                                        .toggle_state(
+                                            editor.focused_control
+                                                == Some(SettingsControl::RemoveProfile(index)),
+                                        )
+                                        .selected_style(ButtonStyle::OutlinedCustom(
+                                            colors.border_focused,
+                                        ))
                                         .tooltip(Tooltip::text("Remove profile"))
                                         .on_click(
                                             move |_, _, cx| {
@@ -763,7 +854,21 @@ impl Zetta {
                         .justify_center()
                         .rounded(px(4.))
                         .border_1()
-                        .border_color(colors.border)
+                        .border_color(
+                            if editor.focused_control == Some(SettingsControl::AddProfile) {
+                                colors.border_focused
+                            } else {
+                                colors.border
+                            },
+                        )
+                        .when(
+                            editor.focused_control == Some(SettingsControl::AddKeymapSection),
+                            |button| button.bg(colors.element_selected),
+                        )
+                        .when(
+                            editor.focused_control == Some(SettingsControl::AddProfile),
+                            |button| button.bg(colors.element_selected),
+                        )
                         .cursor_pointer()
                         .hover(|style| style.bg(colors.element_hover))
                         .child("Add profile")
@@ -839,7 +944,20 @@ impl Zetta {
                                         .items_center()
                                         .rounded(px(4.))
                                         .border_1()
-                                        .border_color(colors.border)
+                                        .border_color(
+                                            if editor.focused_control
+                                                == Some(SettingsControl::SearchThemes)
+                                            {
+                                                colors.border_focused
+                                            } else {
+                                                colors.border
+                                            },
+                                        )
+                                        .when(
+                                            editor.focused_control
+                                                == Some(SettingsControl::SearchThemes),
+                                            |button| button.bg(colors.element_selected),
+                                        )
                                         .cursor_pointer()
                                         .hover(|style| style.bg(colors.element_hover))
                                         .on_click(move |_, window, cx| {
@@ -876,13 +994,24 @@ impl Zetta {
                         let disabled = editor.theme_extension_downloading.is_some();
                         let remove_handle = handle.clone();
                         let theme_names = installed.theme_names.join(", ");
+                        let focused = editor.focused_control
+                            == Some(SettingsControl::RemoveTheme(installed.id.clone()));
                         rows.push(
                             div()
                                 .mb_2()
                                 .p_3()
                                 .rounded(px(4.))
                                 .border_1()
-                                .border_color(colors.border)
+                                .border_color(if focused {
+                                    colors.border_focused
+                                } else {
+                                    colors.border
+                                })
+                                .bg(if focused {
+                                    colors.element_selected
+                                } else {
+                                    colors.editor_background
+                                })
                                 .child(
                                     h_flex()
                                         .justify_between()
@@ -926,7 +1055,17 @@ impl Zetta {
                                                 .flex_none()
                                                 .rounded(px(4.))
                                                 .border_1()
-                                                .border_color(colors.border)
+                                                .border_color(
+                                                    if editor.focused_control
+                                                        == Some(SettingsControl::RemoveTheme(
+                                                            installed.id.clone(),
+                                                        ))
+                                                    {
+                                                        colors.border_focused
+                                                    } else {
+                                                        colors.border
+                                                    },
+                                                )
                                                 .when(!disabled, |button| {
                                                     button
                                                         .cursor_pointer()
@@ -983,6 +1122,8 @@ impl Zetta {
                     let disabled =
                         editor.theme_extension_downloading.is_some() || already_installed;
                     let install_handle = handle.clone();
+                    let focused = editor.focused_control
+                        == Some(SettingsControl::InstallTheme(extension.id.clone()));
                     let description = extension
                         .description
                         .clone()
@@ -998,7 +1139,16 @@ impl Zetta {
                             .p_3()
                             .rounded(px(4.))
                             .border_1()
-                            .border_color(colors.border)
+                            .border_color(if focused {
+                                colors.border_focused
+                            } else {
+                                colors.border
+                            })
+                            .bg(if focused {
+                                colors.element_selected
+                            } else {
+                                colors.editor_background
+                            })
                             .child(
                                 h_flex()
                                     .justify_between()
@@ -1040,7 +1190,17 @@ impl Zetta {
                                             .flex_none()
                                             .rounded(px(4.))
                                             .border_1()
-                                            .border_color(colors.border)
+                                            .border_color(
+                                                if editor.focused_control
+                                                    == Some(SettingsControl::InstallTheme(
+                                                        extension.id.clone(),
+                                                    ))
+                                                {
+                                                    colors.border_focused
+                                                } else {
+                                                    colors.border
+                                                },
+                                            )
                                             .when(!disabled, |button| {
                                                 button
                                                     .cursor_pointer()
@@ -1074,8 +1234,24 @@ impl Zetta {
             SettingsPage::Keymap => {
                 let mut sections = Vec::new();
                 for (section_index, section) in editor.keymap.sections.iter().enumerate() {
+                    let section_focused = matches!(
+                        editor.focused_control.as_ref(),
+                        Some(SettingsControl::Input(SettingsInput::Keymap(
+                            KeymapTextField::Context(index)
+                        ))) if *index == section_index
+                    ) || editor.focused_control
+                        == Some(SettingsControl::AddBinding(section_index));
                     let mut bindings = Vec::new();
                     for (binding_index, binding) in section.bindings.iter().enumerate() {
+                        let binding_focused = editor.focused_control
+                            == Some(SettingsControl::Input(SettingsInput::Keymap(
+                                KeymapTextField::Keystroke(section_index, binding_index),
+                            )))
+                            || editor.focused_control
+                                == Some(SettingsControl::RemoveBinding(
+                                    section_index,
+                                    binding_index,
+                                ));
                         let action = dropdown(
                             format!("settings-binding-{section_index}-{binding_index}-action"),
                             binding.action_name(),
@@ -1115,7 +1291,18 @@ impl Zetta {
                         bindings.push(
                             h_flex()
                                 .mb_2()
+                                .p_1()
                                 .gap_2()
+                                .rounded(px(4.))
+                                .border_1()
+                                .border_color(if binding_focused {
+                                    colors.border_focused
+                                } else {
+                                    colors.border_variant
+                                })
+                                .when(binding_focused, |row| {
+                                    row.bg(colors.element_selected)
+                                })
                                 .child(
                                     div()
                                         .w(px(220.))
@@ -1146,6 +1333,16 @@ impl Zetta {
                                         IconName::Trash,
                                     )
                                     .icon_size(IconSize::Small)
+                                    .toggle_state(
+                                        editor.focused_control
+                                            == Some(SettingsControl::RemoveBinding(
+                                                section_index,
+                                                binding_index,
+                                            )),
+                                    )
+                                    .selected_style(ButtonStyle::OutlinedCustom(
+                                        colors.border_focused,
+                                    ))
                                     .tooltip(Tooltip::text("Remove binding"))
                                     .on_click(move |_, _, cx| {
                                         remove_handle
@@ -1173,8 +1370,16 @@ impl Zetta {
                             .mb_3()
                             .rounded(px(6.))
                             .border_1()
-                            .border_color(colors.border)
-                            .bg(colors.editor_background)
+                            .border_color(if section_focused {
+                                colors.border_focused
+                            } else {
+                                colors.border
+                            })
+                            .bg(if section_focused {
+                                colors.element_selected
+                            } else {
+                                colors.editor_background
+                            })
                             .child(
                                 h_flex()
                                     .mb_3()
@@ -1199,7 +1404,20 @@ impl Zetta {
                                     .justify_center()
                                     .rounded(px(4.))
                                     .border_1()
-                                    .border_color(colors.border)
+                                    .border_color(
+                                        if editor.focused_control
+                                            == Some(SettingsControl::AddBinding(section_index))
+                                        {
+                                            colors.border_focused
+                                        } else {
+                                            colors.border
+                                        },
+                                    )
+                                    .when(
+                                        editor.focused_control
+                                            == Some(SettingsControl::AddBinding(section_index)),
+                                        |button| button.bg(colors.element_selected),
+                                    )
                                     .cursor_pointer()
                                     .hover(|style| style.bg(colors.element_hover))
                                     .child("Add binding")
@@ -1239,7 +1457,17 @@ impl Zetta {
                         .justify_center()
                         .rounded(px(4.))
                         .border_1()
-                        .border_color(colors.border)
+                        .border_color(
+                            if editor.focused_control == Some(SettingsControl::AddKeymapSection) {
+                                colors.border_focused
+                            } else {
+                                colors.border
+                            },
+                        )
+                        .when(
+                            editor.focused_control == Some(SettingsControl::AddKeymapSection),
+                            |button| button.bg(colors.element_selected),
+                        )
                         .cursor_pointer()
                         .hover(|style| style.bg(colors.element_hover))
                         .child("Add keymap context")
@@ -1269,6 +1497,8 @@ impl Zetta {
                 let close_handle = handle.clone();
                 IconButton::new("close-font-picker", IconName::Close)
                     .icon_size(IconSize::Small)
+                    .toggle_state(editor.focused_control == Some(SettingsControl::CloseFontPicker))
+                    .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
                     .tooltip(Tooltip::text("Close font picker"))
                     .on_click(move |_, _, cx| {
                         close_handle
@@ -1286,6 +1516,7 @@ impl Zetta {
             let fonts = editor.fonts.clone();
             let font_handle = handle.clone();
             let font_colors = colors.clone();
+            let focused_control = editor.focused_control.clone();
             let font_rows = uniform_list(
                 "settings-font-list",
                 filtered_fonts.len(),
@@ -1295,6 +1526,7 @@ impl Zetta {
                             let index = filtered_fonts[row_index];
                             let font = &fonts[index];
                             let selected = *font == current_font;
+                            let focused = focused_control == Some(SettingsControl::Font(index));
                             let value = font.clone();
                             let row_handle = font_handle.clone();
                             h_flex()
@@ -1304,7 +1536,9 @@ impl Zetta {
                                 .justify_between()
                                 .cursor_pointer()
                                 .rounded(px(4.))
-                                .when(selected, |row| row.bg(font_colors.element_selected))
+                                .when(selected || focused, |row| {
+                                    row.bg(font_colors.element_selected)
+                                })
                                 .hover(|style| style.bg(font_colors.element_hover))
                                 .child(
                                     div()
@@ -1407,6 +1641,10 @@ impl Zetta {
                 let cancel_handle = handle.clone();
                 IconButton::new("close-new-profile", IconName::Close)
                     .icon_size(IconSize::Small)
+                    .toggle_state(
+                        editor.focused_control == Some(SettingsControl::CloseProfileDialog),
+                    )
+                    .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
                     .on_click(move |_, _, cx| {
                         cancel_handle
                             .update(cx, |this, cx| {
@@ -1517,6 +1755,16 @@ impl Zetta {
                                     .px_4()
                                     .py_2()
                                     .rounded(px(4.))
+                                    .border_1()
+                                    .border_color(
+                                        if editor.focused_control
+                                            == Some(SettingsControl::CreateProfile)
+                                        {
+                                            colors.border_focused
+                                        } else {
+                                            colors.element_selected
+                                        },
+                                    )
                                     .cursor_pointer()
                                     .bg(colors.element_selected)
                                     .hover(|style| style.bg(colors.element_hover))
@@ -1567,6 +1815,8 @@ impl Zetta {
             let close_handle = handle.clone();
             IconButton::new("close-settings", IconName::Close)
                 .icon_size(IconSize::Small)
+                .toggle_state(editor.focused_control == Some(SettingsControl::Close))
+                .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
                 .tooltip(Tooltip::text("Close settings"))
                 .on_click(move |_, window, cx| {
                     close_handle
@@ -1632,7 +1882,11 @@ impl Zetta {
                                                 .rounded(px(4.))
                                                 .cursor_pointer()
                                                 .when(
-                                                    editor.page == SettingsPage::Configuration,
+                                                    editor.page == SettingsPage::Configuration
+                                                        || editor.focused_control
+                                                            == Some(SettingsControl::Tab(
+                                                                SettingsPage::Configuration,
+                                                            )),
                                                     |tab| tab.bg(colors.element_selected),
                                                 )
                                                 .on_click(move |_, window, cx| {
@@ -1655,9 +1909,14 @@ impl Zetta {
                                                 .py_1()
                                                 .rounded(px(4.))
                                                 .cursor_pointer()
-                                                .when(editor.page == SettingsPage::Themes, |tab| {
-                                                    tab.bg(colors.element_selected)
-                                                })
+                                                .when(
+                                                    editor.page == SettingsPage::Themes
+                                                        || editor.focused_control
+                                                            == Some(SettingsControl::Tab(
+                                                                SettingsPage::Themes,
+                                                            )),
+                                                    |tab| tab.bg(colors.element_selected),
+                                                )
                                                 .on_click(move |_, window, cx| {
                                                     themes_handle
                                                         .update(cx, |this, cx| {
@@ -1678,9 +1937,14 @@ impl Zetta {
                                                 .py_1()
                                                 .rounded(px(4.))
                                                 .cursor_pointer()
-                                                .when(editor.page == SettingsPage::Keymap, |tab| {
-                                                    tab.bg(colors.element_selected)
-                                                })
+                                                .when(
+                                                    editor.page == SettingsPage::Keymap
+                                                        || editor.focused_control
+                                                            == Some(SettingsControl::Tab(
+                                                                SettingsPage::Keymap,
+                                                            )),
+                                                    |tab| tab.bg(colors.element_selected),
+                                                )
                                                 .on_click(move |_, window, cx| {
                                                     keymap_handle
                                                         .update(cx, |this, cx| {
@@ -1704,6 +1968,16 @@ impl Zetta {
                                                 .px_3()
                                                 .py_1()
                                                 .rounded(px(4.))
+                                                .border_1()
+                                                .border_color(
+                                                    if editor.focused_control
+                                                        == Some(SettingsControl::Save)
+                                                    {
+                                                        colors.border_focused
+                                                    } else {
+                                                        colors.element_selected
+                                                    },
+                                                )
                                                 .cursor_pointer()
                                                 .bg(colors.element_selected)
                                                 .hover(|style| style.bg(colors.element_hover))
