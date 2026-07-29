@@ -328,6 +328,7 @@ impl Render for Zetta {
         let profile_menu_profiles = self.profiles.clone();
         let default_profile = self.launch_config.default_profile;
         let profile_menu_handle = handle.clone();
+        let profile_menu_dismiss_handle = handle.clone();
         let profile_menu = PopoverMenu::new("new-tab-profile-menu")
             .with_handle(self.profile_menu_handle.clone())
             .trigger_with_tooltip(
@@ -349,7 +350,8 @@ impl Render for Zetta {
             .menu(move |window, cx| {
                 let profiles = profile_menu_profiles.clone();
                 let handle = profile_menu_handle.clone();
-                Some(ui::ContextMenu::build(window, cx, move |mut menu, _, _| {
+                let dismiss_handle = profile_menu_dismiss_handle.clone();
+                let menu = ui::ContextMenu::build(window, cx, move |mut menu, _, _| {
                     for (index, profile) in profiles.iter().enumerate() {
                         let is_default = index == default_profile;
                         let label = profile.name.clone();
@@ -401,7 +403,20 @@ impl Render for Zetta {
                         );
                     }
                     menu
-                }))
+                });
+                // Register before PopoverMenu's dismissal listener so a menu
+                // reached through left/right navigation cannot restore focus to
+                // the menu it replaced.
+                window
+                    .subscribe(&menu, cx, move |menu, _: &DismissEvent, window, cx| {
+                        if menu.focus_handle(cx).is_focused(window) {
+                            dismiss_handle
+                                .update(cx, |this, cx| this.focus_active(window, cx))
+                                .ok();
+                        }
+                    })
+                    .detach();
+                Some(menu)
             });
 
         let reconnect_menu_entries = if background_session_count > 1 {
@@ -489,6 +504,7 @@ impl Render for Zetta {
             reconnect_menu.into_any_element()
         };
 
+        let application_menu_dismiss_handle = handle.clone();
         let application_menu = PopoverMenu::new("application-menu")
             .with_handle(self.application_menu_handle.clone())
             .trigger_with_tooltip(
@@ -512,24 +528,34 @@ impl Render for Zetta {
             )
             .anchor(Anchor::TopLeft)
             .menu(move |window, cx| {
-                Some(ui::ContextMenu::build(
-                    window,
-                    cx,
-                    move |menu, window, cx| {
-                        let menu = menu
-                            .when_some(window.focused(cx), |menu, focused| menu.context(focused));
-                        menu.action("New Tab", Box::new(NewTab))
-                            .action("New Window", Box::new(NewWindow))
-                            .separator()
-                            .action("Open Settings", Box::new(ToggleSettings))
-                            .action("Open Themes", Box::new(OpenThemes))
-                            .action("Open Keymap", Box::new(OpenKeymap))
-                            .separator()
-                            .action("Close Tab", Box::new(CloseTab))
-                            .action("Close Window", Box::new(CloseWindow))
-                            .action("Close All Windows", Box::new(CloseAllWindows))
-                    },
-                ))
+                let dismiss_handle = application_menu_dismiss_handle.clone();
+                let menu = ui::ContextMenu::build(window, cx, move |menu, window, cx| {
+                    let menu =
+                        menu.when_some(window.focused(cx), |menu, focused| menu.context(focused));
+                    menu.action("New Tab", Box::new(NewTab))
+                        .action("New Window", Box::new(NewWindow))
+                        .separator()
+                        .action("Open Settings", Box::new(ToggleSettings))
+                        .action("Open Themes", Box::new(OpenThemes))
+                        .action("Open Keymap", Box::new(OpenKeymap))
+                        .separator()
+                        .action("Close Tab", Box::new(CloseTab))
+                        .action("Close Window", Box::new(CloseWindow))
+                        .action("Close All Windows", Box::new(CloseAllWindows))
+                });
+                // Register before PopoverMenu's dismissal listener so a menu
+                // reached through left/right navigation cannot restore focus to
+                // the menu it replaced.
+                window
+                    .subscribe(&menu, cx, move |menu, _: &DismissEvent, window, cx| {
+                        if menu.focus_handle(cx).is_focused(window) {
+                            dismiss_handle
+                                .update(cx, |this, cx| this.focus_active(window, cx))
+                                .ok();
+                        }
+                    })
+                    .detach();
+                Some(menu)
             });
 
         let title_bar = div()

@@ -111,6 +111,7 @@ pub(crate) struct Zetta {
     pub(crate) application_menu_handle: PopoverMenuHandle<ui::ContextMenu>,
     pub(crate) profile_menu_handle: PopoverMenuHandle<ui::ContextMenu>,
     pub(crate) reconnect_menu_handle: PopoverMenuHandle<ui::ContextMenu>,
+    pub(crate) application_menu_switch_pending: bool,
     pub(crate) session_authentication_focus: gpui::FocusHandle,
     pub(crate) session_authentication: Option<SessionAuthenticationPrompt>,
     pub(crate) session_authentication_generation: u64,
@@ -303,6 +304,7 @@ impl Zetta {
             application_menu_handle: PopoverMenuHandle::default(),
             profile_menu_handle: PopoverMenuHandle::default(),
             reconnect_menu_handle: PopoverMenuHandle::default(),
+            application_menu_switch_pending: false,
             session_authentication_focus: cx.focus_handle(),
             session_authentication: None,
             session_authentication_generation: 0,
@@ -1122,18 +1124,42 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Keep auto-repeat from starting another handoff before the new menu
+        // receives its deferred focus update.
+        if self.application_menu_switch_pending {
+            return;
+        }
+
         // Keep the navigable menus in title-bar order. Adding a new top-level
         // menu only requires adding its handle here.
         let handles = self.title_bar_menu_handles();
-        let Some(current_index) = handles.iter().position(PopoverMenuHandle::is_deployed) else {
+        let Some(current_index) = handles
+            .iter()
+            .position(|handle| handle.is_focused(window, cx))
+        else {
             cx.propagate();
             return;
         };
         let next_index = adjacent_application_menu_index(handles.len(), current_index, direction);
 
-        handles[current_index].hide(cx);
+        // A popover restores its previous focus when dismissed. Hiding the
+        // current menu before the next one has focus briefly returns focus to
+        // the terminal, causing a visible pane redraw and allowing repeated
+        // arrow keys to reach it. Open the replacement first, then dismiss
+        // the current menu after the replacement's deferred focus update.
+        self.application_menu_switch_pending = true;
+        let current_handle = handles[current_index].clone();
         let next_handle = handles[next_index].clone();
-        cx.defer_in(window, move |_, window, cx| next_handle.show(window, cx));
+        let zetta = cx.entity().downgrade();
+        next_handle.show(window, cx);
+        window.on_next_frame(move |window, _| {
+            window.on_next_frame(move |_, cx| {
+                current_handle.hide(cx);
+                zetta
+                    .update(cx, |this, _| this.application_menu_switch_pending = false)
+                    .ok();
+            });
+        });
     }
 
     pub(crate) fn activate_application_menu_left(
@@ -2567,15 +2593,35 @@ impl Zetta {
         owns_window_bottom: bool,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        self.render_pane_layout_with_edges(
-            tab,
-            layout,
-            colors,
-            error_color,
-            window,
-            PaneWindowEdges::all().with_bottom(owns_window_bottom),
-            cx,
-        )
+        let edges = PaneWindowEdges::all().with_bottom(owns_window_bottom);
+        let corner_radii = edges.client_corner_radii(window);
+        div()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .flex_grow_1()
+            .flex_basis(gpui::relative(0.))
+            .overflow_hidden()
+            // Use one opaque surface behind every pane layout. This fills
+            // terminal-grid margins and pane separators consistently while
+            // retaining the outer client-window corners.
+            .when(corner_radii.bottom_left > Pixels::ZERO, |layout| {
+                layout.rounded_bl(corner_radii.bottom_left)
+            })
+            .when(corner_radii.bottom_right > Pixels::ZERO, |layout| {
+                layout.rounded_br(corner_radii.bottom_right)
+            })
+            .bg(colors.border)
+            .child(self.render_pane_layout_with_edges(
+                tab,
+                layout,
+                colors,
+                error_color,
+                window,
+                edges,
+                cx,
+            ))
+            .into_any_element()
     }
 
     fn render_pane_layout_with_edges(
@@ -2588,13 +2634,12 @@ impl Zetta {
         edges: PaneWindowEdges,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let transparent_client_window = cfg!(any(target_os = "linux", target_os = "freebsd"))
-            && matches!(window.window_decorations(), Decorations::Client { .. });
         match layout {
             PaneLayout::Pane(pane_id) => {
                 let Some(pane) = tab.pane(*pane_id) else {
                     return div().size_full().into_any_element();
                 };
+                let corner_radii = edges.client_corner_radii(window);
                 let pane_label = tab
                     .displayed_pane_label(*pane_id)
                     .unwrap_or_else(|| pane.label());
@@ -2611,7 +2656,6 @@ impl Zetta {
                 }) || (pane.view.is_none() && tab.active_pane == *pane_id);
                 let content = match (&pane.view, &pane.error) {
                     (Some(view), _) => {
-                        let corner_radii = edges.client_corner_radii(window);
                         view.update(cx, |view, cx| {
                             view.set_window_corner_radii(corner_radii, cx)
                         });
@@ -2653,7 +2697,6 @@ impl Zetta {
                     .flex_grow_1()
                     .flex_basis(gpui::relative(0.))
                     .overflow_hidden()
-                    .when(!transparent_client_window, |pane| pane.bg(gpui::black()))
                     .child(
                         div()
                             .size_full()
@@ -2830,49 +2873,36 @@ impl Zetta {
                 axis,
                 first,
                 second,
-            } => {
-                // This background fills the one-pixel pane separator. It also
-                // sits behind both terminal surfaces, so it must share their
-                // outer bottom corners instead of leaking through them.
-                let corner_radii = edges.client_corner_radii(window);
-                div()
-                    .size_full()
-                    .min_w_0()
-                    .min_h_0()
-                    .flex_grow_1()
-                    .flex_basis(gpui::relative(0.))
-                    .flex()
-                    .when(matches!(axis, SplitAxis::Horizontal), |split| {
-                        split.flex_col()
-                    })
-                    .gap_px()
-                    .bg(colors.border)
-                    .when(corner_radii.bottom_left > Pixels::ZERO, |split| {
-                        split.rounded_bl(corner_radii.bottom_left)
-                    })
-                    .when(corner_radii.bottom_right > Pixels::ZERO, |split| {
-                        split.rounded_br(corner_radii.bottom_right)
-                    })
-                    .child(self.render_pane_layout_with_edges(
-                        tab,
-                        first,
-                        colors,
-                        error_color,
-                        window,
-                        edges.first(*axis),
-                        cx,
-                    ))
-                    .child(self.render_pane_layout_with_edges(
-                        tab,
-                        second,
-                        colors,
-                        error_color,
-                        window,
-                        edges.second(*axis),
-                        cx,
-                    ))
-                    .into_any_element()
-            }
+            } => div()
+                .size_full()
+                .min_w_0()
+                .min_h_0()
+                .flex_grow_1()
+                .flex_basis(gpui::relative(0.))
+                .flex()
+                .when(matches!(axis, SplitAxis::Horizontal), |split| {
+                    split.flex_col()
+                })
+                .gap_px()
+                .child(self.render_pane_layout_with_edges(
+                    tab,
+                    first,
+                    colors,
+                    error_color,
+                    window,
+                    edges.first(*axis),
+                    cx,
+                ))
+                .child(self.render_pane_layout_with_edges(
+                    tab,
+                    second,
+                    colors,
+                    error_color,
+                    window,
+                    edges.second(*axis),
+                    cx,
+                ))
+                .into_any_element(),
         }
     }
 }

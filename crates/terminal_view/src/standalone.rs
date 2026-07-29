@@ -4,10 +4,10 @@ mod terminal_scrollbar;
 use std::{cmp, ops::Range as StdRange, path::PathBuf, sync::Arc, time::Duration};
 
 use gpui::{
-    Action, AnyElement, App, AppContext as _, ClipboardItem, Context, Corners, Decorations,
-    DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, KeyContext, KeyDownEvent,
-    Keystroke, MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollWheelEvent, Subscription,
-    Task, Window, actions, anchored, deferred, div, px,
+    Action, AnyElement, App, AppContext as _, ClipboardItem, Context, Corners, DismissEvent,
+    Entity, EventEmitter, FocusHandle, Focusable, KeyContext, KeyDownEvent, Keystroke, MouseButton,
+    MouseDownEvent, Pixels, Point, Render, ScrollWheelEvent, Subscription, Task, Window, actions,
+    anchored, deferred, div, px,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -1073,12 +1073,6 @@ impl ScrollbarVisibility for TerminalScrollbarSettings {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // The terminal element paints the two outer bottom corners itself.
-        // Keep the wrapper background for ordinary panes, including all panes
-        // above a split, so they retain their normal opaque surface.
-        let needs_wrapper_background = !cfg!(any(target_os = "linux", target_os = "freebsd"))
-            || !matches!(window.window_decorations(), Decorations::Client { .. })
-            || self.window_corner_radii == Corners::default();
         self.scroll_handle.update(self.terminal.read(cx));
         if let Some(offset) = self.scroll_handle.future_display_offset.take() {
             self.terminal.update(cx, |terminal, _| {
@@ -1234,9 +1228,20 @@ impl Render for TerminalView {
                 div()
                     .id("terminal-view-container")
                     .size_full()
-                    .when(needs_wrapper_background, |container| {
-                        container.bg(theme.colors().editor_background)
-                    })
+                    // The wrapper must remain opaque even when this terminal
+                    // owns a client-window corner. Apply the same radii as the
+                    // terminal surface instead of removing its background, or
+                    // inactive-pane opacity and modal backdrops expose the
+                    // transparent window underneath.
+                    .when(
+                        self.window_corner_radii.bottom_left > Pixels::ZERO,
+                        |container| container.rounded_bl(self.window_corner_radii.bottom_left),
+                    )
+                    .when(
+                        self.window_corner_radii.bottom_right > Pixels::ZERO,
+                        |container| container.rounded_br(self.window_corner_radii.bottom_right),
+                    )
+                    .bg(theme.colors().editor_background)
                     .child(
                         TerminalElement::new(
                             self.terminal.clone(),

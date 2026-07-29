@@ -45,7 +45,7 @@ use config::{Config, PaneControlsPosition, PaneSplitAxis, PaneSplitTemplate, Pro
 use futures::StreamExt as _;
 use gpui::{
     Action, Anchor, AnyElement, App, AppContext as _, Bounds, Context, CursorStyle, Decorations,
-    Entity, Focusable, FrameTiming, FrameTimingCollector, Global, HitboxBehavior,
+    DismissEvent, Entity, Focusable, FrameTiming, FrameTimingCollector, Global, HitboxBehavior,
     InteractiveElement as _, IntoElement, KeyBinding, KeyBindingContextPredicate, KeyDownEvent,
     MAX_BUTTONS_PER_SIDE, MouseButton, Pixels, PlatformKeyboardMapper, Point, Render, ResizeEdge,
     ScrollHandle, SharedString, Size, Subscription, Task, Tiling, TitlebarOptions,
