@@ -164,6 +164,14 @@ where
                 writer.write_all(&buf[..unprocessed]).unwrap();
             }
 
+            // Detect the one window-manipulation escape sequence Zetta
+            // supports before the generic parser discards unsupported xterm
+            // window operations. Keeping this scanner in the PTY reader makes
+            // it work identically for Unix PTYs and Windows ConPTY.
+            state.resize_requests.advance(&buf[..unprocessed], |rows, columns| {
+                self.event_proxy.send_event(Event::ResizeRequest { rows, columns });
+            });
+
             // Parse the incoming bytes.
             #[cfg(windows)]
             let parse_started = Instant::now();
@@ -448,8 +456,112 @@ pub struct State {
     write_list: VecDeque<Cow<'static, [u8]>>,
     writing: Option<Writing>,
     parser: ansi::Processor,
+    resize_requests: ResizeRequestParser,
     #[cfg(windows)]
     profile: PtyProfile,
+}
+
+/// A small streaming recognizer for `CSI 8 ; rows ; columns t`.
+///
+/// The VTE parser deliberately ignores unsupported window operations, but
+/// Zetta owns pane geometry and can implement this one safely. Keeping only
+/// partial CSI state means split writes from a PTY are handled without
+/// buffering arbitrary terminal output.
+#[derive(Default)]
+struct ResizeRequestParser {
+    state: ResizeRequestParserState,
+}
+
+#[derive(Default)]
+enum ResizeRequestParserState {
+    #[default]
+    Ground,
+    Escape,
+    Csi {
+        params: [u32; 3],
+        count: usize,
+        value: Option<u32>,
+        valid: bool,
+    },
+}
+
+impl ResizeRequestParser {
+    fn advance(&mut self, bytes: &[u8], mut on_request: impl FnMut(u16, u16)) {
+        // The common path is ordinary terminal output. Avoid a state-machine
+        // branch for every byte until an escape actually appears.
+        let bytes = if matches!(self.state, ResizeRequestParserState::Ground) {
+            let Some(first_escape) = bytes.iter().position(|byte| *byte == 0x1b) else {
+                return;
+            };
+            &bytes[first_escape..]
+        } else {
+            bytes
+        };
+        for &byte in bytes {
+            match &mut self.state {
+                ResizeRequestParserState::Ground => {
+                    if byte == 0x1b {
+                        self.state = ResizeRequestParserState::Escape;
+                    }
+                },
+                ResizeRequestParserState::Escape => match byte {
+                    b'[' => {
+                        self.state = ResizeRequestParserState::Csi {
+                            params: [0; 3],
+                            count: 0,
+                            value: None,
+                            valid: true,
+                        };
+                    },
+                    0x1b => {},
+                    _ => self.state = ResizeRequestParserState::Ground,
+                },
+                ResizeRequestParserState::Csi { params, count, value, valid } => match byte {
+                    b'0'..=b'9' => {
+                        let digit = u32::from(byte - b'0');
+                        let next = value
+                            .unwrap_or(0)
+                            .checked_mul(10)
+                            .and_then(|value| value.checked_add(digit));
+                        if next.is_none() {
+                            *valid = false;
+                        }
+                        *value = next;
+                    },
+                    b';' => {
+                        if *count < params.len() {
+                            params[*count] = value.unwrap_or(0);
+                        } else {
+                            *valid = false;
+                        }
+                        *count += 1;
+                        *value = None;
+                    },
+                    b't' => {
+                        if *count < params.len() {
+                            params[*count] = value.unwrap_or(0);
+                        } else {
+                            *valid = false;
+                        }
+                        *count += 1;
+                        if *valid
+                            && *count == 3
+                            && params[0] == 8
+                            && let (Ok(rows), Ok(columns)) =
+                                (u16::try_from(params[1]), u16::try_from(params[2]))
+                            && rows > 0
+                            && columns > 0
+                        {
+                            on_request(rows, columns);
+                        }
+                        self.state = ResizeRequestParserState::Ground;
+                    },
+                    0x1b => self.state = ResizeRequestParserState::Escape,
+                    _ => self.state = ResizeRequestParserState::Ground,
+                },
+            }
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -540,5 +652,37 @@ impl<T> PeekableReceiver<T> {
                 res => res.ok(),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resize_request_parser_handles_split_xterm_sequences() {
+        let mut parser = ResizeRequestParser::default();
+        let mut requests = Vec::new();
+
+        parser.advance(b"ignored\x1b[8;4", |rows, columns| {
+            requests.push((rows, columns));
+        });
+        parser.advance(b"0;120t", |rows, columns| {
+            requests.push((rows, columns));
+        });
+
+        assert_eq!(requests, [(40, 120)]);
+    }
+
+    #[test]
+    fn resize_request_parser_ignores_invalid_window_operations() {
+        let mut parser = ResizeRequestParser::default();
+        let mut requests = Vec::new();
+
+        parser.advance(b"\x1b[8;0;120t\x1b[8;40;70000t\x1b[18t", |rows, columns| {
+            requests.push((rows, columns));
+        });
+
+        assert!(requests.is_empty());
     }
 }

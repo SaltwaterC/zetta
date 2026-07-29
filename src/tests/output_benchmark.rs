@@ -100,6 +100,11 @@ fn terminal_size_json_includes_columns_and_rows() {
 }
 
 #[test]
+fn terminal_resize_sequence_uses_rows_before_columns() {
+    assert_eq!(terminal_resize_sequence(120, 40), "\x1b[8;40;120t");
+}
+
+#[test]
 fn default_output_benchmark_uses_complete_lines() {
     let bytes = DEFAULT_OUTPUT_BENCHMARK_MIB * MIB_BYTES;
     assert_eq!(bytes % OUTPUT_BENCHMARK_LINE_BYTES, 0);

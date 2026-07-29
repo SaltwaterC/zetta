@@ -160,6 +160,9 @@ as separate artifacts associated with the JSON report.
   and tests together when adding a user-facing setting.
 - Keep action registration, keybindings, command-palette availability, and
   settings UI behavior synchronized when adding or renaming actions.
+- When adding a command-line flag, provide and document both a long form and
+  a non-conflicting short form; update shell completions and parser tests for
+  both spellings.
 - Preserve cross-platform behavior. Avoid assuming Unix paths, shells, or
   environment variables in shared code.
 - Add focused regression tests for bug fixes and boundary-condition tests for

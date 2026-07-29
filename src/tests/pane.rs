@@ -9,6 +9,7 @@ fn terminal_size_label_uses_columns_before_rows() {
 fn two_pane_layout_rotates_between_axes() {
     let mut layout = PaneLayout::Split {
         axis: SplitAxis::Horizontal,
+        first_ratio: DEFAULT_PANE_SPLIT_RATIO,
         first: Box::new(PaneLayout::Pane(1)),
         second: Box::new(PaneLayout::Pane(2)),
     };
@@ -18,6 +19,7 @@ fn two_pane_layout_rotates_between_axes() {
         layout,
         PaneLayout::Split {
             axis: SplitAxis::Vertical,
+            first_ratio: DEFAULT_PANE_SPLIT_RATIO,
             first: Box::new(PaneLayout::Pane(1)),
             second: Box::new(PaneLayout::Pane(2)),
         }
@@ -27,6 +29,7 @@ fn two_pane_layout_rotates_between_axes() {
         layout,
         PaneLayout::Split {
             axis: SplitAxis::Horizontal,
+            first_ratio: DEFAULT_PANE_SPLIT_RATIO,
             first: Box::new(PaneLayout::Pane(1)),
             second: Box::new(PaneLayout::Pane(2)),
         }
@@ -38,17 +41,21 @@ fn non_two_pane_layouts_do_not_rotate() {
     let mut single = PaneLayout::Pane(1);
     let mut three_right = PaneLayout::Split {
         axis: SplitAxis::Vertical,
+        first_ratio: DEFAULT_PANE_SPLIT_RATIO,
         first: Box::new(PaneLayout::Pane(1)),
         second: Box::new(PaneLayout::Split {
             axis: SplitAxis::Horizontal,
+            first_ratio: DEFAULT_PANE_SPLIT_RATIO,
             first: Box::new(PaneLayout::Pane(2)),
             second: Box::new(PaneLayout::Pane(3)),
         }),
     };
     let mut three_left = PaneLayout::Split {
         axis: SplitAxis::Vertical,
+        first_ratio: DEFAULT_PANE_SPLIT_RATIO,
         first: Box::new(PaneLayout::Split {
             axis: SplitAxis::Horizontal,
+            first_ratio: DEFAULT_PANE_SPLIT_RATIO,
             first: Box::new(PaneLayout::Pane(1)),
             second: Box::new(PaneLayout::Pane(2)),
         }),
@@ -78,6 +85,7 @@ fn pane_template_replaces_only_the_target_leaf() {
     };
     let mut layout = PaneLayout::Split {
         axis: SplitAxis::Vertical,
+        first_ratio: DEFAULT_PANE_SPLIT_RATIO,
         first: Box::new(PaneLayout::Pane(1)),
         second: Box::new(PaneLayout::Pane(2)),
     };
@@ -88,9 +96,11 @@ fn pane_template_replaces_only_the_target_leaf() {
         layout,
         PaneLayout::Split {
             axis: SplitAxis::Vertical,
+            first_ratio: DEFAULT_PANE_SPLIT_RATIO,
             first: Box::new(PaneLayout::Pane(1)),
             second: Box::new(PaneLayout::Split {
                 axis: SplitAxis::Horizontal,
+                first_ratio: DEFAULT_PANE_SPLIT_RATIO,
                 first: Box::new(PaneLayout::Pane(2)),
                 second: Box::new(PaneLayout::Pane(3)),
             }),
@@ -102,6 +112,7 @@ fn pane_template_replaces_only_the_target_leaf() {
 fn pane_layout_replacement_moves_the_tree_without_cloning_it() {
     let replacement = PaneLayout::Split {
         axis: SplitAxis::Horizontal,
+        first_ratio: DEFAULT_PANE_SPLIT_RATIO,
         first: Box::new(PaneLayout::Pane(10)),
         second: Box::new(PaneLayout::Pane(11)),
     };
@@ -111,6 +122,7 @@ fn pane_layout_replacement_moves_the_tree_without_cloning_it() {
     };
     let mut layout = PaneLayout::Split {
         axis: SplitAxis::Vertical,
+        first_ratio: DEFAULT_PANE_SPLIT_RATIO,
         first: Box::new(PaneLayout::Pane(1)),
         second: Box::new(PaneLayout::Pane(2)),
     };
@@ -132,13 +144,16 @@ fn four_commands_tile_into_quarters() {
         PaneLayout::tiled(&[1, 2, 3, 4]),
         Some(PaneLayout::Split {
             axis: SplitAxis::Vertical,
+            first_ratio: DEFAULT_PANE_SPLIT_RATIO,
             first: Box::new(PaneLayout::Split {
                 axis: SplitAxis::Horizontal,
+                first_ratio: DEFAULT_PANE_SPLIT_RATIO,
                 first: Box::new(PaneLayout::Pane(1)),
                 second: Box::new(PaneLayout::Pane(2)),
             }),
             second: Box::new(PaneLayout::Split {
                 axis: SplitAxis::Horizontal,
+                first_ratio: DEFAULT_PANE_SPLIT_RATIO,
                 first: Box::new(PaneLayout::Pane(3)),
                 second: Box::new(PaneLayout::Pane(4)),
             }),
@@ -152,9 +167,11 @@ fn three_commands_use_the_three_right_layout() {
         PaneLayout::tiled(&[1, 2, 3]),
         Some(PaneLayout::Split {
             axis: SplitAxis::Vertical,
+            first_ratio: DEFAULT_PANE_SPLIT_RATIO,
             first: Box::new(PaneLayout::Pane(1)),
             second: Box::new(PaneLayout::Split {
                 axis: SplitAxis::Horizontal,
+                first_ratio: DEFAULT_PANE_SPLIT_RATIO,
                 first: Box::new(PaneLayout::Pane(2)),
                 second: Box::new(PaneLayout::Pane(3)),
             }),
@@ -263,6 +280,7 @@ fn configured_template_layout_is_built_through_a_borrow() {
         layout,
         Some(PaneLayout::Split {
             axis: SplitAxis::Vertical,
+            first_ratio: DEFAULT_PANE_SPLIT_RATIO,
             first: Box::new(PaneLayout::Pane(10)),
             second: Box::new(PaneLayout::Pane(11)),
         })
@@ -346,6 +364,7 @@ fn nested_pane_layouts_split_and_collapse() {
         layout,
         PaneLayout::Split {
             axis: SplitAxis::Horizontal,
+            first_ratio: DEFAULT_PANE_SPLIT_RATIO,
             first: Box::new(PaneLayout::Pane(1)),
             second: Box::new(PaneLayout::Pane(3)),
         }
@@ -363,9 +382,11 @@ fn pane_layouts_can_insert_new_panes_before_the_active_pane() {
         layout,
         PaneLayout::Split {
             axis: SplitAxis::Vertical,
+            first_ratio: DEFAULT_PANE_SPLIT_RATIO,
             first: Box::new(PaneLayout::Pane(2)),
             second: Box::new(PaneLayout::Split {
                 axis: SplitAxis::Horizontal,
+                first_ratio: DEFAULT_PANE_SPLIT_RATIO,
                 first: Box::new(PaneLayout::Pane(3)),
                 second: Box::new(PaneLayout::Pane(1)),
             }),
@@ -382,6 +403,7 @@ fn layout_removes_multiple_panes_in_one_traversal() {
         layout.without_all(&minimized),
         Some(PaneLayout::Split {
             axis: SplitAxis::Vertical,
+            first_ratio: DEFAULT_PANE_SPLIT_RATIO,
             first: Box::new(PaneLayout::Pane(1)),
             second: Box::new(PaneLayout::Pane(4)),
         })
@@ -433,6 +455,7 @@ fn split_profile_comes_from_the_active_pane() {
         next_pane_label: 3,
         layout: PaneLayout::Split {
             axis: SplitAxis::Vertical,
+            first_ratio: DEFAULT_PANE_SPLIT_RATIO,
             first: Box::new(PaneLayout::Pane(1)),
             second: Box::new(PaneLayout::Pane(2)),
         },
@@ -562,6 +585,51 @@ fn directional_focus_moves_between_quarter_panes() {
     assert_eq!(layout.regions().len(), 4);
 }
 
+#[test]
+fn pane_resize_boundary_moves_the_nearest_matching_split() {
+    let mut layout = PaneLayout::Split {
+        axis: SplitAxis::Vertical,
+        first_ratio: DEFAULT_PANE_SPLIT_RATIO,
+        first: Box::new(PaneLayout::Pane(1)),
+        second: Box::new(PaneLayout::Split {
+            axis: SplitAxis::Horizontal,
+            first_ratio: DEFAULT_PANE_SPLIT_RATIO,
+            first: Box::new(PaneLayout::Pane(2)),
+            second: Box::new(PaneLayout::Pane(3)),
+        }),
+    };
+
+    let boundary = layout.resize_boundary(1, SplitAxis::Vertical).unwrap();
+    assert_eq!(boundary.parent_fraction, 1.);
+    assert!(boundary.active_is_first);
+    assert_eq!(boundary.sibling_panes, [2, 3]);
+    assert!(layout.adjust_resize_boundary(1, SplitAxis::Vertical, 0.1));
+
+    let first = layout
+        .regions()
+        .into_iter()
+        .find(|region| region.id == 1)
+        .unwrap();
+    assert!((first.right - first.left - 0.6).abs() < f32::EPSILON);
+
+    let mut layout = PaneLayout::Split {
+        axis: SplitAxis::Vertical,
+        first_ratio: DEFAULT_PANE_SPLIT_RATIO,
+        first: Box::new(PaneLayout::Pane(1)),
+        second: Box::new(PaneLayout::Pane(2)),
+    };
+    assert!(layout.adjust_resize_boundary(2, SplitAxis::Vertical, 0.1));
+    let second = layout
+        .regions()
+        .into_iter()
+        .find(|region| region.id == 2)
+        .unwrap();
+    assert!((second.right - second.left - 0.6).abs() < f32::EPSILON);
+
+    let boundary = layout.resize_boundary(2, SplitAxis::Vertical).unwrap();
+    assert!(!boundary.active_is_first);
+}
+
 fn pane_management_tab() -> Tab {
     let profile = Profile {
         name: "System".to_owned(),
@@ -582,9 +650,11 @@ fn pane_management_tab() -> Tab {
     };
     let layout = PaneLayout::Split {
         axis: SplitAxis::Vertical,
+        first_ratio: DEFAULT_PANE_SPLIT_RATIO,
         first: Box::new(PaneLayout::Pane(1)),
         second: Box::new(PaneLayout::Split {
             axis: SplitAxis::Horizontal,
+            first_ratio: DEFAULT_PANE_SPLIT_RATIO,
             first: Box::new(PaneLayout::Pane(2)),
             second: Box::new(PaneLayout::Pane(3)),
         }),
@@ -635,9 +705,11 @@ fn transferred_tabs_receive_target_window_ids_consistently() {
         tab.layout,
         PaneLayout::Split {
             axis: SplitAxis::Vertical,
+            first_ratio: DEFAULT_PANE_SPLIT_RATIO,
             first: Box::new(PaneLayout::Pane(20)),
             second: Box::new(PaneLayout::Split {
                 axis: SplitAxis::Horizontal,
+                first_ratio: DEFAULT_PANE_SPLIT_RATIO,
                 first: Box::new(PaneLayout::Pane(21)),
                 second: Box::new(PaneLayout::Pane(22)),
             }),
@@ -756,6 +828,7 @@ fn minimizing_and_restoring_preserves_the_nested_split_position() {
         tab.visible_layout(),
         Some(PaneLayout::Split {
             axis: SplitAxis::Vertical,
+            first_ratio: DEFAULT_PANE_SPLIT_RATIO,
             first: Box::new(PaneLayout::Pane(1)),
             second: Box::new(PaneLayout::Pane(3)),
         })

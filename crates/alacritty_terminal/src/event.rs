@@ -42,6 +42,11 @@ pub enum Event {
     /// Request to write the text area size.
     TextAreaSizeRequest(Arc<dyn Fn(WindowSize) -> String + Sync + Send + 'static>),
 
+    /// Request that the terminal viewport be resized to the given character
+    /// dimensions. This is emitted for the xterm `CSI 8 ; rows ; columns t`
+    /// window-manipulation sequence.
+    ResizeRequest { rows: u16, columns: u16 },
+
     /// Cursor blinking state has changed.
     CursorBlinkingChange,
 
@@ -64,6 +69,9 @@ impl Debug for Event {
             Event::ClipboardStore(ty, text) => write!(f, "ClipboardStore({ty:?}, {text})"),
             Event::ClipboardLoad(ty, _) => write!(f, "ClipboardLoad({ty:?})"),
             Event::TextAreaSizeRequest(_) => write!(f, "TextAreaSizeRequest"),
+            Event::ResizeRequest { rows, columns } => {
+                write!(f, "ResizeRequest({columns}x{rows})")
+            },
             Event::ColorRequest(index, _) => write!(f, "ColorRequest({index})"),
             Event::PtyWrite(text) => write!(f, "PtyWrite({text})"),
             Event::Title(title) => write!(f, "Title({title})"),

@@ -12,6 +12,7 @@
       "ctrl-shift-o": "zetta::SplitHorizontalDown",
       "ctrl-shift-e": "zetta::SplitVerticalRight",
       "alt-shift-l": "zetta::RotatePaneLayout",
+      "ctrl-shift-j": "zetta::TogglePaneResizeMode",
       "alt-shift-o": ["zetta::ApplyPaneSplitTemplate", { "name": "three-right" }],
       "alt-shift-e": ["zetta::ApplyPaneSplitTemplate", { "name": "quarters" }],
       "alt-shift-a": "terminal_view::SelectAll",
@@ -58,6 +59,15 @@
       "ctrl-&": ["zetta::OpenProfile", { "slot": 7 }],
       "ctrl-*": ["zetta::OpenProfile", { "slot": 8 }],
       "ctrl-(": ["zetta::OpenProfile", { "slot": 9 }]
+    }
+  },
+  {
+    "context": "Zetta > PaneResize > Terminal",
+    "bindings": {
+      "left": "zetta::ResizePaneLeft",
+      "right": "zetta::ResizePaneRight",
+      "up": "zetta::ResizePaneUp",
+      "down": "zetta::ResizePaneDown"
     }
   },
   {

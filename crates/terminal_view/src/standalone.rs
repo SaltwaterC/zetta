@@ -216,6 +216,7 @@ pub struct TerminalView {
     search_select_all: bool,
     search_cursor: usize,
     emit_input_events: bool,
+    input_enabled: bool,
     pub(crate) focus_handle: FocusHandle,
     cursor_shape: CursorShape,
     blink_manager: Entity<BlinkManager>,
@@ -310,6 +311,7 @@ impl TerminalView {
                     view.blinking_terminal_enabled = *blinking;
                     view.update_blinking(window, cx);
                 }
+                Event::ResizeRequested { .. } => {}
                 Event::TitleChanged => cx.emit(TerminalViewEvent::TitleChanged),
                 Event::CloseTerminal => cx.emit(TerminalViewEvent::Close),
                 Event::NewNavigationTarget(target) => {
@@ -358,6 +360,7 @@ impl TerminalView {
             search_select_all: false,
             search_cursor: 0,
             emit_input_events: false,
+            input_enabled: true,
             focus_handle,
             cursor_shape: TerminalSettings::get_global(cx).cursor_shape,
             blink_manager,
@@ -387,6 +390,22 @@ impl TerminalView {
 
     pub fn set_emit_input_events(&mut self, enabled: bool) {
         self.emit_input_events = enabled;
+    }
+
+    pub fn input_enabled(&self) -> bool {
+        self.input_enabled
+    }
+
+    /// Controls user input without affecting terminal output or programmatic
+    /// input used to restore a pane or broadcast an existing command.
+    pub fn set_input_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.input_enabled != enabled {
+            self.input_enabled = enabled;
+            if !enabled {
+                self.ime_state = None;
+            }
+            cx.notify();
+        }
     }
 
     pub fn set_window_corner_radii(
@@ -473,6 +492,9 @@ impl TerminalView {
     }
 
     pub(crate) fn set_marked_text(&mut self, text: String, cx: &mut Context<Self>) {
+        if !self.input_enabled {
+            return;
+        }
         self.ime_state = (!text.is_empty()).then_some(ImeState { marked_text: text });
         cx.notify();
     }
@@ -483,7 +505,7 @@ impl TerminalView {
     }
 
     pub(crate) fn commit_text(&mut self, text: &str, cx: &mut Context<Self>) {
-        if !text.is_empty() {
+        if self.input_enabled && !text.is_empty() {
             self.terminal
                 .update(cx, |terminal, _| terminal.input(text.as_bytes().to_vec()));
             if let Some(event) = enabled_input_event(self.emit_input_events, || {
@@ -736,6 +758,9 @@ impl TerminalView {
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.input_enabled {
+            return;
+        }
         if self.search_query.is_some() {
             match event.keystroke.key.as_str() {
                 "escape" => self.dismiss_search(&DismissSearch, window, cx),
@@ -878,6 +903,9 @@ impl TerminalView {
     }
 
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.input_enabled {
+            return;
+        }
         let Some(clipboard) = cx.read_from_clipboard() else {
             return;
         };
@@ -901,6 +929,9 @@ impl TerminalView {
     }
 
     fn paste_trimmed(&mut self, _: &PasteTrimmed, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.input_enabled {
+            return;
+        }
         let Some(clipboard) = cx.read_from_clipboard() else {
             return;
         };
@@ -1030,6 +1061,9 @@ impl TerminalView {
     }
 
     fn send_text(&mut self, text: &SendText, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.input_enabled {
+            return;
+        }
         self.terminal.update(cx, |terminal, _| {
             terminal.input(text.0.clone().into_bytes())
         });
@@ -1041,6 +1075,9 @@ impl TerminalView {
     }
 
     fn send_keystroke(&mut self, key: &SendKeystroke, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.input_enabled {
+            return;
+        }
         if let Ok(keystroke) = Keystroke::parse(&key.0) {
             if self.process_keystroke(&keystroke, cx) {
                 if let Some(event) = enabled_input_event(self.emit_input_events, || {

@@ -51,8 +51,12 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     assert!(help.contains("Profiles accepted by --profile NAME (case-insensitive):"));
     assert!(help.contains("  System\n  Operations"));
     assert!(help.contains("Select one of the profiles listed above"));
-    assert!(help.contains("zetta terminal-size [--json]"));
-    assert!(help.contains("terminal-size                       Print the current terminal size"));
+    assert!(help.contains("zetta terminal-size [--json | --resize"));
+    assert!(
+        help.contains(
+            "terminal-size                       Print or resize the current terminal pane"
+        )
+    );
     assert!(help.contains("zetta init SHELL"));
     assert!(help.contains("init                                Generate shell integration"));
 
@@ -115,16 +119,131 @@ fn sessions_subcommand_supports_human_and_json_output() {
 fn terminal_size_subcommand_bypasses_application_startup() {
     let args = parse_args_from([OsString::from("terminal-size")]).unwrap();
 
-    assert_eq!(args.mode, StartupMode::PrintTerminalSize { json: false });
+    assert_eq!(
+        args.mode,
+        StartupMode::PrintTerminalSize {
+            json: false,
+            resize: None,
+        }
+    );
     assert!(!should_handoff_to_existing_process(&args));
     let json =
         parse_args_from([OsString::from("terminal-size"), OsString::from("--json")]).unwrap();
     let short_json =
         parse_args_from([OsString::from("terminal-size"), OsString::from("-j")]).unwrap();
-    assert_eq!(json.mode, StartupMode::PrintTerminalSize { json: true });
+    assert_eq!(
+        json.mode,
+        StartupMode::PrintTerminalSize {
+            json: true,
+            resize: None,
+        }
+    );
     assert_eq!(short_json, json);
     assert!(
         parse_args_from([OsString::from("terminal-size"), OsString::from("--unknown")]).is_err()
+    );
+}
+
+#[test]
+fn terminal_size_resize_accepts_each_dimension_independently() {
+    let columns = parse_args_from([
+        OsString::from("terminal-size"),
+        OsString::from("--resize"),
+        OsString::from("--columns"),
+        OsString::from("120"),
+    ])
+    .unwrap();
+    assert_eq!(
+        columns.mode,
+        StartupMode::PrintTerminalSize {
+            json: false,
+            resize: Some(TerminalResize {
+                columns: Some(120),
+                rows: None,
+            }),
+        }
+    );
+    let short_columns = parse_args_from([
+        OsString::from("terminal-size"),
+        OsString::from("-r"),
+        OsString::from("-c"),
+        OsString::from("120"),
+    ])
+    .unwrap();
+    assert_eq!(short_columns, columns);
+
+    let rows = parse_args_from([
+        OsString::from("terminal-size"),
+        OsString::from("--resize"),
+        OsString::from("--rows"),
+        OsString::from("40"),
+    ])
+    .unwrap();
+    assert_eq!(
+        rows.mode,
+        StartupMode::PrintTerminalSize {
+            json: false,
+            resize: Some(TerminalResize {
+                columns: None,
+                rows: Some(40),
+            }),
+        }
+    );
+    let short_rows = parse_args_from([
+        OsString::from("terminal-size"),
+        OsString::from("-r"),
+        OsString::from("-R"),
+        OsString::from("40"),
+    ])
+    .unwrap();
+    assert_eq!(short_rows, rows);
+
+    let dimensions = parse_args_from([
+        OsString::from("terminal-size"),
+        OsString::from("--resize"),
+        OsString::from("--columns"),
+        OsString::from("120"),
+        OsString::from("--rows"),
+        OsString::from("40"),
+    ])
+    .unwrap();
+    assert_eq!(
+        dimensions.mode,
+        StartupMode::PrintTerminalSize {
+            json: false,
+            resize: Some(TerminalResize {
+                columns: Some(120),
+                rows: Some(40),
+            }),
+        }
+    );
+    let short_dimensions = parse_args_from([
+        OsString::from("terminal-size"),
+        OsString::from("-r"),
+        OsString::from("-c"),
+        OsString::from("120"),
+        OsString::from("-R"),
+        OsString::from("40"),
+    ])
+    .unwrap();
+    assert_eq!(short_dimensions, dimensions);
+
+    assert!(
+        parse_args_from([
+            OsString::from("terminal-size"),
+            OsString::from("--columns"),
+            OsString::from("120"),
+        ])
+        .is_err()
+    );
+    assert!(
+        parse_args_from([
+            OsString::from("terminal-size"),
+            OsString::from("--resize"),
+            OsString::from("--rows"),
+            OsString::from("0"),
+        ])
+        .is_err()
     );
 }
 
@@ -1006,6 +1125,34 @@ fn pane_layout_rotation_uses_the_requested_shortcut() {
         rotate_pane_layout_keybinding().match_keystrokes(&[shortcut]),
         Some(false)
     );
+}
+
+#[test]
+fn pane_resize_mode_uses_a_dedicated_ctrl_shift_shortcut() {
+    assert_eq!(TOGGLE_PANE_RESIZE_MODE_KEYBINDING, "ctrl-shift-j");
+    let shortcut = gpui::Keystroke::parse(TOGGLE_PANE_RESIZE_MODE_KEYBINDING).unwrap();
+    assert_eq!(
+        pane_resize_mode_keybinding().match_keystrokes(&[shortcut]),
+        Some(false)
+    );
+    for (binding, shortcut) in pane_resize_keybindings()
+        .into_iter()
+        .zip(["left", "right", "up", "down"])
+    {
+        let shortcut = gpui::Keystroke::parse(shortcut).unwrap();
+        assert_eq!(binding.match_keystrokes(&[shortcut]), Some(false));
+        assert!(
+            binding
+                .predicate()
+                .expect("pane resize shortcut should be scoped to a terminal")
+                .depth_of(&[
+                    gpui::KeyContext::parse("Zetta").unwrap(),
+                    gpui::KeyContext::parse("PaneResize").unwrap(),
+                    gpui::KeyContext::parse("Terminal").unwrap(),
+                ])
+                .is_some()
+        );
+    }
 }
 
 #[test]

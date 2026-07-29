@@ -6,6 +6,9 @@ names from Zetta's current configuration, so `zetta --profile <Tab>` completes
 them as well. The script also provides `ztftp`, a shortcut for the built-in
 TFTP client; it has the same TFTP completion as `zetta tftp`.
 
+It also completes the full-length `zetta terminal-size` resize flags, which
+resize the current Zetta pane while retaining an omitted dimension.
+
 The supported shell names are `bash`, `zsh`, `fish`, and `powershell` (`pwsh`
 is accepted as an alternative spelling).
 

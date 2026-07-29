@@ -4,6 +4,8 @@ pub(crate) const MAX_PANES_PER_TAB: usize = 64;
 pub(crate) const MAX_CONCURRENT_MULTI_COMMAND_SPAWNS: usize = 4;
 pub(crate) const TERMINAL_SPAWN_NOTIFY_INTERVAL: Duration = Duration::from_millis(16);
 pub(crate) const PANE_OUTPUT_DEFAULT_FILENAME: &str = "terminal-output.txt";
+pub(crate) const PANE_SPLIT_RATIO_SCALE: u16 = 1_000;
+pub(crate) const DEFAULT_PANE_SPLIT_RATIO: u16 = PANE_SPLIT_RATIO_SCALE / 2;
 
 pub(crate) fn terminal_size_label(columns: usize, rows: usize) -> String {
     format!("{columns} × {rows}")
@@ -216,11 +218,27 @@ pub(crate) struct PaneRegion {
     pub(crate) bottom: f32,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PaneResizeBoundary {
+    /// The fraction of the complete pane layout occupied by the split along
+    /// the axis being resized.
+    pub(crate) parent_fraction: f32,
+    /// Whether the pane being resized is in the split's first child. Arrow
+    /// keys move a screen-directional edge, so the second child uses the
+    /// inverse size delta.
+    pub(crate) active_is_first: bool,
+    pub(crate) sibling_panes: Vec<u64>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PaneLayout {
     Pane(u64),
     Split {
         axis: SplitAxis,
+        /// The first child's share of the available extent on `axis`, scaled
+        /// by [`PANE_SPLIT_RATIO_SCALE`]. An integer keeps layouts comparable
+        /// and avoids accumulating floating point drift while resizing.
+        first_ratio: u16,
         first: Box<PaneLayout>,
         second: Box<PaneLayout>,
     },
@@ -233,6 +251,7 @@ pub(crate) fn background_pane_layout(layout: &PaneLayout) -> BackgroundPaneLayou
             axis,
             first,
             second,
+            ..
         } => BackgroundPaneLayout::Split {
             axis: match axis {
                 SplitAxis::Horizontal => "horizontal",
@@ -251,6 +270,7 @@ impl PaneLayout {
             axis,
             first,
             second,
+            ..
         } = self
         else {
             return false;
@@ -291,6 +311,7 @@ impl PaneLayout {
             };
             PaneLayout::Split {
                 axis,
+                first_ratio: DEFAULT_PANE_SPLIT_RATIO,
                 first: Box::new(build(&pane_ids[..midpoint], next_axis)),
                 second: Box::new(build(&pane_ids[midpoint..], next_axis)),
             }
@@ -314,6 +335,7 @@ impl PaneLayout {
                 };
                 *self = Self::Split {
                     axis,
+                    first_ratio: DEFAULT_PANE_SPLIT_RATIO,
                     first: Box::new(Self::Pane(first)),
                     second: Box::new(Self::Pane(second)),
                 };
@@ -371,6 +393,7 @@ impl PaneLayout {
                     PaneSplitAxis::Horizontal => SplitAxis::Horizontal,
                     PaneSplitAxis::Vertical => SplitAxis::Vertical,
                 },
+                first_ratio: DEFAULT_PANE_SPLIT_RATIO,
                 first: Box::new(Self::from_template(first, pane_ids)),
                 second: Box::new(Self::from_template(second, pane_ids)),
             },
@@ -382,11 +405,13 @@ impl PaneLayout {
             Self::Pane(id) => (id != target).then_some(Self::Pane(id)),
             Self::Split {
                 axis,
+                first_ratio,
                 first,
                 second,
             } => match (first.without(target), second.without(target)) {
                 (Some(first), Some(second)) => Some(Self::Split {
                     axis,
+                    first_ratio,
                     first: Box::new(first),
                     second: Box::new(second),
                 }),
@@ -401,11 +426,13 @@ impl PaneLayout {
             Self::Pane(id) => (!targets.contains(id)).then_some(Self::Pane(*id)),
             Self::Split {
                 axis,
+                first_ratio,
                 first,
                 second,
             } => match (first.without_all(targets), second.without_all(targets)) {
                 (Some(first), Some(second)) => Some(Self::Split {
                     axis: *axis,
+                    first_ratio: *first_ratio,
                     first: Box::new(first),
                     second: Box::new(second),
                 }),
@@ -446,20 +473,171 @@ impl PaneLayout {
             }),
             Self::Split {
                 axis: SplitAxis::Horizontal,
+                first_ratio,
                 first,
                 second,
             } => {
-                first.collect_regions(left, top, width, height / 2., regions);
-                second.collect_regions(left, top + height / 2., width, height / 2., regions);
+                let first_height = height * Self::ratio_fraction(*first_ratio);
+                first.collect_regions(left, top, width, first_height, regions);
+                second.collect_regions(
+                    left,
+                    top + first_height,
+                    width,
+                    height - first_height,
+                    regions,
+                );
             }
             Self::Split {
                 axis: SplitAxis::Vertical,
+                first_ratio,
                 first,
                 second,
             } => {
-                first.collect_regions(left, top, width / 2., height, regions);
-                second.collect_regions(left + width / 2., top, width / 2., height, regions);
+                let first_width = width * Self::ratio_fraction(*first_ratio);
+                first.collect_regions(left, top, first_width, height, regions);
+                second.collect_regions(
+                    left + first_width,
+                    top,
+                    width - first_width,
+                    height,
+                    regions,
+                );
             }
+        }
+    }
+
+    pub(crate) fn ratio_fraction(first_ratio: u16) -> f32 {
+        f32::from(first_ratio) / f32::from(PANE_SPLIT_RATIO_SCALE)
+    }
+
+    /// Finds the closest split on `axis` that can resize `pane_id` against
+    /// its sibling subtree.
+    pub(crate) fn resize_boundary(
+        &self,
+        pane_id: u64,
+        axis: SplitAxis,
+    ) -> Option<PaneResizeBoundary> {
+        self.resize_boundary_inner(pane_id, axis, 1.)
+    }
+
+    fn resize_boundary_inner(
+        &self,
+        pane_id: u64,
+        axis: SplitAxis,
+        parent_fraction: f32,
+    ) -> Option<PaneResizeBoundary> {
+        let Self::Split {
+            axis: split_axis,
+            first_ratio,
+            first,
+            second,
+        } = self
+        else {
+            return None;
+        };
+        let first_fraction = Self::ratio_fraction(*first_ratio);
+        if first.contains_pane(pane_id) {
+            return first
+                .resize_boundary_inner(pane_id, axis, parent_fraction * first_fraction)
+                .or_else(|| {
+                    (*split_axis == axis).then(|| PaneResizeBoundary {
+                        parent_fraction,
+                        active_is_first: true,
+                        sibling_panes: second.pane_ids(),
+                    })
+                });
+        }
+        if second.contains_pane(pane_id) {
+            return second
+                .resize_boundary_inner(pane_id, axis, parent_fraction * (1. - first_fraction))
+                .or_else(|| {
+                    (*split_axis == axis).then(|| PaneResizeBoundary {
+                        parent_fraction,
+                        active_is_first: false,
+                        sibling_panes: first.pane_ids(),
+                    })
+                });
+        }
+        None
+    }
+
+    /// Adjust the closest resize boundary for a pane. A positive delta grows
+    /// the pane and a negative delta shrinks it. The delta is expressed as a
+    /// fraction of that split's available size.
+    pub(crate) fn adjust_resize_boundary(
+        &mut self,
+        pane_id: u64,
+        axis: SplitAxis,
+        delta: f32,
+    ) -> bool {
+        self.adjust_resize_boundary_inner(pane_id, axis, delta)
+            .unwrap_or(false)
+    }
+
+    fn adjust_resize_boundary_inner(
+        &mut self,
+        pane_id: u64,
+        axis: SplitAxis,
+        delta: f32,
+    ) -> Option<bool> {
+        let Self::Split {
+            axis: split_axis,
+            first_ratio,
+            first,
+            second,
+        } = self
+        else {
+            return None;
+        };
+        if first.contains_pane(pane_id) {
+            if let Some(result) = first.adjust_resize_boundary_inner(pane_id, axis, delta) {
+                return Some(result);
+            }
+            if *split_axis == axis {
+                return Some(Self::adjust_first_ratio(first_ratio, delta));
+            }
+        } else if second.contains_pane(pane_id) {
+            if let Some(result) = second.adjust_resize_boundary_inner(pane_id, axis, delta) {
+                return Some(result);
+            }
+            if *split_axis == axis {
+                return Some(Self::adjust_first_ratio(first_ratio, -delta));
+            }
+        }
+        None
+    }
+
+    fn adjust_first_ratio(first_ratio: &mut u16, delta: f32) -> bool {
+        let delta = (delta * f32::from(PANE_SPLIT_RATIO_SCALE)).round() as i32;
+        if delta == 0 {
+            return false;
+        }
+        let ratio = i32::from(*first_ratio);
+        let clamped = (ratio + delta).clamp(1, i32::from(PANE_SPLIT_RATIO_SCALE - 1));
+        if clamped == ratio {
+            return false;
+        }
+        *first_ratio = clamped as u16;
+        true
+    }
+
+    fn contains_pane(&self, pane_id: u64) -> bool {
+        match self {
+            Self::Pane(id) => *id == pane_id,
+            Self::Split { first, second, .. } => {
+                first.contains_pane(pane_id) || second.contains_pane(pane_id)
+            }
+        }
+    }
+
+    fn pane_ids(&self) -> Vec<u64> {
+        match self {
+            Self::Pane(id) => vec![*id],
+            Self::Split { first, second, .. } => first
+                .pane_ids()
+                .into_iter()
+                .chain(second.pane_ids())
+                .collect(),
         }
     }
 

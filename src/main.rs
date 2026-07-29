@@ -88,6 +88,8 @@ use ui::{
 use util::{ResultExt as _, paths::PathStyle};
 use zetta_assets::ZettaAssets;
 
+const ZETTA_MINIMUM_WINDOW_SIZE: Size<Pixels> = size(px(520.), px(320.));
+
 actions!(
     zetta,
     [
@@ -116,6 +118,11 @@ actions!(
         SplitVerticalRight,
         SplitVerticalLeft,
         RotatePaneLayout,
+        TogglePaneResizeMode,
+        ResizePaneLeft,
+        ResizePaneRight,
+        ResizePaneUp,
+        ResizePaneDown,
         FocusPaneLeft,
         FocusPaneRight,
         FocusPaneUp,

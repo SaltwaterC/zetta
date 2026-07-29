@@ -42,13 +42,42 @@ fn generated_shell_syntax_uses_the_native_powershell_completer_signature() {
     assert!(
         ShellIntegration::Zsh
             .script(&profiles)
-            .contains("terminal-size|sessions)")
+            .contains("terminal-size)")
     );
     assert!(
         ShellIntegration::Zsh
             .script(&profiles)
             .contains("compadd -S ' ' -- benchmark")
     );
+}
+
+#[test]
+fn terminal_size_completions_include_pane_resize_options() {
+    let profiles = profiles();
+    for shell in [
+        ShellIntegration::Bash,
+        ShellIntegration::Fish,
+        ShellIntegration::PowerShell,
+        ShellIntegration::Zsh,
+    ] {
+        let script = shell.script(&profiles);
+        match shell {
+            ShellIntegration::Fish => {
+                assert!(script.contains("-l resize"));
+                assert!(script.contains("-l columns"));
+                assert!(script.contains("-l rows"));
+                assert!(!script.contains("-s r -l resize"));
+                assert!(!script.contains("-s c -l columns"));
+                assert!(!script.contains("-s R -l rows"));
+            }
+            _ => {
+                assert!(script.contains("--resize"));
+                assert!(script.contains("--columns"));
+                assert!(script.contains("--rows"));
+                assert!(!script.contains("--resize -r"));
+            }
+        }
+    }
 }
 
 #[test]
@@ -65,6 +94,34 @@ fn generated_scripts_include_root_flags_and_configured_profiles() {
         assert!(script.contains("config"));
         assert!(script.contains("WSL: Ubuntu"));
         assert!(script.contains("profile-report"));
+    }
+}
+
+#[test]
+fn generated_scripts_only_offer_long_form_flags() {
+    let profiles = profiles();
+    for shell in [
+        ShellIntegration::Bash,
+        ShellIntegration::Fish,
+        ShellIntegration::PowerShell,
+        ShellIntegration::Zsh,
+    ] {
+        let script = shell.script(&profiles);
+        match shell {
+            ShellIntegration::Bash => assert!(script.contains(
+                "terminal-size sessions init tftp --help --version --config --keymap --profile'"
+            )),
+            ShellIntegration::Fish => {
+                assert!(script.contains("-l profile -r"));
+                assert!(!script.contains("-s p -l profile"));
+            }
+            ShellIntegration::PowerShell => assert!(
+                script.contains("'--help', '--version', '--config', '--keymap', '--profile'")
+            ),
+            ShellIntegration::Zsh => {
+                assert!(script.contains("compadd -- --help --version --config --keymap --profile"))
+            }
+        }
     }
 }
 

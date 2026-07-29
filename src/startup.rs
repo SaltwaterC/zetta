@@ -33,6 +33,7 @@ pub(crate) enum StartupMode {
     },
     PrintTerminalSize {
         json: bool,
+        resize: Option<TerminalResize>,
     },
     ListBackgroundSessions {
         json: bool,
@@ -43,6 +44,12 @@ pub(crate) enum StartupMode {
     TerminalRenderingWorkload,
     TerminalCheckerboardWorkload,
     TerminalSparseUpdateWorkload,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TerminalResize {
+    pub(crate) columns: Option<usize>,
+    pub(crate) rows: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -95,13 +102,27 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         .collect::<Vec<_>>()
         .join("\n  ");
     format!(
-        "Zetta Terminal\n\nUsage: zetta [OPTIONS]\n       zetta benchmark [OPTIONS]\n       zetta benchmark-output [OPTIONS]\n       zetta terminal-size [--json]\n       zetta sessions [--json]\n       zetta init SHELL{tftp_usage}\n\nCommands:\n  benchmark                           Profile terminal rendering\n  benchmark-output                    Write and time a text payload (default: 10 MiB)\n  terminal-size                       Print the current terminal size\n  sessions                            List detached background sessions\n  init                                Generate shell integration{tftp_command}\n\nBuilt-in features:\n  {}\n\nProfiles accepted by --profile NAME (case-insensitive):\n  {profiles}\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Select one of the profiles listed above",
+        "Zetta Terminal\n\nUsage: zetta [OPTIONS]\n       zetta benchmark [OPTIONS]\n       zetta benchmark-output [OPTIONS]\n       zetta terminal-size [--json | --resize [--columns COLUMNS] [--rows ROWS]]\n       zetta sessions [--json]\n       zetta init SHELL{tftp_usage}\n\nCommands:\n  benchmark                           Profile terminal rendering\n  benchmark-output                    Write and time a text payload (default: 10 MiB)\n  terminal-size                       Print or resize the current terminal pane\n  sessions                            List detached background sessions\n  init                                Generate shell integration{tftp_command}\n\nBuilt-in features:\n  {}\n\nProfiles accepted by --profile NAME (case-insensitive):\n  {profiles}\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Select one of the profiles listed above",
         features.join("\n  "),
     )
 }
 
 fn is_version_argument(argument: &str) -> bool {
     matches!(argument, "--version" | "-v")
+}
+
+fn parse_terminal_resize_dimension(argument: &OsString, option: &str) -> Result<usize> {
+    let value = argument
+        .to_string_lossy()
+        .parse::<usize>()
+        .with_context(|| format!("{option} must be a positive whole number"))?;
+    anyhow::ensure!(value > 0, "{option} must be greater than zero");
+    anyhow::ensure!(
+        value <= usize::from(u16::MAX),
+        "{option} must not exceed {}",
+        u16::MAX
+    );
+    Ok(value)
 }
 
 pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Result<StartupArgs> {
@@ -180,23 +201,58 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
         .is_some_and(|argument| argument == "terminal-size")
     {
         let mut json = false;
-        for argument in &arguments[1..] {
+        let mut resize = false;
+        let mut columns = None;
+        let mut rows = None;
+        let mut terminal_size_arguments = arguments[1..].iter();
+        while let Some(argument) = terminal_size_arguments.next() {
             match argument.to_string_lossy().as_ref() {
                 "--json" | "-j" => json = true,
+                "--resize" | "-r" => resize = true,
+                "--columns" | "-c" => {
+                    anyhow::ensure!(columns.is_none(), "--columns may only be specified once");
+                    columns = Some(parse_terminal_resize_dimension(
+                        terminal_size_arguments
+                            .next()
+                            .context("--columns requires a positive whole number")?,
+                        "--columns",
+                    )?);
+                }
+                "--rows" | "-R" => {
+                    anyhow::ensure!(rows.is_none(), "--rows may only be specified once");
+                    rows = Some(parse_terminal_resize_dimension(
+                        terminal_size_arguments
+                            .next()
+                            .context("--rows requires a positive whole number")?,
+                        "--rows",
+                    )?);
+                }
                 "--help" | "-h" => {
                     println!(
-                        "Print the current terminal size\n\nUsage: zetta terminal-size [--json]\n\nPrints the terminal width in columns and height in rows.\n\nOptions:\n  -j, --json  Print machine-readable JSON\n  -h, --help  Print help"
+                        "Print or resize the current terminal pane\n\nUsage: zetta terminal-size [--json | --resize [--columns COLUMNS] [--rows ROWS]]\n\nWithout --resize, prints the terminal width in columns and height in rows. With --resize, emits the xterm CSI 8 resize request for the current pane; an omitted dimension is kept unchanged.\n\nOptions:\n  -j, --json           Print machine-readable JSON\n  -r, --resize         Resize the current pane\n  -c, --columns COLUMNS Set the pane width in columns\n  -R, --rows ROWS       Set the pane height in rows\n  -h, --help           Print help"
                     );
                     std::process::exit(0);
                 }
                 unknown => anyhow::bail!("unknown terminal-size argument {unknown:?}"),
             }
         }
+        anyhow::ensure!(!json || !resize, "--json cannot be used with --resize");
+        anyhow::ensure!(
+            resize || (columns.is_none() && rows.is_none()),
+            "--columns and --rows require --resize"
+        );
+        anyhow::ensure!(
+            !resize || columns.is_some() || rows.is_some(),
+            "--resize requires --columns and/or --rows"
+        );
         return Ok(StartupArgs {
             config_path: None,
             keymap_path: None,
             profile: None,
-            mode: StartupMode::PrintTerminalSize { json },
+            mode: StartupMode::PrintTerminalSize {
+                json,
+                resize: resize.then_some(TerminalResize { columns, rows }),
+            },
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,
@@ -896,6 +952,7 @@ pub(crate) const CLOSE_ALL_WINDOWS_KEYBINDING: &str = "ctrl-shift-x";
 pub(crate) const SERIAL_CONSOLE_KEYBINDING: &str = "ctrl-shift-s";
 pub(crate) const AUTO_BACKGROUND_TAB_KEYBINDING: &str = "ctrl-shift-b";
 pub(crate) const ROTATE_PANE_LAYOUT_KEYBINDING: &str = "alt-shift-l";
+pub(crate) const TOGGLE_PANE_RESIZE_MODE_KEYBINDING: &str = "ctrl-shift-j";
 pub(crate) const APPLICATION_MENU_KEYBINDING: &str = "alt-space";
 
 pub(crate) fn pane_output_keybinding() -> KeyBinding {
@@ -987,6 +1044,35 @@ pub(crate) fn rotate_pane_layout_keybinding() -> KeyBinding {
     )
 }
 
+pub(crate) fn pane_resize_mode_keybinding() -> KeyBinding {
+    KeyBinding::new(
+        TOGGLE_PANE_RESIZE_MODE_KEYBINDING,
+        TogglePaneResizeMode,
+        Some("Zetta > Terminal"),
+    )
+}
+
+pub(crate) fn pane_resize_keybindings() -> [KeyBinding; 4] {
+    [
+        KeyBinding::new(
+            "left",
+            ResizePaneLeft,
+            Some("Zetta > PaneResize > Terminal"),
+        ),
+        KeyBinding::new(
+            "right",
+            ResizePaneRight,
+            Some("Zetta > PaneResize > Terminal"),
+        ),
+        KeyBinding::new("up", ResizePaneUp, Some("Zetta > PaneResize > Terminal")),
+        KeyBinding::new(
+            "down",
+            ResizePaneDown,
+            Some("Zetta > PaneResize > Terminal"),
+        ),
+    ]
+}
+
 pub(crate) fn minimized_pane_keybindings() -> [KeyBinding; 4] {
     [
         KeyBinding::new("alt-shift-down", MinimizePane, Some("Zetta > Terminal")),
@@ -1031,6 +1117,7 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
         ),
         KeyBinding::new("ctrl-shift-e", SplitVerticalRight, Some("Zetta > Terminal")),
         rotate_pane_layout_keybinding(),
+        pane_resize_mode_keybinding(),
         select_all_keybinding(),
         KeyBinding::new(
             "ctrl-shift-backspace",
@@ -1136,6 +1223,7 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
     bindings.extend(application_menu_keybinding());
     bindings.extend(application_menu_navigation_keybindings());
     bindings.extend(minimized_pane_keybindings());
+    bindings.extend(pane_resize_keybindings());
     bindings.extend(pane_template_keybindings());
     bindings.extend(pane_font_size_keybindings());
     let keyboard_mapper = cx.keyboard_mapper().clone();
@@ -1208,7 +1296,7 @@ fn zetta_window_options(cx: &App) -> WindowOptions {
     let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
-        window_min_size: Some(size(px(520.), px(320.))),
+        window_min_size: Some(ZETTA_MINIMUM_WINDOW_SIZE),
         app_id: Some(ZETTA_APP_ID.to_owned()),
         titlebar: Some(TitlebarOptions {
             title: Some("Zetta".into()),
@@ -1557,7 +1645,10 @@ pub(crate) fn run() -> Result<()> {
     {
         return run_output_benchmark(*size_mib, *output_type);
     }
-    if let StartupMode::PrintTerminalSize { json } = args.mode {
+    if let StartupMode::PrintTerminalSize { json, resize } = args.mode {
+        if let Some(resize) = resize {
+            return request_terminal_resize(resize.columns, resize.rows);
+        }
         print_terminal_size(json);
         return Ok(());
     }

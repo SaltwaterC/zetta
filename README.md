@@ -11,8 +11,8 @@ tested.
 
 ## Highlights
 
-- Tabs, recursive pane splits, pane templates, pane minimization, and input
-  broadcasting
+- Tabs, recursive pane splits, pane templates, pane minimization, input
+  broadcasting, and modal pane resizing
 - Automatically detected shells and first-class WSL profiles with working
   directory tracking
 - Detachable background sessions that can survive after the last window closes

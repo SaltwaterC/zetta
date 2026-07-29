@@ -7,6 +7,13 @@ height in rows. Add `-j` or `--json` for machine-readable output. This works
 from Zetta and other terminals on macOS, Linux, and Windows, including
 PowerShell.
 
+Inside Zetta, `zetta terminal-size -r -c 120 -R 40` (or
+`--resize --columns 120 --rows 40`) resizes the pane that runs it. `--columns`
+and `--rows` may be used independently; an omitted dimension remains
+unchanged. Programs can make the same request with the standard xterm sequence
+`CSI 8 ; rows ; columns t` (for example,
+`\033[8;40;120t`).
+
 ## Profiles and tabs
 
 Zetta creates profiles for common installed command interpreters. On Windows,
@@ -37,6 +44,16 @@ The control strip shows the pane's live size next to its label. The maximized
 pane status strip shows the same size.
 Press `Alt-Shift-R` or double-click the label to assign a custom name; submit an
 empty name to restore its automatic label.
+
+Press `Ctrl-Shift-J` to enter or leave pane-resize mode. While it is active,
+the arrow keys move the corresponding edge of the active pane by one cell and
+every visible pane shows its live cell dimensions; normal terminal input is
+paused. For example, Left grows a right-hand pane and Up grows a bottom pane.
+Zetta first takes space from the nearest neighboring pane on that axis. If no
+neighbor can give up a cell, it grows the window only within the current
+display's usable bounds; a maximized or full-screen window is the hard growth
+limit. The native client window never shrinks below the size required for its
+window controls.
 
 A maximized pane has a status strip below it. Restore it from that strip or
 with `Shift-Escape`.
@@ -183,6 +200,7 @@ filter, use the arrow keys to select a command, and press `Enter` to run it.
 | `Ctrl-Shift-O` | Split active pane horizontally, adding a pane below |
 | `Ctrl-Shift-E` | Split active pane vertically, adding a pane on the right |
 | `Alt-Shift-L` | Rotate a two-pane layout |
+| `Ctrl-Shift-J`, then Arrow keys | Toggle pane-resize mode; shrink/grow the active pane |
 | `Alt-Shift-X` | Close the active pane or its final tab |
 | `PageUp` / `PageDown` | Send page navigation to the foreground program |
 | `Shift-PageUp` / `Shift-PageDown` | Scroll history by one page |

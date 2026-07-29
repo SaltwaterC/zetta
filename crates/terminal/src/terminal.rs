@@ -672,6 +672,7 @@ pub enum Event {
     Bell,
     Wakeup,
     BlinkChanged(bool),
+    ResizeRequested { rows: usize, columns: usize },
     SelectionsChanged,
     NewNavigationTarget(Option<MaybeNavigationTarget>),
     Open(MaybeNavigationTarget),
@@ -740,6 +741,7 @@ pub(crate) enum TerminalBackendEvent {
     ColorRequest(usize, ColorFormatter),
     PtyWrite(String),
     TextAreaSizeRequest(TextAreaSizeFormatter),
+    ResizeRequest { rows: usize, columns: usize },
     CursorBlinkingChange,
     Wakeup,
     Bell,
@@ -884,6 +886,9 @@ impl fmt::Debug for TerminalBackendEvent {
             Self::ColorRequest(index, _) => write!(f, "ColorRequest({index})"),
             Self::PtyWrite(output) => write!(f, "PtyWrite({output})"),
             Self::TextAreaSizeRequest(_) => f.write_str("TextAreaSizeRequest"),
+            Self::ResizeRequest { rows, columns } => {
+                write!(f, "ResizeRequest({columns}x{rows})")
+            }
             Self::CursorBlinkingChange => f.write_str("CursorBlinkingChange"),
             Self::Wakeup => f.write_str("Wakeup"),
             Self::Bell => f.write_str("Bell"),
@@ -1897,6 +1902,9 @@ impl Terminal {
             TerminalBackendEvent::PtyWrite(out) => self.write_to_pty(out.into_bytes()),
             TerminalBackendEvent::TextAreaSizeRequest(format) => {
                 self.write_to_pty(format(self.last_content.terminal_bounds).into_bytes())
+            }
+            TerminalBackendEvent::ResizeRequest { rows, columns } => {
+                cx.emit(Event::ResizeRequested { rows, columns });
             }
             TerminalBackendEvent::CursorBlinkingChange => {
                 let terminal = self.term.lock();

@@ -82,37 +82,48 @@ _zetta_complete() {
             fi
             return
             ;;
-        --config|-c|--keymap|-k|--profile-report|-r)
+        --config|--keymap|-k|--profile-report)
             COMPREPLY=( $(compgen -f -- "$current") )
+            return
+            ;;
+        -c|-r)
+            if [[ $command == terminal-size ]]; then
+                COMPREPLY=()
+            else
+                COMPREPLY=( $(compgen -f -- "$current") )
+            fi
             return
             ;;
         --output-type|-t)
             COMPREPLY=( $(compgen -W 'repeated unique' -- "$current") )
             return
             ;;
-        --port|-p|--size|-s|--profile-duration|-d)
+        --port|-p|--size|-s|--profile-duration|-d|--columns|-c|--rows|-R)
             COMPREPLY=()
             return
             ;;
     esac
 
     if (( COMP_CWORD == 1 )); then
-        COMPREPLY=( $(compgen -W 'benchmark benchmark-output terminal-size sessions init tftp --help --version --config --keymap --profile -h -v -c -k -p' -- "$current") )
+        COMPREPLY=( $(compgen -W 'benchmark benchmark-output terminal-size sessions init tftp --help --version --config --keymap --profile' -- "$current") )
         return
     fi
 
     case "$command" in
         benchmark)
-            COMPREPLY=( $(compgen -W '--terminal-render-workload --terminal-checkerboard-workload --terminal-sparse-update-workload --profile-report --profile-duration --profile-pane-stress --profile-background-stress --profile-sparse-updates --profile-external-terminal -r -d -s -b -u -x --help -h' -- "$current") )
+            COMPREPLY=( $(compgen -W '--terminal-render-workload --terminal-checkerboard-workload --terminal-sparse-update-workload --profile-report --profile-duration --profile-pane-stress --profile-background-stress --profile-sparse-updates --profile-external-terminal --help' -- "$current") )
             ;;
         benchmark-output)
-            COMPREPLY=( $(compgen -W '--size --output-type -s -t -h --help' -- "$current") )
+            COMPREPLY=( $(compgen -W '--size --output-type --help' -- "$current") )
             ;;
-        terminal-size|sessions)
-            COMPREPLY=( $(compgen -W '--json -j --help -h' -- "$current") )
+        terminal-size)
+            COMPREPLY=( $(compgen -W '--json --resize --columns --rows --help' -- "$current") )
+            ;;
+        sessions)
+            COMPREPLY=( $(compgen -W '--json --help' -- "$current") )
             ;;
         init)
-            COMPREPLY=( $(compgen -W 'bash fish powershell pwsh zsh -h --help' -- "$current") )
+            COMPREPLY=( $(compgen -W 'bash fish powershell pwsh zsh --help' -- "$current") )
             ;;
         tftp)
             _zetta_tftp_complete 2
@@ -127,11 +138,11 @@ _zetta_tftp_complete() {
     previous=${COMP_WORDS[COMP_CWORD-1]}
 
     if (( COMP_CWORD == operation_index )); then
-        COMPREPLY=( $(compgen -W 'get put --help -h' -- "$current") )
+        COMPREPLY=( $(compgen -W 'get put --help' -- "$current") )
         return
     fi
     if [[ $current == -* ]]; then
-        COMPREPLY=( $(compgen -W '--port -p --help -h' -- "$current") )
+        COMPREPLY=( $(compgen -W '--port --help' -- "$current") )
         return
     fi
     if [[ $previous == '--port' || $previous == '-p' ]]; then
@@ -183,33 +194,38 @@ complete -c zetta -n '__fish_use_subcommand' -a terminal-size -d 'Print the curr
 complete -c zetta -n '__fish_use_subcommand' -a sessions -d 'List detached background sessions'
 complete -c zetta -n '__fish_use_subcommand' -a init -d 'Generate shell integration'
 complete -c zetta -n '__fish_use_subcommand' -a tftp -d 'Transfer a file with TFTP'
-complete -c zetta -n '__fish_use_subcommand' -s h -l help -d 'Print help'
-complete -c zetta -n '__fish_use_subcommand' -s v -l version -d 'Print version'
-complete -c zetta -n '__fish_use_subcommand' -s c -l config -r -d 'Use a configuration file'
-complete -c zetta -n '__fish_use_subcommand' -s k -l keymap -r -d 'Use a keymap file'
-complete -c zetta -n '__fish_use_subcommand' -s p -l profile -r -a '(__zetta_profiles)' -d 'Select a profile'
+complete -c zetta -n '__fish_use_subcommand' -l help -d 'Print help'
+complete -c zetta -n '__fish_use_subcommand' -l version -d 'Print version'
+complete -c zetta -n '__fish_use_subcommand' -l config -r -d 'Use a configuration file'
+complete -c zetta -n '__fish_use_subcommand' -l keymap -r -d 'Use a keymap file'
+complete -c zetta -n '__fish_use_subcommand' -l profile -r -a '(__zetta_profiles)' -d 'Select a profile'
 complete -c zetta -n '__fish_seen_subcommand_from init' -a 'bash fish powershell pwsh zsh'
-complete -c zetta -n '__fish_seen_subcommand_from terminal-size sessions' -s j -l json -d 'Print machine-readable JSON'
-complete -c zetta -n '__fish_seen_subcommand_from terminal-size sessions' -s h -l help -d 'Print help'
-complete -c zetta -n '__fish_seen_subcommand_from benchmark-output' -s s -l size -r -d 'Set the output size in MiB'
-complete -c zetta -n '__fish_seen_subcommand_from benchmark-output' -s t -l output-type -r -a 'repeated unique'
-complete -c zetta -n '__fish_seen_subcommand_from benchmark-output' -s h -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l json -d 'Print machine-readable JSON'
+complete -c zetta -n '__fish_seen_subcommand_from sessions' -l json -d 'Print machine-readable JSON'
+complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l resize -d 'Resize the current pane'
+complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l columns -r -d 'Set pane width in columns'
+complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l rows -r -d 'Set pane height in rows'
+complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from sessions' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from benchmark-output' -l size -r -d 'Set the output size in MiB'
+complete -c zetta -n '__fish_seen_subcommand_from benchmark-output' -l output-type -r -a 'repeated unique'
+complete -c zetta -n '__fish_seen_subcommand_from benchmark-output' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l terminal-render-workload
 complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l terminal-checkerboard-workload
 complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l terminal-sparse-update-workload
-complete -c zetta -n '__fish_seen_subcommand_from benchmark' -s r -l profile-report -r
-complete -c zetta -n '__fish_seen_subcommand_from benchmark' -s d -l profile-duration -r
-complete -c zetta -n '__fish_seen_subcommand_from benchmark' -s s -l profile-pane-stress
-complete -c zetta -n '__fish_seen_subcommand_from benchmark' -s b -l profile-background-stress
-complete -c zetta -n '__fish_seen_subcommand_from benchmark' -s u -l profile-sparse-updates
-complete -c zetta -n '__fish_seen_subcommand_from benchmark' -s x -l profile-external-terminal
-complete -c zetta -n '__fish_seen_subcommand_from benchmark' -s h -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l profile-report -r
+complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l profile-duration -r
+complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l profile-pane-stress
+complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l profile-background-stress
+complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l profile-sparse-updates
+complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l profile-external-terminal
+complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from tftp' -a 'get put'
-complete -c zetta -n '__fish_seen_subcommand_from tftp' -s p -l port -r -d 'Server port'
-complete -c zetta -n '__fish_seen_subcommand_from tftp' -s h -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from tftp' -l port -r -d 'Server port'
+complete -c zetta -n '__fish_seen_subcommand_from tftp' -l help -d 'Print help'
 complete -c ztftp -f -a 'get put'
-complete -c ztftp -s p -l port -r -d 'Server port'
-complete -c ztftp -s h -l help -d 'Print help'
+complete -c ztftp -l port -r -d 'Server port'
+complete -c ztftp -l help -d 'Print help'
 "#;
 
 const POWERSHELL_INTEGRATION: &str = r#"# Zetta shell integration for PowerShell.
@@ -229,21 +245,23 @@ $zettaCompletions = {
     } | Select-Object -First 1
 
     $candidates = if ($commandName -eq 'ztftp') {
-        if ($words.Count -le 1) { 'get', 'put', '--help', '-h' } else { '--port', '-p', '--help', '-h' }
+        if ($words.Count -le 1) { 'get', 'put', '--help' } else { '--port', '--help' }
     } elseif ($previous -in '--profile', '-p' -or $last -in '--profile', '-p') {
         $zettaProfiles
     } elseif ($previous -in '--output-type', '-t') {
         'repeated', 'unique'
+    } elseif ($previous -in '--columns', '-c', '--rows', '-R') {
+        @()
     } elseif ($null -eq $subcommand) {
-        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'init', 'tftp', '--help', '--version', '--config', '--keymap', '--profile', '-h', '-v', '-c', '-k', '-p'
+        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'init', 'tftp', '--help', '--version', '--config', '--keymap', '--profile'
     } else {
         switch ($subcommand) {
-            'benchmark' { '--terminal-render-workload', '--terminal-checkerboard-workload', '--terminal-sparse-update-workload', '--profile-report', '--profile-duration', '--profile-pane-stress', '--profile-background-stress', '--profile-sparse-updates', '--profile-external-terminal', '-r', '-d', '-s', '-b', '-u', '-x', '--help', '-h' }
-            'benchmark-output' { '--size', '--output-type', '-s', '-t', '--help', '-h' }
-            'terminal-size' { '--json', '-j', '--help', '-h' }
-            'sessions' { '--json', '-j', '--help', '-h' }
-            'init' { 'bash', 'fish', 'powershell', 'pwsh', 'zsh', '--help', '-h' }
-            'tftp' { if ($words.Count -le 2) { 'get', 'put', '--help', '-h' } else { '--port', '-p', '--help', '-h' } }
+            'benchmark' { '--terminal-render-workload', '--terminal-checkerboard-workload', '--terminal-sparse-update-workload', '--profile-report', '--profile-duration', '--profile-pane-stress', '--profile-background-stress', '--profile-sparse-updates', '--profile-external-terminal', '--help' }
+            'benchmark-output' { '--size', '--output-type', '--help' }
+            'terminal-size' { '--json', '--resize', '--columns', '--rows', '--help' }
+            'sessions' { '--json', '--help' }
+            'init' { 'bash', 'fish', 'powershell', 'pwsh', 'zsh', '--help' }
+            'tftp' { if ($words.Count -le 2) { 'get', 'put', '--help' } else { '--port', '--help' } }
         }
     }
 
@@ -273,7 +291,7 @@ _zetta() {
 
     if (( CURRENT == 2 )); then
         compadd -S ' ' -- benchmark benchmark-output terminal-size sessions init tftp
-        compadd -- --help --version --config --keymap --profile -h -v -c -k -p
+        compadd -- --help --version --config --keymap --profile
         return
     fi
 
@@ -282,7 +300,14 @@ _zetta() {
             _zetta_profiles
             return
             ;;
-        --config|-c|--keymap|-k|--profile-report|-r)
+        --config|--keymap|-k|--profile-report)
+            _files
+            return
+            ;;
+        -c|-r)
+            if [[ $words[2] == terminal-size ]]; then
+                return
+            fi
             _files
             return
             ;;
@@ -290,7 +315,7 @@ _zetta() {
             compadd -- repeated unique
             return
             ;;
-        --port|--size|--profile-duration|-d)
+        --port|--size|--profile-duration|-d|--columns|-c|--rows|-R)
             return
             ;;
     esac
@@ -300,16 +325,19 @@ _zetta() {
             compadd -- --terminal-render-workload --terminal-checkerboard-workload \
                 --terminal-sparse-update-workload --profile-report --profile-duration \
                 --profile-pane-stress --profile-background-stress --profile-sparse-updates \
-                --profile-external-terminal -r -d -s -b -u -x --help -h
+                --profile-external-terminal --help
             ;;
         benchmark-output)
-            compadd -- --size --output-type -s -t --help -h
+            compadd -- --size --output-type --help
             ;;
-        terminal-size|sessions)
-            compadd -- --json -j --help -h
+        terminal-size)
+            compadd -- --json --resize --columns --rows --help
+            ;;
+        sessions)
+            compadd -- --json --help
             ;;
         init)
-            compadd -- bash fish powershell pwsh zsh --help -h
+            compadd -- bash fish powershell pwsh zsh --help
             ;;
         tftp)
             _zetta_tftp
@@ -329,12 +357,12 @@ _zetta_tftp() {
 
     if (( CURRENT == operation_index )); then
         compadd -S ' ' -- get put
-        compadd -- --help -h
+        compadd -- --help
         return
     fi
 
     if [[ $current == -* ]]; then
-        compadd -- --port -p --help -h
+        compadd -- --port --help
         return
     fi
     if [[ $words[CURRENT-1] == --port || $words[CURRENT-1] == -p ]]; then

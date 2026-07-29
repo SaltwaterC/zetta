@@ -614,7 +614,9 @@ impl Render for Zetta {
                     // Keep application controls out of the draggable native title-bar region.
                     .occlude()
                     .min_w_0()
-                    .flex_none()
+                    // Drop trailing controls before they can overlap the client corner.
+                    .flex_shrink_1()
+                    .overflow_hidden()
                     .gap_1()
                     // The traffic lights are native controls even with a client title bar.
                     .when(cfg!(target_os = "macos"), |controls| controls.ml(px(72.)))
@@ -1667,6 +1669,11 @@ impl Render for Zetta {
             .on_action(cx.listener(Self::split_vertical_right))
             .on_action(cx.listener(Self::split_vertical_left))
             .on_action(cx.listener(Self::rotate_pane_layout))
+            .on_action(cx.listener(Self::toggle_pane_resize_mode))
+            .on_action(cx.listener(Self::resize_pane_left))
+            .on_action(cx.listener(Self::resize_pane_right))
+            .on_action(cx.listener(Self::resize_pane_up))
+            .on_action(cx.listener(Self::resize_pane_down))
             .on_action(cx.listener(Self::apply_pane_split_template))
             .on_action(cx.listener(Self::focus_pane_left))
             .on_action(cx.listener(Self::focus_pane_right))

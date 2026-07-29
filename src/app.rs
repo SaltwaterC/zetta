@@ -3,6 +3,8 @@ use super::*;
 const PANE_CONTROLS_IDLE_DELAY: Duration = Duration::from_millis(1200);
 const BACKGROUND_PROCESS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const PERFORMANCE_PANE_STRESS_COUNT: usize = 4;
+const MINIMUM_PANE_COLUMNS: usize = 2;
+const MINIMUM_PANE_ROWS: usize = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ReconnectRequest {
@@ -98,6 +100,109 @@ fn new_tab_profile(
         .or_else(|| profiles.get(default_profile).cloned())
 }
 
+fn resize_cell_count(current: usize, delta: isize, minimum: usize) -> usize {
+    if delta.is_negative() {
+        current.saturating_sub(delta.unsigned_abs()).max(minimum)
+    } else {
+        current.saturating_add(delta as usize).max(minimum)
+    }
+}
+
+fn pane_input_enabled(pane_resize_mode: bool) -> bool {
+    !pane_resize_mode
+}
+
+fn pane_resize_cell_delta(
+    layout: &PaneLayout,
+    pane_id: u64,
+    axis: SplitAxis,
+    directional_delta: isize,
+) -> isize {
+    if layout
+        .resize_boundary(pane_id, axis)
+        .is_some_and(|boundary| !boundary.active_is_first)
+    {
+        -directional_delta
+    } else {
+        directional_delta
+    }
+}
+
+#[derive(Default)]
+struct WindowResize {
+    width_delta: f32,
+    height_delta: f32,
+}
+
+impl WindowResize {
+    fn add(&mut self, axis: SplitAxis, delta: f32) {
+        match axis {
+            SplitAxis::Vertical => self.width_delta += delta,
+            SplitAxis::Horizontal => self.height_delta += delta,
+        }
+    }
+}
+
+fn minimum_resized_window_extent(current: f32, requested: f32, minimum: Pixels) -> f32 {
+    requested.max(current.min(f32::from(minimum)))
+}
+
+fn resize_window(window: &mut Window, resize: WindowResize, cx: &App) -> bool {
+    if resize.width_delta == 0. && resize.height_delta == 0. {
+        return false;
+    }
+    let bounds = window.bounds();
+    let current_width = f32::from(bounds.size.width);
+    let current_height = f32::from(bounds.size.height);
+    let mut requested_width = current_width + resize.width_delta;
+    let mut requested_height = current_height + resize.height_delta;
+
+    // WindowOptions enforces this limit for native resize gestures, but a
+    // programmatic resize must clamp it explicitly on every platform.
+    requested_width = minimum_resized_window_extent(
+        current_width,
+        requested_width,
+        ZETTA_MINIMUM_WINDOW_SIZE.width,
+    );
+    requested_height = minimum_resized_window_extent(
+        current_height,
+        requested_height,
+        ZETTA_MINIMUM_WINDOW_SIZE.height,
+    );
+
+    if window.is_maximized() || window.is_fullscreen() {
+        if resize.width_delta.is_sign_positive() {
+            requested_width = current_width;
+        }
+        if resize.height_delta.is_sign_positive() {
+            requested_height = current_height;
+        }
+    }
+    if (resize.width_delta.is_sign_positive() || resize.height_delta.is_sign_positive())
+        && let Some(display) = window.display(cx)
+    {
+        let visible = display.visible_bounds();
+        if resize.width_delta.is_sign_positive() {
+            let maximum = f32::from(visible.right() - bounds.origin.x);
+            requested_width = requested_width.min(maximum).max(current_width);
+        }
+        if resize.height_delta.is_sign_positive() {
+            let maximum = f32::from(visible.bottom() - bounds.origin.y);
+            requested_height = requested_height.min(maximum).max(current_height);
+        }
+    }
+    if requested_width <= 0.
+        || requested_height <= 0.
+        || ((requested_width - current_width).abs() < f32::EPSILON
+            && (requested_height - current_height).abs() < f32::EPSILON)
+    {
+        return false;
+    }
+
+    window.resize(size(px(requested_width), px(requested_height)));
+    true
+}
+
 pub(crate) struct Zetta {
     pub(crate) launch_config: Config,
     pub(crate) configuration_error: Option<String>,
@@ -143,6 +248,7 @@ pub(crate) struct Zetta {
     pub(crate) pane_controls_hidden_for: HashSet<u64>,
     pub(crate) pane_controls_last_motion: Instant,
     pub(crate) pane_controls_hide_task: Option<Task<()>>,
+    pub(crate) pane_resize_mode: bool,
     pub(crate) titlebar_dragging: bool,
     pub(crate) button_layout: WindowButtonLayout,
     pub(crate) performance_overlay: Option<PerformanceOverlay>,
@@ -336,6 +442,7 @@ impl Zetta {
             pane_controls_hidden_for: HashSet::new(),
             pane_controls_last_motion: Instant::now(),
             pane_controls_hide_task: None,
+            pane_resize_mode: false,
             titlebar_dragging: false,
             button_layout,
             performance_overlay: None,
@@ -567,6 +674,23 @@ impl Zetta {
                             )
                         });
                         cx.subscribe_in(
+                            &terminal,
+                            window,
+                            move |this, _, event: &TerminalEvent, window, cx| {
+                                if let TerminalEvent::ResizeRequested { rows, columns } = event {
+                                    this.resize_pane_to(
+                                        tab_id,
+                                        pane_id,
+                                        Some(*columns),
+                                        Some(*rows),
+                                        window,
+                                        cx,
+                                    );
+                                }
+                            },
+                        )
+                        .detach();
+                        cx.subscribe_in(
                             &view,
                             window,
                             move |this, _, event, window, cx| match event {
@@ -588,8 +712,12 @@ impl Zetta {
                             .iter()
                             .find(|tab| tab.id == tab_id)
                             .is_some_and(|tab| tab.broadcast_input);
-                        view.update(cx, |view, _| view.set_emit_input_events(emit_input_events));
-                        cx.on_focus(&focus_handle, window, move |this, _, cx| {
+                        let input_enabled = pane_input_enabled(this.pane_resize_mode);
+                        view.update(cx, |view, cx| {
+                            view.set_emit_input_events(emit_input_events);
+                            view.set_input_enabled(input_enabled, cx);
+                        });
+                        cx.on_focus_in(&focus_handle, window, move |this, _, cx| {
                             if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.id == tab_id) {
                                 tab.activate_pane(pane_id);
                                 cx.notify();
@@ -1664,7 +1792,7 @@ impl Zetta {
         )
         .detach();
         let focus_handle = view.focus_handle(cx);
-        cx.on_focus(&focus_handle, window, move |this, _, cx| {
+        cx.on_focus_in(&focus_handle, window, move |this, _, cx| {
             if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.id == tab_id) {
                 tab.activate_pane(pane_id);
                 cx.notify();
@@ -1998,6 +2126,288 @@ impl Zetta {
         };
         tab.activate_pane(pane_id);
         self.focus_active(window, cx);
+    }
+
+    pub(crate) fn toggle_pane_resize_mode(
+        &mut self,
+        _: &TogglePaneResizeMode,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .tabs
+            .get(self.active_tab)
+            .is_none_or(|tab| tab.active_pane().is_none())
+        {
+            return;
+        }
+        self.pane_resize_mode = !self.pane_resize_mode;
+        let input_enabled = pane_input_enabled(self.pane_resize_mode);
+        for view in self
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.panes.iter())
+            .filter_map(|pane| pane.view.as_ref())
+        {
+            view.update(cx, |view, cx| view.set_input_enabled(input_enabled, cx));
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn resize_pane_left(
+        &mut self,
+        _: &ResizePaneLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.resize_active_pane_by_cells(-1, 0, window, cx);
+    }
+
+    pub(crate) fn resize_pane_right(
+        &mut self,
+        _: &ResizePaneRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.resize_active_pane_by_cells(1, 0, window, cx);
+    }
+
+    pub(crate) fn resize_pane_up(
+        &mut self,
+        _: &ResizePaneUp,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.resize_active_pane_by_cells(0, -1, window, cx);
+    }
+
+    pub(crate) fn resize_pane_down(
+        &mut self,
+        _: &ResizePaneDown,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.resize_active_pane_by_cells(0, 1, window, cx);
+    }
+
+    fn resize_active_pane_by_cells(
+        &mut self,
+        columns_delta: isize,
+        rows_delta: isize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.pane_resize_mode {
+            return;
+        }
+        let (tab_id, pane_id, bounds, columns_delta, rows_delta) = {
+            let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+                return;
+            };
+            // The terminal focus is authoritative while a keybinding is being
+            // handled. This also protects against focus notifications that
+            // have not yet updated Tab::active_pane.
+            let pane_id = tab
+                .panes
+                .iter()
+                .find(|pane| {
+                    pane.view
+                        .as_ref()
+                        .is_some_and(|view| view.focus_handle(cx).contains_focused(window, cx))
+                })
+                .map(|pane| pane.id)
+                .unwrap_or(tab.active_pane);
+            tab.activate_pane(pane_id);
+            let Some(bounds) = tab
+                .pane(pane_id)
+                .and_then(|pane| pane.terminal.as_ref())
+                .map(|terminal| terminal.read(cx).last_content().terminal_bounds)
+            else {
+                return;
+            };
+            let layout = tab.visible_layout();
+            let columns_delta = layout.as_ref().map_or(columns_delta, |layout| {
+                pane_resize_cell_delta(layout, pane_id, SplitAxis::Vertical, columns_delta)
+            });
+            let rows_delta = layout.as_ref().map_or(rows_delta, |layout| {
+                pane_resize_cell_delta(layout, pane_id, SplitAxis::Horizontal, rows_delta)
+            });
+            (tab.id, pane_id, bounds, columns_delta, rows_delta)
+        };
+        let columns = resize_cell_count(bounds.num_columns(), columns_delta, MINIMUM_PANE_COLUMNS);
+        let rows = resize_cell_count(bounds.num_lines(), rows_delta, MINIMUM_PANE_ROWS);
+        self.resize_pane_to(tab_id, pane_id, Some(columns), Some(rows), window, cx);
+    }
+
+    fn resize_pane_to(
+        &mut self,
+        tab_id: u64,
+        pane_id: u64,
+        columns: Option<usize>,
+        rows: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab_index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            return;
+        };
+        let Some(bounds) = self.tabs[tab_index]
+            .pane(pane_id)
+            .and_then(|pane| pane.terminal.as_ref())
+            .map(|terminal| terminal.read(cx).last_content().terminal_bounds)
+        else {
+            return;
+        };
+
+        let mut changed = false;
+        let mut window_resize = WindowResize::default();
+        if let Some(columns) = columns {
+            let (layout_changed, window_delta) = self.resize_pane_axis(
+                tab_index,
+                pane_id,
+                SplitAxis::Vertical,
+                columns.max(MINIMUM_PANE_COLUMNS),
+                bounds.num_columns(),
+                bounds.cell_width(),
+                cx,
+            );
+            changed |= layout_changed;
+            window_resize.add(SplitAxis::Vertical, window_delta);
+        }
+        if let Some(rows) = rows {
+            let (layout_changed, window_delta) = self.resize_pane_axis(
+                tab_index,
+                pane_id,
+                SplitAxis::Horizontal,
+                rows.max(MINIMUM_PANE_ROWS),
+                bounds.num_lines(),
+                bounds.line_height(),
+                cx,
+            );
+            changed |= layout_changed;
+            window_resize.add(SplitAxis::Horizontal, window_delta);
+        }
+        changed |= resize_window(window, window_resize, cx);
+        if changed {
+            // The next terminal size change is driven by pane geometry, so do
+            // not synchronously reflow retained scrollback for every keypress.
+            if let Some(tab) = self.tabs.get(tab_index) {
+                for terminal in tab.panes.iter().filter_map(|pane| pane.terminal.as_ref()) {
+                    terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
+                }
+            }
+            cx.notify();
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn resize_pane_axis(
+        &mut self,
+        tab_index: usize,
+        pane_id: u64,
+        axis: SplitAxis,
+        requested_cells: usize,
+        current_cells: usize,
+        cell_size: Pixels,
+        cx: &mut Context<Self>,
+    ) -> (bool, f32) {
+        if requested_cells == current_cells {
+            return (false, 0.);
+        }
+        let requested_delta =
+            (requested_cells as isize - current_cells as isize) as f32 * f32::from(cell_size);
+        let (active_region, boundary, can_adjust_layout) = {
+            let tab = &self.tabs[tab_index];
+            let Some(layout) = tab.visible_layout() else {
+                return (false, 0.);
+            };
+            let Some(region) = layout
+                .regions()
+                .into_iter()
+                .find(|region| region.id == pane_id)
+            else {
+                return (false, 0.);
+            };
+            let region_fraction = match axis {
+                SplitAxis::Vertical => region.right - region.left,
+                SplitAxis::Horizontal => region.bottom - region.top,
+            };
+            (
+                region_fraction,
+                layout.resize_boundary(pane_id, axis),
+                tab.maximized_pane.is_none() && tab.minimized_panes.is_empty(),
+            )
+        };
+        if active_region <= f32::EPSILON {
+            return (false, 0.);
+        }
+
+        let current_pixels = current_cells as f32 * f32::from(cell_size);
+        let root_pixels = current_pixels / active_region;
+        let mut remaining_delta = requested_delta;
+        let mut changed = false;
+
+        if can_adjust_layout && let Some(boundary) = boundary {
+            let parent_pixels = root_pixels * boundary.parent_fraction;
+            if parent_pixels > 0. {
+                let layout_delta = if requested_delta.is_sign_positive() {
+                    let available =
+                        self.minimum_sibling_capacity(tab_index, &boundary.sibling_panes, axis, cx);
+                    requested_delta.min(available)
+                } else {
+                    requested_delta
+                };
+                if layout_delta != 0.
+                    && self.tabs[tab_index].layout.adjust_resize_boundary(
+                        pane_id,
+                        axis,
+                        layout_delta / parent_pixels,
+                    )
+                {
+                    remaining_delta -= layout_delta;
+                    changed = true;
+                }
+            }
+        }
+
+        let window_delta = if remaining_delta != 0. {
+            let target_fraction = (active_region
+                + (requested_delta - remaining_delta) / root_pixels)
+                .max(f32::EPSILON);
+            remaining_delta / target_fraction
+        } else {
+            0.
+        };
+        (changed, window_delta)
+    }
+
+    fn minimum_sibling_capacity(
+        &self,
+        tab_index: usize,
+        sibling_panes: &[u64],
+        axis: SplitAxis,
+        cx: &App,
+    ) -> f32 {
+        sibling_panes
+            .iter()
+            .filter_map(|pane_id| self.tabs[tab_index].pane(*pane_id))
+            .filter_map(|pane| pane.terminal.as_ref())
+            .map(|terminal| {
+                let bounds = terminal.read(cx).last_content().terminal_bounds;
+                let (available, minimum) = match axis {
+                    SplitAxis::Vertical => (
+                        f32::from(bounds.width()),
+                        f32::from(bounds.cell_width()) * MINIMUM_PANE_COLUMNS as f32,
+                    ),
+                    SplitAxis::Horizontal => (
+                        f32::from(bounds.height()),
+                        f32::from(bounds.line_height()) * MINIMUM_PANE_ROWS as f32,
+                    ),
+                };
+                (available - minimum).max(0.)
+            })
+            .reduce(f32::min)
+            .unwrap_or(0.)
     }
 
     pub(crate) fn toggle_maximize_pane_by_id(
@@ -2615,6 +3025,9 @@ impl Zetta {
         let edges = PaneWindowEdges::all().with_bottom(owns_window_bottom);
         let corner_radii = edges.client_corner_radii(window);
         div()
+            .when(self.pane_resize_mode, |layout| {
+                layout.key_context("PaneResize")
+            })
             .size_full()
             .min_w_0()
             .min_h_0()
@@ -2663,6 +3076,10 @@ impl Zetta {
                     .displayed_pane_label(*pane_id)
                     .unwrap_or_else(|| pane.label());
                 let pane_terminal = pane.terminal.as_ref();
+                let pane_size = pane_terminal.map(|terminal| {
+                    let bounds = terminal.read(cx).last_content().terminal_bounds;
+                    terminal_size_label(bounds.num_columns(), bounds.num_lines())
+                });
                 let pane_label_selected = tab.renaming_pane == Some(*pane_id)
                     && tab.rename_select_all
                     && tab.rename_buffer.is_some();
@@ -2725,6 +3142,24 @@ impl Zetta {
                             })
                             .child(content),
                     )
+                    .when_some(
+                        self.pane_resize_mode.then_some(pane_size.clone()).flatten(),
+                        |pane, pane_size| {
+                            pane.child(
+                                div()
+                                    .absolute()
+                                    .right(px(6.))
+                                    .bottom(px(6.))
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .bg(colors.status_bar_background)
+                                    .text_sm()
+                                    .text_color(colors.text)
+                                    .child(pane_size),
+                            )
+                        },
+                    )
                     .when(
                         tab.panes.len() > 1
                             && tab.maximized_pane.is_none()
@@ -2742,10 +3177,6 @@ impl Zetta {
                             let rename_pane_id = *pane_id;
                             let pane_label_tooltip =
                                 format!("{pane_label}\nDouble-click to label this pane");
-                            let pane_size = pane_terminal.map(|terminal| {
-                                let bounds = terminal.read(cx).last_content().terminal_bounds;
-                                terminal_size_label(bounds.num_columns(), bounds.num_lines())
-                            });
                             pane.child(
                                 div()
                                     .absolute()
@@ -2809,7 +3240,7 @@ impl Zetta {
                                                     .color(Color::Custom(colors.text_muted)),
                                             ),
                                     )
-                                    .when_some(pane_size, |controls, pane_size| {
+                                    .when_some(pane_size.clone(), |controls, pane_size| {
                                         controls.child(
                                             Label::new(pane_size)
                                                 .size(LabelSize::Small)
@@ -2910,38 +3341,57 @@ impl Zetta {
             }
             PaneLayout::Split {
                 axis,
+                first_ratio,
                 first,
                 second,
-            } => div()
-                .size_full()
-                .min_w_0()
-                .min_h_0()
-                .flex_grow_1()
-                .flex_basis(gpui::relative(0.))
-                .flex()
-                .when(matches!(axis, SplitAxis::Horizontal), |split| {
-                    split.flex_col()
-                })
-                .gap_px()
-                .child(self.render_pane_layout_with_edges(
-                    tab,
-                    first,
-                    colors,
-                    error_color,
-                    window,
-                    edges.first(*axis),
-                    cx,
-                ))
-                .child(self.render_pane_layout_with_edges(
-                    tab,
-                    second,
-                    colors,
-                    error_color,
-                    window,
-                    edges.second(*axis),
-                    cx,
-                ))
-                .into_any_element(),
+            } => {
+                let first_ratio = PaneLayout::ratio_fraction(*first_ratio);
+                let second_ratio = 1. - first_ratio;
+                div()
+                    .size_full()
+                    .min_w_0()
+                    .min_h_0()
+                    .flex_grow_1()
+                    .flex_basis(gpui::relative(0.))
+                    .flex()
+                    .when(matches!(axis, SplitAxis::Horizontal), |split| {
+                        split.flex_col()
+                    })
+                    .gap_px()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .min_h_0()
+                            .flex_grow(first_ratio)
+                            .flex_basis(gpui::relative(0.))
+                            .child(self.render_pane_layout_with_edges(
+                                tab,
+                                first,
+                                colors,
+                                error_color,
+                                window,
+                                edges.first(*axis),
+                                cx,
+                            )),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .min_h_0()
+                            .flex_grow(second_ratio)
+                            .flex_basis(gpui::relative(0.))
+                            .child(self.render_pane_layout_with_edges(
+                                tab,
+                                second,
+                                colors,
+                                error_color,
+                                window,
+                                edges.second(*axis),
+                                cx,
+                            )),
+                    )
+                    .into_any_element()
+            }
         }
     }
 }

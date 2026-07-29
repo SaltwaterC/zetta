@@ -1,5 +1,5 @@
 use std::{
-    io,
+    io::{self, Write as _},
     time::{Duration, Instant},
 };
 
@@ -210,6 +210,33 @@ pub(crate) fn print_terminal_size(json: bool) {
     } else {
         println!("{}", terminal_size_summary(terminal_size));
     }
+}
+
+/// Emit xterm's character-cell resize request for the terminal attached to
+/// standard output. Zetta intercepts this request for the pane that produced
+/// it, on every supported PTY backend including Windows ConPTY.
+pub(crate) fn request_terminal_resize(columns: Option<usize>, rows: Option<usize>) -> Result<()> {
+    let current = current_terminal_size().context("terminal size is unavailable")?;
+    let columns = columns.unwrap_or(current.columns);
+    let rows = rows.unwrap_or(current.rows);
+    anyhow::ensure!(
+        columns > 0 && rows > 0,
+        "terminal dimensions must be positive"
+    );
+    anyhow::ensure!(
+        columns <= usize::from(u16::MAX) && rows <= usize::from(u16::MAX),
+        "terminal dimensions must not exceed {}",
+        u16::MAX
+    );
+
+    let mut stdout = io::stdout().lock();
+    write!(stdout, "{}", terminal_resize_sequence(columns, rows))?;
+    stdout.flush()?;
+    Ok(())
+}
+
+fn terminal_resize_sequence(columns: usize, rows: usize) -> String {
+    format!("\x1b[8;{rows};{columns}t")
 }
 
 pub(crate) fn run_output_benchmark(

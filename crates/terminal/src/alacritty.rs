@@ -371,6 +371,10 @@ impl From<AlacTermEvent> for TerminalBackendEvent {
                     format(window_size_from_terminal_bounds(bounds))
                 }))
             }
+            AlacTermEvent::ResizeRequest { rows, columns } => Self::ResizeRequest {
+                rows: usize::from(rows),
+                columns: usize::from(columns),
+            },
             AlacTermEvent::CursorBlinkingChange => Self::CursorBlinkingChange,
             AlacTermEvent::Wakeup => Self::Wakeup,
             AlacTermEvent::Bell => Self::Bell,
