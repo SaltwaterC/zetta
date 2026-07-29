@@ -2643,6 +2643,7 @@ impl Zetta {
                 let pane_label = tab
                     .displayed_pane_label(*pane_id)
                     .unwrap_or_else(|| pane.label());
+                let pane_terminal = pane.terminal.as_ref();
                 let pane_label_selected = tab.renaming_pane == Some(*pane_id)
                     && tab.rename_select_all
                     && tab.rename_buffer.is_some();
@@ -2722,6 +2723,10 @@ impl Zetta {
                             let rename_pane_id = *pane_id;
                             let pane_label_tooltip =
                                 format!("{pane_label}\nDouble-click to label this pane");
+                            let pane_size = pane_terminal.map(|terminal| {
+                                let bounds = terminal.read(cx).last_content().terminal_bounds;
+                                terminal_size_label(bounds.num_columns(), bounds.num_lines())
+                            });
                             pane.child(
                                 div()
                                     .absolute()
@@ -2761,7 +2766,10 @@ impl Zetta {
                                             })
                                             .cursor_text()
                                             .overflow_hidden()
-                                            .tooltip(Tooltip::text(pane_label_tooltip))
+                                            .tooltip(Tooltip::for_action_title(
+                                                pane_label_tooltip,
+                                                &RenamePane,
+                                            ))
                                             .on_click(move |event, window, cx| {
                                                 if event.click_count() == 2 {
                                                     cx.stop_propagation();
@@ -2782,6 +2790,13 @@ impl Zetta {
                                                     .color(Color::Custom(colors.text_muted)),
                                             ),
                                     )
+                                    .when_some(pane_size, |controls, pane_size| {
+                                        controls.child(
+                                            Label::new(pane_size)
+                                                .size(LabelSize::Small)
+                                                .color(Color::Custom(colors.text_muted)),
+                                        )
+                                    })
                                     .child(
                                         div()
                                             .flex()
@@ -2797,8 +2812,9 @@ impl Zetta {
                                                 .icon_size(IconSize::XSmall)
                                                 .icon_color(Color::Custom(colors.icon))
                                                 .aria_label("Minimize pane")
-                                                .tooltip(Tooltip::text(
-                                                    "Minimize pane (Alt-Shift-Down)",
+                                                .tooltip(Tooltip::for_action_title(
+                                                    "Minimize pane",
+                                                    &MinimizePane,
                                                 ))
                                                 .on_click(move |_, window, cx| {
                                                     minimize_handle
@@ -2822,8 +2838,9 @@ impl Zetta {
                                                 .icon_size(IconSize::XSmall)
                                                 .icon_color(Color::Custom(colors.icon))
                                                 .aria_label("Maximize pane")
-                                                .tooltip(Tooltip::text(
-                                                    "Maximize pane (Shift-Escape)",
+                                                .tooltip(Tooltip::for_action_title(
+                                                    "Maximize pane",
+                                                    &ToggleMaximizePane,
                                                 ))
                                                 .on_click(move |_, window, cx| {
                                                     maximize_handle
@@ -2848,7 +2865,10 @@ impl Zetta {
                                         .icon_size(IconSize::XSmall)
                                         .icon_color(Color::Custom(colors.icon))
                                         .aria_label("Close pane")
-                                        .tooltip(Tooltip::text("Close pane (Alt-Shift-X)"))
+                                        .tooltip(Tooltip::for_action_title(
+                                            "Close pane",
+                                            &ClosePane,
+                                        ))
                                         .on_click(
                                             move |_, window, cx| {
                                                 close_handle

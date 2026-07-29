@@ -5,6 +5,10 @@ pub(crate) const MAX_CONCURRENT_MULTI_COMMAND_SPAWNS: usize = 4;
 pub(crate) const TERMINAL_SPAWN_NOTIFY_INTERVAL: Duration = Duration::from_millis(16);
 pub(crate) const PANE_OUTPUT_DEFAULT_FILENAME: &str = "terminal-output.txt";
 
+pub(crate) fn terminal_size_label(columns: usize, rows: usize) -> String {
+    format!("{columns} × {rows}")
+}
+
 pub(crate) fn can_add_panes(current: usize, additional: usize) -> bool {
     current
         .checked_add(additional)

@@ -51,6 +51,8 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     assert!(help.contains("Profiles accepted by --profile NAME (case-insensitive):"));
     assert!(help.contains("  System\n  Operations"));
     assert!(help.contains("Select one of the profiles listed above"));
+    assert!(help.contains("zetta terminal-size [--json]"));
+    assert!(help.contains("terminal-size                       Print the current terminal size"));
 
     #[cfg(feature = "wayland")]
     assert!(help.contains("Wayland backend"));
@@ -102,7 +104,26 @@ fn sessions_subcommand_supports_human_and_json_output() {
         json.mode,
         StartupMode::ListBackgroundSessions { json: true }
     );
+    let short_json = parse_args_from([OsString::from("sessions"), OsString::from("-j")]).unwrap();
+    assert_eq!(short_json, json);
     assert!(parse_args_from([OsString::from("sessions"), OsString::from("--unknown")]).is_err());
+}
+
+#[test]
+fn terminal_size_subcommand_bypasses_application_startup() {
+    let args = parse_args_from([OsString::from("terminal-size")]).unwrap();
+
+    assert_eq!(args.mode, StartupMode::PrintTerminalSize { json: false });
+    assert!(!should_handoff_to_existing_process(&args));
+    let json =
+        parse_args_from([OsString::from("terminal-size"), OsString::from("--json")]).unwrap();
+    let short_json =
+        parse_args_from([OsString::from("terminal-size"), OsString::from("-j")]).unwrap();
+    assert_eq!(json.mode, StartupMode::PrintTerminalSize { json: true });
+    assert_eq!(short_json, json);
+    assert!(
+        parse_args_from([OsString::from("terminal-size"), OsString::from("--unknown")]).is_err()
+    );
 }
 
 #[test]
@@ -731,13 +752,6 @@ fn pane_template_shortcuts_are_built_in() {
         Some(false)
     );
     assert_eq!(quarters.match_keystrokes(&[quarters_key]), Some(false));
-}
-
-#[test]
-fn profile_shortcut_labels_cover_the_number_row() {
-    assert_eq!(profile_shortcut_label(1).as_deref(), Some("Ctrl+Shift+1"));
-    assert_eq!(profile_shortcut_label(9).as_deref(), Some("Ctrl+Shift+9"));
-    assert_eq!(profile_shortcut_label(10), None);
 }
 
 #[test]

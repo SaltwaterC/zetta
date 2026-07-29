@@ -1,5 +1,12 @@
 # Using Zetta
 
+## Terminal size
+
+Run `zetta terminal-size` to print the current terminal width in columns and
+height in rows. Add `-j` or `--json` for machine-readable output. This works
+from Zetta and other terminals on macOS, Linux, and Windows, including
+PowerShell.
+
 ## Profiles and tabs
 
 Zetta creates profiles for common installed command interpreters. On Windows,
@@ -26,6 +33,8 @@ exiting the final pane closes the tab.
 Pane controls appear when the pointer moves over a pane and hide after a short
 period of inactivity. They can maximize, minimize, or close the pane. Each pane
 also has a stable per-tab label that remains as panes are rearranged or closed.
+The control strip shows the pane's live size next to its label. The maximized
+pane status strip shows the same size.
 Press `Alt-Shift-R` or double-click the label to assign a custom name; submit an
 empty name to restore its automatic label.
 

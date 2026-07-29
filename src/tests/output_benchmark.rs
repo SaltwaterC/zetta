@@ -88,6 +88,18 @@ fn terminal_size_summary_includes_columns_and_rows() {
 }
 
 #[test]
+fn terminal_size_json_includes_columns_and_rows() {
+    assert_eq!(
+        terminal_size_json(Some(TerminalSize {
+            columns: 120,
+            rows: 40,
+        })),
+        r#"{"columns":120,"rows":40}"#
+    );
+    assert_eq!(terminal_size_json(None), r#"{"columns":null,"rows":null}"#);
+}
+
+#[test]
 fn default_output_benchmark_uses_complete_lines() {
     let bytes = DEFAULT_OUTPUT_BENCHMARK_MIB * MIB_BYTES;
     assert_eq!(bytes % OUTPUT_BENCHMARK_LINE_BYTES, 0);

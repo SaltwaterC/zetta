@@ -325,10 +325,17 @@ impl Render for Zetta {
             window.viewport_size().width,
             background_session_count > 0,
         );
+        let active_terminal_focus = self
+            .tabs
+            .get(self.active_tab)
+            .and_then(Tab::active_pane)
+            .and_then(|pane| pane.view.as_ref())
+            .map(|view| view.focus_handle(cx));
         let profile_menu_profiles = self.profiles.clone();
         let default_profile = self.launch_config.default_profile;
         let profile_menu_handle = handle.clone();
         let profile_menu_dismiss_handle = handle.clone();
+        let profile_menu_terminal_focus = active_terminal_focus.clone();
         let profile_menu = PopoverMenu::new("new-tab-profile-menu")
             .with_handle(self.profile_menu_handle.clone())
             .trigger_with_tooltip(
@@ -351,12 +358,17 @@ impl Render for Zetta {
                 let profiles = profile_menu_profiles.clone();
                 let handle = profile_menu_handle.clone();
                 let dismiss_handle = profile_menu_dismiss_handle.clone();
-                let menu = ui::ContextMenu::build(window, cx, move |mut menu, _, _| {
+                let terminal_focus = profile_menu_terminal_focus.clone();
+                let menu = ui::ContextMenu::build(window, cx, move |mut menu, _, cx| {
                     for (index, profile) in profiles.iter().enumerate() {
                         let is_default = index == default_profile;
                         let label = profile.name.clone();
                         let label_for_row = label.clone();
-                        let shortcut = profile_shortcut_label(index + 1);
+                        let action = OpenProfile { slot: index + 1 };
+                        let shortcut = terminal_focus
+                            .as_ref()
+                            .map(|focus| ui::KeyBinding::for_action_in(&action, focus, cx))
+                            .unwrap_or_else(|| ui::KeyBinding::for_action(&action, cx));
                         let handle = handle.clone();
                         menu = menu.custom_entry(
                             move |_, _| {
@@ -383,13 +395,7 @@ impl Render for Zetta {
                                                 },
                                             )),
                                     )
-                                    .when_some(shortcut.clone(), |row, shortcut| {
-                                        row.child(
-                                            Label::new(shortcut)
-                                                .size(LabelSize::Small)
-                                                .color(Color::Muted),
-                                        )
-                                    })
+                                    .child(shortcut.clone())
                                     .into_any_element()
                             },
                             move |window, cx| {
@@ -436,13 +442,14 @@ impl Render for Zetta {
                         ""
                     },
                 )
-                    .start_icon(Icon::new(IconName::RotateCw).size(IconSize::Small))
-                    .style(ButtonStyle::Subtle)
-                    .size(ButtonSize::Large)
-                    .aria_label("Choose background session to reconnect"),
-                Tooltip::text(format!(
-                    "Choose background session to reconnect ({background_session_count}) (Ctrl-Shift-A)"
-                )),
+                .start_icon(Icon::new(IconName::RotateCw).size(IconSize::Small))
+                .style(ButtonStyle::Subtle)
+                .size(ButtonSize::Large)
+                .aria_label("Choose background session to reconnect"),
+                Tooltip::for_action_title(
+                    format!("Choose background session to reconnect ({background_session_count})"),
+                    &ReconnectSession,
+                ),
             )
             .anchor(Anchor::TopRight)
             .menu(move |window, cx| {
@@ -471,10 +478,7 @@ impl Render for Zetta {
                                 handle
                                     .update(cx, |this, cx| {
                                         this.reconnect_background_session(
-                                            runner_id,
-                                            session_id,
-                                            window,
-                                            cx,
+                                            runner_id, session_id, window, cx,
                                         )
                                     })
                                     .ok();
@@ -497,7 +501,10 @@ impl Render for Zetta {
             .style(ButtonStyle::Subtle)
             .size(ButtonSize::Large)
             .aria_label("Reconnect background session")
-            .tooltip(Tooltip::text("Reconnect background session (Ctrl-Shift-A)"))
+            .tooltip(Tooltip::for_action_title(
+                "Reconnect background session",
+                &ReconnectSession,
+            ))
             .on_click(|_, window, cx| window.dispatch_action(Box::new(ReconnectSession), cx))
             .into_any_element()
         } else {
@@ -520,11 +527,7 @@ impl Render for Zetta {
                 .style(ButtonStyle::Subtle)
                 .size(ButtonSize::Large)
                 .aria_label("Application menu"),
-                Tooltip::text(if cfg!(any(target_os = "windows", target_os = "linux")) {
-                    "Open application menu (Alt+Space)"
-                } else {
-                    "Open application menu"
-                }),
+                Tooltip::for_action_title("Open application menu", &OpenApplicationMenu),
             )
             .anchor(Anchor::TopLeft)
             .menu(move |window, cx| {
@@ -631,15 +634,18 @@ impl Render for Zetta {
                         .size(ButtonSize::Large)
                         .toggle_state(auto_background_tab)
                         .aria_label("Keep this tab running after close")
-                        .tooltip(Tooltip::text(if auto_background_tab {
-                            if auto_background_protected {
-                                "Keep running after close is on · authentication required (Ctrl-Shift-B)"
+                        .tooltip(Tooltip::for_action_title(
+                            if auto_background_tab {
+                                if auto_background_protected {
+                                    "Keep running after close is on · authentication required"
+                                } else {
+                                    "Keep running after close is on · no authentication"
+                                }
                             } else {
-                                "Keep running after close is on · no authentication (Ctrl-Shift-B)"
-                            }
-                        } else {
-                            "Keep this tab running after the tab or window is closed (Ctrl-Shift-B)"
-                        }))
+                                "Keep this tab running after the tab or window is closed"
+                            },
+                            &ToggleAutoBackgroundTab,
+                        ))
                         .on_click(|_, window, cx| {
                             window.dispatch_action(Box::new(ToggleAutoBackgroundTab), cx)
                         }),
@@ -657,10 +663,11 @@ impl Render for Zetta {
                         .style(ButtonStyle::Subtle)
                         .size(ButtonSize::Large)
                         .aria_label("Detach tab")
-                        .tooltip(Tooltip::text("Detach tab to background (Ctrl-Shift-D)"))
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(DetachTab), cx)
-                        }),
+                        .tooltip(Tooltip::for_action_title(
+                            "Detach tab to background",
+                            &DetachTab,
+                        ))
+                        .on_click(|_, window, cx| window.dispatch_action(Box::new(DetachTab), cx)),
                     )
                     .when(background_session_count > 0, |controls| {
                         controls.child(reconnect_control)
@@ -679,11 +686,14 @@ impl Render for Zetta {
                         .size(ButtonSize::Large)
                         .toggle_state(broadcast_input)
                         .aria_label("Broadcast input to all panes")
-                        .tooltip(Tooltip::text(if broadcast_input {
-                            "Broadcast input is on (Ctrl-Shift-I)"
-                        } else {
-                            "Broadcast input to all panes (Ctrl-Shift-I)"
-                        }))
+                        .tooltip(Tooltip::for_action_title(
+                            if broadcast_input {
+                                "Broadcast input is on"
+                            } else {
+                                "Broadcast input to all panes"
+                            },
+                            &ToggleBroadcastInput,
+                        ))
                         .on_click(|_, window, cx| {
                             window.dispatch_action(Box::new(ToggleBroadcastInput), cx)
                         }),
@@ -701,7 +711,7 @@ impl Render for Zetta {
                         .style(ButtonStyle::Subtle)
                         .size(ButtonSize::Large)
                         .aria_label("Open settings")
-                        .tooltip(Tooltip::text("Open settings (Ctrl+,)"))
+                        .tooltip(Tooltip::for_action_title("Open settings", &ToggleSettings))
                         .on_click(|_, window, cx| {
                             window.dispatch_action(Box::new(ToggleSettings), cx)
                         }),
@@ -718,6 +728,10 @@ impl Render for Zetta {
                 let layout = tab.visible_layout();
                 let maximized_pane = tab.maximized_pane.and_then(|pane_id| {
                     tab.pane(pane_id).map(|pane| {
+                        let pane_size = pane.terminal.as_ref().map(|terminal| {
+                            let bounds = terminal.read(cx).last_content().terminal_bounds;
+                            terminal_size_label(bounds.num_columns(), bounds.num_lines())
+                        });
                         (
                             pane_id,
                             tab.displayed_pane_label(pane_id)
@@ -725,6 +739,7 @@ impl Render for Zetta {
                             tab.renaming_pane == Some(pane_id)
                                 && tab.rename_select_all
                                 && tab.rename_buffer.is_some(),
+                            pane_size,
                         )
                     })
                 });
@@ -767,7 +782,7 @@ impl Render for Zetta {
                     .flex()
                     .flex_col()
                     .child(div().min_h_0().flex_1().child(content))
-                    .when_some(maximized_pane, |body, (pane_id, pane_label, pane_label_selected)| {
+                    .when_some(maximized_pane, |body, (pane_id, pane_label, pane_label_selected, pane_size)| {
                         let restore_handle = handle.clone();
                         let close_handle = handle.clone();
                         let tab_id = tab.id;
@@ -820,7 +835,16 @@ impl Render for Zetta {
                                                     Label::new("maximized")
                                                         .size(LabelSize::Small)
                                                         .color(Color::Custom(tab_colors.text_muted)),
-                                                ),
+                                                )
+                                                .when_some(pane_size, |bar, pane_size| {
+                                                    bar.child(
+                                                        Label::new(pane_size)
+                                                            .size(LabelSize::Small)
+                                                            .color(Color::Custom(
+                                                                tab_colors.text_muted,
+                                                            )),
+                                                    )
+                                                }),
                                         ),
                                 )
                                 .child(
@@ -836,8 +860,9 @@ impl Render for Zetta {
                                             .icon_size(IconSize::XSmall)
                                             .icon_color(Color::Custom(tab_colors.icon))
                                             .aria_label("Restore maximized pane")
-                                            .tooltip(Tooltip::text(
-                                                "Restore pane to its split position (Shift-Escape)",
+                                            .tooltip(Tooltip::for_action_title(
+                                                "Restore pane to its split position",
+                                                &ToggleMaximizePane,
                                             ))
                                             .on_click(move |_, window, cx| {
                                                 restore_handle
@@ -859,8 +884,9 @@ impl Render for Zetta {
                                             .icon_size(IconSize::XSmall)
                                             .icon_color(Color::Custom(tab_colors.icon))
                                             .aria_label("Close pane")
-                                            .tooltip(Tooltip::text(
-                                                "Close pane (Alt-Shift-X)",
+                                            .tooltip(Tooltip::for_action_title(
+                                                "Close pane",
+                                                &ClosePane,
                                             ))
                                             .on_click(move |_, window, cx| {
                                                 close_handle
@@ -912,7 +938,7 @@ impl Render for Zetta {
                                         .flex_none()
                                         .overflow_hidden()
                                         .tooltip(Tooltip::text(
-                                            "Alt-Shift-Left/Right selects; Alt-Shift-Up restores",
+                                            "Use the pane controls to select or restore",
                                         ))
                                         .child(
                                             Label::new(format!(
@@ -936,8 +962,9 @@ impl Render for Zetta {
                                         .icon_size(IconSize::XSmall)
                                         .icon_color(Color::Custom(tab_colors.icon))
                                         .aria_label("Select previous minimized pane")
-                                        .tooltip(Tooltip::text(
-                                            "Select previous minimized pane (Alt-Shift-Left)",
+                                        .tooltip(Tooltip::for_action_title(
+                                            "Select previous minimized pane",
+                                            &SelectPreviousMinimizedPane,
                                         ))
                                         .on_click(move |_, window, cx| {
                                             previous_handle
@@ -1026,13 +1053,16 @@ impl Render for Zetta {
                                                     })
                                                     .cursor_pointer()
                                                     .overflow_hidden()
-                                                    .tooltip(Tooltip::text(if is_selected {
-                                                        format!(
-                                                            "{shelf_label}\nSelected minimized pane; restore with Alt-Shift-Up"
-                                                        )
-                                                    } else {
-                                                        format!("{shelf_label}\nRestore minimized pane")
-                                                    }))
+                                                    .tooltip(Tooltip::for_action_title(
+                                                        if is_selected {
+                                                            format!(
+                                                                "{shelf_label}\nSelected minimized pane; restore"
+                                                            )
+                                                        } else {
+                                                            format!("{shelf_label}\nRestore minimized pane")
+                                                        },
+                                                        &RestoreMinimizedPane,
+                                                    ))
                                                     .on_click(move |_, window, cx| {
                                                         restore_handle
                                                             .update(cx, |this, cx| {
@@ -1078,8 +1108,9 @@ impl Render for Zetta {
                                         .icon_size(IconSize::XSmall)
                                         .icon_color(Color::Custom(tab_colors.icon))
                                         .aria_label("Select next minimized pane")
-                                        .tooltip(Tooltip::text(
-                                            "Select next minimized pane (Alt-Shift-Right)",
+                                        .tooltip(Tooltip::for_action_title(
+                                            "Select next minimized pane",
+                                            &SelectNextMinimizedPane,
                                         ))
                                         .on_click(move |_, window, cx| {
                                             next_handle
@@ -1101,8 +1132,9 @@ impl Render for Zetta {
                                         .icon_size(IconSize::XSmall)
                                         .icon_color(Color::Custom(tab_colors.icon))
                                         .aria_label("Close minimized pane")
-                                        .tooltip(Tooltip::text(
-                                            "Close selected minimized pane (Alt-Shift-X when active)",
+                                        .tooltip(Tooltip::for_action_title(
+                                            "Close selected minimized pane",
+                                            &ClosePane,
                                         ))
                                         .on_click(move |_, window, cx| {
                                             close_handle

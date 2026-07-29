@@ -30,6 +30,9 @@ pub(crate) enum StartupMode {
         size_mib: usize,
         output_type: OutputBenchmarkType,
     },
+    PrintTerminalSize {
+        json: bool,
+    },
     ListBackgroundSessions {
         json: bool,
     },
@@ -91,7 +94,7 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         .collect::<Vec<_>>()
         .join("\n  ");
     format!(
-        "Zetta Terminal\n\nUsage: zetta [OPTIONS]\n       zetta benchmark [OPTIONS]\n       zetta benchmark-output [OPTIONS]\n       zetta sessions [--json]{tftp_usage}\n\nCommands:\n  benchmark                           Profile terminal rendering\n  benchmark-output                    Write and time a text payload (default: 10 MiB)\n  sessions                            List detached background sessions{tftp_command}\n\nBuilt-in features:\n  {}\n\nProfiles accepted by --profile NAME (case-insensitive):\n  {profiles}\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Select one of the profiles listed above",
+        "Zetta Terminal\n\nUsage: zetta [OPTIONS]\n       zetta benchmark [OPTIONS]\n       zetta benchmark-output [OPTIONS]\n       zetta terminal-size [--json]\n       zetta sessions [--json]{tftp_usage}\n\nCommands:\n  benchmark                           Profile terminal rendering\n  benchmark-output                    Write and time a text payload (default: 10 MiB)\n  terminal-size                       Print the current terminal size\n  sessions                            List detached background sessions{tftp_command}\n\nBuilt-in features:\n  {}\n\nProfiles accepted by --profile NAME (case-insensitive):\n  {profiles}\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Select one of the profiles listed above",
         features.join("\n  "),
     )
 }
@@ -173,15 +176,46 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
     }
     if arguments
         .first()
+        .is_some_and(|argument| argument == "terminal-size")
+    {
+        let mut json = false;
+        for argument in &arguments[1..] {
+            match argument.to_string_lossy().as_ref() {
+                "--json" | "-j" => json = true,
+                "--help" | "-h" => {
+                    println!(
+                        "Print the current terminal size\n\nUsage: zetta terminal-size [--json]\n\nPrints the terminal width in columns and height in rows.\n\nOptions:\n  -j, --json  Print machine-readable JSON\n  -h, --help  Print help"
+                    );
+                    std::process::exit(0);
+                }
+                unknown => anyhow::bail!("unknown terminal-size argument {unknown:?}"),
+            }
+        }
+        return Ok(StartupArgs {
+            config_path: None,
+            keymap_path: None,
+            profile: None,
+            mode: StartupMode::PrintTerminalSize { json },
+            profile_report: None,
+            profile_duration: None,
+            profile_pane_stress: false,
+            profile_background_stress: false,
+            profile_sparse_updates: false,
+            profile_external_terminal: false,
+            tftp_command: None,
+        });
+    }
+    if arguments
+        .first()
         .is_some_and(|argument| argument == "sessions")
     {
         let mut json = false;
         for argument in &arguments[1..] {
             match argument.to_string_lossy().as_ref() {
-                "--json" => json = true,
+                "--json" | "-j" => json = true,
                 "--help" | "-h" => {
                     println!(
-                        "List detached Zetta sessions\n\nUsage: zetta sessions [--json]\n\nOptions:\n  --json  Print machine-readable JSON"
+                        "List detached Zetta sessions\n\nUsage: zetta sessions [--json]\n\nOptions:\n  -j, --json  Print machine-readable JSON\n  -h, --help  Print help"
                     );
                     std::process::exit(0);
                 }
@@ -529,12 +563,6 @@ pub(crate) fn pane_font_size_keybindings() -> [KeyBinding; 4] {
         ),
         KeyBinding::new("alt-shift-0", ResetPaneFontSize, Some("Zetta > Terminal")),
     ]
-}
-
-pub(crate) fn profile_shortcut_label(slot: usize) -> Option<String> {
-    (1..=9)
-        .contains(&slot)
-        .then(|| format!("Ctrl+Shift+{slot}"))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1493,6 +1521,10 @@ pub(crate) fn run() -> Result<()> {
     } = &args.mode
     {
         return run_output_benchmark(*size_mib, *output_type);
+    }
+    if let StartupMode::PrintTerminalSize { json } = args.mode {
+        print_terminal_size(json);
+        return Ok(());
     }
     if let StartupMode::ListBackgroundSessions { json } = &args.mode {
         return print_session_catalogs(*json);

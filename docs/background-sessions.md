@@ -31,7 +31,7 @@ Inspect detached sessions without opening another window:
 
 ```sh
 zetta sessions
-zetta sessions --json
+zetta sessions -j # or --json
 ```
 
 The human-readable listing includes a stable `process:runner:session` ID, saved

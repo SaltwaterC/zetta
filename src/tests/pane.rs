@@ -1,6 +1,11 @@
 use super::*;
 
 #[test]
+fn terminal_size_label_uses_columns_before_rows() {
+    assert_eq!(terminal_size_label(120, 40), "120 × 40");
+}
+
+#[test]
 fn two_pane_layout_rotates_between_axes() {
     let mut layout = PaneLayout::Split {
         axis: SplitAxis::Horizontal,
