@@ -1602,6 +1602,8 @@ impl Render for Zetta {
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::rename_tab))
             .on_action(cx.listener(Self::rename_pane))
+            .on_action(cx.listener(Self::toggle_pane_controls))
+            .on_action(cx.listener(Self::toggle_tab_pane_controls))
             .on_action(cx.listener(Self::split_horizontal))
             .on_action(cx.listener(Self::split_vertical))
             .on_action(cx.listener(Self::rotate_pane_layout))

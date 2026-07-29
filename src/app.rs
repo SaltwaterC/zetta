@@ -74,6 +74,20 @@ fn pane_controls_hide_delay(last_motion: Instant, now: Instant) -> Option<Durati
     (!remaining.is_zero()).then_some(remaining)
 }
 
+fn toggle_hidden_pane_controls(hidden_panes: &mut HashSet<u64>, pane_ids: &[u64]) -> bool {
+    let hide = pane_ids
+        .iter()
+        .any(|pane_id| !hidden_panes.contains(pane_id));
+    if hide {
+        hidden_panes.extend(pane_ids.iter().copied());
+    } else {
+        for pane_id in pane_ids {
+            hidden_panes.remove(pane_id);
+        }
+    }
+    hide
+}
+
 fn new_tab_profile(
     active_profile: Option<&Profile>,
     profiles: &[Profile],
@@ -125,6 +139,7 @@ pub(crate) struct Zetta {
     pub(crate) tab_search: Option<TabSearch>,
     pub(crate) minimized_panes_focus: gpui::FocusHandle,
     pub(crate) pane_controls_visible_for: Option<u64>,
+    pub(crate) pane_controls_hidden_for: HashSet<u64>,
     pub(crate) pane_controls_last_motion: Instant,
     pub(crate) pane_controls_hide_task: Option<Task<()>>,
     pub(crate) titlebar_dragging: bool,
@@ -316,6 +331,7 @@ impl Zetta {
             tab_search: None,
             minimized_panes_focus: cx.focus_handle(),
             pane_controls_visible_for: None,
+            pane_controls_hidden_for: HashSet::new(),
             pane_controls_last_motion: Instant::now(),
             pane_controls_hide_task: None,
             titlebar_dragging: false,
@@ -697,6 +713,12 @@ impl Zetta {
             }
             return;
         }
+        let closed_pane_ids = self.tabs[index]
+            .panes
+            .iter()
+            .map(|pane| pane.id)
+            .collect::<Vec<_>>();
+        self.forget_pane_controls(closed_pane_ids);
         self.tabs.remove(index);
         self.retain_open_visible_terminals();
         if self.tabs.is_empty() {
@@ -783,6 +805,7 @@ impl Zetta {
             tab.remove_pane(pane_id);
             tab.layout.clone().without(pane_id)
         };
+        self.forget_pane_controls([pane_id]);
         self.retain_open_visible_terminals();
         let Some(layout) = layout else {
             self.close_tab_at_with_policy(tab_index, background_if_last_pane, window, cx);
@@ -2438,6 +2461,9 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.pane_controls_hidden_for.contains(&pane_id) {
+            return;
+        }
         let visibility_changed = self.pane_controls_visible_for != Some(pane_id);
         self.pane_controls_visible_for = Some(pane_id);
         self.pane_controls_last_motion = Instant::now();
@@ -2474,6 +2500,55 @@ impl Zetta {
         if visibility_changed {
             cx.notify();
         }
+    }
+
+    fn forget_pane_controls(&mut self, pane_ids: impl IntoIterator<Item = u64>) {
+        for pane_id in pane_ids {
+            self.pane_controls_hidden_for.remove(&pane_id);
+            if self.pane_controls_visible_for == Some(pane_id) {
+                self.pane_controls_visible_for = None;
+            }
+        }
+    }
+
+    fn toggle_pane_controls_for(&mut self, pane_ids: &[u64], cx: &mut Context<Self>) {
+        if pane_ids.is_empty() {
+            return;
+        }
+        if toggle_hidden_pane_controls(&mut self.pane_controls_hidden_for, pane_ids)
+            && self
+                .pane_controls_visible_for
+                .is_some_and(|pane_id| pane_ids.contains(&pane_id))
+        {
+            self.pane_controls_visible_for = None;
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_pane_controls(
+        &mut self,
+        _: &TogglePaneControls,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let pane_id = self.tabs.get(self.active_tab).map(|tab| tab.active_pane);
+        if let Some(pane_id) = pane_id {
+            self.toggle_pane_controls_for(&[pane_id], cx);
+        }
+    }
+
+    pub(crate) fn toggle_tab_pane_controls(
+        &mut self,
+        _: &ToggleTabPaneControls,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let pane_ids = self
+            .tabs
+            .get(self.active_tab)
+            .map(|tab| tab.panes.iter().map(|pane| pane.id).collect::<Vec<_>>())
+            .unwrap_or_default();
+        self.toggle_pane_controls_for(&pane_ids, cx);
     }
 
     pub(crate) fn is_renaming(&self) -> bool {

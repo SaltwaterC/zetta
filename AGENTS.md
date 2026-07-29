@@ -87,6 +87,14 @@ cargo test
 git diff --check
 ```
 
+Zetta has no library target, so do not use `cargo test --lib` (including for
+focused tests). Run a focused test with its filter against the binary target,
+for example:
+
+```sh
+cargo test pane_controls
+```
+
 Run Clippy for broader Rust changes when practical:
 
 ```sh

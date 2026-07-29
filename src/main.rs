@@ -107,6 +107,8 @@ actions!(
         PreviousTab,
         RenameTab,
         RenamePane,
+        TogglePaneControls,
+        ToggleTabPaneControls,
         ClosePane,
         SplitHorizontal,
         SplitVertical,

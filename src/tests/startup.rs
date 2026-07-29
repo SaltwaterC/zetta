@@ -960,6 +960,16 @@ fn pane_label_uses_the_documented_shortcut() {
 }
 
 #[test]
+fn pane_controls_use_the_requested_shortcuts() {
+    assert_eq!(TOGGLE_PANE_CONTROLS_KEYBINDING, "alt-shift-h");
+    assert_eq!(TOGGLE_TAB_PANE_CONTROLS_KEYBINDING, "ctrl-shift-h");
+    assert_ne!(
+        TOGGLE_PANE_CONTROLS_KEYBINDING,
+        TOGGLE_TAB_PANE_CONTROLS_KEYBINDING
+    );
+}
+
+#[test]
 fn pane_layout_rotation_uses_the_requested_shortcut() {
     assert_eq!(ROTATE_PANE_LAYOUT_KEYBINDING, "alt-shift-l");
     let shortcut = gpui::Keystroke::parse(ROTATE_PANE_LAYOUT_KEYBINDING).unwrap();

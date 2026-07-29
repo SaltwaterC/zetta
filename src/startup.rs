@@ -824,6 +824,8 @@ pub(crate) fn validate_keymap_contents(content: &str, cx: &mut App) -> Result<()
 pub(crate) const RENAME_TAB_KEYBINDING: &str = "ctrl-shift-r";
 pub(crate) const RELOAD_CONFIGURATION_KEYBINDING: &str = "ctrl-alt-r";
 pub(crate) const RENAME_PANE_KEYBINDING: &str = "alt-shift-r";
+pub(crate) const TOGGLE_PANE_CONTROLS_KEYBINDING: &str = "alt-shift-h";
+pub(crate) const TOGGLE_TAB_PANE_CONTROLS_KEYBINDING: &str = "ctrl-shift-h";
 pub(crate) const CLOSE_PANE_KEYBINDING: &str = "alt-shift-x";
 pub(crate) const SAVE_PANE_OUTPUT_KEYBINDING: &str = "alt-shift-s";
 pub(crate) const SELECT_ALL_KEYBINDING: &str = "alt-shift-a";
@@ -1039,6 +1041,16 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
         KeyBinding::new("ctrl-,", ToggleSettings, Some("Zetta > Terminal")),
         KeyBinding::new(RENAME_TAB_KEYBINDING, RenameTab, Some("Zetta > Terminal")),
         KeyBinding::new(RENAME_PANE_KEYBINDING, RenamePane, Some("Zetta > Terminal")),
+        KeyBinding::new(
+            TOGGLE_PANE_CONTROLS_KEYBINDING,
+            TogglePaneControls,
+            Some("Zetta > Terminal"),
+        ),
+        KeyBinding::new(
+            TOGGLE_TAB_PANE_CONTROLS_KEYBINDING,
+            ToggleTabPaneControls,
+            Some("Zetta > Terminal"),
+        ),
         KeyBinding::new("ctrl-=", IncreaseTerminalFontSize, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-+", IncreaseTerminalFontSize, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl--", DecreaseTerminalFontSize, Some("Zetta > Terminal")),
