@@ -57,8 +57,12 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
             "terminal-size                       Print or resize the current terminal pane"
         )
     );
-    assert!(help.contains("zetta init SHELL"));
-    assert!(help.contains("init                                Generate shell integration"));
+    assert!(help.contains("zetta init [SHELL]"));
+    assert!(
+        help.contains(
+            "init                                Configure or generate shell integration"
+        )
+    );
 
     #[cfg(feature = "wayland")]
     assert!(help.contains("Wayland backend"));
@@ -248,7 +252,14 @@ fn terminal_size_resize_accepts_each_dimension_independently() {
 }
 
 #[test]
-fn init_subcommand_selects_shell_integration_without_starting_the_application() {
+fn init_subcommand_configures_the_current_shell_or_prints_an_explicit_integration() {
+    let configured = parse_args_from([OsString::from("init")]).unwrap();
+    assert_eq!(
+        configured.mode,
+        StartupMode::ConfigureCurrentShellIntegration
+    );
+    assert!(!should_handoff_to_existing_process(&configured));
+
     let args = parse_args_from([OsString::from("init"), OsString::from("zsh")]).unwrap();
 
     assert_eq!(
@@ -256,8 +267,16 @@ fn init_subcommand_selects_shell_integration_without_starting_the_application() 
         StartupMode::PrintShellIntegration(ShellIntegration::Zsh)
     );
     assert!(!should_handoff_to_existing_process(&args));
-    assert!(parse_args_from([OsString::from("init")]).is_err());
     assert!(parse_args_from([OsString::from("init"), OsString::from("sh")]).is_err());
+}
+
+#[test]
+fn shell_integration_setup_message_explains_how_to_enable_a_new_configuration() {
+    let message = shell_integration_configuration_message(&ShellIntegrationConfiguration::Written(
+        PathBuf::from("/home/example/.zshrc"),
+    ));
+
+    assert!(message.contains("Start a new shell or reload this file"));
 }
 
 #[test]

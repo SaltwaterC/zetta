@@ -38,14 +38,19 @@ zetta init powershell | Invoke-Expression
 
 ## Enable persistently
 
-Add the applicable command to your shell's startup file:
+Run `zetta init` to detect the current shell and add the applicable command to
+its startup file. It prints the file it writes, or reports that the integration
+is already present without changing the file.
+
+The startup files and commands are:
 
 - Bash: `~/.bashrc`
 - Zsh: `~/.zshrc`
 - Fish: `~/.config/fish/config.fish`
 - PowerShell: `$PROFILE`
 
-For example, add `eval "$(zetta init zsh)"` to `~/.zshrc`, or add
+For example, `zetta init` from Zsh adds `eval "$(zetta init zsh)"` to
+`~/.zshrc`. You can also add it manually, or add
 `zetta init powershell | Invoke-Expression` to `$PROFILE`. Start a new shell
 or source the file after editing it.
 

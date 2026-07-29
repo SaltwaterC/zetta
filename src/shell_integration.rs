@@ -1,4 +1,5 @@
 use super::*;
+use std::io::Write as _;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ShellIntegration {
@@ -30,6 +31,108 @@ impl ShellIntegration {
         };
         template.replace("ZETTA_PROFILES", &render_profiles(self, profiles))
     }
+
+    fn startup_file(self, home: &Path) -> PathBuf {
+        match self {
+            Self::Bash => home.join(".bashrc"),
+            Self::Fish => home.join(".config/fish/config.fish"),
+            Self::PowerShell => {
+                #[cfg(windows)]
+                {
+                    home.join("Documents/PowerShell/Microsoft.PowerShell_profile.ps1")
+                }
+                #[cfg(not(windows))]
+                {
+                    home.join(".config/powershell/Microsoft.PowerShell_profile.ps1")
+                }
+            }
+            Self::Zsh => home.join(".zshrc"),
+        }
+    }
+
+    fn configuration_command(self) -> &'static str {
+        match self {
+            Self::Bash => "eval \"$(zetta init bash)\"",
+            Self::Fish => "zetta init fish | source",
+            Self::PowerShell => "zetta init powershell | Invoke-Expression",
+            Self::Zsh => "eval \"$(zetta init zsh)\"",
+        }
+    }
+
+    fn configuration_is_present(self, contents: &str) -> bool {
+        contents.lines().any(|line| {
+            let line = line.trim_start();
+            if line.starts_with('#') {
+                return false;
+            }
+            match self {
+                Self::PowerShell => {
+                    line.contains("zetta init powershell") || line.contains("zetta init pwsh")
+                }
+                _ => line.contains(self.configuration_command()),
+            }
+        })
+    }
+
+    fn from_shell_path(path: &Path) -> Result<Self> {
+        let shell_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("could not determine the current shell from SHELL")?;
+        Self::parse(shell_name)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ShellIntegrationConfiguration {
+    Written(PathBuf),
+    AlreadyPresent(PathBuf),
+}
+
+pub(crate) fn configure_current_shell_integration() -> Result<ShellIntegrationConfiguration> {
+    let shell =
+        env::var_os("SHELL").context("could not determine the current shell: SHELL is not set")?;
+    let shell = ShellIntegration::from_shell_path(Path::new(&shell))?;
+    let home =
+        env::var_os("HOME").context("could not locate the home directory: HOME is not set")?;
+    configure_shell_integration(shell, Path::new(&home))
+}
+
+fn configure_shell_integration(
+    shell: ShellIntegration,
+    home: &Path,
+) -> Result<ShellIntegrationConfiguration> {
+    let path = shell.startup_file(home);
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", path.display()));
+        }
+    };
+
+    if shell.configuration_is_present(&contents) {
+        return Ok(ShellIntegrationConfiguration::AlreadyPresent(path));
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let separator = if contents.is_empty() || contents.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&path)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    file.write_all(format!("{separator}{}\n", shell.configuration_command()).as_bytes())
+        .with_context(|| format!("failed to write {}", path.display()))?;
+
+    Ok(ShellIntegrationConfiguration::Written(path))
 }
 
 fn render_profiles(shell: ShellIntegration, profiles: &[Profile]) -> String {
@@ -50,7 +153,7 @@ fn shell_single_quote(value: &str) -> String {
 }
 
 pub(crate) fn shell_integration_help() -> &'static str {
-    "Generate shell integration\n\nUsage: zetta init SHELL\n\nSupported shells:\n  bash        Bash\n  fish        Fish\n  powershell  PowerShell (also accepted as pwsh)\n  zsh         Z shell\n\nThe generated script adds command completion and the ztftp shortcut when the TFTP client is enabled."
+    "Configure or generate shell integration\n\nUsage: zetta init [SHELL]\n\nWithout SHELL, detects the current shell from SHELL and adds the integration command to its startup file. Running it again leaves an existing integration unchanged. With SHELL, prints the integration script for use in a shell startup file.\n\nSupported shells:\n  bash        Bash\n  fish        Fish\n  powershell  PowerShell (also accepted as pwsh)\n  zsh         Z shell\n\nThe generated script adds command completion and the ztftp shortcut when the TFTP client is enabled."
 }
 
 const BASH_INTEGRATION: &str = r#"# Zetta shell integration for Bash.

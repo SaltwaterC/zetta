@@ -32,6 +32,71 @@ fn supported_shells_generate_completion_and_tftp_shortcut() {
 }
 
 #[test]
+fn configuring_zsh_writes_the_startup_command_once() {
+    let home = tempfile::tempdir().unwrap();
+    let startup_file = home.path().join(".zshrc");
+
+    assert_eq!(
+        configure_shell_integration(ShellIntegration::Zsh, home.path()).unwrap(),
+        ShellIntegrationConfiguration::Written(startup_file.clone())
+    );
+    assert_eq!(
+        fs::read_to_string(&startup_file).unwrap(),
+        "eval \"$(zetta init zsh)\"\n"
+    );
+
+    assert_eq!(
+        configure_shell_integration(ShellIntegration::Zsh, home.path()).unwrap(),
+        ShellIntegrationConfiguration::AlreadyPresent(startup_file.clone())
+    );
+    assert_eq!(
+        fs::read_to_string(startup_file).unwrap(),
+        "eval \"$(zetta init zsh)\"\n"
+    );
+}
+
+#[test]
+fn shell_detection_uses_the_shell_name_from_shell_environment_path() {
+    assert_eq!(
+        ShellIntegration::from_shell_path(Path::new("/usr/bin/zsh")).unwrap(),
+        ShellIntegration::Zsh
+    );
+}
+
+#[test]
+fn commented_integration_does_not_prevent_configuration() {
+    let home = tempfile::tempdir().unwrap();
+    let startup_file = home.path().join(".zshrc");
+    fs::write(&startup_file, "# eval \"$(zetta init zsh)\"\n").unwrap();
+
+    assert_eq!(
+        configure_shell_integration(ShellIntegration::Zsh, home.path()).unwrap(),
+        ShellIntegrationConfiguration::Written(startup_file.clone())
+    );
+    assert_eq!(
+        fs::read_to_string(startup_file).unwrap(),
+        "# eval \"$(zetta init zsh)\"\neval \"$(zetta init zsh)\"\n"
+    );
+}
+
+#[test]
+fn configuring_fish_creates_its_startup_directory_and_preserves_existing_content() {
+    let home = tempfile::tempdir().unwrap();
+    let startup_file = home.path().join(".config/fish/config.fish");
+    fs::create_dir_all(startup_file.parent().unwrap()).unwrap();
+    fs::write(&startup_file, "set -gx EDITOR vim").unwrap();
+
+    assert_eq!(
+        configure_shell_integration(ShellIntegration::Fish, home.path()).unwrap(),
+        ShellIntegrationConfiguration::Written(startup_file.clone())
+    );
+    assert_eq!(
+        fs::read_to_string(startup_file).unwrap(),
+        "set -gx EDITOR vim\nzetta init fish | source\n"
+    );
+}
+
+#[test]
 fn generated_shell_syntax_uses_the_native_powershell_completer_signature() {
     let profiles = profiles();
     assert!(

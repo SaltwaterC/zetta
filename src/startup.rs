@@ -27,6 +27,7 @@ const DEFAULT_PERFORMANCE_REPORT_DURATION: Duration = Duration::from_secs(10);
 pub(crate) enum StartupMode {
     Application,
     PrintShellIntegration(ShellIntegration),
+    ConfigureCurrentShellIntegration,
     OutputBenchmark {
         size_mib: usize,
         output_type: OutputBenchmarkType,
@@ -102,7 +103,7 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         .collect::<Vec<_>>()
         .join("\n  ");
     format!(
-        "Zetta Terminal\n\nUsage: zetta [OPTIONS]\n       zetta benchmark [OPTIONS]\n       zetta benchmark-output [OPTIONS]\n       zetta terminal-size [--json | --resize [--columns COLUMNS] [--rows ROWS]]\n       zetta sessions [--json]\n       zetta init SHELL{tftp_usage}\n\nCommands:\n  benchmark                           Profile terminal rendering\n  benchmark-output                    Write and time a text payload (default: 10 MiB)\n  terminal-size                       Print or resize the current terminal pane\n  sessions                            List detached background sessions\n  init                                Generate shell integration{tftp_command}\n\nBuilt-in features:\n  {}\n\nProfiles accepted by --profile NAME (case-insensitive):\n  {profiles}\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Select one of the profiles listed above",
+        "Zetta Terminal\n\nUsage: zetta [OPTIONS]\n       zetta benchmark [OPTIONS]\n       zetta benchmark-output [OPTIONS]\n       zetta terminal-size [--json | --resize [--columns COLUMNS] [--rows ROWS]]\n       zetta sessions [--json]\n       zetta init [SHELL]{tftp_usage}\n\nCommands:\n  benchmark                           Profile terminal rendering\n  benchmark-output                    Write and time a text payload (default: 10 MiB)\n  terminal-size                       Print or resize the current terminal pane\n  sessions                            List detached background sessions\n  init                                Configure or generate shell integration{tftp_command}\n\nBuilt-in features:\n  {}\n\nProfiles accepted by --profile NAME (case-insensitive):\n  {profiles}\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Select one of the profiles listed above",
         features.join("\n  "),
     )
 }
@@ -303,9 +304,24 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             std::process::exit(0);
         }
         anyhow::ensure!(
-            integration_arguments.len() == 1,
-            "usage: zetta init SHELL; run `zetta init --help` for supported shells"
+            integration_arguments.len() <= 1,
+            "usage: zetta init [SHELL]; run `zetta init --help` for supported shells"
         );
+        if integration_arguments.is_empty() {
+            return Ok(StartupArgs {
+                config_path: None,
+                keymap_path: None,
+                profile: None,
+                mode: StartupMode::ConfigureCurrentShellIntegration,
+                profile_report: None,
+                profile_duration: None,
+                profile_pane_stress: false,
+                profile_background_stress: false,
+                profile_sparse_updates: false,
+                profile_external_terminal: false,
+                tftp_command: None,
+            });
+        }
         let shell = integration_arguments[0]
             .to_str()
             .context("SHELL must be valid UTF-8")?;
@@ -1657,6 +1673,13 @@ pub(crate) fn run() -> Result<()> {
         print!("{}", shell.script(&config.profiles));
         return Ok(());
     }
+    if args.mode == StartupMode::ConfigureCurrentShellIntegration {
+        println!(
+            "{}",
+            shell_integration_configuration_message(&configure_current_shell_integration()?)
+        );
+        return Ok(());
+    }
     if let StartupMode::ListBackgroundSessions { json } = &args.mode {
         return print_session_catalogs(*json);
     }
@@ -1805,6 +1828,21 @@ pub(crate) fn run() -> Result<()> {
         result.map_err(anyhow::Error::msg)?;
     }
     Ok(())
+}
+
+fn shell_integration_configuration_message(
+    configuration: &ShellIntegrationConfiguration,
+) -> String {
+    match configuration {
+        ShellIntegrationConfiguration::Written(path) => format!(
+            "Added Zetta shell integration to {}. Start a new shell or reload this file to enable it.",
+            path.display()
+        ),
+        ShellIntegrationConfiguration::AlreadyPresent(path) => format!(
+            "Zetta shell integration is already present in {}; no changes made.",
+            path.display()
+        ),
+    }
 }
 
 #[cfg(test)]
