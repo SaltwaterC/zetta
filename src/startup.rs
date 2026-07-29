@@ -62,6 +62,10 @@ pub(crate) fn version_text() -> String {
 
 pub(crate) fn help_text(profiles: &[Profile]) -> String {
     let mut features = vec!["Terminal emulator"];
+    #[cfg(feature = "wayland")]
+    features.push("Wayland backend");
+    #[cfg(feature = "x11")]
+    features.push("X11 backend");
     #[cfg(feature = "serial-console")]
     features.push("Serial console");
     #[cfg(feature = "http-server")]

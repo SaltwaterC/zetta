@@ -52,6 +52,16 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     assert!(help.contains("  System\n  Operations"));
     assert!(help.contains("Select one of the profiles listed above"));
 
+    #[cfg(feature = "wayland")]
+    assert!(help.contains("Wayland backend"));
+    #[cfg(not(feature = "wayland"))]
+    assert!(!help.contains("Wayland backend"));
+
+    #[cfg(feature = "x11")]
+    assert!(help.contains("X11 backend"));
+    #[cfg(not(feature = "x11"))]
+    assert!(!help.contains("X11 backend"));
+
     #[cfg(feature = "serial-console")]
     assert!(help.contains("Serial console"));
     #[cfg(not(feature = "serial-console"))]
