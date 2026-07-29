@@ -302,7 +302,9 @@ impl Render for Zetta {
                             .cursor_pointer()
                             .hover(|style| style.bg(tab_colors.element_hover))
                             .aria_label("Close tab")
-                            .tooltip(Tooltip::text("Close tab"))
+                            .tooltip(move |_window, cx| {
+                                Tooltip::for_action("Close tab", &CloseTab, cx)
+                            })
                             .child(
                                 svg()
                                     .path(IconName::Close.path())
@@ -1671,7 +1673,9 @@ impl Render for Zetta {
                                     .width(px(32.))
                                     .icon_size(IconSize::Small)
                                     .aria_label("New tab")
-                                    .tooltip(Tooltip::text("New tab"))
+                                    .tooltip(move |_window, cx| {
+                                        Tooltip::for_action("New tab", &NewTab, cx)
+                                    })
                                     .on_click(|_, window, cx| {
                                         window.dispatch_action(Box::new(NewTab), cx)
                                     }),
