@@ -86,6 +86,8 @@ built, how it should behave, and when the result was good enough.
   and themes
 - [Background sessions](docs/background-sessions.md): detach, protect, inspect,
   and reconnect sessions
+- [Shell integration](docs/shell-integration.md): command completion and the
+  `ztftp` shortcut
 - [Serial and network tools](docs/tools.md): serial consoles, HTTP and TFTP
   servers, and the TFTP client
 - [Performance profiling](docs/performance.md): overlays, automated reports,

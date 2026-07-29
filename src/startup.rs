@@ -26,6 +26,7 @@ const DEFAULT_PERFORMANCE_REPORT_DURATION: Duration = Duration::from_secs(10);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StartupMode {
     Application,
+    PrintShellIntegration(ShellIntegration),
     OutputBenchmark {
         size_mib: usize,
         output_type: OutputBenchmarkType,
@@ -94,7 +95,7 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         .collect::<Vec<_>>()
         .join("\n  ");
     format!(
-        "Zetta Terminal\n\nUsage: zetta [OPTIONS]\n       zetta benchmark [OPTIONS]\n       zetta benchmark-output [OPTIONS]\n       zetta terminal-size [--json]\n       zetta sessions [--json]{tftp_usage}\n\nCommands:\n  benchmark                           Profile terminal rendering\n  benchmark-output                    Write and time a text payload (default: 10 MiB)\n  terminal-size                       Print the current terminal size\n  sessions                            List detached background sessions{tftp_command}\n\nBuilt-in features:\n  {}\n\nProfiles accepted by --profile NAME (case-insensitive):\n  {profiles}\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Select one of the profiles listed above",
+        "Zetta Terminal\n\nUsage: zetta [OPTIONS]\n       zetta benchmark [OPTIONS]\n       zetta benchmark-output [OPTIONS]\n       zetta terminal-size [--json]\n       zetta sessions [--json]\n       zetta init SHELL{tftp_usage}\n\nCommands:\n  benchmark                           Profile terminal rendering\n  benchmark-output                    Write and time a text payload (default: 10 MiB)\n  terminal-size                       Print the current terminal size\n  sessions                            List detached background sessions\n  init                                Generate shell integration{tftp_command}\n\nBuilt-in features:\n  {}\n\nProfiles accepted by --profile NAME (case-insensitive):\n  {profiles}\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Select one of the profiles listed above",
         features.join("\n  "),
     )
 }
@@ -227,6 +228,36 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             keymap_path: None,
             profile: None,
             mode: StartupMode::ListBackgroundSessions { json },
+            profile_report: None,
+            profile_duration: None,
+            profile_pane_stress: false,
+            profile_background_stress: false,
+            profile_sparse_updates: false,
+            profile_external_terminal: false,
+            tftp_command: None,
+        });
+    }
+    if arguments.first().is_some_and(|argument| argument == "init") {
+        let integration_arguments = &arguments[1..];
+        if integration_arguments
+            .iter()
+            .any(|argument| matches!(argument.to_string_lossy().as_ref(), "--help" | "-h"))
+        {
+            println!("{}", shell_integration_help());
+            std::process::exit(0);
+        }
+        anyhow::ensure!(
+            integration_arguments.len() == 1,
+            "usage: zetta init SHELL; run `zetta init --help` for supported shells"
+        );
+        let shell = integration_arguments[0]
+            .to_str()
+            .context("SHELL must be valid UTF-8")?;
+        return Ok(StartupArgs {
+            config_path: None,
+            keymap_path: None,
+            profile: None,
+            mode: StartupMode::PrintShellIntegration(ShellIntegration::parse(shell)?),
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,
@@ -1524,6 +1555,11 @@ pub(crate) fn run() -> Result<()> {
     }
     if let StartupMode::PrintTerminalSize { json } = args.mode {
         print_terminal_size(json);
+        return Ok(());
+    }
+    if let StartupMode::PrintShellIntegration(shell) = args.mode {
+        let (config, _) = load_startup_config(None, None);
+        print!("{}", shell.script(&config.profiles));
         return Ok(());
     }
     if let StartupMode::ListBackgroundSessions { json } = &args.mode {

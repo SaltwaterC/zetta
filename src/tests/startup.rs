@@ -53,6 +53,8 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     assert!(help.contains("Select one of the profiles listed above"));
     assert!(help.contains("zetta terminal-size [--json]"));
     assert!(help.contains("terminal-size                       Print the current terminal size"));
+    assert!(help.contains("zetta init SHELL"));
+    assert!(help.contains("init                                Generate shell integration"));
 
     #[cfg(feature = "wayland")]
     assert!(help.contains("Wayland backend"));
@@ -124,6 +126,19 @@ fn terminal_size_subcommand_bypasses_application_startup() {
     assert!(
         parse_args_from([OsString::from("terminal-size"), OsString::from("--unknown")]).is_err()
     );
+}
+
+#[test]
+fn init_subcommand_selects_shell_integration_without_starting_the_application() {
+    let args = parse_args_from([OsString::from("init"), OsString::from("zsh")]).unwrap();
+
+    assert_eq!(
+        args.mode,
+        StartupMode::PrintShellIntegration(ShellIntegration::Zsh)
+    );
+    assert!(!should_handoff_to_existing_process(&args));
+    assert!(parse_args_from([OsString::from("init")]).is_err());
+    assert!(parse_args_from([OsString::from("init"), OsString::from("sh")]).is_err());
 }
 
 #[test]

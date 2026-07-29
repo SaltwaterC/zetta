@@ -12,6 +12,7 @@ mod serial_console;
 mod server_ui;
 mod session_auth_ui;
 mod settings_editor;
+mod shell_integration;
 #[cfg(any(feature = "tftp-server", feature = "tftp-client"))]
 mod tftp;
 mod theme_extensions;
@@ -212,6 +213,7 @@ mod app_render;
 mod window_frame;
 use window_frame::*;
 mod startup;
+use shell_integration::*;
 #[cfg(windows)]
 mod windows_integration;
 use startup::*;

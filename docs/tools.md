@@ -81,3 +81,5 @@ zetta tftp get --port 1069 HOST REMOTE [LOCAL]
 
 The client uses octet mode and negotiates block-size and transfer-size options
 when supported by the server. Run `zetta tftp --help` for complete syntax.
+With [shell integration](shell-integration.md) enabled, `ztftp` is an
+equivalent shortcut and retains TFTP command completion.
