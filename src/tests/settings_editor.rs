@@ -101,6 +101,10 @@ fn configuration_form_round_trip_uses_typed_values_and_profiles() {
     {
         form.http_server_port.text = "8080".to_owned();
     }
+    #[cfg(feature = "tftp-server")]
+    {
+        form.tftp_server_port.text = "1069".to_owned();
+    }
     form.profiles
         .iter_mut()
         .find(|profile| !profile.detected)
@@ -120,6 +124,8 @@ fn configuration_form_round_trip_uses_typed_values_and_profiles() {
     assert_eq!(output["pane_controls_hidden_by_default"], true);
     #[cfg(feature = "http-server")]
     assert_eq!(output["http_server_port"], 8080);
+    #[cfg(feature = "tftp-server")]
+    assert_eq!(output["tftp_server_port"], 1069);
     assert_eq!(output["profiles"][0]["args"], json!(["-l", "-i"]));
 }
 

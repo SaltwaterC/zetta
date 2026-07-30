@@ -88,23 +88,15 @@ impl Zetta {
 
         let text_input = |id: String, field: TextField, input: SettingsInput| -> gpui::AnyElement {
             let focused = editor.focused_input == Some(input);
-            let centered = matches!(
-                input,
+            let centered = match input {
                 SettingsInput::Configuration(
-                    ConfigTextField::FontSize | ConfigTextField::ScrollHistory
-                )
-            ) || {
+                    ConfigTextField::FontSize | ConfigTextField::ScrollHistory,
+                ) => true,
                 #[cfg(feature = "http-server")]
-                {
-                    matches!(
-                        input,
-                        SettingsInput::Configuration(ConfigTextField::HttpServerPort)
-                    )
-                }
-                #[cfg(not(feature = "http-server"))]
-                {
-                    false
-                }
+                SettingsInput::Configuration(ConfigTextField::HttpServerPort) => true,
+                #[cfg(feature = "tftp-server")]
+                SettingsInput::Configuration(ConfigTextField::TftpServerPort) => true,
+                _ => false,
             };
             let cursor = field.cursor.min(field.text.len());
             let (before, after) = field.text.split_at(cursor);
@@ -650,6 +642,19 @@ impl Zetta {
                         configuration.http_server_port.clone(),
                         NumericSetting::HttpServerPort,
                         ConfigTextField::HttpServerPort,
+                    ),
+                ));
+                #[cfg(feature = "tftp-server")]
+                rows.push(setting_row(
+                    "TFTP server port",
+                    "UDP port used when starting the TFTP server",
+                    editor.focused_control
+                        == Some(SettingsControl::Numeric(NumericSetting::TftpServerPort)),
+                    numeric(
+                        "settings-tftp-server-port",
+                        configuration.tftp_server_port.clone(),
+                        NumericSetting::TftpServerPort,
+                        ConfigTextField::TftpServerPort,
                     ),
                 ));
                 rows.push(

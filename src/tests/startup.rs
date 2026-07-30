@@ -1,4 +1,12 @@
 use super::*;
+#[cfg(any(
+    feature = "serial-console",
+    feature = "http-server",
+    feature = "tftp-server"
+))]
+use crate::cli_services::CliServiceCommand;
+#[cfg(feature = "serial-console")]
+use crate::cli_services::SerialCommand;
 
 #[cfg(windows)]
 fn msys2_shell(root: &Path, shell: &str) -> Shell {
@@ -167,30 +175,92 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     assert!(!help.contains("X11 backend"));
 
     #[cfg(feature = "serial-console")]
-    assert!(help.contains("Serial console"));
+    {
+        assert!(help.contains("Serial console"));
+        assert!(help.contains("zetta serial <COMMAND>"));
+        assert!(
+            help.contains("serial                              List or connect to serial devices")
+        );
+    }
     #[cfg(not(feature = "serial-console"))]
     assert!(!help.contains("Serial console"));
 
     #[cfg(feature = "http-server")]
-    assert!(help.contains("HTTP server"));
+    {
+        assert!(help.contains("HTTP server"));
+        assert!(help.contains("zetta http server [OPTIONS]"));
+        assert!(help.contains("http server                         Serve static files over HTTP"));
+    }
     #[cfg(not(feature = "http-server"))]
     assert!(!help.contains("HTTP server"));
 
     #[cfg(feature = "tftp-server")]
-    assert!(help.contains("TFTP server"));
+    {
+        assert!(help.contains("TFTP server"));
+        assert!(help.contains("zetta tftp <COMMAND>"));
+    }
     #[cfg(not(feature = "tftp-server"))]
     assert!(!help.contains("TFTP server"));
 
-    #[cfg(feature = "tftp-client")]
+    #[cfg(any(feature = "tftp-client", feature = "tftp-server"))]
     {
+        #[cfg(feature = "tftp-client")]
         assert!(help.contains("TFTP client"));
         assert!(help.contains("zetta tftp <COMMAND>"));
     }
-    #[cfg(not(feature = "tftp-client"))]
+    #[cfg(not(any(feature = "tftp-client", feature = "tftp-server")))]
     {
         assert!(!help.contains("TFTP client"));
         assert!(!help.contains("zetta tftp <COMMAND>"));
     }
+}
+
+#[cfg(feature = "serial-console")]
+#[test]
+fn serial_subcommands_bypass_application_startup() {
+    let args = parse_args_from([OsString::from("serial"), OsString::from("list")]).unwrap();
+
+    assert!(matches!(
+        args.mode,
+        StartupMode::CliService(CliServiceCommand::Serial(SerialCommand::List))
+    ));
+    assert!(!should_handoff_to_existing_process(&args));
+}
+
+#[cfg(feature = "http-server")]
+#[test]
+fn http_server_subcommand_bypasses_application_startup() {
+    let args = parse_args_from([
+        OsString::from("http"),
+        OsString::from("server"),
+        OsString::from("--port"),
+        OsString::from("8080"),
+    ])
+    .unwrap();
+
+    assert!(matches!(
+        args.mode,
+        StartupMode::CliService(CliServiceCommand::Http(_))
+    ));
+    assert!(!should_handoff_to_existing_process(&args));
+}
+
+#[cfg(feature = "tftp-server")]
+#[test]
+fn tftp_server_subcommand_bypasses_application_startup() {
+    let args = parse_args_from([
+        OsString::from("tftp"),
+        OsString::from("server"),
+        OsString::from("--port"),
+        OsString::from("1069"),
+    ])
+    .unwrap();
+
+    assert!(matches!(
+        args.mode,
+        StartupMode::CliService(CliServiceCommand::Tftp(_))
+    ));
+    assert!(!should_handoff_to_existing_process(&args));
 }
 
 #[test]

@@ -54,6 +54,7 @@ fn default_working_directory_is_the_user_home() {
     assert_eq!(config.working_directory, Some(home_dir()));
     assert!(!config.working_directory_configured);
     assert_eq!(config.http_server_port, DEFAULT_HTTP_PORT);
+    assert_eq!(config.tftp_server_port, DEFAULT_TFTP_SERVER_PORT);
     assert_eq!(config.pane_controls_position, PaneControlsPosition::Right);
     assert!(!config.pane_controls_hidden_by_default);
 }
@@ -111,6 +112,22 @@ fn validates_http_server_port() {
         assert!(
             Config::parse(&format!(r#"{{"http_server_port":{value}}}"#), None, None).is_err(),
             "accepted invalid HTTP server port {value}"
+        );
+    }
+}
+
+#[test]
+fn validates_tftp_server_port() {
+    assert_eq!(
+        Config::parse(r#"{"tftp_server_port":1069}"#, None, None)
+            .unwrap()
+            .tftp_server_port,
+        1069
+    );
+    for value in ["0", "65536", "-1", "1.5", "\"69\""] {
+        assert!(
+            Config::parse(&format!(r#"{{"tftp_server_port":{value}}}"#), None, None).is_err(),
+            "accepted invalid TFTP server port {value}"
         );
     }
 }

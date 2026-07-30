@@ -406,7 +406,7 @@ fn shell_single_quote(value: &str) -> String {
 }
 
 pub(crate) fn shell_integration_help() -> &'static str {
-    "Configure or generate shell integration\n\nUsage: zetta init [SHELL]\n\nWithout SHELL, detects the current shell from SHELL and adds the integration command to its startup file. On Windows, Unix-style HOME paths from MSYS2 and similar environments are resolved with cygpath; when SHELL is unavailable, Zetta detects the launching PowerShell and writes to its $PROFILE. Running it again leaves an existing integration unchanged. With SHELL, prints the integration script for use in a shell startup file.\n\nSupported shells:\n  bash        Bash\n  fish        Fish\n  powershell  PowerShell (also accepted as pwsh)\n  zsh         Z shell\n\nThe generated script adds command completion and the ztftp shortcut when the TFTP client is enabled."
+    "Configure or generate shell integration\n\nUsage: zetta init [SHELL]\n\nWithout SHELL, detects the current shell from SHELL and adds the integration command to its startup file. On Windows, Unix-style HOME paths from MSYS2 and similar environments are resolved with cygpath; when SHELL is unavailable, Zetta detects the launching PowerShell and writes to its $PROFILE. Running it again leaves an existing integration unchanged. With SHELL, prints the integration script for use in a shell startup file.\n\nSupported shells:\n  bash        Bash\n  fish        Fish\n  powershell  PowerShell (also accepted as pwsh)\n  zsh         Z shell\n\nThe generated script adds command completion, including live serial-device completion, and the ztftp shortcut when the TFTP client is enabled."
 }
 
 const BASH_INTEGRATION: &str = r#"# Zetta shell integration for Bash.
@@ -431,19 +431,71 @@ _zetta_complete() {
             return
             ;;
         -p)
-            if [[ $command != tftp ]]; then
+            if [[ $command == serial ]]; then
+                COMPREPLY=( $(compgen -W 'none odd even' -- "$current") )
+            elif [[ $command != tftp && $command != http ]]; then
                 _zetta_complete_profiles
             else
                 COMPREPLY=()
             fi
             return
             ;;
+        --root)
+            COMPREPLY=( $(compgen -d -- "$current") )
+            return
+            ;;
+        --device)
+            _zetta_complete_serial_devices
+            return
+            ;;
+        -d)
+            if [[ $command == serial ]]; then
+                _zetta_complete_serial_devices
+            else
+                COMPREPLY=()
+            fi
+            return
+            ;;
+        --data-bits|-D)
+            if [[ $command == serial ]]; then
+                COMPREPLY=( $(compgen -W '5 6 7 8' -- "$current") )
+            else
+                COMPREPLY=()
+            fi
+            return
+            ;;
+        --parity)
+            COMPREPLY=( $(compgen -W 'none odd even' -- "$current") )
+            return
+            ;;
+        --stop-bits|-s)
+            if [[ $command == serial ]]; then
+                COMPREPLY=( $(compgen -W '1 2' -- "$current") )
+            else
+                COMPREPLY=()
+            fi
+            return
+            ;;
+        --flow-control|-f)
+            COMPREPLY=( $(compgen -W 'none software hardware' -- "$current") )
+            return
+            ;;
         --config|--keymap|-k|--profile-report)
             COMPREPLY=( $(compgen -f -- "$current") )
             return
             ;;
-        -c|-r)
+        -c)
             if [[ $command == terminal-size ]]; then
+                COMPREPLY=()
+            else
+                COMPREPLY=( $(compgen -f -- "$current") )
+            fi
+            return
+            ;;
+        -r)
+            if [[ $command == http || ( $command == tftp && ${COMP_WORDS[2]} == server ) ]]; then
+                COMPREPLY=( $(compgen -d -- "$current") )
+            elif [[ $command == terminal-size ]]; then
                 COMPREPLY=()
             else
                 COMPREPLY=( $(compgen -f -- "$current") )
@@ -454,14 +506,14 @@ _zetta_complete() {
             COMPREPLY=( $(compgen -W 'repeated unique' -- "$current") )
             return
             ;;
-        --port|-p|--size|-s|--profile-duration|-d|--columns|-c|--rows|-R)
+        --port|-p|--baud-rate|-b|--size|--profile-duration|--columns|--rows|-R)
             COMPREPLY=()
             return
             ;;
     esac
 
     if (( COMP_CWORD == 1 )); then
-        COMPREPLY=( $(compgen -W 'benchmark benchmark-output terminal-size sessions init tftp --help --version --config --keymap --profile' -- "$current") )
+        COMPREPLY=( $(compgen -W 'benchmark benchmark-output terminal-size sessions init serial http tftp --help --version --config --keymap --profile' -- "$current") )
         return
     fi
 
@@ -481,6 +533,20 @@ _zetta_complete() {
         init)
             COMPREPLY=( $(compgen -W 'bash fish powershell pwsh zsh --help' -- "$current") )
             ;;
+        serial)
+            if (( COMP_CWORD == 2 )); then
+                COMPREPLY=( $(compgen -W 'console list --help' -- "$current") )
+            elif [[ ${COMP_WORDS[2]} == console ]]; then
+                COMPREPLY=( $(compgen -W '-d --device -b --baud-rate -D --data-bits -p --parity -s --stop-bits -f --flow-control -h --help' -- "$current") )
+            fi
+            ;;
+        http)
+            if (( COMP_CWORD == 2 )); then
+                COMPREPLY=( $(compgen -W 'server --help' -- "$current") )
+            else
+                COMPREPLY=( $(compgen -W '-r --root -p --port -c --config -h --help' -- "$current") )
+            fi
+            ;;
         tftp)
             _zetta_tftp_complete 2
             ;;
@@ -494,11 +560,18 @@ _zetta_tftp_complete() {
     previous=${COMP_WORDS[COMP_CWORD-1]}
 
     if (( COMP_CWORD == operation_index )); then
-        COMPREPLY=( $(compgen -W 'get put --help' -- "$current") )
+        COMPREPLY=( $(compgen -W 'get put server --help' -- "$current") )
+        return
+    fi
+    operation=${COMP_WORDS[operation_index]}
+    if [[ $operation == server ]]; then
+        if [[ $current == -* || -z $current ]]; then
+            COMPREPLY=( $(compgen -W '-r --root -p --port -c --config -h --help' -- "$current") )
+        fi
         return
     fi
     if [[ $current == -* ]]; then
-        COMPREPLY=( $(compgen -W '--port --help' -- "$current") )
+        COMPREPLY=( $(compgen -W '-p --port -h --help' -- "$current") )
         return
     fi
     if [[ $previous == '--port' || $previous == '-p' ]]; then
@@ -506,7 +579,6 @@ _zetta_tftp_complete() {
         return
     fi
 
-    operation=${COMP_WORDS[operation_index]}
     for (( index = operation_index + 1; index < COMP_CWORD; index++ )); do
         argument=${COMP_WORDS[index]}
         if (( skip_port )); then
@@ -523,6 +595,12 @@ _zetta_tftp_complete() {
             (( positional == 1 )) && COMPREPLY=( $(compgen -f -- "$current") )
             ;;
     esac
+}
+
+_zetta_complete_serial_devices() {
+    local devices
+    devices=$(zetta serial list 2>/dev/null)
+    COMPREPLY=( $(compgen -W "$devices" -- "$current") )
 }
 
 _ztftp_complete() {
@@ -543,12 +621,18 @@ function __zetta_profiles
     printf '%s\n' ZETTA_PROFILES
 end
 
+function __zetta_serial_devices
+    zetta serial list 2>/dev/null
+end
+
 complete -c zetta -f
 complete -c zetta -n '__fish_use_subcommand' -a benchmark -d 'Profile terminal rendering'
 complete -c zetta -n '__fish_use_subcommand' -a benchmark-output -d 'Write and time a text payload'
 complete -c zetta -n '__fish_use_subcommand' -a terminal-size -d 'Print the current terminal size'
 complete -c zetta -n '__fish_use_subcommand' -a sessions -d 'List detached background sessions'
 complete -c zetta -n '__fish_use_subcommand' -a init -d 'Generate shell integration'
+complete -c zetta -n '__fish_use_subcommand' -a serial -d 'List or connect to serial devices'
+complete -c zetta -n '__fish_use_subcommand' -a http -d 'Serve static files over HTTP'
 complete -c zetta -n '__fish_use_subcommand' -a tftp -d 'Transfer a file with TFTP'
 complete -c zetta -n '__fish_use_subcommand' -l help -d 'Print help'
 complete -c zetta -n '__fish_use_subcommand' -l version -d 'Print version'
@@ -556,6 +640,8 @@ complete -c zetta -n '__fish_use_subcommand' -l config -r -d 'Use a configuratio
 complete -c zetta -n '__fish_use_subcommand' -l keymap -r -d 'Use a keymap file'
 complete -c zetta -n '__fish_use_subcommand' -l profile -r -a '(__zetta_profiles)' -d 'Select a profile'
 complete -c zetta -n '__fish_seen_subcommand_from init' -a 'bash fish powershell pwsh zsh'
+complete -c zetta -n '__fish_seen_subcommand_from serial' -a 'console list'
+complete -c zetta -n '__fish_seen_subcommand_from http' -a server
 complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l json -d 'Print machine-readable JSON'
 complete -c zetta -n '__fish_seen_subcommand_from sessions' -l json -d 'Print machine-readable JSON'
 complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l resize -d 'Resize the current pane'
@@ -576,11 +662,22 @@ complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l profile-backgrou
 complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l profile-sparse-updates
 complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l profile-external-terminal
 complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l help -d 'Print help'
-complete -c zetta -n '__fish_seen_subcommand_from tftp' -a 'get put'
-complete -c zetta -n '__fish_seen_subcommand_from tftp' -l port -r -d 'Server port'
+complete -c zetta -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console' -s d -l device -r -a '(__zetta_serial_devices)' -d 'Serial device'
+complete -c zetta -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console' -s b -l baud-rate -r -d 'Baud rate'
+complete -c zetta -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console' -s D -l data-bits -r -a '5 6 7 8'
+complete -c zetta -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console' -s p -l parity -r -a 'none odd even'
+complete -c zetta -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console' -s s -l stop-bits -r -a '1 2'
+complete -c zetta -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console' -s f -l flow-control -r -a 'none software hardware'
+complete -c zetta -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server' -s r -l root -r -a '(__fish_complete_directories)' -d 'Directory to serve'
+complete -c zetta -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server' -s p -l port -r -d 'TCP port'
+complete -c zetta -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server' -s c -l config -r -d 'Configuration file'
+complete -c zetta -n '__fish_seen_subcommand_from tftp' -a 'get put server'
+complete -c zetta -n '__fish_seen_subcommand_from tftp' -s p -l port -r -d 'Server port'
+complete -c zetta -n '__fish_seen_subcommand_from tftp; and __fish_seen_subcommand_from server' -s r -l root -r -a '(__fish_complete_directories)' -d 'Directory to serve'
+complete -c zetta -n '__fish_seen_subcommand_from tftp; and __fish_seen_subcommand_from server' -s c -l config -r -d 'Configuration file'
 complete -c zetta -n '__fish_seen_subcommand_from tftp' -l help -d 'Print help'
 complete -c ztftp -f -a 'get put'
-complete -c ztftp -l port -r -d 'Server port'
+complete -c ztftp -s p -l port -r -d 'Server port'
 complete -c ztftp -l help -d 'Print help'
 "#;
 
@@ -597,19 +694,35 @@ $zettaCompletions = {
     $previous = if ($words.Count -gt 1) { $words[$words.Count - 2] } else { '' }
     $last = if ($words.Count -gt 1) { $words[$words.Count - 1] } else { '' }
     $subcommand = $words | Where-Object {
-        $_ -in 'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'init', 'tftp'
+        $_ -in 'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'init', 'serial', 'http', 'tftp'
     } | Select-Object -First 1
 
     $candidates = if ($commandName -eq 'ztftp') {
         if ($words.Count -le 1) { 'get', 'put', '--help' } else { '--port', '--help' }
-    } elseif ($previous -in '--profile', '-p' -or $last -in '--profile', '-p') {
+    } elseif (
+        $previous -eq '--profile' -or $last -eq '--profile' -or
+        (($previous -eq '-p' -or $last -eq '-p') -and $null -eq $subcommand)
+    ) {
         $zettaProfiles
     } elseif ($previous -in '--output-type', '-t') {
         'repeated', 'unique'
-    } elseif ($previous -in '--columns', '-c', '--rows', '-R') {
+    } elseif ($previous -in '--device', '-d') {
+        if ($subcommand -eq 'serial') { @(& zetta serial list 2>$null) } else { @() }
+    } elseif ($previous -in '--data-bits', '-D') {
+        if ($subcommand -eq 'serial') { '5', '6', '7', '8' } else { @() }
+    } elseif ($previous -eq '--parity' -or ($previous -eq '-p' -and $subcommand -eq 'serial')) {
+        'none', 'odd', 'even'
+    } elseif ($previous -in '--stop-bits', '-s') {
+        if ($subcommand -eq 'serial') { '1', '2' } else { @() }
+    } elseif ($previous -in '--flow-control', '-f') {
+        'none', 'software', 'hardware'
+    } elseif (
+        $previous -in '--columns', '--rows', '-R' -or
+        ($previous -eq '-c' -and $subcommand -eq 'terminal-size')
+    ) {
         @()
     } elseif ($null -eq $subcommand) {
-        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'init', 'tftp', '--help', '--version', '--config', '--keymap', '--profile'
+        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'init', 'serial', 'http', 'tftp', '--help', '--version', '--config', '--keymap', '--profile'
     } else {
         switch ($subcommand) {
             'benchmark' { '--terminal-render-workload', '--terminal-checkerboard-workload', '--terminal-sparse-update-workload', '--profile-report', '--profile-duration', '--profile-pane-stress', '--profile-background-stress', '--profile-sparse-updates', '--profile-external-terminal', '--help' }
@@ -617,7 +730,18 @@ $zettaCompletions = {
             'terminal-size' { '--json', '--resize', '--columns', '--rows', '--help' }
             'sessions' { '--json', '--help' }
             'init' { 'bash', 'fish', 'powershell', 'pwsh', 'zsh', '--help' }
-            'tftp' { if ($words.Count -le 2) { 'get', 'put', '--help' } else { '--port', '--help' } }
+            'serial' {
+                if ($words.Count -le 2) { 'console', 'list', '--help' }
+                elseif ($words[2] -eq 'console') { '-d', '--device', '-b', '--baud-rate', '-D', '--data-bits', '-p', '--parity', '-s', '--stop-bits', '-f', '--flow-control', '-h', '--help' }
+            }
+            'http' {
+                if ($words.Count -le 2) { 'server', '--help' } else { '-r', '--root', '-p', '--port', '-c', '--config', '-h', '--help' }
+            }
+            'tftp' {
+                if ($words.Count -le 2) { 'get', 'put', 'server', '--help' }
+                elseif ($words[2] -eq 'server') { '-r', '--root', '-p', '--port', '-c', '--config', '-h', '--help' }
+                else { '-p', '--port', '-h', '--help' }
+            }
         }
     }
 
@@ -646,21 +770,74 @@ _zetta() {
     local previous=${words[CURRENT-1]}
 
     if (( CURRENT == 2 )); then
-        compadd -S ' ' -- benchmark benchmark-output terminal-size sessions init tftp
+        compadd -S ' ' -- benchmark benchmark-output terminal-size sessions init serial http tftp
         compadd -- --help --version --config --keymap --profile
         return
     fi
 
     case $previous in
-        --profile|-p)
+        --profile)
             _zetta_profiles
+            return
+            ;;
+        -p)
+            if [[ $words[2] == serial ]]; then
+                compadd -- none odd even
+            elif [[ $words[2] != http && $words[2] != tftp ]]; then
+                _zetta_profiles
+            fi
             return
             ;;
         --config|--keymap|-k|--profile-report)
             _files
             return
             ;;
-        -c|-r)
+        --root)
+            _files -/
+            return
+            ;;
+        --device)
+            compadd -- "${(@f)$(zetta serial list 2>/dev/null)}"
+            return
+            ;;
+        -d)
+            if [[ $words[2] == serial ]]; then
+                compadd -- "${(@f)$(zetta serial list 2>/dev/null)}"
+            fi
+            return
+            ;;
+        --data-bits|-D)
+            if [[ $words[2] == serial ]]; then
+                compadd -- 5 6 7 8
+            fi
+            return
+            ;;
+        --parity)
+            compadd -- none odd even
+            return
+            ;;
+        --stop-bits|-s)
+            if [[ $words[2] == serial ]]; then
+                compadd -- 1 2
+            fi
+            return
+            ;;
+        --flow-control|-f)
+            compadd -- none software hardware
+            return
+            ;;
+        -c)
+            if [[ $words[2] == terminal-size ]]; then
+                return
+            fi
+            _files
+            return
+            ;;
+        -r)
+            if [[ $words[2] == http || ( $words[2] == tftp && $words[3] == server ) ]]; then
+                _files -/
+                return
+            fi
             if [[ $words[2] == terminal-size ]]; then
                 return
             fi
@@ -671,7 +848,7 @@ _zetta() {
             compadd -- repeated unique
             return
             ;;
-        --port|--size|--profile-duration|-d|--columns|-c|--rows|-R)
+        --port|-p|--baud-rate|-b|--size|--profile-duration|--columns|--rows|-R)
             return
             ;;
     esac
@@ -695,6 +872,22 @@ _zetta() {
         init)
             compadd -- bash fish powershell pwsh zsh --help
             ;;
+        serial)
+            if (( CURRENT == 3 )); then
+                compadd -S ' ' -- console list
+                compadd -- --help
+            elif [[ $words[3] == console ]]; then
+                compadd -- -d --device -b --baud-rate -D --data-bits -p --parity -s --stop-bits -f --flow-control -h --help
+            fi
+            ;;
+        http)
+            if (( CURRENT == 3 )); then
+                compadd -S ' ' -- server
+                compadd -- --help
+            else
+                compadd -- -r --root -p --port -c --config -h --help
+            fi
+            ;;
         tftp)
             _zetta_tftp
             ;;
@@ -712,20 +905,27 @@ _zetta_tftp() {
     fi
 
     if (( CURRENT == operation_index )); then
-        compadd -S ' ' -- get put
+        compadd -S ' ' -- get put server
         compadd -- --help
         return
     fi
 
+    operation=${words[operation_index]}
+    if [[ $operation == server ]]; then
+        if [[ $current == -* || -z $current ]]; then
+            compadd -- -r --root -p --port -c --config -h --help
+        fi
+        return
+    fi
+
     if [[ $current == -* ]]; then
-        compadd -- --port --help
+        compadd -- -p --port -h --help
         return
     fi
     if [[ $words[CURRENT-1] == --port || $words[CURRENT-1] == -p ]]; then
         return
     fi
 
-    operation=${words[operation_index]}
     for (( index = operation_index + 1; index < CURRENT; index++ )); do
         argument=${words[index]}
         if (( skip_port )); then

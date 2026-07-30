@@ -82,3 +82,17 @@ fn linux_legacy_probe_rejects_files_without_tty_attributes() {
     let file = tempfile::NamedTempFile::new().unwrap();
     assert!(!linux_tty_responds(file.path()));
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn generic_serial8250_slots_are_identified_as_possible_phantom_uarts() {
+    assert!(linux_generic_serial8250_device_path(Path::new(
+        "/sys/devices/platform/serial8250/serial8250:0/serial8250:0.15"
+    )));
+    assert!(!linux_generic_serial8250_device_path(Path::new(
+        "/sys/devices/pci0000:00/0000:00:16.3/0000:00:16.3:0/tty/ttyS4"
+    )));
+    assert!(!linux_generic_serial8250_device_path(Path::new(
+        "/sys/devices/pnp0/00:04/tty/ttyS0"
+    )));
+}

@@ -1,4 +1,16 @@
 use super::*;
+#[cfg(any(
+    feature = "serial-console",
+    feature = "http-server",
+    feature = "tftp-server"
+))]
+use crate::cli_services::CliServiceCommand;
+#[cfg(feature = "http-server")]
+use crate::cli_services::{http_server_help, parse_http_args};
+#[cfg(feature = "serial-console")]
+use crate::cli_services::{parse_serial_args, serial_help};
+#[cfg(feature = "tftp-server")]
+use crate::cli_services::{parse_tftp_server_args, tftp_server_help};
 
 #[cfg(not(feature = "tftp-client"))]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -13,7 +25,14 @@ impl TftpCommand {
 
 #[cfg(not(feature = "tftp-client"))]
 pub(crate) fn tftp_help() -> &'static str {
-    "TFTP support is disabled in this build"
+    #[cfg(feature = "tftp-server")]
+    {
+        "Zetta TFTP server\n\nUsage: zetta tftp server [OPTIONS]\n\nRun `zetta tftp server --help` for server options."
+    }
+    #[cfg(not(feature = "tftp-server"))]
+    {
+        "TFTP support is disabled in this build"
+    }
 }
 
 #[cfg(not(feature = "tftp-client"))]
@@ -26,6 +45,12 @@ const DEFAULT_PERFORMANCE_REPORT_DURATION: Duration = Duration::from_secs(10);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StartupMode {
     Application,
+    #[cfg(any(
+        feature = "serial-console",
+        feature = "http-server",
+        feature = "tftp-server"
+    ))]
+    CliService(CliServiceCommand),
     PrintShellIntegration(ShellIntegration),
     ConfigureCurrentShellIntegration,
     OutputBenchmark {
@@ -87,13 +112,33 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
     #[cfg(feature = "tftp-client")]
     features.push("TFTP client");
 
-    let tftp_usage = if cfg!(feature = "tftp-client") {
+    let serial_usage = if cfg!(feature = "serial-console") {
+        "\n       zetta serial <COMMAND>"
+    } else {
+        ""
+    };
+    let http_usage = if cfg!(feature = "http-server") {
+        "\n       zetta http server [OPTIONS]"
+    } else {
+        ""
+    };
+    let tftp_usage = if cfg!(any(feature = "tftp-client", feature = "tftp-server")) {
         "\n       zetta tftp <COMMAND>"
     } else {
         ""
     };
-    let tftp_command = if cfg!(feature = "tftp-client") {
-        "\n  tftp                                Transfer a file with TFTP"
+    let serial_command = if cfg!(feature = "serial-console") {
+        "\n  serial                              List or connect to serial devices"
+    } else {
+        ""
+    };
+    let http_command = if cfg!(feature = "http-server") {
+        "\n  http server                         Serve static files over HTTP"
+    } else {
+        ""
+    };
+    let tftp_command = if cfg!(any(feature = "tftp-client", feature = "tftp-server")) {
+        "\n  tftp                                Transfer files or serve them with TFTP"
     } else {
         ""
     };
@@ -103,7 +148,7 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         .collect::<Vec<_>>()
         .join("\n  ");
     format!(
-        "Zetta Terminal\n\nUsage: zetta [OPTIONS]\n       zetta benchmark [OPTIONS]\n       zetta benchmark-output [OPTIONS]\n       zetta terminal-size [--json | --resize [--columns COLUMNS] [--rows ROWS]]\n       zetta sessions [--json]\n       zetta init [SHELL]{tftp_usage}\n\nCommands:\n  benchmark                           Profile terminal rendering\n  benchmark-output                    Write and time a text payload (default: 10 MiB)\n  terminal-size                       Print or resize the current terminal pane\n  sessions                            List detached background sessions\n  init                                Configure or generate shell integration{tftp_command}\n\nBuilt-in features:\n  {}\n\nProfiles accepted by --profile NAME (case-insensitive):\n  {profiles}\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Select one of the profiles listed above",
+        "Zetta Terminal\n\nUsage: zetta [OPTIONS]\n       zetta benchmark [OPTIONS]\n       zetta benchmark-output [OPTIONS]\n       zetta terminal-size [--json | --resize [--columns COLUMNS] [--rows ROWS]]\n       zetta sessions [--json]\n       zetta init [SHELL]{serial_usage}{http_usage}{tftp_usage}\n\nCommands:\n  benchmark                           Profile terminal rendering\n  benchmark-output                    Write and time a text payload (default: 10 MiB)\n  terminal-size                       Print or resize the current terminal pane\n  sessions                            List detached background sessions\n  init                                Configure or generate shell integration{serial_command}{http_command}{tftp_command}\n\nBuilt-in features:\n  {}\n\nProfiles accepted by --profile NAME (case-insensitive):\n  {profiles}\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Select one of the profiles listed above",
         features.join("\n  "),
     )
 }
@@ -339,8 +384,100 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             tftp_command: None,
         });
     }
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "serial")
+    {
+        #[cfg(feature = "serial-console")]
+        {
+            let serial_arguments = &arguments[1..];
+            if serial_arguments
+                .iter()
+                .any(|argument| matches!(argument.to_string_lossy().as_ref(), "--help" | "-h"))
+            {
+                println!("{}", serial_help());
+                std::process::exit(0);
+            }
+            return Ok(StartupArgs {
+                config_path: None,
+                keymap_path: None,
+                profile: None,
+                mode: StartupMode::CliService(parse_serial_args(serial_arguments.iter().cloned())?),
+                profile_report: None,
+                profile_duration: None,
+                profile_pane_stress: false,
+                profile_background_stress: false,
+                profile_sparse_updates: false,
+                profile_external_terminal: false,
+                tftp_command: None,
+            });
+        }
+        #[cfg(not(feature = "serial-console"))]
+        anyhow::bail!("Serial console support is disabled in this build");
+    }
+    if arguments.first().is_some_and(|argument| argument == "http") {
+        #[cfg(feature = "http-server")]
+        {
+            let http_arguments = &arguments[1..];
+            if http_arguments
+                .iter()
+                .any(|argument| matches!(argument.to_string_lossy().as_ref(), "--help" | "-h"))
+            {
+                println!("{}", http_server_help());
+                std::process::exit(0);
+            }
+            return Ok(StartupArgs {
+                config_path: None,
+                keymap_path: None,
+                profile: None,
+                mode: StartupMode::CliService(parse_http_args(http_arguments.iter().cloned())?),
+                profile_report: None,
+                profile_duration: None,
+                profile_pane_stress: false,
+                profile_background_stress: false,
+                profile_sparse_updates: false,
+                profile_external_terminal: false,
+                tftp_command: None,
+            });
+        }
+        #[cfg(not(feature = "http-server"))]
+        anyhow::bail!("HTTP server support is disabled in this build");
+    }
     if arguments.first().is_some_and(|argument| argument == "tftp") {
         let tftp_arguments = &arguments[1..];
+        if tftp_arguments
+            .first()
+            .is_some_and(|argument| argument == "server")
+        {
+            #[cfg(feature = "tftp-server")]
+            {
+                let server_arguments = &tftp_arguments[1..];
+                if server_arguments
+                    .iter()
+                    .any(|argument| matches!(argument.to_string_lossy().as_ref(), "--help" | "-h"))
+                {
+                    println!("{}", tftp_server_help());
+                    std::process::exit(0);
+                }
+                return Ok(StartupArgs {
+                    config_path: None,
+                    keymap_path: None,
+                    profile: None,
+                    mode: StartupMode::CliService(parse_tftp_server_args(
+                        server_arguments.iter().cloned(),
+                    )?),
+                    profile_report: None,
+                    profile_duration: None,
+                    profile_pane_stress: false,
+                    profile_background_stress: false,
+                    profile_sparse_updates: false,
+                    profile_external_terminal: false,
+                    tftp_command: None,
+                });
+            }
+            #[cfg(not(feature = "tftp-server"))]
+            anyhow::bail!("TFTP server support is disabled in this build");
+        }
         if tftp_arguments
             .iter()
             .any(|argument| matches!(argument.to_string_lossy().as_ref(), "--help" | "-h"))
@@ -1867,6 +2004,14 @@ pub(crate) fn run() -> Result<()> {
     }
     if let StartupMode::ListBackgroundSessions { json } = &args.mode {
         return print_session_catalogs(*json);
+    }
+    #[cfg(any(
+        feature = "serial-console",
+        feature = "http-server",
+        feature = "tftp-server"
+    ))]
+    if let StartupMode::CliService(command) = &args.mode {
+        return command.run();
     }
     if should_handoff_to_existing_process(&args) && request_existing_process_window()? {
         return Ok(());

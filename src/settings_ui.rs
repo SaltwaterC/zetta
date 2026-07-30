@@ -35,6 +35,8 @@ pub(crate) enum NumericSetting {
     ScrollHistory,
     #[cfg(feature = "http-server")]
     HttpServerPort,
+    #[cfg(feature = "tftp-server")]
+    TftpServerPort,
 }
 
 /// A keyboard-reachable control in the settings dialog. Keeping this separate
@@ -679,6 +681,8 @@ impl Zetta {
                 ]);
                 #[cfg(feature = "http-server")]
                 controls.push(SettingsControl::Numeric(NumericSetting::HttpServerPort));
+                #[cfg(feature = "tftp-server")]
+                controls.push(SettingsControl::Numeric(NumericSetting::TftpServerPort));
                 for (index, profile) in editor.configuration.profiles.iter().enumerate() {
                     if !profile.detected {
                         controls.extend([
@@ -1346,6 +1350,21 @@ impl Zetta {
                     .parse::<u16>()
                     .unwrap_or(config::DEFAULT_HTTP_PORT);
                 configuration.http_server_port = TextField::new(
+                    current
+                        .saturating_add_signed(direction as i16)
+                        .clamp(1, u16::MAX)
+                        .to_string(),
+                );
+            }
+            #[cfg(feature = "tftp-server")]
+            NumericSetting::TftpServerPort => {
+                let current = configuration
+                    .tftp_server_port
+                    .text
+                    .trim()
+                    .parse::<u16>()
+                    .unwrap_or(config::DEFAULT_TFTP_SERVER_PORT);
+                configuration.tftp_server_port = TextField::new(
                     current
                         .saturating_add_signed(direction as i16)
                         .clamp(1, u16::MAX)

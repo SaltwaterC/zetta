@@ -17,6 +17,7 @@ const DEFAULT_TERMINAL_FONT_FAMILY: &str = "MesloLGS NF";
 const DEFAULT_MAX_SCROLL_HISTORY_LINES: usize = MAX_SCROLL_HISTORY_LINES;
 const DEFAULT_INACTIVE_PANE_OPACITY: f32 = 0.8;
 pub(crate) const DEFAULT_HTTP_PORT: u16 = 8000;
+pub(crate) const DEFAULT_TFTP_SERVER_PORT: u16 = 69;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PaneControlsPosition {
@@ -96,6 +97,7 @@ pub struct Config {
     pub pane_controls_position: PaneControlsPosition,
     pub pane_controls_hidden_by_default: bool,
     pub http_server_port: u16,
+    pub tftp_server_port: u16,
     pub pane_split_templates: HashMap<String, PaneSplitTemplate>,
 }
 
@@ -121,6 +123,7 @@ impl Config {
             pane_controls_position: PaneControlsPosition::default(),
             pane_controls_hidden_by_default: false,
             http_server_port: DEFAULT_HTTP_PORT,
+            tftp_server_port: DEFAULT_TFTP_SERVER_PORT,
             pane_split_templates: default_pane_split_templates(),
         }
     }
@@ -210,13 +213,10 @@ impl Config {
                 .context("pane_controls_hidden_by_default must be a boolean")?;
         }
         if let Some(port) = root.get("http_server_port") {
-            let port = port
-                .as_u64()
-                .context("http_server_port must be an integer from 1 to 65535")?;
-            config.http_server_port = u16::try_from(port)
-                .ok()
-                .filter(|port| *port != 0)
-                .context("http_server_port must be an integer from 1 to 65535")?;
+            config.http_server_port = parse_server_port(port, "http_server_port")?;
+        }
+        if let Some(port) = root.get("tftp_server_port") {
+            config.tftp_server_port = parse_server_port(port, "tftp_server_port")?;
         }
         if let Some(templates) = root.get("pane_split_templates") {
             let templates = templates
@@ -269,6 +269,7 @@ fn validate_config_fields(root: &Value) -> Result<()> {
         "pane_controls_position",
         "pane_controls_hidden_by_default",
         "http_server_port",
+        "tftp_server_port",
         "pane_split_templates",
         "profiles",
     ];
@@ -282,6 +283,15 @@ fn validate_config_fields(root: &Value) -> Result<()> {
         anyhow::bail!("unrecognized configuration field {field:?}");
     }
     Ok(())
+}
+
+fn parse_server_port(value: &Value, field: &str) -> Result<u16> {
+    let message = || format!("{field} must be an integer from 1 to 65535");
+    let port = value.as_u64().with_context(message)?;
+    u16::try_from(port)
+        .ok()
+        .filter(|port| *port != 0)
+        .with_context(message)
 }
 
 fn default_pane_split_templates() -> HashMap<String, PaneSplitTemplate> {

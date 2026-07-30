@@ -97,6 +97,8 @@ pub enum ConfigTextField {
     ScrollHistory,
     #[cfg(feature = "http-server")]
     HttpServerPort,
+    #[cfg(feature = "tftp-server")]
+    TftpServerPort,
     ProfileName(usize),
     ProfileProgram(usize),
     ProfileArguments(usize),
@@ -125,6 +127,8 @@ pub struct ConfigurationForm {
     pub pane_controls_hidden_by_default: bool,
     #[cfg(feature = "http-server")]
     pub http_server_port: TextField,
+    #[cfg(feature = "tftp-server")]
+    pub tftp_server_port: TextField,
     pub profiles: Vec<ProfileForm>,
 }
 
@@ -207,6 +211,8 @@ impl ConfigurationForm {
             pane_controls_hidden_by_default: config.pane_controls_hidden_by_default,
             #[cfg(feature = "http-server")]
             http_server_port: TextField::new(config.http_server_port.to_string()),
+            #[cfg(feature = "tftp-server")]
+            tftp_server_port: TextField::new(config.tftp_server_port.to_string()),
             root,
             profiles,
         })
@@ -219,6 +225,8 @@ impl ConfigurationForm {
             ConfigTextField::ScrollHistory => Some(&mut self.max_scroll_history_lines),
             #[cfg(feature = "http-server")]
             ConfigTextField::HttpServerPort => Some(&mut self.http_server_port),
+            #[cfg(feature = "tftp-server")]
+            ConfigTextField::TftpServerPort => Some(&mut self.tftp_server_port),
             ConfigTextField::ProfileName(index) => {
                 self.profiles.get_mut(index).map(|p| &mut p.name)
             }
@@ -288,6 +296,18 @@ impl ConfigurationForm {
                 .filter(|port| *port != 0)
                 .context("HTTP server port must be an integer from 1 to 65535")?;
             root.insert("http_server_port".into(), json!(http_server_port));
+        }
+        #[cfg(feature = "tftp-server")]
+        {
+            let tftp_server_port = self
+                .tftp_server_port
+                .text
+                .trim()
+                .parse::<u16>()
+                .ok()
+                .filter(|port| *port != 0)
+                .context("TFTP server port must be an integer from 1 to 65535")?;
+            root.insert("tftp_server_port".into(), json!(tftp_server_port));
         }
         if !self.profiles.is_empty() || root.contains_key("profiles") {
             root.insert(

@@ -80,7 +80,14 @@ impl TftpCommand {
 
 #[cfg(feature = "tftp-client")]
 pub(crate) fn tftp_help() -> &'static str {
-    "Zetta TFTP client\n\nUsage:\n  zetta tftp get [--port PORT] HOST REMOTE [LOCAL]\n  zetta tftp put [--port PORT] HOST LOCAL [REMOTE]\n\nCommands:\n  get    Download REMOTE, optionally naming the LOCAL output file\n  put    Upload LOCAL, optionally naming the REMOTE file\n\nOptions:\n  -p, --port PORT    Server port (default: 69)\n  -h, --help         Print help"
+    #[cfg(feature = "tftp-server")]
+    {
+        "Zetta TFTP tools\n\nUsage:\n  zetta tftp get [--port PORT] HOST REMOTE [LOCAL]\n  zetta tftp put [--port PORT] HOST LOCAL [REMOTE]\n  zetta tftp server [OPTIONS]\n\nCommands:\n  get       Download REMOTE, optionally naming the LOCAL output file\n  put       Upload LOCAL, optionally naming the REMOTE file\n  server    Serve files with TFTP\n\nClient options:\n  -p, --port PORT    Server port (default: 69)\n  -h, --help         Print help\n\nRun `zetta tftp server --help` for server options."
+    }
+    #[cfg(not(feature = "tftp-server"))]
+    {
+        "Zetta TFTP client\n\nUsage:\n  zetta tftp get [--port PORT] HOST REMOTE [LOCAL]\n  zetta tftp put [--port PORT] HOST LOCAL [REMOTE]\n\nCommands:\n  get    Download REMOTE, optionally naming the LOCAL output file\n  put    Upload LOCAL, optionally naming the REMOTE file\n\nOptions:\n  -p, --port PORT    Server port (default: 69)\n  -h, --help         Print help"
+    }
 }
 
 #[cfg(feature = "tftp-client")]

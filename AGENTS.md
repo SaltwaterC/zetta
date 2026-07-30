@@ -163,8 +163,7 @@ as separate artifacts associated with the JSON report.
 - Resolve accelerator labels from the effective keybinding at render time; do
   not hardcode them, because users can remap actions in their keymap.
 - When adding a command-line flag, provide and document both a long form and
-  a non-conflicting short form; update shell completions and parser tests for
-  both spellings.
+  a non-conflicting short form; update shell completions and parser tests.
 - Preserve cross-platform behavior. Avoid assuming Unix paths, shells, or
   environment variables in shared code.
 - Add focused regression tests for bug fixes and boundary-condition tests for
@@ -172,3 +171,22 @@ as separate artifacts associated with the JSON report.
 - Avoid broad dependency or `Cargo.lock` updates unless required by the task.
 - Update `README.md` and example configuration/keymap files when user-visible
   behavior, installation steps, or defaults change.
+
+## Command line integration design
+
+Always create both long and short command line arguments. Expose only the long
+versions in autocomplete to declutter the completion interface and aid with
+readability.
+
+For the short command line arguments prefer lowercase version. If there is a
+conflict, prioritise the lowercase version for the more commonly used arguments
+such as mandatory arguments and reserve upper case versions for optional
+arguments.
+
+Every subcommand must have a help section that describes how to use the CLI. Do
+not assume that the user knows everything, so if an argument accepts input that
+is only known at runtime, such as auto detected profiles, list these explicitly
+and offer them in the tab auto-complete for their respective command line
+argument. Arguments that depend on both runtime knowledge and a specific state,
+such as a serial console emulator being plugged, in must offer a way to
+dynamically enumerate these values via CLI and offer these via auto complete.

@@ -19,7 +19,7 @@ tested.
 - Native command, path, and SSH-alias completion in a multi-command prompt
 - Typed settings and keymap editor, per-profile themes, and installable Zed
   themes
-- Serial consoles plus built-in HTTP and TFTP tools
+- Serial consoles plus built-in HTTP and TFTP tools, usable from panes or the CLI
 - Reproducible terminal-rendering performance reports
 
 ## Quick start
@@ -40,6 +40,11 @@ network tools at build time. For example, `make build SERIAL=0 HTTP=0 TFTP=0`
 produces a terminal-only build. `TFTP_SERVER=0` and `TFTP_CLIENT=0` control the
 two TFTP components independently. The flags also accept `false`, `no`, or
 `off`.
+
+The tools are available directly when enabled: `zetta serial console --device
+PATH`, `zetta http server`, and `zetta tftp server`. Shell integration completes
+the current serial-device list dynamically. See [Serial and network
+tools](docs/tools.md) for flags and safety notes.
 
 ## Multi-command prompt
 

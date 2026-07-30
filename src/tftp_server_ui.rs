@@ -42,11 +42,12 @@ impl Zetta {
                 return;
             }
         };
+        let port = self.launch_config.tftp_server_port;
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
                     let root = root.resolve()?;
-                    start_server(&root, DEFAULT_TFTP_PORT)
+                    start_server(&root, port)
                 })
                 .await;
             this.update_in(cx, |this, window, cx| match result {

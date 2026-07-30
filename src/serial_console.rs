@@ -108,6 +108,7 @@ fn linux_tty_responds(path: &Path) -> bool {
     use std::mem::MaybeUninit;
     use std::os::{fd::AsRawFd as _, unix::fs::OpenOptionsExt as _};
 
+    let generic_serial8250_slot = linux_generic_serial8250_slot(path);
     let file = match OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
@@ -115,16 +116,68 @@ fn linux_tty_responds(path: &Path) -> bool {
     {
         Ok(file) => file,
         Err(error) => {
-            // A real device can be visible but unavailable to this process.
-            // Keep it in the list so connecting reports the actionable error.
-            return error.kind() == std::io::ErrorKind::PermissionDenied
-                || error.raw_os_error() == Some(libc::EBUSY);
+            // A non-generic device can be visible but unavailable to this
+            // process. Keep it so connecting reports the actionable error.
+            // Generic serial8250 slots are commonly phantom UARTs, so they
+            // require a successful driver probe before being listed.
+            return !generic_serial8250_slot
+                && (error.kind() == std::io::ErrorKind::PermissionDenied
+                    || error.raw_os_error() == Some(libc::EBUSY));
         }
     };
+
+    let mut serial = MaybeUninit::<LinuxSerialInfo>::zeroed();
+    // SAFETY: `serial` points to writable storage matching Linux's
+    // `serial_struct`, and the file descriptor remains valid for the call.
+    if unsafe { libc::ioctl(file.as_raw_fd(), libc::TIOCGSERIAL, serial.as_mut_ptr()) } == 0 {
+        // SAFETY: TIOCGSERIAL initialized the structure after returning zero.
+        return unsafe { serial.assume_init() }.port_type != 0;
+    }
+
     let mut attributes = MaybeUninit::<libc::termios>::uninit();
     // SAFETY: `attributes` points to writable storage for `tcgetattr`, and the
     // file descriptor remains valid for the duration of the call.
     unsafe { libc::tcgetattr(file.as_raw_fd(), attributes.as_mut_ptr()) == 0 }
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct LinuxSerialInfo {
+    port_type: libc::c_int,
+    line: libc::c_int,
+    port: libc::c_uint,
+    irq: libc::c_int,
+    flags: libc::c_int,
+    xmit_fifo_size: libc::c_int,
+    custom_divisor: libc::c_int,
+    baud_base: libc::c_int,
+    close_delay: libc::c_ushort,
+    io_type: libc::c_char,
+    reserved_char: [libc::c_char; 1],
+    hub6: libc::c_int,
+    closing_wait: libc::c_ushort,
+    closing_wait2: libc::c_ushort,
+    iomem_base: *mut libc::c_uchar,
+    iomem_reg_shift: libc::c_ushort,
+    port_high: libc::c_uint,
+    iomap_base: libc::c_ulong,
+}
+
+#[cfg(target_os = "linux")]
+fn linux_generic_serial8250_slot(path: &Path) -> bool {
+    let Some(name) = path.file_name() else {
+        return false;
+    };
+    let Ok(device_path) = fs::canonicalize(Path::new("/sys/class/tty").join(name).join("device"))
+    else {
+        return false;
+    };
+    linux_generic_serial8250_device_path(&device_path)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_generic_serial8250_device_path(path: &Path) -> bool {
+    path.starts_with("/sys/devices/platform/serial8250")
 }
 
 pub(crate) struct SerialConsolePrompt {

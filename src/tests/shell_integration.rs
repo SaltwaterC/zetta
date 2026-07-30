@@ -27,8 +27,61 @@ fn supported_shells_generate_completion_and_tftp_shortcut() {
         let script = shell.script(&profiles);
         assert!(script.contains("ztftp"));
         assert!(script.contains("tftp"));
+        assert!(script.contains("serial"));
+        assert!(script.contains("http"));
         assert!(script.contains("init"));
     }
+}
+
+#[test]
+fn serial_completion_enumerates_devices_when_completion_is_requested() {
+    let profiles = profiles();
+    let scripts = [
+        ShellIntegration::Bash.script(&profiles),
+        ShellIntegration::Fish.script(&profiles),
+        ShellIntegration::PowerShell.script(&profiles),
+        ShellIntegration::Zsh.script(&profiles),
+    ];
+
+    for script in scripts {
+        assert!(script.contains("serial list"));
+        assert!(script.contains("tftp") && script.contains("server"));
+    }
+}
+
+#[test]
+fn service_completion_uses_command_local_short_options() {
+    let profiles = profiles();
+    let bash = ShellIntegration::Bash.script(&profiles);
+    assert!(bash.contains("--device)\n            _zetta_complete_serial_devices"));
+    assert!(bash.contains("--data-bits|-D)"));
+    assert!(bash.contains("if [[ $command == serial ]]; then\n                COMPREPLY=( $(compgen -W 'none odd even'"));
+    assert!(bash.contains(
+        "if [[ $command == http || ( $command == tftp && ${COMP_WORDS[2]} == server ) ]]; then"
+    ));
+
+    let fish = ShellIntegration::Fish.script(&profiles);
+    assert!(fish.contains("-s d -l device"));
+    assert!(fish.contains("-s D -l data-bits"));
+    assert!(fish.contains("-s p -l parity"));
+    assert!(
+        fish.contains(
+            "subcommand_from tftp; and __fish_seen_subcommand_from server' -s c -l config"
+        )
+    );
+
+    let powershell = ShellIntegration::PowerShell.script(&profiles);
+    assert!(powershell.contains("'--device', '-d'"));
+    assert!(powershell.contains("'--data-bits', '-D'"));
+    assert!(powershell.contains("$previous -eq '-p' -and $subcommand -eq 'serial'"));
+    assert!(
+        powershell.contains("{ '-r', '--root', '-p', '--port', '-c', '--config', '-h', '--help' }")
+    );
+
+    let zsh = ShellIntegration::Zsh.script(&profiles);
+    assert!(zsh.contains("--data-bits|-D)"));
+    assert!(zsh.contains("$words[2] == serial"));
+    assert!(zsh.contains("compadd -- -r --root -p --port -c --config -h --help"));
 }
 
 #[test]
@@ -355,7 +408,7 @@ fn generated_scripts_only_offer_long_form_flags() {
         let script = shell.script(&profiles);
         match shell {
             ShellIntegration::Bash => assert!(script.contains(
-                "terminal-size sessions init tftp --help --version --config --keymap --profile'"
+                "terminal-size sessions init serial http tftp --help --version --config --keymap --profile'"
             )),
             ShellIntegration::Fish => {
                 assert!(script.contains("-l profile -r"));

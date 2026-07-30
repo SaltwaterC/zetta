@@ -37,6 +37,10 @@ closes the dialog, and returns focus to the terminal. Invalid settings or
 bindings are reported without replacing the existing file. Custom `--config`
 and `--keymap` paths remain CLI-only settings.
 
+The HTTP and TFTP server ports are typed settings backed by
+`http_server_port` and `tftp_server_port` in `config.json`. They default to
+8000 and 69 respectively and accept integers from 1 through 65535.
+
 ## Profiles and working directories
 
 Zetta detects common shells. On Windows this includes Windows PowerShell,

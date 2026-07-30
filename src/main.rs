@@ -1,6 +1,7 @@
 #![cfg_attr(windows, windows_subsystem = "console")]
 
 mod background_sessions;
+mod cli_services;
 mod command_palette;
 mod config;
 #[cfg(feature = "http-server")]

@@ -6,6 +6,11 @@ names from Zetta's current configuration, so `zetta --profile <Tab>` completes
 them as well. The script also provides `ztftp`, a shortcut for the built-in
 TFTP client; it has the same TFTP completion as `zetta tftp`.
 
+Serial-device completion is dynamic: completing `zetta serial console --device`
+runs `zetta serial list` at completion time. A serial device connected after
+the integration was generated is therefore available without rerunning
+`zetta init`.
+
 It also completes the full-length `zetta terminal-size` resize flags, which
 resize the current Zetta pane while retaining an omitted dimension.
 
