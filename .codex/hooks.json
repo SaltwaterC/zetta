@@ -1,0 +1,17 @@
+{
+  "description": "Build Zetta after each completed Codex turn.",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'make test >&2 && make build >&2 && printf \"%s\\n\" \"{\\\"continue\\\":true}\"'",
+            "commandWindows": "cmd.exe /d /c make test 1>&2 && make build 1>&2 && echo {\"continue\":true}",
+            "statusMessage": "Testing and building Zetta"
+          }
+        ]
+      }
+    ]
+  }
+}
