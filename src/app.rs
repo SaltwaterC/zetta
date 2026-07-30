@@ -5,6 +5,10 @@ const BACKGROUND_PROCESS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const PERFORMANCE_PANE_STRESS_COUNT: usize = 4;
 const MINIMUM_PANE_COLUMNS: usize = 2;
 const MINIMUM_PANE_ROWS: usize = 1;
+const PANE_RESIZE_REPEAT_DELAY: Duration = Duration::from_millis(400);
+const PANE_RESIZE_REPEAT_INTERVAL: Duration = Duration::from_millis(75);
+const PANE_RESIZE_GUTTER_SIZE: Pixels = px(20.);
+const PANE_SPLIT_SEPARATOR_SIZE: Pixels = px(1.);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ReconnectRequest {
@@ -128,6 +132,92 @@ fn pane_resize_cell_delta(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum PaneResizeDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+impl PaneResizeDirection {
+    fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "left" => Some(Self::Left),
+            "right" => Some(Self::Right),
+            "up" => Some(Self::Up),
+            "down" => Some(Self::Down),
+            _ => None,
+        }
+    }
+
+    fn bit(self) -> u8 {
+        match self {
+            Self::Left => 1 << 0,
+            Self::Right => 1 << 1,
+            Self::Up => 1 << 2,
+            Self::Down => 1 << 3,
+        }
+    }
+}
+
+#[derive(Default)]
+struct PaneResizeKeys {
+    pressed: u8,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PaneResizeGutter {
+    tab_id: u64,
+    first_pane: u64,
+    second_pane: u64,
+    axis: SplitAxis,
+}
+
+struct PaneResizeDrag {
+    gutter: PaneResizeGutter,
+    first_panes: Vec<u64>,
+    second_panes: Vec<u64>,
+}
+
+impl PaneResizeKeys {
+    /// Returns whether `direction` was newly pressed.
+    fn press(&mut self, direction: PaneResizeDirection) -> bool {
+        let bit = direction.bit();
+        if self.pressed & bit == 0 {
+            self.pressed |= bit;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn release(&mut self, direction: PaneResizeDirection) {
+        self.pressed &= !direction.bit();
+    }
+
+    fn clear(&mut self) {
+        self.pressed = 0;
+    }
+
+    fn is_empty(&self) -> bool {
+        self.pressed == 0
+    }
+
+    fn len(&self) -> u32 {
+        self.pressed.count_ones()
+    }
+
+    fn delta(&self) -> (isize, isize) {
+        let held = |direction: PaneResizeDirection| self.pressed & direction.bit() != 0;
+        (
+            (held(PaneResizeDirection::Right) as isize)
+                - (held(PaneResizeDirection::Left) as isize),
+            (held(PaneResizeDirection::Down) as isize) - (held(PaneResizeDirection::Up) as isize),
+        )
+    }
+}
+
 #[derive(Default)]
 struct WindowResize {
     width_delta: f32,
@@ -147,6 +237,21 @@ fn minimum_resized_window_extent(current: f32, requested: f32, minimum: Pixels) 
     requested.max(current.min(f32::from(minimum)))
 }
 
+fn clamp_window_size_to_minimum(window_size: Size<Pixels>) -> Size<Pixels> {
+    size(
+        window_size.width.max(ZETTA_MINIMUM_WINDOW_SIZE.width),
+        window_size.height.max(ZETTA_MINIMUM_WINDOW_SIZE.height),
+    )
+}
+
+pub(crate) fn enforce_minimum_window_size(window: &mut Window) {
+    let current_size = window.bounds().size;
+    let clamped_size = clamp_window_size_to_minimum(current_size);
+    if clamped_size != current_size {
+        window.resize(clamped_size);
+    }
+}
+
 fn resize_window(window: &mut Window, resize: WindowResize, cx: &App) -> bool {
     if resize.width_delta == 0. && resize.height_delta == 0. {
         return false;
@@ -157,8 +262,8 @@ fn resize_window(window: &mut Window, resize: WindowResize, cx: &App) -> bool {
     let mut requested_width = current_width + resize.width_delta;
     let mut requested_height = current_height + resize.height_delta;
 
-    // WindowOptions enforces this limit for native resize gestures, but a
-    // programmatic resize must clamp it explicitly on every platform.
+    // Clamp programmatic resizes before issuing them so resize-mode keypresses
+    // never produce an undersized window.
     requested_width = minimum_resized_window_extent(
         current_width,
         requested_width,
@@ -249,6 +354,9 @@ pub(crate) struct Zetta {
     pub(crate) pane_controls_last_motion: Instant,
     pub(crate) pane_controls_hide_task: Option<Task<()>>,
     pub(crate) pane_resize_mode: bool,
+    pane_resize_keys: PaneResizeKeys,
+    pane_resize_repeat_generation: u64,
+    pane_resize_drag: Option<PaneResizeDrag>,
     pub(crate) titlebar_dragging: bool,
     pub(crate) button_layout: WindowButtonLayout,
     pub(crate) performance_overlay: Option<PerformanceOverlay>,
@@ -443,6 +551,9 @@ impl Zetta {
             pane_controls_last_motion: Instant::now(),
             pane_controls_hide_task: None,
             pane_resize_mode: false,
+            pane_resize_keys: PaneResizeKeys::default(),
+            pane_resize_repeat_generation: 0,
+            pane_resize_drag: None,
             titlebar_dragging: false,
             button_layout,
             performance_overlay: None,
@@ -2142,6 +2253,9 @@ impl Zetta {
             return;
         }
         self.pane_resize_mode = !self.pane_resize_mode;
+        self.pane_resize_keys.clear();
+        self.cancel_pane_resize_repeat();
+        self.pane_resize_drag = None;
         let input_enabled = pane_input_enabled(self.pane_resize_mode);
         for view in self
             .tabs
@@ -2160,7 +2274,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.resize_active_pane_by_cells(-1, 0, window, cx);
+        self.resize_active_pane_in_direction(PaneResizeDirection::Left, window, cx);
     }
 
     pub(crate) fn resize_pane_right(
@@ -2169,7 +2283,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.resize_active_pane_by_cells(1, 0, window, cx);
+        self.resize_active_pane_in_direction(PaneResizeDirection::Right, window, cx);
     }
 
     pub(crate) fn resize_pane_up(
@@ -2178,7 +2292,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.resize_active_pane_by_cells(0, -1, window, cx);
+        self.resize_active_pane_in_direction(PaneResizeDirection::Up, window, cx);
     }
 
     pub(crate) fn resize_pane_down(
@@ -2187,7 +2301,198 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.resize_active_pane_by_cells(0, 1, window, cx);
+        self.resize_active_pane_in_direction(PaneResizeDirection::Down, window, cx);
+    }
+
+    pub(crate) fn pane_resize_key_up(
+        &mut self,
+        event: &KeyUpEvent,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        if self.pane_resize_mode
+            && let Some(direction) = PaneResizeDirection::from_key(&event.keystroke.key)
+        {
+            self.pane_resize_keys.release(direction);
+            if self.pane_resize_keys.is_empty() {
+                self.cancel_pane_resize_repeat();
+            }
+        }
+    }
+
+    fn resize_active_pane_in_direction(
+        &mut self,
+        direction: PaneResizeDirection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.pane_resize_mode {
+            return;
+        }
+        let held_key_count = self.pane_resize_keys.len();
+        if !self.pane_resize_keys.press(direction) {
+            // Preserve the platform's native repeat for an ordinary one-key
+            // resize. Synthetic repeat is only needed once multiple held keys
+            // must be combined into a single two-axis operation.
+            if held_key_count == 1 {
+                let (columns_delta, rows_delta) = match direction {
+                    PaneResizeDirection::Left => (-1, 0),
+                    PaneResizeDirection::Right => (1, 0),
+                    PaneResizeDirection::Up => (0, -1),
+                    PaneResizeDirection::Down => (0, 1),
+                };
+                self.resize_active_pane_by_cells(columns_delta, rows_delta, window, cx);
+            }
+            return;
+        }
+        self.resize_active_pane_by_held_keys(window, cx);
+        if held_key_count == 1 {
+            self.start_pane_resize_repeat(window, cx);
+        }
+    }
+
+    fn resize_active_pane_by_held_keys(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (columns_delta, rows_delta) = self.pane_resize_keys.delta();
+        if columns_delta == 0 && rows_delta == 0 {
+            return;
+        }
+        self.resize_active_pane_by_cells(columns_delta, rows_delta, window, cx);
+    }
+
+    fn start_pane_resize_repeat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pane_resize_repeat_generation = self.pane_resize_repeat_generation.wrapping_add(1);
+        let generation = self.pane_resize_repeat_generation;
+        let this = cx.entity().downgrade();
+        let executor = cx.background_executor().clone();
+        window
+            .spawn(cx, async move |cx| {
+                executor.timer(PANE_RESIZE_REPEAT_DELAY).await;
+                loop {
+                    let repeating = this
+                        .update_in(cx, |this, window, cx| {
+                            let repeating = this.pane_resize_mode
+                                && this.pane_resize_repeat_generation == generation
+                                && !this.pane_resize_keys.is_empty();
+                            if repeating {
+                                this.resize_active_pane_by_held_keys(window, cx);
+                            }
+                            repeating
+                        })
+                        .unwrap_or(false);
+                    if !repeating {
+                        break;
+                    }
+                    executor.timer(PANE_RESIZE_REPEAT_INTERVAL).await;
+                }
+            })
+            .detach();
+    }
+
+    fn cancel_pane_resize_repeat(&mut self) {
+        self.pane_resize_repeat_generation = self.pane_resize_repeat_generation.wrapping_add(1);
+    }
+
+    pub(crate) fn resize_pane_gutter_drag(
+        &mut self,
+        gutter: PaneResizeGutter,
+        split_bounds: Bounds<Pixels>,
+        pointer_position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.pane_resize_mode {
+            return;
+        }
+        if self
+            .pane_resize_drag
+            .as_ref()
+            .is_none_or(|drag| drag.gutter != gutter)
+            && !self.begin_pane_resize_drag(gutter)
+        {
+            return;
+        }
+
+        let Some(tab_index) = self.tabs.iter().position(|tab| tab.id == gutter.tab_id) else {
+            return;
+        };
+        let Some(drag) = self.pane_resize_drag.as_ref() else {
+            return;
+        };
+        let (split_start, split_extent, pointer_coordinate) = match gutter.axis {
+            SplitAxis::Vertical => (
+                split_bounds.left(),
+                split_bounds.size.width,
+                pointer_position.x,
+            ),
+            SplitAxis::Horizontal => (
+                split_bounds.top(),
+                split_bounds.size.height,
+                pointer_position.y,
+            ),
+        };
+        let available_extent = f32::from(split_extent) - f32::from(PANE_SPLIT_SEPARATOR_SIZE);
+        if available_extent <= 0. {
+            return;
+        }
+        let Some(first_ratio) = self.tabs[tab_index].layout.split_ratio(
+            gutter.first_pane,
+            gutter.second_pane,
+            gutter.axis,
+        ) else {
+            return;
+        };
+
+        let current_first_extent = available_extent * first_ratio;
+        let requested_first_extent = (f32::from(pointer_coordinate - split_start)
+            - f32::from(PANE_SPLIT_SEPARATOR_SIZE) / 2.)
+            .clamp(0., available_extent);
+        let first_capacity =
+            self.minimum_pane_capacity(tab_index, &drag.first_panes, gutter.axis, cx);
+        let second_capacity =
+            self.minimum_pane_capacity(tab_index, &drag.second_panes, gutter.axis, cx);
+        let layout_delta =
+            (requested_first_extent - current_first_extent).clamp(-first_capacity, second_capacity);
+        if layout_delta == 0. {
+            return;
+        }
+
+        if self.tabs[tab_index].layout.adjust_split_ratio(
+            gutter.first_pane,
+            gutter.second_pane,
+            gutter.axis,
+            layout_delta / available_extent,
+        ) {
+            // A gutter drag changes terminal geometry just like keyboard pane
+            // resizing, so defer scrollback reflow until that resize arrives.
+            for terminal in self.tabs[tab_index]
+                .panes
+                .iter()
+                .filter_map(|pane| pane.terminal.as_ref())
+            {
+                terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
+            }
+            cx.notify();
+        }
+    }
+
+    fn begin_pane_resize_drag(&mut self, gutter: PaneResizeGutter) -> bool {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == gutter.tab_id) else {
+            return false;
+        };
+        if tab.maximized_pane.is_some() || !tab.minimized_panes.is_empty() {
+            return false;
+        }
+        let Some((first_panes, second_panes)) =
+            tab.layout
+                .split_panes(gutter.first_pane, gutter.second_pane, gutter.axis)
+        else {
+            return false;
+        };
+        self.pane_resize_drag = Some(PaneResizeDrag {
+            gutter,
+            first_panes,
+            second_panes,
+        });
+        true
     }
 
     fn resize_active_pane_by_cells(
@@ -2352,7 +2657,7 @@ impl Zetta {
             if parent_pixels > 0. {
                 let layout_delta = if requested_delta.is_sign_positive() {
                     let available =
-                        self.minimum_sibling_capacity(tab_index, &boundary.sibling_panes, axis, cx);
+                        self.minimum_pane_capacity(tab_index, &boundary.sibling_panes, axis, cx);
                     requested_delta.min(available)
                 } else {
                     requested_delta
@@ -2381,7 +2686,7 @@ impl Zetta {
         (changed, window_delta)
     }
 
-    fn minimum_sibling_capacity(
+    fn minimum_pane_capacity(
         &self,
         tab_index: usize,
         sibling_panes: &[u64],
@@ -3056,6 +3361,47 @@ impl Zetta {
             .into_any_element()
     }
 
+    fn render_pane_resize_gutter(
+        &self,
+        gutter: PaneResizeGutter,
+        first_ratio: f32,
+        colors: &ThemeColors,
+        _cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let cursor = match gutter.axis {
+            SplitAxis::Vertical => CursorStyle::ResizeLeftRight,
+            SplitAxis::Horizontal => CursorStyle::ResizeUpDown,
+        };
+        div()
+            .id(format!(
+                "pane-resize-gutter-{}-{}-{}",
+                gutter.tab_id, gutter.first_pane, gutter.second_pane
+            ))
+            .absolute()
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .hover(|gutter| gutter.bg(colors.element_hover))
+            .cursor(cursor)
+            .when(matches!(gutter.axis, SplitAxis::Vertical), |gutter| {
+                gutter
+                    .left(gpui::relative(first_ratio))
+                    .ml(-PANE_RESIZE_GUTTER_SIZE / 2.)
+                    .w(PANE_RESIZE_GUTTER_SIZE)
+                    .h_full()
+            })
+            .when(matches!(gutter.axis, SplitAxis::Horizontal), |gutter| {
+                gutter
+                    .top(gpui::relative(first_ratio))
+                    .mt(-PANE_RESIZE_GUTTER_SIZE / 2.)
+                    .h(PANE_RESIZE_GUTTER_SIZE)
+                    .w_full()
+            })
+            .on_drag(gutter, |_, _, _, cx| cx.new(|_| gpui::Empty))
+            .into_any_element()
+    }
+
     fn render_pane_layout_with_edges(
         &self,
         tab: &Tab,
@@ -3347,7 +3693,45 @@ impl Zetta {
             } => {
                 let first_ratio = PaneLayout::ratio_fraction(*first_ratio);
                 let second_ratio = 1. - first_ratio;
-                div()
+                let pane_resize_enabled = self.pane_resize_mode
+                    && tab.maximized_pane.is_none()
+                    && tab.minimized_panes.is_empty();
+                let gutter = PaneResizeGutter {
+                    tab_id: tab.id,
+                    first_pane: first.first_pane(),
+                    second_pane: second.first_pane(),
+                    axis: *axis,
+                };
+                let first_child = div()
+                    .min_w_0()
+                    .min_h_0()
+                    .flex_grow(first_ratio)
+                    .flex_basis(gpui::relative(0.))
+                    .child(self.render_pane_layout_with_edges(
+                        tab,
+                        first,
+                        colors,
+                        error_color,
+                        window,
+                        edges.first(*axis),
+                        cx,
+                    ));
+                let second_child = div()
+                    .min_w_0()
+                    .min_h_0()
+                    .flex_grow(second_ratio)
+                    .flex_basis(gpui::relative(0.))
+                    .child(self.render_pane_layout_with_edges(
+                        tab,
+                        second,
+                        colors,
+                        error_color,
+                        window,
+                        edges.second(*axis),
+                        cx,
+                    ));
+                let split = div()
+                    .relative()
                     .size_full()
                     .min_w_0()
                     .min_h_0()
@@ -3357,40 +3741,31 @@ impl Zetta {
                     .when(matches!(axis, SplitAxis::Horizontal), |split| {
                         split.flex_col()
                     })
-                    .gap_px()
-                    .child(
-                        div()
-                            .min_w_0()
-                            .min_h_0()
-                            .flex_grow(first_ratio)
-                            .flex_basis(gpui::relative(0.))
-                            .child(self.render_pane_layout_with_edges(
-                                tab,
-                                first,
-                                colors,
-                                error_color,
-                                window,
-                                edges.first(*axis),
-                                cx,
-                            )),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .min_h_0()
-                            .flex_grow(second_ratio)
-                            .flex_basis(gpui::relative(0.))
-                            .child(self.render_pane_layout_with_edges(
-                                tab,
-                                second,
-                                colors,
-                                error_color,
-                                window,
-                                edges.second(*axis),
-                                cx,
-                            )),
-                    )
-                    .into_any_element()
+                    .gap_px();
+                if pane_resize_enabled {
+                    split
+                        .on_drag_move::<PaneResizeGutter>(cx.listener(
+                            move |this, event: &gpui::DragMoveEvent<PaneResizeGutter>, _, cx| {
+                                if *event.drag(cx) == gutter {
+                                    this.resize_pane_gutter_drag(
+                                        gutter,
+                                        event.bounds,
+                                        event.event.position,
+                                        cx,
+                                    );
+                                }
+                            },
+                        ))
+                        .child(first_child)
+                        .child(second_child)
+                        .child(self.render_pane_resize_gutter(gutter, first_ratio, colors, cx))
+                        .into_any_element()
+                } else {
+                    split
+                        .child(first_child)
+                        .child(second_child)
+                        .into_any_element()
+                }
             }
         }
     }

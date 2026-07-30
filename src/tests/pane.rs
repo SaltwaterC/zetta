@@ -630,6 +630,42 @@ fn pane_resize_boundary_moves_the_nearest_matching_split() {
     assert!(!boundary.active_is_first);
 }
 
+#[test]
+fn pane_resize_gutter_targets_its_exact_split() {
+    let mut layout = PaneLayout::Split {
+        axis: SplitAxis::Vertical,
+        first_ratio: DEFAULT_PANE_SPLIT_RATIO,
+        first: Box::new(PaneLayout::Split {
+            axis: SplitAxis::Vertical,
+            first_ratio: DEFAULT_PANE_SPLIT_RATIO,
+            first: Box::new(PaneLayout::Pane(1)),
+            second: Box::new(PaneLayout::Pane(2)),
+        }),
+        second: Box::new(PaneLayout::Pane(3)),
+    };
+
+    assert_eq!(
+        layout.split_panes(1, 3, SplitAxis::Vertical),
+        Some((vec![1, 2], vec![3]))
+    );
+    assert!(layout.adjust_split_ratio(1, 3, SplitAxis::Vertical, 0.1));
+
+    assert_eq!(
+        layout,
+        PaneLayout::Split {
+            axis: SplitAxis::Vertical,
+            first_ratio: 600,
+            first: Box::new(PaneLayout::Split {
+                axis: SplitAxis::Vertical,
+                first_ratio: DEFAULT_PANE_SPLIT_RATIO,
+                first: Box::new(PaneLayout::Pane(1)),
+                second: Box::new(PaneLayout::Pane(2)),
+            }),
+            second: Box::new(PaneLayout::Pane(3)),
+        }
+    );
+}
+
 fn pane_management_tab() -> Tab {
     let profile = Profile {
         name: "System".to_owned(),

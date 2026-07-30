@@ -574,6 +574,88 @@ impl PaneLayout {
             .unwrap_or(false)
     }
 
+    /// Returns the panes on both sides of the split identified by its first
+    /// pane in each child. The pair uniquely identifies a split in a layout.
+    pub(crate) fn split_panes(
+        &self,
+        first_pane: u64,
+        second_pane: u64,
+        axis: SplitAxis,
+    ) -> Option<(Vec<u64>, Vec<u64>)> {
+        let Self::Split {
+            axis: split_axis,
+            first,
+            second,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        if *split_axis == axis
+            && first.first_pane() == first_pane
+            && second.first_pane() == second_pane
+        {
+            return Some((first.pane_ids(), second.pane_ids()));
+        }
+        first
+            .split_panes(first_pane, second_pane, axis)
+            .or_else(|| second.split_panes(first_pane, second_pane, axis))
+    }
+
+    pub(crate) fn split_ratio(
+        &self,
+        first_pane: u64,
+        second_pane: u64,
+        axis: SplitAxis,
+    ) -> Option<f32> {
+        let Self::Split {
+            axis: split_axis,
+            first_ratio,
+            first,
+            second,
+        } = self
+        else {
+            return None;
+        };
+        if *split_axis == axis
+            && first.first_pane() == first_pane
+            && second.first_pane() == second_pane
+        {
+            return Some(Self::ratio_fraction(*first_ratio));
+        }
+        first
+            .split_ratio(first_pane, second_pane, axis)
+            .or_else(|| second.split_ratio(first_pane, second_pane, axis))
+    }
+
+    /// Adjusts one exact split, rather than the nearest matching split for a
+    /// pane. Mouse gutters use this to avoid changing a nested parallel split.
+    pub(crate) fn adjust_split_ratio(
+        &mut self,
+        first_pane: u64,
+        second_pane: u64,
+        axis: SplitAxis,
+        delta: f32,
+    ) -> bool {
+        let Self::Split {
+            axis: split_axis,
+            first_ratio,
+            first,
+            second,
+        } = self
+        else {
+            return false;
+        };
+        if *split_axis == axis
+            && first.first_pane() == first_pane
+            && second.first_pane() == second_pane
+        {
+            return Self::adjust_first_ratio(first_ratio, delta);
+        }
+        first.adjust_split_ratio(first_pane, second_pane, axis, delta)
+            || second.adjust_split_ratio(first_pane, second_pane, axis, delta)
+    }
+
     fn adjust_resize_boundary_inner(
         &mut self,
         pane_id: u64,

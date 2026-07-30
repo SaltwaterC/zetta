@@ -55,6 +55,11 @@ fn resolve_visible_minimized_panes<T>(
 
 impl Render for Zetta {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Native mouse resizing is constrained by WindowOptions where the
+        // platform supports it. Keep it consistent with resize mode if a
+        // compositor reports an undersized bound anyway.
+        crate::app::enforce_minimum_window_size(window);
+
         // Hidden terminals keep parsing PTY output and retaining scrollback, but they must not
         // continually enqueue work on the foreground executor. A newly visible terminal emits
         // one consolidated wakeup to render everything produced while it was hidden.
@@ -1704,6 +1709,7 @@ impl Render for Zetta {
             .when(self.is_renaming(), |content| {
                 content.track_focus(&self.rename_focus)
             })
+            .capture_key_up(cx.listener(Self::pane_resize_key_up))
             .on_key_down(cx.listener(Self::command_palette_key_down))
             .child(title_bar)
             .child(

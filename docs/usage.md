@@ -48,7 +48,9 @@ empty name to restore its automatic label.
 Press `Ctrl-Shift-J` to enter or leave pane-resize mode. While it is active,
 the arrow keys move the corresponding edge of the active pane by one cell and
 every visible pane shows its live cell dimensions; normal terminal input is
-paused. For example, Left grows a right-hand pane and Up grows a bottom pane.
+paused. Each split also exposes a 20px drag gutter, so you can resize either
+axis directly with the mouse. For example, Left grows a right-hand pane and Up
+grows a bottom pane.
 Zetta first takes space from the nearest neighboring pane on that axis. If no
 neighbor can give up a cell, it grows the window only within the current
 display's usable bounds; a maximized or full-screen window is the hard growth
@@ -200,7 +202,7 @@ filter, use the arrow keys to select a command, and press `Enter` to run it.
 | `Ctrl-Shift-O` | Split active pane horizontally, adding a pane below |
 | `Ctrl-Shift-E` | Split active pane vertically, adding a pane on the right |
 | `Alt-Shift-L` | Rotate a two-pane layout |
-| `Ctrl-Shift-J`, then Arrow keys | Toggle pane-resize mode; shrink/grow the active pane |
+| `Ctrl-Shift-J`, then Arrow keys or a split gutter drag | Toggle pane-resize mode; resize panes |
 | `Alt-Shift-X` | Close the active pane or its final tab |
 | `PageUp` / `PageDown` | Send page navigation to the foreground program |
 | `Shift-PageUp` / `Shift-PageDown` | Scroll history by one page |

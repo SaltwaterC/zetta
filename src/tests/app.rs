@@ -36,6 +36,23 @@ fn pane_resize_keeps_the_window_large_enough_for_client_controls() {
 }
 
 #[test]
+fn mouse_window_resize_clamps_each_dimension_to_the_minimum() {
+    assert_eq!(
+        clamp_window_size_to_minimum(size(px(400.), px(500.))),
+        size(px(520.), px(500.))
+    );
+    assert_eq!(
+        clamp_window_size_to_minimum(size(px(600.), px(200.))),
+        size(px(600.), px(320.))
+    );
+}
+
+#[test]
+fn pane_resize_mode_uses_a_twenty_pixel_mouse_gutter() {
+    assert_eq!(PANE_RESIZE_GUTTER_SIZE, px(20.));
+}
+
+#[test]
 fn pane_resize_mode_pauses_terminal_input() {
     assert!(pane_input_enabled(false));
     assert!(!pane_input_enabled(true));
@@ -72,6 +89,33 @@ fn pane_resize_arrows_follow_the_active_pane_edge() {
         pane_resize_cell_delta(&horizontal, 2, SplitAxis::Horizontal, -1),
         1
     );
+}
+
+#[test]
+fn held_pane_resize_arrows_repeat_on_both_axes() {
+    let mut keys = PaneResizeKeys::default();
+
+    assert!(keys.press(PaneResizeDirection::Down));
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys.delta(), (0, 1));
+    assert!(keys.press(PaneResizeDirection::Right));
+    assert_eq!(keys.len(), 2);
+    assert_eq!(keys.delta(), (1, 1));
+
+    keys.release(PaneResizeDirection::Right);
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys.delta(), (0, 1));
+    assert!(!keys.press(PaneResizeDirection::Down));
+}
+
+#[test]
+fn opposite_held_pane_resize_arrows_cancel_each_other() {
+    let mut keys = PaneResizeKeys::default();
+
+    assert!(keys.press(PaneResizeDirection::Left));
+    assert!(keys.press(PaneResizeDirection::Right));
+    assert!(keys.press(PaneResizeDirection::Down));
+    assert_eq!(keys.delta(), (0, 1));
 }
 
 #[test]
