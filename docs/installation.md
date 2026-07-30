@@ -92,6 +92,11 @@ to the user `PATH`, and creates a Start Menu shortcut. New console sessions can
 then run `zetta`. The shortcut launches `zetta-gui.exe`, which starts the
 console-native executable without opening an extra console window.
 
+Zetta can be reinstalled while it is running. Windows keeps the previous
+runtime under names such as `zetta.old.exe` until its processes exit. Repeating
+an identical install preserves that rollback generation; the next changed
+install removes it before activating the new one.
+
 The shortcut exposes available profiles in its Windows Jump List, including
 when Zetta appears in Start Menu search. Zetta refreshes the entries after
 startup and configuration reloads.
