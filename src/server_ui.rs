@@ -33,9 +33,7 @@ impl Zetta {
         }
 
         let directory = pane
-            .terminal
-            .as_ref()
-            .and_then(|terminal| terminal.read(cx).working_directory())
+            .working_directory(cx)
             .or_else(|| env::current_dir().ok())
             .context("reading the active pane working directory")?;
         Ok(ServerRoot::Local(directory))

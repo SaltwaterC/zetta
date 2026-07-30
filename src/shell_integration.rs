@@ -2,6 +2,8 @@ use super::*;
 use std::ffi::OsStr;
 use std::io::Write as _;
 #[cfg(windows)]
+use std::os::windows::process::CommandExt as _;
+#[cfg(windows)]
 use std::process::Command;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,15 +147,56 @@ pub(crate) fn configure_current_shell_integration() -> Result<ShellIntegrationCo
         return configure_shell_integration_file(shell, &profile);
     }
 
-    let home =
-        env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).with_context(|| {
-            if cfg!(windows) {
-                "could not locate the home directory: USERPROFILE is not set"
-            } else {
-                "could not locate the home directory: HOME is not set"
-            }
-        })?;
-    configure_shell_integration(shell, Path::new(&home))
+    configure_shell_integration(shell, &current_posix_shell_home()?)
+}
+
+fn current_posix_shell_home() -> Result<PathBuf> {
+    #[cfg(windows)]
+    {
+        resolve_windows_posix_shell_home(
+            env::var_os("HOME").map(PathBuf::from),
+            env::var_os("USERPROFILE").map(PathBuf::from),
+            |home| {
+                const CREATE_NO_WINDOW: u32 = 0x08000000;
+                let output = Command::new("cygpath.exe")
+                    .args(["-w", "--"])
+                    .arg(home)
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .output()
+                    .context("HOME uses a Unix path, but cygpath.exe could not be run")?;
+                anyhow::ensure!(
+                    output.status.success(),
+                    "cygpath.exe could not resolve HOME: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+                let home = String::from_utf8(output.stdout)
+                    .context("cygpath.exe returned a home path that was not UTF-8")?;
+                let home = home.trim().trim_start_matches('\u{feff}');
+                anyhow::ensure!(!home.is_empty(), "cygpath.exe returned an empty home path");
+                Ok(PathBuf::from(home))
+            },
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        env::var_os("HOME")
+            .map(PathBuf::from)
+            .context("could not locate the home directory: HOME is not set")
+    }
+}
+
+#[cfg(windows)]
+fn resolve_windows_posix_shell_home(
+    home: Option<PathBuf>,
+    user_profile: Option<PathBuf>,
+    convert_unix_path: impl FnOnce(&Path) -> Result<PathBuf>,
+) -> Result<PathBuf> {
+    match home {
+        Some(home) if home.is_absolute() => Ok(home),
+        Some(home) => convert_unix_path(&home),
+        None => user_profile
+            .context("could not locate the home directory: HOME and USERPROFILE are not set"),
+    }
 }
 
 fn configure_shell_integration(
@@ -161,7 +204,73 @@ fn configure_shell_integration(
     home: &Path,
 ) -> Result<ShellIntegrationConfiguration> {
     let path = shell.startup_file(home);
+    #[cfg(windows)]
+    let path = resolve_msys2_link_startup_file(&path, resolve_msys2_link)?;
     configure_shell_integration_file(shell, &path)
+}
+
+#[cfg(windows)]
+fn resolve_msys2_link_startup_file(
+    path: &Path,
+    resolve_link: impl FnOnce(&Path) -> Result<PathBuf>,
+) -> Result<PathBuf> {
+    if path.exists() {
+        return Ok(path.to_path_buf());
+    }
+    let mut link = path.as_os_str().to_os_string();
+    link.push(".lnk");
+    let link = PathBuf::from(link);
+    if !link.is_file() {
+        return Ok(path.to_path_buf());
+    }
+    resolve_link(&link)
+}
+
+#[cfg(windows)]
+fn resolve_msys2_link(link: &Path) -> Result<PathBuf> {
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let resolved = Command::new("readlink.exe")
+        .args(["-f", "--"])
+        .arg(link)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .with_context(|| format!("failed to resolve the MSYS2 link {}", link.display()))?;
+    anyhow::ensure!(
+        resolved.status.success(),
+        "readlink.exe could not resolve {}: {}",
+        link.display(),
+        String::from_utf8_lossy(&resolved.stderr).trim()
+    );
+    let resolved = String::from_utf8(resolved.stdout)
+        .context("readlink.exe returned a path that was not UTF-8")?;
+    let resolved = resolved.trim().trim_start_matches('\u{feff}');
+    anyhow::ensure!(
+        !resolved.is_empty(),
+        "readlink.exe returned an empty path for {}",
+        link.display()
+    );
+
+    let native = Command::new("cygpath.exe")
+        .args(["-w", "--", resolved])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .with_context(|| format!("failed to convert the MSYS2 link {}", link.display()))?;
+    anyhow::ensure!(
+        native.status.success(),
+        "cygpath.exe could not convert {}: {}",
+        link.display(),
+        String::from_utf8_lossy(&native.stderr).trim()
+    );
+    let native = String::from_utf8(native.stdout)
+        .context("cygpath.exe returned a path that was not UTF-8")?;
+    let native = native.trim().trim_start_matches('\u{feff}');
+    anyhow::ensure!(
+        !native.is_empty(),
+        "cygpath.exe returned an empty path for {}",
+        link.display()
+    );
+    Ok(PathBuf::from(native))
 }
 
 fn configure_shell_integration_file(
@@ -297,7 +406,7 @@ fn shell_single_quote(value: &str) -> String {
 }
 
 pub(crate) fn shell_integration_help() -> &'static str {
-    "Configure or generate shell integration\n\nUsage: zetta init [SHELL]\n\nWithout SHELL, detects the current shell from SHELL and adds the integration command to its startup file. On Windows, Zetta detects the launching PowerShell and writes to its $PROFILE when SHELL is unavailable. Running it again leaves an existing integration unchanged. With SHELL, prints the integration script for use in a shell startup file.\n\nSupported shells:\n  bash        Bash\n  fish        Fish\n  powershell  PowerShell (also accepted as pwsh)\n  zsh         Z shell\n\nThe generated script adds command completion and the ztftp shortcut when the TFTP client is enabled."
+    "Configure or generate shell integration\n\nUsage: zetta init [SHELL]\n\nWithout SHELL, detects the current shell from SHELL and adds the integration command to its startup file. On Windows, Unix-style HOME paths from MSYS2 and similar environments are resolved with cygpath; when SHELL is unavailable, Zetta detects the launching PowerShell and writes to its $PROFILE. Running it again leaves an existing integration unchanged. With SHELL, prints the integration script for use in a shell startup file.\n\nSupported shells:\n  bash        Bash\n  fish        Fish\n  powershell  PowerShell (also accepted as pwsh)\n  zsh         Z shell\n\nThe generated script adds command completion and the ztftp shortcut when the TFTP client is enabled."
 }
 
 const BASH_INTEGRATION: &str = r#"# Zetta shell integration for Bash.

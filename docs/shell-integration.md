@@ -42,6 +42,10 @@ Run `zetta init` to detect the current shell and add the applicable command to
 its startup file. It prints the file it writes, or reports that the integration
 is already present without changing the file.
 
+When run from MSYS2 on Windows, Zetta resolves its Unix-style `$HOME` with
+`cygpath` before writing `.bashrc` or `.zshrc`, including for MSYS2 installed
+outside `C:\msys64`.
+
 The startup files and commands are:
 
 - Bash: `~/.bashrc`

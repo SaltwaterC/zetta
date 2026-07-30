@@ -524,10 +524,234 @@ fn discover_profiles() -> Vec<Profile> {
         }
     }
     #[cfg(windows)]
+    if let Some(root) = msys2_installation_root() {
+        profiles.extend(msys2_profiles(&root));
+    }
+    #[cfg(windows)]
     if let Some(program) = wsl_program() {
         profiles.extend(discovered_wsl_profiles(&program));
     }
     profiles
+}
+
+#[cfg(windows)]
+fn msys2_installation_root() -> Option<PathBuf> {
+    msys2_start_menu_installation_roots()
+        .into_iter()
+        .chain(msys2_registered_installation_roots())
+        .chain([PathBuf::from(r"C:\msys64")])
+        .find(|root| root.join("msys2_shell.cmd").is_file())
+}
+
+#[cfg(windows)]
+fn msys2_start_menu_installation_roots() -> Vec<PathBuf> {
+    use windows::Win32::{
+        Foundation::RPC_E_CHANGED_MODE,
+        System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize},
+    };
+
+    let shortcuts = [
+        env::var_os("APPDATA").map(PathBuf::from),
+        env::var_os("ProgramData").map(PathBuf::from),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|start_menu| {
+        start_menu
+            .join("Microsoft/Windows/Start Menu/Programs/MSYS2")
+            .join("MSYS2 MSYS.lnk")
+    })
+    .filter(|shortcut| shortcut.is_file())
+    .collect::<Vec<_>>();
+    if shortcuts.is_empty() {
+        return Vec::new();
+    }
+
+    // SAFETY: COM is initialized for this thread before creating Shell Link objects,
+    // and is uninitialized only when this call initialized it successfully.
+    unsafe {
+        let result = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let initialized = if result.is_ok() {
+            true
+        } else if result == RPC_E_CHANGED_MODE {
+            false
+        } else {
+            return Vec::new();
+        };
+        let roots = shortcuts
+            .into_iter()
+            .filter_map(|shortcut| shortcut_working_directory(&shortcut))
+            .collect();
+        if initialized {
+            CoUninitialize();
+        }
+        roots
+    }
+}
+
+#[cfg(windows)]
+fn shortcut_working_directory(shortcut: &Path) -> Option<PathBuf> {
+    use windows::{
+        Win32::{
+            System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, IPersistFile, STGM_READ},
+            UI::Shell::{IShellLinkW, ShellLink},
+        },
+        core::{HSTRING, Interface},
+    };
+
+    // SAFETY: The caller initializes COM before this helper is used. All output
+    // buffers remain alive for the duration of the corresponding COM calls.
+    unsafe {
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
+        let persist: IPersistFile = link.cast().ok()?;
+        persist
+            .Load(&HSTRING::from(shortcut.as_os_str()), STGM_READ)
+            .ok()?;
+        let mut directory = vec![0_u16; 32_768];
+        link.GetWorkingDirectory(&mut directory).ok()?;
+        let len = directory.iter().position(|character| *character == 0)?;
+        (len > 0).then(|| PathBuf::from(String::from_utf16_lossy(&directory[..len])))
+    }
+}
+
+#[cfg(windows)]
+fn msys2_registered_installation_roots() -> Vec<PathBuf> {
+    use windows::{
+        Win32::{
+            Foundation::ERROR_SUCCESS,
+            System::Registry::{
+                HKEY, HKEY_CURRENT_USER, KEY_READ, RegCloseKey, RegEnumKeyW, RegOpenKeyExW,
+            },
+        },
+        core::w,
+    };
+
+    fn read_string(key: HKEY, name: windows::core::PCWSTR) -> Option<String> {
+        use windows::Win32::{
+            Foundation::ERROR_SUCCESS,
+            System::Registry::{REG_SZ, RegQueryValueExW},
+        };
+
+        let mut value_type = REG_SZ;
+        let mut byte_len = 0;
+        // SAFETY: The first query requests only the value size and writes to valid local
+        // variables. The second query uses a buffer sized from that result.
+        if unsafe {
+            RegQueryValueExW(
+                key,
+                name,
+                None,
+                Some(&mut value_type),
+                None,
+                Some(&mut byte_len),
+            )
+        } != ERROR_SUCCESS
+            || value_type != REG_SZ
+            || byte_len < 2
+        {
+            return None;
+        }
+        let mut value = vec![0_u16; byte_len as usize / 2];
+        if unsafe {
+            RegQueryValueExW(
+                key,
+                name,
+                None,
+                Some(&mut value_type),
+                Some(value.as_mut_ptr().cast()),
+                Some(&mut byte_len),
+            )
+        } != ERROR_SUCCESS
+        {
+            return None;
+        }
+        let len = value.iter().position(|character| *character == 0)?;
+        Some(String::from_utf16_lossy(&value[..len]))
+    }
+
+    let mut uninstall = HKEY::default();
+    // The official MSYS2 installer registers its per-user uninstall entry here.
+    // SAFETY: `uninstall` is a valid output pointer and is closed below.
+    if unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            w!(r"Software\Microsoft\Windows\CurrentVersion\Uninstall"),
+            None,
+            KEY_READ,
+            &mut uninstall,
+        )
+    } != ERROR_SUCCESS
+    {
+        return Vec::new();
+    }
+
+    let mut roots = Vec::new();
+    for index in 0.. {
+        let mut name = [0_u16; 256];
+        // RegEnumKeyW writes at most the supplied buffer length.
+        let result = unsafe { RegEnumKeyW(uninstall, index, Some(&mut name)) };
+        if result != ERROR_SUCCESS {
+            break;
+        }
+        if !name.contains(&0) {
+            continue;
+        }
+        let mut entry = HKEY::default();
+        // SAFETY: The enumerated name is terminated in the local buffer, and `entry`
+        // is a valid output pointer.
+        if unsafe {
+            RegOpenKeyExW(
+                uninstall,
+                windows::core::PCWSTR(name.as_ptr()),
+                None,
+                KEY_READ,
+                &mut entry,
+            )
+        } != ERROR_SUCCESS
+        {
+            continue;
+        }
+        let is_msys2 = read_string(entry, w!("DisplayName")).is_some_and(|display_name| {
+            display_name.eq_ignore_ascii_case("MSYS2")
+                || display_name.to_ascii_lowercase().starts_with("msys2 ")
+        });
+        if is_msys2 && let Some(location) = read_string(entry, w!("InstallLocation")) {
+            roots.push(PathBuf::from(location));
+        }
+        // SAFETY: `entry` was opened successfully in this iteration.
+        unsafe {
+            let _ = RegCloseKey(entry);
+        }
+    }
+    // SAFETY: `uninstall` was opened successfully above.
+    unsafe {
+        let _ = RegCloseKey(uninstall);
+    }
+    roots
+}
+
+#[cfg(any(windows, test))]
+fn msys2_profiles(root: &Path) -> Vec<Profile> {
+    let launcher = root.join("msys2_shell.cmd");
+    [("MSYS2", "bash"), ("MSYS2: Zsh", "zsh")]
+        .into_iter()
+        .filter(|(_, shell)| root.join("usr/bin").join(format!("{shell}.exe")).is_file())
+        .map(|(name, shell)| {
+            let command = format!(
+                "\"\"{}\" -defterm -here -no-start -msys -use-full-path -shell {shell}\"",
+                launcher.display()
+            );
+            Profile {
+                name: name.to_owned(),
+                command: Shell::WithArguments {
+                    program: "cmd.exe".to_owned(),
+                    args: vec!["/d".to_owned(), "/s".to_owned(), "/c".to_owned(), command],
+                    title_override: Some(name.to_owned()),
+                },
+                theme: None,
+            }
+        })
+        .collect()
 }
 
 #[cfg(windows)]

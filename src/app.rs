@@ -636,8 +636,7 @@ impl Zetta {
         let active_pane = self.tabs.get(self.active_tab).and_then(Tab::active_pane);
         let inherited_working_directory = active_pane
             .filter(|pane| !is_wsl_shell(&pane.profile.command))
-            .and_then(|pane| pane.view.as_ref())
-            .and_then(|view| view.read(cx).terminal().read(cx).working_directory());
+            .and_then(|pane| pane.working_directory(cx));
         let inherited_wsl_directory = active_pane
             .filter(|pane| pane.profile.name.eq_ignore_ascii_case(&profile.name))
             .and_then(|pane| pane.wsl_working_directory(cx));
@@ -783,7 +782,27 @@ impl Zetta {
         let environment = if is_wsl {
             HashMap::default()
         } else {
-            native_terminal_environment().into_iter().collect()
+            let msys2_environment =
+                match msys2_cwd_tracking_environment(&command, pane_id, &env::temp_dir()) {
+                    Ok(environment) => environment,
+                    Err(error) => {
+                        if let Some(pane) = self
+                            .tabs
+                            .iter_mut()
+                            .find(|tab| tab.id == tab_id)
+                            .and_then(|tab| tab.pane_mut(pane_id))
+                        {
+                            pane.error =
+                                Some(format!("Could not configure MSYS2 CWD tracking: {error:#}"));
+                        }
+                        cx.notify();
+                        return;
+                    }
+                };
+            native_terminal_environment()
+                .into_iter()
+                .chain(msys2_environment)
+                .collect()
         };
         let builder = TerminalBuilder::new(
             working_directory,
@@ -1126,8 +1145,7 @@ impl Zetta {
         let active_pane = tab.active_pane();
         let inherited_working_directory = active_pane
             .filter(|pane| !is_wsl_shell(&pane.profile.command))
-            .and_then(|pane| pane.view.as_ref())
-            .and_then(|view| view.read(cx).terminal().read(cx).working_directory());
+            .and_then(|pane| pane.working_directory(cx));
         let Some(profile) = tab.active_profile().cloned() else {
             return;
         };
@@ -1824,7 +1842,7 @@ impl Zetta {
             .panes
             .iter()
             .map(|pane| {
-                let (terminal_title, foreground_command, working_directory) = pane
+                let (terminal_title, foreground_command) = pane
                     .terminal
                     .as_ref()
                     .map(|terminal| {
@@ -1832,10 +1850,10 @@ impl Zetta {
                         (
                             Some(terminal.title(false)),
                             terminal.foreground_process_command_line(),
-                            terminal.working_directory(),
                         )
                     })
                     .unwrap_or_default();
+                let working_directory = pane.working_directory(cx);
                 let state = if pane.error.is_some() {
                     BackgroundPaneState::Failed
                 } else if pane.terminal.is_some() {
@@ -2000,7 +2018,7 @@ impl Zetta {
         let terminal = view.read(cx).terminal().clone();
         let output = terminal.read(cx).get_content_async();
         let directory = (!is_wsl)
-            .then(|| terminal.read(cx).working_directory())
+            .then(|| pane.working_directory(cx))
             .flatten()
             .or_else(|| env::current_dir().ok())
             .unwrap_or_default();
@@ -2122,8 +2140,7 @@ impl Zetta {
         let active_pane = tab.active_pane();
         let inherited_working_directory = active_pane
             .filter(|pane| !is_wsl_shell(&pane.profile.command))
-            .and_then(|pane| pane.view.as_ref())
-            .and_then(|view| view.read(cx).terminal().read(cx).working_directory());
+            .and_then(|pane| pane.working_directory(cx));
         let Some(profile) = tab.active_profile().cloned() else {
             return;
         };

@@ -351,6 +351,116 @@ fn creates_a_profile_for_each_wsl_distribution() {
 }
 
 #[test]
+fn creates_msys2_profiles_for_installed_shells_using_the_launcher() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("msys2_shell.cmd"), "").unwrap();
+    fs::create_dir_all(root.path().join("usr/bin")).unwrap();
+    fs::write(root.path().join("usr/bin/bash.exe"), "").unwrap();
+    fs::write(root.path().join("usr/bin/zsh.exe"), "").unwrap();
+
+    let profiles = msys2_profiles(root.path());
+
+    assert_eq!(
+        profiles
+            .iter()
+            .map(|profile| profile.name.as_str())
+            .collect::<Vec<_>>(),
+        ["MSYS2", "MSYS2: Zsh"]
+    );
+    for (profile, shell) in profiles.iter().zip(["bash", "zsh"]) {
+        assert!(matches!(
+            profile.command,
+            Shell::WithArguments {
+                ref program,
+                ref args,
+                ..
+            } if program == "cmd.exe"
+                && args[..3] == ["/d", "/s", "/c"]
+                && args[3].starts_with("\"\"")
+                && args[3].contains("msys2_shell.cmd\" -defterm")
+                && args[3].contains("-defterm -here -no-start -msys -use-full-path")
+                && args[3].ends_with(&format!("-shell {shell}\""))
+        ));
+    }
+}
+
+#[test]
+fn omits_msys2_zsh_profile_when_zsh_is_not_installed() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(root.path().join("usr/bin")).unwrap();
+    fs::write(root.path().join("usr/bin/bash.exe"), "").unwrap();
+
+    let profiles = msys2_profiles(root.path());
+
+    assert_eq!(profiles.len(), 1);
+    assert_eq!(profiles[0].name, "MSYS2");
+}
+
+#[cfg(windows)]
+#[test]
+fn msys2_launcher_command_supports_custom_paths_with_spaces() {
+    use std::os::windows::process::CommandExt as _;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("custom MSYS2 installation");
+    fs::create_dir_all(root.join("usr/bin")).unwrap();
+    fs::write(
+        root.join("msys2_shell.cmd"),
+        "@echo off\r\nif \"%7\"==\"zsh\" exit /b 0\r\nexit /b 1\r\n",
+    )
+    .unwrap();
+    fs::write(root.join("usr/bin/zsh.exe"), "").unwrap();
+    let profile = msys2_profiles(&root).pop().unwrap();
+    let Shell::WithArguments { program, args, .. } = profile.command else {
+        panic!("MSYS2 profile did not include launcher arguments");
+    };
+
+    let status = Command::new(program)
+        .raw_arg(args.join(" "))
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+}
+
+#[cfg(windows)]
+#[test]
+fn reads_custom_msys2_root_from_an_installer_shortcut() {
+    use windows::{
+        Win32::{
+            System::Com::{
+                CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+                CoUninitialize, IPersistFile,
+            },
+            UI::Shell::{IShellLinkW, ShellLink},
+        },
+        core::{HSTRING, Interface},
+    };
+
+    let temporary = tempfile::tempdir().unwrap();
+    let shortcut = temporary.path().join("MSYS2 MSYS.lnk");
+    let root = temporary.path().join("custom MSYS2 installation");
+    unsafe {
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap();
+        {
+            let link: IShellLinkW =
+                CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).unwrap();
+            link.SetPath(&HSTRING::from(root.join("msys2.exe").as_os_str()))
+                .unwrap();
+            link.SetWorkingDirectory(&HSTRING::from(root.as_os_str()))
+                .unwrap();
+            let persist: IPersistFile = link.cast().unwrap();
+            persist
+                .Save(&HSTRING::from(shortcut.as_os_str()), true)
+                .unwrap();
+
+            assert_eq!(shortcut_working_directory(&shortcut), Some(root));
+        }
+        CoUninitialize();
+    }
+}
+
+#[test]
 fn validates_max_scroll_history_lines() {
     assert_eq!(
         parse_max_scroll_history_lines(&serde_json::json!(0)).unwrap(),

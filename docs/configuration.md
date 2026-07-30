@@ -40,7 +40,26 @@ and `--keymap` paths remain CLI-only settings.
 ## Profiles and working directories
 
 Zetta detects common shells. On Windows this includes Windows PowerShell,
-PowerShell 7, Command Prompt, and registered WSL distributions.
+PowerShell 7, Command Prompt, MSYS2, and registered WSL distributions. The
+MSYS2 Start Menu shortcut is used to find current custom installation paths;
+legacy uninstall registration is also checked, with `C:\msys64` as a fallback.
+Zetta launches `msys2_shell.cmd` in the MSYS environment so the normal MSYS2
+initialization is retained. The launcher imports the Windows `PATH`, with
+Zetta's installation directory placed first, so `zetta init` and other Zetta
+commands are immediately available inside the profile. Bash and Zsh profiles
+also report their current MSYS2 directory to Zetta, so new tabs, split panes,
+multi-command panes, and local server actions inherit the directory after `cd`.
+
+MSYS2 Bash appears as `MSYS2`. If `usr\bin\zsh.exe` is installed, Zetta also
+adds `MSYS2: Zsh` and passes MSYS2's supported `-shell zsh` launcher option.
+Select that profile as `default_profile` (or in the settings editor) to use
+Zsh without relying on `chsh`:
+
+```json
+{
+  "default_profile": "MSYS2: Zsh"
+}
+```
 
 Profile 1 is `System`, followed by detected profiles and configured `profiles`
 in the order displayed by the profile menu. A configured profile with the same

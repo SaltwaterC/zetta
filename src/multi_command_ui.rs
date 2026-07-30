@@ -88,8 +88,7 @@ impl Zetta {
         let active_pane = tab.active_pane();
         let inherited_working_directory = active_pane
             .filter(|pane| !is_wsl_shell(&pane.profile.command))
-            .and_then(|pane| pane.view.as_ref())
-            .and_then(|view| view.read(cx).terminal().read(cx).working_directory());
+            .and_then(|pane| pane.working_directory(cx));
         let Some(profile) = tab.active_profile().cloned() else {
             return;
         };
@@ -288,8 +287,7 @@ impl Zetta {
                 .tabs
                 .get(self.active_tab)
                 .and_then(Tab::active_pane)
-                .and_then(|pane| pane.view.as_ref())
-                .and_then(|view| view.read(cx).terminal().read(cx).working_directory())
+                .and_then(|pane| pane.working_directory(cx))
                 .or_else(|| self.working_directory.clone())
                 .unwrap_or_else(|| util::paths::home_dir().clone());
             let request = self.multi_command.as_mut().and_then(|prompt| {

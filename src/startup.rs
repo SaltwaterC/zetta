@@ -761,6 +761,176 @@ pub(crate) fn is_wsl_shell(shell: &Shell) -> bool {
         .is_some_and(|name| name.eq_ignore_ascii_case("wsl.exe"))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Msys2Shell {
+    Bash,
+    Zsh,
+}
+
+pub(crate) fn msys2_profile(shell: &Shell) -> Option<(PathBuf, Msys2Shell)> {
+    let Shell::WithArguments { program, args, .. } = shell else {
+        return None;
+    };
+    if !program
+        .rsplit(['/', '\\'])
+        .next()
+        .is_some_and(|name| name.eq_ignore_ascii_case("cmd.exe"))
+    {
+        return None;
+    }
+    let command = args.last()?.strip_prefix("\"\"")?;
+    let launcher_end = command.find("\" -defterm")?;
+    let launcher = PathBuf::from(&command[..launcher_end]);
+    if !launcher
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("msys2_shell.cmd"))
+    {
+        return None;
+    }
+    let shell = command[launcher_end..]
+        .split_once(" -shell ")?
+        .1
+        .strip_suffix('"')?;
+    let shell = match shell {
+        "bash" => Msys2Shell::Bash,
+        "zsh" => Msys2Shell::Zsh,
+        _ => return None,
+    };
+    Some((launcher.parent()?.to_path_buf(), shell))
+}
+
+pub(crate) fn msys2_path_to_windows(root: &Path, directory: &str) -> Option<PathBuf> {
+    if !directory.starts_with('/') || directory.chars().any(char::is_control) {
+        return None;
+    }
+    let parts = directory
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.iter().any(|part| matches!(*part, "." | "..")) {
+        return None;
+    }
+    if directory.starts_with("//") {
+        return (parts.len() >= 2)
+            .then(|| PathBuf::from(format!(r"\\{}\{}", parts[0], parts[1..].join(r"\"))));
+    }
+    if parts
+        .first()
+        .is_some_and(|drive| drive.len() == 1 && drive.as_bytes()[0].is_ascii_alphabetic())
+    {
+        let drive = parts[0].to_ascii_uppercase();
+        let mut path = PathBuf::from(format!("{drive}:\\"));
+        path.extend(&parts[1..]);
+        return Some(path);
+    }
+    let mut path = root.to_path_buf();
+    path.extend(parts);
+    Some(path)
+}
+
+#[cfg(windows)]
+fn windows_path_to_msys(path: &Path) -> Option<String> {
+    let path = path.to_string_lossy().replace('\\', "/");
+    let bytes = path.as_bytes();
+    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1..3] == *b":/" {
+        return Some(format!(
+            "/{}/{}",
+            (bytes[0] as char).to_ascii_lowercase(),
+            &path[3..]
+        ));
+    }
+    path.strip_prefix("//")
+        .map(|path| format!("//{path}"))
+        .or_else(|| path.starts_with('/').then_some(path))
+}
+
+#[cfg(windows)]
+const MSYS2_BASH_CWD_TRACKER: &str = r#"printf '\033]2;zetta-cwd:%s\033\\' "$PWD""#;
+
+#[cfg(windows)]
+const MSYS2_ZSH_CWD_TRACKER: &str = r#"if [[ -n ${ZETTA_ORIGINAL_ZDOTDIR+x} ]]; then
+    ZDOTDIR="$ZETTA_ORIGINAL_ZDOTDIR"
+    export ZDOTDIR
+else
+    unset ZDOTDIR
+fi
+original_zdotdir="${ZDOTDIR:-$HOME}"
+[[ -r "$original_zdotdir/.zshenv" ]] && source "$original_zdotdir/.zshenv"
+
+function __zetta_report_cwd() {
+    [[ "$PWD" == /* ]] && printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
+}
+autoload -Uz add-zsh-hook
+add-zsh-hook precmd __zetta_report_cwd
+command rm -rf -- "$ZETTA_INTEGRATION_ZDOTDIR"
+unset ZETTA_ORIGINAL_ZDOTDIR ZETTA_INTEGRATION_ZDOTDIR original_zdotdir
+"#;
+
+#[cfg(windows)]
+pub(crate) fn msys2_cwd_tracking_environment(
+    shell: &Shell,
+    pane_id: u64,
+    temporary_directory: &Path,
+) -> Result<Vec<(String, String)>> {
+    let Some((_, shell)) = msys2_profile(shell) else {
+        return Ok(Vec::new());
+    };
+    match shell {
+        Msys2Shell::Bash => {
+            let existing = env::var("PROMPT_COMMAND").ok();
+            Ok(vec![(
+                "PROMPT_COMMAND".to_owned(),
+                format!(
+                    "{MSYS2_BASH_CWD_TRACKER}{}",
+                    existing
+                        .filter(|command| !command.is_empty())
+                        .map(|command| format!(";{command}"))
+                        .unwrap_or_default()
+                ),
+            )])
+        }
+        Msys2Shell::Zsh => {
+            let directory = temporary_directory
+                .join(format!("zetta-msys2-zsh-{}-{pane_id}", std::process::id()));
+            fs::create_dir_all(&directory)
+                .with_context(|| format!("creating {}", directory.display()))?;
+            fs::write(directory.join(".zshenv"), MSYS2_ZSH_CWD_TRACKER).with_context(|| {
+                format!(
+                    "writing MSYS2 Zsh CWD integration in {}",
+                    directory.display()
+                )
+            })?;
+            let msys_directory = windows_path_to_msys(&directory)
+                .context("temporary directory cannot be represented as an MSYS2 path")?;
+            let mut environment = vec![
+                ("ZDOTDIR".to_owned(), msys_directory.clone()),
+                ("ZETTA_INTEGRATION_ZDOTDIR".to_owned(), msys_directory),
+            ];
+            if let Some(original) = env::var_os("ZDOTDIR") {
+                let original = PathBuf::from(original);
+                let original = if original.is_absolute() {
+                    windows_path_to_msys(&original)
+                        .context("ZDOTDIR cannot be represented as an MSYS2 path")?
+                } else {
+                    original.to_string_lossy().into_owned()
+                };
+                environment.push(("ZETTA_ORIGINAL_ZDOTDIR".to_owned(), original));
+            }
+            Ok(environment)
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn msys2_cwd_tracking_environment(
+    _shell: &Shell,
+    _pane_id: u64,
+    _temporary_directory: &Path,
+) -> Result<Vec<(String, String)>> {
+    Ok(Vec::new())
+}
+
 pub(crate) fn launch_working_directory(
     profile: &Profile,
     inherited: Option<PathBuf>,

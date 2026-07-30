@@ -187,6 +187,17 @@ impl TerminalPane {
         (directory.starts_with('/') && !directory.contains(['\r', '\n', '\0']))
             .then(|| directory.to_owned())
     }
+
+    pub(crate) fn working_directory(&self, cx: &App) -> Option<PathBuf> {
+        let terminal = self.terminal.as_ref()?.read(cx);
+        if let Some((root, _)) = msys2_profile(&self.profile.command)
+            && let Some(directory) = terminal.reported_working_directory()
+            && let Some(directory) = msys2_path_to_windows(&root, directory)
+        {
+            return Some(directory);
+        }
+        terminal.working_directory()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

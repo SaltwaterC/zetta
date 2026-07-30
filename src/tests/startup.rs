@@ -1,6 +1,98 @@
 use super::*;
 
 #[cfg(windows)]
+fn msys2_shell(root: &Path, shell: &str) -> Shell {
+    Shell::WithArguments {
+        program: "cmd.exe".to_owned(),
+        args: vec![
+            "/d".to_owned(),
+            "/s".to_owned(),
+            "/c".to_owned(),
+            format!(
+                "\"\"{}\" -defterm -here -no-start -msys -use-full-path -shell {shell}\"",
+                root.join("msys2_shell.cmd").display()
+            ),
+        ],
+        title_override: None,
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn recognizes_detected_msys2_profiles_and_their_custom_root() {
+    let root = Path::new(r"D:\Applications with spaces\MSYS2");
+
+    assert_eq!(
+        msys2_profile(&msys2_shell(root, "bash")),
+        Some((root.to_path_buf(), Msys2Shell::Bash))
+    );
+    assert_eq!(
+        msys2_profile(&msys2_shell(root, "zsh")),
+        Some((root.to_path_buf(), Msys2Shell::Zsh))
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn converts_reported_msys2_directories_to_native_windows_paths() {
+    let root = Path::new(r"D:\Applications\MSYS2");
+
+    assert_eq!(
+        msys2_path_to_windows(root, "/c/Users/saltw/source/zetta"),
+        Some(PathBuf::from(r"C:\Users\saltw\source\zetta"))
+    );
+    assert_eq!(
+        msys2_path_to_windows(root, "/home/saltw/project"),
+        Some(root.join("home").join("saltw").join("project"))
+    );
+    assert_eq!(
+        msys2_path_to_windows(root, "//server/share/project"),
+        Some(PathBuf::from(r"\\server\share\project"))
+    );
+    assert_eq!(msys2_path_to_windows(root, "/c/../Windows"), None);
+    assert_eq!(msys2_path_to_windows(root, "relative/path"), None);
+}
+
+#[cfg(windows)]
+#[test]
+fn configures_bash_to_report_each_prompt_directory() {
+    let environment = msys2_cwd_tracking_environment(
+        &msys2_shell(Path::new(r"C:\msys64"), "bash"),
+        7,
+        Path::new(r"C:\Temp"),
+    )
+    .unwrap();
+
+    assert_eq!(environment.len(), 1);
+    assert_eq!(environment[0].0, "PROMPT_COMMAND");
+    assert!(environment[0].1.contains("zetta-cwd:%s"));
+    assert!(environment[0].1.contains("\"$PWD\""));
+}
+
+#[cfg(windows)]
+#[test]
+fn configures_zsh_to_report_each_prompt_directory_without_changing_user_files() {
+    let temporary = tempfile::tempdir().unwrap();
+    let environment = msys2_cwd_tracking_environment(
+        &msys2_shell(Path::new(r"C:\msys64"), "zsh"),
+        11,
+        temporary.path(),
+    )
+    .unwrap();
+    let integration_directory = environment
+        .iter()
+        .find_map(|(name, value)| (name == "ZDOTDIR").then_some(value))
+        .unwrap();
+    let native_directory =
+        msys2_path_to_windows(Path::new(r"C:\msys64"), integration_directory).unwrap();
+    let integration = fs::read_to_string(native_directory.join(".zshenv")).unwrap();
+
+    assert!(integration.contains("add-zsh-hook precmd __zetta_report_cwd"));
+    assert!(integration.contains("zetta-cwd:%s"));
+    assert!(integration.contains("source \"$original_zdotdir/.zshenv\""));
+}
+
+#[cfg(windows)]
 #[test]
 fn executable_directory_is_prepended_to_native_terminal_path() {
     let executable_directory = Path::new(r"C:\Program Files\Zetta");

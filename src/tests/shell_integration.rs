@@ -133,6 +133,62 @@ fn shell_detection_accepts_powershell_executables() {
 
 #[cfg(windows)]
 #[test]
+fn msys_home_is_converted_before_selecting_the_startup_file() {
+    let home = resolve_windows_posix_shell_home(
+        Some(PathBuf::from("/home/alice")),
+        Some(PathBuf::from(r"C:\Users\alice")),
+        |home| {
+            assert_eq!(home, Path::new("/home/alice"));
+            Ok(PathBuf::from(r"D:\tools\msys64\home\alice"))
+        },
+    )
+    .unwrap();
+
+    assert_eq!(home, PathBuf::from(r"D:\tools\msys64\home\alice"));
+    assert_eq!(
+        ShellIntegration::Zsh.startup_file(&home),
+        PathBuf::from(r"D:\tools\msys64\home\alice\.zshrc")
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn native_home_does_not_require_cygpath() {
+    let home =
+        resolve_windows_posix_shell_home(Some(PathBuf::from(r"D:\homes\alice")), None, |_| {
+            panic!("native HOME should not be converted")
+        })
+        .unwrap();
+
+    assert_eq!(home, PathBuf::from(r"D:\homes\alice"));
+}
+
+#[cfg(windows)]
+#[test]
+fn msys2_link_startup_file_is_resolved_without_creating_a_shadow_file() {
+    let temporary = tempfile::tempdir().unwrap();
+    let startup_file = temporary.path().join(".zshrc");
+    let link = temporary.path().join(".zshrc.lnk");
+    let target = temporary.path().join("prezto-zshrc");
+    fs::write(&link, "MSYS2 shortcut placeholder").unwrap();
+    fs::write(&target, "# existing configuration\n").unwrap();
+
+    let resolved = resolve_msys2_link_startup_file(&startup_file, |candidate| {
+        assert_eq!(candidate, link);
+        Ok(target.clone())
+    })
+    .unwrap();
+    configure_shell_integration_file(ShellIntegration::Zsh, &resolved).unwrap();
+
+    assert!(!startup_file.exists());
+    assert_eq!(
+        fs::read_to_string(target).unwrap(),
+        "# existing configuration\neval \"$(zetta init zsh)\"\n"
+    );
+}
+
+#[cfg(windows)]
+#[test]
 fn powershell_profile_query_uses_the_requested_shell_edition() {
     let profile = query_powershell_profile(Path::new("powershell.exe")).unwrap();
 
