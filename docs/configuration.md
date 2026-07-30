@@ -116,6 +116,7 @@ appearance settings include:
   "terminal_font_family": "MesloLGS NF",
   "inactive_pane_opacity": 0.8,
   "pane_controls_position": "right",
+  "pane_controls_hidden_by_default": false,
   "max_scroll_history_lines": 2147483647
 }
 ```
@@ -128,6 +129,11 @@ appearance settings include:
 window-button layout so they do not move over a left-aligned prompt unless you
 choose that placement explicitly. Tab close buttons do follow the system
 window-button side.
+`pane_controls_hidden_by_default` defaults to `false`. Set it to `true` to
+start new panes with the controls hidden; `Alt-Shift-H` still toggles the
+active pane and `Ctrl-Shift-H` still toggles every pane in the active tab.
+When this setting changes and configuration reloads, Zetta resets every open
+pane to the selected default visibility.
 
 `max_scroll_history_lines` defaults to the Alacritty engine's signed
 line-coordinate ceiling of 2,147,483,647 lines, which is effectively unlimited

@@ -21,6 +21,7 @@ pub(crate) enum SettingsDropdown {
     DefaultProfile,
     Theme,
     PaneControlsPosition,
+    PaneControlsDefaultVisibility,
     ProfileTheme(usize),
     ProfileDraftTheme,
     BindingAction(usize, usize),
@@ -674,6 +675,7 @@ impl Zetta {
                     SettingsControl::Numeric(NumericSetting::ScrollHistory),
                     SettingsControl::Opacity,
                     SettingsControl::Dropdown(SettingsDropdown::PaneControlsPosition),
+                    SettingsControl::Dropdown(SettingsDropdown::PaneControlsDefaultVisibility),
                 ]);
                 #[cfg(feature = "http-server")]
                 controls.push(SettingsControl::Numeric(NumericSetting::HttpServerPort));
@@ -850,6 +852,14 @@ impl Zetta {
                     .label()
                     .to_owned(),
                 vec!["Right".to_owned(), "Left".to_owned()],
+            ),
+            SettingsDropdown::PaneControlsDefaultVisibility => (
+                if editor.configuration.pane_controls_hidden_by_default {
+                    "Hidden".to_owned()
+                } else {
+                    "Visible".to_owned()
+                },
+                vec!["Visible".to_owned(), "Hidden".to_owned()],
             ),
             SettingsDropdown::ProfileTheme(index) => (
                 editor
@@ -1196,6 +1206,9 @@ impl Zetta {
                 } else {
                     PaneControlsPosition::Right
                 };
+            }
+            SettingsDropdown::PaneControlsDefaultVisibility => {
+                editor.configuration.pane_controls_hidden_by_default = value == "Hidden";
             }
             SettingsDropdown::ProfileTheme(index) => {
                 if let Some(profile) = editor.configuration.profiles.get_mut(index) {

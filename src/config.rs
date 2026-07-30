@@ -94,6 +94,7 @@ pub struct Config {
     pub max_scroll_history_lines: usize,
     pub inactive_pane_opacity: f32,
     pub pane_controls_position: PaneControlsPosition,
+    pub pane_controls_hidden_by_default: bool,
     pub http_server_port: u16,
     pub pane_split_templates: HashMap<String, PaneSplitTemplate>,
 }
@@ -118,6 +119,7 @@ impl Config {
             max_scroll_history_lines: DEFAULT_MAX_SCROLL_HISTORY_LINES,
             inactive_pane_opacity: DEFAULT_INACTIVE_PANE_OPACITY,
             pane_controls_position: PaneControlsPosition::default(),
+            pane_controls_hidden_by_default: false,
             http_server_port: DEFAULT_HTTP_PORT,
             pane_split_templates: default_pane_split_templates(),
         }
@@ -202,6 +204,11 @@ impl Config {
                 _ => anyhow::bail!("pane_controls_position must be \"left\" or \"right\""),
             };
         }
+        if let Some(hidden) = root.get("pane_controls_hidden_by_default") {
+            config.pane_controls_hidden_by_default = hidden
+                .as_bool()
+                .context("pane_controls_hidden_by_default must be a boolean")?;
+        }
         if let Some(port) = root.get("http_server_port") {
             let port = port
                 .as_u64()
@@ -260,6 +267,7 @@ fn validate_config_fields(root: &Value) -> Result<()> {
         "max_scroll_history_lines",
         "inactive_pane_opacity",
         "pane_controls_position",
+        "pane_controls_hidden_by_default",
         "http_server_port",
         "pane_split_templates",
         "profiles",

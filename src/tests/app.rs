@@ -138,6 +138,27 @@ fn pane_controls_toggle_keeps_other_tabs_unchanged() {
 }
 
 #[test]
+fn pane_controls_can_start_hidden_without_disabling_toggles() {
+    let mut hidden_panes = default_hidden_pane_controls(true, [1, 2]);
+
+    assert_eq!(hidden_panes, HashSet::from([1, 2]));
+    assert!(!toggle_hidden_pane_controls(&mut hidden_panes, &[1, 2]));
+    assert!(hidden_panes.is_empty());
+    assert!(default_hidden_pane_controls(false, [3]).is_empty());
+}
+
+#[test]
+fn reloading_changed_pane_controls_default_resets_open_panes() {
+    let mut hidden_panes = HashSet::from([1, 3]);
+
+    reset_pane_controls_visibility(&mut hidden_panes, true, [1, 2]);
+    assert_eq!(hidden_panes, HashSet::from([1, 2, 3]));
+
+    reset_pane_controls_visibility(&mut hidden_panes, false, [1, 2]);
+    assert_eq!(hidden_panes, HashSet::from([3]));
+}
+
+#[test]
 fn reconnect_is_immediate_only_for_one_background_session() {
     assert_eq!(reconnect_request(0), ReconnectRequest::None);
     assert_eq!(reconnect_request(1), ReconnectRequest::Immediate(0));

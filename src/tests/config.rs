@@ -55,6 +55,27 @@ fn default_working_directory_is_the_user_home() {
     assert!(!config.working_directory_configured);
     assert_eq!(config.http_server_port, DEFAULT_HTTP_PORT);
     assert_eq!(config.pane_controls_position, PaneControlsPosition::Right);
+    assert!(!config.pane_controls_hidden_by_default);
+}
+
+#[test]
+fn validates_pane_controls_default_visibility() {
+    assert!(
+        Config::parse(r#"{"pane_controls_hidden_by_default":true}"#, None, None)
+            .unwrap()
+            .pane_controls_hidden_by_default
+    );
+    for value in [r#""hidden""#, "1", "null"] {
+        assert!(
+            Config::parse(
+                &format!(r#"{{"pane_controls_hidden_by_default":{value}}}"#),
+                None,
+                None
+            )
+            .is_err(),
+            "accepted invalid pane controls default visibility {value}"
+        );
+    }
 }
 
 #[test]

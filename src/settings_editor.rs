@@ -122,6 +122,7 @@ pub struct ConfigurationForm {
     pub max_scroll_history_lines: TextField,
     pub inactive_pane_opacity: f32,
     pub pane_controls_position: PaneControlsPosition,
+    pub pane_controls_hidden_by_default: bool,
     #[cfg(feature = "http-server")]
     pub http_server_port: TextField,
     pub profiles: Vec<ProfileForm>,
@@ -203,6 +204,7 @@ impl ConfigurationForm {
             ),
             inactive_pane_opacity: config.inactive_pane_opacity,
             pane_controls_position: config.pane_controls_position,
+            pane_controls_hidden_by_default: config.pane_controls_hidden_by_default,
             #[cfg(feature = "http-server")]
             http_server_port: TextField::new(config.http_server_port.to_string()),
             root,
@@ -270,6 +272,10 @@ impl ConfigurationForm {
         root.insert(
             "pane_controls_position".into(),
             json!(self.pane_controls_position.as_str()),
+        );
+        root.insert(
+            "pane_controls_hidden_by_default".into(),
+            json!(self.pane_controls_hidden_by_default),
         );
         #[cfg(feature = "http-server")]
         {

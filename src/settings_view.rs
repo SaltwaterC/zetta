@@ -496,6 +496,18 @@ impl Zetta {
                     window,
                     cx,
                 );
+                let pane_controls_default_visibility = dropdown(
+                    "settings-pane-controls-default-visibility".to_owned(),
+                    if configuration.pane_controls_hidden_by_default {
+                        "Hidden".to_owned()
+                    } else {
+                        "Visible".to_owned()
+                    },
+                    vec!["Visible".to_owned(), "Hidden".to_owned()].into(),
+                    SettingsDropdown::PaneControlsDefaultVisibility,
+                    window,
+                    cx,
+                );
                 let current_font = configuration.terminal_font_family.clone();
                 let picker_handle = handle.clone();
                 let font_family = h_flex()
@@ -616,6 +628,15 @@ impl Zetta {
                                 SettingsDropdown::PaneControlsPosition,
                             )),
                         pane_controls_position,
+                    ),
+                    setting_row(
+                        "Pane controls by default",
+                        "Start new panes with overlay controls visible or hidden",
+                        editor.focused_control
+                            == Some(SettingsControl::Dropdown(
+                                SettingsDropdown::PaneControlsDefaultVisibility,
+                            )),
+                        pane_controls_default_visibility,
                     ),
                 ];
                 #[cfg(feature = "http-server")]

@@ -94,6 +94,29 @@ fn toggle_hidden_pane_controls(hidden_panes: &mut HashSet<u64>, pane_ids: &[u64]
     hide
 }
 
+fn default_hidden_pane_controls(
+    pane_controls_hidden_by_default: bool,
+    pane_ids: impl IntoIterator<Item = u64>,
+) -> HashSet<u64> {
+    pane_controls_hidden_by_default
+        .then(|| pane_ids.into_iter().collect())
+        .unwrap_or_default()
+}
+
+fn reset_pane_controls_visibility(
+    hidden_panes: &mut HashSet<u64>,
+    pane_controls_hidden_by_default: bool,
+    pane_ids: impl IntoIterator<Item = u64>,
+) {
+    for pane_id in pane_ids {
+        if pane_controls_hidden_by_default {
+            hidden_panes.insert(pane_id);
+        } else {
+            hidden_panes.remove(&pane_id);
+        }
+    }
+}
+
 fn new_tab_profile(
     active_profile: Option<&Profile>,
     profiles: &[Profile],
@@ -459,6 +482,11 @@ impl Zetta {
             pane_ids.push(pane_id);
             added_pane_ids.push(pane_id);
         }
+        self.pane_controls_hidden_for
+            .extend(default_hidden_pane_controls(
+                self.launch_config.pane_controls_hidden_by_default,
+                added_pane_ids.iter().copied(),
+            ));
 
         let tab = &mut self.tabs[self.active_tab];
         for (index, pane_id) in added_pane_ids.iter().copied().enumerate() {
@@ -625,6 +653,11 @@ impl Zetta {
         let pane_id = self.next_pane_id;
         self.next_pane_id += 1;
         let wsl_cwd_file = wsl_cwd_tracking_file(&profile, pane_id);
+        self.pane_controls_hidden_for
+            .extend(default_hidden_pane_controls(
+                self.launch_config.pane_controls_hidden_by_default,
+                [pane_id],
+            ));
         self.tabs.push(Tab {
             id: tab_id,
             panes: vec![TerminalPane {
@@ -1117,6 +1150,11 @@ impl Zetta {
         let pane_id = self.next_pane_id;
         self.next_pane_id += 1;
         let wsl_cwd_file = wsl_cwd_tracking_file(&profile, pane_id);
+        self.pane_controls_hidden_for
+            .extend(default_hidden_pane_controls(
+                self.launch_config.pane_controls_hidden_by_default,
+                [pane_id],
+            ));
 
         // A vertical split changes terminal widths. Reflowing a large retained buffer during the
         // next paint blocks the UI before the new pane can appear. Preserve logical rows for this
@@ -2117,6 +2155,11 @@ impl Zetta {
         let new_panes = prepare_pane_launches(new_pane_ids, |pane_id| {
             wsl_cwd_tracking_file(&profile, pane_id)
         });
+        self.pane_controls_hidden_for
+            .extend(default_hidden_pane_controls(
+                self.launch_config.pane_controls_hidden_by_default,
+                new_panes.iter().map(|(pane_id, _)| *pane_id),
+            ));
         let mut all_pane_ids =
             std::iter::once(active_pane_id).chain(new_panes.iter().map(|(pane_id, _)| *pane_id));
         let replacement = pane_layout_from_configured_template(
@@ -3100,6 +3143,18 @@ impl Zetta {
         #[cfg(windows)]
         windows_integration::update_profile_jump_list(config.profiles.clone());
 
+        if config.pane_controls_hidden_by_default
+            != self.launch_config.pane_controls_hidden_by_default
+        {
+            reset_pane_controls_visibility(
+                &mut self.pane_controls_hidden_for,
+                config.pane_controls_hidden_by_default,
+                self.tabs
+                    .iter()
+                    .flat_map(|tab| tab.panes.iter().map(|pane| pane.id)),
+            );
+            self.pane_controls_visible_for = None;
+        }
         self.profiles = config.profiles.clone();
         self.working_directory = config.working_directory.clone();
         self.launch_config = config;
