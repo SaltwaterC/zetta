@@ -385,6 +385,7 @@ impl Modes {
     pub const MOUSE_DRAG: Self = Self(1 << 14);
     pub const MOUSE_MOTION: Self = Self(1 << 15);
     pub const VI: Self = Self(1 << 16);
+    pub const WIN32_INPUT: Self = Self(1 << 17);
     pub const MOUSE_MODE: Self =
         Self(Self::MOUSE_REPORT_CLICK.0 | Self::MOUSE_DRAG.0 | Self::MOUSE_MOTION.0);
 
@@ -4565,6 +4566,61 @@ mod tests {
             history_size > 100_000,
             "expected the complete benchmark payload in scrollback, got {history_size} lines"
         );
+    }
+
+    #[cfg(windows)]
+    #[gpui::test]
+    async fn windows_conpty_preserves_ctrl_j_in_win32_input_mode(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+        });
+
+        let output_path =
+            std::env::temp_dir().join(format!("zetta-ctrl-j-{}.txt", std::process::id()));
+        let escaped_output_path = output_path.to_string_lossy().replace('\'', "''");
+        let command = format!(
+            "$key = [Console]::ReadKey($true); [IO.File]::WriteAllText('{}', ('{{0}}|{{1}}|{{2}}' -f [int]$key.KeyChar, $key.Key, $key.Modifiers))",
+            escaped_output_path
+        );
+        let (terminal, completion_rx) = build_test_terminal_with_arguments(
+            cx,
+            "powershell.exe".to_owned(),
+            vec!["-NoProfile".to_owned(), "-Command".to_owned(), command],
+        )
+        .await;
+
+        let mut negotiated = false;
+        for _ in 0..100 {
+            negotiated = terminal.update(cx, |terminal, _| {
+                terminal
+                    .term
+                    .lock()
+                    .mode()
+                    .contains(alacritty_terminal::term::TermMode::WIN32_INPUT)
+            });
+            if negotiated {
+                break;
+            }
+            cx.executor().timer(Duration::from_millis(50)).await;
+        }
+        assert!(negotiated, "terminal did not process DECSET 9001");
+
+        let handled = terminal.update(cx, |terminal, _| {
+            terminal.last_content.mode.insert(Modes::WIN32_INPUT);
+            terminal.try_keystroke(&Keystroke::parse("ctrl-j").unwrap(), false)
+        });
+        assert!(handled);
+
+        assert_eq!(
+            completion_rx.recv().await.unwrap(),
+            Some(ExitStatus::default())
+        );
+        let observed = std::fs::read_to_string(&output_path).unwrap();
+        let _ = std::fs::remove_file(output_path);
+        assert_eq!(observed, "10|J|Control");
     }
 
     #[gpui::test]

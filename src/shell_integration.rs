@@ -1,5 +1,8 @@
 use super::*;
+use std::ffi::OsStr;
 use std::io::Write as _;
+#[cfg(windows)]
+use std::process::Command;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ShellIntegration {
@@ -54,7 +57,7 @@ impl ShellIntegration {
         match self {
             Self::Bash => "eval \"$(zetta init bash)\"",
             Self::Fish => "zetta init fish | source",
-            Self::PowerShell => "zetta init powershell | Invoke-Expression",
+            Self::PowerShell => "zetta init powershell | Out-String | Invoke-Expression",
             Self::Zsh => "eval \"$(zetta init zsh)\"",
         }
     }
@@ -66,20 +69,64 @@ impl ShellIntegration {
                 return false;
             }
             match self {
-                Self::PowerShell => {
-                    line.contains("zetta init powershell") || line.contains("zetta init pwsh")
-                }
+                Self::PowerShell => line.contains(self.configuration_command()),
                 _ => line.contains(self.configuration_command()),
             }
         })
     }
 
+    fn migrate_configuration(self, contents: &str) -> Option<String> {
+        if self != Self::PowerShell {
+            return None;
+        }
+
+        const LEGACY_COMMANDS: [&str; 2] = [
+            "zetta init powershell | Invoke-Expression",
+            "zetta init pwsh | Invoke-Expression",
+        ];
+        let mut changed = false;
+        let mut migrated = String::with_capacity(contents.len());
+        for line in contents.split_inclusive('\n') {
+            if line.trim_start().starts_with('#') {
+                migrated.push_str(line);
+                continue;
+            }
+
+            let mut line = line.to_owned();
+            for legacy_command in LEGACY_COMMANDS {
+                if line.contains(legacy_command) {
+                    line = line.replacen(legacy_command, self.configuration_command(), 1);
+                    changed = true;
+                    break;
+                }
+            }
+            migrated.push_str(&line);
+        }
+        changed.then_some(migrated)
+    }
+
     fn from_shell_path(path: &Path) -> Result<Self> {
         let shell_name = path
-            .file_name()
+            .file_stem()
             .and_then(|name| name.to_str())
             .context("could not determine the current shell from SHELL")?;
         Self::parse(shell_name)
+    }
+
+    fn current(shell_path: Option<&OsStr>) -> Result<Self> {
+        match shell_path {
+            Some(shell_path) => Self::from_shell_path(Path::new(shell_path)),
+            None => {
+                #[cfg(windows)]
+                {
+                    Ok(Self::PowerShell)
+                }
+                #[cfg(not(windows))]
+                {
+                    anyhow::bail!("could not determine the current shell: SHELL is not set")
+                }
+            }
+        }
     }
 }
 
@@ -90,11 +137,22 @@ pub(crate) enum ShellIntegrationConfiguration {
 }
 
 pub(crate) fn configure_current_shell_integration() -> Result<ShellIntegrationConfiguration> {
-    let shell =
-        env::var_os("SHELL").context("could not determine the current shell: SHELL is not set")?;
-    let shell = ShellIntegration::from_shell_path(Path::new(&shell))?;
+    let shell = ShellIntegration::current(env::var_os("SHELL").as_deref())?;
+
+    #[cfg(windows)]
+    if shell == ShellIntegration::PowerShell {
+        let profile = current_powershell_profile()?;
+        return configure_shell_integration_file(shell, &profile);
+    }
+
     let home =
-        env::var_os("HOME").context("could not locate the home directory: HOME is not set")?;
+        env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).with_context(|| {
+            if cfg!(windows) {
+                "could not locate the home directory: USERPROFILE is not set"
+            } else {
+                "could not locate the home directory: HOME is not set"
+            }
+        })?;
     configure_shell_integration(shell, Path::new(&home))
 }
 
@@ -103,7 +161,14 @@ fn configure_shell_integration(
     home: &Path,
 ) -> Result<ShellIntegrationConfiguration> {
     let path = shell.startup_file(home);
-    let contents = match fs::read_to_string(&path) {
+    configure_shell_integration_file(shell, &path)
+}
+
+fn configure_shell_integration_file(
+    shell: ShellIntegration,
+    path: &Path,
+) -> Result<ShellIntegrationConfiguration> {
+    let contents = match fs::read_to_string(path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(error) => {
@@ -112,13 +177,21 @@ fn configure_shell_integration(
     };
 
     if shell.configuration_is_present(&contents) {
-        return Ok(ShellIntegrationConfiguration::AlreadyPresent(path));
+        return Ok(ShellIntegrationConfiguration::AlreadyPresent(
+            path.to_path_buf(),
+        ));
     }
 
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
+    if let Some(migrated) = shell.migrate_configuration(&contents) {
+        fs::write(path, migrated)
+            .with_context(|| format!("failed to update {}", path.display()))?;
+        return Ok(ShellIntegrationConfiguration::Written(path.to_path_buf()));
+    }
+
     let separator = if contents.is_empty() || contents.ends_with('\n') {
         ""
     } else {
@@ -127,15 +200,86 @@ fn configure_shell_integration(
     let mut file = fs::OpenOptions::new()
         .append(true)
         .create(true)
-        .open(&path)
+        .open(path)
         .with_context(|| format!("failed to write {}", path.display()))?;
     file.write_all(format!("{separator}{}\n", shell.configuration_command()).as_bytes())
         .with_context(|| format!("failed to write {}", path.display()))?;
 
-    Ok(ShellIntegrationConfiguration::Written(path))
+    Ok(ShellIntegrationConfiguration::Written(path.to_path_buf()))
+}
+
+#[cfg(windows)]
+fn current_powershell_profile() -> Result<PathBuf> {
+    let executable =
+        parent_powershell_executable().unwrap_or_else(|| PathBuf::from("powershell.exe"));
+    query_powershell_profile(&executable)
+}
+
+#[cfg(windows)]
+fn parent_powershell_executable() -> Option<PathBuf> {
+    let mut system = sysinfo::System::new();
+    let mut pid = sysinfo::get_current_pid().ok()?;
+
+    loop {
+        system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+        let parent_pid = system.process(pid)?.parent()?;
+        system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[parent_pid]), true);
+        let parent = system.process(parent_pid)?;
+        if parent.exe().is_some_and(|executable| {
+            executable
+                .file_stem()
+                .and_then(OsStr::to_str)
+                .is_some_and(|name| {
+                    name.eq_ignore_ascii_case("powershell") || name.eq_ignore_ascii_case("pwsh")
+                })
+        }) {
+            return parent.exe().map(Path::to_path_buf);
+        }
+        pid = parent_pid;
+    }
+}
+
+#[cfg(windows)]
+fn query_powershell_profile(executable: &Path) -> Result<PathBuf> {
+    let output = Command::new(executable)
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "[Console]::OutputEncoding = New-Object Text.UTF8Encoding; \
+             [Console]::Out.Write($PROFILE.CurrentUserCurrentHost)",
+        ])
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to query the PowerShell profile using {}",
+                executable.display()
+            )
+        })?;
+    anyhow::ensure!(
+        output.status.success(),
+        "failed to query the PowerShell profile using {}: {}",
+        executable.display(),
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+
+    let profile = String::from_utf8(output.stdout)
+        .context("PowerShell returned a profile path that was not UTF-8")?;
+    let profile = profile.trim().trim_start_matches('\u{feff}');
+    anyhow::ensure!(
+        !profile.is_empty(),
+        "{} returned an empty PowerShell profile path",
+        executable.display()
+    );
+    Ok(PathBuf::from(profile))
 }
 
 fn render_profiles(shell: ShellIntegration, profiles: &[Profile]) -> String {
+    let separator = if shell == ShellIntegration::PowerShell {
+        ", "
+    } else {
+        " "
+    };
     profiles
         .iter()
         .map(|profile| match shell {
@@ -145,7 +289,7 @@ fn render_profiles(shell: ShellIntegration, profiles: &[Profile]) -> String {
             ShellIntegration::PowerShell => format!("'{}'", profile.name.replace('\'', "''")),
         })
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(separator)
 }
 
 fn shell_single_quote(value: &str) -> String {
@@ -153,7 +297,7 @@ fn shell_single_quote(value: &str) -> String {
 }
 
 pub(crate) fn shell_integration_help() -> &'static str {
-    "Configure or generate shell integration\n\nUsage: zetta init [SHELL]\n\nWithout SHELL, detects the current shell from SHELL and adds the integration command to its startup file. Running it again leaves an existing integration unchanged. With SHELL, prints the integration script for use in a shell startup file.\n\nSupported shells:\n  bash        Bash\n  fish        Fish\n  powershell  PowerShell (also accepted as pwsh)\n  zsh         Z shell\n\nThe generated script adds command completion and the ztftp shortcut when the TFTP client is enabled."
+    "Configure or generate shell integration\n\nUsage: zetta init [SHELL]\n\nWithout SHELL, detects the current shell from SHELL and adds the integration command to its startup file. On Windows, Zetta detects the launching PowerShell and writes to its $PROFILE when SHELL is unavailable. Running it again leaves an existing integration unchanged. With SHELL, prints the integration script for use in a shell startup file.\n\nSupported shells:\n  bash        Bash\n  fish        Fish\n  powershell  PowerShell (also accepted as pwsh)\n  zsh         Z shell\n\nThe generated script adds command completion and the ztftp shortcut when the TFTP client is enabled."
 }
 
 const BASH_INTEGRATION: &str = r#"# Zetta shell integration for Bash.

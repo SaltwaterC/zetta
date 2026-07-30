@@ -32,6 +32,55 @@ fn supported_shells_generate_completion_and_tftp_shortcut() {
 }
 
 #[test]
+fn powershell_profiles_are_comma_separated() {
+    assert_eq!(
+        render_profiles(ShellIntegration::PowerShell, &profiles()),
+        "'System', 'WSL: Ubuntu'"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn powershell_accepts_the_generated_integration_syntax() {
+    let script = ShellIntegration::PowerShell.script(&profiles());
+
+    for executable in ["powershell.exe", "pwsh.exe"] {
+        let mut child = match Command::new(executable)
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "$source = [Console]::In.ReadToEnd(); \
+                 [scriptblock]::Create($source) | Out-Null",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error)
+                if executable == "pwsh.exe" && error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                continue;
+            }
+            Err(error) => panic!("failed to launch {executable}: {error}"),
+        };
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(script.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{executable} rejected the generated integration:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
 fn configuring_zsh_writes_the_startup_command_once() {
     let home = tempfile::tempdir().unwrap();
     let startup_file = home.path().join(".zshrc");
@@ -60,6 +109,82 @@ fn shell_detection_uses_the_shell_name_from_shell_environment_path() {
     assert_eq!(
         ShellIntegration::from_shell_path(Path::new("/usr/bin/zsh")).unwrap(),
         ShellIntegration::Zsh
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn missing_shell_defaults_to_powershell_on_windows() {
+    assert_eq!(
+        ShellIntegration::current(None).unwrap(),
+        ShellIntegration::PowerShell
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn shell_detection_accepts_powershell_executables() {
+    assert_eq!(
+        ShellIntegration::from_shell_path(Path::new(r"C:\Program Files\PowerShell\7\pwsh.exe"))
+            .unwrap(),
+        ShellIntegration::PowerShell
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn powershell_profile_query_uses_the_requested_shell_edition() {
+    let profile = query_powershell_profile(Path::new("powershell.exe")).unwrap();
+
+    assert_eq!(
+        profile.file_name().and_then(|name| name.to_str()),
+        Some("Microsoft.PowerShell_profile.ps1")
+    );
+    assert_eq!(
+        profile
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str()),
+        Some("WindowsPowerShell")
+    );
+}
+
+#[test]
+fn configuring_powershell_writes_the_resolved_profile() {
+    let home = tempfile::tempdir().unwrap();
+    let profile = home
+        .path()
+        .join("Redirected Documents")
+        .join("WindowsPowerShell")
+        .join("Microsoft.PowerShell_profile.ps1");
+
+    assert_eq!(
+        configure_shell_integration_file(ShellIntegration::PowerShell, &profile).unwrap(),
+        ShellIntegrationConfiguration::Written(profile.clone())
+    );
+    assert_eq!(
+        fs::read_to_string(profile).unwrap(),
+        "zetta init powershell | Out-String | Invoke-Expression\n"
+    );
+}
+
+#[test]
+fn configuring_powershell_migrates_the_broken_pipeline() {
+    let home = tempfile::tempdir().unwrap();
+    let profile = home.path().join("Microsoft.PowerShell_profile.ps1");
+    fs::write(
+        &profile,
+        "# Keep this comment unchanged.\r\nzetta init powershell | Invoke-Expression\r\n",
+    )
+    .unwrap();
+
+    assert_eq!(
+        configure_shell_integration_file(ShellIntegration::PowerShell, &profile).unwrap(),
+        ShellIntegrationConfiguration::Written(profile.clone())
+    );
+    assert_eq!(
+        fs::read_to_string(profile).unwrap(),
+        "# Keep this comment unchanged.\r\nzetta init powershell | Out-String | Invoke-Expression\r\n"
     );
 }
 

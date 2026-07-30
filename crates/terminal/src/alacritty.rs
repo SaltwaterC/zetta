@@ -682,6 +682,7 @@ impl Modes {
         add_alacritty_mode(&mut mode, self, Self::MOUSE_DRAG, TermMode::MOUSE_DRAG);
         add_alacritty_mode(&mut mode, self, Self::MOUSE_MOTION, TermMode::MOUSE_MOTION);
         add_alacritty_mode(&mut mode, self, Self::VI, TermMode::VI);
+        add_alacritty_mode(&mut mode, self, Self::WIN32_INPUT, TermMode::WIN32_INPUT);
         mode
     }
 }
@@ -775,6 +776,12 @@ fn terminal_modes_from_alacritty(mode: TermMode) -> Modes {
         Modes::MOUSE_MOTION,
     );
     add_terminal_mode(&mut terminal_modes, mode, TermMode::VI, Modes::VI);
+    add_terminal_mode(
+        &mut terminal_modes,
+        mode,
+        TermMode::WIN32_INPUT,
+        Modes::WIN32_INPUT,
+    );
     terminal_modes
 }
 
@@ -1486,6 +1493,7 @@ mod tests {
             | TermMode::ALT_SCREEN
             | TermMode::MOUSE_DRAG
             | TermMode::SGR_MOUSE
+            | TermMode::WIN32_INPUT
             | TermMode::VI;
 
         let terminal_modes = terminal_modes_from_alacritty(alacritty_modes);
@@ -1495,6 +1503,7 @@ mod tests {
         assert!(terminal_modes.contains(Modes::MOUSE_DRAG));
         assert!(terminal_modes.intersects(Modes::MOUSE_MODE));
         assert!(terminal_modes.contains(Modes::SGR_MOUSE));
+        assert!(terminal_modes.contains(Modes::WIN32_INPUT));
         assert!(terminal_modes.contains(Modes::VI));
         assert!(!terminal_modes.contains(Modes::MOUSE_REPORT_CLICK));
 
@@ -1504,6 +1513,7 @@ mod tests {
         assert!(alacritty_modes.contains(TermMode::ALT_SCREEN));
         assert!(alacritty_modes.contains(TermMode::MOUSE_DRAG));
         assert!(alacritty_modes.contains(TermMode::SGR_MOUSE));
+        assert!(alacritty_modes.contains(TermMode::WIN32_INPUT));
         assert!(alacritty_modes.contains(TermMode::VI));
         assert!(!alacritty_modes.contains(TermMode::MOUSE_REPORT_CLICK));
     }

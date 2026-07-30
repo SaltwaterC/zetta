@@ -33,7 +33,7 @@ zetta init fish | source
 For PowerShell:
 
 ```powershell
-zetta init powershell | Invoke-Expression
+zetta init powershell | Out-String | Invoke-Expression
 ```
 
 ## Enable persistently
@@ -51,7 +51,7 @@ The startup files and commands are:
 
 For example, `zetta init` from Zsh adds `eval "$(zetta init zsh)"` to
 `~/.zshrc`. You can also add it manually, or add
-`zetta init powershell | Invoke-Expression` to `$PROFILE`. Start a new shell
+`zetta init powershell | Out-String | Invoke-Expression` to `$PROFILE`. Start a new shell
 or source the file after editing it.
 
 Profile names are captured when the integration script is generated. After

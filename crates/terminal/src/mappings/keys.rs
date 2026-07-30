@@ -49,6 +49,11 @@ pub(crate) fn to_esc_str(
     mode: Modes,
     option_as_meta: bool,
 ) -> Option<Cow<'static, str>> {
+    #[cfg(windows)]
+    if let Some(sequence) = win32_input_sequence(keystroke, mode) {
+        return Some(sequence);
+    }
+
     let modifiers = TerminalModifiers::new(keystroke);
 
     // Manual Bindings including modifiers
@@ -233,6 +238,135 @@ pub(crate) fn to_esc_str(
     None
 }
 
+#[cfg(windows)]
+fn win32_input_sequence(keystroke: &Keystroke, mode: Modes) -> Option<Cow<'static, str>> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{MAPVK_VK_TO_VSC, MapVirtualKeyW};
+
+    if !mode.contains(Modes::WIN32_INPUT) {
+        return None;
+    }
+
+    let virtual_key = win32_virtual_key(&keystroke.key)?;
+    let scan_code = unsafe { MapVirtualKeyW(virtual_key, MAPVK_VK_TO_VSC) };
+    let unicode_char = win32_unicode_char(keystroke);
+    let control_key_state = win32_control_key_state(keystroke);
+
+    // ConPTY's Win32 input mode accepts serialized KEY_EVENT_RECORD fields:
+    // virtual key, scan code, Unicode character, key-down, control state, repeat count.
+    Some(Cow::Owned(format!(
+        "\x1b[{virtual_key};{scan_code};{unicode_char};1;{control_key_state};1_"
+    )))
+}
+
+#[cfg(windows)]
+fn win32_virtual_key(key: &str) -> Option<u32> {
+    let virtual_key = match key {
+        "back" | "backspace" => 0x08,
+        "tab" => 0x09,
+        "enter" => 0x0d,
+        "escape" => 0x1b,
+        "space" => 0x20,
+        "pageup" => 0x21,
+        "pagedown" => 0x22,
+        "end" => 0x23,
+        "home" => 0x24,
+        "left" => 0x25,
+        "up" => 0x26,
+        "right" => 0x27,
+        "down" => 0x28,
+        "insert" => 0x2d,
+        "delete" => 0x2e,
+        ";" | ":" => 0xba,
+        "=" | "+" => 0xbb,
+        "," | "<" => 0xbc,
+        "-" | "_" => 0xbd,
+        "." | ">" => 0xbe,
+        "/" | "?" => 0xbf,
+        "`" | "~" => 0xc0,
+        "[" | "{" => 0xdb,
+        "\\" | "|" => 0xdc,
+        "]" | "}" => 0xdd,
+        "'" | "\"" => 0xde,
+        key if key.len() == 1 && key.as_bytes()[0].is_ascii_alphanumeric() => {
+            key.as_bytes()[0].to_ascii_uppercase() as u32
+        }
+        key if key
+            .strip_prefix('f')
+            .and_then(|number| number.parse::<u32>().ok())
+            .is_some_and(|number| (1..=24).contains(&number)) =>
+        {
+            0x6f + key[1..].parse::<u32>().unwrap()
+        }
+        _ => return None,
+    };
+    Some(virtual_key)
+}
+
+#[cfg(windows)]
+fn win32_unicode_char(keystroke: &Keystroke) -> u32 {
+    if keystroke.modifiers.control {
+        let key = keystroke.key.as_bytes();
+        if key.len() == 1 {
+            let byte = key[0].to_ascii_uppercase();
+            return match byte {
+                b'@'..=b'_' => (byte & 0x1f) as u32,
+                b'?' => 0x7f,
+                _ => 0,
+            };
+        }
+    }
+
+    match keystroke.key.as_str() {
+        "back" | "backspace" => 0x08,
+        "tab" => 0x09,
+        "enter" => 0x0d,
+        "escape" => 0x1b,
+        "space" => 0x20,
+        _ => keystroke
+            .key_char
+            .as_deref()
+            .or_else(|| (keystroke.key.chars().count() == 1).then_some(keystroke.key.as_str()))
+            .and_then(|key| key.encode_utf16().next())
+            .map(u32::from)
+            .unwrap_or(0),
+    }
+}
+
+#[cfg(windows)]
+fn win32_control_key_state(keystroke: &Keystroke) -> u32 {
+    const LEFT_ALT_PRESSED: u32 = 0x0002;
+    const LEFT_CTRL_PRESSED: u32 = 0x0008;
+    const SHIFT_PRESSED: u32 = 0x0010;
+    const ENHANCED_KEY: u32 = 0x0100;
+
+    let mut state = 0;
+    if keystroke.modifiers.shift {
+        state |= SHIFT_PRESSED;
+    }
+    if keystroke.modifiers.alt {
+        state |= LEFT_ALT_PRESSED;
+    }
+    if keystroke.modifiers.control {
+        state |= LEFT_CTRL_PRESSED;
+    }
+    if matches!(
+        keystroke.key.as_str(),
+        "pageup"
+            | "pagedown"
+            | "end"
+            | "home"
+            | "left"
+            | "up"
+            | "right"
+            | "down"
+            | "insert"
+            | "delete"
+    ) {
+        state |= ENHANCED_KEY;
+    }
+    state
+}
+
 ///   Code     Modifiers
 /// ---------+---------------------------
 ///    2     | Shift
@@ -411,6 +545,17 @@ mod test {
         let ctrl_j = Keystroke::parse("ctrl-j").unwrap();
 
         assert_eq!(to_esc_str(&ctrl_j, Modes::NONE, false), Some("\x0a".into()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ctrl_j_uses_win32_input_record_when_requested() {
+        let ctrl_j = Keystroke::parse("ctrl-j").unwrap();
+
+        assert_eq!(
+            to_esc_str(&ctrl_j, Modes::WIN32_INPUT, false),
+            Some("\x1b[74;36;10;1;8;1_".into())
+        );
     }
 
     #[test]
