@@ -160,6 +160,8 @@ as separate artifacts associated with the JSON report.
   and tests together when adding a user-facing setting.
 - Keep action registration, keybindings, command-palette availability, and
   settings UI behavior synchronized when adding or renaming actions.
+- Resolve accelerator labels from the effective keybinding at render time; do
+  not hardcode them, because users can remap actions in their keymap.
 - When adding a command-line flag, provide and document both a long form and
   a non-conflicting short form; update shell completions and parser tests for
   both spellings.

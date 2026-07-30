@@ -53,6 +53,44 @@ fn resolve_visible_minimized_panes<T>(
     entries
 }
 
+#[derive(Clone)]
+enum ProfileMenuShortcut {
+    Alias(String),
+    Binding(ui::KeyBinding),
+}
+
+impl ProfileMenuShortcut {
+    fn render(&self) -> AnyElement {
+        match self {
+            Self::Alias(label) => Label::new(label.clone())
+                .size(LabelSize::Small)
+                .color(Color::Muted)
+                .into_any_element(),
+            Self::Binding(binding) => binding.clone().into_any_element(),
+        }
+    }
+}
+
+fn profile_menu_shortcut(
+    slot: usize,
+    terminal_focus: Option<&gpui::FocusHandle>,
+    window: &Window,
+) -> Option<ProfileMenuShortcut> {
+    let action = OpenProfile { slot };
+    let binding = terminal_focus
+        .and_then(|focus| window.highest_precedence_binding_for_action_in(&action, focus))
+        .or_else(|| window.highest_precedence_binding_for_action(&action));
+    let binding = binding?;
+
+    if let Some(label) = profile_shortcut_label(slot, &binding) {
+        Some(ProfileMenuShortcut::Alias(label))
+    } else {
+        Some(ProfileMenuShortcut::Binding(
+            ui::KeyBinding::from_keystrokes(binding.keystrokes().to_vec().into(), false),
+        ))
+    }
+}
+
 impl Render for Zetta {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Native mouse resizing is constrained by WindowOptions where the
@@ -364,16 +402,13 @@ impl Render for Zetta {
                 let handle = profile_menu_handle.clone();
                 let dismiss_handle = profile_menu_dismiss_handle.clone();
                 let terminal_focus = profile_menu_terminal_focus.clone();
-                let menu = ui::ContextMenu::build(window, cx, move |mut menu, _, cx| {
+                let menu = ui::ContextMenu::build(window, cx, move |mut menu, window, _| {
                     for (index, profile) in profiles.iter().enumerate() {
                         let is_default = index == default_profile;
                         let label = profile.name.clone();
                         let label_for_row = label.clone();
-                        let action = OpenProfile { slot: index + 1 };
-                        let shortcut = terminal_focus
-                            .as_ref()
-                            .map(|focus| ui::KeyBinding::for_action_in(&action, focus, cx))
-                            .unwrap_or_else(|| ui::KeyBinding::for_action(&action, cx));
+                        let shortcut =
+                            profile_menu_shortcut(index + 1, terminal_focus.as_ref(), window);
                         let handle = handle.clone();
                         menu = menu.custom_entry(
                             move |_, _| {
@@ -400,7 +435,9 @@ impl Render for Zetta {
                                                 },
                                             )),
                                     )
-                                    .child(shortcut.clone())
+                                    .when_some(shortcut.clone(), |row, shortcut| {
+                                        row.child(shortcut.render())
+                                    })
                                     .into_any_element()
                             },
                             move |window, cx| {
@@ -517,6 +554,10 @@ impl Render for Zetta {
         };
 
         let application_menu_dismiss_handle = handle.clone();
+        // The popover receives focus while it is open. Retain the active
+        // terminal's context so actions continue to resolve their shortcuts
+        // when the user cycles here from the Profile menu.
+        let application_menu_action_context = active_terminal_focus;
         let application_menu = PopoverMenu::new("application-menu")
             .with_handle(self.application_menu_handle.clone())
             .trigger_with_tooltip(
@@ -537,9 +578,10 @@ impl Render for Zetta {
             .anchor(Anchor::TopLeft)
             .menu(move |window, cx| {
                 let dismiss_handle = application_menu_dismiss_handle.clone();
-                let menu = ui::ContextMenu::build(window, cx, move |menu, window, cx| {
+                let action_context = application_menu_action_context.clone();
+                let menu = ui::ContextMenu::build(window, cx, move |menu, _, _| {
                     let menu =
-                        menu.when_some(window.focused(cx), |menu, focused| menu.context(focused));
+                        menu.when_some(action_context.clone(), |menu, focus| menu.context(focus));
                     menu.action("New Tab", Box::new(NewTab))
                         .action("New Window", Box::new(NewWindow))
                         .separator()

@@ -987,6 +987,24 @@ fn profile_shortcuts_match_the_shifted_number_row() {
 }
 
 #[test]
+fn profile_shortcut_labels_use_number_row_aliases() {
+    let keyboard_mapper = gpui::DummyKeyboardMapper;
+    let slot_one = profile_keybindings(1, &keyboard_mapper)[0].clone();
+    let slot_nine = profile_keybindings(9, &keyboard_mapper)[0].clone();
+    let remapped = KeyBinding::new("alt-p", OpenProfile { slot: 1 }, Some("Zetta > Terminal"));
+
+    assert_eq!(
+        profile_shortcut_label(1, &slot_one).as_deref(),
+        Some("Ctrl+Shift+1")
+    );
+    assert_eq!(
+        profile_shortcut_label(9, &slot_nine).as_deref(),
+        Some("Ctrl+Shift+9")
+    );
+    assert_eq!(profile_shortcut_label(1, &remapped), None);
+}
+
+#[test]
 fn pane_template_shortcuts_are_built_in() {
     let [three_right, quarters] = pane_template_keybindings();
     let three_right_key = gpui::Keystroke::parse("alt-shift-o").unwrap();
