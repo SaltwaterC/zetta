@@ -61,27 +61,73 @@ fn service_completion_uses_command_local_short_options() {
     ));
 
     let fish = ShellIntegration::Fish.script(&profiles);
-    assert!(fish.contains("-s d -l device"));
-    assert!(fish.contains("-s D -l data-bits"));
-    assert!(fish.contains("-s p -l parity"));
+    assert!(fish.contains("-l device"));
+    assert!(fish.contains("-l data-bits"));
+    assert!(fish.contains("-l parity"));
     assert!(
-        fish.contains(
-            "subcommand_from tftp; and __fish_seen_subcommand_from server' -s c -l config"
-        )
+        fish.contains("subcommand_from tftp; and __fish_seen_subcommand_from server' -l config")
     );
 
     let powershell = ShellIntegration::PowerShell.script(&profiles);
     assert!(powershell.contains("'--device', '-d'"));
     assert!(powershell.contains("'--data-bits', '-D'"));
     assert!(powershell.contains("$previous -eq '-p' -and $subcommand -eq 'serial'"));
-    assert!(
-        powershell.contains("{ '-r', '--root', '-p', '--port', '-c', '--config', '-h', '--help' }")
-    );
+    assert!(powershell.contains("{ '--root', '--port', '--config', '--help' }"));
 
     let zsh = ShellIntegration::Zsh.script(&profiles);
     assert!(zsh.contains("--data-bits|-D)"));
     assert!(zsh.contains("$words[2] == serial"));
-    assert!(zsh.contains("compadd -- -r --root -p --port -c --config -h --help"));
+    assert!(zsh.contains("compadd -- --root --port --config --help"));
+}
+
+// Regression test: commit 72afe3b ("Add serial console, and HTTP, TFTP
+// servers to CLI integration") offered both short and long option names as
+// completion candidates for `serial console`, `http server`, and `tftp`,
+// contrary to the "long form only in autocomplete" rule in AGENTS.md. Short
+// forms must remain valid on the command line (see cli_services.rs and
+// tftp.rs parsing) but must not be offered as completion candidates.
+#[test]
+fn service_subcommand_completions_only_offer_long_form_flags() {
+    let profiles = profiles();
+
+    let bash = ShellIntegration::Bash.script(&profiles);
+    assert!(!bash.contains("'-d --device"));
+    assert!(!bash.contains("'-r --root -p --port -c --config -h --help'"));
+    assert!(!bash.contains("'-p --port -h --help'"));
+    assert!(
+        bash.contains(
+            "'--device --baud-rate --data-bits --parity --stop-bits --flow-control --help'"
+        )
+    );
+    assert!(bash.contains("'--root --port --config --help'"));
+
+    let zsh = ShellIntegration::Zsh.script(&profiles);
+    assert!(!zsh.contains("-d --device -b --baud-rate"));
+    assert!(!zsh.contains("compadd -- -r --root -p --port -c --config -h --help"));
+    assert!(!zsh.contains("compadd -- -p --port -h --help"));
+    assert!(zsh.contains(
+        "compadd -- --device --baud-rate --data-bits --parity --stop-bits --flow-control --help"
+    ));
+    assert!(zsh.contains("compadd -- --root --port --config --help"));
+
+    let powershell = ShellIntegration::PowerShell.script(&profiles);
+    assert!(!powershell.contains("'-d', '--device', '-b', '--baud-rate'"));
+    assert!(
+        !powershell.contains("'-r', '--root', '-p', '--port', '-c', '--config', '-h', '--help'")
+    );
+    assert!(!powershell.contains("'-p', '--port', '-h', '--help'"));
+    assert!(powershell.contains(
+        "'--device', '--baud-rate', '--data-bits', '--parity', '--stop-bits', '--flow-control', '--help'"
+    ));
+    assert!(powershell.contains("'--root', '--port', '--config', '--help'"));
+
+    let fish = ShellIntegration::Fish.script(&profiles);
+    assert!(!fish.contains("-s d -l device"));
+    assert!(!fish.contains("-s r -l root"));
+    assert!(!fish.contains("-s p -l port"));
+    assert!(!fish.contains("-s c -l config"));
+    assert!(fish.contains("subcommand_from console' -l device"));
+    assert!(fish.contains("subcommand_from server' -l root"));
 }
 
 #[test]

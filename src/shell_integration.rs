@@ -537,14 +537,14 @@ _zetta_complete() {
             if (( COMP_CWORD == 2 )); then
                 COMPREPLY=( $(compgen -W 'console list --help' -- "$current") )
             elif [[ ${COMP_WORDS[2]} == console ]]; then
-                COMPREPLY=( $(compgen -W '-d --device -b --baud-rate -D --data-bits -p --parity -s --stop-bits -f --flow-control -h --help' -- "$current") )
+                COMPREPLY=( $(compgen -W '--device --baud-rate --data-bits --parity --stop-bits --flow-control --help' -- "$current") )
             fi
             ;;
         http)
             if (( COMP_CWORD == 2 )); then
                 COMPREPLY=( $(compgen -W 'server --help' -- "$current") )
             else
-                COMPREPLY=( $(compgen -W '-r --root -p --port -c --config -h --help' -- "$current") )
+                COMPREPLY=( $(compgen -W '--root --port --config --help' -- "$current") )
             fi
             ;;
         tftp)
@@ -566,12 +566,12 @@ _zetta_tftp_complete() {
     operation=${COMP_WORDS[operation_index]}
     if [[ $operation == server ]]; then
         if [[ $current == -* || -z $current ]]; then
-            COMPREPLY=( $(compgen -W '-r --root -p --port -c --config -h --help' -- "$current") )
+            COMPREPLY=( $(compgen -W '--root --port --config --help' -- "$current") )
         fi
         return
     fi
     if [[ $current == -* ]]; then
-        COMPREPLY=( $(compgen -W '-p --port -h --help' -- "$current") )
+        COMPREPLY=( $(compgen -W '--port --help' -- "$current") )
         return
     fi
     if [[ $previous == '--port' || $previous == '-p' ]]; then
@@ -662,22 +662,22 @@ complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l profile-backgrou
 complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l profile-sparse-updates
 complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l profile-external-terminal
 complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l help -d 'Print help'
-complete -c zetta -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console' -s d -l device -r -a '(__zetta_serial_devices)' -d 'Serial device'
-complete -c zetta -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console' -s b -l baud-rate -r -d 'Baud rate'
-complete -c zetta -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console' -s D -l data-bits -r -a '5 6 7 8'
-complete -c zetta -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console' -s p -l parity -r -a 'none odd even'
-complete -c zetta -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console' -s s -l stop-bits -r -a '1 2'
-complete -c zetta -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console' -s f -l flow-control -r -a 'none software hardware'
-complete -c zetta -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server' -s r -l root -r -a '(__fish_complete_directories)' -d 'Directory to serve'
-complete -c zetta -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server' -s p -l port -r -d 'TCP port'
-complete -c zetta -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server' -s c -l config -r -d 'Configuration file'
+complete -c zetta -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console' -l device -r -a '(__zetta_serial_devices)' -d 'Serial device'
+complete -c zetta -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console' -l baud-rate -r -d 'Baud rate'
+complete -c zetta -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console' -l data-bits -r -a '5 6 7 8'
+complete -c zetta -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console' -l parity -r -a 'none odd even'
+complete -c zetta -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console' -l stop-bits -r -a '1 2'
+complete -c zetta -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console' -l flow-control -r -a 'none software hardware'
+complete -c zetta -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server' -l root -r -a '(__fish_complete_directories)' -d 'Directory to serve'
+complete -c zetta -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server' -l port -r -d 'TCP port'
+complete -c zetta -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server' -l config -r -d 'Configuration file'
 complete -c zetta -n '__fish_seen_subcommand_from tftp' -a 'get put server'
-complete -c zetta -n '__fish_seen_subcommand_from tftp' -s p -l port -r -d 'Server port'
-complete -c zetta -n '__fish_seen_subcommand_from tftp; and __fish_seen_subcommand_from server' -s r -l root -r -a '(__fish_complete_directories)' -d 'Directory to serve'
-complete -c zetta -n '__fish_seen_subcommand_from tftp; and __fish_seen_subcommand_from server' -s c -l config -r -d 'Configuration file'
+complete -c zetta -n '__fish_seen_subcommand_from tftp' -l port -r -d 'Server port'
+complete -c zetta -n '__fish_seen_subcommand_from tftp; and __fish_seen_subcommand_from server' -l root -r -a '(__fish_complete_directories)' -d 'Directory to serve'
+complete -c zetta -n '__fish_seen_subcommand_from tftp; and __fish_seen_subcommand_from server' -l config -r -d 'Configuration file'
 complete -c zetta -n '__fish_seen_subcommand_from tftp' -l help -d 'Print help'
 complete -c ztftp -f -a 'get put'
-complete -c ztftp -s p -l port -r -d 'Server port'
+complete -c ztftp -l port -r -d 'Server port'
 complete -c ztftp -l help -d 'Print help'
 "#;
 
@@ -732,15 +732,15 @@ $zettaCompletions = {
             'init' { 'bash', 'fish', 'powershell', 'pwsh', 'zsh', '--help' }
             'serial' {
                 if ($words.Count -le 2) { 'console', 'list', '--help' }
-                elseif ($words[2] -eq 'console') { '-d', '--device', '-b', '--baud-rate', '-D', '--data-bits', '-p', '--parity', '-s', '--stop-bits', '-f', '--flow-control', '-h', '--help' }
+                elseif ($words[2] -eq 'console') { '--device', '--baud-rate', '--data-bits', '--parity', '--stop-bits', '--flow-control', '--help' }
             }
             'http' {
-                if ($words.Count -le 2) { 'server', '--help' } else { '-r', '--root', '-p', '--port', '-c', '--config', '-h', '--help' }
+                if ($words.Count -le 2) { 'server', '--help' } else { '--root', '--port', '--config', '--help' }
             }
             'tftp' {
                 if ($words.Count -le 2) { 'get', 'put', 'server', '--help' }
-                elseif ($words[2] -eq 'server') { '-r', '--root', '-p', '--port', '-c', '--config', '-h', '--help' }
-                else { '-p', '--port', '-h', '--help' }
+                elseif ($words[2] -eq 'server') { '--root', '--port', '--config', '--help' }
+                else { '--port', '--help' }
             }
         }
     }
@@ -877,7 +877,7 @@ _zetta() {
                 compadd -S ' ' -- console list
                 compadd -- --help
             elif [[ $words[3] == console ]]; then
-                compadd -- -d --device -b --baud-rate -D --data-bits -p --parity -s --stop-bits -f --flow-control -h --help
+                compadd -- --device --baud-rate --data-bits --parity --stop-bits --flow-control --help
             fi
             ;;
         http)
@@ -885,7 +885,7 @@ _zetta() {
                 compadd -S ' ' -- server
                 compadd -- --help
             else
-                compadd -- -r --root -p --port -c --config -h --help
+                compadd -- --root --port --config --help
             fi
             ;;
         tftp)
@@ -913,13 +913,13 @@ _zetta_tftp() {
     operation=${words[operation_index]}
     if [[ $operation == server ]]; then
         if [[ $current == -* || -z $current ]]; then
-            compadd -- -r --root -p --port -c --config -h --help
+            compadd -- --root --port --config --help
         fi
         return
     fi
 
     if [[ $current == -* ]]; then
-        compadd -- -p --port -h --help
+        compadd -- --port --help
         return
     fi
     if [[ $words[CURRENT-1] == --port || $words[CURRENT-1] == -p ]]; then
