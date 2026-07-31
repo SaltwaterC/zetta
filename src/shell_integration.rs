@@ -406,7 +406,7 @@ fn shell_single_quote(value: &str) -> String {
 }
 
 pub(crate) fn shell_integration_help() -> &'static str {
-    "Configure or generate shell integration\n\nUsage: zetta init [SHELL]\n\nWithout SHELL, detects the current shell from SHELL and adds the integration command to its startup file. On Windows, Unix-style HOME paths from MSYS2 and similar environments are resolved with cygpath; when SHELL is unavailable, Zetta detects the launching PowerShell and writes to its $PROFILE. Running it again leaves an existing integration unchanged. With SHELL, prints the integration script for use in a shell startup file.\n\nSupported shells:\n  bash        Bash\n  fish        Fish\n  powershell  PowerShell (also accepted as pwsh)\n  zsh         Z shell\n\nThe generated script adds command completion, including live serial-device completion, and the ztftp shortcut when the TFTP client is enabled."
+    "Configure or generate shell integration\n\nUsage: zetta init [SHELL]\n\nWithout SHELL, detects the current shell from SHELL and adds the integration command to its startup file. On Windows, Unix-style HOME paths from MSYS2 and similar environments are resolved with cygpath; when SHELL is unavailable, Zetta detects the launching PowerShell and writes to its $PROFILE. Running it again leaves an existing integration unchanged. With SHELL, prints the integration script for use in a shell startup file.\n\nSupported shells:\n  bash        Bash\n  fish        Fish\n  powershell  PowerShell (also accepted as pwsh)\n  zsh         Z shell\n\nThe generated script adds command completion, including live serial-device completion, the ztftp shortcut when the TFTP client is enabled, and the zntfy shortcut when desktop notifications are enabled."
 }
 
 const BASH_INTEGRATION: &str = r#"# Zetta shell integration for Bash.
@@ -433,7 +433,7 @@ _zetta_complete() {
         -p)
             if [[ $command == serial ]]; then
                 COMPREPLY=( $(compgen -W 'none odd even' -- "$current") )
-            elif [[ $command != tftp && $command != http ]]; then
+            elif [[ $command != tftp && $command != http && $command != notify ]]; then
                 _zetta_complete_profiles
             else
                 COMPREPLY=()
@@ -471,6 +471,8 @@ _zetta_complete() {
         --stop-bits|-s)
             if [[ $command == serial ]]; then
                 COMPREPLY=( $(compgen -W '1 2' -- "$current") )
+            elif [[ $command == notify ]]; then
+                _zetta_complete_sound_names
             else
                 COMPREPLY=()
             fi
@@ -478,6 +480,22 @@ _zetta_complete() {
             ;;
         --flow-control|-f)
             COMPREPLY=( $(compgen -W 'none software hardware' -- "$current") )
+            return
+            ;;
+        --app-name|-a)
+            COMPREPLY=()
+            return
+            ;;
+        --icon|-i)
+            COMPREPLY=( $(compgen -f -- "$current") )
+            return
+            ;;
+        --sound)
+            _zetta_complete_sound_names
+            return
+            ;;
+        --timeout)
+            COMPREPLY=( $(compgen -W 'default never' -- "$current") )
             return
             ;;
         --config|--keymap|-k|--profile-report)
@@ -503,7 +521,11 @@ _zetta_complete() {
             return
             ;;
         --output-type|-t)
-            COMPREPLY=( $(compgen -W 'repeated unique' -- "$current") )
+            if [[ $command == notify ]]; then
+                COMPREPLY=( $(compgen -W 'default never' -- "$current") )
+            else
+                COMPREPLY=( $(compgen -W 'repeated unique' -- "$current") )
+            fi
             return
             ;;
         --port|-p|--baud-rate|-b|--size|--profile-duration|--columns|--rows|-R)
@@ -513,7 +535,7 @@ _zetta_complete() {
     esac
 
     if (( COMP_CWORD == 1 )); then
-        COMPREPLY=( $(compgen -W 'benchmark benchmark-output terminal-size sessions init serial http tftp --help --version --config --keymap --profile' -- "$current") )
+        COMPREPLY=( $(compgen -W 'benchmark benchmark-output terminal-size sessions init serial http tftp notify --help --version --config --keymap --profile' -- "$current") )
         return
     fi
 
@@ -549,6 +571,9 @@ _zetta_complete() {
             ;;
         tftp)
             _zetta_tftp_complete 2
+            ;;
+        notify)
+            COMPREPLY=( $(compgen -W '--app-name --icon --sound --timeout --help' -- "$current") )
             ;;
     esac
 }
@@ -603,18 +628,70 @@ _zetta_complete_serial_devices() {
     COMPREPLY=( $(compgen -W "$devices" -- "$current") )
 }
 
+# zetta-default/zetta-ok/zetta-alarm are bundled tones Zetta plays itself, so
+# they always work; the rest are the current platform's own system sound
+# names, which only work on that platform, so only that platform's names are
+# offered.
+_zetta_complete_sound_names() {
+    local platform_sounds
+    case "$OSTYPE" in
+        darwin*)
+            platform_sounds='Basso Blow Bottle Frog Funk Glass Hero Morse Ping Pop Purr Sosumi Submarine Tink'
+            ;;
+        msys*|cygwin*|win32*)
+            platform_sounds='Default IM Mail Reminder SMS'
+            ;;
+        *)
+            platform_sounds='bell complete message message-new-instant dialog-information dialog-warning dialog-error trash-empty'
+            ;;
+    esac
+    COMPREPLY=( $(compgen -W "zetta-default zetta-ok zetta-alarm $platform_sounds" -- "$current") )
+}
+
 _ztftp_complete() {
     _zetta_tftp_complete 1
 }
 
+_zntfy_complete() {
+    local current previous
+    current=${COMP_WORDS[COMP_CWORD]}
+    previous=${COMP_WORDS[COMP_CWORD-1]}
+
+    case "$previous" in
+        --app-name|-a)
+            COMPREPLY=()
+            return
+            ;;
+        --icon|-i)
+            COMPREPLY=( $(compgen -f -- "$current") )
+            return
+            ;;
+        --sound|-s)
+            _zetta_complete_sound_names
+            return
+            ;;
+        --timeout|-t)
+            COMPREPLY=( $(compgen -W 'default never' -- "$current") )
+            return
+            ;;
+    esac
+    COMPREPLY=( $(compgen -W '--app-name --icon --sound --timeout --help' -- "$current") )
+}
+
 ztftp() { zetta tftp "$@"; }
+zntfy() { zetta notify "$@"; }
 complete -F _zetta_complete zetta
 complete -F _ztftp_complete ztftp
+complete -F _zntfy_complete zntfy
 "#;
 
 const FISH_INTEGRATION: &str = r#"# Zetta shell integration for Fish.
 function ztftp --wraps 'zetta tftp' --description 'Zetta TFTP client'
     zetta tftp $argv
+end
+
+function zntfy --wraps 'zetta notify' --description 'Zetta desktop notifications'
+    zetta notify $argv
 end
 
 function __zetta_profiles
@@ -623,6 +700,21 @@ end
 
 function __zetta_serial_devices
     zetta serial list 2>/dev/null
+end
+
+# zetta-default/zetta-ok/zetta-alarm are bundled tones Zetta plays itself, so
+# they always work; the rest are the current platform's own system sound
+# names, which only work on that platform, so only that platform's names are
+# offered.
+function __zetta_sound_names
+    switch (uname)
+        case Darwin
+            printf '%s\n' zetta-default zetta-ok zetta-alarm \
+                Basso Blow Bottle Frog Funk Glass Hero Morse Ping Pop Purr Sosumi Submarine Tink
+        case '*'
+            printf '%s\n' zetta-default zetta-ok zetta-alarm bell complete message \
+                message-new-instant dialog-information dialog-warning dialog-error trash-empty
+    end
 end
 
 complete -c zetta -f
@@ -634,6 +726,7 @@ complete -c zetta -n '__fish_use_subcommand' -a init -d 'Generate shell integrat
 complete -c zetta -n '__fish_use_subcommand' -a serial -d 'List or connect to serial devices'
 complete -c zetta -n '__fish_use_subcommand' -a http -d 'Serve static files over HTTP'
 complete -c zetta -n '__fish_use_subcommand' -a tftp -d 'Transfer a file with TFTP'
+complete -c zetta -n '__fish_use_subcommand' -a notify -d 'Show a desktop notification'
 complete -c zetta -n '__fish_use_subcommand' -l help -d 'Print help'
 complete -c zetta -n '__fish_use_subcommand' -l version -d 'Print version'
 complete -c zetta -n '__fish_use_subcommand' -l config -r -d 'Use a configuration file'
@@ -676,6 +769,11 @@ complete -c zetta -n '__fish_seen_subcommand_from tftp' -l port -r -d 'Server po
 complete -c zetta -n '__fish_seen_subcommand_from tftp; and __fish_seen_subcommand_from server' -l root -r -a '(__fish_complete_directories)' -d 'Directory to serve'
 complete -c zetta -n '__fish_seen_subcommand_from tftp; and __fish_seen_subcommand_from server' -l config -r -d 'Configuration file'
 complete -c zetta -n '__fish_seen_subcommand_from tftp' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from notify' -l app-name -r -d 'Application name'
+complete -c zetta -n '__fish_seen_subcommand_from notify' -l icon -r -d 'Image to show with the notification'
+complete -c zetta -n '__fish_seen_subcommand_from notify' -l sound -r -a '(__zetta_sound_names)' -d 'Sound name'
+complete -c zetta -n '__fish_seen_subcommand_from notify' -l timeout -r -a 'default never' -d 'Timeout'
+complete -c zetta -n '__fish_seen_subcommand_from notify' -l help -d 'Print help'
 complete -c ztftp -f -a 'get put'
 complete -c ztftp -l port -r -d 'Server port'
 complete -c ztftp -l help -d 'Print help'
@@ -683,8 +781,24 @@ complete -c ztftp -l help -d 'Print help'
 
 const POWERSHELL_INTEGRATION: &str = r#"# Zetta shell integration for PowerShell.
 function ztftp { & zetta tftp @args }
+function zntfy { & zetta notify @args }
 
 $zettaProfiles = @(ZETTA_PROFILES)
+
+# zetta-default/zetta-ok/zetta-alarm are bundled tones Zetta plays itself, so
+# they always work; the rest are the current platform's own system sound
+# names, which only work on that platform, so only that platform's names are
+# offered. $IsMacOS/$IsLinux are unset on Windows PowerShell 5.1, which only
+# runs on Windows, so the Windows branch is also the correct fallback there.
+$zettaSoundNames = @('zetta-default', 'zetta-ok', 'zetta-alarm') + $(
+    if ($IsMacOS) {
+        'Basso', 'Blow', 'Bottle', 'Frog', 'Funk', 'Glass', 'Hero', 'Morse', 'Ping', 'Pop', 'Purr', 'Sosumi', 'Submarine', 'Tink'
+    } elseif ($IsLinux) {
+        'bell', 'complete', 'message', 'message-new-instant', 'dialog-information', 'dialog-warning', 'dialog-error', 'trash-empty'
+    } else {
+        'Default', 'IM', 'Mail', 'Reminder', 'SMS'
+    }
+)
 
 $zettaCompletions = {
     param($wordToComplete, $commandAst, $cursorPosition)
@@ -694,18 +808,24 @@ $zettaCompletions = {
     $previous = if ($words.Count -gt 1) { $words[$words.Count - 2] } else { '' }
     $last = if ($words.Count -gt 1) { $words[$words.Count - 1] } else { '' }
     $subcommand = $words | Where-Object {
-        $_ -in 'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'init', 'serial', 'http', 'tftp'
+        $_ -in 'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'init', 'serial', 'http', 'tftp', 'notify'
     } | Select-Object -First 1
 
     $candidates = if ($commandName -eq 'ztftp') {
         if ($words.Count -le 1) { 'get', 'put', '--help' } else { '--port', '--help' }
+    } elseif ($commandName -eq 'zntfy') {
+        if ($previous -in '--timeout', '-t') { 'default', 'never' }
+        elseif ($previous -in '--sound', '-s') { $zettaSoundNames }
+        else { '--app-name', '--icon', '--sound', '--timeout', '--help' }
     } elseif (
         $previous -eq '--profile' -or $last -eq '--profile' -or
         (($previous -eq '-p' -or $last -eq '-p') -and $null -eq $subcommand)
     ) {
         $zettaProfiles
+    } elseif ($previous -eq '--timeout') {
+        'default', 'never'
     } elseif ($previous -in '--output-type', '-t') {
-        'repeated', 'unique'
+        if ($subcommand -eq 'notify') { 'default', 'never' } else { 'repeated', 'unique' }
     } elseif ($previous -in '--device', '-d') {
         if ($subcommand -eq 'serial') { @(& zetta serial list 2>$null) } else { @() }
     } elseif ($previous -in '--data-bits', '-D') {
@@ -713,7 +833,11 @@ $zettaCompletions = {
     } elseif ($previous -eq '--parity' -or ($previous -eq '-p' -and $subcommand -eq 'serial')) {
         'none', 'odd', 'even'
     } elseif ($previous -in '--stop-bits', '-s') {
-        if ($subcommand -eq 'serial') { '1', '2' } else { @() }
+        if ($subcommand -eq 'serial') { '1', '2' }
+        elseif ($subcommand -eq 'notify') { $zettaSoundNames }
+        else { @() }
+    } elseif ($previous -eq '--sound') {
+        $zettaSoundNames
     } elseif ($previous -in '--flow-control', '-f') {
         'none', 'software', 'hardware'
     } elseif (
@@ -722,7 +846,7 @@ $zettaCompletions = {
     ) {
         @()
     } elseif ($null -eq $subcommand) {
-        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'init', 'serial', 'http', 'tftp', '--help', '--version', '--config', '--keymap', '--profile'
+        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'init', 'serial', 'http', 'tftp', 'notify', '--help', '--version', '--config', '--keymap', '--profile'
     } else {
         switch ($subcommand) {
             'benchmark' { '--terminal-render-workload', '--terminal-checkerboard-workload', '--terminal-sparse-update-workload', '--profile-report', '--profile-duration', '--profile-pane-stress', '--profile-background-stress', '--profile-sparse-updates', '--profile-external-terminal', '--help' }
@@ -742,6 +866,7 @@ $zettaCompletions = {
                 elseif ($words[2] -eq 'server') { '--root', '--port', '--config', '--help' }
                 else { '--port', '--help' }
             }
+            'notify' { '--app-name', '--icon', '--sound', '--timeout', '--help' }
         }
     }
 
@@ -752,6 +877,7 @@ $zettaCompletions = {
 
 Register-ArgumentCompleter -Native -CommandName zetta -ScriptBlock $zettaCompletions
 Register-ArgumentCompleter -CommandName ztftp -ScriptBlock $zettaCompletions
+Register-ArgumentCompleter -CommandName zntfy -ScriptBlock $zettaCompletions
 "#;
 
 const ZSH_INTEGRATION: &str = r#"# Zetta shell integration for Zsh.
@@ -761,16 +887,37 @@ if ! (( $+functions[compdef] )); then
 fi
 
 ztftp() { zetta tftp "$@"; }
+zntfy() { zetta notify "$@"; }
 
 _zetta_profiles() {
     compadd -- ZETTA_PROFILES
+}
+
+# zetta-default/zetta-ok/zetta-alarm are bundled tones Zetta plays itself, so
+# they always work; the rest are the current platform's own system sound
+# names, which only work on that platform, so only that platform's names are
+# offered.
+_zetta_sound_names() {
+    case "$OSTYPE" in
+        darwin*)
+            compadd -- zetta-default zetta-ok zetta-alarm \
+                Basso Blow Bottle Frog Funk Glass Hero Morse Ping Pop Purr Sosumi Submarine Tink
+            ;;
+        msys*|cygwin*|win32*)
+            compadd -- zetta-default zetta-ok zetta-alarm Default IM Mail Reminder SMS
+            ;;
+        *)
+            compadd -- zetta-default zetta-ok zetta-alarm bell complete message \
+                message-new-instant dialog-information dialog-warning dialog-error trash-empty
+            ;;
+    esac
 }
 
 _zetta() {
     local previous=${words[CURRENT-1]}
 
     if (( CURRENT == 2 )); then
-        compadd -S ' ' -- benchmark benchmark-output terminal-size sessions init serial http tftp
+        compadd -S ' ' -- benchmark benchmark-output terminal-size sessions init serial http tftp notify
         compadd -- --help --version --config --keymap --profile
         return
     fi
@@ -783,7 +930,7 @@ _zetta() {
         -p)
             if [[ $words[2] == serial ]]; then
                 compadd -- none odd even
-            elif [[ $words[2] != http && $words[2] != tftp ]]; then
+            elif [[ $words[2] != http && $words[2] != tftp && $words[2] != notify ]]; then
                 _zetta_profiles
             fi
             return
@@ -819,11 +966,28 @@ _zetta() {
         --stop-bits|-s)
             if [[ $words[2] == serial ]]; then
                 compadd -- 1 2
+            elif [[ $words[2] == notify ]]; then
+                _zetta_sound_names
             fi
             return
             ;;
         --flow-control|-f)
             compadd -- none software hardware
+            return
+            ;;
+        --app-name|-a)
+            return
+            ;;
+        --icon|-i)
+            _files
+            return
+            ;;
+        --sound)
+            _zetta_sound_names
+            return
+            ;;
+        --timeout)
+            compadd -- default never
             return
             ;;
         -c)
@@ -845,7 +1009,11 @@ _zetta() {
             return
             ;;
         --output-type|-t)
-            compadd -- repeated unique
+            if [[ $words[2] == notify ]]; then
+                compadd -- default never
+            else
+                compadd -- repeated unique
+            fi
             return
             ;;
         --port|-p|--baud-rate|-b|--size|--profile-duration|--columns|--rows|-R)
@@ -890,6 +1058,9 @@ _zetta() {
             ;;
         tftp)
             _zetta_tftp
+            ;;
+        notify)
+            compadd -- --app-name --icon --sound --timeout --help
             ;;
     esac
 }
@@ -948,8 +1119,32 @@ _ztftp() {
     _zetta_tftp
 }
 
+_zntfy() {
+    local previous=${words[CURRENT-1]}
+
+    case $previous in
+        --app-name|-a)
+            return
+            ;;
+        --icon|-i)
+            _files
+            return
+            ;;
+        --sound|-s)
+            _zetta_sound_names
+            return
+            ;;
+        --timeout|-t)
+            compadd -- default never
+            return
+            ;;
+    esac
+    compadd -- --app-name --icon --sound --timeout --help
+}
+
 compdef _zetta zetta
 compdef _ztftp ztftp
+compdef _zntfy zntfy
 "#;
 
 #[cfg(test)]

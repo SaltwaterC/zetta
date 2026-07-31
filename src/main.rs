@@ -6,6 +6,8 @@ mod command_palette;
 mod config;
 #[cfg(feature = "http-server")]
 mod http_server;
+#[cfg(feature = "notifications")]
+mod notification_sounds;
 mod process_control;
 #[cfg(feature = "serial-console")]
 mod serial_console;

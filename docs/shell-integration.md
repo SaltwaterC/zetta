@@ -4,7 +4,8 @@ Zetta can emit a shell-specific integration script with completion for its
 subcommands, flags, and flag values. The generated script includes the profile
 names from Zetta's current configuration, so `zetta --profile <Tab>` completes
 them as well. The script also provides `ztftp`, a shortcut for the built-in
-TFTP client; it has the same TFTP completion as `zetta tftp`.
+TFTP client, and `zntfy`, a shortcut for sending desktop notifications; each
+has the same completion as its `zetta tftp`/`zetta notify` counterpart.
 
 Serial-device completion is dynamic: completing `zetta serial console --device`
 runs `zetta serial list` at completion time. A serial device connected after

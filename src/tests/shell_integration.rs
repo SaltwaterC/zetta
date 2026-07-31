@@ -34,6 +34,147 @@ fn supported_shells_generate_completion_and_tftp_shortcut() {
 }
 
 #[test]
+fn supported_shells_generate_notify_completion_and_zntfy_shortcut() {
+    let profiles = profiles();
+    for shell in [
+        ShellIntegration::Bash,
+        ShellIntegration::Fish,
+        ShellIntegration::PowerShell,
+        ShellIntegration::Zsh,
+    ] {
+        let script = shell.script(&profiles);
+        assert!(script.contains("zntfy"));
+        assert!(script.contains("notify"));
+        if shell == ShellIntegration::Fish {
+            assert!(script.contains("-l app-name"));
+            assert!(script.contains("-l icon"));
+            assert!(script.contains("-l sound"));
+            assert!(script.contains("-l timeout"));
+        } else {
+            assert!(script.contains("--app-name"));
+            assert!(script.contains("--icon"));
+            assert!(script.contains("--sound"));
+            assert!(script.contains("--timeout"));
+        }
+    }
+}
+
+#[test]
+fn sound_completion_calls_a_shared_helper_from_every_call_site() {
+    let profiles = profiles();
+
+    let bash = ShellIntegration::Bash.script(&profiles);
+    assert!(bash.contains("--sound)\n            _zetta_complete_sound_names"));
+    assert!(bash.contains("--sound|-s)\n            _zetta_complete_sound_names"));
+    assert!(bash.contains(
+        "elif [[ $command == notify ]]; then\n                _zetta_complete_sound_names"
+    ));
+
+    let zsh = ShellIntegration::Zsh.script(&profiles);
+    assert!(zsh.contains("--sound)\n            _zetta_sound_names"));
+    assert!(zsh.contains("--sound|-s)\n            _zetta_sound_names"));
+    assert!(
+        zsh.contains("elif [[ $words[2] == notify ]]; then\n                _zetta_sound_names")
+    );
+
+    let fish = ShellIntegration::Fish.script(&profiles);
+    assert!(fish.contains("-l sound -r -a '(__zetta_sound_names)'"));
+
+    let powershell = ShellIntegration::PowerShell.script(&profiles);
+    assert!(powershell.contains("elseif ($previous -in '--sound', '-s') { $zettaSoundNames }"));
+    assert!(powershell.contains("elseif ($previous -eq '--sound') {\n        $zettaSoundNames"));
+    assert!(powershell.contains("elseif ($subcommand -eq 'notify') { $zettaSoundNames }"));
+}
+
+// Regression guard: a flat, unconditional merge of every platform's sound
+// names is confusing (e.g. offering macOS's "Glass" while completing on
+// Linux, where it does not work). Each shell must detect the actual host
+// platform at completion time and only offer that platform's own names,
+// alongside the bundled zetta-* tones which work everywhere.
+#[test]
+fn sound_completion_is_scoped_to_the_detected_platform() {
+    let profiles = profiles();
+    let bundled = ["zetta-default", "zetta-ok", "zetta-alarm"];
+    let linux_only = ["bell", "message-new-instant", "trash-empty"];
+    let macos_only = ["Basso", "Glass", "Sosumi"];
+    let windows_only = ["IM", "Reminder", "SMS"];
+
+    let bash = ShellIntegration::Bash.script(&profiles);
+    assert!(bash.contains("case \"$OSTYPE\" in"));
+    assert!(bash.contains("darwin*)"));
+    assert!(bash.contains("msys*|cygwin*|win32*)"));
+
+    let zsh = ShellIntegration::Zsh.script(&profiles);
+    assert!(zsh.contains("case \"$OSTYPE\" in"));
+    assert!(zsh.contains("darwin*)"));
+    assert!(zsh.contains("msys*|cygwin*|win32*)"));
+
+    let fish = ShellIntegration::Fish.script(&profiles);
+    assert!(fish.contains("switch (uname)"));
+    assert!(fish.contains("case Darwin"));
+
+    let powershell = ShellIntegration::PowerShell.script(&profiles);
+    assert!(powershell.contains("if ($IsMacOS) {"));
+    assert!(powershell.contains("} elseif ($IsLinux) {"));
+
+    // Fish has no Windows branch (fish does not target native Windows here).
+    for script in [&bash, &zsh, &fish, &powershell] {
+        for name in bundled {
+            assert!(
+                script.contains(name),
+                "expected {name:?} to always be offered"
+            );
+        }
+        for name in linux_only {
+            assert!(
+                script.contains(name),
+                "expected the Linux-only name {name:?} to be gated to a Linux branch"
+            );
+        }
+        for name in macos_only {
+            assert!(
+                script.contains(name),
+                "expected the macOS-only name {name:?} to be gated to a macOS branch"
+            );
+        }
+    }
+    for script in [&bash, &zsh, &powershell] {
+        for name in windows_only {
+            assert!(
+                script.contains(name),
+                "expected the Windows-only name {name:?} to be gated to a Windows branch"
+            );
+        }
+    }
+}
+
+// Regression guard: --timeout shares its short form (-t) with
+// benchmark-output's --output-type. Completion after -t/--output-type must
+// stay scoped to the active subcommand instead of always suggesting
+// benchmark-output's repeated/unique values.
+#[test]
+fn notify_timeout_completion_does_not_leak_into_other_short_t_flags() {
+    let profiles = profiles();
+
+    let bash = ShellIntegration::Bash.script(&profiles);
+    assert!(bash.contains(
+        "--output-type|-t)\n            if [[ $command == notify ]]; then\n                COMPREPLY=( $(compgen -W 'default never'"
+    ));
+    assert!(bash.contains("COMPREPLY=( $(compgen -W 'repeated unique'"));
+
+    let zsh = ShellIntegration::Zsh.script(&profiles);
+    assert!(zsh.contains(
+        "--output-type|-t)\n            if [[ $words[2] == notify ]]; then\n                compadd -- default never"
+    ));
+    assert!(zsh.contains("compadd -- repeated unique"));
+
+    let powershell = ShellIntegration::PowerShell.script(&profiles);
+    assert!(powershell.contains(
+        "elseif ($previous -in '--output-type', '-t') {\n        if ($subcommand -eq 'notify') { 'default', 'never' } else { 'repeated', 'unique' }"
+    ));
+}
+
+#[test]
 fn serial_completion_enumerates_devices_when_completion_is_requested() {
     let profiles = profiles();
     let scripts = [
@@ -128,6 +269,15 @@ fn service_subcommand_completions_only_offer_long_form_flags() {
     assert!(!fish.contains("-s c -l config"));
     assert!(fish.contains("subcommand_from console' -l device"));
     assert!(fish.contains("subcommand_from server' -l root"));
+
+    assert!(!bash.contains("'-a --app-name -i --icon -s --sound -t --timeout --help'"));
+    assert!(bash.contains("'--app-name --icon --sound --timeout --help'"));
+    assert!(!zsh.contains("compadd -- -a --app-name -i --icon -s --sound -t --timeout --help"));
+    assert!(zsh.contains("compadd -- --app-name --icon --sound --timeout --help"));
+    assert!(!powershell.contains("'-a', '--app-name'"));
+    assert!(powershell.contains("'--app-name', '--icon', '--sound', '--timeout', '--help'"));
+    assert!(!fish.contains("-s a -l app-name"));
+    assert!(fish.contains("subcommand_from notify' -l app-name"));
 }
 
 #[test]
@@ -454,7 +604,7 @@ fn generated_scripts_only_offer_long_form_flags() {
         let script = shell.script(&profiles);
         match shell {
             ShellIntegration::Bash => assert!(script.contains(
-                "terminal-size sessions init serial http tftp --help --version --config --keymap --profile'"
+                "terminal-size sessions init serial http tftp notify --help --version --config --keymap --profile'"
             )),
             ShellIntegration::Fish => {
                 assert!(script.contains("-l profile -r"));

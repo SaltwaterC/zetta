@@ -2,11 +2,14 @@ use super::*;
 #[cfg(any(
     feature = "serial-console",
     feature = "http-server",
-    feature = "tftp-server"
+    feature = "tftp-server",
+    feature = "notifications"
 ))]
 use crate::cli_services::CliServiceCommand;
 #[cfg(feature = "http-server")]
 use crate::cli_services::{http_server_help, parse_http_args};
+#[cfg(feature = "notifications")]
+use crate::cli_services::{notify_help, parse_notify_args};
 #[cfg(feature = "serial-console")]
 use crate::cli_services::{parse_serial_args, serial_help};
 #[cfg(feature = "tftp-server")]
@@ -48,7 +51,8 @@ pub(crate) enum StartupMode {
     #[cfg(any(
         feature = "serial-console",
         feature = "http-server",
-        feature = "tftp-server"
+        feature = "tftp-server",
+        feature = "notifications"
     ))]
     CliService(CliServiceCommand),
     PrintShellIntegration(ShellIntegration),
@@ -111,6 +115,8 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
     features.push("TFTP server");
     #[cfg(feature = "tftp-client")]
     features.push("TFTP client");
+    #[cfg(feature = "notifications")]
+    features.push("Desktop notifications");
 
     let serial_usage = if cfg!(feature = "serial-console") {
         "\n       zetta serial <COMMAND>"
@@ -124,6 +130,11 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
     };
     let tftp_usage = if cfg!(any(feature = "tftp-client", feature = "tftp-server")) {
         "\n       zetta tftp <COMMAND>"
+    } else {
+        ""
+    };
+    let notify_usage = if cfg!(feature = "notifications") {
+        "\n       zetta notify [OPTIONS] SUMMARY [BODY]"
     } else {
         ""
     };
@@ -142,13 +153,18 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
     } else {
         ""
     };
+    let notify_command = if cfg!(feature = "notifications") {
+        "\n  notify                              Show a desktop notification"
+    } else {
+        ""
+    };
     let profiles = profiles
         .iter()
         .map(|profile| profile.name.as_str())
         .collect::<Vec<_>>()
         .join("\n  ");
     format!(
-        "Zetta Terminal\n\nUsage: zetta [OPTIONS]\n       zetta benchmark [OPTIONS]\n       zetta benchmark-output [OPTIONS]\n       zetta terminal-size [--json | --resize [--columns COLUMNS] [--rows ROWS]]\n       zetta sessions [--json]\n       zetta init [SHELL]{serial_usage}{http_usage}{tftp_usage}\n\nCommands:\n  benchmark                           Profile terminal rendering\n  benchmark-output                    Write and time a text payload (default: 10 MiB)\n  terminal-size                       Print or resize the current terminal pane\n  sessions                            List detached background sessions\n  init                                Configure or generate shell integration{serial_command}{http_command}{tftp_command}\n\nBuilt-in features:\n  {}\n\nProfiles accepted by --profile NAME (case-insensitive):\n  {profiles}\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Select one of the profiles listed above",
+        "Zetta Terminal\n\nUsage: zetta [OPTIONS]\n       zetta benchmark [OPTIONS]\n       zetta benchmark-output [OPTIONS]\n       zetta terminal-size [--json | --resize [--columns COLUMNS] [--rows ROWS]]\n       zetta sessions [--json]\n       zetta init [SHELL]{serial_usage}{http_usage}{tftp_usage}{notify_usage}\n\nCommands:\n  benchmark                           Profile terminal rendering\n  benchmark-output                    Write and time a text payload (default: 10 MiB)\n  terminal-size                       Print or resize the current terminal pane\n  sessions                            List detached background sessions\n  init                                Configure or generate shell integration{serial_command}{http_command}{tftp_command}{notify_command}\n\nBuilt-in features:\n  {}\n\nProfiles accepted by --profile NAME (case-insensitive):\n  {profiles}\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Select one of the profiles listed above",
         features.join("\n  "),
     )
 }
@@ -498,6 +514,37 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             profile_external_terminal: false,
             tftp_command: Some(parse_tftp_args(tftp_arguments.iter().cloned())?),
         });
+    }
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "notify")
+    {
+        #[cfg(feature = "notifications")]
+        {
+            let notify_arguments = &arguments[1..];
+            if notify_arguments
+                .iter()
+                .any(|argument| matches!(argument.to_string_lossy().as_ref(), "--help" | "-h"))
+            {
+                println!("{}", notify_help());
+                std::process::exit(0);
+            }
+            return Ok(StartupArgs {
+                config_path: None,
+                keymap_path: None,
+                profile: None,
+                mode: StartupMode::CliService(parse_notify_args(notify_arguments.iter().cloned())?),
+                profile_report: None,
+                profile_duration: None,
+                profile_pane_stress: false,
+                profile_background_stress: false,
+                profile_sparse_updates: false,
+                profile_external_terminal: false,
+                tftp_command: None,
+            });
+        }
+        #[cfg(not(feature = "notifications"))]
+        anyhow::bail!("Desktop notification support is disabled in this build");
     }
     if arguments
         .iter()
@@ -2008,7 +2055,8 @@ pub(crate) fn run() -> Result<()> {
     #[cfg(any(
         feature = "serial-console",
         feature = "http-server",
-        feature = "tftp-server"
+        feature = "tftp-server",
+        feature = "notifications"
     ))]
     if let StartupMode::CliService(command) = &args.mode {
         return command.run();

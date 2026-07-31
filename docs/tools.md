@@ -1,11 +1,12 @@
 # Serial and network tools
 
-Zetta includes serial-console support, static HTTP and TFTP servers, and a
-command-line TFTP client. The servers have no authentication or encryption;
-expose them only on networks whose clients you trust.
+Zetta includes serial-console support, static HTTP and TFTP servers, a
+command-line TFTP client, and desktop notifications. The servers have no
+authentication or encryption; expose them only on networks whose clients you
+trust.
 
 These components are enabled in normal builds. Distribution builds can omit
-them with `make build SERIAL=0 HTTP=0 TFTP=0`; `TFTP_SERVER=0` and
+them with `make build SERIAL=0 HTTP=0 TFTP=0 NOTIFY=0`; `TFTP_SERVER=0` and
 `TFTP_CLIENT=0` select the two TFTP components separately. See the
 [installation guide](installation.md#linux-desktop-integration) for the full
 set of accepted flag values.
@@ -124,3 +125,39 @@ The client uses octet mode and negotiates block-size and transfer-size options
 when supported by the server. Run `zetta tftp --help` for complete syntax.
 With [shell integration](shell-integration.md) enabled, `ztftp` is an
 equivalent shortcut and retains TFTP command completion.
+
+## Desktop notifications
+
+`zetta notify` shows a desktop notification through the native notification
+system of the current platform: D-Bus on Linux and BSD, Notification Center on
+macOS, and toast notifications on Windows.
+
+```sh
+zetta notify "Build finished"
+zetta notify "Build finished" "All tests passed"
+zetta notify --icon ./artifacts/logo.png --sound zetta-ok "Build finished"
+zetta notify --sound zetta-alarm --timeout never "Long-running task complete"
+```
+
+SUMMARY is required and is the notification's title; BODY is optional
+additional text. `--icon` takes a path to an image file, shown consistently on
+every supported platform; without it, Zetta's own icon is shown. That icon is
+bundled in the binary, so it is always available even without an installed
+desktop entry. `--app-name` and `--timeout` (`default`, `never`, or a number of
+milliseconds) behave the same everywhere except that some macOS notification
+centers ignore the timeout and always show the application name as Zetta.
+Run `zetta notify --help` for complete syntax.
+
+`--sound` accepts `zetta-default`, `zetta-ok`, or `zetta-alarm`: short tones
+that Zetta synthesizes and plays itself, so they sound the same regardless of
+the host's sound theme, volume mixer routing quirks, or whether one is
+configured at all. Any other value is passed through as a platform-specific
+system sound name instead (for example a freedesktop sound-theme name such as
+`message-new-instant` on Linux, a system sound name such as `Glass` on macOS,
+or a toast sound identifier such as `IM` on Windows) and only plays if the
+platform recognizes it. Playing a built-in tone briefly blocks `zetta notify`
+until the tone finishes (well under a second); passthrough sound names do not
+block, since the OS notification server plays those itself.
+
+With [shell integration](shell-integration.md) enabled, `zntfy` is an
+equivalent shortcut and retains notification command completion.

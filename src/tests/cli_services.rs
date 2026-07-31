@@ -1,5 +1,102 @@
 use super::*;
 
+#[cfg(feature = "notifications")]
+#[test]
+fn notify_parser_accepts_summary_body_and_options() {
+    assert_eq!(
+        parse_notify_args([OsString::from("Build finished")]).unwrap(),
+        CliServiceCommand::Notify(NotifyCommand {
+            summary: "Build finished".to_owned(),
+            body: None,
+            app_name: None,
+            icon: None,
+            sound: None,
+            timeout: None,
+        })
+    );
+
+    assert_eq!(
+        parse_notify_args([
+            OsString::from("--app-name"),
+            OsString::from("zetta"),
+            OsString::from("--icon"),
+            OsString::from("/usr/share/icons/zetta.png"),
+            OsString::from("--sound"),
+            OsString::from("message-new-instant"),
+            OsString::from("--timeout"),
+            OsString::from("never"),
+            OsString::from("Build finished"),
+            OsString::from("All tests passed"),
+        ])
+        .unwrap(),
+        CliServiceCommand::Notify(NotifyCommand {
+            summary: "Build finished".to_owned(),
+            body: Some("All tests passed".to_owned()),
+            app_name: Some("zetta".to_owned()),
+            icon: Some("/usr/share/icons/zetta.png".to_owned()),
+            sound: Some("message-new-instant".to_owned()),
+            timeout: Some(notify_rust::Timeout::Never),
+        })
+    );
+
+    let shorthand = parse_notify_args([
+        OsString::from("-a"),
+        OsString::from("zetta"),
+        OsString::from("-i"),
+        OsString::from("icon.png"),
+        OsString::from("-s"),
+        OsString::from("bell"),
+        OsString::from("-t"),
+        OsString::from("5000"),
+        OsString::from("Build finished"),
+    ])
+    .unwrap();
+    assert_eq!(
+        shorthand,
+        CliServiceCommand::Notify(NotifyCommand {
+            summary: "Build finished".to_owned(),
+            body: None,
+            app_name: Some("zetta".to_owned()),
+            icon: Some("icon.png".to_owned()),
+            sound: Some("bell".to_owned()),
+            timeout: Some(notify_rust::Timeout::Milliseconds(5000)),
+        })
+    );
+}
+
+#[cfg(feature = "notifications")]
+#[test]
+fn notify_requires_a_summary_and_rejects_invalid_options() {
+    assert!(parse_notify_args([]).is_err());
+    assert!(
+        parse_notify_args([
+            OsString::from("a"),
+            OsString::from("b"),
+            OsString::from("c"),
+        ])
+        .is_err()
+    );
+    assert!(parse_notify_args([OsString::from("--timeout"), OsString::from("soon")]).is_err());
+    assert!(parse_notify_args([OsString::from("--unknown")]).is_err());
+}
+
+#[cfg(feature = "notifications")]
+#[test]
+fn default_notification_icon_is_cached_and_kept_up_to_date() {
+    let directory = tempfile::tempdir().unwrap();
+    let config_dir = directory.path().join("zetta");
+    let expected = crate::zetta_assets::embedded_notification_icon().unwrap();
+
+    let path = write_default_notification_icon(&config_dir).unwrap();
+    assert_eq!(path, config_dir.join("notification-icon.png"));
+    assert_eq!(std::fs::read(&path).unwrap(), *expected);
+
+    // A stale or corrupted cached icon is rewritten rather than trusted as-is.
+    std::fs::write(&path, b"stale").unwrap();
+    write_default_notification_icon(&config_dir).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), *expected);
+}
+
 #[cfg(feature = "serial-console")]
 #[test]
 fn serial_console_parser_uses_the_panel_defaults_and_accepts_all_settings() {

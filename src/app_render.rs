@@ -779,14 +779,11 @@ impl Render for Zetta {
             .child(div().min_w_0().flex_1())
             .when_some(active_pane_size, |title_bar, active_pane_size| {
                 title_bar.child(
-                    div()
-                        .flex_none()
-                        .px_2()
-                        .child(
-                            Label::new(active_pane_size)
-                                .size(LabelSize::Small)
-                                .color(Color::Muted),
-                        ),
+                    div().flex_none().px_2().child(
+                        Label::new(active_pane_size)
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    ),
                 )
             })
             .child(right_window_controls);

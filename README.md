@@ -20,6 +20,7 @@ tested.
 - Typed settings and keymap editor, per-profile themes, and installable Zed
   themes
 - Serial consoles plus built-in HTTP and TFTP tools, usable from panes or the CLI
+- Cross-platform desktop notifications from the CLI
 - Reproducible terminal-rendering performance reports
 
 ## Quick start
@@ -35,16 +36,16 @@ Linux defaults to Wayland. Use `make build X11=1` to include the X11 backend
 as well. Linux system dependencies and platform-specific build and desktop
 installation instructions are in the [installation guide](docs/installation.md).
 
-Corporate or otherwise restricted deployments can omit the serial console and
-network tools at build time. For example, `make build SERIAL=0 HTTP=0 TFTP=0`
-produces a terminal-only build. `TFTP_SERVER=0` and `TFTP_CLIENT=0` control the
-two TFTP components independently. The flags also accept `false`, `no`, or
-`off`.
+Corporate or otherwise restricted deployments can omit the serial console,
+network tools, and desktop notifications at build time. For example, `make
+build SERIAL=0 HTTP=0 TFTP=0 NOTIFY=0` produces a terminal-only build.
+`TFTP_SERVER=0` and `TFTP_CLIENT=0` control the two TFTP components
+independently. The flags also accept `false`, `no`, or `off`.
 
 The tools are available directly when enabled: `zetta serial console --device
-PATH`, `zetta http server`, and `zetta tftp server`. Shell integration completes
-the current serial-device list dynamically. See [Serial and network
-tools](docs/tools.md) for flags and safety notes.
+PATH`, `zetta http server`, `zetta tftp server`, and `zetta notify`. Shell
+integration completes the current serial-device list dynamically. See [Serial
+and network tools](docs/tools.md) for flags and safety notes.
 
 ## Multi-command prompt
 
@@ -92,9 +93,9 @@ built, how it should behave, and when the result was good enough.
 - [Background sessions](docs/background-sessions.md): detach, protect, inspect,
   and reconnect sessions
 - [Shell integration](docs/shell-integration.md): command completion and the
-  `ztftp` shortcut
+  `ztftp`/`zntfy` shortcuts
 - [Serial and network tools](docs/tools.md): serial consoles, HTTP and TFTP
-  servers, and the TFTP client
+  servers, the TFTP client, and desktop notifications
 - [Performance profiling](docs/performance.md): overlays, automated reports,
   stress workloads, and diagnostics
 

@@ -2,7 +2,8 @@ use super::*;
 #[cfg(any(
     feature = "serial-console",
     feature = "http-server",
-    feature = "tftp-server"
+    feature = "tftp-server",
+    feature = "notifications"
 ))]
 use crate::cli_services::CliServiceCommand;
 #[cfg(feature = "serial-console")]
@@ -213,6 +214,18 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
         assert!(!help.contains("TFTP client"));
         assert!(!help.contains("zetta tftp <COMMAND>"));
     }
+
+    #[cfg(feature = "notifications")]
+    {
+        assert!(help.contains("Desktop notifications"));
+        assert!(help.contains("zetta notify [OPTIONS] SUMMARY [BODY]"));
+        assert!(help.contains("notify                              Show a desktop notification"));
+    }
+    #[cfg(not(feature = "notifications"))]
+    {
+        assert!(!help.contains("Desktop notifications"));
+        assert!(!help.contains("zetta notify"));
+    }
 }
 
 #[cfg(feature = "serial-console")]
@@ -243,6 +256,26 @@ fn http_server_subcommand_bypasses_application_startup() {
         StartupMode::CliService(CliServiceCommand::Http(_))
     ));
     assert!(!should_handoff_to_existing_process(&args));
+}
+
+#[cfg(feature = "notifications")]
+#[test]
+fn notify_subcommand_bypasses_application_startup() {
+    let args = parse_args_from([
+        OsString::from("notify"),
+        OsString::from("--app-name"),
+        OsString::from("zetta"),
+        OsString::from("Build finished"),
+    ])
+    .unwrap();
+
+    assert!(matches!(
+        args.mode,
+        StartupMode::CliService(CliServiceCommand::Notify(_))
+    ));
+    assert!(!should_handoff_to_existing_process(&args));
+
+    assert!(parse_args_from([OsString::from("notify")]).is_err());
 }
 
 #[cfg(feature = "tftp-server")]

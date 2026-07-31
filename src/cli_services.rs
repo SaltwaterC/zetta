@@ -1,37 +1,52 @@
-#[cfg(any(feature = "http-server", feature = "tftp-server"))]
+#[cfg(any(
+    feature = "serial-console",
+    feature = "http-server",
+    feature = "tftp-server",
+    feature = "notifications"
+))]
+use std::ffi::OsString;
+#[cfg(feature = "notifications")]
+use std::fs;
+#[cfg(any(
+    feature = "serial-console",
+    feature = "http-server",
+    feature = "tftp-server"
+))]
+use std::io::{self, Read as _, Write as _};
+#[cfg(feature = "notifications")]
+use std::path::Path;
+#[cfg(any(
+    feature = "http-server",
+    feature = "tftp-server",
+    feature = "notifications"
+))]
 use std::path::PathBuf;
 #[cfg(feature = "serial-console")]
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-#[cfg(any(
-    feature = "serial-console",
-    feature = "http-server",
-    feature = "tftp-server"
-))]
-use std::{
-    ffi::OsString,
-    io::{self, Read as _, Write as _},
-};
 
 #[cfg(any(
     feature = "serial-console",
     feature = "http-server",
-    feature = "tftp-server"
+    feature = "tftp-server",
+    feature = "notifications"
 ))]
 use anyhow::Context as _;
 #[cfg(any(
     feature = "serial-console",
     feature = "http-server",
-    feature = "tftp-server"
+    feature = "tftp-server",
+    feature = "notifications"
 ))]
 use anyhow::Result;
 
 #[cfg(any(
     feature = "serial-console",
     feature = "http-server",
-    feature = "tftp-server"
+    feature = "tftp-server",
+    feature = "notifications"
 ))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CliServiceCommand {
@@ -41,12 +56,15 @@ pub(crate) enum CliServiceCommand {
     Http(HttpServerCommand),
     #[cfg(feature = "tftp-server")]
     Tftp(TftpServerCommand),
+    #[cfg(feature = "notifications")]
+    Notify(NotifyCommand),
 }
 
 #[cfg(any(
     feature = "serial-console",
     feature = "http-server",
-    feature = "tftp-server"
+    feature = "tftp-server",
+    feature = "notifications"
 ))]
 impl CliServiceCommand {
     pub(crate) fn run(&self) -> Result<()> {
@@ -57,6 +75,8 @@ impl CliServiceCommand {
             Self::Http(command) => command.run(),
             #[cfg(feature = "tftp-server")]
             Self::Tftp(command) => command.run(),
+            #[cfg(feature = "notifications")]
+            Self::Notify(command) => command.run(),
         }
     }
 }
@@ -629,6 +649,170 @@ fn stream_server_logs(
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
             Err(error) => return Err(error).context("reading server log output"),
         }
+    }
+}
+
+#[cfg(feature = "notifications")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NotifyCommand {
+    summary: String,
+    body: Option<String>,
+    app_name: Option<String>,
+    icon: Option<String>,
+    sound: Option<String>,
+    timeout: Option<notify_rust::Timeout>,
+}
+
+#[cfg(feature = "notifications")]
+pub(crate) fn notify_help() -> &'static str {
+    "Show a desktop notification\n\nUsage: zetta notify [OPTIONS] SUMMARY [BODY]\n\nSUMMARY is the notification's title; BODY is optional additional text.\n\nOptions:\n  -a, --app-name NAME                Set the notification's application name\n  -i, --icon PATH                    Show an image from PATH with the notification (default: Zetta's icon)\n  -s, --sound NAME                   zetta-default, zetta-ok, zetta-alarm, or a platform-specific system sound name\n  -t, --timeout WHEN                 default, never, or a number of milliseconds (default: default)\n  -h, --help                         Print help\n\nShows the notification through the desktop's native notification system: D-Bus\non Linux and BSD, Notification Center on macOS, and toast notifications on\nWindows. Without --icon, Zetta's own icon is shown; it is bundled in the\nbinary, so it is always available. --app-name has no effect on macOS and\n--timeout is ignored by some macOS notification centers; every other option\nbehaves the same on all platforms.\n\n--sound zetta-default, zetta-ok, and zetta-alarm are bundled tones that Zetta\nsynthesizes and plays itself, so they always play the same way regardless of\nthe host's sound theme or configuration. Any other value is passed through as\na platform-specific system sound name (for example a freedesktop sound-theme\nname on Linux, a system sound name on macOS, or a toast sound identifier on\nWindows) and is only played if the platform recognizes it."
+}
+
+#[cfg(feature = "notifications")]
+pub(crate) fn parse_notify_args(
+    args: impl IntoIterator<Item = OsString>,
+) -> Result<CliServiceCommand> {
+    let mut app_name = None;
+    let mut icon = None;
+    let mut sound = None;
+    let mut timeout = None;
+    let mut positional = Vec::new();
+    let mut arguments = args.into_iter();
+    while let Some(argument) = arguments.next() {
+        match argument.to_string_lossy().as_ref() {
+            "--app-name" | "-a" => {
+                anyhow::ensure!(app_name.is_none(), "--app-name may only be specified once");
+                app_name = Some(
+                    arguments
+                        .next()
+                        .context("--app-name requires a name")?
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+            "--icon" | "-i" => {
+                anyhow::ensure!(icon.is_none(), "--icon may only be specified once");
+                icon = Some(
+                    arguments
+                        .next()
+                        .context("--icon requires a path")?
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+            "--sound" | "-s" => {
+                anyhow::ensure!(sound.is_none(), "--sound may only be specified once");
+                sound = Some(
+                    arguments
+                        .next()
+                        .context("--sound requires a name")?
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+            "--timeout" | "-t" => {
+                anyhow::ensure!(timeout.is_none(), "--timeout may only be specified once");
+                let value = arguments
+                    .next()
+                    .context("--timeout requires default, never, or a number of milliseconds")?
+                    .to_string_lossy()
+                    .into_owned();
+                timeout = Some(parse_notify_timeout(&value)?);
+            }
+            "--help" | "-h" => anyhow::bail!("{}", notify_help()),
+            option if option.starts_with('-') => anyhow::bail!("unknown notify option {option:?}"),
+            _ => positional.push(argument),
+        }
+    }
+    anyhow::ensure!(
+        (1..=2).contains(&positional.len()),
+        "usage: zetta notify [OPTIONS] SUMMARY [BODY]; run `zetta notify --help` for details"
+    );
+    let summary = positional[0].to_string_lossy().into_owned();
+    anyhow::ensure!(!summary.is_empty(), "SUMMARY must not be empty");
+    let body = positional
+        .get(1)
+        .map(|value| value.to_string_lossy().into_owned());
+    Ok(CliServiceCommand::Notify(NotifyCommand {
+        summary,
+        body,
+        app_name,
+        icon,
+        sound,
+        timeout,
+    }))
+}
+
+#[cfg(feature = "notifications")]
+fn parse_notify_timeout(value: &str) -> Result<notify_rust::Timeout> {
+    value.parse().map_err(|_: std::num::ParseIntError| {
+        anyhow::anyhow!(
+            "--timeout must be default, never, or a whole number of milliseconds, got {value:?}"
+        )
+    })
+}
+
+#[cfg(feature = "notifications")]
+fn default_notification_icon_path() -> Result<PathBuf> {
+    write_default_notification_icon(&crate::config::platform_config_dir())
+}
+
+// Notification backends (D-Bus, mac-notification-sys, winrt-notification) all
+// take an icon as a filesystem path rather than raw bytes, so the icon
+// embedded via ZettaEmbeddedAssets is cached on disk once and reused rather
+// than rewritten on every `zetta notify` invocation.
+#[cfg(feature = "notifications")]
+fn write_default_notification_icon(config_dir: &Path) -> Result<PathBuf> {
+    let icon = crate::zetta_assets::embedded_notification_icon()
+        .context("embedded notification icon is missing")?;
+    let path = config_dir.join("notification-icon.png");
+    let up_to_date = fs::read(&path).is_ok_and(|existing| existing == *icon);
+    if !up_to_date {
+        fs::create_dir_all(config_dir)
+            .with_context(|| format!("creating {}", config_dir.display()))?;
+        fs::write(&path, &icon).with_context(|| format!("writing {}", path.display()))?;
+    }
+    Ok(path)
+}
+
+#[cfg(feature = "notifications")]
+impl NotifyCommand {
+    fn run(&self) -> Result<()> {
+        let mut notification = notify_rust::Notification::new();
+        notification.summary(&self.summary);
+        if let Some(body) = &self.body {
+            notification.body(body);
+        }
+        if let Some(app_name) = &self.app_name {
+            notification.appname(app_name);
+        }
+        let icon = match &self.icon {
+            Some(icon) => icon.clone(),
+            None => default_notification_icon_path()?
+                .to_string_lossy()
+                .into_owned(),
+        };
+        notification.image_path(&icon);
+        let bundled_sound = self
+            .sound
+            .as_deref()
+            .and_then(crate::notification_sounds::BuiltinSound::parse);
+        if let Some(sound) = &self.sound
+            && bundled_sound.is_none()
+        {
+            notification.sound_name(sound);
+        }
+        if let Some(timeout) = self.timeout {
+            notification.timeout(timeout);
+        }
+        notification
+            .show()
+            .map_err(|error| anyhow::anyhow!("{error}"))
+            .context("showing the desktop notification")?;
+        if let Some(bundled_sound) = bundled_sound {
+            bundled_sound.play()?;
+        }
+        Ok(())
     }
 }
 
