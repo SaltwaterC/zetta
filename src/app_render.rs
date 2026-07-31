@@ -320,6 +320,7 @@ impl Render for Zetta {
                         this.border_t_2().border_color(tab_colors.text_accent)
                     })
                     .on_click(move |event, window, cx| {
+                        cx.stop_propagation();
                         select_handle
                             .update(cx, |this, cx| {
                                 this.active_tab = index;
@@ -1756,6 +1757,7 @@ impl Render for Zetta {
             .child(title_bar)
             .child(
                 div()
+                    .id("tab-bar")
                     .h_8()
                     .flex_none()
                     .flex()
@@ -1764,6 +1766,11 @@ impl Render for Zetta {
                     .border_t_1()
                     .border_b_1()
                     .border_color(colors.border)
+                    .on_click(|event, window, cx| {
+                        if event.click_count() == 2 {
+                            window.dispatch_action(Box::new(NewTab), cx)
+                        }
+                    })
                     .child(
                         div()
                             .id("tabs-scroll")
@@ -1794,6 +1801,7 @@ impl Render for Zetta {
                                         Tooltip::for_action("New tab", &NewTab, cx)
                                     })
                                     .on_click(|_, window, cx| {
+                                        cx.stop_propagation();
                                         window.dispatch_action(Box::new(NewTab), cx)
                                     }),
                             ),

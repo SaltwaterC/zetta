@@ -3589,10 +3589,10 @@ impl Zetta {
                         },
                     )
                     .when(
-                        tab.panes.len() > 1
-                            && tab.maximized_pane.is_none()
-                            && (self.pane_controls_visible_for == Some(*pane_id)
-                                || tab.renaming_pane == Some(*pane_id)),
+                        tab.maximized_pane.is_none()
+                            && (tab.renaming_pane == Some(*pane_id)
+                                || (tab.panes.len() > 1
+                                    && self.pane_controls_visible_for == Some(*pane_id))),
                         |pane| {
                             let maximize_handle = cx.entity().downgrade();
                             let minimize_handle = cx.entity().downgrade();
@@ -3668,37 +3668,99 @@ impl Zetta {
                                                     .color(Color::Custom(colors.text_muted)),
                                             ),
                                     )
-                                    .when_some(pane_size.clone(), |controls, pane_size| {
-                                        controls.child(
-                                            Label::new(pane_size)
-                                                .size(LabelSize::Small)
-                                                .color(Color::Custom(colors.text_muted)),
-                                        )
-                                    })
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap_1()
+                                    .when(tab.panes.len() > 1, |controls| {
+                                        controls
+                                            .when_some(pane_size.clone(), |controls, pane_size| {
+                                                controls.child(
+                                                    Label::new(pane_size)
+                                                        .size(LabelSize::Small)
+                                                        .color(Color::Custom(colors.text_muted)),
+                                                )
+                                            })
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_1()
+                                                    .child(
+                                                        IconButton::new(
+                                                            (
+                                                                "minimize-terminal-pane",
+                                                                *pane_id as usize,
+                                                            ),
+                                                            IconName::Dash,
+                                                        )
+                                                        .style(ButtonStyle::Transparent)
+                                                        .size(ButtonSize::Compact)
+                                                        .icon_size(IconSize::XSmall)
+                                                        .icon_color(Color::Custom(colors.icon))
+                                                        .aria_label("Minimize pane")
+                                                        .tooltip(Tooltip::for_action_title(
+                                                            "Minimize pane",
+                                                            &MinimizePane,
+                                                        ))
+                                                        .on_click(move |_, window, cx| {
+                                                            minimize_handle
+                                                                .update(cx, |this, cx| {
+                                                                    this.minimize_pane_by_id(
+                                                                        minimize_pane_id,
+                                                                        window,
+                                                                        cx,
+                                                                    );
+                                                                })
+                                                                .ok();
+                                                        }),
+                                                    )
+                                                    .child(
+                                                        IconButton::new(
+                                                            (
+                                                                "maximize-terminal-pane",
+                                                                *pane_id as usize,
+                                                            ),
+                                                            IconName::Maximize,
+                                                        )
+                                                        .style(ButtonStyle::Transparent)
+                                                        .size(ButtonSize::Compact)
+                                                        .icon_size(IconSize::XSmall)
+                                                        .icon_color(Color::Custom(colors.icon))
+                                                        .aria_label("Maximize pane")
+                                                        .tooltip(Tooltip::for_action_title(
+                                                            "Maximize pane",
+                                                            &ToggleMaximizePane,
+                                                        ))
+                                                        .on_click(move |_, window, cx| {
+                                                            maximize_handle
+                                                                .update(cx, |this, cx| {
+                                                                    this.toggle_maximize_pane_by_id(
+                                                                        maximize_pane_id,
+                                                                        window,
+                                                                        cx,
+                                                                    );
+                                                                })
+                                                                .ok();
+                                                        }),
+                                                    ),
+                                            )
                                             .child(
                                                 IconButton::new(
-                                                    ("minimize-terminal-pane", *pane_id as usize),
-                                                    IconName::Dash,
+                                                    ("close-terminal-pane", *pane_id as usize),
+                                                    IconName::Close,
                                                 )
                                                 .style(ButtonStyle::Transparent)
                                                 .size(ButtonSize::Compact)
                                                 .icon_size(IconSize::XSmall)
                                                 .icon_color(Color::Custom(colors.icon))
-                                                .aria_label("Minimize pane")
+                                                .aria_label("Close pane")
                                                 .tooltip(Tooltip::for_action_title(
-                                                    "Minimize pane",
-                                                    &MinimizePane,
+                                                    "Close pane",
+                                                    &ClosePane,
                                                 ))
                                                 .on_click(move |_, window, cx| {
-                                                    minimize_handle
+                                                    close_handle
                                                         .update(cx, |this, cx| {
-                                                            this.minimize_pane_by_id(
-                                                                minimize_pane_id,
+                                                            this.close_pane(
+                                                                tab_id,
+                                                                close_pane_id,
                                                                 window,
                                                                 cx,
                                                             );
@@ -3706,62 +3768,7 @@ impl Zetta {
                                                         .ok();
                                                 }),
                                             )
-                                            .child(
-                                                IconButton::new(
-                                                    ("maximize-terminal-pane", *pane_id as usize),
-                                                    IconName::Maximize,
-                                                )
-                                                .style(ButtonStyle::Transparent)
-                                                .size(ButtonSize::Compact)
-                                                .icon_size(IconSize::XSmall)
-                                                .icon_color(Color::Custom(colors.icon))
-                                                .aria_label("Maximize pane")
-                                                .tooltip(Tooltip::for_action_title(
-                                                    "Maximize pane",
-                                                    &ToggleMaximizePane,
-                                                ))
-                                                .on_click(move |_, window, cx| {
-                                                    maximize_handle
-                                                        .update(cx, |this, cx| {
-                                                            this.toggle_maximize_pane_by_id(
-                                                                maximize_pane_id,
-                                                                window,
-                                                                cx,
-                                                            );
-                                                        })
-                                                        .ok();
-                                                }),
-                                            ),
-                                    )
-                                    .child(
-                                        IconButton::new(
-                                            ("close-terminal-pane", *pane_id as usize),
-                                            IconName::Close,
-                                        )
-                                        .style(ButtonStyle::Transparent)
-                                        .size(ButtonSize::Compact)
-                                        .icon_size(IconSize::XSmall)
-                                        .icon_color(Color::Custom(colors.icon))
-                                        .aria_label("Close pane")
-                                        .tooltip(Tooltip::for_action_title(
-                                            "Close pane",
-                                            &ClosePane,
-                                        ))
-                                        .on_click(
-                                            move |_, window, cx| {
-                                                close_handle
-                                                    .update(cx, |this, cx| {
-                                                        this.close_pane(
-                                                            tab_id,
-                                                            close_pane_id,
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    })
-                                                    .ok();
-                                            },
-                                        ),
-                                    ),
+                                    }),
                             )
                         },
                     )
