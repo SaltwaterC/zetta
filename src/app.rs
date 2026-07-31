@@ -302,7 +302,22 @@ fn resize_window(window: &mut Window, resize: WindowResize, cx: &App) -> bool {
         ZETTA_MINIMUM_WINDOW_SIZE.height,
     );
 
-    if window.is_maximized() || window.is_fullscreen() {
+    if window.is_maximized() {
+        let wants_growth =
+            resize.width_delta.is_sign_positive() || resize.height_delta.is_sign_positive();
+        if resize.width_delta.is_sign_positive() {
+            requested_width = current_width;
+        }
+        if resize.height_delta.is_sign_positive() {
+            requested_height = current_height;
+        }
+        if wants_growth {
+            // A maximized window is pinned to the screen bounds, so growth has
+            // nowhere to go. Un-maximize so the next resize can actually widen
+            // or heighten the window, matching floating-window behavior.
+            window.zoom_window();
+        }
+    } else if window.is_fullscreen() {
         if resize.width_delta.is_sign_positive() {
             requested_width = current_width;
         }
