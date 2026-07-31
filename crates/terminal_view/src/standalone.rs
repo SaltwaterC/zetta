@@ -230,6 +230,8 @@ pub struct TerminalView {
     pub(crate) ime_state: Option<ImeState>,
     context_menu: Option<(Entity<ContextMenu>, Point<Pixels>, Subscription)>,
     pub(crate) window_corner_radii: Corners<Pixels>,
+    pane_resize_mode_active: bool,
+    pane_resize_toggle_action: Option<Box<dyn Action>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -373,6 +375,8 @@ impl TerminalView {
             ime_state: None,
             context_menu: None,
             window_corner_radii: Corners::default(),
+            pane_resize_mode_active: false,
+            pane_resize_toggle_action: None,
             _subscriptions: vec![
                 focus_in,
                 focus_out,
@@ -417,6 +421,18 @@ impl TerminalView {
             self.window_corner_radii = corner_radii;
             cx.notify();
         }
+    }
+
+    /// Surfaces a "Pane Resize Mode" entry in the right-click context menu.
+    /// `toggle_action` is only `Some` when the containing tab has 2+ panes,
+    /// since resize mode has nothing to do with a single pane.
+    pub fn set_pane_resize_mode_entry(
+        &mut self,
+        active: bool,
+        toggle_action: Option<Box<dyn Action>>,
+    ) {
+        self.pane_resize_mode_active = active;
+        self.pane_resize_toggle_action = toggle_action;
     }
 
     pub fn set_theme(&mut self, theme: Option<Arc<Theme>>, cx: &mut Context<Self>) {
@@ -979,6 +995,11 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let pane_resize_mode_active = self.pane_resize_mode_active;
+        let pane_resize_toggle_action = self
+            .pane_resize_toggle_action
+            .as_ref()
+            .map(|action| action.boxed_clone());
         let menu = ContextMenu::build(window, cx, |menu, _, _| {
             menu.context(self.focus_handle.clone())
                 .action("Copy", Box::new(Copy))
@@ -988,6 +1009,13 @@ impl TerminalView {
                 .separator()
                 .action("Clear Clipboard", Box::new(ClearClipboard))
                 .action("Clear", Box::new(Clear))
+                .when_some(pane_resize_toggle_action, |menu, action| {
+                    menu.separator().action_checked(
+                        "Pane Resize Mode",
+                        action,
+                        pane_resize_mode_active,
+                    )
+                })
         });
         window.focus(&menu.focus_handle(cx), cx);
         let subscription =

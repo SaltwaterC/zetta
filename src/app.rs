@@ -139,6 +139,10 @@ fn pane_input_enabled(pane_resize_mode: bool) -> bool {
     !pane_resize_mode
 }
 
+fn pane_resize_menu_entry_available(pane_count: usize) -> bool {
+    pane_count >= 2
+}
+
 fn pane_resize_cell_delta(
     layout: &PaneLayout,
     pane_id: u64,
@@ -3509,10 +3513,16 @@ impl Zetta {
                             search.tab_id == tab.id && tab.active_pane == *pane_id
                         })
                 }) || (pane.view.is_none() && tab.active_pane == *pane_id);
+                let pane_resize_toggle_action = pane_resize_menu_entry_available(tab.panes.len())
+                    .then(|| Box::new(TogglePaneResizeMode) as Box<dyn Action>);
                 let content = match (&pane.view, &pane.error) {
                     (Some(view), _) => {
                         view.update(cx, |view, cx| {
-                            view.set_window_corner_radii(corner_radii, cx)
+                            view.set_window_corner_radii(corner_radii, cx);
+                            view.set_pane_resize_mode_entry(
+                                self.pane_resize_mode,
+                                pane_resize_toggle_action,
+                            );
                         });
                         div().size_full().child(view.clone()).into_any_element()
                     }

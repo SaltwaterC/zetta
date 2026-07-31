@@ -59,6 +59,14 @@ fn pane_resize_mode_pauses_terminal_input() {
 }
 
 #[test]
+fn pane_resize_menu_entry_requires_at_least_two_panes() {
+    assert!(!pane_resize_menu_entry_available(0));
+    assert!(!pane_resize_menu_entry_available(1));
+    assert!(pane_resize_menu_entry_available(2));
+    assert!(pane_resize_menu_entry_available(3));
+}
+
+#[test]
 fn pane_resize_arrows_follow_the_active_pane_edge() {
     let vertical = PaneLayout::Split {
         axis: SplitAxis::Vertical,

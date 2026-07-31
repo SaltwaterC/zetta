@@ -45,8 +45,10 @@ pane status strip shows the same size.
 Press `Alt-Shift-R` or double-click the label to assign a custom name; submit an
 empty name to restore its automatic label.
 
-Press `Ctrl-Shift-J` to enter or leave pane-resize mode. While it is active,
-the arrow keys move the corresponding edge of the active pane by one cell and
+Press `Ctrl-Shift-J`, or right-click a pane and toggle "Pane Resize Mode" from
+its context menu (shown once 2 or more panes are open), to enter or leave
+pane-resize mode. While it is active, the arrow keys move the corresponding
+edge of the active pane by one cell and
 every visible pane shows its live cell dimensions; normal terminal input is
 paused. Each split also exposes a 20px drag gutter, so you can resize either
 axis directly with the mouse. For example, Left grows a right-hand pane and Up
