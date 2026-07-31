@@ -196,6 +196,15 @@ impl Render for Zetta {
         } else {
             colors.title_bar_background
         };
+        let active_pane_size = self
+            .tabs
+            .get(self.active_tab)
+            .and_then(|tab| tab.active_pane())
+            .and_then(|pane| pane.terminal.as_ref())
+            .map(|terminal| {
+                let bounds = terminal.read(cx).last_content().terminal_bounds;
+                terminal_size_label(bounds.num_columns(), bounds.num_lines())
+            });
         let tabs = self
             .tabs
             .iter()
@@ -768,6 +777,18 @@ impl Render for Zetta {
                     ),
             )
             .child(div().min_w_0().flex_1())
+            .when_some(active_pane_size, |title_bar, active_pane_size| {
+                title_bar.child(
+                    div()
+                        .flex_none()
+                        .px_2()
+                        .child(
+                            Label::new(active_pane_size)
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        ),
+                )
+            })
             .child(right_window_controls);
 
         let body = match self.tabs.get(self.active_tab) {
@@ -778,10 +799,6 @@ impl Render for Zetta {
                 let layout = tab.visible_layout();
                 let maximized_pane = tab.maximized_pane.and_then(|pane_id| {
                     tab.pane(pane_id).map(|pane| {
-                        let pane_size = pane.terminal.as_ref().map(|terminal| {
-                            let bounds = terminal.read(cx).last_content().terminal_bounds;
-                            terminal_size_label(bounds.num_columns(), bounds.num_lines())
-                        });
                         (
                             pane_id,
                             tab.displayed_pane_label(pane_id)
@@ -789,7 +806,6 @@ impl Render for Zetta {
                             tab.renaming_pane == Some(pane_id)
                                 && tab.rename_select_all
                                 && tab.rename_buffer.is_some(),
-                            pane_size,
                         )
                     })
                 });
@@ -832,7 +848,7 @@ impl Render for Zetta {
                     .flex()
                     .flex_col()
                     .child(div().min_h_0().flex_1().child(content))
-                    .when_some(maximized_pane, |body, (pane_id, pane_label, pane_label_selected, pane_size)| {
+                    .when_some(maximized_pane, |body, (pane_id, pane_label, pane_label_selected)| {
                         let restore_handle = handle.clone();
                         let close_handle = handle.clone();
                         let tab_id = tab.id;
@@ -885,16 +901,7 @@ impl Render for Zetta {
                                                     Label::new("maximized")
                                                         .size(LabelSize::Small)
                                                         .color(Color::Custom(tab_colors.text_muted)),
-                                                )
-                                                .when_some(pane_size, |bar, pane_size| {
-                                                    bar.child(
-                                                        Label::new(pane_size)
-                                                            .size(LabelSize::Small)
-                                                            .color(Color::Custom(
-                                                                tab_colors.text_muted,
-                                                            )),
-                                                    )
-                                                }),
+                                                ),
                                         ),
                                 )
                                 .child(
