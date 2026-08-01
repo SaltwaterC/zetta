@@ -85,6 +85,12 @@ pub(crate) struct PtyProcessInfo {
     pub(crate) current: RwLock<Option<ProcessInfo>>,
     task: Mutex<Option<Task<()>>>,
     last_refresh: Mutex<Option<Instant>>,
+    // ConPTY only exposes the PID of the process it spawned (the shell); unlike
+    // Unix's `tcgetpgrp`, there is no OS primitive to ask which process currently
+    // owns the terminal. This is a dedicated `System` for periodically walking the
+    // live process tree to approximate an answer (see `resolve_foreground_pid`).
+    #[cfg(windows)]
+    descendant_tree: RwLock<System>,
 }
 
 const PROCESS_INFO_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
@@ -124,6 +130,8 @@ impl PtyProcessInfo {
             current: RwLock::new(None),
             task: Mutex::new(None),
             last_refresh: Mutex::new(None),
+            #[cfg(windows)]
+            descendant_tree: RwLock::new(System::new()),
         }
     }
 
@@ -131,8 +139,45 @@ impl PtyProcessInfo {
         &self.pid_getter
     }
 
+    #[cfg(unix)]
+    fn resolve_foreground_pid(&self) -> Option<Pid> {
+        self.pid_getter.pid()
+    }
+
+    /// Best-effort stand-in for Unix's `tcgetpgrp`: walk the live process tree
+    /// from the shell down to its most recently started childless descendant,
+    /// on the assumption that's the interactively running command. Refreshing
+    /// with `ProcessesToUpdate::All` and `remove_dead_processes = true` keeps
+    /// `descendant_tree` bounded to currently-alive processes rather than
+    /// accumulating stale entries (see the accumulation concern in `refresh`
+    /// below / #58651).
+    #[cfg(windows)]
+    fn resolve_foreground_pid(&self) -> Option<Pid> {
+        const MAX_DEPTH: usize = 32;
+        let shell_pid = self.pid_getter.pid()?;
+        let mut system = self.descendant_tree.write();
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        let mut current = shell_pid;
+        for _ in 0..MAX_DEPTH {
+            let Some(child) = system
+                .processes()
+                .values()
+                .filter(|process| process.parent() == Some(current))
+                .max_by_key(|process| process.start_time())
+            else {
+                break;
+            };
+            current = child.pid();
+        }
+        Some(current)
+    }
+
     fn refresh(&self) -> Option<MappedRwLockReadGuard<'_, Process>> {
-        let pid = self.pid_getter.pid()?;
+        let pid = self.resolve_foreground_pid()?;
         let fallback_pid = self.pid_getter.fallback_pid();
         let mut system = self.system.write();
         // sysinfo never evicts processes that are absent from the refreshed pid
@@ -210,12 +255,26 @@ impl PtyProcessInfo {
         self.load()
     }
 
+    #[cfg(unix)]
+    fn cheap_foreground_pid_changed(&self) -> bool {
+        self.pid_getter.pid() != *self.last_foreground_pid.lock()
+    }
+
+    /// Unlike `tcgetpgrp` on Unix, there is no cheap way to detect a foreground-
+    /// process change on Windows: `resolve_foreground_pid` needs a fresh,
+    /// system-wide process snapshot. Rely solely on the periodic refresh timer
+    /// (`process_refresh_due`) instead of an eager check.
+    #[cfg(windows)]
+    fn cheap_foreground_pid_changed(&self) -> bool {
+        false
+    }
+
     /// Updates the cached process info, emitting a [`Event::TitleChanged`] event if the Zed-relevant info has changed
     pub(crate) fn emit_title_changed_if_changed(self: &Arc<Self>, cx: &mut Context<'_, Terminal>) {
         if self.task.lock().is_some() {
             return;
         }
-        let foreground_pid_changed = self.pid_getter.pid() != *self.last_foreground_pid.lock();
+        let foreground_pid_changed = self.cheap_foreground_pid_changed();
         let refresh_due = process_refresh_due(*self.last_refresh.lock(), Instant::now());
         if !foreground_pid_changed && !refresh_due {
             return;

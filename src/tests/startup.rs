@@ -1337,6 +1337,14 @@ fn wsl_wrapper_prefers_prompt_cwd_reports_and_keeps_a_shell_fallback() {
     assert!(WSL_CWD_TRACKER.contains("]7;file://localhost"));
     assert!(WSL_CWD_TRACKER.contains("]2;zetta-cwd:"));
     assert!(WSL_CWD_TRACKER.contains("readlink \"/proc/$parent/cwd\""));
+
+    // Windows-side process inspection can't see into the WSL VM's own process
+    // namespace, so the running command is reported explicitly by each shell's
+    // preexec-equivalent hook via the `zetta-cmd:` title marker.
+    assert!(WSL_CWD_TRACKER.contains("trap '__zetta_preexec' DEBUG"));
+    assert!(WSL_CWD_TRACKER.contains("--on-event fish_preexec"));
+    assert!(WSL_CWD_TRACKER.contains("add-zsh-hook preexec __zetta_report_preexec"));
+    assert!(WSL_CWD_TRACKER.contains("]2;zetta-cmd:"));
 }
 
 #[test]

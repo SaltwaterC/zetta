@@ -1248,16 +1248,41 @@ if [ ! -x "$shell" ]; then
     shell="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f7)"
 fi
 [ -x "$shell" ] || shell=/bin/sh
+# Windows-side process inspection can't see into the WSL VM's own process
+# namespace, so the tab title can't be derived from the host process tree the
+# way it is for native Windows/MSYS2 shells. Report it explicitly instead: a
+# `zetta-cmd:<value>` title marker carrying the shell name at idle, or the
+# command about to run, mirrored by `reported_foreground_command_from_title`
+# in crates/terminal/src/terminal.rs.
+export ZETTA_SHELL_NAME="${shell##*/}"
 
-cwd_command='case "$PWD" in /*) printf "\033]7;file://localhost%s\033\\\033]2;zetta-cwd:%s\033\\" "$PWD" "$PWD";; esac'
 case "${shell##*/}" in
     bash)
-        PROMPT_COMMAND="${cwd_command}${PROMPT_COMMAND:+;${PROMPT_COMMAND}}"
+        zetta_full_prompt_command="$(cat <<'ZETTA_BASH_PROMPT'
+__zetta_preexec() {
+    case "$BASH_COMMAND" in
+        __zetta_precmd) return ;;
+    esac
+    printf '\033]2;zetta-cmd:%s\033\\' "$BASH_COMMAND"
+}
+__zetta_precmd() {
+    case "$PWD" in
+        /*) printf '\033]7;file://localhost%s\033\\\033]2;zetta-cwd:%s\033\\' "$PWD" "$PWD" ;;
+    esac
+    printf '\033]2;zetta-cmd:%s\033\\' "$ZETTA_SHELL_NAME"
+}
+trap '__zetta_preexec' DEBUG
+PROMPT_COMMAND="__zetta_precmd${ZETTA_ORIGINAL_PROMPT_COMMAND:+;${ZETTA_ORIGINAL_PROMPT_COMMAND}}"
+__zetta_precmd
+ZETTA_BASH_PROMPT
+)"
+        export ZETTA_ORIGINAL_PROMPT_COMMAND="$PROMPT_COMMAND"
+        PROMPT_COMMAND="$zetta_full_prompt_command"
         export PROMPT_COMMAND
         exec "$shell" -l
         ;;
     fish)
-        exec "$shell" -l -C 'function __zetta_report_cwd --on-event fish_prompt; if string match -qr "^/" -- "$PWD"; printf "\033]7;file://localhost%s\033\\\033]2;zetta-cwd:%s\033\\" "$PWD" "$PWD"; end; end'
+        exec "$shell" -l -C 'function __zetta_report_cwd --on-event fish_prompt; if string match -qr "^/" -- "$PWD"; printf "\033]7;file://localhost%s\033\\" "$PWD"; printf "\033]2;zetta-cwd:%s\033\\" "$PWD"; end; printf "\033]2;zetta-cmd:%s\033\\" "$ZETTA_SHELL_NAME"; end; function __zetta_report_preexec --on-event fish_preexec; printf "\033]2;zetta-cmd:%s\033\\" "$argv[1]"; end'
         ;;
     zsh)
         integration_zdotdir="$(mktemp -d "${TMPDIR:-/tmp}/zetta-zsh-XXXXXX" 2>/dev/null || true)"
@@ -1270,9 +1295,14 @@ ZDOTDIR="$ZETTA_ORIGINAL_ZDOTDIR"
 
 function __zetta_report_cwd() {
     [[ "$PWD" == /* ]] && printf '\033]7;file://localhost%s\033\\\033]2;zetta-cwd:%s\033\\' "$PWD" "$PWD"
+    printf '\033]2;zetta-cmd:%s\033\\' "$ZETTA_SHELL_NAME"
+}
+function __zetta_report_preexec() {
+    printf '\033]2;zetta-cmd:%s\033\\' "$1"
 }
 autoload -Uz add-zsh-hook
 add-zsh-hook precmd __zetta_report_cwd
+add-zsh-hook preexec __zetta_report_preexec
 command rm -rf -- "$ZETTA_INTEGRATION_ZDOTDIR"
 unset ZETTA_ORIGINAL_ZDOTDIR ZETTA_INTEGRATION_ZDOTDIR
 ZETTA_ZSHENV

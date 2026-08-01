@@ -751,6 +751,7 @@ pub(crate) enum TerminalBackendEvent {
 }
 
 const REPORTED_WORKING_DIRECTORY_TITLE_PREFIX: &str = "zetta-cwd:";
+const REPORTED_FOREGROUND_COMMAND_TITLE_PREFIX: &str = "zetta-cmd:";
 
 #[cfg(any(windows, test))]
 const POWERSHELL_CWD_TRACKER: &str = r#"$global:__ZettaOriginalPrompt = $function:prompt
@@ -874,6 +875,18 @@ fn reported_working_directory_from_title(title: &str) -> Option<String> {
     let is_unix_absolute = directory.starts_with('/');
     let is_native_absolute = Path::new(directory).is_absolute();
     (is_unix_absolute || is_native_absolute).then(|| directory.to_owned())
+}
+
+/// Parses the `zetta-cmd:<command>` marker that WSL sessions report via a
+/// prompt/preexec shell hook (see `WSL_CWD_TRACKER`), since Windows-side
+/// process inspection can't see into the WSL VM's own process namespace to
+/// discover what's actually running there.
+fn reported_foreground_command_from_title(title: &str) -> Option<String> {
+    let command = title.strip_prefix(REPORTED_FOREGROUND_COMMAND_TITLE_PREFIX)?;
+    if command.chars().any(char::is_control) {
+        return None;
+    }
+    Some(command.to_owned())
 }
 
 impl fmt::Debug for TerminalBackendEvent {
@@ -1270,6 +1283,7 @@ impl TerminalBuilder {
             path_style,
             reported_theme: None,
             reported_working_directory: None,
+            reported_foreground_command: None,
             #[cfg(any(test, feature = "test-support"))]
             input_log: Vec::new(),
             #[cfg(any(test, feature = "test-support"))]
@@ -1599,6 +1613,7 @@ impl TerminalBuilder {
                 path_style,
                 reported_theme: None,
                 reported_working_directory: None,
+                reported_foreground_command: None,
                 #[cfg(any(test, feature = "test-support"))]
                 input_log: Vec::new(),
                 #[cfg(any(test, feature = "test-support"))]
@@ -1775,6 +1790,7 @@ pub struct Terminal {
     path_style: PathStyle,
     reported_theme: Option<Arc<Theme>>,
     reported_working_directory: Option<String>,
+    reported_foreground_command: Option<String>,
     #[cfg(any(test, feature = "test-support"))]
     input_log: Vec<Vec<u8>>,
     #[cfg(any(test, feature = "test-support"))]
@@ -1865,6 +1881,14 @@ impl Terminal {
             TerminalBackendEvent::Title(title) => {
                 if let Some(directory) = reported_working_directory_from_title(&title) {
                     self.reported_working_directory = Some(directory);
+                    return;
+                }
+
+                if let Some(command) = reported_foreground_command_from_title(&title) {
+                    if self.reported_foreground_command.as_deref() != Some(command.as_str()) {
+                        self.reported_foreground_command = Some(command);
+                        cx.emit(Event::TitleChanged);
+                    }
                     return;
                 }
 
@@ -3200,36 +3224,43 @@ impl Terminal {
                     task_state.spawned_task.full_label.clone()
                 }
             }
+            // A profile's `title_override` (e.g. WSL/MSYS2's static "WSL: Ubuntu")
+            // is only a placeholder for before any live info is available - it must
+            // not mask a live-reported or foreground-process-derived title once one
+            // exists, or the tab name would never update to reflect what's running.
             None => self
-                .title_override
-                .as_ref()
-                .map(|title_override| title_override.to_string())
-                .unwrap_or_else(|| match &self.terminal_type {
-                    TerminalType::Pty { info, .. } => info
-                        .current
-                        .read()
-                        .as_ref()
-                        .map(|fpi| {
-                            let argv = visible_process_argv(&fpi.argv);
-                            let process_name = format!(
-                                "{}{}",
-                                fpi.name,
-                                if !argv.is_empty() {
-                                    format!(" {}", (argv[1..]).join(" "))
-                                } else {
-                                    "".to_string()
-                                }
-                            );
-                            let process_name = if truncate {
-                                truncate_and_trailoff(&process_name, MAX_CHARS)
+                .reported_foreground_command
+                .as_deref()
+                .filter(|command| !command.is_empty())
+                .map(|command| {
+                    if truncate {
+                        truncate_and_trailoff(command, MAX_CHARS)
+                    } else {
+                        command.to_string()
+                    }
+                })
+                .or_else(|| match &self.terminal_type {
+                    TerminalType::Pty { info, .. } => info.current.read().as_ref().map(|fpi| {
+                        let argv = visible_process_argv(&fpi.argv);
+                        let process_name = format!(
+                            "{}{}",
+                            fpi.name,
+                            if !argv.is_empty() {
+                                format!(" {}", (argv[1..]).join(" "))
                             } else {
-                                process_name
-                            };
-                            format!("{process_name}")
-                        })
-                        .unwrap_or_else(|| "Terminal".to_string()),
-                    TerminalType::DisplayOnly => "Terminal".to_string(),
-                }),
+                                "".to_string()
+                            }
+                        );
+                        if truncate {
+                            truncate_and_trailoff(&process_name, MAX_CHARS)
+                        } else {
+                            process_name
+                        }
+                    }),
+                    TerminalType::DisplayOnly => None,
+                })
+                .or_else(|| self.title_override.clone())
+                .unwrap_or_else(|| "Terminal".to_string()),
         }
     }
 
@@ -3923,6 +3954,23 @@ mod tests {
                 Some(r"\\server\share\zetta".to_owned())
             );
         }
+    }
+
+    #[test]
+    fn reported_foreground_command_titles_are_parsed_from_the_marker() {
+        assert_eq!(
+            reported_foreground_command_from_title("zetta-cmd:npm run build"),
+            Some("npm run build".to_owned())
+        );
+        assert_eq!(
+            reported_foreground_command_from_title("zetta-cmd:bash"),
+            Some("bash".to_owned())
+        );
+        assert_eq!(reported_foreground_command_from_title("ordinary title"), None);
+        assert_eq!(
+            reported_foreground_command_from_title("zetta-cmd:with\ncontrol"),
+            None
+        );
     }
 
     #[cfg(windows)]

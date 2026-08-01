@@ -777,6 +777,36 @@ fn default_notification_icon_path() -> Result<PathBuf> {
     write_default_notification_icon(&crate::config::platform_config_dir())
 }
 
+// Without an explicit `App User Model ID`, notify-rust's Windows backend
+// (tauri-winrt-notification) falls back to `Toast::POWERSHELL_APP_ID` - a
+// built-in Windows AUMID whose own doc comment warns the toast "will
+// erroneously report its origin as powershell", with PowerShell's icon.
+// Register Zetta's own AUMID (idempotent; cheap enough to redo on every
+// `zetta notify` invocation, mirroring `register_app_user_model_id` in
+// crates/gpui_windows/src/system_notifications.rs) and point the toast at it.
+#[cfg(all(feature = "notifications", target_os = "windows"))]
+fn register_windows_notification_identity(notification: &mut notify_rust::Notification) {
+    let icon_uri = std::env::current_exe()
+        .ok()
+        .map(|exe| format!("{},0", exe.display()));
+    let result = windows_registry::CURRENT_USER
+        .create(format!(
+            r"Software\Classes\AppUserModelId\{}",
+            crate::ZETTA_APP_ID
+        ))
+        .and_then(|key| {
+            key.set_string("DisplayName", "Zetta")?;
+            if let Some(icon_uri) = &icon_uri {
+                key.set_string("IconUri", icon_uri)?;
+            }
+            Ok(())
+        });
+    if let Err(error) = result {
+        eprintln!("zetta: failed to register AppUserModelID; notifications may not display correctly: {error}");
+    }
+    notification.app_id(crate::ZETTA_APP_ID);
+}
+
 // Notification backends (D-Bus, mac-notification-sys, winrt-notification) all
 // take an icon as a filesystem path rather than raw bytes, so the icon
 // embedded via ZettaEmbeddedAssets is cached on disk once and reused rather
@@ -813,6 +843,8 @@ impl NotifyCommand {
                 .into_owned(),
         };
         notification.image_path(&icon);
+        #[cfg(target_os = "windows")]
+        register_windows_notification_identity(&mut notification);
         let bundled_sound = self
             .sound
             .as_deref()
