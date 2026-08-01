@@ -1,12 +1,12 @@
 {
-  "description": "Build Zetta after each completed Codex turn.",
+  "description": "Test and build Zetta after each completed Codex turn, then report the result.",
   "hooks": {
     "Stop": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'make test >&2 && make build >&2 && printf \"%s\\n\" \"{\\\"continue\\\":true}\"'",
+            "command": "sh scripts/codex-stop-hook.sh",
             "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"& (Join-Path (& git rev-parse --show-toplevel) 'scripts/codex-stop-hook.ps1')\"",
             "statusMessage": "Testing and building Zetta"
           }
