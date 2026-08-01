@@ -64,7 +64,7 @@ fn converts_reported_msys2_directories_to_native_windows_paths() {
 
 #[cfg(windows)]
 #[test]
-fn configures_bash_to_report_each_prompt_directory() {
+fn configures_bash_to_report_prompt_directories_and_foreground_commands() {
     let environment = msys2_cwd_tracking_environment(
         &msys2_shell(Path::new(r"C:\msys64"), "bash"),
         7,
@@ -76,11 +76,16 @@ fn configures_bash_to_report_each_prompt_directory() {
     assert_eq!(environment[0].0, "PROMPT_COMMAND");
     assert!(environment[0].1.contains("zetta-cwd:%s"));
     assert!(environment[0].1.contains("\"$PWD\""));
+    assert!(environment[0].1.contains("trap '__zetta_preexec' DEBUG"));
+    assert!(environment[0].1.contains("__zetta_at_prompt=0"));
+    assert!(environment[0].1.contains("__zetta_at_prompt=1"));
+    assert!(environment[0].1.contains("zetta-cmd:%s"));
+    assert!(environment[0].1.contains("zetta-cmd:bash"));
 }
 
 #[cfg(windows)]
 #[test]
-fn configures_zsh_to_report_each_prompt_directory_without_changing_user_files() {
+fn configures_zsh_to_report_directories_and_commands_without_changing_user_files() {
     let temporary = tempfile::tempdir().unwrap();
     let environment = msys2_cwd_tracking_environment(
         &msys2_shell(Path::new(r"C:\msys64"), "zsh"),
@@ -97,7 +102,10 @@ fn configures_zsh_to_report_each_prompt_directory_without_changing_user_files() 
     let integration = fs::read_to_string(native_directory.join(".zshenv")).unwrap();
 
     assert!(integration.contains("add-zsh-hook precmd __zetta_report_cwd"));
+    assert!(integration.contains("add-zsh-hook preexec __zetta_report_preexec"));
     assert!(integration.contains("zetta-cwd:%s"));
+    assert!(integration.contains("zetta-cmd:%s"));
+    assert!(integration.contains("zetta-cmd:zsh"));
     assert!(integration.contains("source \"$original_zdotdir/.zshenv\""));
 }
 

@@ -1123,10 +1123,20 @@ fn windows_path_to_msys(path: &Path) -> Option<String> {
 }
 
 #[cfg(windows)]
-const MSYS2_BASH_CWD_TRACKER: &str = r#"printf '\033]2;zetta-cwd:%s\033\\' "$PWD""#;
+const MSYS2_BASH_TRACKER: &str = r#"__zetta_preexec() {
+    [[ "$__zetta_at_prompt" == 1 ]] || return
+    __zetta_at_prompt=0
+    printf '\033]2;zetta-cmd:%s\033\\' "$BASH_COMMAND"
+}
+__zetta_precmd() {
+    printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
+    printf '\033]2;zetta-cmd:bash\033\\'
+    __zetta_at_prompt=1
+}
+trap '__zetta_preexec' DEBUG"#;
 
 #[cfg(windows)]
-const MSYS2_ZSH_CWD_TRACKER: &str = r#"if [[ -n ${ZETTA_ORIGINAL_ZDOTDIR+x} ]]; then
+const MSYS2_ZSH_TRACKER: &str = r#"if [[ -n ${ZETTA_ORIGINAL_ZDOTDIR+x} ]]; then
     ZDOTDIR="$ZETTA_ORIGINAL_ZDOTDIR"
     export ZDOTDIR
 else
@@ -1137,9 +1147,14 @@ original_zdotdir="${ZDOTDIR:-$HOME}"
 
 function __zetta_report_cwd() {
     [[ "$PWD" == /* ]] && printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
+    printf '\033]2;zetta-cmd:zsh\033\\'
+}
+function __zetta_report_preexec() {
+    printf '\033]2;zetta-cmd:%s\033\\' "$1"
 }
 autoload -Uz add-zsh-hook
 add-zsh-hook precmd __zetta_report_cwd
+add-zsh-hook preexec __zetta_report_preexec
 command rm -rf -- "$ZETTA_INTEGRATION_ZDOTDIR"
 unset ZETTA_ORIGINAL_ZDOTDIR ZETTA_INTEGRATION_ZDOTDIR original_zdotdir
 "#;
@@ -1159,7 +1174,7 @@ pub(crate) fn msys2_cwd_tracking_environment(
             Ok(vec![(
                 "PROMPT_COMMAND".to_owned(),
                 format!(
-                    "{MSYS2_BASH_CWD_TRACKER}{}",
+                    "{MSYS2_BASH_TRACKER}{};__zetta_precmd",
                     existing
                         .filter(|command| !command.is_empty())
                         .map(|command| format!(";{command}"))
@@ -1172,7 +1187,7 @@ pub(crate) fn msys2_cwd_tracking_environment(
                 .join(format!("zetta-msys2-zsh-{}-{pane_id}", std::process::id()));
             fs::create_dir_all(&directory)
                 .with_context(|| format!("creating {}", directory.display()))?;
-            fs::write(directory.join(".zshenv"), MSYS2_ZSH_CWD_TRACKER).with_context(|| {
+            fs::write(directory.join(".zshenv"), MSYS2_ZSH_TRACKER).with_context(|| {
                 format!(
                     "writing MSYS2 Zsh CWD integration in {}",
                     directory.display()
@@ -1250,7 +1265,7 @@ fi
 [ -x "$shell" ] || shell=/bin/sh
 # Windows-side process inspection can't see into the WSL VM's own process
 # namespace, so the tab title can't be derived from the host process tree the
-# way it is for native Windows/MSYS2 shells. Report it explicitly instead: a
+# way it is for native Windows shells. Report it explicitly instead: a
 # `zetta-cmd:<value>` title marker carrying the shell name at idle, or the
 # command about to run, mirrored by `reported_foreground_command_from_title`
 # in crates/terminal/src/terminal.rs.

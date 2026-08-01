@@ -877,10 +877,9 @@ fn reported_working_directory_from_title(title: &str) -> Option<String> {
     (is_unix_absolute || is_native_absolute).then(|| directory.to_owned())
 }
 
-/// Parses the `zetta-cmd:<command>` marker that WSL sessions report via a
-/// prompt/preexec shell hook (see `WSL_CWD_TRACKER`), since Windows-side
-/// process inspection can't see into the WSL VM's own process namespace to
-/// discover what's actually running there.
+/// Parses the `zetta-cmd:<command>` marker that WSL and MSYS2 sessions report
+/// via prompt/preexec shell hooks. Windows-side process inspection cannot see
+/// into WSL and does not reliably represent MSYS2's POSIX process hierarchy.
 fn reported_foreground_command_from_title(title: &str) -> Option<String> {
     let command = title.strip_prefix(REPORTED_FOREGROUND_COMMAND_TITLE_PREFIX)?;
     if command.chars().any(char::is_control) {
