@@ -125,6 +125,9 @@ pub struct WaylandWindowState {
     pub(crate) force_render_after_recovery: bool,
     renderer_presented: bool,
     in_progress_configure: Option<InProgressConfigure>,
+    /// Invalidates deferred client-driven resizes whenever a newer resize or a
+    /// compositor configure supersedes them.
+    resize_generation: u64,
     resize_throttle: bool,
     in_progress_window_controls: Option<WindowControls>,
     window_controls: WindowControls,
@@ -614,6 +617,7 @@ impl WaylandWindowState {
             tiling: Tiling::default(),
             window_bounds: options.bounds,
             in_progress_configure: None,
+            resize_generation: 0,
             resize_throttle: false,
             client,
             appearance,
@@ -899,6 +903,11 @@ impl WaylandWindowStatePtr {
             }
             {
                 let mut state = self.state.borrow_mut();
+
+                // A configure is authoritative. Any client-driven resize task
+                // queued before it must not overwrite the configured drawable
+                // size after this handler returns.
+                state.resize_generation = state.resize_generation.wrapping_add(1);
 
                 if let Some(mut configure) = state.in_progress_configure.take() {
                     let got_unmaximized = state.maximized && !configure.maximized;
@@ -1300,6 +1309,42 @@ impl WaylandWindowStatePtr {
         self.set_size_and_scale(Some(size), None);
     }
 
+    fn apply_programmatic_resize(&self, size: Size<Pixels>, generation: u64) {
+        let state = self.state.borrow();
+        if !programmatic_resize_is_current(
+            generation,
+            state.resize_generation,
+            state.maximized,
+            state.fullscreen,
+        ) {
+            return;
+        }
+
+        // Keep the geometry and drawable update in the same event-loop task.
+        // Splitting these allowed a compositor configure to land between them,
+        // after which the stale drawable resize could hide the Wayland surface.
+        let window_geometry = inset_by_tiling(
+            Bounds {
+                origin: Point::default(),
+                size,
+            },
+            state.inset(),
+            state.tiling,
+        )
+        .map(|value| f32::from(value) as i32)
+        .map_size(|value| value.max(1));
+
+        state.surface_state.set_geometry(
+            window_geometry.origin.x,
+            window_geometry.origin.y,
+            window_geometry.size.width,
+            window_geometry.size.height,
+        );
+        drop(state);
+
+        self.resize(size);
+    }
+
     pub fn rescale(&self, scale: f32) {
         self.set_size_and_scale(None, Some(scale));
     }
@@ -1490,31 +1535,23 @@ impl PlatformWindow for WaylandWindow {
             return;
         }
 
-        // Keep window geometry consistent with configure handling. On Wayland, window geometry is
-        // surface-local: resizing should not attempt to translate the window; the compositor
-        // controls placement. We also account for client-side decoration insets and tiling.
-        let window_geometry = inset_by_tiling(
-            Bounds {
-                origin: Point::default(),
-                size,
-            },
-            state.inset(),
-            state.tiling,
-        )
-        .map(|v| f32::from(v) as i32)
-        .map_size(|v| if v <= 0 { 1 } else { v });
+        // A maximized or fullscreen toplevel must keep using the compositor's
+        // configured size. If an unset request is already in flight, its
+        // configure will restore the window before a later resize is accepted.
+        if state.maximized || state.fullscreen {
+            return;
+        }
 
-        state.surface_state.set_geometry(
-            window_geometry.origin.x,
-            window_geometry.origin.y,
-            window_geometry.size.width,
-            window_geometry.size.height,
-        );
+        let executor = state.globals.executor.clone();
+        drop(state);
 
-        state
-            .globals
-            .executor
-            .spawn(async move { state_ptr.resize(size) })
+        let generation = {
+            let mut state = self.borrow_mut();
+            state.resize_generation = state.resize_generation.wrapping_add(1);
+            state.resize_generation
+        };
+        executor
+            .spawn(async move { state_ptr.apply_programmatic_resize(size, generation) })
             .detach();
     }
 
@@ -2085,4 +2122,26 @@ fn inset_by_tiling(mut bounds: Bounds<Pixels>, inset: Pixels, tiling: Tiling) ->
     }
 
     bounds
+}
+
+fn programmatic_resize_is_current(
+    requested_generation: u64,
+    current_generation: u64,
+    maximized: bool,
+    fullscreen: bool,
+) -> bool {
+    requested_generation == current_generation && !maximized && !fullscreen
+}
+
+#[cfg(test)]
+mod tests {
+    use super::programmatic_resize_is_current;
+
+    #[test]
+    fn stale_or_compositor_constrained_programmatic_resizes_are_ignored() {
+        assert!(programmatic_resize_is_current(7, 7, false, false));
+        assert!(!programmatic_resize_is_current(6, 7, false, false));
+        assert!(!programmatic_resize_is_current(7, 7, true, false));
+        assert!(!programmatic_resize_is_current(7, 7, false, true));
+    }
 }
