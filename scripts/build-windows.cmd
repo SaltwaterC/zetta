@@ -7,12 +7,14 @@ if not defined HTTP set "HTTP=1"
 if not defined TFTP set "TFTP=1"
 if not defined TFTP_SERVER set "TFTP_SERVER=%TFTP%"
 if not defined TFTP_CLIENT set "TFTP_CLIENT=%TFTP%"
+if not defined CLIPBOARD set "CLIPBOARD=1"
 
 set "FEATURES=windows-gui"
 call :append_feature "%SERIAL%" serial-console
 call :append_feature "%HTTP%" http-server
 call :append_feature "%TFTP_SERVER%" tftp-server
 call :append_feature "%TFTP_CLIENT%" tftp-client
+call :append_feature "%CLIPBOARD%" clipboard
 
 if not defined VSCMD_VER (
     set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"

@@ -10,11 +10,12 @@ TFTP ?= 1
 TFTP_SERVER ?= $(TFTP)
 TFTP_CLIENT ?= $(TFTP)
 NOTIFY ?= 1
+CLIPBOARD ?= 1
 X11 ?= 0
 
-# Set any of SERIAL, HTTP, TFTP, TFTP_SERVER, TFTP_CLIENT, or NOTIFY to 0,
-# false, no, or off to omit that tool from the built binary. TFTP is a
-# convenient shorthand for disabling both the server and client.
+# Set any of SERIAL, HTTP, TFTP, TFTP_SERVER, TFTP_CLIENT, NOTIFY, or
+# CLIPBOARD to 0, false, no, or off to omit that tool from the built binary.
+# TFTP is a convenient shorthand for disabling both the server and client.
 # Set X11=1 to include the X11 backend alongside the default Wayland backend.
 tool_enabled = $(if $(filter 0 false no off,$(strip $(1))),,1)
 BUILD_FEATURES := wayland
@@ -33,11 +34,14 @@ endif
 ifneq ($(call tool_enabled,$(NOTIFY)),)
 BUILD_FEATURES += notifications
 endif
+ifneq ($(call tool_enabled,$(CLIPBOARD)),)
+BUILD_FEATURES += clipboard
+endif
 ifneq ($(call tool_enabled,$(X11)),)
 BUILD_FEATURES += x11
 endif
 
-export SERIAL HTTP TFTP TFTP_SERVER TFTP_CLIENT NOTIFY X11
+export SERIAL HTTP TFTP TFTP_SERVER TFTP_CLIENT NOTIFY CLIPBOARD X11
 
 export CARGO
 

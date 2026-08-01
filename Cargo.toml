@@ -6,7 +6,7 @@ license = "GPL-3.0-or-later"
 default-run = "zetta"
 
 [features]
-default = ["wayland", "serial-console", "http-server", "tftp-server", "tftp-client", "notifications"]
+default = ["wayland", "serial-console", "http-server", "tftp-server", "tftp-client", "notifications", "clipboard"]
 wayland = ["gpui_platform/wayland"]
 x11 = ["gpui_platform/x11"]
 windows-gui = []
@@ -15,6 +15,7 @@ http-server = []
 tftp-server = []
 tftp-client = []
 notifications = ["dep:notify-rust", "dep:cpal"]
+clipboard = ["dep:arboard"]
 
 [[bin]]
 name = "zetta-gui"
@@ -23,6 +24,7 @@ required-features = ["windows-gui"]
 
 [dependencies]
 anyhow = "1"
+arboard = { version = "3", default-features = false, features = ["wayland-data-control"], optional = true }
 argon2 = "0.5"
 libc = "0.2"
 async-compression = { version = "0.4", features = ["gzip", "futures-io"] }

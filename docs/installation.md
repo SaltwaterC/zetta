@@ -37,6 +37,12 @@ sudo apt install libasound2-dev
 Building with `NOTIFY=0` (or `--no-default-features` without re-enabling
 `notifications`) omits this requirement along with the rest of `zetta notify`.
 
+The `clipboard` feature (enabled by default; see
+[Serial and network tools](tools.md#clipboard)) needs no extra system
+packages to build. Building with `CLIPBOARD=0` (or `--no-default-features`
+without re-enabling `clipboard`) omits `zetta copy`, `zetta paste`, and the
+`zcopy`/`zpaste`/`pbcopy`/`pbpaste` shell integration aliases.
+
 ## macOS build and runtime requirements
 
 macOS builds require CMake and the full Xcode installation. Install CMake with
@@ -132,13 +138,13 @@ sudo make install
 ```
 
 To build a restricted binary, pass build flags to both the build and install
-steps. `SERIAL`, `HTTP`, `TFTP`, `TFTP_SERVER`, `TFTP_CLIENT`, and `NOTIFY`
-accept `0`, `false`, `no`, and `off`. `TFTP=0` disables both TFTP components;
-the server and client switches can be used independently:
+steps. `SERIAL`, `HTTP`, `TFTP`, `TFTP_SERVER`, `TFTP_CLIENT`, `NOTIFY`, and
+`CLIPBOARD` accept `0`, `false`, `no`, and `off`. `TFTP=0` disables both TFTP
+components; the server and client switches can be used independently:
 
 ```sh
-make build SERIAL=0 HTTP=0 TFTP=0 NOTIFY=0
-sudo make install SERIAL=0 HTTP=0 TFTP=0 NOTIFY=0
+make build SERIAL=0 HTTP=0 TFTP=0 NOTIFY=0 CLIPBOARD=0
+sudo make install SERIAL=0 HTTP=0 TFTP=0 NOTIFY=0 CLIPBOARD=0
 
 # Keep only the TFTP client.
 make build TFTP_SERVER=0

@@ -278,6 +278,27 @@ fn notify_subcommand_bypasses_application_startup() {
     assert!(parse_args_from([OsString::from("notify")]).is_err());
 }
 
+#[cfg(feature = "clipboard")]
+#[test]
+fn copy_and_paste_subcommands_bypass_application_startup() {
+    let copy = parse_args_from([OsString::from("copy")]).unwrap();
+    assert!(matches!(
+        copy.mode,
+        StartupMode::CliService(CliServiceCommand::Copy(_))
+    ));
+    assert!(!should_handoff_to_existing_process(&copy));
+
+    let paste = parse_args_from([OsString::from("paste")]).unwrap();
+    assert!(matches!(
+        paste.mode,
+        StartupMode::CliService(CliServiceCommand::Paste(_))
+    ));
+    assert!(!should_handoff_to_existing_process(&paste));
+
+    assert!(parse_args_from([OsString::from("copy"), OsString::from("--unknown")]).is_err());
+    assert!(parse_args_from([OsString::from("paste"), OsString::from("--unknown")]).is_err());
+}
+
 #[cfg(feature = "tftp-server")]
 #[test]
 fn tftp_server_subcommand_bypasses_application_startup() {

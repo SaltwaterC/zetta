@@ -161,3 +161,37 @@ block, since the OS notification server plays those itself.
 
 With [shell integration](shell-integration.md) enabled, `zntfy` is an
 equivalent shortcut and retains notification command completion.
+
+## Clipboard
+
+`zetta copy` and `zetta paste` read standard input to the system clipboard and
+write the clipboard's text contents to standard output, mirroring macOS's
+`pbcopy`/`pbpaste`:
+
+```sh
+echo "Build finished" | zetta copy
+zetta copy < release-notes.txt
+zetta paste > release-notes-copy.txt
+zetta paste | grep TODO
+```
+
+Both accept `-pboard {general | ruler | find | font}` for `pbcopy`/`pbpaste`
+compatibility; Zetta has only one clipboard, so the value is validated but
+otherwise has no effect. `zetta paste` also accepts `-Prefer {txt | rtf | ps}`
+for the same reason: Zetta only ever stores plain UTF-8 text, so the
+preference is validated but does not change the output. `zetta paste` prints
+nothing, without an error, if the clipboard is empty or holds no text. Run
+`zetta copy --help` or `zetta paste --help` for complete syntax.
+
+On Linux and BSD, the X11 and Wayland clipboards are only available while
+their owning process keeps running, so `zetta copy` forks a short-lived
+background process that keeps serving the clipboard after the command exits.
+macOS and Windows keep the clipboard through their own system services, so no
+such process is needed there.
+
+With [shell integration](shell-integration.md) enabled, `zcopy` and `zpaste`
+are equivalent shortcuts and retain command completion. On every platform
+other than macOS (which already has real `pbcopy`/`pbpaste`), the integration
+also defines `pbcopy` and `pbpaste` as the same shortcuts, taking priority
+over any preexisting `pbcopy`/`pbpaste` alias (for example one pointing at
+`xclip`) so that muscle memory keeps working there too.

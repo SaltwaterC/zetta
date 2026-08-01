@@ -406,7 +406,7 @@ fn shell_single_quote(value: &str) -> String {
 }
 
 pub(crate) fn shell_integration_help() -> &'static str {
-    "Configure or generate shell integration\n\nUsage: zetta init [SHELL]\n\nWithout SHELL, detects the current shell from SHELL and adds the integration command to its startup file. On Windows, Unix-style HOME paths from MSYS2 and similar environments are resolved with cygpath; when SHELL is unavailable, Zetta detects the launching PowerShell and writes to its $PROFILE. Running it again leaves an existing integration unchanged. With SHELL, prints the integration script for use in a shell startup file.\n\nSupported shells:\n  bash        Bash\n  fish        Fish\n  powershell  PowerShell (also accepted as pwsh)\n  zsh         Z shell\n\nThe generated script adds command completion, including live serial-device completion, the ztftp shortcut when the TFTP client is enabled, and the zntfy shortcut when desktop notifications are enabled."
+    "Configure or generate shell integration\n\nUsage: zetta init [SHELL]\n\nWithout SHELL, detects the current shell from SHELL and adds the integration command to its startup file. On Windows, Unix-style HOME paths from MSYS2 and similar environments are resolved with cygpath; when SHELL is unavailable, Zetta detects the launching PowerShell and writes to its $PROFILE. Running it again leaves an existing integration unchanged. With SHELL, prints the integration script for use in a shell startup file.\n\nSupported shells:\n  bash        Bash\n  fish        Fish\n  powershell  PowerShell (also accepted as pwsh)\n  zsh         Z shell\n\nThe generated script adds command completion, including live serial-device completion, the ztftp shortcut when the TFTP client is enabled, and the zntfy and zcopy/zpaste shortcuts when desktop notifications and clipboard access are enabled. zcopy/zpaste are also available as pbcopy/pbpaste on platforms other than macOS, taking priority over any existing pbcopy/pbpaste alias so pbcopy/pbpaste muscle memory keeps working there too."
 }
 
 const BASH_INTEGRATION: &str = r#"# Zetta shell integration for Bash.
@@ -482,6 +482,14 @@ _zetta_complete() {
             COMPREPLY=( $(compgen -W 'none software hardware' -- "$current") )
             return
             ;;
+        --pboard|-pboard)
+            COMPREPLY=( $(compgen -W 'general ruler find font' -- "$current") )
+            return
+            ;;
+        --prefer|-prefer|--Prefer|-Prefer)
+            COMPREPLY=( $(compgen -W 'txt rtf ps' -- "$current") )
+            return
+            ;;
         --app-name|-a)
             COMPREPLY=()
             return
@@ -535,7 +543,7 @@ _zetta_complete() {
     esac
 
     if (( COMP_CWORD == 1 )); then
-        COMPREPLY=( $(compgen -W 'benchmark benchmark-output terminal-size sessions init serial http tftp notify --help --version --config --keymap --profile' -- "$current") )
+        COMPREPLY=( $(compgen -W 'benchmark benchmark-output terminal-size sessions init serial http tftp notify copy paste --help --version --config --keymap --profile' -- "$current") )
         return
     fi
 
@@ -574,6 +582,12 @@ _zetta_complete() {
             ;;
         notify)
             COMPREPLY=( $(compgen -W '--app-name --icon --sound --timeout --help' -- "$current") )
+            ;;
+        copy)
+            COMPREPLY=( $(compgen -W '--pboard --help' -- "$current") )
+            ;;
+        paste)
+            COMPREPLY=( $(compgen -W '--pboard --prefer --help' -- "$current") )
             ;;
     esac
 }
@@ -678,11 +692,56 @@ _zntfy_complete() {
     COMPREPLY=( $(compgen -W '--app-name --icon --sound --timeout --help' -- "$current") )
 }
 
+_zcopy_complete() {
+    local current=${COMP_WORDS[COMP_CWORD]} previous=${COMP_WORDS[COMP_CWORD-1]}
+    case "$previous" in
+        --pboard|-pboard)
+            COMPREPLY=( $(compgen -W 'general ruler find font' -- "$current") )
+            return
+            ;;
+    esac
+    COMPREPLY=( $(compgen -W '--pboard --help' -- "$current") )
+}
+
+_zpaste_complete() {
+    local current=${COMP_WORDS[COMP_CWORD]} previous=${COMP_WORDS[COMP_CWORD-1]}
+    case "$previous" in
+        --pboard|-pboard)
+            COMPREPLY=( $(compgen -W 'general ruler find font' -- "$current") )
+            return
+            ;;
+        --prefer|-prefer|--Prefer|-Prefer)
+            COMPREPLY=( $(compgen -W 'txt rtf ps' -- "$current") )
+            return
+            ;;
+    esac
+    COMPREPLY=( $(compgen -W '--pboard --prefer --help' -- "$current") )
+}
+
 ztftp() { zetta tftp "$@"; }
 zntfy() { zetta notify "$@"; }
+zcopy() { zetta copy "$@"; }
+zpaste() { zetta paste "$@"; }
 complete -F _zetta_complete zetta
 complete -F _ztftp_complete ztftp
 complete -F _zntfy_complete zntfy
+complete -F _zcopy_complete zcopy
+complete -F _zpaste_complete zpaste
+
+# Real pbcopy/pbpaste already exist on macOS, so Zetta leaves them alone there.
+# Elsewhere, Zetta's pbcopy/pbpaste keep the muscle memory working; any
+# preexisting pbcopy/pbpaste alias (eg. one pointing at xclip) is removed
+# first so Zetta's functions take priority over it.
+case "$OSTYPE" in
+    darwin*) ;;
+    *)
+        unalias pbcopy pbpaste 2>/dev/null
+        pbcopy() { zetta copy "$@"; }
+        pbpaste() { zetta paste "$@"; }
+        complete -F _zcopy_complete pbcopy
+        complete -F _zpaste_complete pbpaste
+        ;;
+esac
 "#;
 
 const FISH_INTEGRATION: &str = r#"# Zetta shell integration for Fish.
@@ -692,6 +751,30 @@ end
 
 function zntfy --wraps 'zetta notify' --description 'Zetta desktop notifications'
     zetta notify $argv
+end
+
+function zcopy --wraps 'zetta copy' --description 'Copy standard input to the clipboard'
+    zetta copy $argv
+end
+
+function zpaste --wraps 'zetta paste' --description "Print the clipboard's contents"
+    zetta paste $argv
+end
+
+# Real pbcopy/pbpaste already exist on macOS, so Zetta leaves them alone
+# there. Elsewhere, Zetta's pbcopy/pbpaste keep the muscle memory working;
+# any preexisting pbcopy/pbpaste function or abbreviation is erased first so
+# Zetta's functions take priority over it.
+switch (uname)
+    case Darwin
+    case '*'
+        functions -e pbcopy pbpaste 2>/dev/null
+        function pbcopy --wraps 'zetta copy' --description 'Copy standard input to the clipboard'
+            zetta copy $argv
+        end
+        function pbpaste --wraps 'zetta paste' --description "Print the clipboard's contents"
+            zetta paste $argv
+        end
 end
 
 function __zetta_profiles
@@ -727,6 +810,8 @@ complete -c zetta -n '__fish_use_subcommand' -a serial -d 'List or connect to se
 complete -c zetta -n '__fish_use_subcommand' -a http -d 'Serve static files over HTTP'
 complete -c zetta -n '__fish_use_subcommand' -a tftp -d 'Transfer a file with TFTP'
 complete -c zetta -n '__fish_use_subcommand' -a notify -d 'Show a desktop notification'
+complete -c zetta -n '__fish_use_subcommand' -a copy -d 'Copy standard input to the clipboard'
+complete -c zetta -n '__fish_use_subcommand' -a paste -d "Print the clipboard's contents"
 complete -c zetta -n '__fish_use_subcommand' -l help -d 'Print help'
 complete -c zetta -n '__fish_use_subcommand' -l version -d 'Print version'
 complete -c zetta -n '__fish_use_subcommand' -l config -r -d 'Use a configuration file'
@@ -774,14 +859,44 @@ complete -c zetta -n '__fish_seen_subcommand_from notify' -l icon -r -d 'Image t
 complete -c zetta -n '__fish_seen_subcommand_from notify' -l sound -r -a '(__zetta_sound_names)' -d 'Sound name'
 complete -c zetta -n '__fish_seen_subcommand_from notify' -l timeout -r -a 'default never' -d 'Timeout'
 complete -c zetta -n '__fish_seen_subcommand_from notify' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from copy' -l pboard -r -a 'general ruler find font'
+complete -c zetta -n '__fish_seen_subcommand_from copy' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from paste' -l pboard -r -a 'general ruler find font'
+complete -c zetta -n '__fish_seen_subcommand_from paste' -l prefer -r -a 'txt rtf ps'
+complete -c zetta -n '__fish_seen_subcommand_from paste' -l help -d 'Print help'
 complete -c ztftp -f -a 'get put'
 complete -c ztftp -l port -r -d 'Server port'
 complete -c ztftp -l help -d 'Print help'
+complete -c zcopy -f -l pboard -r -a 'general ruler find font'
+complete -c zcopy -l help -d 'Print help'
+complete -c zpaste -f -l pboard -r -a 'general ruler find font'
+complete -c zpaste -l prefer -r -a 'txt rtf ps'
+complete -c zpaste -l help -d 'Print help'
+if test (uname) != Darwin
+    complete -c pbcopy -f -l pboard -r -a 'general ruler find font'
+    complete -c pbcopy -l help -d 'Print help'
+    complete -c pbpaste -f -l pboard -r -a 'general ruler find font'
+    complete -c pbpaste -l prefer -r -a 'txt rtf ps'
+    complete -c pbpaste -l help -d 'Print help'
+end
 "#;
 
 const POWERSHELL_INTEGRATION: &str = r#"# Zetta shell integration for PowerShell.
 function ztftp { & zetta tftp @args }
 function zntfy { & zetta notify @args }
+function zcopy { & zetta copy @args }
+function zpaste { & zetta paste @args }
+
+# Real pbcopy/pbpaste already exist on macOS, so Zetta leaves them alone
+# there. Elsewhere, Zetta's pbcopy/pbpaste keep the muscle memory working;
+# any preexisting pbcopy/pbpaste alias (eg. one pointing at a third-party
+# tool) is removed first so Zetta's functions take priority over it. As
+# above, $IsMacOS is unset (falsy) on Windows PowerShell 5.1.
+if (-not $IsMacOS) {
+    Remove-Item -Path Alias:pbcopy,Alias:pbpaste -ErrorAction SilentlyContinue
+    function pbcopy { & zetta copy @args }
+    function pbpaste { & zetta paste @args }
+}
 
 $zettaProfiles = @(ZETTA_PROFILES)
 
@@ -808,7 +923,7 @@ $zettaCompletions = {
     $previous = if ($words.Count -gt 1) { $words[$words.Count - 2] } else { '' }
     $last = if ($words.Count -gt 1) { $words[$words.Count - 1] } else { '' }
     $subcommand = $words | Where-Object {
-        $_ -in 'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'init', 'serial', 'http', 'tftp', 'notify'
+        $_ -in 'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste'
     } | Select-Object -First 1
 
     $candidates = if ($commandName -eq 'ztftp') {
@@ -817,6 +932,13 @@ $zettaCompletions = {
         if ($previous -in '--timeout', '-t') { 'default', 'never' }
         elseif ($previous -in '--sound', '-s') { $zettaSoundNames }
         else { '--app-name', '--icon', '--sound', '--timeout', '--help' }
+    } elseif ($commandName -in 'zcopy', 'pbcopy') {
+        if ($previous -in '--pboard', '-pboard') { 'general', 'ruler', 'find', 'font' }
+        else { '--pboard', '--help' }
+    } elseif ($commandName -in 'zpaste', 'pbpaste') {
+        if ($previous -in '--pboard', '-pboard') { 'general', 'ruler', 'find', 'font' }
+        elseif ($previous -in '--prefer', '-prefer', '--Prefer', '-Prefer') { 'txt', 'rtf', 'ps' }
+        else { '--pboard', '--prefer', '--help' }
     } elseif (
         $previous -eq '--profile' -or $last -eq '--profile' -or
         (($previous -eq '-p' -or $last -eq '-p') -and $null -eq $subcommand)
@@ -840,13 +962,17 @@ $zettaCompletions = {
         $zettaSoundNames
     } elseif ($previous -in '--flow-control', '-f') {
         'none', 'software', 'hardware'
+    } elseif ($previous -in '--pboard', '-pboard') {
+        'general', 'ruler', 'find', 'font'
+    } elseif ($previous -in '--prefer', '-prefer', '--Prefer', '-Prefer') {
+        'txt', 'rtf', 'ps'
     } elseif (
         $previous -in '--columns', '--rows', '-R' -or
         ($previous -eq '-c' -and $subcommand -eq 'terminal-size')
     ) {
         @()
     } elseif ($null -eq $subcommand) {
-        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'init', 'serial', 'http', 'tftp', 'notify', '--help', '--version', '--config', '--keymap', '--profile'
+        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste', '--help', '--version', '--config', '--keymap', '--profile'
     } else {
         switch ($subcommand) {
             'benchmark' { '--terminal-render-workload', '--terminal-checkerboard-workload', '--terminal-sparse-update-workload', '--profile-report', '--profile-duration', '--profile-pane-stress', '--profile-background-stress', '--profile-sparse-updates', '--profile-external-terminal', '--help' }
@@ -867,6 +993,8 @@ $zettaCompletions = {
                 else { '--port', '--help' }
             }
             'notify' { '--app-name', '--icon', '--sound', '--timeout', '--help' }
+            'copy' { '--pboard', '--help' }
+            'paste' { '--pboard', '--prefer', '--help' }
         }
     }
 
@@ -878,6 +1006,12 @@ $zettaCompletions = {
 Register-ArgumentCompleter -Native -CommandName zetta -ScriptBlock $zettaCompletions
 Register-ArgumentCompleter -CommandName ztftp -ScriptBlock $zettaCompletions
 Register-ArgumentCompleter -CommandName zntfy -ScriptBlock $zettaCompletions
+Register-ArgumentCompleter -CommandName zcopy -ScriptBlock $zettaCompletions
+Register-ArgumentCompleter -CommandName zpaste -ScriptBlock $zettaCompletions
+if (-not $IsMacOS) {
+    Register-ArgumentCompleter -CommandName pbcopy -ScriptBlock $zettaCompletions
+    Register-ArgumentCompleter -CommandName pbpaste -ScriptBlock $zettaCompletions
+}
 "#;
 
 const ZSH_INTEGRATION: &str = r#"# Zetta shell integration for Zsh.
@@ -888,6 +1022,21 @@ fi
 
 ztftp() { zetta tftp "$@"; }
 zntfy() { zetta notify "$@"; }
+zcopy() { zetta copy "$@"; }
+zpaste() { zetta paste "$@"; }
+
+# Real pbcopy/pbpaste already exist on macOS, so Zetta leaves them alone
+# there. Elsewhere, Zetta's pbcopy/pbpaste keep the muscle memory working;
+# any preexisting pbcopy/pbpaste alias (eg. one pointing at xclip) is
+# removed first so Zetta's functions take priority over it.
+case "$OSTYPE" in
+    darwin*) ;;
+    *)
+        unalias pbcopy pbpaste 2>/dev/null
+        pbcopy() { zetta copy "$@"; }
+        pbpaste() { zetta paste "$@"; }
+        ;;
+esac
 
 _zetta_profiles() {
     compadd -- ZETTA_PROFILES
@@ -917,7 +1066,7 @@ _zetta() {
     local previous=${words[CURRENT-1]}
 
     if (( CURRENT == 2 )); then
-        compadd -S ' ' -- benchmark benchmark-output terminal-size sessions init serial http tftp notify
+        compadd -S ' ' -- benchmark benchmark-output terminal-size sessions init serial http tftp notify copy paste
         compadd -- --help --version --config --keymap --profile
         return
     fi
@@ -973,6 +1122,14 @@ _zetta() {
             ;;
         --flow-control|-f)
             compadd -- none software hardware
+            return
+            ;;
+        --pboard|-pboard)
+            compadd -- general ruler find font
+            return
+            ;;
+        --prefer|-prefer|--Prefer|-Prefer)
+            compadd -- txt rtf ps
             return
             ;;
         --app-name|-a)
@@ -1062,6 +1219,12 @@ _zetta() {
         notify)
             compadd -- --app-name --icon --sound --timeout --help
             ;;
+        copy)
+            compadd -- --pboard --help
+            ;;
+        paste)
+            compadd -- --pboard --prefer --help
+            ;;
     esac
 }
 
@@ -1142,9 +1305,44 @@ _zntfy() {
     compadd -- --app-name --icon --sound --timeout --help
 }
 
+_zcopy() {
+    local previous=${words[CURRENT-1]}
+    case $previous in
+        --pboard|-pboard)
+            compadd -- general ruler find font
+            return
+            ;;
+    esac
+    compadd -- --pboard --help
+}
+
+_zpaste() {
+    local previous=${words[CURRENT-1]}
+    case $previous in
+        --pboard|-pboard)
+            compadd -- general ruler find font
+            return
+            ;;
+        --prefer|-prefer|--Prefer|-Prefer)
+            compadd -- txt rtf ps
+            return
+            ;;
+    esac
+    compadd -- --pboard --prefer --help
+}
+
 compdef _zetta zetta
 compdef _ztftp ztftp
 compdef _zntfy zntfy
+compdef _zcopy zcopy
+compdef _zpaste zpaste
+case "$OSTYPE" in
+    darwin*) ;;
+    *)
+        compdef _zcopy pbcopy
+        compdef _zpaste pbpaste
+        ;;
+esac
 "#;
 
 #[cfg(test)]

@@ -6,6 +6,8 @@ use super::*;
     feature = "notifications"
 ))]
 use crate::cli_services::CliServiceCommand;
+#[cfg(feature = "clipboard")]
+use crate::cli_services::{copy_help, parse_copy_args, parse_paste_args, paste_help};
 #[cfg(feature = "http-server")]
 use crate::cli_services::{http_server_help, parse_http_args};
 #[cfg(feature = "notifications")]
@@ -52,7 +54,8 @@ pub(crate) enum StartupMode {
         feature = "serial-console",
         feature = "http-server",
         feature = "tftp-server",
-        feature = "notifications"
+        feature = "notifications",
+        feature = "clipboard"
     ))]
     CliService(CliServiceCommand),
     PrintShellIntegration(ShellIntegration),
@@ -117,6 +120,8 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
     features.push("TFTP client");
     #[cfg(feature = "notifications")]
     features.push("Desktop notifications");
+    #[cfg(feature = "clipboard")]
+    features.push("Clipboard access");
 
     let serial_usage = if cfg!(feature = "serial-console") {
         "\n       zetta serial <COMMAND>"
@@ -135,6 +140,11 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
     };
     let notify_usage = if cfg!(feature = "notifications") {
         "\n       zetta notify [OPTIONS] SUMMARY [BODY]"
+    } else {
+        ""
+    };
+    let clipboard_usage = if cfg!(feature = "clipboard") {
+        "\n       zetta copy [OPTIONS]\n       zetta paste [OPTIONS]"
     } else {
         ""
     };
@@ -158,13 +168,18 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
     } else {
         ""
     };
+    let clipboard_command = if cfg!(feature = "clipboard") {
+        "\n  copy                                Copy standard input to the clipboard\n  paste                                Print the clipboard's contents"
+    } else {
+        ""
+    };
     let profiles = profiles
         .iter()
         .map(|profile| profile.name.as_str())
         .collect::<Vec<_>>()
         .join("\n  ");
     format!(
-        "Zetta Terminal\n\nUsage: zetta [OPTIONS]\n       zetta benchmark [OPTIONS]\n       zetta benchmark-output [OPTIONS]\n       zetta terminal-size [--json | --resize [--columns COLUMNS] [--rows ROWS]]\n       zetta sessions [--json]\n       zetta init [SHELL]{serial_usage}{http_usage}{tftp_usage}{notify_usage}\n\nCommands:\n  benchmark                           Profile terminal rendering\n  benchmark-output                    Write and time a text payload (default: 10 MiB)\n  terminal-size                       Print or resize the current terminal pane\n  sessions                            List detached background sessions\n  init                                Configure or generate shell integration{serial_command}{http_command}{tftp_command}{notify_command}\n\nBuilt-in features:\n  {}\n\nProfiles accepted by --profile NAME (case-insensitive):\n  {profiles}\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Select one of the profiles listed above",
+        "Zetta Terminal\n\nUsage: zetta [OPTIONS]\n       zetta benchmark [OPTIONS]\n       zetta benchmark-output [OPTIONS]\n       zetta terminal-size [--json | --resize [--columns COLUMNS] [--rows ROWS]]\n       zetta sessions [--json]\n       zetta init [SHELL]{serial_usage}{http_usage}{tftp_usage}{notify_usage}{clipboard_usage}\n\nCommands:\n  benchmark                           Profile terminal rendering\n  benchmark-output                    Write and time a text payload (default: 10 MiB)\n  terminal-size                       Print or resize the current terminal pane\n  sessions                            List detached background sessions\n  init                                Configure or generate shell integration{serial_command}{http_command}{tftp_command}{notify_command}{clipboard_command}\n\nBuilt-in features:\n  {}\n\nProfiles accepted by --profile NAME (case-insensitive):\n  {profiles}\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Select one of the profiles listed above",
         features.join("\n  "),
     )
 }
@@ -545,6 +560,69 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
         }
         #[cfg(not(feature = "notifications"))]
         anyhow::bail!("Desktop notification support is disabled in this build");
+    }
+    if arguments.first().is_some_and(|argument| argument == "copy") {
+        #[cfg(feature = "clipboard")]
+        {
+            let copy_arguments = &arguments[1..];
+            if copy_arguments.iter().any(|argument| {
+                matches!(
+                    argument.to_string_lossy().as_ref(),
+                    "--help" | "-h" | "-help"
+                )
+            }) {
+                println!("{}", copy_help());
+                std::process::exit(0);
+            }
+            return Ok(StartupArgs {
+                config_path: None,
+                keymap_path: None,
+                profile: None,
+                mode: StartupMode::CliService(parse_copy_args(copy_arguments.iter().cloned())?),
+                profile_report: None,
+                profile_duration: None,
+                profile_pane_stress: false,
+                profile_background_stress: false,
+                profile_sparse_updates: false,
+                profile_external_terminal: false,
+                tftp_command: None,
+            });
+        }
+        #[cfg(not(feature = "clipboard"))]
+        anyhow::bail!("Clipboard support is disabled in this build");
+    }
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "paste")
+    {
+        #[cfg(feature = "clipboard")]
+        {
+            let paste_arguments = &arguments[1..];
+            if paste_arguments.iter().any(|argument| {
+                matches!(
+                    argument.to_string_lossy().as_ref(),
+                    "--help" | "-h" | "-help"
+                )
+            }) {
+                println!("{}", paste_help());
+                std::process::exit(0);
+            }
+            return Ok(StartupArgs {
+                config_path: None,
+                keymap_path: None,
+                profile: None,
+                mode: StartupMode::CliService(parse_paste_args(paste_arguments.iter().cloned())?),
+                profile_report: None,
+                profile_duration: None,
+                profile_pane_stress: false,
+                profile_background_stress: false,
+                profile_sparse_updates: false,
+                profile_external_terminal: false,
+                tftp_command: None,
+            });
+        }
+        #[cfg(not(feature = "clipboard"))]
+        anyhow::bail!("Clipboard support is disabled in this build");
     }
     if arguments
         .iter()
@@ -2056,7 +2134,8 @@ pub(crate) fn run() -> Result<()> {
         feature = "serial-console",
         feature = "http-server",
         feature = "tftp-server",
-        feature = "notifications"
+        feature = "notifications",
+        feature = "clipboard"
     ))]
     if let StartupMode::CliService(command) = &args.mode {
         return command.run();

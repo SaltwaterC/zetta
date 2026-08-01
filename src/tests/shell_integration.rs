@@ -60,6 +60,62 @@ fn supported_shells_generate_notify_completion_and_zntfy_shortcut() {
 }
 
 #[test]
+fn supported_shells_generate_copy_paste_completion_and_shortcuts() {
+    let profiles = profiles();
+    for shell in [
+        ShellIntegration::Bash,
+        ShellIntegration::Fish,
+        ShellIntegration::PowerShell,
+        ShellIntegration::Zsh,
+    ] {
+        let script = shell.script(&profiles);
+        assert!(script.contains("zcopy"));
+        assert!(script.contains("zpaste"));
+        assert!(script.contains("copy"));
+        assert!(script.contains("paste"));
+        if shell == ShellIntegration::Fish {
+            assert!(script.contains("-l pboard"));
+            assert!(script.contains("-l prefer"));
+        } else {
+            assert!(script.contains("--pboard"));
+            assert!(script.contains("--prefer"));
+        }
+    }
+}
+
+// Regression guard: pbcopy/pbpaste already exist natively on macOS, so Zetta
+// must not shadow them there, but every other platform should get them so
+// pbcopy/pbpaste muscle memory keeps working.
+#[test]
+fn pbcopy_and_pbpaste_are_gated_to_non_macos_platforms() {
+    let profiles = profiles();
+
+    let bash = ShellIntegration::Bash.script(&profiles);
+    assert!(bash.contains("pbcopy"));
+    assert!(bash.contains("pbpaste"));
+    assert!(bash.contains("unalias pbcopy pbpaste"));
+    assert!(bash.contains("darwin*) ;;"));
+
+    let zsh = ShellIntegration::Zsh.script(&profiles);
+    assert!(zsh.contains("pbcopy"));
+    assert!(zsh.contains("pbpaste"));
+    assert!(zsh.contains("unalias pbcopy pbpaste"));
+    assert!(zsh.contains("darwin*) ;;"));
+
+    let fish = ShellIntegration::Fish.script(&profiles);
+    assert!(fish.contains("pbcopy"));
+    assert!(fish.contains("pbpaste"));
+    assert!(fish.contains("functions -e pbcopy pbpaste"));
+    assert!(fish.contains("case Darwin\n    case '*'"));
+
+    let powershell = ShellIntegration::PowerShell.script(&profiles);
+    assert!(powershell.contains("pbcopy"));
+    assert!(powershell.contains("pbpaste"));
+    assert!(powershell.contains("if (-not $IsMacOS) {"));
+    assert!(powershell.contains("Remove-Item -Path Alias:pbcopy,Alias:pbpaste"));
+}
+
+#[test]
 fn sound_completion_calls_a_shared_helper_from_every_call_site() {
     let profiles = profiles();
 
@@ -604,7 +660,7 @@ fn generated_scripts_only_offer_long_form_flags() {
         let script = shell.script(&profiles);
         match shell {
             ShellIntegration::Bash => assert!(script.contains(
-                "terminal-size sessions init serial http tftp notify --help --version --config --keymap --profile'"
+                "terminal-size sessions init serial http tftp notify copy paste --help --version --config --keymap --profile'"
             )),
             ShellIntegration::Fish => {
                 assert!(script.contains("-l profile -r"));
