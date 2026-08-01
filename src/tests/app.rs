@@ -36,6 +36,18 @@ fn pane_resize_keeps_the_window_large_enough_for_client_controls() {
 }
 
 #[test]
+fn pane_resize_window_target_waits_for_the_platform_to_catch_up() {
+    let requested = size(px(820.), px(600.));
+
+    assert!(resize_window_target_settled(None, requested));
+    assert!(!resize_window_target_settled(
+        Some(requested),
+        size(px(800.), px(600.))
+    ));
+    assert!(resize_window_target_settled(Some(requested), requested));
+}
+
+#[test]
 fn mouse_window_resize_clamps_each_dimension_to_the_minimum() {
     assert_eq!(
         clamp_window_size_to_minimum(size(px(400.), px(500.))),
