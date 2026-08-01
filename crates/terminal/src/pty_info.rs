@@ -84,6 +84,7 @@ pub(crate) struct PtyProcessInfo {
     last_foreground_pid: Mutex<Option<Pid>>,
     pub(crate) current: RwLock<Option<ProcessInfo>>,
     task: Mutex<Option<Task<()>>>,
+    refresh_pending: Mutex<bool>,
     last_refresh: Mutex<Option<Instant>>,
     // ConPTY only exposes the PID of the process it spawned (the shell); unlike
     // Unix's `tcgetpgrp`, there is no OS primitive to ask which process currently
@@ -96,8 +97,13 @@ pub(crate) struct PtyProcessInfo {
 const PROCESS_INFO_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 
 fn process_refresh_due(last_refresh: Option<Instant>, now: Instant) -> bool {
-    last_refresh
-        .is_none_or(|last| now.saturating_duration_since(last) >= PROCESS_INFO_REFRESH_INTERVAL)
+    process_refresh_delay(last_refresh, now).is_zero()
+}
+
+fn process_refresh_delay(last_refresh: Option<Instant>, now: Instant) -> Duration {
+    last_refresh.map_or(Duration::ZERO, |last| {
+        PROCESS_INFO_REFRESH_INTERVAL.saturating_sub(now.saturating_duration_since(last))
+    })
 }
 
 impl PtyProcessInfo {
@@ -129,6 +135,7 @@ impl PtyProcessInfo {
             last_foreground_pid: Mutex::new(None),
             current: RwLock::new(None),
             task: Mutex::new(None),
+            refresh_pending: Mutex::new(false),
             last_refresh: Mutex::new(None),
             #[cfg(windows)]
             descendant_tree: RwLock::new(System::new()),
@@ -272,15 +279,26 @@ impl PtyProcessInfo {
     /// Updates the cached process info, emitting a [`Event::TitleChanged`] event if the Zed-relevant info has changed
     pub(crate) fn emit_title_changed_if_changed(self: &Arc<Self>, cx: &mut Context<'_, Terminal>) {
         if self.task.lock().is_some() {
+            *self.refresh_pending.lock() = true;
             return;
         }
         let foreground_pid_changed = self.cheap_foreground_pid_changed();
-        let refresh_due = process_refresh_due(*self.last_refresh.lock(), Instant::now());
-        if !foreground_pid_changed && !refresh_due {
-            return;
-        }
+        let now = Instant::now();
+        let last_refresh = *self.last_refresh.lock();
+        let refresh_delay = if foreground_pid_changed || process_refresh_due(last_refresh, now) {
+            Duration::ZERO
+        } else {
+            process_refresh_delay(last_refresh, now)
+        };
         let this = self.clone();
+        let executor = cx.background_executor().clone();
         let has_changed = cx.background_executor().spawn(async move {
+            if !refresh_delay.is_zero() {
+                executor.timer(refresh_delay).await;
+            }
+            // Wakeups received before this scan are covered by it. Only a
+            // wakeup racing with the scan itself needs another pass.
+            *this.refresh_pending.lock() = false;
             let previous = this.current.read().clone();
             let current = this.load();
             let has_changed = match (previous.as_ref(), current.as_ref()) {
@@ -302,6 +320,9 @@ impl PtyProcessInfo {
             }
             if let Some(this) = this.upgrade() {
                 this.task.lock().take();
+                if std::mem::take(&mut *this.refresh_pending.lock()) {
+                    term.update(cx, Terminal::refresh_foreground_process).ok();
+                }
             }
         }));
     }
@@ -311,7 +332,7 @@ impl PtyProcessInfo {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -329,12 +350,28 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn throttled_process_refreshes_are_deferred() {
+        let now = Instant::now();
+
+        assert_eq!(process_refresh_delay(None, now), Duration::ZERO);
+        assert_eq!(
+            process_refresh_delay(Some(now), now + Duration::from_millis(200)),
+            Duration::from_millis(300)
+        );
+        assert_eq!(
+            process_refresh_delay(Some(now), now + PROCESS_INFO_REFRESH_INTERVAL),
+            Duration::ZERO
+        );
+    }
+
     /// Regression test for <https://github.com/zed-industries/zed/issues/58651>:
     /// on Linux, sysinfo keeps an open `/proc/<pid>/stat` handle for every
     /// `Process` entry retained in a `System`, and never evicts entries that are
     /// absent from the refreshed pid set. The per-terminal `System` must
     /// therefore not snapshot every process on the machine, nor accumulate an
     /// entry per foreground process that has ever run in this terminal.
+    #[cfg(unix)]
     #[test]
     #[allow(
         clippy::disallowed_methods,
