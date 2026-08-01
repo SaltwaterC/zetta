@@ -839,15 +839,34 @@ impl NotifyCommand {
         if let Some(app_name) = &self.app_name {
             notification.appname(app_name);
         }
-        let icon = match &self.icon {
-            Some(icon) => icon.clone(),
-            None => default_notification_icon_path()?
-                .to_string_lossy()
-                .into_owned(),
-        };
-        notification.image_path(&icon);
         #[cfg(target_os = "windows")]
-        register_windows_notification_identity(&mut notification, Path::new(&icon));
+        {
+            // notify-rust's Windows backend has no small "app logo" placement -
+            // any icon passed to `image_path` renders as a large image below
+            // the notification text. That's right for a user's deliberately
+            // attached `--icon`, but Zetta's default icon shouldn't also be
+            // shown that way: `register_windows_notification_identity` already
+            // makes it appear correctly-sized next to the app name via the
+            // AUMID registration, so only attach an inline image when the user
+            // explicitly asked for one.
+            register_windows_notification_identity(
+                &mut notification,
+                &default_notification_icon_path()?,
+            );
+            if let Some(icon) = &self.icon {
+                notification.image_path(icon);
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let icon = match &self.icon {
+                Some(icon) => icon.clone(),
+                None => default_notification_icon_path()?
+                    .to_string_lossy()
+                    .into_owned(),
+            };
+            notification.image_path(&icon);
+        }
         let bundled_sound = self
             .sound
             .as_deref()
