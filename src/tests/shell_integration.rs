@@ -115,6 +115,45 @@ fn pbcopy_and_pbpaste_are_gated_to_non_macos_platforms() {
     assert!(powershell.contains("Remove-Item -Path Alias:pbcopy,Alias:pbpaste"));
 }
 
+// Regression test: zsh expands an active alias while parsing a `name() {
+// ... }` function definition of the same name, which fails to parse
+// ("defining function based on alias") even when a preceding `unalias`
+// removes it, because the whole `case` branch is parsed as one unit before
+// any of it runs. `zsh -n` (syntax check only) does not catch this, since it
+// depends on the alias actually being defined; only executing the script
+// with a preexisting pbcopy/pbpaste alias (as a real user's zshrc would
+// have) reproduces it. Zetta must use `function name { ... }` there instead.
+#[test]
+fn zsh_accepts_the_generated_integration_with_a_preexisting_pbcopy_alias() {
+    let script = ShellIntegration::Zsh.script(&profiles());
+    let combined = format!(
+        "alias pbcopy='xclip -selection clipboard'\nalias pbpaste='xclip -selection clipboard -o'\n{script}"
+    );
+
+    let mut child = match std::process::Command::new("zsh")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => panic!("failed to launch zsh: {error}"),
+    };
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(combined.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "zsh rejected the generated integration with a preexisting pbcopy/pbpaste alias:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn sound_completion_calls_a_shared_helper_from_every_call_site() {
     let profiles = profiles();

@@ -1028,13 +1028,18 @@ zpaste() { zetta paste "$@"; }
 # Real pbcopy/pbpaste already exist on macOS, so Zetta leaves them alone
 # there. Elsewhere, Zetta's pbcopy/pbpaste keep the muscle memory working;
 # any preexisting pbcopy/pbpaste alias (eg. one pointing at xclip) is
-# removed first so Zetta's functions take priority over it.
+# removed first so Zetta's functions take priority over it. The `function
+# name { ... }` form (rather than `name() { ... }`) is required here: zsh
+# expands an active alias while parsing a `name() { ... }` definition of the
+# same name, which fails to parse ("defining function based on alias") even
+# though the preceding unalias runs first, because the whole case branch is
+# parsed as one unit before any of it executes.
 case "$OSTYPE" in
     darwin*) ;;
     *)
         unalias pbcopy pbpaste 2>/dev/null
-        pbcopy() { zetta copy "$@"; }
-        pbpaste() { zetta paste "$@"; }
+        function pbcopy { zetta copy "$@"; }
+        function pbpaste { zetta paste "$@"; }
         ;;
 esac
 
