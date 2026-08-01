@@ -24,7 +24,7 @@ gpui = { path = "../../zed/crates/gpui", default-features = false }
 gpui_macos = { path = "../../zed/crates/gpui_macos", default-features = false }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-gpui_windows = { path = "../../zed/crates/gpui_windows", default-features = false }
+gpui_windows = { path = "../gpui_windows", default-features = false }
 gpui = { path = "../../zed/crates/gpui", default-features = false, features = ["windows-manifest"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]

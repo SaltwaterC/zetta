@@ -16,3 +16,7 @@ baseline was `90b3aa0b3bd3b453775b11a386907c7ac9acd997`.
 
 No upstream `terminal` source changes occurred in this revision range. No
 upstream changes affected the compiled standalone `terminal_view` renderer.
+
+`gpui_windows` was forked at this revision (previously used directly from the
+`zed/` submodule) to carry a `WindowsWindow::zoom` fix; see
+`../gpui_windows/UPSTREAM.md` for the patch this fork must retain.
