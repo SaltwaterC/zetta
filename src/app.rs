@@ -279,18 +279,9 @@ pub(crate) fn enforce_minimum_window_size(window: &mut Window) {
     }
 }
 
-/// Whether the platform has caught up with the last programmatic resize we
-/// asked for. `pending` is the size passed to the most recent `window.resize`
-/// call driven by pane-resize-mode; platform resizes are not applied
-/// synchronously, so `current` (the window's live bounds) can still reflect
-/// an older size for a while after that call returns.
-fn resize_window_target_settled(pending: Option<Size<Pixels>>, current: Size<Pixels>) -> bool {
-    pending.is_none_or(|pending| current == pending)
-}
-
-fn resize_window(window: &mut Window, resize: WindowResize, cx: &App) -> Option<Size<Pixels>> {
+fn resize_window(window: &mut Window, resize: WindowResize, cx: &App) -> bool {
     if resize.width_delta == 0. && resize.height_delta == 0. {
-        return None;
+        return false;
     }
     let bounds = window.bounds();
     let current_width = f32::from(bounds.size.width);
@@ -352,12 +343,11 @@ fn resize_window(window: &mut Window, resize: WindowResize, cx: &App) -> Option<
         || ((requested_width - current_width).abs() < f32::EPSILON
             && (requested_height - current_height).abs() < f32::EPSILON)
     {
-        return None;
+        return false;
     }
 
-    let requested_size = size(px(requested_width), px(requested_height));
-    window.resize(requested_size);
-    Some(requested_size)
+    window.resize(size(px(requested_width), px(requested_height)));
+    true
 }
 
 pub(crate) struct Zetta {
@@ -409,7 +399,6 @@ pub(crate) struct Zetta {
     pane_resize_keys: PaneResizeKeys,
     pane_resize_repeat_generation: u64,
     pane_resize_drag: Option<PaneResizeDrag>,
-    pane_resize_pending_window_size: Option<Size<Pixels>>,
     pub(crate) titlebar_dragging: bool,
     pub(crate) button_layout: WindowButtonLayout,
     pub(crate) performance_overlay: Option<PerformanceOverlay>,
@@ -612,7 +601,6 @@ impl Zetta {
             pane_resize_keys: PaneResizeKeys::default(),
             pane_resize_repeat_generation: 0,
             pane_resize_drag: None,
-            pane_resize_pending_window_size: None,
             titlebar_dragging: false,
             button_layout,
             performance_overlay: None,
@@ -2347,7 +2335,6 @@ impl Zetta {
         self.pane_resize_keys.clear();
         self.cancel_pane_resize_repeat();
         self.pane_resize_drag = None;
-        self.pane_resize_pending_window_size = None;
         let input_enabled = pane_input_enabled(self.pane_resize_mode);
         for view in self
             .tabs
@@ -2684,26 +2671,7 @@ impl Zetta {
             changed |= layout_changed;
             window_resize.add(SplitAxis::Horizontal, window_delta);
         }
-        // A resize the platform hasn't acknowledged yet (window.bounds() has not
-        // caught up to the size we last requested) must be allowed to land before
-        // requesting another one. Wayland's window geometry and buffer size are
-        // negotiated independently; piling up back-to-back programmatic resizes
-        // before the previous one is applied can commit a buffer that no longer
-        // matches the geometry already sent to the compositor, which some
-        // compositors treat as a protocol error and respond to by destroying the
-        // surface outright. This mostly surfaces under fast keyboard repeat (see
-        // PANE_RESIZE_REPEAT_INTERVAL) on compositors with extra latency, such as
-        // WSLg, where the previous resize is less likely to have settled in time.
-        let previous_resize_settled = resize_window_target_settled(
-            self.pane_resize_pending_window_size,
-            window.bounds().size,
-        );
-        if previous_resize_settled
-            && let Some(requested_size) = resize_window(window, window_resize, cx)
-        {
-            self.pane_resize_pending_window_size = Some(requested_size);
-            changed = true;
-        }
+        changed |= resize_window(window, window_resize, cx);
         if changed {
             // The next terminal size change is driven by pane geometry, so do
             // not synchronously reflow retained scrollback for every keypress.

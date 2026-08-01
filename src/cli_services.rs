@@ -784,11 +784,16 @@ fn default_notification_icon_path() -> Result<PathBuf> {
 // Register Zetta's own AUMID (idempotent; cheap enough to redo on every
 // `zetta notify` invocation, mirroring `register_app_user_model_id` in
 // crates/gpui_windows/src/system_notifications.rs) and point the toast at it.
+//
+// `IconUri` must be a plain path to an image file - unlike a shortcut's
+// `IconLocation`, it does not understand the `<path>,<index>` resource syntax,
+// so pointing it at the exe itself silently produces a blank icon. Reuse the
+// same on-disk icon already passed to `Notification::image_path`.
 #[cfg(all(feature = "notifications", target_os = "windows"))]
-fn register_windows_notification_identity(notification: &mut notify_rust::Notification) {
-    let icon_uri = std::env::current_exe()
-        .ok()
-        .map(|exe| format!("{},0", exe.display()));
+fn register_windows_notification_identity(
+    notification: &mut notify_rust::Notification,
+    icon_path: &Path,
+) {
     let result = windows_registry::CURRENT_USER
         .create(format!(
             r"Software\Classes\AppUserModelId\{}",
@@ -796,10 +801,8 @@ fn register_windows_notification_identity(notification: &mut notify_rust::Notifi
         ))
         .and_then(|key| {
             key.set_string("DisplayName", "Zetta")?;
-            if let Some(icon_uri) = &icon_uri {
-                key.set_string("IconUri", icon_uri)?;
-            }
-            Ok(())
+            key.set_string("IconBackgroundColor", "0")?;
+            key.set_hstring("IconUri", &icon_path.into())
         });
     if let Err(error) = result {
         eprintln!("zetta: failed to register AppUserModelID; notifications may not display correctly: {error}");
@@ -844,7 +847,7 @@ impl NotifyCommand {
         };
         notification.image_path(&icon);
         #[cfg(target_os = "windows")]
-        register_windows_notification_identity(&mut notification);
+        register_windows_notification_identity(&mut notification, Path::new(&icon));
         let bundled_sound = self
             .sound
             .as_deref()
