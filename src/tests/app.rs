@@ -19,6 +19,25 @@ fn pane_controls_idle_delay_resets_and_expires() {
 }
 
 #[test]
+fn pane_resize_window_resize_is_rate_limited_but_never_stuck() {
+    let start = Instant::now();
+
+    assert!(pane_resize_window_resize_allowed(None, start));
+    assert!(!pane_resize_window_resize_allowed(
+        Some(start),
+        start + Duration::from_millis(10)
+    ));
+    assert!(pane_resize_window_resize_allowed(
+        Some(start),
+        start + PANE_RESIZE_WINDOW_RESIZE_MIN_INTERVAL
+    ));
+    assert!(pane_resize_window_resize_allowed(
+        Some(start),
+        start + Duration::from_secs(5)
+    ));
+}
+
+#[test]
 fn pane_resize_combines_window_dimension_changes() {
     let mut resize = WindowResize::default();
     resize.add(SplitAxis::Vertical, 120.);

@@ -7,6 +7,17 @@ const MINIMUM_PANE_COLUMNS: usize = 2;
 const MINIMUM_PANE_ROWS: usize = 1;
 const PANE_RESIZE_REPEAT_DELAY: Duration = Duration::from_millis(400);
 const PANE_RESIZE_REPEAT_INTERVAL: Duration = Duration::from_millis(75);
+// Platform window resizes are applied asynchronously (a Wayland compositor
+// round-trip, for example), so issuing them faster than this can queue up
+// several in flight at once. On compositors with extra latency (WSLg) that
+// backlog can apply out of order and commit a render buffer smaller than the
+// window geometry already sent to the compositor, which is a protocol
+// violation some compositors respond to by destroying the surface outright.
+// This rate limit is intentionally below PANE_RESIZE_REPEAT_INTERVAL so it
+// does not slow down the normal two-key held-resize cadence; it only kicks in
+// for single-key resizes, whose repeat rate is set by the OS and can be much
+// faster.
+const PANE_RESIZE_WINDOW_RESIZE_MIN_INTERVAL: Duration = Duration::from_millis(50);
 const PANE_RESIZE_GUTTER_SIZE: Pixels = px(20.);
 const PANE_SPLIT_SEPARATOR_SIZE: Pixels = px(1.);
 
@@ -78,6 +89,15 @@ fn pane_controls_hide_delay(last_motion: Instant, now: Instant) -> Option<Durati
     let elapsed = now.saturating_duration_since(last_motion);
     let remaining = PANE_CONTROLS_IDLE_DELAY.checked_sub(elapsed)?;
     (!remaining.is_zero()).then_some(remaining)
+}
+
+/// Whether enough time has passed since the last programmatic window resize
+/// issued from pane-resize-mode to safely issue another one. `last_resize` is
+/// `None` when no resize has been requested yet, or after resize mode ends.
+fn pane_resize_window_resize_allowed(last_resize: Option<Instant>, now: Instant) -> bool {
+    last_resize.is_none_or(|last_resize| {
+        now.saturating_duration_since(last_resize) >= PANE_RESIZE_WINDOW_RESIZE_MIN_INTERVAL
+    })
 }
 
 fn toggle_hidden_pane_controls(hidden_panes: &mut HashSet<u64>, pane_ids: &[u64]) -> bool {
@@ -399,6 +419,7 @@ pub(crate) struct Zetta {
     pane_resize_keys: PaneResizeKeys,
     pane_resize_repeat_generation: u64,
     pane_resize_drag: Option<PaneResizeDrag>,
+    pane_resize_last_window_resize_at: Option<Instant>,
     pub(crate) titlebar_dragging: bool,
     pub(crate) button_layout: WindowButtonLayout,
     pub(crate) performance_overlay: Option<PerformanceOverlay>,
@@ -601,6 +622,7 @@ impl Zetta {
             pane_resize_keys: PaneResizeKeys::default(),
             pane_resize_repeat_generation: 0,
             pane_resize_drag: None,
+            pane_resize_last_window_resize_at: None,
             titlebar_dragging: false,
             button_layout,
             performance_overlay: None,
@@ -2335,6 +2357,7 @@ impl Zetta {
         self.pane_resize_keys.clear();
         self.cancel_pane_resize_repeat();
         self.pane_resize_drag = None;
+        self.pane_resize_last_window_resize_at = None;
         let input_enabled = pane_input_enabled(self.pane_resize_mode);
         for view in self
             .tabs
@@ -2671,7 +2694,13 @@ impl Zetta {
             changed |= layout_changed;
             window_resize.add(SplitAxis::Horizontal, window_delta);
         }
-        changed |= resize_window(window, window_resize, cx);
+        let now = Instant::now();
+        if pane_resize_window_resize_allowed(self.pane_resize_last_window_resize_at, now)
+            && resize_window(window, window_resize, cx)
+        {
+            self.pane_resize_last_window_resize_at = Some(now);
+            changed = true;
+        }
         if changed {
             // The next terminal size change is driven by pane geometry, so do
             // not synchronously reflow retained scrollback for every keypress.
