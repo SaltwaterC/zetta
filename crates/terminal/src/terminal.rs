@@ -3965,7 +3965,10 @@ mod tests {
             reported_foreground_command_from_title("zetta-cmd:bash"),
             Some("bash".to_owned())
         );
-        assert_eq!(reported_foreground_command_from_title("ordinary title"), None);
+        assert_eq!(
+            reported_foreground_command_from_title("ordinary title"),
+            None
+        );
         assert_eq!(
             reported_foreground_command_from_title("zetta-cmd:with\ncontrol"),
             None

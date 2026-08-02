@@ -132,6 +132,12 @@ equivalent shortcut and retains TFTP command completion.
 system of the current platform: D-Bus on Linux and BSD, Notification Center on
 macOS, and toast notifications on Windows.
 
+On macOS, an installed CLI transparently submits notifications through the
+signed `Zetta.app` bundle and the modern `UNUserNotificationCenter` API. The
+first invocation asks macOS for notification permission. Standalone development
+builds fall back to macOS's bundled script host, so they do not require an app
+bundle merely to show a notification.
+
 ```sh
 zetta notify "Build finished"
 zetta notify "Build finished" "All tests passed"
@@ -155,9 +161,9 @@ configured at all. Any other value is passed through as a platform-specific
 system sound name instead (for example a freedesktop sound-theme name such as
 `message-new-instant` on Linux, a system sound name such as `Glass` on macOS,
 or a toast sound identifier such as `IM` on Windows) and only plays if the
-platform recognizes it. Playing a built-in tone briefly blocks `zetta notify`
-until the tone finishes (well under a second); passthrough sound names do not
-block, since the OS notification server plays those itself.
+platform recognizes it. On macOS, Notification Center owns playback of system
+sound names, while Zetta's built-in tones continue asynchronously after
+`zetta notify` exits.
 
 With [shell integration](shell-integration.md) enabled, `zntfy` is an
 equivalent shortcut and retains notification command completion.

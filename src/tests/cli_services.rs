@@ -97,6 +97,61 @@ fn default_notification_icon_is_cached_and_kept_up_to_date() {
     assert_eq!(std::fs::read(&path).unwrap(), *expected);
 }
 
+#[cfg(all(feature = "notifications", target_os = "macos"))]
+#[test]
+fn macos_bundle_executable_resolves_a_cli_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().unwrap();
+    let executable = directory.path().join("Zetta.app/Contents/MacOS/zetta");
+    std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+    std::fs::write(&executable, b"test executable").unwrap();
+    let cli_link = directory.path().join("zetta");
+    symlink(&executable, &cli_link).unwrap();
+    let standalone = directory.path().join("standalone-zetta");
+    std::fs::write(&standalone, b"standalone executable").unwrap();
+
+    assert_eq!(
+        macos_bundle_executable(&cli_link),
+        executable.canonicalize().ok()
+    );
+    assert_eq!(macos_bundle_executable(&standalone), None);
+}
+
+#[cfg(all(feature = "notifications", target_os = "macos"))]
+#[test]
+fn macos_only_attaches_an_explicit_notification_icon() {
+    let mut command = NotifyCommand {
+        summary: "Build finished".to_owned(),
+        body: None,
+        app_name: None,
+        icon: None,
+        sound: None,
+        timeout: None,
+    };
+    assert_eq!(macos_notification_attachment(&command), None);
+
+    command.icon = Some("custom.png".to_owned());
+    assert_eq!(macos_notification_attachment(&command), Some("custom.png"));
+}
+
+#[cfg(all(feature = "notifications", target_os = "macos"))]
+#[test]
+fn macos_routes_system_sounds_through_notification_center() {
+    let mut command = NotifyCommand {
+        summary: "Build finished".to_owned(),
+        body: None,
+        app_name: None,
+        icon: None,
+        sound: Some("Ping".to_owned()),
+        timeout: None,
+    };
+    assert_eq!(macos_notification_sound(&command), Some("Ping"));
+
+    command.sound = Some("zetta-alarm".to_owned());
+    assert_eq!(macos_notification_sound(&command), None);
+}
+
 #[cfg(feature = "serial-console")]
 #[test]
 fn serial_console_parser_uses_the_panel_defaults_and_accepts_all_settings() {

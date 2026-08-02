@@ -14,7 +14,7 @@ serial-console = ["dep:serialport"]
 http-server = []
 tftp-server = []
 tftp-client = []
-notifications = ["dep:notify-rust", "dep:cpal"]
+notifications = ["dep:notify-rust", "dep:cpal", "dep:mac-usernotifications"]
 clipboard = ["dep:arboard"]
 
 [[bin]]
@@ -30,13 +30,12 @@ libc = "0.2"
 async-compression = { version = "0.4", features = ["gzip", "futures-io"] }
 async-tar = "0.6"
 assets = { path = "zed/crates/assets" }
-cpal = { version = "0.16", optional = true }
 futures = "0.3"
 getrandom = "0.3"
 gpui = { path = "zed/crates/gpui" }
 gpui_platform = { path = "crates/gpui_platform", features = ["font-kit"] }
 menu = { path = "zed/crates/menu" }
-notify-rust = { version = "4", optional = true }
+notify-rust = { version = "4", features = ["preview-macos-un"], optional = true }
 release_channel = { path = "zed/crates/release_channel" }
 reqwest_client = { path = "zed/crates/reqwest_client" }
 rust-embed = "8"
@@ -74,6 +73,12 @@ windows = { version = "0.61", features = [
     "Win32_UI_Shell_Common",
     "Win32_UI_Shell_PropertiesSystem",
 ] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+cpal = { version = "0.16", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+mac-usernotifications = { version = "0.3.1", features = ["blocking-wrappers"], optional = true }
 
 [build-dependencies]
 embed-resource = "3"

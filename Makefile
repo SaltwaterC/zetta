@@ -114,7 +114,9 @@ install:
 install-binary:
 	mkdir -p "$(MAC_BUNDLE)/Contents/MacOS" "$(BINDIR)"
 	$(INSTALL) -m 755 target/release/zetta "$(MAC_BUNDLE)/Contents/MacOS/zetta"
-	ln -sfn "$(MAC_RUNTIME_BUNDLE)/Contents/MacOS/zetta" "$(MAC_CLI_PATH)"
+	$(RM) "$(MAC_CLI_PATH)"
+	sed 's|@MAC_RUNTIME_BUNDLE@|$(MAC_RUNTIME_BUNDLE)|g' resources/macos/zetta-cli.in > "$(MAC_CLI_PATH)"
+	chmod 755 "$(MAC_CLI_PATH)"
 
 install-capabilities:
 

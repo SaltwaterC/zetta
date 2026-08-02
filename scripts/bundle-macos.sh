@@ -18,5 +18,6 @@ mkdir -p "$resources_path"
 sips -s format icns "$icon_source" --out "$resources_path/Zetta.icns" >/dev/null
 sed "s/@VERSION@/$version/g" "$plist_template" > "$bundle_path/Contents/Info.plist"
 plutil -lint "$bundle_path/Contents/Info.plist" >/dev/null
+codesign --force --deep --sign - "$bundle_path" >/dev/null
 
 echo "Created application bundle: $bundle_path"

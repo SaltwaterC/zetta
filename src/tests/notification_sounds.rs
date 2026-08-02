@@ -79,3 +79,43 @@ fn rendered_tone_notes_start_and_end_at_exactly_zero_amplitude() {
         );
     }
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_wav_output_is_pcm_with_the_rendered_sample_count() {
+    let samples = vec![0.0, 0.5, -0.5];
+    let mut wav = Vec::new();
+    write_wav(&mut wav, 44_100, &samples).unwrap();
+
+    assert_eq!(&wav[..4], b"RIFF");
+    assert_eq!(&wav[8..16], b"WAVEfmt ");
+    assert_eq!(&wav[36..40], b"data");
+    assert_eq!(u32::from_le_bytes(wav[40..44].try_into().unwrap()), 6);
+    assert_eq!(wav.len(), 44 + samples.len() * 2);
+    assert_eq!(i16::from_le_bytes(wav[44..46].try_into().unwrap()), 0);
+    assert_eq!(i16::from_le_bytes(wav[46..48].try_into().unwrap()), 16_384);
+    assert_eq!(i16::from_le_bytes(wav[48..50].try_into().unwrap()), -16_384);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_builtin_sound_is_cached_with_trailing_silence() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = prepare_macos_builtin_sound(BuiltinSound::Alarm, directory.path()).unwrap();
+    let wav = std::fs::read(&path).unwrap();
+    let data_size = u32::from_le_bytes(wav[40..44].try_into().unwrap()) as usize;
+    let rendered_samples = BuiltinSound::Alarm.samples(44_100).len();
+    let trailing_samples = 44_100 * 200 / 1000;
+
+    assert_eq!(path.file_name().unwrap(), "zetta-alarm-v1.wav",);
+    assert_eq!(data_size, (rendered_samples + trailing_samples) * 2);
+    assert!(
+        wav[wav.len() - trailing_samples * 2..]
+            .iter()
+            .all(|byte| *byte == 0)
+    );
+    assert_eq!(
+        prepare_macos_builtin_sound(BuiltinSound::Alarm, directory.path()).unwrap(),
+        path
+    );
+}

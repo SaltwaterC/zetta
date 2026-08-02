@@ -10,12 +10,12 @@ use rust_embed::RustEmbed;
 #[exclude = "**/*:Zone.Identifier"]
 struct ZettaEmbeddedAssets;
 
-/// The default icon shown with a `zetta notify` notification when `--icon`
-/// is not given.
-#[cfg(feature = "notifications")]
+/// The default notification icon on platforms that do not derive the small
+/// identity icon from an application bundle.
+#[cfg(all(feature = "notifications", any(not(target_os = "macos"), test)))]
 pub(crate) const NOTIFICATION_ICON_ASSET_PATH: &str = "icons/zetta-terminal-icon-128.png";
 
-#[cfg(feature = "notifications")]
+#[cfg(all(feature = "notifications", any(not(target_os = "macos"), test)))]
 pub(crate) fn embedded_notification_icon() -> Option<Cow<'static, [u8]>> {
     ZettaEmbeddedAssets::get(NOTIFICATION_ICON_ASSET_PATH).map(|asset| asset.data)
 }

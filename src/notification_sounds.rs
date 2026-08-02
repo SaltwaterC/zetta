@@ -1,8 +1,21 @@
+#[cfg(not(target_os = "macos"))]
 use std::sync::{Arc, Condvar, Mutex};
+#[cfg(not(target_os = "macos"))]
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
+#[cfg(not(target_os = "macos"))]
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+#[cfg(target_os = "macos")]
+use std::fs;
+#[cfg(target_os = "macos")]
+use std::io::Write;
+#[cfg(target_os = "macos")]
+use std::os::unix::process::CommandExt as _;
+#[cfg(target_os = "macos")]
+use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::process::{Command, Stdio};
 
 /// The built-in notification tones bundled with Zetta. Unlike a system sound
 /// name (which the OS notification server resolves against its own sound
@@ -56,6 +69,26 @@ impl BuiltinSound {
     }
 
     pub(crate) fn play(self) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            self.play_with_afplay()
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.play_with_cpal()
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn play_with_afplay(self) -> Result<()> {
+        let audio_path = prepare_macos_builtin_sound(self, &crate::config::platform_config_dir())?;
+        spawn_afplay(&audio_path).context("starting macOS notification audio")?;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn play_with_cpal(self) -> Result<()> {
         // Output is buffered: the callback fills audio somewhat ahead of when
         // it is physically played, so hardware is typically still draining
         // real audio when the callback writes its last real sample. Padding
@@ -113,6 +146,83 @@ impl BuiltinSound {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn spawn_afplay(path: &Path) -> std::io::Result<()> {
+    // afplay owns CoreAudio playback after it starts, so the short-lived CLI
+    // does not need to wait for the sound's full duration. The persistent
+    // cached WAV remains valid after Zetta exits and includes trailing silence
+    // to avoid clipping.
+    Command::new("/usr/bin/afplay")
+        .arg(path)
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+}
+
+#[cfg(target_os = "macos")]
+fn prepare_macos_builtin_sound(sound: BuiltinSound, config_dir: &Path) -> Result<PathBuf> {
+    const SAMPLE_RATE: u32 = 44_100;
+    const TRAILING_SILENCE_MILLISECONDS: u32 = 200;
+
+    let directory = config_dir.join("notification-sounds");
+    // Bump the suffix if the waveform or WAV encoding changes. An immutable,
+    // versioned path lets the common path avoid regenerating or reading audio.
+    let path = directory.join(format!("{}-v1.wav", sound.name()));
+    if path.is_file() {
+        return Ok(path);
+    }
+
+    fs::create_dir_all(&directory).with_context(|| format!("creating {}", directory.display()))?;
+    let mut samples = sound.samples(SAMPLE_RATE);
+    samples.extend(std::iter::repeat_n(
+        0.0,
+        (SAMPLE_RATE as u64 * TRAILING_SILENCE_MILLISECONDS as u64 / 1000) as usize,
+    ));
+    let mut temporary = tempfile::NamedTempFile::new_in(&directory)
+        .context("creating cached notification audio")?;
+    write_wav(temporary.as_file_mut(), SAMPLE_RATE, &samples)
+        .context("writing cached notification audio")?;
+    temporary
+        .as_file_mut()
+        .flush()
+        .context("flushing cached notification audio")?;
+    match temporary.persist_noclobber(&path) {
+        Ok(_) => {}
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            return Err(error.error).with_context(|| format!("persisting {}", path.display()));
+        }
+    }
+    Ok(path)
+}
+
+#[cfg(target_os = "macos")]
+fn write_wav(writer: &mut impl Write, sample_rate: u32, samples: &[f32]) -> std::io::Result<()> {
+    let data_size = samples.len() as u32 * 2;
+    let riff_size = 36 + data_size;
+    writer.write_all(b"RIFF")?;
+    writer.write_all(&riff_size.to_le_bytes())?;
+    writer.write_all(b"WAVEfmt ")?;
+    writer.write_all(&16u32.to_le_bytes())?;
+    writer.write_all(&1u16.to_le_bytes())?;
+    writer.write_all(&1u16.to_le_bytes())?;
+    writer.write_all(&sample_rate.to_le_bytes())?;
+    writer.write_all(&(sample_rate * 2).to_le_bytes())?;
+    writer.write_all(&2u16.to_le_bytes())?;
+    writer.write_all(&16u16.to_le_bytes())?;
+    writer.write_all(b"data")?;
+    writer.write_all(&data_size.to_le_bytes())?;
+    for sample in samples {
+        let sample = (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
+        writer.write_all(&sample.to_le_bytes())?;
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
 fn build_stream<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,

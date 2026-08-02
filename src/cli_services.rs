@@ -8,7 +8,7 @@ use std::env;
     feature = "clipboard"
 ))]
 use std::ffi::OsString;
-#[cfg(feature = "notifications")]
+#[cfg(all(feature = "notifications", any(not(target_os = "macos"), test)))]
 use std::fs;
 #[cfg(any(
     feature = "serial-console",
@@ -25,6 +25,8 @@ use std::path::Path;
     feature = "notifications"
 ))]
 use std::path::PathBuf;
+#[cfg(all(feature = "notifications", target_os = "macos"))]
+use std::process::Command;
 #[cfg(feature = "serial-console")]
 use std::sync::{
     Arc,
@@ -772,7 +774,7 @@ fn parse_notify_timeout(value: &str) -> Result<notify_rust::Timeout> {
     })
 }
 
-#[cfg(feature = "notifications")]
+#[cfg(all(feature = "notifications", not(target_os = "macos")))]
 fn default_notification_icon_path() -> Result<PathBuf> {
     write_default_notification_icon(&crate::config::platform_config_dir())
 }
@@ -805,16 +807,17 @@ fn register_windows_notification_identity(
             key.set_hstring("IconUri", &icon_path.into())
         });
     if let Err(error) = result {
-        eprintln!("zetta: failed to register AppUserModelID; notifications may not display correctly: {error}");
+        eprintln!(
+            "zetta: failed to register AppUserModelID; notifications may not display correctly: {error}"
+        );
     }
     notification.app_id(crate::ZETTA_APP_ID);
 }
 
-// Notification backends (D-Bus, mac-notification-sys, winrt-notification) all
-// take an icon as a filesystem path rather than raw bytes, so the icon
-// embedded via ZettaEmbeddedAssets is cached on disk once and reused rather
-// than rewritten on every `zetta notify` invocation.
-#[cfg(feature = "notifications")]
+// D-Bus and winrt-notification take an icon as a filesystem path rather than
+// raw bytes, so the icon embedded via ZettaEmbeddedAssets is cached on disk
+// once and reused rather than rewritten on every `zetta notify` invocation.
+#[cfg(all(feature = "notifications", any(not(target_os = "macos"), test)))]
 fn write_default_notification_icon(config_dir: &Path) -> Result<PathBuf> {
     let icon = crate::zetta_assets::embedded_notification_icon()
         .context("embedded notification icon is missing")?;
@@ -828,9 +831,177 @@ fn write_default_notification_icon(config_dir: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
+#[cfg(all(feature = "notifications", target_os = "macos"))]
+const MACOS_NOTIFICATION_REEXEC_ENV: &str = "ZETTA_INTERNAL_NOTIFICATION_BUNDLE_REEXEC";
+
+#[cfg(all(feature = "notifications", target_os = "macos"))]
+fn macos_bundle_executable(path: &Path) -> Option<PathBuf> {
+    let executable = path.canonicalize().ok()?;
+    let macos = executable.parent()?;
+    let contents = macos.parent()?;
+    let bundle = contents.parent()?;
+    (macos.file_name()? == "MacOS"
+        && contents.file_name()? == "Contents"
+        && bundle
+            .extension()
+            .is_some_and(|extension| extension == "app"))
+    .then_some(executable)
+}
+
+/// A process entered through `/usr/local/bin/zetta` does not inherit the
+/// bundle identity of the signed executable behind that symlink. Re-enter the
+/// exact same command through its canonical `.app` path so Notification Center
+/// sees Zetta's bundle identifier. Standalone development builds return false
+/// and use the script-host fallback below instead.
+#[cfg(all(feature = "notifications", target_os = "macos"))]
+fn rerun_notification_from_macos_bundle() -> Result<bool> {
+    if std::env::var_os(MACOS_NOTIFICATION_REEXEC_ENV).is_some() {
+        return Ok(false);
+    }
+    let current_executable = std::env::current_exe().context("locating the Zetta executable")?;
+    let Some(bundle_executable) = macos_bundle_executable(&current_executable) else {
+        return Ok(false);
+    };
+    let output = Command::new(&bundle_executable)
+        .args(std::env::args_os().skip(1))
+        .env(MACOS_NOTIFICATION_REEXEC_ENV, "1")
+        .output()
+        .with_context(|| {
+            format!(
+                "restarting notification command through {}",
+                bundle_executable.display()
+            )
+        })?;
+    if !output.status.success() {
+        let message = String::from_utf8_lossy(&output.stderr);
+        let message = message
+            .trim()
+            .strip_prefix("Zetta failed to start: ")
+            .unwrap_or(message.trim());
+        anyhow::bail!(
+            "{}",
+            if message.is_empty() {
+                format!(
+                    "bundled macOS notification command exited with {}",
+                    output.status
+                )
+            } else {
+                message.to_owned()
+            }
+        );
+    }
+    Ok(true)
+}
+
+/// `UNUserNotificationCenter` rejects binaries that are not inside an app
+/// bundle. Keep `target/debug/zetta notify` and other standalone copies useful
+/// by asking macOS's bundled script host to submit the notification instead.
+#[cfg(all(feature = "notifications", target_os = "macos"))]
+fn show_unbundled_macos_notification(command: &NotifyCommand, sound: Option<&str>) -> Result<()> {
+    const SCRIPT: &str = r#"
+function run(argv) {
+    const app = Application.currentApplication();
+    app.includeStandardAdditions = true;
+    const options = { withTitle: argv[0] };
+    if (argv[2]) options.subtitle = argv[2];
+    if (argv[3]) options.soundName = argv[3];
+    app.displayNotification(argv[1], options);
+}
+"#;
+    let status = Command::new("/usr/bin/osascript")
+        .args(["-l", "JavaScript", "-e", SCRIPT, "--"])
+        .arg(&command.summary)
+        .arg(command.body.as_deref().unwrap_or_default())
+        .arg(command.app_name.as_deref().unwrap_or("Zetta"))
+        .arg(sound.unwrap_or_default())
+        .status()
+        .context("showing an unbundled macOS desktop notification")?;
+    anyhow::ensure!(
+        status.success(),
+        "macOS notification script exited with {status}"
+    );
+    Ok(())
+}
+
+#[cfg(all(feature = "notifications", target_os = "macos"))]
+fn show_bundled_macos_notification(command: &NotifyCommand, sound: Option<&str>) -> Result<()> {
+    let authorized = mac_usernotifications::blocking::request_auth()
+        .map_err(|error| anyhow::anyhow!("{error}"))
+        .context("requesting macOS desktop notification authorization")?;
+    anyhow::ensure!(
+        authorized,
+        "macOS desktop notification authorization was denied; enable notifications for Zetta in System Settings"
+    );
+
+    let mut notification = mac_usernotifications::Notification::new()
+        .title(&command.summary)
+        .message(command.body.as_deref().unwrap_or_default())
+        .maybe_sound(sound);
+    // The signed app bundle already supplies the small Zetta identity icon.
+    // Only an explicit --icon is an attachment; adding the embedded icon here
+    // would render it a second time on the opposite side of the banner.
+    if let Some(icon) = macos_notification_attachment(command) {
+        notification = notification.image_path(icon);
+    }
+    mac_usernotifications::blocking::send(notification)
+        .map_err(|error| anyhow::anyhow!("{error}"))
+        .context("showing the desktop notification")?;
+    Ok(())
+}
+
+#[cfg(all(feature = "notifications", target_os = "macos"))]
+fn macos_notification_attachment(command: &NotifyCommand) -> Option<&str> {
+    command.icon.as_deref()
+}
+
+#[cfg(all(feature = "notifications", target_os = "macos"))]
+fn macos_notification_sound(command: &NotifyCommand) -> Option<&str> {
+    command
+        .sound
+        .as_deref()
+        .filter(|sound| crate::notification_sounds::BuiltinSound::parse(sound).is_none())
+}
+
 #[cfg(feature = "notifications")]
 impl NotifyCommand {
     fn run(&self) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            self.run_macos()
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.run_non_macos()
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn run_macos(&self) -> Result<()> {
+        if mac_usernotifications::check_bundle().is_err() && rerun_notification_from_macos_bundle()?
+        {
+            return Ok(());
+        }
+
+        let bundled_sound = self
+            .sound
+            .as_deref()
+            .and_then(crate::notification_sounds::BuiltinSound::parse);
+        let notification_sound = macos_notification_sound(self);
+
+        if mac_usernotifications::check_bundle().is_ok() {
+            show_bundled_macos_notification(self, notification_sound)?;
+        } else {
+            show_unbundled_macos_notification(self, notification_sound)?;
+        }
+        if let Some(sound) = bundled_sound {
+            sound.play()?;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn run_non_macos(&self) -> Result<()> {
         let mut notification = notify_rust::Notification::new();
         notification.summary(&self.summary);
         if let Some(body) = &self.body {
@@ -871,15 +1042,14 @@ impl NotifyCommand {
             .sound
             .as_deref()
             .and_then(crate::notification_sounds::BuiltinSound::parse);
-        if let Some(sound) = &self.sound
-            && bundled_sound.is_none()
-        {
+        let notification_sound = self.sound.as_deref().filter(|_| bundled_sound.is_none());
+        if let Some(sound) = notification_sound {
             notification.sound_name(sound);
         }
         if let Some(timeout) = self.timeout {
             notification.timeout(timeout);
         }
-        notification
+        let _notification_handle = notification
             .show()
             .map_err(|error| anyhow::anyhow!("{error}"))
             .context("showing the desktop notification")?;

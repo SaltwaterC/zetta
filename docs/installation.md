@@ -103,11 +103,11 @@ sudo make install
 ```
 
 This installs `/Applications/Zetta.app`, including the Zetta icon and the
-release binary, and creates `/usr/local/bin/zetta` pointing at the bundled
-executable. Ensure `/usr/local/bin` is in your `PATH`; then `zetta init` can
-configure the current shell or generate an integration script while Zetta is
-running. `sudo make uninstall` removes both the application bundle and the CLI
-entry point.
+release binary, and creates `/usr/local/bin/zetta` as a command-line launcher
+for the bundled executable. Ensure `/usr/local/bin` is in your `PATH`; then
+`zetta init` can configure the current shell or generate an integration script
+while Zetta is running. `sudo make uninstall` removes both the application
+bundle and the CLI entry point.
 
 ## Windows
 
