@@ -187,14 +187,14 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
         )
     );
 
-    #[cfg(feature = "wayland")]
+    #[cfg(all(feature = "wayland", any(target_os = "linux", target_os = "freebsd")))]
     assert!(help.contains("Wayland backend"));
-    #[cfg(not(feature = "wayland"))]
+    #[cfg(not(all(feature = "wayland", any(target_os = "linux", target_os = "freebsd"))))]
     assert!(!help.contains("Wayland backend"));
 
-    #[cfg(feature = "x11")]
+    #[cfg(all(feature = "x11", any(target_os = "linux", target_os = "freebsd")))]
     assert!(help.contains("X11 backend"));
-    #[cfg(not(feature = "x11"))]
+    #[cfg(not(all(feature = "x11", any(target_os = "linux", target_os = "freebsd"))))]
     assert!(!help.contains("X11 backend"));
 
     #[cfg(feature = "serial-console")]
