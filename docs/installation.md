@@ -45,6 +45,14 @@ without re-enabling `clipboard`) omits `zetta copy`, `zetta paste`, and the
 
 ## macOS build and runtime requirements
 
+Install Rust tooling via:
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+The tooling from Homebrew raises some challenges.
+
 macOS builds require CMake and the full Xcode installation. Install CMake with
 Homebrew or otherwise ensure that `cmake` is available on `PATH`:
 
@@ -67,6 +75,15 @@ directory provides it before building:
 xcrun --find metal
 ```
 
+Note:
+
+Metal needs to be installed if the Xcode version is not the full version or
+it was not installed during initial setup:
+
+```sh
+xcodebuild -downloadComponent MetalToolchain
+```
+
 The graphical application also requires a Metal-capable GPU at runtime. This
 is separate from the Metal compiler requirement above: installing Xcode makes
 the compiler available but does not provide a Metal device. Virtual machines
@@ -77,6 +94,20 @@ the reported display and Metal support with:
 ```sh
 system_profiler SPDisplaysDataType
 ```
+
+Install the application bundle and its command-line entry point with:
+
+```sh
+make build
+sudo make install
+```
+
+This installs `/Applications/Zetta.app`, including the Zetta icon and the
+release binary, and creates `/usr/local/bin/zetta` pointing at the bundled
+executable. Ensure `/usr/local/bin` is in your `PATH`; then `zetta init` can
+configure the current shell or generate an integration script while Zetta is
+running. `sudo make uninstall` removes both the application bundle and the CLI
+entry point.
 
 ## Windows
 

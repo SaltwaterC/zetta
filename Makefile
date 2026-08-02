@@ -2,7 +2,6 @@ CARGO ?= cargo
 ENV ?= env
 INSTALL ?= install
 SETCAP ?= setcap
-PREFIX ?= /usr
 DESTDIR ?=
 SERIAL ?= 1
 HTTP ?= 1
@@ -12,6 +11,13 @@ TFTP_CLIENT ?= $(TFTP)
 NOTIFY ?= 1
 CLIPBOARD ?= 1
 X11 ?= 0
+
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+PREFIX ?= /usr/local
+else
+PREFIX ?= /usr
+endif
 
 # Set any of SERIAL, HTTP, TFTP, TFTP_SERVER, TFTP_CLIENT, NOTIFY, or
 # CLIPBOARD to 0, false, no, or off to omit that tool from the built binary.
@@ -51,6 +57,11 @@ DATADIR := $(DESTDIR)$(PREFIX)/share
 APPLICATIONS_DIR := $(DATADIR)/applications
 ICON_128_DIR := $(DATADIR)/icons/hicolor/128x128/apps
 ICON_512_DIR := $(DATADIR)/icons/hicolor/512x512/apps
+VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+MAC_APPLICATIONS_DIR ?= /Applications
+MAC_BUNDLE := $(DESTDIR)$(MAC_APPLICATIONS_DIR)/$(APP_ID).app
+MAC_RUNTIME_BUNDLE := $(MAC_APPLICATIONS_DIR)/$(APP_ID).app
+MAC_CLI_PATH := $(DESTDIR)$(PREFIX)/bin/zetta
 
 .PHONY: build test install install-binary install-capabilities install-assets uninstall \
 	uninstall-binary uninstall-assets refresh-desktop-caches
@@ -81,6 +92,49 @@ uninstall-binary:
 
 uninstall-assets:
 	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Action UninstallShortcut
+
+refresh-desktop-caches:
+else ifeq ($(UNAME_S),Darwin)
+build:
+	$(ENV) -u DESTDIR $(CARGO) build --release --locked --no-default-features --features "$(BUILD_FEATURES)"
+
+install:
+	@if [ "$$(id -u)" -eq 0 ]; then \
+		test -x target/release/zetta || { \
+			echo "target/release/zetta is missing; run 'make build' without sudo first" >&2; \
+			exit 1; \
+		}; \
+	else \
+		$(MAKE) build; \
+	fi
+	$(MAKE) install-binary
+	$(MAKE) install-capabilities
+	$(MAKE) install-assets
+
+install-binary:
+	mkdir -p "$(MAC_BUNDLE)/Contents/MacOS" "$(BINDIR)"
+	$(INSTALL) -m 755 target/release/zetta "$(MAC_BUNDLE)/Contents/MacOS/zetta"
+	ln -sfn "$(MAC_RUNTIME_BUNDLE)/Contents/MacOS/zetta" "$(MAC_CLI_PATH)"
+
+install-capabilities:
+
+install-assets:
+	@test -x "$(MAC_BUNDLE)/Contents/MacOS/zetta" || { \
+		echo "$(MAC_BUNDLE)/Contents/MacOS/zetta is missing; run 'make install-binary' first" >&2; \
+		exit 1; \
+	}
+	scripts/bundle-macos.sh "$(MAC_BUNDLE)" "$(VERSION)"
+
+uninstall:
+	$(MAKE) uninstall-binary
+	$(MAKE) uninstall-assets
+
+uninstall-binary:
+	$(RM) "$(MAC_CLI_PATH)"
+	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zetta"
+
+uninstall-assets:
+	rm -rf "$(MAC_BUNDLE)"
 
 refresh-desktop-caches:
 else
