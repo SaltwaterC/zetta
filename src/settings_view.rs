@@ -235,6 +235,7 @@ impl Zetta {
                             .max_h(px(260.))
                             .overflow_y_scroll()
                             .track_scroll(&editor.dropdown_scroll)
+                            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
                             .p_1()
                             .rounded(px(4.))
                             .border_1()
