@@ -3212,6 +3212,8 @@ impl Zetta {
         self.profiles = config.profiles.clone();
         self.working_directory = config.working_directory.clone();
         self.launch_config = config;
+        #[cfg(target_os = "macos")]
+        update_native_macos_menus(cx, &self.profiles, self.launch_config.default_profile);
         self.configuration_error = None;
         self.focus_active(window, cx);
         cx.notify();

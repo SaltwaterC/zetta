@@ -1808,12 +1808,30 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
 }
 
 #[cfg(target_os = "macos")]
-fn native_macos_menus() -> [Menu; 2] {
+fn native_macos_menus(profiles: &[Profile], default_profile: usize) -> [Menu; 3] {
+    let profile_menu =
+        Menu::new("Profile").items(profiles.iter().enumerate().map(|(index, profile)| {
+            MenuItem::action(profile.name.clone(), OpenProfile { slot: index + 1 })
+                .checked(index == default_profile)
+        }));
+
     // Keep Window separate from the first, application-owned menu and preserve
     // the standard Minimize/Zoom/separator shape that AppKit augments with its
     // native Move & Resize commands.
     [
-        Menu::new("Zetta"),
+        Menu::new("Zetta").items([
+            MenuItem::action("New Tab", NewTab),
+            MenuItem::action("New Window", NewWindow),
+            MenuItem::separator(),
+            MenuItem::action("Open Settings", ToggleSettings),
+            MenuItem::action("Open Themes", OpenThemes),
+            MenuItem::action("Open Keymap", OpenKeymap),
+            MenuItem::separator(),
+            MenuItem::action("Close Tab", CloseTab),
+            MenuItem::action("Close Window", CloseWindow),
+            MenuItem::action("Close All Windows", CloseAllWindows),
+        ]),
+        profile_menu,
         Menu::new("Window").items([
             MenuItem::action("Minimize", MinimizeWindow),
             MenuItem::action("Zoom", ZoomWindow),
@@ -1823,8 +1841,17 @@ fn native_macos_menus() -> [Menu; 2] {
 }
 
 #[cfg(target_os = "macos")]
-fn install_native_macos_menus(cx: &mut App) {
-    cx.set_menus(native_macos_menus());
+pub(crate) fn update_native_macos_menus(
+    cx: &mut App,
+    profiles: &[Profile],
+    default_profile: usize,
+) {
+    cx.set_menus(native_macos_menus(profiles, default_profile));
+}
+
+#[cfg(target_os = "macos")]
+fn install_native_macos_menus(cx: &mut App, profiles: &[Profile], default_profile: usize) {
+    update_native_macos_menus(cx, profiles, default_profile);
     install_native_macos_window_menu_key_equivalents();
 }
 
@@ -1848,9 +1875,9 @@ fn install_native_macos_window_menu_key_equivalents() {
                 return event.as_ptr();
             }
             let handled = application.mainMenu().is_some_and(|menu| {
-                // AppKit materializes its standard tiling commands while updating
-                // the main menu; querying the Window submenu directly skips this.
-                menu.update();
+                // `performKeyEquivalent` performs the menu validation it needs.
+                // Calling `update` first re-enters AppKit while it is dispatching
+                // the key event and can race the input method's deactivation.
                 menu.performKeyEquivalent(event_ref)
             });
             if handled {
@@ -2364,7 +2391,7 @@ pub(crate) fn run() -> Result<()> {
             apply_config_settings(&config, cx).expect("failed to apply Zetta configuration");
             load_keybindings(&keymap_path, profile_count, cx);
             #[cfg(target_os = "macos")]
-            install_native_macos_menus(cx);
+            install_native_macos_menus(cx, &config.profiles, config.default_profile);
             let (control_tx, mut control_rx) = futures::channel::mpsc::unbounded();
             let control_server = ProcessControlServer::start(control_tx)
                 .expect("failed to start Zetta process control");
@@ -2385,6 +2412,10 @@ pub(crate) fn run() -> Result<()> {
                 configuration_error: configuration_error.clone(),
                 control_server,
                 _quit_subscription: quit_subscription,
+            });
+            #[cfg(target_os = "macos")]
+            cx.on_action(|_: &NewWindow, cx| {
+                open_dormant_or_new_window(cx).log_err();
             });
             cx.spawn(async move |cx| {
                 while let Some(ProcessControlCommand::OpenWindow { completion }) =
@@ -2413,7 +2444,10 @@ pub(crate) fn run() -> Result<()> {
             .detach();
             let layout_keymap_path = keymap_path.clone();
             cx.on_keyboard_layout_change(move |cx| {
-                load_keybindings(&layout_keymap_path, profile_count, cx);
+                let layout_keymap_path = layout_keymap_path.clone();
+                cx.defer(move |cx| {
+                    load_keybindings(&layout_keymap_path, profile_count, cx);
+                });
             })
             .detach();
             cx.on_window_closed(handle_zetta_window_closed).detach();

@@ -1672,11 +1672,66 @@ fn minimized_pane_shortcuts_are_built_in() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn native_macos_menus_keep_window_management_in_a_distinct_window_menu() {
-    let [application_menu, window_menu] = native_macos_menus();
+fn native_macos_menus_duplicate_the_title_bar_menus() {
+    let profiles = vec![
+        Profile {
+            name: "System".to_owned(),
+            command: Shell::System,
+            theme: None,
+        },
+        Profile {
+            name: "Alternate".to_owned(),
+            command: Shell::Program("alternate-shell".to_owned()),
+            theme: None,
+        },
+    ];
+    let [application_menu, profile_menu, window_menu] = native_macos_menus(&profiles, 1);
     assert_eq!(application_menu.name, "Zetta");
+    assert_eq!(profile_menu.name, "Profile");
     assert_eq!(window_menu.name, "Window");
-    assert!(application_menu.items.is_empty());
+
+    let application_action_names = application_menu
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            MenuItem::Action { action, .. } => Some(action.name()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        application_action_names,
+        [
+            NewTab.name(),
+            NewWindow.name(),
+            ToggleSettings.name(),
+            OpenThemes.name(),
+            OpenKeymap.name(),
+            CloseTab.name(),
+            CloseWindow.name(),
+            CloseAllWindows.name(),
+        ]
+    );
+
+    let profile_items = profile_menu
+        .items
+        .into_iter()
+        .map(|item| match item {
+            MenuItem::Action {
+                name,
+                action,
+                checked,
+                ..
+            } => (name.to_string(), action.name(), checked),
+            _ => panic!("profile menu contains a non-action item"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        profile_items,
+        vec![
+            ("System".to_owned(), OpenProfile::name_for_type(), false),
+            ("Alternate".to_owned(), OpenProfile::name_for_type(), true)
+        ]
+    );
 
     let action_names = window_menu
         .items
