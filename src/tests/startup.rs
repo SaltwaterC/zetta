@@ -1140,14 +1140,29 @@ fn profile_shortcut_labels_use_number_row_aliases() {
     let remapped = KeyBinding::new("alt-p", OpenProfile { slot: 1 }, Some("Zetta > Terminal"));
 
     assert_eq!(
-        profile_shortcut_label(1, &slot_one).as_deref(),
+        profile_shortcut_label(1, &slot_one, &slot_one).as_deref(),
         Some("Ctrl+Shift+1")
     );
     assert_eq!(
-        profile_shortcut_label(9, &slot_nine).as_deref(),
+        profile_shortcut_label(9, &slot_nine, &slot_nine).as_deref(),
         Some("Ctrl+Shift+9")
     );
-    assert_eq!(profile_shortcut_label(1, &remapped), None);
+    assert_eq!(profile_shortcut_label(1, &remapped, &slot_one), None);
+}
+
+#[test]
+fn profile_shortcut_labels_survive_keyboard_layout_mapping() {
+    // On the British layout, GPUI's mapper turns the shifted `#` source into
+    // `£` before it reaches the menu renderer.
+    let expected = KeyBinding::new("ctrl-£", OpenProfile { slot: 3 }, Some("Zetta > Terminal"));
+    let mapped = KeyBinding::new("ctrl-£", OpenProfile { slot: 3 }, Some("Zetta > Terminal"));
+    let raw = KeyBinding::new("ctrl-#", OpenProfile { slot: 3 }, Some("Zetta > Terminal"));
+
+    assert_eq!(
+        profile_shortcut_label(3, &mapped, &expected).as_deref(),
+        Some("Ctrl+Shift+3")
+    );
+    assert_eq!(profile_shortcut_label(3, &raw, &expected), None);
 }
 
 #[test]

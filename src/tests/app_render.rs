@@ -37,3 +37,15 @@ fn minimized_shelf_resolves_metadata_only_for_visible_entries() {
     assert_eq!(entries, [60, 61, 62]);
     assert_eq!(resolved, [60, 61, 62]);
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn profile_shortcut_alias_uses_unmapped_number_row_modifiers() {
+    let keystroke = profile_shortcut_alias_keystroke(3);
+    let inner = keystroke.inner();
+
+    assert_eq!(inner.key, "3");
+    assert!(inner.modifiers.control);
+    assert!(inner.modifiers.shift);
+    assert!(!inner.modifiers.platform);
+}

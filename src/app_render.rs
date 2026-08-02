@@ -55,6 +55,7 @@ fn resolve_visible_minimized_panes<T>(
 
 #[derive(Clone)]
 enum ProfileMenuShortcut {
+    #[cfg(not(target_os = "macos"))]
     Alias(String),
     Binding(ui::KeyBinding),
 }
@@ -62,6 +63,7 @@ enum ProfileMenuShortcut {
 impl ProfileMenuShortcut {
     fn render(&self) -> AnyElement {
         match self {
+            #[cfg(not(target_os = "macos"))]
             Self::Alias(label) => Label::new(label.clone())
                 .size(LabelSize::Small)
                 .color(Color::Muted)
@@ -75,6 +77,7 @@ fn profile_menu_shortcut(
     slot: usize,
     terminal_focus: Option<&gpui::FocusHandle>,
     window: &Window,
+    keyboard_mapper: &dyn PlatformKeyboardMapper,
 ) -> Option<ProfileMenuShortcut> {
     let action = OpenProfile { slot };
     let binding = terminal_focus
@@ -82,13 +85,36 @@ fn profile_menu_shortcut(
         .or_else(|| window.highest_precedence_binding_for_action(&action));
     let binding = binding?;
 
-    if let Some(label) = profile_shortcut_label(slot, &binding) {
-        Some(ProfileMenuShortcut::Alias(label))
-    } else {
-        Some(ProfileMenuShortcut::Binding(
-            ui::KeyBinding::from_keystrokes(binding.keystrokes().to_vec().into(), false),
-        ))
+    if slot <= 9 {
+        let expected_binding = profile_keybindings(slot, keyboard_mapper)[0].clone();
+        if let Some(label) = profile_shortcut_label(slot, &binding, &expected_binding) {
+            return Some(profile_shortcut_alias(slot, label));
+        }
     }
+
+    Some(ProfileMenuShortcut::Binding(
+        ui::KeyBinding::from_keystrokes(binding.keystrokes().to_vec().into(), false),
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn profile_shortcut_alias_keystroke(slot: usize) -> gpui::KeybindingKeystroke {
+    let keystroke = gpui::Keystroke::parse(&format!("ctrl-shift-{slot}"))
+        .expect("profile shortcut alias must be a valid keystroke");
+    gpui::KeybindingKeystroke::from_keystroke(keystroke)
+}
+
+#[cfg(target_os = "macos")]
+fn profile_shortcut_alias(slot: usize, _label: String) -> ProfileMenuShortcut {
+    ProfileMenuShortcut::Binding(ui::KeyBinding::from_keystrokes(
+        vec![profile_shortcut_alias_keystroke(slot)].into(),
+        false,
+    ))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn profile_shortcut_alias(_slot: usize, label: String) -> ProfileMenuShortcut {
+    ProfileMenuShortcut::Alias(label)
 }
 
 impl Render for Zetta {
@@ -389,6 +415,7 @@ impl Render for Zetta {
         let profile_menu_handle = handle.clone();
         let profile_menu_dismiss_handle = handle.clone();
         let profile_menu_terminal_focus = active_terminal_focus.clone();
+        let profile_menu_keyboard_mapper = cx.keyboard_mapper().clone();
         let profile_menu = PopoverMenu::new("new-tab-profile-menu")
             .with_handle(self.profile_menu_handle.clone())
             .trigger_with_tooltip(
@@ -412,13 +439,18 @@ impl Render for Zetta {
                 let handle = profile_menu_handle.clone();
                 let dismiss_handle = profile_menu_dismiss_handle.clone();
                 let terminal_focus = profile_menu_terminal_focus.clone();
+                let keyboard_mapper = profile_menu_keyboard_mapper.clone();
                 let menu = ui::ContextMenu::build(window, cx, move |mut menu, window, _| {
                     for (index, profile) in profiles.iter().enumerate() {
                         let is_default = index == default_profile;
                         let label = profile.name.clone();
                         let label_for_row = label.clone();
-                        let shortcut =
-                            profile_menu_shortcut(index + 1, terminal_focus.as_ref(), window);
+                        let shortcut = profile_menu_shortcut(
+                            index + 1,
+                            terminal_focus.as_ref(),
+                            window,
+                            keyboard_mapper.as_ref(),
+                        );
                         let handle = handle.clone();
                         menu = menu.custom_entry(
                             move |_, _| {

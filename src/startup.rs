@@ -899,14 +899,15 @@ pub(crate) fn profile_keybindings(
 /// GPUI represents a shifted number key by its produced symbol (for example,
 /// `ctrl-!`), while users type the more familiar `Ctrl+Shift+1` chord. A
 /// remapped binding has no alias, so callers display the effective binding.
-pub(crate) fn profile_shortcut_label(slot: usize, binding: &KeyBinding) -> Option<String> {
-    const SHIFTED_DIGITS: [&str; 9] = ["!", "@", "#", "$", "%", "^", "&", "*", "("];
-    let symbol = SHIFTED_DIGITS.get(slot.checked_sub(1)?)?;
-    let expected = gpui::Keystroke::parse(&format!("ctrl-{symbol}")).ok()?;
-    let [keystroke] = binding.keystrokes() else {
+pub(crate) fn profile_shortcut_label(
+    slot: usize,
+    binding: &KeyBinding,
+    expected_binding: &KeyBinding,
+) -> Option<String> {
+    if !(1..=9).contains(&slot) {
         return None;
-    };
-    (keystroke.inner() == &expected).then(|| format!("Ctrl+Shift+{slot}"))
+    }
+    (binding.keystrokes() == expected_binding.keystrokes()).then(|| format!("Ctrl+Shift+{slot}"))
 }
 
 pub(crate) fn pane_template_keybindings() -> [KeyBinding; 2] {
