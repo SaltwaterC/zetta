@@ -34,7 +34,8 @@ Tabs retain a fixed width as their names change.
 ## Panes
 
 Splits inherit the active pane's working directory and selected profile. Use
-`Alt-Arrow` or the pointer to move focus. Exiting a shell removes its pane;
+`Cmd-Arrow` on macOS, `Alt-Arrow` on Windows/Linux, or the pointer to move
+focus. Exiting a shell removes its pane;
 exiting the final pane closes the tab.
 
 Pane controls appear when the pointer moves over a pane and hide after a short
@@ -42,8 +43,9 @@ period of inactivity. They can maximize, minimize, or close the pane. Each pane
 also has a stable per-tab label that remains as panes are rearranged or closed.
 The control strip shows the pane's live size next to its label. The maximized
 pane status strip shows the same size.
-Press `Alt-Shift-R` or double-click the label to assign a custom name; submit an
-empty name to restore its automatic label.
+Press `Cmd-Shift-R` on macOS or `Alt-Shift-R` on Windows/Linux, or double-click
+the label to assign a custom name; submit an empty name to restore its automatic
+label.
 
 Press `Ctrl-Shift-J`, or right-click a pane and toggle "Pane Resize Mode" from
 its context menu (shown once 2 or more panes are open), to enter or leave
@@ -66,9 +68,12 @@ Minimized panes appear on a shelf at the bottom of the tab. The shelf displays
 as many complete entries as fit, including each pane's label and profile. Use
 these shortcuts to operate it:
 
-- `Alt-Shift-Down` minimizes the active pane.
-- `Alt-Shift-Left` and `Alt-Shift-Right` move the shelf selection.
-- `Alt-Shift-Up` restores the selected pane.
+- `Cmd-Shift-Down` on macOS / `Alt-Shift-Down` on Windows/Linux minimizes the
+  active pane.
+- `Cmd-Shift-Left` / `Cmd-Shift-Right` on macOS or `Alt-Shift-Left` /
+  `Alt-Shift-Right` on Windows/Linux move the shelf selection.
+- `Cmd-Shift-Up` on macOS / `Alt-Shift-Up` on Windows/Linux restores the
+  selected minimized pane.
 
 The same actions are available from the command palette.
 
@@ -104,7 +109,8 @@ pane with a reusable layout. Built-in templates are:
 - `quarters`: a 2-by-2 grid
 
 Each is available by name in the command palette. Add bindings like these to
-`keymap.json` for direct access:
+`keymap.json` for direct access. On macOS, replace `alt` with `cmd` in these
+custom bindings:
 
 ```json
 {
@@ -135,6 +141,9 @@ unbound by default. Add custom bindings when needed:
   }
 ]
 ```
+
+On macOS, use `ctrl-cmd-shift` instead of `ctrl-alt-shift` for these custom
+bindings.
 
 Templates are recursive. `"pane"` is a leaf, `vertical` places two children
 side by side, and `horizontal` stacks two children. Define named templates in
@@ -177,9 +186,10 @@ event; it is not a paste gesture.
 
 ## Search
 
-`Alt-Shift-F` searches the active pane's scrollback. `Enter` and `F3` select
-the next match, `Shift-Enter` and `Shift-F3` select the previous match, and
-`Escape` closes search. In terminal vi mode, `/` also opens scrollback search.
+`Cmd-Shift-F` on macOS / `Alt-Shift-F` on Windows/Linux searches the active
+pane's scrollback. `Enter` and `F3` select the next match, `Shift-Enter` and
+`Shift-F3` select the previous match, and `Escape` closes search. In terminal vi
+mode, `/` also opens scrollback search.
 
 `Ctrl-Shift-F` searches every pane in the active tab. It highlights all matches
 and activates the pane containing the current result as you navigate.
@@ -192,6 +202,11 @@ filter, use the arrow keys to select a command, and press `Enter` to run it.
 
 ## Default shortcuts
 
+On macOS, `Cmd` replaces `Alt` in the shortcuts below, except for `Alt-Space`,
+which opens Zetta's title-bar menu on every platform. `Ctrl-Alt` combinations
+become `Ctrl-Cmd`; for example, paste-trim is `Ctrl-Cmd-V` on macOS and
+`Ctrl-Alt-V` on Windows/Linux.
+
 | Shortcut | Action |
 | --- | --- |
 | `Ctrl-Shift-T` | New tab |
@@ -203,39 +218,40 @@ filter, use the arrow keys to select a command, and press `Enter` to run it.
 | `Ctrl-Shift-A` | Reconnect the most recently detached tab |
 | `Ctrl-Shift-O` | Split active pane horizontally, adding a pane below |
 | `Ctrl-Shift-E` | Split active pane vertically, adding a pane on the right |
-| `Alt-Shift-L` | Rotate a two-pane layout |
+| `Alt-Space` | Open Zetta's title-bar menu |
+| `Cmd-Shift-L` (macOS) / `Alt-Shift-L` (Windows/Linux) | Rotate a two-pane layout |
 | `Ctrl-Shift-J`, then Arrow keys or a split gutter drag | Toggle pane-resize mode; resize panes |
-| `Alt-Shift-X` | Close the active pane or its final tab |
+| `Cmd-Shift-X` (macOS) / `Alt-Shift-X` (Windows/Linux) | Close the active pane or its final tab |
 | `PageUp` / `PageDown` | Send page navigation to the foreground program |
 | `Shift-PageUp` / `Shift-PageDown` | Scroll history by one page |
-| `Alt-Shift-A` | Select all terminal text |
+| `Cmd-Shift-A` (macOS) / `Alt-Shift-A` (Windows/Linux) | Select all terminal text |
 | `Ctrl-Shift-Backspace` | Clear the system clipboard |
-| `Alt-Arrow` | Focus the pane in that direction |
-| `Alt-Shift-Down` | Minimize the active pane |
-| `Alt-Shift-Left` / `Alt-Shift-Right` | Select the previous / next minimized pane |
-| `Alt-Shift-Up` | Restore the selected minimized pane |
+| `Cmd-Arrow` (macOS) / `Alt-Arrow` (Windows/Linux) | Focus the pane in that direction |
+| `Cmd-Shift-Down` (macOS) / `Alt-Shift-Down` (Windows/Linux) | Minimize the active pane |
+| `Cmd-Shift-Left` / `Cmd-Shift-Right` (macOS) / `Alt-Shift-Left` / `Alt-Shift-Right` (Windows/Linux) | Select the previous / next minimized pane |
+| `Cmd-Shift-Up` (macOS) / `Alt-Shift-Up` (Windows/Linux) | Restore the selected minimized pane |
 | `Shift-Escape` | Maximize or restore the active pane |
 | `Ctrl-Shift-I` | Toggle input broadcasting in the active tab |
 | `Ctrl-Tab` / `Ctrl-Shift-Tab` | Next / previous tab |
 | `Ctrl-PageUp` / `Ctrl-PageDown` | Next / previous tab |
 | `Ctrl-C` | Copy selected text or send interrupt |
 | `Ctrl-V` | Paste |
-| `Alt-Shift-F` | Search the active pane's scrollback |
+| `Cmd-Shift-F` (macOS) / `Alt-Shift-F` (Windows/Linux) | Search the active pane's scrollback |
 | `Ctrl-Shift-F` | Search scrollback across the active tab |
-| `Ctrl-Alt-V` | Paste with surrounding whitespace trimmed |
-| `Alt-Shift-S` | Save the active pane's complete output |
+| `Ctrl-Cmd-V` (macOS) / `Ctrl-Alt-V` (Windows/Linux) | Paste with surrounding whitespace trimmed |
+| `Cmd-Shift-S` (macOS) / `Alt-Shift-S` (Windows/Linux) | Save the active pane's complete output |
 | `Ctrl-Shift-P` | Open the command palette |
 | `Ctrl-,` | Open the configuration and keymap editor |
 | `Ctrl-Shift-S` | Open a serial console in a new pane |
 | `Ctrl-Shift-R` | Rename the active tab |
-| `Alt-Shift-R` | Label the active pane |
+| `Cmd-Shift-R` (macOS) / `Alt-Shift-R` (Windows/Linux) | Label the active pane |
 | `Ctrl-=` / `Ctrl-+` | Increase font size globally |
 | `Ctrl--` | Decrease font size globally |
 | `Ctrl-0` | Reset font size globally |
-| `Alt-Shift-=` / `Alt-Shift-+` | Increase active pane font size |
-| `Alt-Shift--` | Decrease active pane font size |
-| `Alt-Shift-0` | Reset active pane font size |
-| `Ctrl-Alt-R` | Reload configuration, keymap, and themes |
+| `Cmd-Shift-=` / `Cmd-Shift-+` (macOS) / `Alt-Shift-=` / `Alt-Shift-+` (Windows/Linux) | Increase active pane font size |
+| `Cmd-Shift--` (macOS) / `Alt-Shift--` (Windows/Linux) | Decrease active pane font size |
+| `Cmd-Shift-0` (macOS) / `Alt-Shift-0` (Windows/Linux) | Reset active pane font size |
+| `Ctrl-Cmd-R` (macOS) / `Ctrl-Alt-R` (Windows/Linux) | Reload configuration, keymap, and themes |
 | `Ctrl-Shift-F12` | Toggle the performance overlay |
 
 Unmodified function keys remain available to terminal applications.

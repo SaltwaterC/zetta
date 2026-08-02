@@ -914,14 +914,14 @@ pub(crate) fn profile_shortcut_label(slot: usize, binding: &KeyBinding) -> Optio
 
 pub(crate) fn pane_template_keybindings() -> [KeyBinding; 2] {
     [
-        KeyBinding::new(
+        platform_keybinding(
             "alt-shift-o",
             ApplyPaneSplitTemplate {
                 name: "three-right".to_owned(),
             },
             Some("Zetta > Terminal"),
         ),
-        KeyBinding::new(
+        platform_keybinding(
             "alt-shift-e",
             ApplyPaneSplitTemplate {
                 name: "quarters".to_owned(),
@@ -933,23 +933,36 @@ pub(crate) fn pane_template_keybindings() -> [KeyBinding; 2] {
 
 pub(crate) fn pane_font_size_keybindings() -> [KeyBinding; 4] {
     [
-        KeyBinding::new(
+        platform_keybinding(
             "alt-shift-=",
             IncreasePaneFontSize,
             Some("Zetta > Terminal"),
         ),
-        KeyBinding::new(
+        platform_keybinding(
             "alt-shift-+",
             IncreasePaneFontSize,
             Some("Zetta > Terminal"),
         ),
-        KeyBinding::new(
+        platform_keybinding(
             "alt-shift--",
             DecreasePaneFontSize,
             Some("Zetta > Terminal"),
         ),
-        KeyBinding::new("alt-shift-0", ResetPaneFontSize, Some("Zetta > Terminal")),
+        platform_keybinding("alt-shift-0", ResetPaneFontSize, Some("Zetta > Terminal")),
     ]
+}
+
+fn platform_keystroke(keystroke: &str) -> String {
+    if cfg!(target_os = "macos") && keystroke != APPLICATION_MENU_KEYBINDING {
+        keystroke.replace("alt-", "cmd-")
+    } else {
+        keystroke.to_owned()
+    }
+}
+
+fn platform_keybinding<A: Action>(keystroke: &str, action: A, context: Option<&str>) -> KeyBinding {
+    let keystroke = platform_keystroke(keystroke);
+    KeyBinding::new(&keystroke, action, context)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1452,12 +1465,30 @@ pub(crate) fn validate_keymap_contents(content: &str, cx: &mut App) -> Result<()
 }
 
 pub(crate) const RENAME_TAB_KEYBINDING: &str = "ctrl-shift-r";
+#[cfg(target_os = "macos")]
+pub(crate) const RELOAD_CONFIGURATION_KEYBINDING: &str = "ctrl-cmd-r";
+#[cfg(not(target_os = "macos"))]
 pub(crate) const RELOAD_CONFIGURATION_KEYBINDING: &str = "ctrl-alt-r";
+#[cfg(target_os = "macos")]
+pub(crate) const RENAME_PANE_KEYBINDING: &str = "cmd-shift-r";
+#[cfg(not(target_os = "macos"))]
 pub(crate) const RENAME_PANE_KEYBINDING: &str = "alt-shift-r";
+#[cfg(target_os = "macos")]
+pub(crate) const TOGGLE_PANE_CONTROLS_KEYBINDING: &str = "cmd-shift-h";
+#[cfg(not(target_os = "macos"))]
 pub(crate) const TOGGLE_PANE_CONTROLS_KEYBINDING: &str = "alt-shift-h";
 pub(crate) const TOGGLE_TAB_PANE_CONTROLS_KEYBINDING: &str = "ctrl-shift-h";
+#[cfg(target_os = "macos")]
+pub(crate) const CLOSE_PANE_KEYBINDING: &str = "cmd-shift-x";
+#[cfg(not(target_os = "macos"))]
 pub(crate) const CLOSE_PANE_KEYBINDING: &str = "alt-shift-x";
+#[cfg(target_os = "macos")]
+pub(crate) const SAVE_PANE_OUTPUT_KEYBINDING: &str = "cmd-shift-s";
+#[cfg(not(target_os = "macos"))]
 pub(crate) const SAVE_PANE_OUTPUT_KEYBINDING: &str = "alt-shift-s";
+#[cfg(target_os = "macos")]
+pub(crate) const SELECT_ALL_KEYBINDING: &str = "cmd-shift-a";
+#[cfg(not(target_os = "macos"))]
 pub(crate) const SELECT_ALL_KEYBINDING: &str = "alt-shift-a";
 pub(crate) const RECONNECT_SESSION_KEYBINDING: &str = "ctrl-shift-a";
 pub(crate) const DETACH_TAB_KEYBINDING: &str = "ctrl-shift-d";
@@ -1466,6 +1497,9 @@ pub(crate) const CLOSE_ALL_WINDOWS_KEYBINDING: &str = "ctrl-shift-x";
 #[cfg(feature = "serial-console")]
 pub(crate) const SERIAL_CONSOLE_KEYBINDING: &str = "ctrl-shift-s";
 pub(crate) const AUTO_BACKGROUND_TAB_KEYBINDING: &str = "ctrl-shift-b";
+#[cfg(target_os = "macos")]
+pub(crate) const ROTATE_PANE_LAYOUT_KEYBINDING: &str = "cmd-shift-l";
+#[cfg(not(target_os = "macos"))]
 pub(crate) const ROTATE_PANE_LAYOUT_KEYBINDING: &str = "alt-shift-l";
 pub(crate) const TOGGLE_PANE_RESIZE_MODE_KEYBINDING: &str = "ctrl-shift-j";
 pub(crate) const APPLICATION_MENU_KEYBINDING: &str = "alt-space";
@@ -1491,16 +1525,14 @@ pub(crate) fn reconnect_session_keybinding() -> KeyBinding {
 }
 
 pub(crate) fn application_menu_keybinding() -> Option<KeyBinding> {
-    cfg!(any(target_os = "windows", target_os = "linux")).then(|| {
-        KeyBinding::new(
-            APPLICATION_MENU_KEYBINDING,
-            OpenApplicationMenu,
-            // The menu is an application-level control. Binding it at the Zetta
-            // context keeps it available even when the focused terminal view does
-            // not contribute its `Terminal` key context.
-            Some("Zetta"),
-        )
-    })
+    Some(KeyBinding::new(
+        APPLICATION_MENU_KEYBINDING,
+        OpenApplicationMenu,
+        // The menu is an application-level control. Binding it at the Zetta
+        // context keeps it available even when the focused terminal view does
+        // not contribute its `Terminal` key context.
+        Some("Zetta"),
+    ))
 }
 
 pub(crate) fn application_menu_navigation_keybindings() -> [KeyBinding; 2] {
@@ -1588,20 +1620,31 @@ pub(crate) fn pane_resize_keybindings() -> [KeyBinding; 4] {
     ]
 }
 
+pub(crate) fn focus_pane_keybindings() -> [KeyBinding; 4] {
+    let shortcuts = ["alt-left", "alt-right", "alt-up", "alt-down"];
+
+    [
+        platform_keybinding(shortcuts[0], FocusPaneLeft, Some("Zetta > Terminal")),
+        platform_keybinding(shortcuts[1], FocusPaneRight, Some("Zetta > Terminal")),
+        platform_keybinding(shortcuts[2], FocusPaneUp, Some("Zetta > Terminal")),
+        platform_keybinding(shortcuts[3], FocusPaneDown, Some("Zetta > Terminal")),
+    ]
+}
+
 pub(crate) fn minimized_pane_keybindings() -> [KeyBinding; 4] {
     [
-        KeyBinding::new("alt-shift-down", MinimizePane, Some("Zetta > Terminal")),
-        KeyBinding::new(
+        platform_keybinding("alt-shift-down", MinimizePane, Some("Zetta > Terminal")),
+        platform_keybinding(
             "alt-shift-up",
             RestoreMinimizedPane,
             Some("Zetta > Terminal"),
         ),
-        KeyBinding::new(
+        platform_keybinding(
             "alt-shift-left",
             SelectPreviousMinimizedPane,
             Some("Zetta > Terminal"),
         ),
-        KeyBinding::new(
+        platform_keybinding(
             "alt-shift-right",
             SelectNextMinimizedPane,
             Some("Zetta > Terminal"),
@@ -1639,10 +1682,6 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
             ClearClipboard,
             Some("Zetta > Terminal"),
         ),
-        KeyBinding::new("alt-left", FocusPaneLeft, Some("Zetta > Terminal")),
-        KeyBinding::new("alt-right", FocusPaneRight, Some("Zetta > Terminal")),
-        KeyBinding::new("alt-up", FocusPaneUp, Some("Zetta > Terminal")),
-        KeyBinding::new("alt-down", FocusPaneDown, Some("Zetta > Terminal")),
         KeyBinding::new("shift-escape", ToggleMaximizePane, Some("Zetta > Terminal")),
         KeyBinding::new(
             "ctrl-shift-i",
@@ -1660,7 +1699,7 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
             Some("Zetta > Terminal && selection"),
         ),
         KeyBinding::new("ctrl-v", Paste, Some("Zetta > Terminal")),
-        KeyBinding::new("alt-shift-f", SearchScrollback, Some("Zetta > Terminal")),
+        platform_keybinding("alt-shift-f", SearchScrollback, Some("Zetta > Terminal")),
         KeyBinding::new(
             "ctrl-shift-f",
             SearchTabScrollback,
@@ -1696,7 +1735,7 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
             SelectAllSearchText,
             Some("Zetta > Terminal && scrollback_search"),
         ),
-        KeyBinding::new("ctrl-alt-v", PasteTrimmed, Some("Zetta > Terminal")),
+        platform_keybinding("ctrl-alt-v", PasteTrimmed, Some("Zetta > Terminal")),
         pane_output_keybinding(),
         KeyBinding::new(
             "ctrl-shift-p",
@@ -1737,6 +1776,7 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
     bindings.push(serial_console_keybinding());
     bindings.extend(application_menu_keybinding());
     bindings.extend(application_menu_navigation_keybindings());
+    bindings.extend(focus_pane_keybindings());
     bindings.extend(minimized_pane_keybindings());
     bindings.extend(pane_resize_keybindings());
     bindings.extend(pane_template_keybindings());

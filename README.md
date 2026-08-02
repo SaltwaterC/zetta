@@ -5,9 +5,8 @@ GPUI, and Zed's terminal engine. It combines a GPU-rendered terminal with the
 tabs, panes, profiles, and configurable shortcuts expected from a complete
 terminal application.
 
-Zetta currently supports Linux, Windows, and macOS at the code level. Linux
-and Windows are the actively tested platforms; macOS support has not yet been
-tested.
+Zetta currently supports Linux, Windows, and macOS. All platforms are targets
+for active development.
 
 ## Highlights
 

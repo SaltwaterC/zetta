@@ -15,8 +15,9 @@ The keymap is `keymap.json` in the same platform-specific directory. Use
 `--config PATH` and `--keymap PATH` to override these locations.
 
 If configuration cannot be parsed, Zetta starts with safe defaults and shows
-the error in the window. Correct the file and press `Ctrl-Alt-R` to reload
-configuration, keymaps, and user themes without restarting. Existing sessions
+the error in the window. Correct the file and press `Ctrl-Cmd-R` on macOS or
+`Ctrl-Alt-R` on Windows/Linux to reload configuration, keymaps, and user themes
+without restarting. Existing sessions
 and their scrollback are retained.
 
 ## Settings editor
@@ -153,8 +154,9 @@ window-button layout so they do not move over a left-aligned prompt unless you
 choose that placement explicitly. Tab close buttons do follow the system
 window-button side.
 `pane_controls_hidden_by_default` defaults to `false`. Set it to `true` to
-start new panes with the controls hidden; `Alt-Shift-H` still toggles the
-active pane and `Ctrl-Shift-H` still toggles every pane in the active tab.
+start new panes with the controls hidden; `Cmd-Shift-H` on macOS or
+`Alt-Shift-H` on Windows/Linux still toggles the active pane, and
+`Ctrl-Shift-H` still toggles every pane in the active tab.
 When this setting changes and configuration reloads, Zetta resets every open
 pane to the selected default visibility.
 

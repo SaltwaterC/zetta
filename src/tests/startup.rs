@@ -1139,8 +1139,8 @@ fn profile_shortcut_labels_use_number_row_aliases() {
 #[test]
 fn pane_template_shortcuts_are_built_in() {
     let [three_right, quarters] = pane_template_keybindings();
-    let three_right_key = gpui::Keystroke::parse("alt-shift-o").unwrap();
-    let quarters_key = gpui::Keystroke::parse("alt-shift-e").unwrap();
+    let three_right_key = gpui::Keystroke::parse(&platform_keystroke("alt-shift-o")).unwrap();
+    let quarters_key = gpui::Keystroke::parse(&platform_keystroke("alt-shift-e")).unwrap();
 
     assert_eq!(
         three_right.match_keystrokes(&[three_right_key]),
@@ -1367,18 +1367,24 @@ fn normalizes_hyphenated_page_key_names() {
 #[test]
 fn tab_rename_and_configuration_reload_shortcuts_are_swapped() {
     assert_eq!(RENAME_TAB_KEYBINDING, "ctrl-shift-r");
-    assert_eq!(RELOAD_CONFIGURATION_KEYBINDING, "ctrl-alt-r");
+    assert_eq!(
+        RELOAD_CONFIGURATION_KEYBINDING,
+        platform_keystroke("ctrl-alt-r")
+    );
     assert_ne!(RENAME_TAB_KEYBINDING, RELOAD_CONFIGURATION_KEYBINDING);
 }
 
 #[test]
 fn pane_label_uses_the_documented_shortcut() {
-    assert_eq!(RENAME_PANE_KEYBINDING, "alt-shift-r");
+    assert_eq!(RENAME_PANE_KEYBINDING, platform_keystroke("alt-shift-r"));
 }
 
 #[test]
 fn pane_controls_use_the_requested_shortcuts() {
-    assert_eq!(TOGGLE_PANE_CONTROLS_KEYBINDING, "alt-shift-h");
+    assert_eq!(
+        TOGGLE_PANE_CONTROLS_KEYBINDING,
+        platform_keystroke("alt-shift-h")
+    );
     assert_eq!(TOGGLE_TAB_PANE_CONTROLS_KEYBINDING, "ctrl-shift-h");
     assert_ne!(
         TOGGLE_PANE_CONTROLS_KEYBINDING,
@@ -1388,7 +1394,10 @@ fn pane_controls_use_the_requested_shortcuts() {
 
 #[test]
 fn pane_layout_rotation_uses_the_requested_shortcut() {
-    assert_eq!(ROTATE_PANE_LAYOUT_KEYBINDING, "alt-shift-l");
+    assert_eq!(
+        ROTATE_PANE_LAYOUT_KEYBINDING,
+        platform_keystroke("alt-shift-l")
+    );
     let shortcut = gpui::Keystroke::parse(ROTATE_PANE_LAYOUT_KEYBINDING).unwrap();
     assert_eq!(
         rotate_pane_layout_keybinding().match_keystrokes(&[shortcut]),
@@ -1425,8 +1434,52 @@ fn pane_resize_mode_uses_a_dedicated_ctrl_shift_shortcut() {
 }
 
 #[test]
+fn pane_focus_shortcuts_use_the_platform_modifier() {
+    let shortcuts = ["alt-left", "alt-right", "alt-up", "alt-down"];
+
+    for (binding, shortcut) in focus_pane_keybindings().into_iter().zip(shortcuts) {
+        let shortcut = gpui::Keystroke::parse(&platform_keystroke(shortcut)).unwrap();
+        assert_eq!(binding.match_keystrokes(&[shortcut]), Some(false));
+    }
+}
+
+#[test]
+fn alt_shortcuts_use_the_platform_equivalent() {
+    for (shortcut, expected) in [
+        ("alt-left", "cmd-left"),
+        ("alt-shift-l", "cmd-shift-l"),
+        ("alt-shift-o", "cmd-shift-o"),
+        ("alt-shift-e", "cmd-shift-e"),
+        ("alt-shift-a", "cmd-shift-a"),
+        ("alt-shift-down", "cmd-shift-down"),
+        ("alt-shift-up", "cmd-shift-up"),
+        ("alt-shift-left", "cmd-shift-left"),
+        ("alt-shift-right", "cmd-shift-right"),
+        ("alt-shift-f", "cmd-shift-f"),
+        ("ctrl-alt-v", "ctrl-cmd-v"),
+        ("alt-shift-s", "cmd-shift-s"),
+        ("alt-shift-r", "cmd-shift-r"),
+        ("alt-shift-h", "cmd-shift-h"),
+        ("alt-shift-x", "cmd-shift-x"),
+        ("alt-shift-=", "cmd-shift-="),
+        ("alt-shift-+", "cmd-shift-+"),
+        ("alt-shift--", "cmd-shift--"),
+        ("alt-shift-0", "cmd-shift-0"),
+        ("ctrl-alt-r", "ctrl-cmd-r"),
+        ("alt-space", "alt-space"),
+    ] {
+        let expected = if cfg!(target_os = "macos") {
+            expected
+        } else {
+            shortcut
+        };
+        assert_eq!(platform_keystroke(shortcut), expected);
+    }
+}
+
+#[test]
 fn close_pane_uses_the_pane_control_modifiers() {
-    assert_eq!(CLOSE_PANE_KEYBINDING, "alt-shift-x");
+    assert_eq!(CLOSE_PANE_KEYBINDING, platform_keystroke("alt-shift-x"));
     let shortcut = gpui::Keystroke::parse(CLOSE_PANE_KEYBINDING).unwrap();
     assert_eq!(
         close_pane_keybinding().match_keystrokes(&[shortcut]),
@@ -1456,7 +1509,10 @@ fn close_window_uses_the_documented_shortcut() {
 
 #[test]
 fn pane_output_uses_the_standard_save_shortcut() {
-    assert_eq!(SAVE_PANE_OUTPUT_KEYBINDING, "alt-shift-s");
+    assert_eq!(
+        SAVE_PANE_OUTPUT_KEYBINDING,
+        platform_keystroke("alt-shift-s")
+    );
     let shortcut = gpui::Keystroke::parse(SAVE_PANE_OUTPUT_KEYBINDING).unwrap();
     assert_eq!(
         pane_output_keybinding().match_keystrokes(&[shortcut]),
@@ -1466,7 +1522,7 @@ fn pane_output_uses_the_standard_save_shortcut() {
 
 #[test]
 fn select_all_and_reconnect_use_scope_based_shortcuts() {
-    assert_eq!(SELECT_ALL_KEYBINDING, "alt-shift-a");
+    assert_eq!(SELECT_ALL_KEYBINDING, platform_keystroke("alt-shift-a"));
     assert_eq!(RECONNECT_SESSION_KEYBINDING, "ctrl-shift-a");
     assert_ne!(SELECT_ALL_KEYBINDING, RECONNECT_SESSION_KEYBINDING);
 
@@ -1483,26 +1539,22 @@ fn select_all_and_reconnect_use_scope_based_shortcuts() {
 }
 
 #[test]
-fn application_menu_shortcut_is_available_on_windows_and_linux() {
+fn application_menu_shortcut_uses_the_platform_modifier() {
     let binding = application_menu_keybinding();
-    if cfg!(any(target_os = "windows", target_os = "linux")) {
-        let shortcut = gpui::Keystroke::parse(APPLICATION_MENU_KEYBINDING).unwrap();
-        let binding =
-            binding.expect("Windows and Linux should bind Alt+Space to the application menu");
-        assert_eq!(binding.match_keystrokes(&[shortcut]), Some(false));
-        assert!(
-            binding
-                .predicate()
-                .expect("application menu shortcut should be scoped to Zetta")
-                .depth_of(&[
-                    gpui::KeyContext::parse("Zetta").unwrap(),
-                    gpui::KeyContext::parse("Terminal").unwrap(),
-                ])
-                .is_some()
-        );
-    } else {
-        assert!(binding.is_none());
-    }
+    assert_eq!(APPLICATION_MENU_KEYBINDING, platform_keystroke("alt-space"));
+    let shortcut = gpui::Keystroke::parse(APPLICATION_MENU_KEYBINDING).unwrap();
+    let binding = binding.expect("all platforms should bind the application menu");
+    assert_eq!(binding.match_keystrokes(&[shortcut]), Some(false));
+    assert!(
+        binding
+            .predicate()
+            .expect("application menu shortcut should be scoped to Zetta")
+            .depth_of(&[
+                gpui::KeyContext::parse("Zetta").unwrap(),
+                gpui::KeyContext::parse("Terminal").unwrap(),
+            ])
+            .is_some()
+    );
 }
 
 #[test]
@@ -1538,7 +1590,7 @@ fn pane_font_size_shortcuts_use_pane_control_modifiers() {
             .into_iter()
             .zip(["alt-shift-=", "alt-shift-+", "alt-shift--", "alt-shift-0"])
     {
-        let shortcut = gpui::Keystroke::parse(shortcut).unwrap();
+        let shortcut = gpui::Keystroke::parse(&platform_keystroke(shortcut)).unwrap();
         assert_eq!(binding.match_keystrokes(&[shortcut]), Some(false));
     }
 }
@@ -1584,7 +1636,7 @@ fn minimized_pane_shortcuts_are_built_in() {
         "alt-shift-left",
         "alt-shift-right",
     ]) {
-        let shortcut = gpui::Keystroke::parse(shortcut).unwrap();
+        let shortcut = gpui::Keystroke::parse(&platform_keystroke(shortcut)).unwrap();
         assert_eq!(binding.match_keystrokes(&[shortcut]), Some(false));
     }
 }
