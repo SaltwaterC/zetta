@@ -300,9 +300,7 @@ fn service_completion_uses_command_local_short_options() {
     assert!(fish.contains("-l device"));
     assert!(fish.contains("-l data-bits"));
     assert!(fish.contains("-l parity"));
-    assert!(
-        fish.contains("subcommand_from tftp; and __fish_seen_subcommand_from server' -l config")
-    );
+    assert!(fish.contains("__zetta_tftp_server' -l config"));
 
     let powershell = ShellIntegration::PowerShell.script(&profiles);
     assert!(powershell.contains("'--device', '-d'"));
@@ -733,6 +731,169 @@ fn generated_scripts_only_offer_long_form_flags() {
                 assert!(script.contains("compadd -- --help --version --config --keymap --profile"))
             }
         }
+    }
+}
+
+#[test]
+fn fish_script_emits_long_option_candidates_for_every_command_context() {
+    let script = ShellIntegration::Fish.script(&profiles());
+
+    for context in [
+        "root",
+        "init",
+        "serial",
+        "http",
+        "terminal-size",
+        "sessions",
+        "benchmark-output",
+        "benchmark",
+        "serial-console",
+        "http-server",
+        "tftp",
+        "tftp-client",
+        "tftp-server",
+        "notify",
+        "copy",
+        "paste",
+        "ztftp",
+        "zntfy",
+        "zcopy",
+        "zpaste",
+        "pbcopy",
+        "pbpaste",
+    ] {
+        assert!(
+            script.contains(&format!("(__zetta_long_options {context})")),
+            "missing Fish long-option candidates for {context}"
+        );
+    }
+}
+
+#[test]
+fn fish_displays_long_option_candidates_and_supports_short_option_values() {
+    use std::process::Command;
+
+    if Command::new("fish").arg("--version").output().is_err() {
+        return;
+    }
+
+    let script = ShellIntegration::Fish.script(&profiles());
+    let script_file = tempfile::NamedTempFile::new().unwrap();
+    fs::write(script_file.path(), script).unwrap();
+    for (line, expected) in [
+        (
+            "zetta ",
+            &["--help", "--version", "--config", "--keymap", "--profile"][..],
+        ),
+        (
+            "zetta benchmark ",
+            &[
+                "--terminal-render-workload",
+                "--terminal-checkerboard-workload",
+                "--terminal-sparse-update-workload",
+                "--profile-report",
+                "--profile-duration",
+                "--profile-pane-stress",
+                "--profile-background-stress",
+                "--profile-sparse-updates",
+                "--profile-external-terminal",
+                "--help",
+            ][..],
+        ),
+        (
+            "zetta benchmark-output ",
+            &["--size", "--output-type", "--help"][..],
+        ),
+        (
+            "zetta terminal-size ",
+            &["--json", "--resize", "--columns", "--rows", "--help"][..],
+        ),
+        ("zetta sessions ", &["--json", "--help"][..]),
+        ("zetta init ", &["--help"][..]),
+        ("zetta init fish ", &["--help"][..]),
+        ("zetta serial ", &["--help"][..]),
+        ("zetta serial list ", &["--help"][..]),
+        (
+            "zetta serial console ",
+            &[
+                "--device",
+                "--baud-rate",
+                "--data-bits",
+                "--parity",
+                "--stop-bits",
+                "--flow-control",
+                "--help",
+            ][..],
+        ),
+        ("zetta http ", &["--help"][..]),
+        (
+            "zetta http server ",
+            &["--root", "--port", "--config", "--help"][..],
+        ),
+        ("zetta tftp ", &["--help"][..]),
+        ("zetta tftp get ", &["--port", "--help"][..]),
+        (
+            "zetta tftp server ",
+            &["--root", "--port", "--config", "--help"][..],
+        ),
+        ("zetta serial console -p ", &["none", "odd", "even"][..]),
+        (
+            "zetta notify ",
+            &["--app-name", "--icon", "--sound", "--timeout", "--help"][..],
+        ),
+        ("zetta notify -s ", &["zetta-default"][..]),
+        ("zetta copy ", &["--pboard", "--help"][..]),
+        ("zetta paste ", &["--pboard", "--prefer", "--help"][..]),
+        (
+            "zetta copy -pboard ",
+            &["general", "ruler", "find", "font"][..],
+        ),
+        ("ztftp ", &["--port", "--help"][..]),
+        (
+            "zntfy ",
+            &["--app-name", "--icon", "--sound", "--timeout", "--help"][..],
+        ),
+        ("zntfy -s ", &["zetta-default"][..]),
+        ("zcopy ", &["--pboard", "--help"][..]),
+        ("zpaste ", &["--pboard", "--prefer", "--help"][..]),
+    ] {
+        let output = Command::new("fish")
+            .args([
+                "--no-config",
+                "-c",
+                "source $argv[1]; complete -C \"$argv[2]\"",
+                "--",
+                script_file.path().to_str().unwrap(),
+                line,
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "Fish rejected generated completion for {line:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let completions = String::from_utf8_lossy(&output.stdout);
+        let candidates = completions
+            .lines()
+            .map(|completion| {
+                completion
+                    .split_once('\t')
+                    .map_or(completion, |(name, _)| name)
+            })
+            .collect::<Vec<_>>();
+        for expected in expected {
+            assert!(
+                candidates.contains(expected),
+                "expected {expected:?} in Fish completions for {line:?}: {completions}"
+            );
+        }
+        assert!(
+            !candidates
+                .iter()
+                .any(|candidate| candidate.starts_with('-') && !candidate.starts_with("--")),
+            "did not expect short-form options in Fish completions for {line:?}: {completions}"
+        );
     }
 }
 

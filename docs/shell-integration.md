@@ -19,7 +19,10 @@ the integration was generated is therefore available without rerunning
 `zetta init`.
 
 It also completes the full-length `zetta terminal-size` resize flags, which
-resize the current Zetta pane while retaining an omitted dimension.
+resize the current Zetta pane while retaining an omitted dimension. Completion
+lists full-length option names alongside valid subcommands without requiring a
+leading dash, while short aliases remain supported, including completion of
+their argument values.
 
 The supported shell names are `bash`, `zsh`, `fish`, and `powershell` (`pwsh`
 is accepted as an alternative spelling).

@@ -844,6 +844,110 @@ function __zetta_sound_names
     end
 end
 
+# Fish completion registrations normally expose every short option as a
+# candidate. Keep the short forms out of the candidate list while retaining
+# their argument completion by activating these registrations only after the
+# user has already entered the short option.
+function __zetta_short_option
+    set -l words (commandline -opc)
+    test (count $words) -gt 0
+    and test "$words[-1]" = "$argv[1]"
+end
+
+function __zetta_at_subcommand
+    set -l words (commandline -opc)
+    test (count $words) -eq 2
+    and test "$words[2]" = "$argv[1]"
+end
+
+function __zetta_tftp_client
+    set -l words (commandline -opc)
+    test (count $words) -ge 3
+    and test "$words[2]" = tftp
+    and contains -- "$words[3]" get put
+end
+
+function __zetta_tftp_server
+    set -l words (commandline -opc)
+    test (count $words) -ge 3
+    and test "$words[2]" = tftp
+    and test "$words[3]" = server
+end
+
+# Fish only considers options registered with `-l` after the user has typed a
+# dash. Emit the same long options as ordinary completion candidates too, so
+# they appear alongside subcommands at every valid argument position.
+function __zetta_long_options
+    switch $argv[1]
+        case root
+            printf '%s\t%s\n' \
+                --help 'Print help' \
+                --version 'Print version' \
+                --config 'Use a configuration file' \
+                --keymap 'Use a keymap file' \
+                --profile 'Select a profile'
+        case init serial http tftp
+            printf '%s\t%s\n' --help 'Print help'
+        case terminal-size
+            printf '%s\t%s\n' \
+                --json 'Print machine-readable JSON' \
+                --resize 'Resize the current pane' \
+                --columns 'Set pane width in columns' \
+                --rows 'Set pane height in rows' \
+                --help 'Print help'
+        case sessions
+            printf '%s\t%s\n' --json 'Print machine-readable JSON' --help 'Print help'
+        case benchmark-output
+            printf '%s\t%s\n' \
+                --size 'Set the output size in MiB' \
+                --output-type 'Select repeated or unique lines' \
+                --help 'Print help'
+        case benchmark
+            printf '%s\n' \
+                --terminal-render-workload \
+                --terminal-checkerboard-workload \
+                --terminal-sparse-update-workload \
+                --profile-report \
+                --profile-duration \
+                --profile-pane-stress \
+                --profile-background-stress \
+                --profile-sparse-updates \
+                --profile-external-terminal \
+                --help
+        case serial-console
+            printf '%s\t%s\n' \
+                --device 'Serial device' \
+                --baud-rate 'Baud rate' \
+                --data-bits 'Data bits' \
+                --parity 'Parity' \
+                --stop-bits 'Stop bits' \
+                --flow-control 'Flow control' \
+                --help 'Print help'
+        case http-server tftp-server
+            printf '%s\t%s\n' \
+                --root 'Directory to serve' \
+                --port 'Server port' \
+                --config 'Configuration file' \
+                --help 'Print help'
+        case tftp-client ztftp
+            printf '%s\t%s\n' --port 'Server port' --help 'Print help'
+        case notify zntfy
+            printf '%s\t%s\n' \
+                --app-name 'Application name' \
+                --icon 'Image to show with the notification' \
+                --sound 'Sound name' \
+                --timeout 'Timeout' \
+                --help 'Print help'
+        case copy zcopy pbcopy
+            printf '%s\t%s\n' --pboard 'Pasteboard to use' --help 'Print help'
+        case paste zpaste pbpaste
+            printf '%s\t%s\n' \
+                --pboard 'Pasteboard to use' \
+                --prefer 'Preferred clipboard format' \
+                --help 'Print help'
+    end
+end
+
 complete -c zetta -f
 complete -c zetta -n '__fish_use_subcommand' -a benchmark -d 'Profile terminal rendering'
 complete -c zetta -n '__fish_use_subcommand' -a benchmark-output -d 'Write and time a text payload'
@@ -861,19 +965,36 @@ complete -c zetta -n '__fish_use_subcommand' -l version -d 'Print version'
 complete -c zetta -n '__fish_use_subcommand' -l config -r -d 'Use a configuration file'
 complete -c zetta -n '__fish_use_subcommand' -l keymap -r -d 'Use a keymap file'
 complete -c zetta -n '__fish_use_subcommand' -l profile -r -a '(__zetta_profiles)' -d 'Select a profile'
-complete -c zetta -n '__fish_seen_subcommand_from init' -a 'bash fish powershell pwsh zsh'
-complete -c zetta -n '__fish_seen_subcommand_from serial' -a 'console list'
-complete -c zetta -n '__fish_seen_subcommand_from http' -a server
+complete -c zetta -n '__fish_use_subcommand' -a '(__zetta_long_options root)'
+complete -c zetta -s c -r -n '__fish_use_subcommand; and __zetta_short_option -c'
+complete -c zetta -s k -r -n '__fish_use_subcommand; and __zetta_short_option -k'
+complete -c zetta -s p -r -a '(__zetta_profiles)' -n '__fish_use_subcommand; and __zetta_short_option -p'
+complete -c zetta -n '__zetta_at_subcommand init' -a 'bash fish powershell pwsh zsh'
+complete -c zetta -n '__fish_seen_subcommand_from init' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from init' -a '(__zetta_long_options init)'
+complete -c zetta -n '__zetta_at_subcommand serial' -a 'console list'
+complete -c zetta -n '__fish_seen_subcommand_from serial' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from serial' -a '(__zetta_long_options serial)'
+complete -c zetta -n '__zetta_at_subcommand http' -a server
+complete -c zetta -n '__fish_seen_subcommand_from http' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from http' -a '(__zetta_long_options http)'
 complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l json -d 'Print machine-readable JSON'
 complete -c zetta -n '__fish_seen_subcommand_from sessions' -l json -d 'Print machine-readable JSON'
 complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l resize -d 'Resize the current pane'
 complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l columns -r -d 'Set pane width in columns'
 complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l rows -r -d 'Set pane height in rows'
 complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -a '(__zetta_long_options terminal-size)'
+complete -c zetta -s c -r -n '__fish_seen_subcommand_from terminal-size; and __zetta_short_option -c'
+complete -c zetta -s R -r -n '__fish_seen_subcommand_from terminal-size; and __zetta_short_option -R'
 complete -c zetta -n '__fish_seen_subcommand_from sessions' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from sessions' -a '(__zetta_long_options sessions)'
 complete -c zetta -n '__fish_seen_subcommand_from benchmark-output' -l size -r -d 'Set the output size in MiB'
 complete -c zetta -n '__fish_seen_subcommand_from benchmark-output' -l output-type -r -a 'repeated unique'
 complete -c zetta -n '__fish_seen_subcommand_from benchmark-output' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from benchmark-output' -a '(__zetta_long_options benchmark-output)'
+complete -c zetta -s s -r -n '__fish_seen_subcommand_from benchmark-output; and __zetta_short_option -s'
+complete -c zetta -s t -r -a 'repeated unique' -n '__fish_seen_subcommand_from benchmark-output; and __zetta_short_option -t'
 complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l terminal-render-workload
 complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l terminal-checkerboard-workload
 complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l terminal-sparse-update-workload
@@ -884,44 +1005,97 @@ complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l profile-backgrou
 complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l profile-sparse-updates
 complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l profile-external-terminal
 complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from benchmark' -a '(__zetta_long_options benchmark)'
+complete -c zetta -s r -r -n '__fish_seen_subcommand_from benchmark; and __zetta_short_option -r'
+complete -c zetta -s d -r -n '__fish_seen_subcommand_from benchmark; and __zetta_short_option -d'
 complete -c zetta -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console' -l device -r -a '(__zetta_serial_devices)' -d 'Serial device'
 complete -c zetta -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console' -l baud-rate -r -d 'Baud rate'
 complete -c zetta -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console' -l data-bits -r -a '5 6 7 8'
 complete -c zetta -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console' -l parity -r -a 'none odd even'
 complete -c zetta -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console' -l stop-bits -r -a '1 2'
 complete -c zetta -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console' -l flow-control -r -a 'none software hardware'
+complete -c zetta -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console' -a '(__zetta_long_options serial-console)'
+complete -c zetta -s d -r -a '(__zetta_serial_devices)' -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console; and __zetta_short_option -d'
+complete -c zetta -s b -r -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console; and __zetta_short_option -b'
+complete -c zetta -s D -r -a '5 6 7 8' -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console; and __zetta_short_option -D'
+complete -c zetta -s p -r -a 'none odd even' -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console; and __zetta_short_option -p'
+complete -c zetta -s s -r -a '1 2' -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console; and __zetta_short_option -s'
+complete -c zetta -s f -r -a 'none software hardware' -n '__fish_seen_subcommand_from serial; and __zetta_short_option -f'
 complete -c zetta -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server' -l root -r -a '(__fish_complete_directories)' -d 'Directory to serve'
 complete -c zetta -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server' -l port -r -d 'TCP port'
 complete -c zetta -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server' -l config -r -d 'Configuration file'
-complete -c zetta -n '__fish_seen_subcommand_from tftp' -a 'get put server'
-complete -c zetta -n '__fish_seen_subcommand_from tftp' -l port -r -d 'Server port'
-complete -c zetta -n '__fish_seen_subcommand_from tftp; and __fish_seen_subcommand_from server' -l root -r -a '(__fish_complete_directories)' -d 'Directory to serve'
-complete -c zetta -n '__fish_seen_subcommand_from tftp; and __fish_seen_subcommand_from server' -l config -r -d 'Configuration file'
+complete -c zetta -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server' -a '(__zetta_long_options http-server)'
+complete -c zetta -s r -r -a '(__fish_complete_directories)' -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server; and __zetta_short_option -r'
+complete -c zetta -s p -r -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server; and __zetta_short_option -p'
+complete -c zetta -s c -r -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server; and __zetta_short_option -c'
+complete -c zetta -n '__zetta_at_subcommand tftp' -a 'get put server'
+complete -c zetta -n '__zetta_tftp_client' -l port -r -d 'Server port'
+complete -c zetta -n '__zetta_tftp_server' -l root -r -a '(__fish_complete_directories)' -d 'Directory to serve'
+complete -c zetta -n '__zetta_tftp_server' -l config -r -d 'Configuration file'
 complete -c zetta -n '__fish_seen_subcommand_from tftp' -l help -d 'Print help'
+complete -c zetta -n '__zetta_at_subcommand tftp' -a '(__zetta_long_options tftp)'
+complete -c zetta -n '__zetta_tftp_client' -a '(__zetta_long_options tftp-client)'
+complete -c zetta -n '__zetta_tftp_server' -a '(__zetta_long_options tftp-server)'
+complete -c zetta -s p -r -n '__zetta_tftp_client; and __zetta_short_option -p'
+complete -c zetta -s r -r -a '(__fish_complete_directories)' -n '__zetta_tftp_server; and __zetta_short_option -r'
+complete -c zetta -s p -r -n '__zetta_tftp_server; and __zetta_short_option -p'
+complete -c zetta -s c -r -n '__zetta_tftp_server; and __zetta_short_option -c'
 complete -c zetta -n '__fish_seen_subcommand_from notify' -l app-name -r -d 'Application name'
 complete -c zetta -n '__fish_seen_subcommand_from notify' -l icon -r -d 'Image to show with the notification'
 complete -c zetta -n '__fish_seen_subcommand_from notify' -l sound -r -a '(__zetta_sound_names)' -d 'Sound name'
 complete -c zetta -n '__fish_seen_subcommand_from notify' -l timeout -r -a 'default never' -d 'Timeout'
 complete -c zetta -n '__fish_seen_subcommand_from notify' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from notify' -a '(__zetta_long_options notify)'
+complete -c zetta -s a -r -n '__fish_seen_subcommand_from notify; and __zetta_short_option -a'
+complete -c zetta -s i -r -n '__fish_seen_subcommand_from notify; and __zetta_short_option -i'
+complete -c zetta -s s -r -a '(__zetta_sound_names)' -n '__fish_seen_subcommand_from notify; and __zetta_short_option -s'
+complete -c zetta -s t -r -a 'default never' -n '__fish_seen_subcommand_from notify; and __zetta_short_option -t'
 complete -c zetta -n '__fish_seen_subcommand_from copy' -l pboard -r -a 'general ruler find font'
 complete -c zetta -n '__fish_seen_subcommand_from copy' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from copy' -a '(__zetta_long_options copy)'
+complete -c zetta -n '__fish_seen_subcommand_from copy; and __zetta_short_option -pboard' -a 'general ruler find font'
 complete -c zetta -n '__fish_seen_subcommand_from paste' -l pboard -r -a 'general ruler find font'
 complete -c zetta -n '__fish_seen_subcommand_from paste' -l prefer -r -a 'txt rtf ps'
 complete -c zetta -n '__fish_seen_subcommand_from paste' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from paste' -a '(__zetta_long_options paste)'
+complete -c zetta -n '__fish_seen_subcommand_from paste; and __zetta_short_option -pboard' -a 'general ruler find font'
+complete -c zetta -n '__fish_seen_subcommand_from paste; and __zetta_short_option -prefer' -a 'txt rtf ps'
 complete -c ztftp -f -a 'get put'
 complete -c ztftp -l port -r -d 'Server port'
 complete -c ztftp -l help -d 'Print help'
+complete -c ztftp -a '(__zetta_long_options ztftp)'
+complete -c ztftp -s p -r -n '__zetta_short_option -p'
+complete -c zntfy -f -l app-name -r
+complete -c zntfy -l icon -r
+complete -c zntfy -l sound -r -a '(__zetta_sound_names)'
+complete -c zntfy -l timeout -r -a 'default never'
+complete -c zntfy -l help -d 'Print help'
+complete -c zntfy -a '(__zetta_long_options zntfy)'
+complete -c zntfy -s a -r -n '__zetta_short_option -a'
+complete -c zntfy -s i -r -n '__zetta_short_option -i'
+complete -c zntfy -s s -r -a '(__zetta_sound_names)' -n '__zetta_short_option -s'
+complete -c zntfy -s t -r -a 'default never' -n '__zetta_short_option -t'
 complete -c zcopy -f -l pboard -r -a 'general ruler find font'
 complete -c zcopy -l help -d 'Print help'
+complete -c zcopy -a '(__zetta_long_options zcopy)'
+complete -c zcopy -n '__zetta_short_option -pboard' -a 'general ruler find font'
 complete -c zpaste -f -l pboard -r -a 'general ruler find font'
 complete -c zpaste -l prefer -r -a 'txt rtf ps'
 complete -c zpaste -l help -d 'Print help'
+complete -c zpaste -a '(__zetta_long_options zpaste)'
+complete -c zpaste -n '__zetta_short_option -pboard' -a 'general ruler find font'
+complete -c zpaste -n '__zetta_short_option -prefer' -a 'txt rtf ps'
 if test (uname) != Darwin
     complete -c pbcopy -f -l pboard -r -a 'general ruler find font'
     complete -c pbcopy -l help -d 'Print help'
+    complete -c pbcopy -a '(__zetta_long_options pbcopy)'
+    complete -c pbcopy -n '__zetta_short_option -pboard' -a 'general ruler find font'
     complete -c pbpaste -f -l pboard -r -a 'general ruler find font'
     complete -c pbpaste -l prefer -r -a 'txt rtf ps'
     complete -c pbpaste -l help -d 'Print help'
+    complete -c pbpaste -a '(__zetta_long_options pbpaste)'
+    complete -c pbpaste -n '__zetta_short_option -pboard' -a 'general ruler find font'
+    complete -c pbpaste -n '__zetta_short_option -prefer' -a 'txt rtf ps'
 end
 "#;
 
