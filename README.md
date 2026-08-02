@@ -1,9 +1,9 @@
 # Zetta
 
 Zetta is a standalone, cross-platform terminal emulator built with Rust,
-GPUI, and Zed's terminal engine. It combines a GPU-rendered terminal with the
-tabs, panes, profiles, and configurable shortcuts expected from a complete
-terminal application.
+GPUI, and Zed's terminal engine (alacritty_terminal). It combines a
+GPU-rendered terminal with the tabs, panes, profiles, and configurable
+shortcuts expected from a complete terminal application.
 
 Zetta currently supports Linux, Windows, and macOS. All platforms are targets
 for active development.
@@ -12,15 +12,16 @@ for active development.
 
 - Tabs, recursive pane splits, pane templates, pane minimization, input
   broadcasting, and modal keyboard or mouse pane resizing
-- Automatically detected shells and first-class WSL profiles with working
-  directory tracking
+- Automatically detected shells, including Homebrew-installed shells on
+  macOS and Linux, plus first-class WSL/MSYS2 profiles with working directory
+  tracking
 - Detachable background sessions that can survive after the last window closes
 - Native command, path, and SSH-alias completion in a multi-command prompt
 - Typed settings and keymap editor, per-profile themes, and installable Zed
   themes
-- Serial consoles plus built-in HTTP and TFTP tools, usable from panes or the CLI
+- Serial consoles plus built-in HTTP and TFTP tools, usable from panes or the
+  CLI
 - Cross-platform desktop notifications from the CLI
-- Reproducible terminal-rendering performance reports
 
 ## Quick start
 

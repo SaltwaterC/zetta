@@ -116,6 +116,24 @@ impl ShellIntegration {
     }
 
     fn current(shell_path: Option<&OsStr>) -> Result<Self> {
+        #[cfg(not(windows))]
+        let active_shell_path = active_posix_shell_path();
+        #[cfg(windows)]
+        let active_shell_path = None;
+
+        Self::current_with_active_shell(active_shell_path.as_deref(), shell_path)
+    }
+
+    fn current_with_active_shell(
+        active_shell_path: Option<&Path>,
+        shell_path: Option<&OsStr>,
+    ) -> Result<Self> {
+        if let Some(active_shell_path) = active_shell_path
+            && let Ok(shell) = Self::from_shell_path(active_shell_path)
+        {
+            return Ok(shell);
+        }
+
         match shell_path {
             Some(shell_path) => Self::from_shell_path(Path::new(shell_path)),
             None => {
@@ -129,6 +147,32 @@ impl ShellIntegration {
                 }
             }
         }
+    }
+}
+
+#[cfg(not(windows))]
+fn active_posix_shell_path() -> Option<PathBuf> {
+    let mut system = sysinfo::System::new();
+    let mut pid = sysinfo::get_current_pid().ok()?;
+
+    loop {
+        system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+        let parent_pid = system.process(pid)?.parent()?;
+        system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[parent_pid]), true);
+        let parent = system.process(parent_pid)?;
+
+        if let Some(executable) = parent.exe()
+            && ShellIntegration::from_shell_path(executable).is_ok()
+        {
+            return Some(executable.to_path_buf());
+        }
+
+        let process_name = parent.name();
+        if ShellIntegration::from_shell_path(Path::new(process_name)).is_ok() {
+            return Some(PathBuf::from(process_name));
+        }
+
+        pid = parent_pid;
     }
 }
 
@@ -406,7 +450,7 @@ fn shell_single_quote(value: &str) -> String {
 }
 
 pub(crate) fn shell_integration_help() -> &'static str {
-    "Configure or generate shell integration\n\nUsage: zetta init [SHELL]\n\nWithout SHELL, detects the current shell from SHELL and adds the integration command to its startup file. On Windows, Unix-style HOME paths from MSYS2 and similar environments are resolved with cygpath; when SHELL is unavailable, Zetta detects the launching PowerShell and writes to its $PROFILE. Running it again leaves an existing integration unchanged. With SHELL, prints the integration script for use in a shell startup file.\n\nSupported shells:\n  bash        Bash\n  fish        Fish\n  powershell  PowerShell (also accepted as pwsh)\n  zsh         Z shell\n\nThe generated script adds command completion, including live serial-device completion, the ztftp shortcut when the TFTP client is enabled, and the zntfy and zcopy/zpaste shortcuts when desktop notifications and clipboard access are enabled. zcopy/zpaste are also available as pbcopy/pbpaste on platforms other than macOS, taking priority over any existing pbcopy/pbpaste alias so pbcopy/pbpaste muscle memory keeps working there too."
+    "Configure or generate shell integration\n\nUsage: zetta init [SHELL]\n\nWithout SHELL, detects the active supported shell process (falling back to SHELL when process inspection cannot identify it) and adds the integration command to its startup file. On Windows, Unix-style HOME paths from MSYS2 and similar environments are resolved with cygpath; when SHELL is unavailable, Zetta detects the launching PowerShell and writes to its $PROFILE. Running it again leaves an existing integration unchanged. With SHELL, prints the integration script for use in a shell startup file.\n\nSupported shells:\n  bash        Bash\n  fish        Fish\n  powershell  PowerShell (also accepted as pwsh)\n  zsh         Z shell\n\nThe generated script adds command completion, including live serial-device completion, the ztftp shortcut when the TFTP client is enabled, and the zntfy and zcopy/zpaste shortcuts when desktop notifications and clipboard access are enabled. zcopy/zpaste are also available as pbcopy/pbpaste on platforms other than macOS, taking priority over any existing pbcopy/pbpaste alias so pbcopy/pbpaste muscle memory keeps working there too."
 }
 
 const BASH_INTEGRATION: &str = r#"# Zetta shell integration for Bash.

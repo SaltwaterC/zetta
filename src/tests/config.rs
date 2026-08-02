@@ -16,6 +16,31 @@ fn parses_profile_with_arguments() {
     ));
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn homebrew_shells_are_profiles_with_their_installed_program_paths() {
+    let prefix = tempfile::tempdir().unwrap();
+    let bin = prefix.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(bin.join("brew"), "").unwrap();
+    fs::write(bin.join("fish"), "").unwrap();
+    fs::write(bin.join("bash"), "").unwrap();
+
+    let profiles = homebrew_shell_profiles([prefix.path().to_path_buf()]);
+
+    assert_eq!(profiles.len(), 2);
+    assert_eq!(profiles[0].name, "Bash (Homebrew)");
+    assert_eq!(
+        profiles[0].command,
+        Shell::Program(bin.join("bash").to_string_lossy().into_owned())
+    );
+    assert_eq!(profiles[1].name, "Fish (Homebrew)");
+    assert_eq!(
+        profiles[1].command,
+        Shell::Program(bin.join("fish").to_string_lossy().into_owned())
+    );
+}
+
 #[test]
 fn configuration_uses_profile_terminology() {
     assert!(

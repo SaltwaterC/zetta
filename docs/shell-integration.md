@@ -50,8 +50,11 @@ zetta init powershell | Out-String | Invoke-Expression
 
 ## Enable persistently
 
-Run `zetta init` to detect the current shell and add the applicable command to
-its startup file. It prints the file it writes, or reports that the integration
+Run `zetta init` to detect the active shell process and add the applicable
+command to its startup file. This takes precedence over an inherited `$SHELL`,
+which may describe the login shell rather than a shell selected as a Zetta
+profile. If process inspection cannot identify a supported shell, Zetta falls
+back to `$SHELL`. It prints the file it writes, or reports that the integration
 is already present without changing the file.
 
 When run from MSYS2 on Windows, Zetta resolves its Unix-style `$HOME` with

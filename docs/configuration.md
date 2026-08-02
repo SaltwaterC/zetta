@@ -44,7 +44,10 @@ The HTTP and TFTP server ports are typed settings backed by
 
 ## Profiles and working directories
 
-Zetta detects common shells. On Windows this includes Windows PowerShell,
+Zetta detects common shells. On macOS and Linux, shells installed by Homebrew
+are also detected as separate profiles (for example, `Bash (Homebrew)`), even
+when the graphical application was not launched with Homebrew's `bin`
+directory in its `PATH`. On Windows this includes Windows PowerShell,
 PowerShell 7, Command Prompt, MSYS2, and registered WSL distributions. The
 MSYS2 Start Menu shortcut is used to find current custom installation paths;
 legacy uninstall registration is also checked, with `C:\msys64` as a fallback.

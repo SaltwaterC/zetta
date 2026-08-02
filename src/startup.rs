@@ -820,23 +820,25 @@ fn should_handoff_to_existing_process(args: &StartupArgs) -> bool {
         && args.profile.is_none()
 }
 
-#[cfg(windows)]
 fn path_with_entry_first(path: Option<&std::ffi::OsStr>, entry: &Path) -> Option<OsString> {
     let inherited = path.map(env::split_paths).into_iter().flatten();
     let entries = inherited.collect::<Vec<_>>();
     let entry_text = entry.to_string_lossy();
     if entries.iter().any(|candidate| {
-        candidate
-            .to_string_lossy()
-            .trim_end_matches(['\\', '/'])
-            .eq_ignore_ascii_case(entry_text.trim_end_matches(['\\', '/']))
+        let candidate_text = candidate.to_string_lossy();
+        let candidate = candidate_text.trim_end_matches(['\\', '/']);
+        let entry = entry_text.trim_end_matches(['\\', '/']);
+        if cfg!(windows) {
+            candidate.eq_ignore_ascii_case(entry)
+        } else {
+            candidate == entry
+        }
     }) {
         return None;
     }
     env::join_paths(std::iter::once(entry.to_path_buf()).chain(entries)).ok()
 }
 
-#[cfg(windows)]
 pub(crate) fn native_terminal_environment() -> Vec<(String, String)> {
     let Some(executable_directory) = env::current_exe()
         .ok()
@@ -849,11 +851,6 @@ pub(crate) fn native_terminal_environment() -> Vec<(String, String)> {
         return Vec::new();
     };
     vec![("PATH".to_owned(), path.to_string_lossy().into_owned())]
-}
-
-#[cfg(not(windows))]
-pub(crate) fn native_terminal_environment() -> Vec<(String, String)> {
-    Vec::new()
 }
 
 pub(crate) fn load_startup_config(

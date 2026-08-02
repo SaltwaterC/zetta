@@ -129,6 +129,20 @@ fn executable_directory_is_prepended_to_native_terminal_path() {
     );
 }
 
+#[cfg(not(windows))]
+#[test]
+fn executable_directory_is_prepended_to_native_terminal_path() {
+    let executable_directory = Path::new("/Applications/Zetta.app/Contents/MacOS");
+    let inherited = std::ffi::OsStr::new("/usr/bin:/bin");
+    let path = path_with_entry_first(Some(inherited), executable_directory).unwrap();
+    let entries = env::split_paths(&path).collect::<Vec<_>>();
+
+    assert_eq!(entries[0], executable_directory);
+    assert_eq!(entries[1], Path::new("/usr/bin"));
+    assert_eq!(entries[2], Path::new("/bin"));
+    assert!(path_with_entry_first(Some(path.as_os_str()), executable_directory).is_none());
+}
+
 #[test]
 fn version_flags_and_output_are_defined() {
     assert!(is_version_argument("-v"));

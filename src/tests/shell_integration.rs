@@ -456,6 +456,27 @@ fn shell_detection_uses_the_shell_name_from_shell_environment_path() {
     );
 }
 
+#[cfg(not(windows))]
+#[test]
+fn shell_detection_prefers_the_active_profile_shell_over_shell_environment() {
+    assert_eq!(
+        ShellIntegration::current_with_active_shell(
+            Some(Path::new("/opt/homebrew/bin/fish")),
+            Some(OsStr::new("/bin/bash")),
+        )
+        .unwrap(),
+        ShellIntegration::Fish
+    );
+}
+
+#[test]
+fn shell_detection_falls_back_to_shell_environment_without_an_active_shell() {
+    assert_eq!(
+        ShellIntegration::current_with_active_shell(None, Some(OsStr::new("/bin/bash"))).unwrap(),
+        ShellIntegration::Bash
+    );
+}
+
 #[cfg(windows)]
 #[test]
 fn missing_shell_defaults_to_powershell_on_windows() {

@@ -525,7 +525,9 @@ fn discover_profiles() -> Vec<Profile> {
     };
     let mut seen = HashSet::new();
     for (name, program) in candidates {
-        if command_exists(program) && seen.insert(*program) {
+        if let Some(path) = command_path(program)
+            && seen.insert(path)
+        {
             profiles.push(Profile {
                 name: (*name).to_owned(),
                 command: Shell::Program((*program).to_owned()),
@@ -533,6 +535,17 @@ fn discover_profiles() -> Vec<Profile> {
             });
         }
     }
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    profiles.extend(
+        homebrew_shell_profiles(homebrew_prefixes())
+            .into_iter()
+            .filter(|profile| {
+                let Shell::Program(program) = &profile.command else {
+                    return true;
+                };
+                seen.insert(PathBuf::from(program))
+            }),
+    );
     #[cfg(windows)]
     if let Some(root) = msys2_installation_root() {
         profiles.extend(msys2_profiles(&root));
@@ -542,6 +555,50 @@ fn discover_profiles() -> Vec<Profile> {
         profiles.extend(discovered_wsl_profiles(&program));
     }
     profiles
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn homebrew_prefixes() -> Vec<PathBuf> {
+    let mut prefixes = env::var_os("HOMEBREW_PREFIX")
+        .into_iter()
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+
+    #[cfg(target_os = "macos")]
+    prefixes.extend([PathBuf::from("/opt/homebrew"), PathBuf::from("/usr/local")]);
+    #[cfg(target_os = "linux")]
+    prefixes.push(PathBuf::from("/home/linuxbrew/.linuxbrew"));
+
+    prefixes.dedup();
+    prefixes
+        .into_iter()
+        .filter(|prefix| prefix.join("bin/brew").is_file())
+        .collect()
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn homebrew_shell_profiles(prefixes: impl IntoIterator<Item = PathBuf>) -> Vec<Profile> {
+    const CANDIDATES: &[(&str, &str)] = &[
+        ("Zsh", "zsh"),
+        ("Bash", "bash"),
+        ("Fish", "fish"),
+        ("Nushell", "nu"),
+    ];
+
+    prefixes
+        .into_iter()
+        .flat_map(|prefix| {
+            let bin = prefix.join("bin");
+            CANDIDATES.iter().filter_map(move |(name, program)| {
+                let path = bin.join(program);
+                path.is_file().then(|| Profile {
+                    name: format!("{name} (Homebrew)"),
+                    command: Shell::Program(path.to_string_lossy().into_owned()),
+                    theme: None,
+                })
+            })
+        })
+        .collect()
 }
 
 #[cfg(windows)]
@@ -858,22 +915,36 @@ fn is_user_wsl_distribution(name: &str) -> bool {
     .any(|service| name.eq_ignore_ascii_case(service))
 }
 
-fn command_exists(program: &str) -> bool {
+fn command_path(program: &str) -> Option<PathBuf> {
     let program_path = Path::new(program);
     if program_path.components().count() > 1 {
-        return program_path.is_file();
+        return program_path.is_file().then(|| program_path.to_path_buf());
     }
-    env::var_os("PATH").is_some_and(|path| {
-        env::split_paths(&path).any(|directory| {
+    env::var_os("PATH").and_then(|path| {
+        env::split_paths(&path).find_map(|directory| {
             if cfg!(windows) {
-                directory.join(program).is_file()
-                    || (!program.to_ascii_lowercase().ends_with(".exe")
-                        && directory.join(format!("{program}.exe")).is_file())
+                if directory.join(program).is_file() {
+                    Some(directory.join(program))
+                } else if !program.to_ascii_lowercase().ends_with(".exe")
+                    && directory.join(format!("{program}.exe")).is_file()
+                {
+                    Some(directory.join(format!("{program}.exe")))
+                } else {
+                    None
+                }
             } else {
-                directory.join(program).is_file()
+                directory
+                    .join(program)
+                    .is_file()
+                    .then(|| directory.join(program))
             }
         })
     })
+}
+
+#[cfg(windows)]
+fn command_exists(program: &str) -> bool {
+    command_path(program).is_some()
 }
 
 pub(crate) fn platform_config_dir() -> PathBuf {
