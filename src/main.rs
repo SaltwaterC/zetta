@@ -53,9 +53,9 @@ use gpui::{
     InteractiveElement as _, IntoElement, KeyBinding, KeyBindingContextPredicate, KeyDownEvent,
     KeyUpEvent, MAX_BUTTONS_PER_SIDE, MouseButton, Pixels, PlatformKeyboardMapper, Point, Render,
     ResizeEdge, ScrollHandle, SharedString, Size, Subscription, Task, Tiling, TitlebarOptions,
-    UniformListScrollHandle, Window, WindowBackgroundAppearance, WindowBounds, WindowButton,
-    WindowButtonLayout, WindowControlArea, WindowControls, WindowDecorations, WindowId,
-    WindowOptions, actions, canvas, container_query, div, point, profiler, px, size, svg,
+    Unbind, UniformListScrollHandle, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowButton, WindowButtonLayout, WindowControlArea, WindowControls, WindowDecorations,
+    WindowId, WindowOptions, actions, canvas, container_query, div, point, profiler, px, size, svg,
     transparent_black, uniform_list,
 };
 use process_control::{
@@ -71,7 +71,7 @@ use settings_editor::{
 };
 use task::Shell;
 use terminal::{
-    Event as TerminalEvent, Paste, PasteTrimmed, Search, Terminal, TerminalBuilder,
+    Clear, Event as TerminalEvent, Paste, PasteTrimmed, Search, Terminal, TerminalBuilder,
     terminal_settings::TerminalSettings,
 };
 use terminal_view::{

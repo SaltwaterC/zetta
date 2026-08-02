@@ -950,6 +950,39 @@ pub(crate) fn pane_font_size_keybindings() -> [KeyBinding; 4] {
     ]
 }
 
+#[cfg(target_os = "macos")]
+fn macos_keybindings() -> [KeyBinding; 9] {
+    [
+        // Keep application bindings unscoped so the native application menu
+        // can resolve their key equivalents, including while a Zetta overlay
+        // is focused. The existing Ctrl bindings remain available too.
+        KeyBinding::new(MACOS_NEW_TAB_KEYBINDING, NewTab, None),
+        KeyBinding::new(MACOS_NEW_WINDOW_KEYBINDING, NewWindow, None),
+        KeyBinding::new(MACOS_SETTINGS_KEYBINDING, ToggleSettings, None),
+        KeyBinding::new(MACOS_CLOSE_TAB_KEYBINDING, CloseTab, None),
+        KeyBinding::new(MACOS_CLOSE_WINDOW_KEYBINDING, CloseWindow, None),
+        KeyBinding::new(MACOS_CLOSE_ALL_WINDOWS_KEYBINDING, CloseAllWindows, None),
+        // Terminal actions stay scoped so they do not override unrelated
+        // macOS editor bindings outside a terminal pane.
+        KeyBinding::new(
+            MACOS_COPY_KEYBINDING,
+            CopyAndClearSelection,
+            Some("Zetta > Terminal && selection"),
+        ),
+        KeyBinding::new(MACOS_CLEAR_KEYBINDING, Clear, Some("Zetta > Terminal")),
+        KeyBinding::new(MACOS_PASTE_KEYBINDING, Paste, Some("Zetta > Terminal")),
+    ]
+}
+
+pub(crate) fn terminal_clear_keybinding() -> KeyBinding {
+    KeyBinding::new("ctrl-shift-l", Clear, Some("Zetta > Terminal"))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_terminal_clear_unbinding() -> KeyBinding {
+    KeyBinding::new("cmd-k", Unbind("terminal::Clear".into()), None)
+}
+
 fn platform_keystroke(keystroke: &str) -> String {
     if cfg!(target_os = "macos") && keystroke != APPLICATION_MENU_KEYBINDING {
         keystroke.replace("alt-", "cmd-")
@@ -1502,6 +1535,25 @@ pub(crate) const ROTATE_PANE_LAYOUT_KEYBINDING: &str = "alt-shift-l";
 pub(crate) const TOGGLE_PANE_RESIZE_MODE_KEYBINDING: &str = "ctrl-shift-j";
 pub(crate) const APPLICATION_MENU_KEYBINDING: &str = "alt-space";
 
+#[cfg(target_os = "macos")]
+pub(crate) const MACOS_NEW_TAB_KEYBINDING: &str = "cmd-t";
+#[cfg(target_os = "macos")]
+pub(crate) const MACOS_NEW_WINDOW_KEYBINDING: &str = "cmd-n";
+#[cfg(target_os = "macos")]
+pub(crate) const MACOS_SETTINGS_KEYBINDING: &str = "cmd-,";
+#[cfg(target_os = "macos")]
+pub(crate) const MACOS_CLOSE_TAB_KEYBINDING: &str = "cmd-w";
+#[cfg(target_os = "macos")]
+pub(crate) const MACOS_CLOSE_WINDOW_KEYBINDING: &str = "cmd-q";
+#[cfg(target_os = "macos")]
+pub(crate) const MACOS_CLOSE_ALL_WINDOWS_KEYBINDING: &str = "cmd-x";
+#[cfg(target_os = "macos")]
+pub(crate) const MACOS_COPY_KEYBINDING: &str = "cmd-c";
+#[cfg(target_os = "macos")]
+pub(crate) const MACOS_CLEAR_KEYBINDING: &str = "cmd-l";
+#[cfg(target_os = "macos")]
+pub(crate) const MACOS_PASTE_KEYBINDING: &str = "cmd-v";
+
 pub(crate) fn pane_output_keybinding() -> KeyBinding {
     KeyBinding::new(
         SAVE_PANE_OUTPUT_KEYBINDING,
@@ -1696,6 +1748,7 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
             CopyAndClearSelection,
             Some("Zetta > Terminal && selection"),
         ),
+        terminal_clear_keybinding(),
         KeyBinding::new("ctrl-v", Paste, Some("Zetta > Terminal")),
         platform_keybinding("alt-shift-f", SearchScrollback, Some("Zetta > Terminal")),
         KeyBinding::new(
@@ -1779,6 +1832,10 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
     bindings.extend(pane_resize_keybindings());
     bindings.extend(pane_template_keybindings());
     bindings.extend(pane_font_size_keybindings());
+    #[cfg(target_os = "macos")]
+    bindings.push(macos_terminal_clear_unbinding());
+    #[cfg(target_os = "macos")]
+    bindings.extend(macos_keybindings());
     let keyboard_mapper = cx.keyboard_mapper().clone();
     bindings.extend(
         (1..=profile_count.min(9))

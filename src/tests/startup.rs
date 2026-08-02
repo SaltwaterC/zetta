@@ -1537,6 +1537,55 @@ fn close_window_uses_the_documented_shortcut() {
 }
 
 #[test]
+fn terminal_clear_uses_ctrl_shift_l() {
+    let shortcut = gpui::Keystroke::parse("ctrl-shift-l").unwrap();
+    assert_eq!(
+        terminal_clear_keybinding().match_keystrokes(&[shortcut]),
+        Some(false)
+    );
+    assert_eq!(terminal_clear_keybinding().action().name(), Clear.name());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_shortcuts_are_additional_application_bindings() {
+    let expected = [
+        ("cmd-t", NewTab.name()),
+        ("cmd-n", NewWindow.name()),
+        ("cmd-,", ToggleSettings.name()),
+        ("cmd-w", CloseTab.name()),
+        ("cmd-q", CloseWindow.name()),
+        ("cmd-x", CloseAllWindows.name()),
+        ("cmd-c", CopyAndClearSelection.name()),
+        ("cmd-l", Clear.name()),
+        ("cmd-v", Paste.name()),
+    ];
+
+    for (binding, (shortcut, action)) in macos_keybindings().into_iter().zip(expected) {
+        let shortcut = gpui::Keystroke::parse(shortcut).unwrap();
+        assert_eq!(binding.match_keystrokes(&[shortcut]), Some(false));
+        assert_eq!(binding.action().name(), action);
+    }
+
+    assert_eq!(CLOSE_WINDOW_KEYBINDING, "ctrl-shift-q");
+    assert_eq!(CLOSE_ALL_WINDOWS_KEYBINDING, "ctrl-shift-x");
+
+    let unbinding = macos_terminal_clear_unbinding();
+    let shortcut = gpui::Keystroke::parse("cmd-k").unwrap();
+    assert_eq!(unbinding.match_keystrokes(&[shortcut]), Some(false));
+    assert_eq!(
+        unbinding
+            .action()
+            .as_any()
+            .downcast_ref::<Unbind>()
+            .expect("Cmd+K should use an unbind marker")
+            .0
+            .as_ref(),
+        "terminal::Clear"
+    );
+}
+
+#[test]
 fn pane_output_uses_the_standard_save_shortcut() {
     assert_eq!(
         SAVE_PANE_OUTPUT_KEYBINDING,
