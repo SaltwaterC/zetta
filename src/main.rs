@@ -104,6 +104,8 @@ actions!(
         CloseTab,
         CloseWindow,
         CloseAllWindows,
+        MinimizeWindow,
+        ZoomWindow,
         OpenThemes,
         OpenKeymap,
         DetachTab,

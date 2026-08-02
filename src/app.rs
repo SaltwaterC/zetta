@@ -1277,6 +1277,24 @@ impl Zetta {
         window.remove_window();
     }
 
+    pub(crate) fn minimize_window(
+        &mut self,
+        _: &MinimizeWindow,
+        window: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        window.minimize_window();
+    }
+
+    pub(crate) fn zoom_window(
+        &mut self,
+        _: &ZoomWindow,
+        window: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        window.zoom_window();
+    }
+
     pub(crate) fn close_all_windows(
         &mut self,
         _: &CloseAllWindows,

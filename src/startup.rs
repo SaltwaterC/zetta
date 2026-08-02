@@ -17,6 +17,13 @@ use crate::cli_services::{parse_serial_args, serial_help};
 #[cfg(feature = "tftp-server")]
 use crate::cli_services::{parse_tftp_server_args, tftp_server_help};
 
+#[cfg(target_os = "macos")]
+use gpui::{Menu, MenuItem};
+#[cfg(target_os = "macos")]
+use objc2::MainThreadMarker;
+#[cfg(target_os = "macos")]
+use objc2_app_kit::{NSApplication, NSEvent, NSEventMask, NSEventModifierFlags};
+
 #[cfg(not(feature = "tftp-client"))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TftpCommand;
@@ -1762,6 +1769,67 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
     }
 }
 
+#[cfg(target_os = "macos")]
+fn native_macos_menus() -> [Menu; 2] {
+    // Keep Window separate from the first, application-owned menu and preserve
+    // the standard Minimize/Zoom/separator shape that AppKit augments with its
+    // native Move & Resize commands.
+    [
+        Menu::new("Zetta"),
+        Menu::new("Window").items([
+            MenuItem::action("Minimize", MinimizeWindow),
+            MenuItem::action("Zoom", ZoomWindow),
+            MenuItem::separator(),
+        ]),
+    ]
+}
+
+#[cfg(target_os = "macos")]
+fn install_native_macos_menus(cx: &mut App) {
+    cx.set_menus(native_macos_menus());
+    install_native_macos_window_menu_key_equivalents();
+}
+
+#[cfg(target_os = "macos")]
+fn install_native_macos_window_menu_key_equivalents() {
+    // GPUI's content view sees key equivalents before AppKit searches the main
+    // menu. A terminal consumes Control+Function combinations as terminal
+    // input, so macOS never gets to invoke the tiling items that it injects
+    // into the registered Window menu. Give that menu first refusal; exact
+    // modifier matching in NSMenu keeps ordinary terminal shortcuts intact.
+    unsafe {
+        let main_thread =
+            MainThreadMarker::new().expect("menu monitor must be installed on AppKit");
+        let application = NSApplication::sharedApplication(main_thread);
+        let handler = block2::RcBlock::new(move |event: std::ptr::NonNull<NSEvent>| {
+            let event_ref = event.as_ref();
+            let modifiers = event_ref.modifierFlags();
+            if !modifiers.contains(NSEventModifierFlags::Control)
+                || !modifiers.contains(NSEventModifierFlags::Function)
+            {
+                return event.as_ptr();
+            }
+            let handled = application.mainMenu().is_some_and(|menu| {
+                // AppKit materializes its standard tiling commands while updating
+                // the main menu; querying the Window submenu directly skips this.
+                menu.update();
+                menu.performKeyEquivalent(event_ref)
+            });
+            if handled {
+                std::ptr::null_mut()
+            } else {
+                event.as_ptr()
+            }
+        });
+
+        let monitor =
+            NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &handler)
+                .expect("failed to install native macOS menu key-equivalent monitor");
+        // The monitor is intentionally process-scoped and removed when AppKit exits.
+        std::mem::forget(monitor);
+    }
+}
+
 pub(crate) fn open_zetta_window(
     config: Config,
     configuration_error: Option<String>,
@@ -2257,6 +2325,8 @@ pub(crate) fn run() -> Result<()> {
             ZettaAssets.load_fonts(cx).log_err();
             apply_config_settings(&config, cx).expect("failed to apply Zetta configuration");
             load_keybindings(&keymap_path, profile_count, cx);
+            #[cfg(target_os = "macos")]
+            install_native_macos_menus(cx);
             let (control_tx, mut control_rx) = futures::channel::mpsc::unbounded();
             let control_server = ProcessControlServer::start(control_tx)
                 .expect("failed to start Zetta process control");

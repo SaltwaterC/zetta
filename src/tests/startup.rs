@@ -1588,3 +1588,22 @@ fn minimized_pane_shortcuts_are_built_in() {
         assert_eq!(binding.match_keystrokes(&[shortcut]), Some(false));
     }
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn native_macos_menus_keep_window_management_in_a_distinct_window_menu() {
+    let [application_menu, window_menu] = native_macos_menus();
+    assert_eq!(application_menu.name, "Zetta");
+    assert_eq!(window_menu.name, "Window");
+    assert!(application_menu.items.is_empty());
+
+    let action_names = window_menu
+        .items
+        .into_iter()
+        .filter_map(|item| match item {
+            MenuItem::Action { action, .. } => Some(action.name()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(action_names, [MinimizeWindow.name(), ZoomWindow.name()]);
+}

@@ -78,7 +78,10 @@ windows = { version = "0.61", features = [
 cpal = { version = "0.16", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
 mac-usernotifications = { version = "0.3.1", features = ["blocking-wrappers"], optional = true }
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["block2", "NSApplication", "NSEvent", "NSMenu"] }
 
 [build-dependencies]
 embed-resource = "3"
