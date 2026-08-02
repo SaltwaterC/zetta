@@ -94,6 +94,10 @@ pub struct Config {
     pub terminal_font_family: String,
     pub max_scroll_history_lines: usize,
     pub inactive_pane_opacity: f32,
+    pub hide_pane_size: bool,
+    pub hide_title_bar_labels: bool,
+    pub hide_title_bar_buttons: bool,
+    pub hide_title_bar_menus: bool,
     pub pane_controls_position: PaneControlsPosition,
     pub pane_controls_hidden_by_default: bool,
     pub http_server_port: u16,
@@ -120,6 +124,10 @@ impl Config {
             terminal_font_family: DEFAULT_TERMINAL_FONT_FAMILY.to_owned(),
             max_scroll_history_lines: DEFAULT_MAX_SCROLL_HISTORY_LINES,
             inactive_pane_opacity: DEFAULT_INACTIVE_PANE_OPACITY,
+            hide_pane_size: true,
+            hide_title_bar_labels: false,
+            hide_title_bar_buttons: false,
+            hide_title_bar_menus: cfg!(target_os = "macos"),
             pane_controls_position: PaneControlsPosition::default(),
             pane_controls_hidden_by_default: false,
             http_server_port: DEFAULT_HTTP_PORT,
@@ -197,6 +205,26 @@ impl Config {
         if let Some(opacity) = root.get("inactive_pane_opacity") {
             config.inactive_pane_opacity = parse_inactive_pane_opacity(opacity)?;
         }
+        if let Some(hidden) = root.get("hide_pane_size") {
+            config.hide_pane_size = hidden
+                .as_bool()
+                .context("hide_pane_size must be a boolean")?;
+        }
+        if let Some(hidden) = root.get("hide_title_bar_labels") {
+            config.hide_title_bar_labels = hidden
+                .as_bool()
+                .context("hide_title_bar_labels must be a boolean")?;
+        }
+        if let Some(hidden) = root.get("hide_title_bar_buttons") {
+            config.hide_title_bar_buttons = hidden
+                .as_bool()
+                .context("hide_title_bar_buttons must be a boolean")?;
+        }
+        if let Some(hidden) = root.get("hide_title_bar_menus") {
+            config.hide_title_bar_menus = hidden
+                .as_bool()
+                .context("hide_title_bar_menus must be a boolean")?;
+        }
         if let Some(position) = root.get("pane_controls_position") {
             config.pane_controls_position = match position
                 .as_str()
@@ -266,6 +294,10 @@ fn validate_config_fields(root: &Value) -> Result<()> {
         "terminal_font_family",
         "max_scroll_history_lines",
         "inactive_pane_opacity",
+        "hide_pane_size",
+        "hide_title_bar_labels",
+        "hide_title_bar_buttons",
+        "hide_title_bar_menus",
         "pane_controls_position",
         "pane_controls_hidden_by_default",
         "http_server_port",

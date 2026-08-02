@@ -142,6 +142,10 @@ appearance settings include:
   "terminal_font_size": 14,
   "terminal_font_family": "MesloLGS NF",
   "inactive_pane_opacity": 0.8,
+  "hide_pane_size": true,
+  "hide_title_bar_labels": false,
+  "hide_title_bar_buttons": false,
+  "hide_title_bar_menus": true,
   "pane_controls_position": "right",
   "pane_controls_hidden_by_default": false,
   "max_scroll_history_lines": 2147483647
@@ -151,6 +155,12 @@ appearance settings include:
 `terminal_font_size` accepts values from 6 through 100.
 `terminal_font_family` accepts bundled and system-installed fonts.
 `inactive_pane_opacity` accepts values from 0 through 1 and defaults to 0.8.
+`hide_pane_size` defaults to `true` and hides the active pane dimensions from
+the title bar. `hide_title_bar_labels` and `hide_title_bar_buttons` default to
+`false`; they hide title-bar text and controls respectively. On macOS,
+`hide_title_bar_menus` defaults to `true` and hides the Menu and Profile menus
+from the title bar. It is ignored on other platforms and is not shown in their
+settings editor.
 `pane_controls_position` accepts `"left"` or `"right"` and defaults to
 `"right"`. It controls the pane overlay buttons independently of the system
 window-button layout so they do not move over a left-aligned prompt unless you

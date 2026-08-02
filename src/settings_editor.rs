@@ -123,6 +123,11 @@ pub struct ConfigurationForm {
     pub terminal_font_family: String,
     pub max_scroll_history_lines: TextField,
     pub inactive_pane_opacity: f32,
+    pub hide_pane_size: bool,
+    pub hide_title_bar_labels: bool,
+    pub hide_title_bar_buttons: bool,
+    #[cfg(target_os = "macos")]
+    pub hide_title_bar_menus: bool,
     pub pane_controls_position: PaneControlsPosition,
     pub pane_controls_hidden_by_default: bool,
     #[cfg(feature = "http-server")]
@@ -207,6 +212,11 @@ impl ConfigurationForm {
                 },
             ),
             inactive_pane_opacity: config.inactive_pane_opacity,
+            hide_pane_size: config.hide_pane_size,
+            hide_title_bar_labels: config.hide_title_bar_labels,
+            hide_title_bar_buttons: config.hide_title_bar_buttons,
+            #[cfg(target_os = "macos")]
+            hide_title_bar_menus: config.hide_title_bar_menus,
             pane_controls_position: config.pane_controls_position,
             pane_controls_hidden_by_default: config.pane_controls_hidden_by_default,
             #[cfg(feature = "http-server")]
@@ -277,6 +287,20 @@ impl ConfigurationForm {
             .parse::<f64>()
             .context("formatting inactive pane opacity")?;
         root.insert("inactive_pane_opacity".into(), json!(inactive_pane_opacity));
+        root.insert("hide_pane_size".into(), json!(self.hide_pane_size));
+        root.insert(
+            "hide_title_bar_labels".into(),
+            json!(self.hide_title_bar_labels),
+        );
+        root.insert(
+            "hide_title_bar_buttons".into(),
+            json!(self.hide_title_bar_buttons),
+        );
+        #[cfg(target_os = "macos")]
+        root.insert(
+            "hide_title_bar_menus".into(),
+            json!(self.hide_title_bar_menus),
+        );
         root.insert(
             "pane_controls_position".into(),
             json!(self.pane_controls_position.as_str()),

@@ -95,6 +95,13 @@ fn configuration_form_round_trip_uses_typed_values_and_profiles() {
     form.terminal_font_size.text = "16".to_owned();
     form.max_scroll_history_lines.text = "123456789".to_owned();
     form.inactive_pane_opacity = 0.65;
+    form.hide_pane_size = false;
+    form.hide_title_bar_labels = true;
+    form.hide_title_bar_buttons = true;
+    #[cfg(target_os = "macos")]
+    {
+        form.hide_title_bar_menus = false;
+    }
     form.pane_controls_position = PaneControlsPosition::Left;
     form.pane_controls_hidden_by_default = true;
     #[cfg(feature = "http-server")]
@@ -120,6 +127,11 @@ fn configuration_form_round_trip_uses_typed_values_and_profiles() {
     assert_eq!(output["terminal_font_size"], 16.);
     assert_eq!(output["max_scroll_history_lines"], 123_456_789);
     assert_eq!(output["inactive_pane_opacity"], 0.65);
+    assert_eq!(output["hide_pane_size"], false);
+    assert_eq!(output["hide_title_bar_labels"], true);
+    assert_eq!(output["hide_title_bar_buttons"], true);
+    #[cfg(target_os = "macos")]
+    assert_eq!(output["hide_title_bar_menus"], false);
     assert_eq!(output["pane_controls_position"], "left");
     assert_eq!(output["pane_controls_hidden_by_default"], true);
     #[cfg(feature = "http-server")]
@@ -127,6 +139,26 @@ fn configuration_form_round_trip_uses_typed_values_and_profiles() {
     #[cfg(feature = "tftp-server")]
     assert_eq!(output["tftp_server_port"], 1069);
     assert_eq!(output["profiles"][0]["args"], json!(["-l", "-i"]));
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn non_macos_configuration_preserves_macos_title_bar_setting() {
+    let root = std::env::temp_dir().join(format!(
+        "zetta-macos-title-bar-setting-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::write(&root, r#"{"hide_title_bar_menus":true}"#).unwrap();
+    let config = Config::load(Some(&root), None).unwrap();
+    let form = ConfigurationForm::load(&root, &config).unwrap();
+    let output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
+    fs::remove_file(root).unwrap();
+
+    assert_eq!(output["hide_title_bar_menus"], true);
 }
 
 #[test]

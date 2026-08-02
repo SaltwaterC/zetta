@@ -30,6 +30,15 @@ pub(crate) enum SettingsDropdown {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SettingsToggle {
+    PaneSize,
+    TitleBarLabels,
+    TitleBarButtons,
+    #[cfg(target_os = "macos")]
+    TitleBarMenus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NumericSetting {
     FontSize,
     ScrollHistory,
@@ -49,6 +58,7 @@ pub(crate) enum SettingsControl {
     Close,
     Input(SettingsInput),
     Dropdown(SettingsDropdown),
+    Toggle(SettingsToggle),
     Numeric(NumericSetting),
     FontPicker,
     Opacity,
@@ -676,6 +686,11 @@ impl Zetta {
                     )),
                     SettingsControl::Numeric(NumericSetting::ScrollHistory),
                     SettingsControl::Opacity,
+                    SettingsControl::Toggle(SettingsToggle::PaneSize),
+                    SettingsControl::Toggle(SettingsToggle::TitleBarLabels),
+                    SettingsControl::Toggle(SettingsToggle::TitleBarButtons),
+                    #[cfg(target_os = "macos")]
+                    SettingsControl::Toggle(SettingsToggle::TitleBarMenus),
                     SettingsControl::Dropdown(SettingsDropdown::PaneControlsPosition),
                     SettingsControl::Dropdown(SettingsDropdown::PaneControlsDefaultVisibility),
                 ]);
@@ -998,6 +1013,18 @@ impl Zetta {
             SettingsControl::Close => self.dismiss_settings(window, cx),
             SettingsControl::Input(input) => self.focus_settings_input(input, window, cx),
             SettingsControl::Dropdown(dropdown) => self.open_settings_dropdown(dropdown, cx),
+            SettingsControl::Toggle(toggle) => {
+                let value = self.settings_editor.as_ref().map(|editor| match toggle {
+                    SettingsToggle::PaneSize => editor.configuration.hide_pane_size,
+                    SettingsToggle::TitleBarLabels => editor.configuration.hide_title_bar_labels,
+                    SettingsToggle::TitleBarButtons => editor.configuration.hide_title_bar_buttons,
+                    #[cfg(target_os = "macos")]
+                    SettingsToggle::TitleBarMenus => editor.configuration.hide_title_bar_menus,
+                });
+                if let Some(value) = value {
+                    self.set_settings_toggle(toggle, !value, window, cx);
+                }
+            }
             SettingsControl::FontPicker => {
                 if let Some(editor) = self.settings_editor.as_mut() {
                     editor.font_query = Some(TextField::default());
@@ -1292,6 +1319,29 @@ impl Zetta {
             _ => editor.configuration_dirty = true,
         }
         editor.message = None;
+        cx.notify();
+    }
+
+    pub(crate) fn set_settings_toggle(
+        &mut self,
+        toggle: SettingsToggle,
+        value: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self.settings_editor.as_mut() else {
+            return;
+        };
+        match toggle {
+            SettingsToggle::PaneSize => editor.configuration.hide_pane_size = value,
+            SettingsToggle::TitleBarLabels => editor.configuration.hide_title_bar_labels = value,
+            SettingsToggle::TitleBarButtons => editor.configuration.hide_title_bar_buttons = value,
+            #[cfg(target_os = "macos")]
+            SettingsToggle::TitleBarMenus => editor.configuration.hide_title_bar_menus = value,
+        }
+        editor.configuration_dirty = true;
+        editor.message = None;
+        self.focus_settings_control(SettingsControl::Toggle(toggle), window, cx);
         cx.notify();
     }
 

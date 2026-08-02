@@ -82,6 +82,41 @@ fn default_working_directory_is_the_user_home() {
     assert_eq!(config.tftp_server_port, DEFAULT_TFTP_SERVER_PORT);
     assert_eq!(config.pane_controls_position, PaneControlsPosition::Right);
     assert!(!config.pane_controls_hidden_by_default);
+    assert!(config.hide_pane_size);
+    assert!(!config.hide_title_bar_labels);
+    assert!(!config.hide_title_bar_buttons);
+    assert_eq!(config.hide_title_bar_menus, cfg!(target_os = "macos"));
+}
+
+#[test]
+fn validates_title_bar_visibility_settings() {
+    let config = Config::parse(
+        r#"{
+            "hide_pane_size": false,
+            "hide_title_bar_labels": true,
+            "hide_title_bar_buttons": true,
+            "hide_title_bar_menus": false
+        }"#,
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(!config.hide_pane_size);
+    assert!(config.hide_title_bar_labels);
+    assert!(config.hide_title_bar_buttons);
+    assert!(!config.hide_title_bar_menus);
+
+    for field in [
+        "hide_pane_size",
+        "hide_title_bar_labels",
+        "hide_title_bar_buttons",
+        "hide_title_bar_menus",
+    ] {
+        assert!(
+            Config::parse(&format!(r#"{{"{field}":"yes"}}"#), None, None).is_err(),
+            "accepted invalid title bar setting {field}"
+        );
+    }
 }
 
 #[test]

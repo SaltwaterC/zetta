@@ -280,6 +280,23 @@ impl Zetta {
                 .into_any_element()
         };
 
+        let setting_toggle =
+            |id: &'static str, value: bool, toggle: SettingsToggle| -> gpui::AnyElement {
+                let toggle_handle = handle.clone();
+                switch(id, value.into())
+                    .label(if value { "On" } else { "Off" })
+                    .full_width(true)
+                    .aria_label(id)
+                    .on_click(move |state, window, cx| {
+                        toggle_handle
+                            .update(cx, |this, cx| {
+                                this.set_settings_toggle(toggle, state.selected(), window, cx);
+                            })
+                            .ok();
+                    })
+                    .into_any_element()
+            };
+
         let numeric = |id: &'static str,
                        field: TextField,
                        setting: NumericSetting,
@@ -611,6 +628,51 @@ impl Zetta {
                         "Dimming level as a percentage",
                         editor.focused_control == Some(SettingsControl::Opacity),
                         opacity_slider(configuration.inactive_pane_opacity),
+                    ),
+                    setting_row(
+                        "Hide pane size",
+                        "Hide the active pane dimensions from the title bar",
+                        editor.focused_control
+                            == Some(SettingsControl::Toggle(SettingsToggle::PaneSize)),
+                        setting_toggle(
+                            "settings-hide-pane-size",
+                            configuration.hide_pane_size,
+                            SettingsToggle::PaneSize,
+                        ),
+                    ),
+                    setting_row(
+                        "Hide title bar labels",
+                        "Hide text such as Menu, Profile, and Keep running",
+                        editor.focused_control
+                            == Some(SettingsControl::Toggle(SettingsToggle::TitleBarLabels)),
+                        setting_toggle(
+                            "settings-hide-title-bar-labels",
+                            configuration.hide_title_bar_labels,
+                            SettingsToggle::TitleBarLabels,
+                        ),
+                    ),
+                    setting_row(
+                        "Hide title bar buttons",
+                        "Hide title bar buttons such as Keep running and Detach",
+                        editor.focused_control
+                            == Some(SettingsControl::Toggle(SettingsToggle::TitleBarButtons)),
+                        setting_toggle(
+                            "settings-hide-title-bar-buttons",
+                            configuration.hide_title_bar_buttons,
+                            SettingsToggle::TitleBarButtons,
+                        ),
+                    ),
+                    #[cfg(target_os = "macos")]
+                    setting_row(
+                        "Hide title bar menus",
+                        "Hide the Menu and Profile menus from the title bar",
+                        editor.focused_control
+                            == Some(SettingsControl::Toggle(SettingsToggle::TitleBarMenus)),
+                        setting_toggle(
+                            "settings-hide-title-bar-menus",
+                            configuration.hide_title_bar_menus,
+                            SettingsToggle::TitleBarMenus,
+                        ),
                     ),
                     setting_row(
                         "Pane controls position",

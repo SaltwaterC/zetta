@@ -2,10 +2,27 @@ use super::*;
 
 #[test]
 fn title_bar_controls_hide_labels_before_they_crowd_the_window() {
-    assert!(!title_bar_shows_control_labels(px(719.), false));
-    assert!(title_bar_shows_control_labels(px(720.), false));
-    assert!(!title_bar_shows_control_labels(px(799.), true));
-    assert!(title_bar_shows_control_labels(px(800.), true));
+    assert!(!title_bar_shows_control_labels(px(719.), false, false));
+    assert!(title_bar_shows_control_labels(px(720.), false, false));
+    assert!(!title_bar_shows_control_labels(px(799.), true, false));
+    assert!(title_bar_shows_control_labels(px(800.), true, false));
+    assert!(!title_bar_shows_control_labels(px(1000.), false, true));
+}
+
+#[test]
+fn title_bar_menu_visibility_is_platform_specific() {
+    assert_eq!(
+        title_bar_menus_visible(true),
+        cfg!(not(target_os = "macos"))
+    );
+    assert!(title_bar_menus_visible(false));
+}
+
+#[test]
+fn background_session_indicator_moves_right_when_buttons_are_hidden() {
+    assert!(!title_bar_background_indicator_on_right(false, 1));
+    assert!(!title_bar_background_indicator_on_right(true, 0));
+    assert!(title_bar_background_indicator_on_right(true, 1));
 }
 
 #[test]
