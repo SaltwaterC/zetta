@@ -837,26 +837,6 @@ impl Render for Zetta {
                                 window.dispatch_action(Box::new(ToggleBroadcastInput), cx)
                             }),
                         )
-                    })
-                    .when(show_title_bar_buttons, |controls| {
-                        controls.child(
-                            Button::new(
-                                "open-settings",
-                                if show_title_bar_control_labels {
-                                    "Settings"
-                                } else {
-                                    ""
-                                },
-                            )
-                            .start_icon(Icon::new(IconName::Settings).size(IconSize::Small))
-                            .style(ButtonStyle::Subtle)
-                            .size(ButtonSize::Large)
-                            .aria_label("Open settings")
-                            .tooltip(Tooltip::for_action_title("Open settings", &ToggleSettings))
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(ToggleSettings), cx)
-                            }),
-                        )
                     }),
             )
             .child(div().min_w_0().flex_1())
