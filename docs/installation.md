@@ -99,17 +99,18 @@ Install the application bundle and its command-line entry point with:
 
 ```sh
 make build
-sudo make install
+make install
 ```
 
-This installs `/Applications/Zetta.app`, including the Zetta icon and the
-release binary, and creates `/usr/local/bin/zetta` as a command-line launcher
-for the bundled executable. Ensure `/usr/local/bin` is in your `PATH`; then
-`zetta init` can configure the current shell or generate an integration script
-while Zetta is running. Native panes also prepend the running executable's
-directory to `PATH`, so Bash and Zsh can invoke `zetta` even when their startup
-files do not inherit the launcher's directory. `sudo make uninstall` removes
-both the application bundle and the CLI entry point.
+This installs `~/Applications/Zetta.app`, including the Zetta icon and the
+release binary, and creates `~/.local/bin/zetta` as a command-line launcher
+for the bundled executable. It also adds `~/.local/bin` to the installing
+user's shell startup file so new shells can invoke `zetta` directly. Native
+panes prepend the running executable's directory to `PATH` as before. `make
+uninstall` removes the application bundle, CLI entry point, and PATH entry.
+
+For a system-wide installation, run `sudo make install PREFIX=/usr/local
+MAC_APPLICATIONS_DIR=/Applications`.
 
 ## Windows
 
@@ -163,12 +164,22 @@ Additional installation targets are:
 ## Linux desktop integration
 
 Zetta uses `Zetta` as its Wayland application ID and X11 `WM_CLASS`. Build and
-install the release binary, desktop entry, and icons under `/usr` with:
+install the release binary, desktop entry, and icons for the current user with:
 
 ```sh
 make build
-sudo make install
+make install
 ```
+
+The Linux user-local install stores the application in `~/.local/zetta.app`,
+links `~/.local/bin/zetta` to its binary, and installs the desktop entry under
+`~/.local/share/applications`. The desktop entry uses the installed binary and
+icon paths directly, so it works even when the desktop session does not have
+`~/.local/bin` in its `PATH`. The installer also adds `~/.local/bin` to
+the installing user's shell startup file, and `make uninstall` removes that
+PATH entry.
+
+For a system-wide installation, run `sudo make install PREFIX=/usr`.
 
 To build a restricted binary, pass build flags to both the build and install
 steps. `SERIAL`, `HTTP`, `TFTP`, `TFTP_SERVER`, `TFTP_CLIENT`, `NOTIFY`, and
@@ -177,7 +188,7 @@ components; the server and client switches can be used independently:
 
 ```sh
 make build SERIAL=0 HTTP=0 TFTP=0 NOTIFY=0 CLIPBOARD=0
-sudo make install SERIAL=0 HTTP=0 TFTP=0 NOTIFY=0 CLIPBOARD=0
+make install SERIAL=0 HTTP=0 TFTP=0 NOTIFY=0 CLIPBOARD=0
 
 # Keep only the TFTP client.
 make build TFTP_SERVER=0
@@ -191,24 +202,27 @@ their implementation is not compiled into the binary. A build without the
 TFTP server does not request `cap_net_bind_service` during installation.
 
 When invoked through `sudo`, `make install` uses the existing release artifact
-and does not run Cargo again. It grants the binary only the
+and does not run Cargo again. A user-local install cannot grant the
 `cap_net_bind_service` capability needed by the TFTP server to bind UDP port
-69. Ubuntu provides `setcap` in `libcap2-bin`.
+69, so the TFTP server will not be able to bind that port without additional
+privileges. A system-wide install grants the capability when possible. Ubuntu
+provides `setcap` in `libcap2-bin`.
 
 An unprivileged install builds first but cannot grant that capability. Enable
 it separately when required:
 
 ```sh
-sudo make install-capabilities PREFIX="$HOME/.local"
+sudo make install-capabilities PREFIX="$HOME/.local/zetta.app"
 ```
 
 Other supported installation forms are:
 
-- `sudo make install-assets` reinstalls only the desktop entry and icons.
-- `sudo make uninstall-assets` removes only those assets.
-- `make uninstall` removes the binary and assets.
-- `PREFIX=/usr/local` selects a traditional local-system prefix.
-- `PREFIX="$HOME/.local"` performs a per-user install without `sudo`.
+- `make install-assets` reinstalls only the desktop entry and icons.
+- `make uninstall-assets` removes only those assets.
+- `make uninstall` removes the binary, assets, and managed `PATH` entry.
+- `sudo make install PREFIX=/usr` selects a traditional system prefix.
+- `PREFIX="$HOME/.local/zetta.app"` selects a custom user-local application
+  directory.
 - `DESTDIR` stages a package build.
 
 Staged installs do not receive filesystem capabilities; packages must apply

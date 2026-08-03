@@ -13,8 +13,25 @@ CLIPBOARD ?= 1
 X11 ?= 0
 
 UNAME_S := $(shell uname -s)
+ifneq ($(OS),Windows_NT)
+IS_ROOT := $(shell test "$$(id -u)" -eq 0 && echo 1)
+else
+IS_ROOT :=
+endif
 ifeq ($(UNAME_S),Darwin)
+ifeq ($(IS_ROOT),1)
 PREFIX ?= /usr/local
+MAC_APPLICATIONS_DIR ?= /Applications
+else
+PREFIX ?= $(HOME)/.local
+MAC_APPLICATIONS_DIR ?= $(HOME)/Applications
+endif
+else ifeq ($(UNAME_S),Linux)
+ifeq ($(IS_ROOT),1)
+PREFIX ?= /usr
+else
+PREFIX ?= $(HOME)/.local/zetta.app
+endif
 else
 PREFIX ?= /usr
 endif
@@ -58,13 +75,18 @@ APPLICATIONS_DIR := $(DATADIR)/applications
 ICON_128_DIR := $(DATADIR)/icons/hicolor/128x128/apps
 ICON_512_DIR := $(DATADIR)/icons/hicolor/512x512/apps
 VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
-MAC_APPLICATIONS_DIR ?= /Applications
 MAC_BUNDLE := $(DESTDIR)$(MAC_APPLICATIONS_DIR)/$(APP_ID).app
 MAC_RUNTIME_BUNDLE := $(MAC_APPLICATIONS_DIR)/$(APP_ID).app
-MAC_CLI_PATH := $(DESTDIR)$(PREFIX)/bin/zetta
+MAC_CLI_DIR := $(DESTDIR)$(PREFIX)/bin
+MAC_CLI_PATH := $(MAC_CLI_DIR)/zetta
+LINUX_USER_INSTALL := $(if $(and $(filter Linux,$(UNAME_S)),$(IS_ROOT)),,1)
+LINUX_USER_DATA_DIR := $(DESTDIR)$(HOME)/.local/share
+LINUX_USER_BIN_DIR := $(DESTDIR)$(HOME)/.local/bin
+LINUX_USER_DESKTOP_DIR := $(LINUX_USER_DATA_DIR)/applications
+LINUX_USER_CLI_PATH := $(LINUX_USER_BIN_DIR)/zetta
 
-.PHONY: build test install install-binary install-capabilities install-assets uninstall \
-	uninstall-binary uninstall-assets refresh-desktop-caches
+.PHONY: build test install install-binary install-capabilities install-assets install-user-path uninstall \
+	uninstall-binary uninstall-assets uninstall-user-path refresh-desktop-caches
 
 test:
 	$(CARGO) test --locked --no-default-features --features "$(BUILD_FEATURES)"
@@ -83,6 +105,10 @@ install-capabilities:
 
 install-assets:
 	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Action InstallShortcut
+
+install-user-path:
+
+uninstall-user-path:
 
 uninstall:
 	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Action Uninstall
@@ -110,6 +136,7 @@ install:
 	$(MAKE) install-binary
 	$(MAKE) install-capabilities
 	$(MAKE) install-assets
+	$(MAKE) install-user-path
 
 install-binary:
 	mkdir -p "$(MAC_BUNDLE)/Contents/MacOS" "$(BINDIR)"
@@ -119,6 +146,20 @@ install-binary:
 	chmod 755 "$(MAC_CLI_PATH)"
 
 install-capabilities:
+
+install-user-path:
+ifeq ($(IS_ROOT),)
+ifeq ($(DESTDIR),)
+	sh scripts/install-user-path.sh "$(MAC_CLI_DIR)"
+endif
+endif
+
+uninstall-user-path:
+ifeq ($(IS_ROOT),)
+ifeq ($(DESTDIR),)
+	sh scripts/install-user-path.sh "$(MAC_CLI_DIR)" uninstall
+endif
+endif
 
 install-assets:
 	@test -x "$(MAC_BUNDLE)/Contents/MacOS/zetta" || { \
@@ -134,6 +175,7 @@ uninstall:
 uninstall-binary:
 	$(RM) "$(MAC_CLI_PATH)"
 	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zetta"
+	$(MAKE) uninstall-user-path
 
 uninstall-assets:
 	rm -rf "$(MAC_BUNDLE)"
@@ -155,9 +197,15 @@ install:
 	$(MAKE) install-binary
 	$(MAKE) install-capabilities
 	$(MAKE) install-assets
+	$(MAKE) install-user-path
 
 install-binary:
 	$(INSTALL) -Dm755 target/release/zetta $(BINDIR)/zetta
+ifneq ($(LINUX_USER_INSTALL),)
+	mkdir -p "$(LINUX_USER_BIN_DIR)"
+	$(RM) "$(LINUX_USER_CLI_PATH)"
+	ln -s "$(BINDIR)/zetta" "$(LINUX_USER_CLI_PATH)"
+endif
 
 install-capabilities:
 	@if [ "$$(uname -s)" = "Linux" ] && [ -n "$(call tool_enabled,$(TFTP_SERVER))" ]; then \
@@ -181,6 +229,20 @@ install-capabilities:
 		fi; \
 	fi
 
+install-user-path:
+ifneq ($(LINUX_USER_INSTALL),)
+ifeq ($(DESTDIR),)
+	sh scripts/install-user-path.sh "$(LINUX_USER_BIN_DIR)"
+endif
+endif
+
+uninstall-user-path:
+ifneq ($(LINUX_USER_INSTALL),)
+ifeq ($(DESTDIR),)
+	sh scripts/install-user-path.sh "$(LINUX_USER_BIN_DIR)" uninstall
+endif
+endif
+
 install-assets:
 	$(INSTALL) -Dm644 resources/linux/$(APP_ID).desktop \
 		$(APPLICATIONS_DIR)/$(APP_ID).desktop
@@ -188,6 +250,15 @@ install-assets:
 		$(ICON_128_DIR)/$(APP_ID).png
 	$(INSTALL) -Dm644 assets/icons/zetta-terminal-icon-512.png \
 		$(ICON_512_DIR)/$(APP_ID).png
+ifneq ($(LINUX_USER_INSTALL),)
+	mkdir -p "$(LINUX_USER_DESKTOP_DIR)"
+	sed \
+		-e 's|^TryExec=.*|TryExec=$(BINDIR)/zetta|' \
+		-e 's|^Exec=.*|Exec=$(BINDIR)/zetta|' \
+		-e 's|^Icon=.*|Icon=$(ICON_512_DIR)/$(APP_ID).png|' \
+		resources/linux/$(APP_ID).desktop > "$(LINUX_USER_DESKTOP_DIR)/$(APP_ID).desktop"
+	chmod 644 "$(LINUX_USER_DESKTOP_DIR)/$(APP_ID).desktop"
+endif
 	$(MAKE) refresh-desktop-caches
 
 uninstall:
@@ -196,17 +267,24 @@ uninstall:
 
 uninstall-binary:
 	$(RM) $(BINDIR)/zetta
+ifneq ($(LINUX_USER_INSTALL),)
+	$(RM) "$(LINUX_USER_CLI_PATH)"
+endif
+	$(MAKE) uninstall-user-path
 
 uninstall-assets:
 	$(RM) $(APPLICATIONS_DIR)/$(APP_ID).desktop
 	$(RM) $(ICON_128_DIR)/$(APP_ID).png
 	$(RM) $(ICON_512_DIR)/$(APP_ID).png
+ifneq ($(LINUX_USER_INSTALL),)
+	$(RM) "$(LINUX_USER_DESKTOP_DIR)/$(APP_ID).desktop"
+endif
 	$(MAKE) refresh-desktop-caches
 
 refresh-desktop-caches:
 	@if [ -z "$(DESTDIR)" ]; then \
 		if command -v update-desktop-database >/dev/null 2>&1; then \
-			update-desktop-database "$(PREFIX)/share/applications"; \
+			update-desktop-database "$(if $(LINUX_USER_INSTALL),$(LINUX_USER_DESKTOP_DIR),$(PREFIX)/share/applications)"; \
 		fi; \
 		if command -v gtk-update-icon-cache >/dev/null 2>&1 \
 			&& [ -f "$(PREFIX)/share/icons/hicolor/index.theme" ]; then \
