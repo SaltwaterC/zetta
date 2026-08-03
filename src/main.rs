@@ -20,6 +20,8 @@ mod shell_integration;
 #[cfg(any(feature = "tftp-server", feature = "tftp-client"))]
 mod tftp;
 mod theme_extensions;
+#[cfg(feature = "syntax-highlighting")]
+mod vi_syntax;
 mod zetta_assets;
 
 const ZETTA_APP_ID: &str = "Zetta";

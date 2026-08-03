@@ -24,8 +24,9 @@ for active development.
 - Serial consoles plus built-in HTTP and TFTP tools, usable from panes or the
   CLI
 - Cross-platform desktop notifications from the CLI
-- A small built-in [vi editor](https://github.com/SaltwaterC/busy-v), available
-  as `zetta vi` and conditionally as `vi` through shell integration
+- A small syntax-highlighted built-in [vi editor](https://github.com/SaltwaterC/busy-v),
+  available as `zetta vi` and conditionally as `vi` through shell integration;
+  see the [supported grammars](docs/usage.md#built-in-vi-syntax-highlighting)
 
 ## Quick start
 
@@ -44,7 +45,9 @@ Corporate or otherwise restricted deployments can omit the serial console,
 network tools, and desktop notifications at build time. For example, `make
 build SERIAL=0 HTTP=0 TFTP=0 NOTIFY=0` produces a terminal-only build.
 `TFTP_SERVER=0` and `TFTP_CLIENT=0` control the two TFTP components
-independently. The flags also accept `false`, `no`, or `off`.
+independently. Set `SYNTAX_HIGHLIGHTING=0` to omit the optional bundled
+Tree-sitter grammar set from the vi editor. The flags also accept `false`,
+`no`, or `off`.
 
 The tools are available directly when enabled: `zetta serial console --device
 PATH`, `zetta http server`, `zetta tftp server`, and `zetta notify`. Shell

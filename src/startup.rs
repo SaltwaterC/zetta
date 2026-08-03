@@ -120,23 +120,27 @@ pub(crate) fn version_text() -> String {
 }
 
 pub(crate) fn help_text(profiles: &[Profile]) -> String {
-    let mut features = vec!["Terminal emulator"];
-    #[cfg(all(feature = "wayland", any(target_os = "linux", target_os = "freebsd")))]
-    features.push("Wayland backend");
-    #[cfg(all(feature = "x11", any(target_os = "linux", target_os = "freebsd")))]
-    features.push("X11 backend");
-    #[cfg(feature = "serial-console")]
-    features.push("Serial console");
-    #[cfg(feature = "http-server")]
-    features.push("HTTP server");
-    #[cfg(feature = "tftp-server")]
-    features.push("TFTP server");
-    #[cfg(feature = "tftp-client")]
-    features.push("TFTP client");
-    #[cfg(feature = "notifications")]
-    features.push("Desktop notifications");
-    #[cfg(feature = "clipboard")]
-    features.push("Clipboard access");
+    let features = [
+        "Terminal emulator",
+        #[cfg(feature = "syntax-highlighting")]
+        "Vi syntax highlighting",
+        #[cfg(all(feature = "wayland", any(target_os = "linux", target_os = "freebsd")))]
+        "Wayland backend",
+        #[cfg(all(feature = "x11", any(target_os = "linux", target_os = "freebsd")))]
+        "X11 backend",
+        #[cfg(feature = "serial-console")]
+        "Serial console",
+        #[cfg(feature = "http-server")]
+        "HTTP server",
+        #[cfg(feature = "tftp-server")]
+        "TFTP server",
+        #[cfg(feature = "tftp-client")]
+        "TFTP client",
+        #[cfg(feature = "notifications")]
+        "Desktop notifications",
+        #[cfg(feature = "clipboard")]
+        "Clipboard access",
+    ];
 
     let serial_usage = if cfg!(feature = "serial-console") {
         "\n       zetta serial <COMMAND>"
@@ -2520,7 +2524,14 @@ pub(crate) fn run() -> Result<()> {
                     .with_context(|| format!("failed to start editor {program:?}"))
                     .map(|status| status.code().unwrap_or(1))
             } else {
-                Ok(busy_v::run(arguments))
+                #[cfg(feature = "syntax-highlighting")]
+                {
+                    Ok(vi_syntax::run(arguments))
+                }
+                #[cfg(not(feature = "syntax-highlighting"))]
+                {
+                    Ok(busy_v::run(arguments))
+                }
             }
         })();
         if let Some(path) = cleanup_path {
@@ -2528,8 +2539,15 @@ pub(crate) fn run() -> Result<()> {
         }
         std::process::exit(result?);
     }
-    if let StartupMode::Vi(arguments) = &args.mode {
-        std::process::exit(busy_v::run(arguments.clone()));
+    if let StartupMode::Vi(arguments) = args.mode {
+        #[cfg(feature = "syntax-highlighting")]
+        {
+            std::process::exit(vi_syntax::run(arguments));
+        }
+        #[cfg(not(feature = "syntax-highlighting"))]
+        {
+            std::process::exit(busy_v::run(arguments));
+        }
     }
     if let StartupMode::OutputBenchmark {
         size_mib,

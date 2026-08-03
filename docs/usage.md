@@ -205,6 +205,35 @@ option in `EDITOR` so the managed file remains available until editing ends.
 **Edit Scrollback** is also available from the terminal context menu and command
 palette.
 
+## Built-in vi syntax highlighting
+
+When the optional `syntax-highlighting` feature is enabled (it is included in
+the default build), `zetta vi` uses bundled Tree-sitter grammars and Zed's
+highlight queries. Language selection follows the bundled Zed grammar metadata
+for file names, suffixes, and first-line patterns.
+
+The supported native grammar registry is:
+
+- Bash
+- C and C++
+- CSS
+- Diff
+- Git commit messages
+- Go, Go modules (`go.mod`), and Go workspaces (`go.work`)
+- JSDoc
+- JSON and JSONC
+- Markdown and Markdown Inline
+- Python
+- Regular expressions
+- Rust
+- TSX and TypeScript
+- YAML
+
+Markdown fenced code blocks can use the other registered grammars, such as
+Rust, JSONC, TSX, and TypeScript. `Markdown Inline`, JSDoc, and regular
+expressions are also used when included by another grammar's Zed query; they
+are not guaranteed to have standalone file-name detection.
+
 ## Search
 
 `Cmd-Shift-F` on macOS / `Alt-Shift-F` on Windows/Linux searches the active

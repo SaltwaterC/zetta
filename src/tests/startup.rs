@@ -171,6 +171,10 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     let help = help_text(&profiles);
     assert!(help.starts_with("Zetta Terminal\n"));
     assert!(help.contains("Built-in features:\n  Terminal emulator"));
+    #[cfg(feature = "syntax-highlighting")]
+    assert!(help.contains("Vi syntax highlighting"));
+    #[cfg(not(feature = "syntax-highlighting"))]
+    assert!(!help.contains("Vi syntax highlighting"));
     assert!(help.contains("Profiles accepted by --profile NAME (case-insensitive):"));
     assert!(help.contains("  System\n  Operations"));
     assert!(help.contains("Select one of the profiles listed above"));
