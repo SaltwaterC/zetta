@@ -20,6 +20,7 @@
       "ctrl-pageup": "zetta::NextTab",
       "ctrl-pagedown": "zetta::PreviousTab",
       "ctrl-v": "terminal::Paste",
+      "alt-shift-v": "terminal_view::EditScrollback",
       "ctrl-shift-f": "zetta::SearchTabScrollback",
       "ctrl-shift-p": "zetta::ToggleCommandPalette",
       "ctrl-,": "zetta::ToggleSettings",

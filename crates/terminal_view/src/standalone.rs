@@ -1,5 +1,11 @@
+mod scrollback_temp;
 mod terminal_element;
 mod terminal_scrollbar;
+
+pub use scrollback_temp::{
+    claim_for_editor as claim_scrollback_for_editor, remove_managed as remove_scrollback_file,
+    start_cleanup_monitor as start_scrollback_cleanup_monitor,
+};
 
 use std::{cmp, ops::Range as StdRange, path::PathBuf, sync::Arc, time::Duration};
 
@@ -49,6 +55,7 @@ actions!(
         SelectAll,
         ClearClipboard,
         CopyAndClearSelection,
+        EditScrollback,
         SearchScrollback,
         SearchNextMatch,
         SearchPreviousMatch,
@@ -390,6 +397,39 @@ impl TerminalView {
 
     pub fn terminal(&self) -> &Entity<Terminal> {
         &self.terminal
+    }
+
+    fn edit_path_like_target(&mut self, target: terminal::PathLikeTarget, cx: &mut Context<Self>) {
+        let path = resolve_local_path(&target);
+        self.terminal
+            .update(cx, |terminal, _| terminal.open_path_in_editor(&path));
+    }
+
+    fn edit_scrollback(&mut self, _: &EditScrollback, _: &mut Window, cx: &mut Context<Self>) {
+        let output = self.terminal.read(cx).get_content_async();
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            let output = output.await;
+            let temporary_file = executor
+                .spawn(async move { scrollback_temp::create(&output) })
+                .await;
+
+            match temporary_file {
+                Ok(path) => {
+                    scrollback_temp::start_cleanup_monitor();
+                    let update = this.update(cx, |this, cx| {
+                        this.terminal.update(cx, |terminal, _| {
+                            terminal.open_temporary_path_in_editor(&path)
+                        });
+                    });
+                    if update.is_err() {
+                        let _ = scrollback_temp::remove_managed(&path);
+                    }
+                }
+                Err(error) => log::error!("failed to create scrollback editor buffer: {error:#}"),
+            }
+        })
+        .detach();
     }
 
     pub fn set_emit_input_events(&mut self, enabled: bool) {
@@ -1006,6 +1046,7 @@ impl TerminalView {
                 .action("Paste", Box::new(Paste))
                 .action("Paste Trimmed", Box::new(PasteTrimmed))
                 .action("Select All", Box::new(SelectAll))
+                .action("Edit Scrollback", Box::new(EditScrollback))
                 .separator()
                 .action("Clear Clipboard", Box::new(ClearClipboard))
                 .action("Clear", Box::new(Clear))
@@ -1269,6 +1310,7 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::scroll_to_bottom))
             .on_action(cx.listener(Self::toggle_vi_mode))
             .on_action(cx.listener(Self::show_character_palette))
+            .on_action(cx.listener(Self::edit_scrollback))
             .on_action(cx.listener(Self::search_scrollback))
             .on_action(cx.listener(Self::search_next_match))
             .on_action(cx.listener(Self::search_previous_match))

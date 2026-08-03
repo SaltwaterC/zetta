@@ -7716,16 +7716,20 @@ version = "0.1.0"
 dependencies = [
  "gpui",
  "itertools 0.14.0",
+ "libc",
  "log",
  "regex",
  "schemars",
  "serde",
  "settings",
+ "sysinfo 0.37.2",
+ "tempfile",
  "terminal",
  "theme",
  "theme_settings",
  "ui",
  "util",
+ "windows 0.61.3",
 ]
 
 [[package]]

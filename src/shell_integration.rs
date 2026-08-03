@@ -637,7 +637,7 @@ _zetta_complete() {
     esac
 
     if (( COMP_CWORD == 1 )); then
-        _zetta_compgen 'benchmark benchmark-output terminal-size sessions vi init serial http tftp notify copy paste --help --version --config --keymap --profile'
+        _zetta_compgen 'benchmark benchmark-output terminal-size sessions edit vi init serial http tftp notify copy paste --help --version --config --keymap --profile'
         return
     fi
 
@@ -650,6 +650,13 @@ _zetta_complete() {
             ;;
         terminal-size)
             _zetta_compgen '--json --resize --columns --rows --help'
+            ;;
+        edit)
+            if [[ $current == -* ]]; then
+                _zetta_compgen '--delete-after --help'
+            else
+                COMPREPLY=( $(compgen -f -- "$current") )
+            fi
             ;;
         vi)
             if [[ $current == -* ]]; then
@@ -1001,6 +1008,8 @@ function __zetta_long_options
                 --columns 'Set pane width in columns' \
                 --rows 'Set pane height in rows' \
                 --help 'Print help'
+        case edit
+            printf '%s\t%s\n' --delete-after 'Delete a managed buffer after editing' --help 'Print help'
         case vi
             printf '%s\t%s\n' --help 'Print help'
         case sessions
@@ -1062,6 +1071,7 @@ complete -c zetta -n '__fish_use_subcommand' -a benchmark -d 'Profile terminal r
 complete -c zetta -n '__fish_use_subcommand' -a benchmark-output -d 'Write and time a text payload'
 complete -c zetta -n '__fish_use_subcommand' -a terminal-size -d 'Print the current terminal size'
 complete -c zetta -n '__fish_use_subcommand' -a sessions -d 'List detached background sessions'
+complete -c zetta -n '__fish_use_subcommand' -a edit -d 'Edit files with EDITOR or Zetta vi'
 complete -c zetta -n '__fish_use_subcommand' -a vi -d "Edit files with Zetta's built-in vi"
 complete -c zetta -n '__fish_use_subcommand' -a init -d 'Generate shell integration'
 complete -c zetta -n '__fish_use_subcommand' -a serial -d 'List or connect to serial devices'
@@ -1102,6 +1112,11 @@ complete -c zetta -n '__fish_seen_subcommand_from sessions' -l help -d 'Print he
 complete -c zetta -n '__fish_seen_subcommand_from sessions' -a '(__zetta_long_options sessions)'
 complete -c zetta -n '__fish_seen_subcommand_from sessions; and __fish_seen_subcommand_from reconnect' -a '(__zetta_session_ids)'
 complete -c zetta -n '__fish_seen_subcommand_from sessions; and __fish_seen_subcommand_from reconnect' -l session -r -d 'Session ID to reconnect'
+complete -c zetta -n '__fish_seen_subcommand_from edit' -l delete-after -d 'Delete a managed buffer after editing'
+complete -c zetta -n '__fish_seen_subcommand_from edit' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from edit' -a '(__zetta_long_options edit)'
+complete -c zetta -n '__fish_seen_subcommand_from edit' -F
+complete -c zetta -s d -n '__fish_seen_subcommand_from edit; and __zetta_short_option -d'
 complete -c zetta -n '__fish_seen_subcommand_from vi' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from vi' -a '(__zetta_long_options vi)'
 complete -c zetta -n '__fish_seen_subcommand_from vi' -F
@@ -1277,7 +1292,7 @@ $zettaCompletions = {
     $previous = if ($words.Count -gt 1) { $words[$words.Count - 2] } else { '' }
     $last = if ($words.Count -gt 1) { $words[$words.Count - 1] } else { '' }
     $subcommand = $words | Where-Object {
-        $_ -in 'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste'
+        $_ -in 'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste'
     } | Select-Object -First 1
 
     $candidates = if ($commandName -eq 'ztftp') {
@@ -1320,7 +1335,7 @@ $zettaCompletions = {
         'general', 'ruler', 'find', 'font'
     } elseif ($previous -in '--prefer', '-prefer', '--Prefer', '-Prefer') {
         'txt', 'rtf', 'ps'
-    } elseif ($commandName -eq 'vi' -or $subcommand -eq 'vi') {
+    } elseif ($commandName -eq 'vi' -or $subcommand -in 'edit', 'vi') {
         if ($wordToComplete -like '-*') {
             '--help'
         } else {
@@ -1334,12 +1349,13 @@ $zettaCompletions = {
     } elseif ($subcommand -eq 'sessions' -and $words.Count -ge 3 -and $words[2] -eq 'reconnect') {
         if ($previous -in '--session', '-s') { @() } else { & $zettaSessionIds }
     } elseif ($null -eq $subcommand) {
-        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste', '--help', '--version', '--config', '--keymap', '--profile'
+        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste', '--help', '--version', '--config', '--keymap', '--profile'
     } else {
         switch ($subcommand) {
             'benchmark' { '--terminal-render-workload', '--terminal-checkerboard-workload', '--terminal-sparse-update-workload', '--profile-report', '--profile-duration', '--profile-pane-stress', '--profile-background-stress', '--profile-sparse-updates', '--profile-external-terminal', '--help' }
             'benchmark-output' { '--size', '--output-type', '--help' }
             'terminal-size' { '--json', '--resize', '--columns', '--rows', '--help' }
+            'edit' { '--delete-after', '--help' }
             'vi' { '--help' }
             'sessions' {
                 if ($words.Count -le 2 -or ($words.Count -eq 3 -and $words[2] -ne 'reconnect')) {
@@ -1484,6 +1500,15 @@ _zetta_sound_names() {
 _zetta() {
     local previous=${words[CURRENT-1]}
 
+    if [[ $words[1] == edit ]]; then
+        if [[ $words[CURRENT] == -* ]]; then
+            _zetta_options --delete-after --help
+        else
+            _files
+        fi
+        return
+    fi
+
     if [[ $words[1] == vi ]]; then
         if [[ $words[CURRENT] == -* ]]; then
             _zetta_options --help
@@ -1494,7 +1519,7 @@ _zetta() {
     fi
 
     if (( CURRENT == 2 )); then
-        compadd -S ' ' -- benchmark benchmark-output terminal-size sessions vi init serial http tftp notify copy paste
+        compadd -S ' ' -- benchmark benchmark-output terminal-size sessions edit vi init serial http tftp notify copy paste
         _zetta_options --help --version --config --keymap --profile
         return
     fi
@@ -1618,6 +1643,13 @@ _zetta() {
             ;;
         terminal-size)
             _zetta_options --json --resize --columns --rows --help
+            ;;
+        edit)
+            if [[ $words[CURRENT] == -* ]]; then
+                _zetta_options --delete-after --help
+            else
+                _files
+            fi
             ;;
         vi)
             if [[ $words[CURRENT] == -* ]]; then

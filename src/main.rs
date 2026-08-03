@@ -77,9 +77,9 @@ use terminal::{
     terminal_settings::TerminalSettings,
 };
 use terminal_view::{
-    ClearClipboard, CopyAndClearSelection, DismissSearch, SearchNextMatch, SearchPreviousMatch,
-    SearchScrollback, SelectAll, SelectAllSearchText, TerminalInput, TerminalView,
-    TerminalViewEvent,
+    ClearClipboard, CopyAndClearSelection, DismissSearch, EditScrollback, SearchNextMatch,
+    SearchPreviousMatch, SearchScrollback, SelectAll, SelectAllSearchText, TerminalInput,
+    TerminalView, TerminalViewEvent,
 };
 use theme::{
     ActiveTheme, ClientDecorationsExt as _, GlobalTheme, Theme, ThemeColors, ThemeRegistry,

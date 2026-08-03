@@ -786,11 +786,32 @@ impl TerminalElement {
                 window.focus(&focus, cx);
 
                 let scroll_top = terminal_view.read(cx).scroll_top;
+                let mut adjusted_event = e.clone();
+                if scroll_top > Pixels::ZERO {
+                    adjusted_event.position.y += scroll_top;
+                }
+
+                let edit_path = if e.modifiers.shift && e.modifiers.secondary() {
+                    terminal.update(cx, |terminal, _| {
+                        let target = terminal.path_like_target_at_event_position(&adjusted_event);
+                        if target.is_some() {
+                            terminal.begin_editor_click();
+                        }
+                        target
+                    })
+                } else {
+                    None
+                };
+
+                if let Some(target) = edit_path {
+                    terminal_view.update(cx, |terminal_view, cx| {
+                        terminal_view.edit_path_like_target(target, cx);
+                    });
+                    cx.stop_propagation();
+                    return;
+                }
+
                 terminal.update(cx, |terminal, cx| {
-                    let mut adjusted_event = e.clone();
-                    if scroll_top > Pixels::ZERO {
-                        adjusted_event.position.y += scroll_top;
-                    }
                     terminal.mouse_down(&adjusted_event, cx);
                     cx.notify();
                 })
@@ -843,7 +864,7 @@ impl TerminalElement {
                 }
 
                 terminal.update(cx, |terminal, cx| {
-                    if terminal.selection_started() {
+                    if terminal.selection_started() || terminal.editor_click_started() {
                         terminal.mouse_up(event, cx);
                         cx.notify();
                     }

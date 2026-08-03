@@ -176,6 +176,8 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     assert!(help.contains("Select one of the profiles listed above"));
     assert!(help.contains("zetta terminal-size [--json | --resize"));
     assert!(help.contains("zetta vi [OPTIONS] [FILE ...]"));
+    assert!(help.contains("zetta edit [OPTIONS] [--] FILE ..."));
+    assert!(help.contains("edit                                Edit files with $EDITOR"));
     assert!(
         help.contains("vi                                  Edit files with Zetta's built-in vi")
     );
@@ -268,6 +270,44 @@ fn vi_subcommand_bypasses_application_startup_and_preserves_arguments() {
         StartupMode::Vi(vec!["-R".into(), "notes.txt".into()])
     );
     assert!(!should_handoff_to_existing_process(&args));
+}
+
+#[test]
+fn edit_subcommand_bypasses_application_startup_and_preserves_paths() {
+    let args = parse_args_from([
+        OsString::from("edit"),
+        OsString::from("--"),
+        OsString::from("notes with spaces.txt"),
+    ])
+    .unwrap();
+
+    assert_eq!(
+        args.mode,
+        StartupMode::Edit {
+            arguments: vec!["notes with spaces.txt".into()],
+            delete_after: false,
+        }
+    );
+    assert!(!should_handoff_to_existing_process(&args));
+}
+
+#[test]
+fn edit_subcommand_accepts_managed_file_cleanup() {
+    let args = parse_args_from([
+        OsString::from("edit"),
+        OsString::from("--delete-after"),
+        OsString::from("--"),
+        OsString::from("scrollback.txt"),
+    ])
+    .unwrap();
+
+    assert_eq!(
+        args.mode,
+        StartupMode::Edit {
+            arguments: vec!["scrollback.txt".into()],
+            delete_after: true,
+        }
+    );
 }
 
 #[cfg(feature = "serial-console")]
@@ -1543,6 +1583,7 @@ fn alt_shortcuts_use_the_platform_equivalent() {
         ("alt-shift-f", "cmd-shift-f"),
         ("ctrl-alt-v", "ctrl-cmd-v"),
         ("alt-shift-s", "cmd-shift-s"),
+        ("alt-shift-v", "cmd-shift-v"),
         ("alt-shift-r", "cmd-shift-r"),
         ("alt-shift-h", "cmd-shift-h"),
         ("alt-shift-x", "cmd-shift-x"),
@@ -1651,6 +1692,26 @@ fn pane_output_uses_the_standard_save_shortcut() {
     assert_eq!(
         pane_output_keybinding().match_keystrokes(&[shortcut]),
         Some(false)
+    );
+}
+
+#[test]
+fn edit_scrollback_uses_a_pane_scoped_shortcut() {
+    assert_eq!(
+        EDIT_SCROLLBACK_KEYBINDING,
+        platform_keystroke("alt-shift-v")
+    );
+    let shortcut = gpui::Keystroke::parse(EDIT_SCROLLBACK_KEYBINDING).unwrap();
+    assert_eq!(
+        edit_scrollback_keybinding().match_keystrokes(&[shortcut]),
+        Some(false)
+    );
+    assert!(
+        edit_scrollback_keybinding()
+            .predicate()
+            .expect("edit scrollback should be scoped to a terminal")
+            .to_string()
+            .contains("Zetta > Terminal")
     );
 }
 

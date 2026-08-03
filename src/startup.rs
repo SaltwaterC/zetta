@@ -86,6 +86,10 @@ pub(crate) enum StartupMode {
     TerminalRenderingProfile,
     TerminalRenderingWorkload,
     TerminalCheckerboardWorkload,
+    Edit {
+        arguments: Vec<String>,
+        delete_after: bool,
+    },
     Vi(Vec<String>),
     TerminalSparseUpdateWorkload,
 }
@@ -195,11 +199,11 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
     );
     help.replace(
         "       zetta sessions [--json]",
-        "       zetta sessions [--json]\n       zetta sessions reconnect SESSION_ID\n       zetta vi [OPTIONS] [FILE ...]",
+        "       zetta sessions [--json]\n       zetta sessions reconnect SESSION_ID\n       zetta edit [OPTIONS] [--] FILE ...\n       zetta vi [OPTIONS] [FILE ...]",
     )
     .replace(
         "sessions                            List detached background sessions",
-        "sessions                            List or reconnect detached background sessions\n  vi                                  Edit files with Zetta's built-in vi",
+        "sessions                            List or reconnect detached background sessions\n  edit                                Edit files with $EDITOR, falling back to Zetta vi\n  vi                                  Edit files with Zetta's built-in vi",
     )
 }
 
@@ -435,6 +439,52 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             keymap_path: None,
             profile: None,
             mode: StartupMode::ListBackgroundSessions { json },
+            profile_report: None,
+            profile_duration: None,
+            profile_pane_stress: false,
+            profile_background_stress: false,
+            profile_sparse_updates: false,
+            profile_external_terminal: false,
+            tftp_command: None,
+        });
+    }
+    if arguments.first().is_some_and(|argument| argument == "edit") {
+        let editor_arguments = arguments[1..].iter();
+        let mut delete_after = false;
+        let mut paths = Vec::new();
+        let mut options = true;
+        for argument in editor_arguments {
+            match argument.to_string_lossy().as_ref() {
+                "--" if options => options = false,
+                "--help" | "-h" if options => {
+                    println!(
+                        "Edit files with the pane's configured editor\n\nUsage: zetta edit [OPTIONS] [--] FILE ...\n\nUses EDITOR from the current environment. If EDITOR is unset or empty, Zetta's built-in vi is used.\n\nOptions:\n  -d, --delete-after             Delete a managed scrollback file after editing\n  -h, --help                     Print help"
+                    );
+                    std::process::exit(0);
+                }
+                "--delete-after" | "-d" if options => {
+                    anyhow::ensure!(!delete_after, "--delete-after may only be specified once");
+                    delete_after = true;
+                }
+                option if options && option.starts_with('-') => {
+                    anyhow::bail!("unknown edit option {option:?}")
+                }
+                _ => paths.push(argument.to_string_lossy().into_owned()),
+            }
+        }
+        anyhow::ensure!(!paths.is_empty(), "zetta edit requires at least one file");
+        anyhow::ensure!(
+            !delete_after || paths.len() == 1,
+            "--delete-after requires exactly one managed scrollback file"
+        );
+        return Ok(StartupArgs {
+            config_path: None,
+            keymap_path: None,
+            profile: None,
+            mode: StartupMode::Edit {
+                arguments: paths,
+                delete_after,
+            },
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,
@@ -1605,6 +1655,10 @@ pub(crate) const SAVE_PANE_OUTPUT_KEYBINDING: &str = "cmd-shift-s";
 #[cfg(not(target_os = "macos"))]
 pub(crate) const SAVE_PANE_OUTPUT_KEYBINDING: &str = "alt-shift-s";
 #[cfg(target_os = "macos")]
+pub(crate) const EDIT_SCROLLBACK_KEYBINDING: &str = "cmd-shift-v";
+#[cfg(not(target_os = "macos"))]
+pub(crate) const EDIT_SCROLLBACK_KEYBINDING: &str = "alt-shift-v";
+#[cfg(target_os = "macos")]
 pub(crate) const SELECT_ALL_KEYBINDING: &str = "cmd-shift-a";
 #[cfg(not(target_os = "macos"))]
 pub(crate) const SELECT_ALL_KEYBINDING: &str = "alt-shift-a";
@@ -1645,6 +1699,14 @@ pub(crate) fn pane_output_keybinding() -> KeyBinding {
     KeyBinding::new(
         SAVE_PANE_OUTPUT_KEYBINDING,
         SavePaneOutput,
+        Some("Zetta > Terminal"),
+    )
+}
+
+pub(crate) fn edit_scrollback_keybinding() -> KeyBinding {
+    KeyBinding::new(
+        EDIT_SCROLLBACK_KEYBINDING,
+        EditScrollback,
         Some("Zetta > Terminal"),
     )
 }
@@ -1814,6 +1876,7 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
         rotate_pane_layout_keybinding(),
         pane_resize_mode_keybinding(),
         select_all_keybinding(),
+        edit_scrollback_keybinding(),
         KeyBinding::new(
             "ctrl-shift-backspace",
             ClearClipboard,
@@ -2423,6 +2486,46 @@ fn selected_performance_workload(args: &StartupArgs) -> PerformanceWorkload {
 
 pub(crate) fn run() -> Result<()> {
     let args = parse_args()?;
+    if args.mode == StartupMode::Application {
+        terminal_view::start_scrollback_cleanup_monitor();
+    }
+    if let StartupMode::Edit {
+        arguments,
+        delete_after,
+    } = &args.mode
+    {
+        let (arguments, cleanup_path) = if *delete_after {
+            let path = terminal_view::claim_scrollback_for_editor(Path::new(&arguments[0]))
+                .context("claiming the managed scrollback file")?;
+            (vec![path.to_string_lossy().into_owned()], Some(path))
+        } else {
+            (arguments.clone(), None)
+        };
+        let editor = env::var("EDITOR")
+            .ok()
+            .filter(|editor| !editor.trim().is_empty());
+        let result: Result<i32> = (|| {
+            if let Some(editor) = editor {
+                let mut editor_parts = task::ShellKind::system()
+                    .split(&editor)
+                    .filter(|parts| !parts.is_empty())
+                    .context("EDITOR does not contain a command")?;
+                let program = editor_parts.remove(0);
+                std::process::Command::new(&program)
+                    .args(editor_parts)
+                    .args(&arguments)
+                    .status()
+                    .with_context(|| format!("failed to start editor {program:?}"))
+                    .map(|status| status.code().unwrap_or(1))
+            } else {
+                Ok(busy_v::run(arguments))
+            }
+        })();
+        if let Some(path) = cleanup_path {
+            let _ = terminal_view::remove_scrollback_file(&path);
+        }
+        std::process::exit(result?);
+    }
     if let StartupMode::Vi(arguments) = &args.mode {
         std::process::exit(busy_v::run(arguments.clone()));
     }

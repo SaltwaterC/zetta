@@ -760,6 +760,21 @@ fn terminal_size_completions_include_pane_resize_options() {
 }
 
 #[test]
+fn edit_completions_offer_managed_cleanup_by_its_long_name() {
+    let profiles = profiles();
+    for shell in [
+        ShellIntegration::Bash,
+        ShellIntegration::Fish,
+        ShellIntegration::PowerShell,
+        ShellIntegration::Zsh,
+    ] {
+        let script = shell.script(&profiles);
+        assert!(script.contains("--delete-after"));
+        assert!(!script.contains("-d --delete-after"));
+    }
+}
+
+#[test]
 fn generated_scripts_include_root_flags_and_configured_profiles() {
     let profiles = profiles();
     for shell in [
@@ -788,7 +803,7 @@ fn generated_scripts_only_offer_long_form_flags() {
         let script = shell.script(&profiles);
         match shell {
             ShellIntegration::Bash => assert!(script.contains(
-                "terminal-size sessions vi init serial http tftp notify copy paste --help --version --config --keymap --profile'"
+                "terminal-size sessions edit vi init serial http tftp notify copy paste --help --version --config --keymap --profile'"
             )),
             ShellIntegration::Fish => {
                 assert!(script.contains("-l profile -r"));

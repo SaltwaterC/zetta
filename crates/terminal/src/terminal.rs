@@ -698,6 +698,18 @@ pub enum MaybeNavigationTarget {
     PathLike(PathLikeTarget),
 }
 
+fn editor_invocation_command(
+    shell_kind: ShellKind,
+    path: &Path,
+    delete_after: bool,
+) -> Option<String> {
+    let path = shell_kind.try_quote(path.to_str()?)?;
+    let delete_after = delete_after
+        .then_some("--delete-after ")
+        .unwrap_or_default();
+    Some(format!("zetta edit {delete_after}-- {path}\r"))
+}
+
 /// Whether the modifiers should activate a terminal hyperlink.
 ///
 /// Control-click is supported on every platform. Command-click remains
@@ -1260,6 +1272,7 @@ impl TerminalBuilder {
             last_mouse_move_time: Instant::now(),
             last_hyperlink_search_position: None,
             mouse_down_hyperlink: None,
+            editor_click_started: false,
             #[cfg(windows)]
             shell_program: None,
             activation_script: Vec::new(),
@@ -1590,6 +1603,7 @@ impl TerminalBuilder {
                 last_mouse_move_time: Instant::now(),
                 last_hyperlink_search_position: None,
                 mouse_down_hyperlink: None,
+                editor_click_started: false,
                 #[cfg(windows)]
                 shell_program,
                 activation_script: activation_script.clone(),
@@ -1776,6 +1790,7 @@ pub struct Terminal {
     last_mouse_move_time: Instant,
     last_hyperlink_search_position: Option<GpuiPoint<Pixels>>,
     mouse_down_hyperlink: Option<HyperlinkMatch>,
+    editor_click_started: bool,
     #[cfg(windows)]
     shell_program: Option<String>,
     template: CopyTemplate,
@@ -2412,6 +2427,28 @@ impl Terminal {
         self.write_input(input);
     }
 
+    /// Runs Zetta's editor dispatcher through the active shell so it inherits
+    /// this pane's current environment and remains attached to this pane's PTY.
+    pub fn open_path_in_editor(&mut self, path: &Path) {
+        let shell_kind = self.template.shell.shell_kind(self.path_style.is_windows());
+        let Some(command) = editor_invocation_command(shell_kind, path, false) else {
+            log::error!("cannot open a non-UTF-8 path in the pane editor: {path:?}");
+            return;
+        };
+        self.input(command.into_bytes());
+    }
+
+    /// Opens a managed scrollback snapshot and asks the editor dispatcher to
+    /// remove it as soon as the editor command returns.
+    pub fn open_temporary_path_in_editor(&mut self, path: &Path) {
+        let shell_kind = self.template.shell.shell_kind(self.path_style.is_windows());
+        let Some(command) = editor_invocation_command(shell_kind, path, true) else {
+            log::error!("cannot open a non-UTF-8 path in the pane editor: {path:?}");
+            return;
+        };
+        self.input(command.into_bytes());
+    }
+
     /// Sends a shell-level marker command and returns a task that completes when
     /// the marker appears in terminal output. Already complete for non-PTY
     /// terminals or those whose child has exited.
@@ -2834,6 +2871,42 @@ impl Terminal {
             .push_back(InternalEvent::SetSelection(Some(selection)));
     }
 
+    /// Finds a local path-like target at a mouse position without changing the
+    /// terminal selection or hyperlink hover state.
+    pub fn path_like_target_at_event_position(
+        &mut self,
+        e: &MouseDownEvent,
+    ) -> Option<PathLikeTarget> {
+        let position = e.position - self.last_content.terminal_bounds.bounds.origin;
+        let point = grid_point(
+            position,
+            self.last_content.terminal_bounds,
+            self.last_content.display_offset,
+        );
+        let hyperlink = self.find_hyperlink_at_point(point)?;
+        let maybe_path = if hyperlink.is_url {
+            let path = hyperlink.text.strip_prefix("file://")?;
+            urlencoding::decode(path)
+                .map(|decoded| decoded.into_owned())
+                .unwrap_or_else(|_| path.to_owned())
+        } else {
+            hyperlink.text
+        };
+
+        Some(PathLikeTarget {
+            maybe_path,
+            terminal_dir: self.working_directory(),
+        })
+    }
+
+    pub fn begin_editor_click(&mut self) {
+        self.editor_click_started = true;
+    }
+
+    pub fn editor_click_started(&self) -> bool {
+        self.editor_click_started
+    }
+
     pub fn mouse_drag(
         &mut self,
         e: &MouseMoveEvent,
@@ -2905,6 +2978,7 @@ impl Terminal {
     }
 
     pub fn mouse_down(&mut self, e: &MouseDownEvent, cx: &mut Context<Self>) {
+        self.editor_click_started = false;
         let position = e.position - self.last_content.terminal_bounds.bounds.origin;
         let point = grid_point(
             position,
@@ -2983,6 +3057,13 @@ impl Terminal {
     }
 
     pub fn mouse_up(&mut self, e: &MouseUpEvent, cx: &Context<Self>) {
+        if self.editor_click_started {
+            self.editor_click_started = false;
+            self.selection_phase = SelectionPhase::Ended;
+            self.last_mouse = None;
+            self.mouse_down_position = None;
+            return;
+        }
         let setting = TerminalSettings::get_global(cx);
 
         let position = e.position - self.last_content.terminal_bounds.bounds.origin;
@@ -4099,6 +4180,32 @@ mod tests {
                 "startup marker command for {shell_kind:?} should not contain the full marker, got {command:?}"
             );
         }
+    }
+
+    #[test]
+    fn editor_invocation_quotes_paths_for_the_active_shell() {
+        let path = Path::new("/tmp/zetta scrollback.txt");
+        assert_eq!(
+            editor_invocation_command(ShellKind::Posix, path, false).as_deref(),
+            Some("zetta edit -- '/tmp/zetta scrollback.txt'\r")
+        );
+        assert_eq!(
+            editor_invocation_command(ShellKind::PowerShell, path, false).as_deref(),
+            Some("zetta edit -- '/tmp/zetta scrollback.txt'\r")
+        );
+        assert_eq!(
+            editor_invocation_command(
+                ShellKind::Cmd,
+                Path::new(r"C:\Temp\zetta scrollback.txt"),
+                false,
+            )
+            .as_deref(),
+            Some("zetta edit -- ^\"C:\\Temp\\zetta scrollback.txt^\"\r")
+        );
+        assert_eq!(
+            editor_invocation_command(ShellKind::Posix, path, true).as_deref(),
+            Some("zetta edit --delete-after -- '/tmp/zetta scrollback.txt'\r")
+        );
     }
 
     #[gpui::test]
@@ -5453,6 +5560,36 @@ mod tests {
                     .iter()
                     .any(|event| matches!(event, InternalEvent::ProcessHyperlink(_, true))),
                 "Should have ProcessHyperlink event when ctrl+clicking on same hyperlink position"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn editor_click_resolves_file_url_and_writes_pane_command(cx: &mut TestAppContext) {
+        let terminal =
+            init_ctrl_click_hyperlink_test(cx, b"Visit file:///tmp/notes.txt for more\r\n");
+
+        terminal.update(cx, |terminal, _| {
+            let event = MouseDownEvent {
+                button: MouseButton::Left,
+                position: point(px(80.0), px(10.0)),
+                modifiers: Modifiers {
+                    control: true,
+                    shift: true,
+                    ..Default::default()
+                },
+                click_count: 1,
+                first_mouse: true,
+            };
+            let target = terminal
+                .path_like_target_at_event_position(&event)
+                .expect("file URL should be recognized under the editor click");
+            assert_eq!(target.maybe_path, "/tmp/notes.txt");
+
+            terminal.open_path_in_editor(Path::new(&target.maybe_path));
+            assert_eq!(
+                terminal.take_pty_write_log(),
+                vec![b"zetta edit -- /tmp/notes.txt\r".to_vec()]
             );
         });
     }

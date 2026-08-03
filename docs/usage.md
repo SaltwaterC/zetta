@@ -184,6 +184,26 @@ menu. **Paste Trimmed** removes leading and trailing whitespace while preserving
 whitespace inside the text. Middle-click is passed to the terminal as a mouse
 event; it is not a paste gesture.
 
+Ctrl-Shift-click a file path on Windows/Linux, or Cmd-Shift-click it on macOS,
+to open the path in `$EDITOR` (or `$env:EDITOR` on Windows). If the variable is
+unset, Zetta falls back to `zetta vi`. The editor runs in the active terminal
+pane, so terminal editors remain attached to that pane and the pane's current
+`EDITOR` value is used.
+
+`Alt-Shift-V` on Windows/Linux or `Cmd-Shift-V` on macOS writes the active
+pane's complete retained scrollback to a private managed file and opens it the
+same way. Linux uses `/dev/shm` when available and falls back to
+`$XDG_CACHE_HOME/zetta` or `~/.cache/zetta`; macOS and Windows use their
+per-user temporary directories. Files are randomly named, owner-only on Unix,
+and deleted as soon as the editor command returns. Zetta also performs
+asynchronous garbage collection at startup, before creating another buffer,
+and once per second while managed files exist, removing files left by editor
+or application crashes without polling when there is nothing to collect.
+Editors that delegate to an existing GUI process should include their wait
+option in `EDITOR` so the managed file remains available until editing ends.
+**Edit Scrollback** is also available from the terminal context menu and command
+palette.
+
 ## Search
 
 `Cmd-Shift-F` on macOS / `Alt-Shift-F` on Windows/Linux searches the active

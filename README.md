@@ -16,6 +16,8 @@ for active development.
   macOS and Linux, plus first-class WSL/MSYS2 profiles with working directory
   tracking
 - Detachable background sessions that can survive after the last window closes
+- Open paths or the complete pane scrollback in `$EDITOR`, with built-in vi as
+  the fallback
 - Native command, path, and SSH-alias completion in a multi-command prompt
 - Typed settings and keymap editor, per-profile themes, and installable Zed
   themes
