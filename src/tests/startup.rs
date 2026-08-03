@@ -358,6 +358,42 @@ fn sessions_subcommand_supports_human_and_json_output() {
 }
 
 #[test]
+fn sessions_reconnect_subcommand_accepts_a_stable_id_without_a_secret_argument() {
+    let args = parse_args_from([
+        OsString::from("sessions"),
+        OsString::from("reconnect"),
+        OsString::from("123:7:42"),
+    ])
+    .unwrap();
+    assert_eq!(
+        args.mode,
+        StartupMode::ReconnectBackgroundSession {
+            identifier: "123:7:42".to_owned(),
+        }
+    );
+    assert!(!should_handoff_to_existing_process(&args));
+
+    let option = parse_args_from([
+        OsString::from("sessions"),
+        OsString::from("reconnect"),
+        OsString::from("-s"),
+        OsString::from("123:7:42"),
+    ])
+    .unwrap();
+    assert_eq!(option, args);
+    assert!(parse_args_from([OsString::from("sessions"), OsString::from("reconnect"),]).is_err());
+    assert!(
+        parse_args_from([
+            OsString::from("sessions"),
+            OsString::from("reconnect"),
+            OsString::from("--secret"),
+            OsString::from("not-private"),
+        ])
+        .is_err()
+    );
+}
+
+#[test]
 fn terminal_size_subcommand_bypasses_application_startup() {
     let args = parse_args_from([OsString::from("terminal-size")]).unwrap();
 

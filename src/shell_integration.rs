@@ -469,6 +469,19 @@ _zetta_complete() {
         done
     }
 
+    _zetta_complete_session_ids() {
+        COMPREPLY=()
+        local session_id
+        while IFS= read -r session_id; do
+            [[ $session_id == "$current"* ]] && COMPREPLY+=("$session_id")
+        done < <(zetta sessions --json 2>/dev/null | awk '
+            /"process_id"[[:space:]]*:/ { match($0, /[0-9]+/); process=substr($0, RSTART, RLENGTH) }
+            /"runner_id"[[:space:]]*:/ { match($0, /[0-9]+/); runner=substr($0, RSTART, RLENGTH) }
+            /"id"[[:space:]]*:/ { match($0, /[0-9]+/); session=substr($0, RSTART, RLENGTH) }
+            /"authentication_required"[[:space:]]*:/ { print process ":" runner ":" session }
+        ')
+    }
+
     case "$previous" in
         --profile)
             _zetta_complete_profiles
@@ -602,7 +615,19 @@ _zetta_complete() {
             COMPREPLY=( $(compgen -W '--json --resize --columns --rows --help' -- "$current") )
             ;;
         sessions)
-            COMPREPLY=( $(compgen -W '--json --help' -- "$current") )
+            if (( COMP_CWORD == 2 )); then
+                COMPREPLY=( $(compgen -W 'reconnect --json --help' -- "$current") )
+            elif [[ ${COMP_WORDS[2]} == reconnect ]]; then
+                if [[ $previous == --session || $previous == -s ]]; then
+                    COMPREPLY=()
+                elif (( COMP_CWORD == 3 )); then
+                    _zetta_complete_session_ids
+                else
+                    COMPREPLY=( $(compgen -W '--session --help' -- "$current") )
+                fi
+            else
+                COMPREPLY=( $(compgen -W '--json --help' -- "$current") )
+            fi
             ;;
         init)
             COMPREPLY=( $(compgen -W 'bash fish powershell pwsh zsh --help' -- "$current") )
@@ -874,6 +899,15 @@ function __zetta_tftp_server
     and test "$words[3]" = server
 end
 
+function __zetta_session_ids
+    zetta sessions --json 2>/dev/null | awk '
+        /"process_id"[[:space:]]*:/ { match($0, /[0-9]+/); process=substr($0, RSTART, RLENGTH) }
+        /"runner_id"[[:space:]]*:/ { match($0, /[0-9]+/); runner=substr($0, RSTART, RLENGTH) }
+        /"id"[[:space:]]*:/ { match($0, /[0-9]+/); session=substr($0, RSTART, RLENGTH) }
+        /"authentication_required"[[:space:]]*:/ { print process ":" runner ":" session }
+    '
+end
+
 # Fish only considers options registered with `-l` after the user has typed a
 # dash. Emit the same long options as ordinary completion candidates too, so
 # they appear alongside subcommands at every valid argument position.
@@ -980,6 +1014,7 @@ complete -c zetta -n '__fish_seen_subcommand_from http' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from http' -a '(__zetta_long_options http)'
 complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l json -d 'Print machine-readable JSON'
 complete -c zetta -n '__fish_seen_subcommand_from sessions' -l json -d 'Print machine-readable JSON'
+complete -c zetta -n '__zetta_at_subcommand sessions' -a reconnect -d 'Reconnect a detached session'
 complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l resize -d 'Resize the current pane'
 complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l columns -r -d 'Set pane width in columns'
 complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l rows -r -d 'Set pane height in rows'
@@ -989,6 +1024,8 @@ complete -c zetta -s c -r -n '__fish_seen_subcommand_from terminal-size; and __z
 complete -c zetta -s R -r -n '__fish_seen_subcommand_from terminal-size; and __zetta_short_option -R'
 complete -c zetta -n '__fish_seen_subcommand_from sessions' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from sessions' -a '(__zetta_long_options sessions)'
+complete -c zetta -n '__fish_seen_subcommand_from sessions; and __fish_seen_subcommand_from reconnect' -a '(__zetta_session_ids)'
+complete -c zetta -n '__fish_seen_subcommand_from sessions; and __fish_seen_subcommand_from reconnect' -l session -r -d 'Session ID to reconnect'
 complete -c zetta -n '__fish_seen_subcommand_from benchmark-output' -l size -r -d 'Set the output size in MiB'
 complete -c zetta -n '__fish_seen_subcommand_from benchmark-output' -l output-type -r -a 'repeated unique'
 complete -c zetta -n '__fish_seen_subcommand_from benchmark-output' -l help -d 'Print help'
@@ -1133,6 +1170,17 @@ $zettaSoundNames = @('zetta-default', 'zetta-ok', 'zetta-alarm') + $(
     }
 )
 
+$zettaSessionIds = {
+    try {
+        $catalogs = @(zetta sessions --json 2>$null | ConvertFrom-Json)
+        foreach ($catalog in $catalogs) {
+            foreach ($session in @($catalog.sessions)) {
+                "{0}:{1}:{2}" -f $catalog.process_id, $catalog.runner_id, $session.id
+            }
+        }
+    } catch {}
+}
+
 $zettaCompletions = {
     param($wordToComplete, $commandAst, $cursorPosition)
 
@@ -1189,6 +1237,8 @@ $zettaCompletions = {
         ($previous -eq '-c' -and $subcommand -eq 'terminal-size')
     ) {
         @()
+    } elseif ($subcommand -eq 'sessions' -and $words.Count -ge 3 -and $words[2] -eq 'reconnect') {
+        if ($previous -in '--session', '-s') { @() } else { & $zettaSessionIds }
     } elseif ($null -eq $subcommand) {
         'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste', '--help', '--version', '--config', '--keymap', '--profile'
     } else {
@@ -1196,7 +1246,13 @@ $zettaCompletions = {
             'benchmark' { '--terminal-render-workload', '--terminal-checkerboard-workload', '--terminal-sparse-update-workload', '--profile-report', '--profile-duration', '--profile-pane-stress', '--profile-background-stress', '--profile-sparse-updates', '--profile-external-terminal', '--help' }
             'benchmark-output' { '--size', '--output-type', '--help' }
             'terminal-size' { '--json', '--resize', '--columns', '--rows', '--help' }
-            'sessions' { '--json', '--help' }
+            'sessions' {
+                if ($words.Count -le 2 -or ($words.Count -eq 3 -and $words[2] -ne 'reconnect')) {
+                    'reconnect', '--json', '--help'
+                } elseif ($words[2] -eq 'reconnect') {
+                    if ($last -eq 'reconnect') { & $zettaSessionIds } else { '--session', '--help' }
+                } else { '--json', '--help' }
+            }
             'init' { 'bash', 'fish', 'powershell', 'pwsh', 'zsh', '--help' }
             'serial' {
                 if ($words.Count -le 2) { 'console', 'list', '--help' }
@@ -1263,6 +1319,15 @@ esac
 
 _zetta_profiles() {
     compadd -- ZETTA_PROFILES
+}
+
+_zetta_session_ids() {
+    compadd -- "${(@f)$(zetta sessions --json 2>/dev/null | awk '
+        /"process_id"[[:space:]]*:/ { match($0, /[0-9]+/); process=substr($0, RSTART, RLENGTH) }
+        /"runner_id"[[:space:]]*:/ { match($0, /[0-9]+/); runner=substr($0, RSTART, RLENGTH) }
+        /"id"[[:space:]]*:/ { match($0, /[0-9]+/); session=substr($0, RSTART, RLENGTH) }
+        /"authentication_required"[[:space:]]*:/ { print process ":" runner ":" session }
+    ')}"
 }
 
 # zetta-default/zetta-ok/zetta-alarm are bundled tones Zetta plays itself, so
@@ -1415,7 +1480,20 @@ _zetta() {
             compadd -- --json --resize --columns --rows --help
             ;;
         sessions)
-            compadd -- --json --help
+            if (( CURRENT == 3 )); then
+                compadd -S ' ' -- reconnect
+                compadd -- --json --help
+            elif [[ $words[3] == reconnect ]]; then
+                if [[ $previous != --session && $previous != -s ]]; then
+                    if (( CURRENT == 4 )); then
+                        _zetta_session_ids
+                    else
+                        compadd -- --session --help
+                    fi
+                fi
+            else
+                compadd -- --json --help
+            fi
             ;;
         init)
             compadd -- bash fish powershell pwsh zsh --help

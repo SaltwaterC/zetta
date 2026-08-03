@@ -14,6 +14,7 @@ mod serial_console;
 #[cfg(any(feature = "http-server", feature = "tftp-server"))]
 mod server_ui;
 mod session_auth_ui;
+mod session_cli;
 mod settings_editor;
 mod shell_integration;
 #[cfg(any(feature = "tftp-server", feature = "tftp-client"))]
@@ -59,7 +60,8 @@ use gpui::{
     transparent_black, uniform_list,
 };
 use process_control::{
-    ProcessControlCommand, ProcessControlServer, request_existing_process_window,
+    ProcessControlCommand, ProcessControlServer, ReconnectSessionResult,
+    request_existing_process_window,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

@@ -10,6 +10,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use zeroize::Zeroize as _;
 
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -21,19 +22,41 @@ use futures::channel::mpsc::UnboundedSender;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 
-const CONTROL_VERSION: u32 = 2;
+const CONTROL_VERSION: u32 = 3;
 const MAX_CONTROL_MESSAGE_BYTES: usize = 4096;
 const CONTROL_COMPLETION_TIMEOUT: Duration = Duration::from_secs(2);
 const CONTROL_COMPLETION_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const CONTROL_CLIENT_TIMEOUT: Duration = Duration::from_secs(3);
 
-pub(crate) enum ProcessControlCommand {
-    OpenWindow { completion: Sender<bool> },
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReconnectSessionResult {
+    Reconnected,
+    AuthenticationFailed,
+    SessionNotFound,
+    StillStarting,
+    Rejected,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProcessControlCommand {
+    OpenWindow {
+        completion: Sender<bool>,
+    },
+    ReconnectSession {
+        runner_id: u64,
+        session_id: u64,
+        secret: Option<String>,
+        completion: Sender<ReconnectSessionResult>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum ControlRequestCommand {
     OpenWindow,
+    ReconnectSession {
+        runner_id: u64,
+        session_id: u64,
+        secret: Option<String>,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -48,6 +71,9 @@ struct ControlEndpoint {
 struct ControlRequest {
     token: String,
     command: String,
+    runner_id: Option<u64>,
+    session_id: Option<u64>,
+    secret: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -101,18 +127,42 @@ impl ProcessControlServer {
                     };
                     let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
                     let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
-                    let accepted = match handle_control_request(&mut stream, &token) {
+                    let status = match handle_control_request(&mut stream, &token) {
                         Some(ControlRequestCommand::OpenWindow) => {
                             let (completion, completed) = channel();
-                            commands
+                            let accepted = commands
                                 .unbounded_send(ProcessControlCommand::OpenWindow { completion })
                                 .is_ok()
-                                && wait_for_control_completion(&completed, &stopping_for_thread)
+                                && wait_for_control_completion(&completed, &stopping_for_thread);
+                            if accepted { "ok" } else { "rejected" }
                         }
-                        None => false,
+                        Some(ControlRequestCommand::ReconnectSession {
+                            runner_id,
+                            session_id,
+                            secret,
+                        }) => {
+                            let (completion, completed) = channel();
+                            let result = commands
+                                .unbounded_send(ProcessControlCommand::ReconnectSession {
+                                    runner_id,
+                                    session_id,
+                                    secret,
+                                    completion,
+                                })
+                                .is_ok()
+                                .then(|| {
+                                    wait_for_reconnect_completion(&completed, &stopping_for_thread)
+                                })
+                                .unwrap_or(ReconnectSessionResult::Rejected);
+                            reconnect_session_status(result)
+                        }
+                        None => "rejected",
                     };
-                    let accepted = accepted && !stopping_for_thread.load(Ordering::Acquire);
-                    let status = if accepted { "ok" } else { "rejected" };
+                    let status = if status == "ok" && stopping_for_thread.load(Ordering::Acquire) {
+                        "rejected"
+                    } else {
+                        status
+                    };
                     let _ = write_message(
                         &mut stream,
                         &ControlResponse {
@@ -165,19 +215,80 @@ fn wait_for_control_completion(completed: &Receiver<bool>, stopping: &AtomicBool
     }
 }
 
-fn handle_control_request(stream: &mut UnixStream, token: &str) -> Option<ControlRequestCommand> {
-    let request = read_message::<ControlRequest>(stream).ok()?;
-    decode_control_request(&request, token)
+fn wait_for_reconnect_completion(
+    completed: &Receiver<ReconnectSessionResult>,
+    stopping: &AtomicBool,
+) -> ReconnectSessionResult {
+    let deadline = Instant::now() + CONTROL_COMPLETION_TIMEOUT;
+    loop {
+        if stopping.load(Ordering::Acquire) {
+            return ReconnectSessionResult::Rejected;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return ReconnectSessionResult::Rejected;
+        }
+        match completed.recv_timeout(remaining.min(CONTROL_COMPLETION_POLL_INTERVAL)) {
+            Ok(result) => return result,
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return ReconnectSessionResult::Rejected,
+        }
+    }
 }
 
-fn decode_control_request(request: &ControlRequest, token: &str) -> Option<ControlRequestCommand> {
+fn reconnect_session_status(result: ReconnectSessionResult) -> &'static str {
+    match result {
+        ReconnectSessionResult::Reconnected => "ok",
+        ReconnectSessionResult::AuthenticationFailed => "authentication_failed",
+        ReconnectSessionResult::SessionNotFound => "session_not_found",
+        ReconnectSessionResult::StillStarting => "session_starting",
+        ReconnectSessionResult::Rejected => "rejected",
+    }
+}
+
+fn handle_control_request(stream: &mut UnixStream, token: &str) -> Option<ControlRequestCommand> {
+    let mut request = read_message::<ControlRequest>(stream).ok()?;
+    decode_control_request(&mut request, token)
+}
+
+fn decode_control_request(
+    request: &mut ControlRequest,
+    token: &str,
+) -> Option<ControlRequestCommand> {
     if request.token != token {
+        if let Some(secret) = request.secret.as_mut() {
+            secret.zeroize();
+        }
         return None;
     }
-    match request.command.as_str() {
-        "open_window" => Some(ControlRequestCommand::OpenWindow),
+    let command = match request.command.as_str() {
+        "open_window"
+            if request.runner_id.is_none()
+                && request.session_id.is_none()
+                && request.secret.is_none() =>
+        {
+            Some(ControlRequestCommand::OpenWindow)
+        }
+        "reconnect_session" => {
+            request
+                .runner_id
+                .zip(request.session_id)
+                .map(
+                    |(runner_id, session_id)| ControlRequestCommand::ReconnectSession {
+                        runner_id,
+                        session_id,
+                        secret: request.secret.take(),
+                    },
+                )
+        }
         _ => None,
+    };
+    if command.is_none()
+        && let Some(secret) = request.secret.as_mut()
+    {
+        secret.zeroize();
     }
+    command
 }
 
 impl Drop for ProcessControlServer {
@@ -226,6 +337,28 @@ pub(crate) fn request_existing_process_window() -> Result<bool> {
     Ok(false)
 }
 
+pub(crate) fn request_reconnect_session(
+    process_id: u32,
+    runner_id: u64,
+    session_id: u64,
+    secret: Option<String>,
+) -> Result<ReconnectSessionResult> {
+    let endpoint_path = control_endpoint_path(process_id);
+    let contents = fs::read(&endpoint_path).with_context(|| {
+        format!(
+            "reading Zetta process control endpoint {}",
+            endpoint_path.display()
+        )
+    })?;
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&contents).context("parsing Zetta process control endpoint")?;
+    anyhow::ensure!(
+        endpoint.version == CONTROL_VERSION && endpoint.process_id == process_id,
+        "Zetta process control endpoint is outdated"
+    );
+    send_reconnect_session_request(&endpoint, runner_id, session_id, secret)
+}
+
 fn send_open_window_request(endpoint: &ControlEndpoint) -> Result<bool> {
     let mut stream = UnixStream::connect(&endpoint.socket_path)?;
     stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
@@ -235,10 +368,45 @@ fn send_open_window_request(endpoint: &ControlEndpoint) -> Result<bool> {
         &ControlRequest {
             token: endpoint.token.clone(),
             command: "open_window".to_owned(),
+            runner_id: None,
+            session_id: None,
+            secret: None,
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
     Ok(response.status == "ok")
+}
+
+fn send_reconnect_session_request(
+    endpoint: &ControlEndpoint,
+    runner_id: u64,
+    session_id: u64,
+    mut secret: Option<String>,
+) -> Result<ReconnectSessionResult> {
+    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
+    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    let mut request = ControlRequest {
+        token: endpoint.token.clone(),
+        command: "reconnect_session".to_owned(),
+        runner_id: Some(runner_id),
+        session_id: Some(session_id),
+        secret: secret.take(),
+    };
+    let result = write_message(&mut stream, &request).and_then(|()| {
+        let response = read_message::<ControlResponse>(&mut stream)?;
+        Ok(match response.status.as_str() {
+            "ok" => ReconnectSessionResult::Reconnected,
+            "authentication_failed" => ReconnectSessionResult::AuthenticationFailed,
+            "session_not_found" => ReconnectSessionResult::SessionNotFound,
+            "session_starting" => ReconnectSessionResult::StillStarting,
+            _ => ReconnectSessionResult::Rejected,
+        })
+    });
+    if let Some(secret) = request.secret.as_mut() {
+        secret.zeroize();
+    }
+    result
 }
 
 fn read_message<T: DeserializeOwned>(stream: &mut UnixStream) -> Result<T> {

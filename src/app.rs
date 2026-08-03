@@ -1,4 +1,5 @@
 use super::*;
+use zeroize::Zeroizing;
 
 const PANE_CONTROLS_IDLE_DELAY: Duration = Duration::from_millis(1200);
 const BACKGROUND_PROCESS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
@@ -1529,10 +1530,10 @@ impl Zetta {
         session_id: u64,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> ReconnectSessionResult {
         if runner_id != self.background_sessions.runner_id() {
             let Some(source) = zetta_for_runner(runner_id, cx) else {
-                return;
+                return ReconnectSessionResult::SessionNotFound;
             };
             if !source
                 .read(cx)
@@ -1543,14 +1544,14 @@ impl Zetta {
                         .to_owned(),
                 );
                 cx.notify();
-                return;
+                return ReconnectSessionResult::StillStarting;
             }
             let verifier = source
                 .read(cx)
                 .background_session_authentication(session_id);
             if verifier.is_some() {
                 self.prompt_to_reconnect_session(runner_id, session_id, window, cx);
-                return;
+                return ReconnectSessionResult::AuthenticationFailed;
             }
             let tab = source.update(cx, |source, cx| {
                 source.take_background_session_by_id(session_id, None, cx)
@@ -1558,27 +1559,88 @@ impl Zetta {
             if let Some(tab) = tab {
                 prune_empty_dormant_runners(cx);
                 self.attach_reconnected_tab(tab, true, window, cx);
+                return ReconnectSessionResult::Reconnected;
             }
-            return;
+            return ReconnectSessionResult::SessionNotFound;
         }
         let Some(index) = self
             .background_sessions
             .iter()
             .position(|tab| tab.id == session_id)
         else {
-            return;
+            return ReconnectSessionResult::SessionNotFound;
         };
         let Some(tab) = self.background_sessions.iter().nth(index) else {
-            return;
+            return ReconnectSessionResult::SessionNotFound;
         };
         if self.background_sessions.authentication_at(index).is_some() {
             self.prompt_to_reconnect_session(runner_id, tab.id, window, cx);
-            return;
+            return ReconnectSessionResult::AuthenticationFailed;
         }
         let session_id = tab.id;
         if let Some(tab) = self.take_background_session_by_id(session_id, None, cx) {
             self.attach_reconnected_tab(tab, false, window, cx);
+            return ReconnectSessionResult::Reconnected;
         }
+        ReconnectSessionResult::SessionNotFound
+    }
+
+    pub(crate) fn reconnect_session_from_cli(
+        &mut self,
+        runner_id: u64,
+        session_id: u64,
+        secret: Option<String>,
+        completion: std::sync::mpsc::Sender<ReconnectSessionResult>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let verifier = self.process_background_session_authentication(runner_id, session_id, cx);
+        if verifier.is_none() {
+            let result = if secret.is_none() {
+                self.reconnect_process_background_session(runner_id, session_id, window, cx)
+            } else {
+                ReconnectSessionResult::AuthenticationFailed
+            };
+            let _ = completion.send(result);
+            return;
+        }
+        let Some(secret) = secret.map(Zeroizing::new) else {
+            let _ = completion.send(ReconnectSessionResult::AuthenticationFailed);
+            return;
+        };
+        let generation = self.session_authentication_generation;
+        cx.spawn_in(window, async move |this, cx| {
+            let authenticated = cx
+                .background_spawn(async move {
+                    let verifier =
+                        verifier.context("the protected session is no longer available")?;
+                    Ok::<_, anyhow::Error>(verifier.verify(&secret).then_some(verifier))
+                })
+                .await
+                .ok()
+                .flatten();
+            let result = this
+                .update_in(cx, |this, window, cx| {
+                    if this.session_authentication_generation != generation {
+                        return ReconnectSessionResult::Rejected;
+                    }
+                    authenticated.map_or(
+                        ReconnectSessionResult::AuthenticationFailed,
+                        |authentication| {
+                            this.complete_authenticated_reconnect(
+                                runner_id,
+                                session_id,
+                                &authentication,
+                                window,
+                                cx,
+                            )
+                        },
+                    )
+                })
+                .unwrap_or(ReconnectSessionResult::Rejected);
+            let _ = completion.send(result);
+        })
+        .detach();
     }
 
     pub(crate) fn background_session_authentication(
@@ -1624,12 +1686,12 @@ impl Zetta {
         authorization: &SessionAuthentication,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> ReconnectSessionResult {
         let tab = if runner_id == self.background_sessions.runner_id() {
             self.take_background_session_by_id(session_id, Some(authorization), cx)
         } else {
             let Some(source) = zetta_for_runner(runner_id, cx) else {
-                return;
+                return ReconnectSessionResult::SessionNotFound;
             };
             if !source
                 .read(cx)
@@ -1640,7 +1702,7 @@ impl Zetta {
                         .to_owned(),
                 );
                 cx.notify();
-                return;
+                return ReconnectSessionResult::StillStarting;
             }
             let tab = source.update(cx, |source, cx| {
                 source.take_background_session_by_id(session_id, Some(authorization), cx)
@@ -1651,7 +1713,9 @@ impl Zetta {
         if let Some(tab) = tab {
             let transferred = runner_id != self.background_sessions.runner_id();
             self.attach_reconnected_tab(tab, transferred, window, cx);
+            return ReconnectSessionResult::Reconnected;
         }
+        ReconnectSessionResult::SessionNotFound
     }
 
     pub(crate) fn take_background_session_by_id(

@@ -5,17 +5,20 @@ fn request(token: &str, command: &str) -> ControlRequest {
     ControlRequest {
         token: token.to_owned(),
         command: command.to_owned(),
+        runner_id: None,
+        session_id: None,
+        secret: None,
     }
 }
 
 #[test]
 fn control_requests_require_the_endpoint_token() {
     assert_eq!(
-        decode_control_request(&request("correct", "open_window"), "correct"),
+        decode_control_request(&mut request("correct", "open_window"), "correct"),
         Some(ControlRequestCommand::OpenWindow)
     );
     assert_eq!(
-        decode_control_request(&request("wrong", "open_window"), "correct"),
+        decode_control_request(&mut request("wrong", "open_window"), "correct"),
         None
     );
 }
@@ -23,9 +26,45 @@ fn control_requests_require_the_endpoint_token() {
 #[test]
 fn unknown_control_commands_are_rejected() {
     assert_eq!(
-        decode_control_request(&request("token", "delete_sessions"), "token"),
+        decode_control_request(&mut request("token", "delete_sessions"), "token"),
         None
     );
+}
+
+#[test]
+fn reconnect_results_use_distinct_control_statuses() {
+    assert_eq!(
+        reconnect_session_status(ReconnectSessionResult::AuthenticationFailed),
+        "authentication_failed"
+    );
+    assert_eq!(
+        reconnect_session_status(ReconnectSessionResult::SessionNotFound),
+        "session_not_found"
+    );
+    assert_eq!(
+        reconnect_session_status(ReconnectSessionResult::StillStarting),
+        "session_starting"
+    );
+}
+
+#[test]
+fn reconnect_requests_carry_a_session_target_and_optional_secret() {
+    let mut request = ControlRequest {
+        token: "token".to_owned(),
+        command: "reconnect_session".to_owned(),
+        runner_id: Some(7),
+        session_id: Some(42),
+        secret: Some("not-an-argument".to_owned()),
+    };
+    assert_eq!(
+        decode_control_request(&mut request, "token"),
+        Some(ControlRequestCommand::ReconnectSession {
+            runner_id: 7,
+            session_id: 42,
+            secret: Some("not-an-argument".to_owned()),
+        })
+    );
+    assert!(request.secret.is_none());
 }
 
 #[test]
@@ -39,7 +78,9 @@ fn control_server_delivers_a_token_authenticated_open_request() {
 
     let client = thread::spawn(move || send_open_window_request(&endpoint).unwrap());
     let command = futures::executor::block_on(received.next()).unwrap();
-    let ProcessControlCommand::OpenWindow { completion } = command;
+    let ProcessControlCommand::OpenWindow { completion } = command else {
+        panic!("unexpected process control command");
+    };
     completion.send(true).unwrap();
     assert!(client.join().unwrap());
 }
@@ -55,7 +96,9 @@ fn control_client_continues_startup_when_window_open_is_rejected() {
 
     let client = thread::spawn(move || send_open_window_request(&endpoint).unwrap());
     let command = futures::executor::block_on(received.next()).unwrap();
-    let ProcessControlCommand::OpenWindow { completion } = command;
+    let ProcessControlCommand::OpenWindow { completion } = command else {
+        panic!("unexpected process control command");
+    };
     completion.send(false).unwrap();
     assert!(!client.join().unwrap());
 }
@@ -73,7 +116,10 @@ fn shutdown_rejects_an_in_flight_window_handoff() {
     let command = futures::executor::block_on(received.next()).unwrap();
     let ProcessControlCommand::OpenWindow {
         completion: _completion,
-    } = command;
+    } = command
+    else {
+        panic!("unexpected process control command");
+    };
     server.begin_shutdown();
 
     assert!(!client.join().unwrap());

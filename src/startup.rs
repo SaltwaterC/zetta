@@ -78,6 +78,9 @@ pub(crate) enum StartupMode {
     ListBackgroundSessions {
         json: bool,
     },
+    ReconnectBackgroundSession {
+        identifier: String,
+    },
     #[cfg(windows)]
     RegisterWindowsShell(PathBuf),
     TerminalRenderingProfile,
@@ -185,9 +188,17 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         .map(|profile| profile.name.as_str())
         .collect::<Vec<_>>()
         .join("\n  ");
-    format!(
+    let help = format!(
         "Zetta Terminal\n\nUsage: zetta [OPTIONS]\n       zetta benchmark [OPTIONS]\n       zetta benchmark-output [OPTIONS]\n       zetta terminal-size [--json | --resize [--columns COLUMNS] [--rows ROWS]]\n       zetta sessions [--json]\n       zetta init [SHELL]{serial_usage}{http_usage}{tftp_usage}{notify_usage}{clipboard_usage}\n\nCommands:\n  benchmark                           Profile terminal rendering\n  benchmark-output                    Write and time a text payload (default: 10 MiB)\n  terminal-size                       Print or resize the current terminal pane\n  sessions                            List detached background sessions\n  init                                Configure or generate shell integration{serial_command}{http_command}{tftp_command}{notify_command}{clipboard_command}\n\nBuilt-in features:\n  {}\n\nProfiles accepted by --profile NAME (case-insensitive):\n  {profiles}\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Select one of the profiles listed above",
         features.join("\n  "),
+    );
+    help.replace(
+        "       zetta sessions [--json]",
+        "       zetta sessions [--json]\n       zetta sessions reconnect SESSION_ID",
+    )
+    .replace(
+        "sessions                            List detached background sessions",
+        "sessions                            List or reconnect detached background sessions",
     )
 }
 
@@ -350,13 +361,68 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
         .first()
         .is_some_and(|argument| argument == "sessions")
     {
+        if arguments
+            .get(1)
+            .is_some_and(|argument| argument == "reconnect")
+        {
+            let mut identifier = None;
+            let mut session_arguments = arguments[2..].iter();
+            while let Some(argument) = session_arguments.next() {
+                match argument.to_string_lossy().as_ref() {
+                    "--session" | "-s" => {
+                        anyhow::ensure!(
+                            identifier.is_none(),
+                            "--session may only be specified once"
+                        );
+                        identifier = Some(
+                            session_arguments
+                                .next()
+                                .context("--session requires a session ID")?
+                                .to_string_lossy()
+                                .into_owned(),
+                        );
+                    }
+                    "--help" | "-h" => {
+                        println!(
+                            "Reconnect a detached Zetta session\n\nUsage: zetta sessions reconnect SESSION_ID\n\nSESSION_ID is the PROCESS:RUNNER:SESSION identifier printed by `zetta sessions`. Protected sessions prompt for their secret without echoing it or placing it in shell history. A bare SESSION value is accepted only when it is unique.\n\nOptions:\n  -s, --session SESSION_ID  Specify the session ID as an option\n  -h, --help                Print help"
+                        );
+                        std::process::exit(0);
+                    }
+                    value if !value.starts_with('-') => {
+                        anyhow::ensure!(
+                            identifier.is_none(),
+                            "only one session ID may be specified"
+                        );
+                        identifier = Some(value.to_owned());
+                    }
+                    unknown => anyhow::bail!("unknown sessions reconnect argument {unknown:?}"),
+                }
+            }
+            return Ok(StartupArgs {
+                config_path: None,
+                keymap_path: None,
+                profile: None,
+                mode: StartupMode::ReconnectBackgroundSession {
+                    identifier: identifier.context(
+                        "sessions reconnect requires a session ID; run `zetta sessions reconnect --help` for usage",
+                    )?,
+                },
+                profile_report: None,
+                profile_duration: None,
+                profile_pane_stress: false,
+                profile_background_stress: false,
+                profile_sparse_updates: false,
+                profile_external_terminal: false,
+                tftp_command: None,
+            });
+        }
         let mut json = false;
         for argument in &arguments[1..] {
             match argument.to_string_lossy().as_ref() {
                 "--json" | "-j" => json = true,
                 "--help" | "-h" => {
                     println!(
-                        "List detached Zetta sessions\n\nUsage: zetta sessions [--json]\n\nOptions:\n  -j, --json  Print machine-readable JSON\n  -h, --help  Print help"
+                        "List or reconnect detached Zetta sessions\n\nUsage: zetta sessions [--json]\n       zetta sessions reconnect SESSION_ID\n\nOptions:\n  -j, --json  Print machine-readable JSON\n  -h, --help  Print help\n\nRun `zetta sessions reconnect --help` for reconnect options."
                     );
                     std::process::exit(0);
                 }
@@ -2123,7 +2189,7 @@ pub(crate) fn quit_zetta_process(cx: &mut App) {
     cx.quit();
 }
 
-fn open_dormant_or_new_window(cx: &mut App) -> Result<()> {
+pub(crate) fn open_dormant_or_new_window(cx: &mut App) -> Result<()> {
     let (existing, dormant, config, configuration_error) = {
         let process = cx.global_mut::<ZettaProcessState>();
         (
@@ -2362,8 +2428,12 @@ pub(crate) fn run() -> Result<()> {
         );
         return Ok(());
     }
-    if let StartupMode::ListBackgroundSessions { json } = &args.mode {
-        return print_session_catalogs(*json);
+    match &args.mode {
+        StartupMode::ListBackgroundSessions { json } => return print_session_catalogs(*json),
+        StartupMode::ReconnectBackgroundSession { identifier } => {
+            return crate::session_cli::run_reconnect_session(identifier);
+        }
+        _ => {}
     }
     #[cfg(any(
         feature = "serial-console",
@@ -2475,27 +2545,77 @@ pub(crate) fn run() -> Result<()> {
                 open_dormant_or_new_window(cx).log_err();
             });
             cx.spawn(async move |cx| {
-                while let Some(ProcessControlCommand::OpenWindow { completion }) =
-                    control_rx.next().await
-                {
-                    let opened = cx.update(|cx| {
-                        if !cx
-                            .global::<ZettaProcessState>()
-                            .control_server
-                            .is_accepting()
-                        {
-                            return false;
-                        }
+                while let Some(command) = control_rx.next().await {
+                    match command {
+                        ProcessControlCommand::OpenWindow { completion } => {
+                            let opened = cx.update(|cx| {
+                                if !cx
+                                    .global::<ZettaProcessState>()
+                                    .control_server
+                                    .is_accepting()
+                                {
+                                    return false;
+                                }
 
-                        match open_dormant_or_new_window(cx) {
-                            Ok(()) => true,
-                            Err(error) => {
-                                eprintln!("Could not open the requested Zetta window: {error:#}");
-                                false
+                                match open_dormant_or_new_window(cx) {
+                                    Ok(()) => true,
+                                    Err(error) => {
+                                        eprintln!(
+                                            "Could not open the requested Zetta window: {error:#}"
+                                        );
+                                        false
+                                    }
+                                }
+                            });
+                            let _ = completion.send(opened);
+                        }
+                        ProcessControlCommand::ReconnectSession {
+                            runner_id,
+                            session_id,
+                            secret,
+                            completion,
+                        } => {
+                            let mut completion = Some(completion);
+                            let dispatched = cx.update(|cx| {
+                                if !cx
+                                    .global::<ZettaProcessState>()
+                                    .control_server
+                                    .is_accepting()
+                                {
+                                    return false;
+                                }
+                                if cx.global::<ZettaProcessState>().windows.is_empty()
+                                    && open_dormant_or_new_window(cx).is_err()
+                                {
+                                    return false;
+                                }
+                                let Some(window_id) = cx
+                                    .global::<ZettaProcessState>()
+                                    .windows
+                                    .keys()
+                                    .next()
+                                    .copied()
+                                else {
+                                    return false;
+                                };
+                                gpui::WindowHandle::<Zetta>::new(window_id)
+                                    .update(cx, |zetta, window, cx| {
+                                        zetta.reconnect_session_from_cli(
+                                            runner_id,
+                                            session_id,
+                                            secret,
+                                            completion.take().expect("completion sender"),
+                                            window,
+                                            cx,
+                                        );
+                                    })
+                                    .is_ok()
+                            });
+                            if !dispatched && let Some(completion) = completion {
+                                let _ = completion.send(ReconnectSessionResult::Rejected);
                             }
                         }
-                    });
-                    let _ = completion.send(opened);
+                    }
                 }
             })
             .detach();

@@ -42,6 +42,18 @@ whether each pane is starting, running, exited, or failed.
 `--json` provides the same catalog as structured, versioned JSON for scripts
 and future remote-session tooling.
 
+Reconnect a session by its stable ID:
+
+```sh
+zetta sessions reconnect 12345:7:42
+```
+
+Use the complete `PROCESS:RUNNER:SESSION` ID when more than one process has a
+session with the same numeric ID. Reconnecting a protected session prompts for
+the secret on the controlling terminal with terminal echo disabled. The secret
+is read from the prompt rather than a command-line option, so it is not stored
+in shell history or exposed in the process list.
+
 ## Closing the last window
 
 When the last Zetta window closes, detached sessions keep the original process
