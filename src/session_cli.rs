@@ -1,4 +1,7 @@
-use std::{fs::OpenOptions, io::Write as _};
+use std::io::Write as _;
+
+#[cfg(unix)]
+use std::fs::OpenOptions;
 
 use anyhow::{Context as _, Result};
 use zeroize::Zeroizing;

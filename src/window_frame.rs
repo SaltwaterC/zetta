@@ -90,6 +90,7 @@ pub(crate) struct WindowControlState {
     pub(crate) is_maximized: bool,
     pub(crate) is_resizable: bool,
     pub(crate) is_minimizable: bool,
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub(crate) client_decorations: bool,
 }
 

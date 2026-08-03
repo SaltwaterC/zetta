@@ -81,7 +81,9 @@ pub(crate) struct ProcessInfo {
 /// shell group can leave a child process orphaned.
 #[derive(Clone, Copy)]
 pub(crate) struct TerminalProcessIds {
+    #[cfg(unix)]
     foreground: Option<Pid>,
+    #[cfg(unix)]
     child: Pid,
 }
 
@@ -197,7 +199,9 @@ impl PtyProcessInfo {
 
     pub(crate) fn capture_process_ids(&self) -> TerminalProcessIds {
         TerminalProcessIds {
+            #[cfg(unix)]
             foreground: self.pid_getter.pid(),
+            #[cfg(unix)]
             child: self.pid_getter.fallback_pid(),
         }
     }

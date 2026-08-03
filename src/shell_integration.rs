@@ -119,7 +119,7 @@ impl ShellIntegration {
         #[cfg(not(windows))]
         let active_shell_path = active_posix_shell_path();
         #[cfg(windows)]
-        let active_shell_path = None;
+        let active_shell_path: Option<PathBuf> = None;
 
         Self::current_with_active_shell(active_shell_path.as_deref(), shell_path)
     }

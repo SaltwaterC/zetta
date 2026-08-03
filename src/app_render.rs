@@ -204,6 +204,7 @@ impl Render for Zetta {
             is_maximized,
             is_resizable,
             is_minimizable,
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             client_decorations,
         };
         let rounded_top_left = cfg!(any(target_os = "linux", target_os = "freebsd"))
