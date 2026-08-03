@@ -14,6 +14,7 @@ use sysinfo::{Pid, ProcessesToUpdate, System};
 
 const FILE_PREFIX: &str = "zetta-scrollback-";
 const DIRECTORY_NAME: &str = "zetta-scrollback";
+const PENDING_FILE_GRACE_PERIOD: Duration = Duration::from_secs(30);
 static CLEANUP_MONITOR_RUNNING: AtomicBool = AtomicBool::new(false);
 static LEGACY_CLEANUP: Once = Once::new();
 
@@ -39,7 +40,7 @@ pub(crate) fn create(content: &str) -> io::Result<PathBuf> {
 fn create_in(directory: &Path, content: &str) -> io::Result<PathBuf> {
     let (pid, start_time) = current_process_identity()?;
     let mut file = tempfile::Builder::new()
-        .prefix(&format!("{FILE_PREFIX}{pid}-{start_time}-"))
+        .prefix(&format!("{FILE_PREFIX}pending-{pid}-{start_time}-"))
         .suffix(".txt")
         .tempfile_in(directory)?;
     file.write_all(content.as_bytes())?;
@@ -53,9 +54,9 @@ fn create_in(directory: &Path, content: &str) -> io::Result<PathBuf> {
     Ok(path)
 }
 
-/// Transfers a managed file to the editor helper's PID. This lets garbage
-/// collection distinguish an active editor from a crashed helper even when
-/// the main Zetta process remains alive.
+/// Transfers a pending managed file to the editor helper's PID. This lets
+/// garbage collection distinguish an active editor from a command that was
+/// consumed by a foreground terminal application.
 pub fn claim_for_editor(path: &Path) -> io::Result<PathBuf> {
     let parent = path.parent().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "scrollback path has no parent")
@@ -82,7 +83,10 @@ pub fn claim_for_editor(path: &Path) -> io::Result<PathBuf> {
         )
     })?;
     let (pid, start_time) = current_process_identity()?;
-    let claimed = parent.join(format!("{FILE_PREFIX}{pid}-{start_time}-{}", owner.suffix));
+    let claimed = parent.join(format!(
+        "{FILE_PREFIX}editor-{pid}-{start_time}-{}",
+        owner.suffix
+    ));
     fs::rename(path, &claimed)?;
     Ok(claimed)
 }
@@ -98,9 +102,14 @@ pub fn remove_managed(path: &Path) -> bool {
     }
 }
 
-/// Removes files whose owning Zetta/editor process no longer exists. Errors
-/// are intentionally per-file so one inaccessible entry never stops cleanup.
+/// Removes files whose owning Zetta/editor process no longer exists, or whose
+/// editor handoff was never claimed. Errors are intentionally per-file so one
+/// inaccessible entry never stops cleanup.
 pub fn cleanup_stale() -> usize {
+    cleanup_stale_at(std::time::SystemTime::now())
+}
+
+fn cleanup_stale_at(now: std::time::SystemTime) -> usize {
     LEGACY_CLEANUP.call_once(cleanup_legacy_files);
     let mut candidates = Vec::new();
     let mut pids = HashSet::new();
@@ -113,18 +122,25 @@ pub fn cleanup_stale() -> usize {
             let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
-            let Some(FileOwner {
-                pid, start_time, ..
-            }) = parse_owner(file_name)
-            else {
+            let Some(owner) = parse_owner(file_name) else {
                 continue;
             };
+            let FileOwner {
+                pid,
+                start_time,
+                kind,
+                ..
+            } = owner;
+            let modified = fs::metadata(&path)
+                .ok()
+                .and_then(|metadata| metadata.modified().ok());
             let pid = Pid::from_u32(pid);
             pids.insert(pid);
-            candidates.push((path, pid, start_time));
+            candidates.push((path, pid, kind, start_time, modified));
         }
     }
 
+    let current_pid = sysinfo::get_current_pid().ok();
     if candidates.is_empty() {
         return 0;
     }
@@ -132,17 +148,32 @@ pub fn cleanup_stale() -> usize {
     let mut system = System::new();
     system.refresh_processes(ProcessesToUpdate::Some(&pids), true);
     let mut remaining = 0;
-    for (path, pid, start_time) in candidates {
+    for (path, pid, kind, start_time, modified) in candidates {
         let owner_is_alive = system
             .process(pid)
             .is_some_and(|process| start_time.is_none_or(|start| process.start_time() == start));
-        if !owner_is_alive {
+        let pending_handoff_expired = handoff_expired(kind, current_pid, pid, modified, now);
+        if !owner_is_alive || pending_handoff_expired {
             remaining += usize::from(!remove_managed(&path));
         } else {
             remaining += 1;
         }
     }
     remaining
+}
+
+fn handoff_expired(
+    kind: FileKind,
+    current_pid: Option<Pid>,
+    pid: Pid,
+    modified: Option<std::time::SystemTime>,
+    now: std::time::SystemTime,
+) -> bool {
+    (kind == FileKind::Pending || (kind == FileKind::Legacy && current_pid == Some(pid)))
+        && modified.is_some_and(|modified| {
+            now.duration_since(modified)
+                .is_ok_and(|age| age >= PENDING_FILE_GRACE_PERIOD)
+        })
 }
 
 fn cleanup_legacy_files() {
@@ -192,14 +223,29 @@ pub fn start_cleanup_monitor() {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FileKind {
+    Pending,
+    Editor,
+    Legacy,
+}
+
 struct FileOwner<'a> {
     pid: u32,
     start_time: Option<u64>,
     suffix: &'a str,
+    kind: FileKind,
 }
 
 fn parse_owner(file_name: &str) -> Option<FileOwner<'_>> {
     let remainder = file_name.strip_prefix(FILE_PREFIX)?;
+    let (kind, remainder) = if let Some(remainder) = remainder.strip_prefix("pending-") {
+        (FileKind::Pending, remainder)
+    } else if let Some(remainder) = remainder.strip_prefix("editor-") {
+        (FileKind::Editor, remainder)
+    } else {
+        (FileKind::Legacy, remainder)
+    };
     let (pid, suffix) = remainder.split_once('-')?;
     let pid = pid.parse().ok()?;
     if let Some((start_time, suffix)) = suffix.split_once('-')
@@ -209,6 +255,7 @@ fn parse_owner(file_name: &str) -> Option<FileOwner<'_>> {
             pid,
             start_time: Some(start_time),
             suffix,
+            kind,
         });
     }
     // Compatibility with files created by the first implementation, which
@@ -217,6 +264,7 @@ fn parse_owner(file_name: &str) -> Option<FileOwner<'_>> {
         pid,
         start_time: None,
         suffix,
+        kind,
     })
 }
 
@@ -308,11 +356,36 @@ mod tests {
         assert_eq!(owner.pid, 42);
         assert_eq!(owner.start_time, Some(123456));
         assert_eq!(owner.suffix, "random.txt");
+        let pending = parse_owner("zetta-scrollback-pending-42-123456-random.txt").unwrap();
+        assert_eq!(pending.kind, FileKind::Pending);
+        let editor = parse_owner("zetta-scrollback-editor-42-123456-random.txt").unwrap();
+        assert_eq!(editor.kind, FileKind::Editor);
         let legacy = parse_owner("zetta-scrollback-42-random.txt").unwrap();
         assert_eq!(legacy.pid, 42);
         assert_eq!(legacy.start_time, None);
         assert_eq!(legacy.suffix, "random.txt");
+        assert_eq!(legacy.kind, FileKind::Legacy);
         assert!(parse_owner("unrelated-42-random.txt").is_none());
+    }
+
+    #[test]
+    fn unclaimed_dumps_expire_but_editor_dumps_do_not() {
+        let now = std::time::SystemTime::UNIX_EPOCH + PENDING_FILE_GRACE_PERIOD;
+        let pid = Pid::from_u32(42);
+        assert!(handoff_expired(
+            FileKind::Pending,
+            Some(pid),
+            pid,
+            Some(std::time::SystemTime::UNIX_EPOCH),
+            now
+        ));
+        assert!(!handoff_expired(
+            FileKind::Editor,
+            Some(pid),
+            pid,
+            Some(std::time::SystemTime::UNIX_EPOCH),
+            now
+        ));
     }
 
     #[test]

@@ -199,6 +199,7 @@ and deleted as soon as the editor command returns. Zetta also performs
 asynchronous garbage collection at startup, before creating another buffer,
 and once per second while managed files exist, removing files left by editor
 or application crashes without polling when there is nothing to collect.
+A buffer whose editor handoff is not claimed is reaped after a 30-second grace period.
 Editors that delegate to an existing GUI process should include their wait
 option in `EDITOR` so the managed file remains available until editing ends.
 **Edit Scrollback** is also available from the terminal context menu and command
