@@ -54,9 +54,9 @@ use gpui::{
     InteractiveElement as _, IntoElement, KeyBinding, KeyBindingContextPredicate, KeyDownEvent,
     KeyUpEvent, MAX_BUTTONS_PER_SIDE, MouseButton, Pixels, PlatformKeyboardMapper, Point, Render,
     ResizeEdge, ScrollHandle, SharedString, Size, Subscription, Task, Tiling, TitlebarOptions,
-    Unbind, UniformListScrollHandle, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowButton, WindowButtonLayout, WindowControlArea, WindowControls, WindowDecorations,
-    WindowId, WindowOptions, actions, canvas, container_query, div, point, profiler, px, size, svg,
+    UniformListScrollHandle, Window, WindowBackgroundAppearance, WindowBounds, WindowButton,
+    WindowButtonLayout, WindowControlArea, WindowControls, WindowDecorations, WindowId,
+    WindowOptions, actions, canvas, container_query, div, point, profiler, px, size, svg,
     transparent_black, uniform_list,
 };
 use process_control::{
