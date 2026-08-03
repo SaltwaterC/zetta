@@ -29,6 +29,60 @@ fn custom_window_border_matches_platform_conventions() {
 }
 
 #[test]
+fn window_controls_respect_window_capabilities() {
+    let supported = WindowControls::default();
+
+    assert!(window_button_enabled(
+        WindowButton::Minimize,
+        supported,
+        true,
+        true,
+    ));
+    assert!(window_button_enabled(
+        WindowButton::Maximize,
+        supported,
+        true,
+        true,
+    ));
+    assert!(!window_button_enabled(
+        WindowButton::Minimize,
+        supported,
+        true,
+        false,
+    ));
+    assert!(!window_button_enabled(
+        WindowButton::Maximize,
+        supported,
+        false,
+        true,
+    ));
+    assert!(window_button_enabled(
+        WindowButton::Close,
+        supported,
+        false,
+        false,
+    ));
+
+    let unsupported = WindowControls {
+        minimize: false,
+        maximize: false,
+        ..supported
+    };
+    assert!(!window_button_enabled(
+        WindowButton::Minimize,
+        unsupported,
+        true,
+        true,
+    ));
+    assert!(!window_button_enabled(
+        WindowButton::Maximize,
+        unsupported,
+        true,
+        true,
+    ));
+}
+
+#[test]
 #[cfg(target_os = "linux")]
 fn parses_quoted_gsettings_button_layout() {
     let layout = parse_gsettings_button_layout("'close,minimize,maximize:'\n").unwrap();

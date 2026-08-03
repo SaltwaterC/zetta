@@ -76,6 +76,55 @@ pub(crate) struct ProcessInfo {
     pub(crate) argv: Vec<String>,
 }
 
+/// Process groups captured while the PTY master is still open. A foreground
+/// job may have a different process group from the shell, so closing only the
+/// shell group can leave a child process orphaned.
+#[derive(Clone, Copy)]
+pub(crate) struct TerminalProcessIds {
+    foreground: Option<Pid>,
+    child: Pid,
+}
+
+#[cfg(unix)]
+impl TerminalProcessIds {
+    fn process_group_ids(self) -> impl Iterator<Item = i32> {
+        std::iter::once(self.child)
+            .chain(
+                self.foreground
+                    .filter(|foreground| *foreground != self.child),
+            )
+            .map(|pid| pid.as_u32() as i32)
+            .filter(|pid| *pid > 0)
+    }
+
+    pub(crate) fn terminate(&self) -> bool {
+        self.signal(libc::SIGTERM)
+    }
+
+    pub(crate) fn kill(&self) -> bool {
+        self.signal(libc::SIGKILL)
+    }
+
+    fn signal(&self, signal: i32) -> bool {
+        let mut signalled = false;
+        for process_group_id in self.process_group_ids() {
+            signalled |= unsafe { libc::killpg(process_group_id, signal) } == 0;
+        }
+        signalled
+    }
+}
+
+#[cfg(not(unix))]
+impl TerminalProcessIds {
+    pub(crate) fn terminate(&self) -> bool {
+        false
+    }
+
+    pub(crate) fn kill(&self) -> bool {
+        false
+    }
+}
+
 /// Fetches Zed-relevant Pseudo-Terminal (PTY) process information
 pub(crate) struct PtyProcessInfo {
     system: RwLock<System>,
@@ -144,6 +193,13 @@ impl PtyProcessInfo {
 
     pub(crate) fn pid_getter(&self) -> &ProcessIdGetter {
         &self.pid_getter
+    }
+
+    pub(crate) fn capture_process_ids(&self) -> TerminalProcessIds {
+        TerminalProcessIds {
+            foreground: self.pid_getter.pid(),
+            child: self.pid_getter.fallback_pid(),
+        }
     }
 
     #[cfg(unix)]
@@ -227,17 +283,6 @@ impl PtyProcessInfo {
 
     pub(crate) fn kill_child_process(&self) -> bool {
         self.get_child().is_some_and(|process| process.kill())
-    }
-
-    #[cfg(unix)]
-    pub(crate) fn terminate_child_process(&self) -> bool {
-        let pid = self.pid_getter.fallback_pid();
-        unsafe { libc::killpg(pid.as_u32() as i32, libc::SIGTERM) == 0 }
-    }
-
-    #[cfg(not(unix))]
-    pub(crate) fn terminate_child_process(&self) -> bool {
-        false
     }
 
     fn load(&self) -> Option<ProcessInfo> {

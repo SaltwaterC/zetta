@@ -24,7 +24,7 @@ use mappings::mouse::{
 use async_channel::{Receiver, Sender};
 use collections::{HashMap, VecDeque};
 use futures::StreamExt;
-use pty_info::{ProcessIdGetter, PtyProcessInfo};
+use pty_info::{ProcessIdGetter, PtyProcessInfo, TerminalProcessIds};
 use serde::{Deserialize, Serialize};
 use settings::Settings;
 use task::{HideStrategy, Shell, ShellKind, SpawnInTerminal};
@@ -40,6 +40,7 @@ use std::{
     borrow::Cow,
     cmp::{self, min},
     fmt::{self, Display, Formatter},
+    future::Future,
     io::{Read, Write},
     mem,
     ops::{BitOr, BitOrAssign, Deref, Range as StdRange},
@@ -80,6 +81,24 @@ use crate::alacritty::{
 };
 use crate::mappings::colors::to_vte_rgb;
 use crate::mappings::keys::to_esc_str;
+
+const PROCESS_KILL_GRACE_PERIOD: Duration = Duration::from_millis(100);
+
+/// Give the shell and its foreground job a short graceful-exit window, then
+/// kill both process groups. This must capture the groups before the PTY is
+/// shut down because foreground-group lookup uses the PTY descriptor.
+fn terminate_processes_with_grace_period(
+    info: Arc<PtyProcessInfo>,
+    executor: BackgroundExecutor,
+) -> impl Future<Output = ()> {
+    let process_ids: TerminalProcessIds = info.capture_process_ids();
+    process_ids.terminate();
+    async move {
+        executor.timer(PROCESS_KILL_GRACE_PERIOD).await;
+        process_ids.kill();
+        info.kill_child_process();
+    }
+}
 
 /// Process-wide flag set by headless hosts (e.g. the eval CLI) that have no
 /// controlling TTY. In such sandboxes PTY allocation and acquiring a
@@ -1664,6 +1683,25 @@ impl TerminalBuilder {
     }
 
     pub fn subscribe(mut self, cx: &Context<Terminal>) -> Terminal {
+        // Keep the escalation alive during application shutdown. A detached
+        // task from `Drop` may not run once GPUI begins terminating executors.
+        let app_quit_subscription = cx.on_app_quit(|terminal, cx| {
+            let kill_processes = match &terminal.terminal_type {
+                TerminalType::Pty { info, .. } => Some(terminate_processes_with_grace_period(
+                    info.clone(),
+                    cx.background_executor().clone(),
+                )),
+                TerminalType::DisplayOnly => None,
+            };
+            async move {
+                if let Some(kill_processes) = kill_processes {
+                    kill_processes.await;
+                }
+            }
+        });
+        cx.on_release(move |_, _| drop(app_quit_subscription))
+            .detach();
+
         //Event loop
         self.terminal.event_loop_task = cx.spawn(async move |terminal, cx| {
             while let Some(event) = self.events_rx.next().await {
@@ -3024,8 +3062,18 @@ impl Terminal {
                     };
 
                     if selection_type == Some(SelectionType::Simple) && e.modifiers.shift {
-                        self.events
-                            .push_back(InternalEvent::UpdateSelection(position));
+                        if self.last_content.selection.is_some() {
+                            // Shift+click extends the existing selection to this point.
+                            self.events
+                                .push_back(InternalEvent::UpdateSelection(position));
+                        } else {
+                            // With no selection yet, Shift is the escape hatch for
+                            // selecting text while an app has mouse tracking enabled,
+                            // so anchor a selection here for the drag to extend.
+                            self.events.push_back(InternalEvent::SetSelection(Some(
+                                Selection::new(SelectionType::Simple, point, side),
+                            )));
+                        }
                         return;
                     }
 
@@ -3787,16 +3835,10 @@ impl Drop for Terminal {
         if let TerminalType::Pty { pty_tx, info } =
             std::mem::replace(&mut self.terminal_type, TerminalType::DisplayOnly)
         {
+            let kill_processes =
+                terminate_processes_with_grace_period(info, self.background_executor.clone());
             pty_tx.shutdown();
-            info.terminate_child_process();
-
-            let timer = self.background_executor.timer(Duration::from_millis(100));
-            self.background_executor
-                .spawn(async move {
-                    timer.await;
-                    info.kill_child_process();
-                })
-                .detach();
+            self.background_executor.spawn(kill_processes).detach();
         }
     }
 }
@@ -4660,6 +4702,114 @@ mod tests {
             assert_eq!(
                 terminal.take_pty_write_log(),
                 vec![b"middle-click paste".to_vec()]
+            );
+        });
+    }
+
+    /// With mouse tracking active (e.g. htop), Shift is the escape hatch to
+    /// select terminal text. Shift+drag must start a selection rather than being
+    /// swallowed as a "extend existing selection" no-op. Regression test for #60254.
+    #[gpui::test]
+    async fn test_terminal_shift_drag_selects_while_mouse_tracking(cx: &mut TestAppContext) {
+        // `?1002h` enables button-event mouse tracking, `?1006h` selects SGR encoding.
+        let terminal = init_ctrl_click_hyperlink_test(cx, b"\x1b[?1002h\x1b[?1006hhello world\r\n");
+
+        terminal.update(cx, |terminal, cx| {
+            assert!(
+                terminal.last_content.mode.intersects(Modes::MOUSE_MODE),
+                "mouse tracking should be active"
+            );
+
+            let shift = Modifiers {
+                shift: true,
+                ..Modifiers::none()
+            };
+            terminal.mouse_down(
+                &MouseDownEvent {
+                    button: MouseButton::Left,
+                    position: point(px(50.0), px(10.0)),
+                    modifiers: shift,
+                    click_count: 1,
+                    first_mouse: true,
+                },
+                cx,
+            );
+
+            // With no selection yet, the shift press must anchor a new selection
+            // so the following drag has something to extend.
+            assert!(
+                terminal
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, InternalEvent::SetSelection(Some(_)))),
+                "shift+click with no existing selection should anchor a selection"
+            );
+            terminal.events.clear();
+
+            let region = terminal.last_content.terminal_bounds.bounds;
+            terminal.mouse_drag(
+                &MouseMoveEvent {
+                    position: point(px(90.0), px(10.0)),
+                    pressed_button: Some(MouseButton::Left),
+                    modifiers: shift,
+                },
+                region,
+                cx,
+            );
+
+            assert!(
+                terminal
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, InternalEvent::UpdateSelection(_))),
+                "shift+drag should extend the selection while mouse tracking is active"
+            );
+            assert!(terminal.selection_phase == SelectionPhase::Selecting);
+        });
+    }
+
+    /// Shift+click with a selection already on screen must keep extending it
+    /// (the behavior added in #25143), not re-anchor a fresh one.
+    #[gpui::test]
+    async fn test_terminal_shift_click_extends_existing_selection(cx: &mut TestAppContext) {
+        let terminal = init_ctrl_click_hyperlink_test(cx, b"hello world\r\n");
+
+        terminal.update(cx, |terminal, cx| {
+            // A visible selection, as a sync would have populated in production.
+            terminal.last_content.selection = Some(SelectionRange {
+                start: Point::new(0, 0),
+                end: Point::new(0, 5),
+                is_block: false,
+            });
+            terminal.events.clear();
+
+            terminal.mouse_down(
+                &MouseDownEvent {
+                    button: MouseButton::Left,
+                    position: point(px(90.0), px(10.0)),
+                    modifiers: Modifiers {
+                        shift: true,
+                        ..Modifiers::none()
+                    },
+                    click_count: 1,
+                    first_mouse: true,
+                },
+                cx,
+            );
+
+            assert!(
+                terminal
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, InternalEvent::UpdateSelection(_))),
+                "shift+click with an existing selection should extend it"
+            );
+            assert!(
+                !terminal
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, InternalEvent::SetSelection(Some(_)))),
+                "shift+click should extend, not re-anchor, an existing selection"
             );
         });
     }

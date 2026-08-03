@@ -1284,7 +1284,9 @@ impl Zetta {
         window: &mut Window,
         _: &mut Context<Self>,
     ) {
-        window.minimize_window();
+        if window.is_minimizable() {
+            window.minimize_window();
+        }
     }
 
     pub(crate) fn zoom_window(
@@ -1293,7 +1295,9 @@ impl Zetta {
         window: &mut Window,
         _: &mut Context<Self>,
     ) {
-        window.zoom_window();
+        if window.is_resizable() {
+            window.zoom_window();
+        }
     }
 
     pub(crate) fn close_all_windows(

@@ -89,7 +89,7 @@ use crate::linux::{
     wayland::{
         clipboard::{Clipboard, DataOffer, FILE_LIST_MIME_TYPE, TEXT_MIME_TYPES},
         cursor::Cursor,
-        serial::{SerialKind, SerialTracker},
+        serial::{Serial, SerialKind, SerialTracker},
         to_shape,
         window::WaylandWindow,
     },
@@ -527,7 +527,7 @@ impl WaylandClientStatePtr {
             .expect("The pointer should always be valid when dispatching in wayland")
     }
 
-    pub fn get_serial(&self, kind: SerialKind) -> u32 {
+    pub fn get_serial(&self, kind: SerialKind) -> Serial {
         self.0.upgrade().unwrap().borrow().serial_tracker.get(kind)
     }
 
@@ -655,7 +655,7 @@ impl WaylandClientState {
             return;
         };
         let serial = self.serial_tracker.get(SerialKind::MouseEnter);
-        wl_pointer.set_cursor(serial, None, 0, 0);
+        wl_pointer.set_cursor(serial.as_raw(), None, 0, 0);
         self.cursor_hidden_window = Some(focused_window);
     }
 
@@ -668,7 +668,7 @@ impl WaylandClientState {
         };
         let serial = self.serial_tracker.get(SerialKind::MouseEnter);
         if let Some(cursor_shape_device) = &self.cursor_shape_device {
-            cursor_shape_device.set_shape(serial, to_shape(style));
+            cursor_shape_device.set_shape(serial.as_raw(), to_shape(style));
             return;
         }
         let Some(focused_window) = self.mouse_focused_window.clone() else {
@@ -688,7 +688,7 @@ impl WaylandClientState {
         let scale = focused_window.primary_output_scale();
         self.cursor.set_icon(
             &wl_pointer,
-            serial,
+            serial.as_raw(),
             cursor_style_to_icon_names(style),
             scale,
         );
@@ -1049,11 +1049,10 @@ impl LinuxClient for WaylandClient {
                 // immediately dismisses the popup, so use the most recent press serial, or no
                 // grab before any press.
                 let popup_grab = options.grab.then(|| {
-                    let serial = state
+                    state
                         .serial_tracker
-                        .get(SerialKind::MousePress)
-                        .max(state.serial_tracker.get(SerialKind::KeyPress));
-                    (serial != 0).then(|| (serial, state.wl_seat.clone()))
+                        .selection_serial()
+                        .map(|serial| (serial.as_raw(), state.wl_seat.clone()))
                 });
                 (Some(parent), popup_grab.flatten())
             }
@@ -1116,7 +1115,7 @@ impl LinuxClient for WaylandClient {
 
         let serial = state.serial_tracker.get(SerialKind::MouseEnter);
         if let Some(cursor_shape_device) = &state.cursor_shape_device {
-            cursor_shape_device.set_shape(serial, to_shape(style));
+            cursor_shape_device.set_shape(serial.as_raw(), to_shape(style));
         } else if let Some(focused_window) = &state.mouse_focused_window {
             // cursor-shape-v1 isn't supported, set the cursor using a surface.
             let wl_pointer = state
@@ -1126,7 +1125,7 @@ impl LinuxClient for WaylandClient {
             let scale = focused_window.primary_output_scale();
             state.cursor.set_icon(
                 &wl_pointer,
-                serial,
+                serial.as_raw(),
                 cursor_style_to_icon_names(style),
                 scale,
             );
@@ -1150,7 +1149,7 @@ impl LinuxClient for WaylandClient {
             state.pending_activation = Some(PendingActivation::Uri(uri.to_string()));
             let token = activation.get_activation_token(&state.globals.qh, ());
             let serial = state.serial_tracker.get(SerialKind::MousePress);
-            token.set_serial(serial, &state.wl_seat);
+            token.set_serial(serial.as_raw(), &state.wl_seat);
             token.set_surface(&window.surface());
             token.commit();
         } else {
@@ -1168,7 +1167,7 @@ impl LinuxClient for WaylandClient {
             state.pending_activation = Some(PendingActivation::Path(path));
             let token = activation.get_activation_token(&state.globals.qh, ());
             let serial = state.serial_tracker.get(SerialKind::MousePress);
-            token.set_serial(serial, &state.wl_seat);
+            token.set_serial(serial.as_raw(), &state.wl_seat);
             token.set_surface(&window.surface());
             token.commit();
         } else {
@@ -1212,15 +1211,18 @@ impl LinuxClient for WaylandClient {
         };
         if state.mouse_focused_window.is_some() || state.keyboard_focused_window.is_some() {
             state.clipboard.set_primary(item);
-            let serial = state
-                .serial_tracker
-                .latest_of(&[SerialKind::KeyPress, SerialKind::MousePress]);
+            let Some(serial) = state.serial_tracker.selection_serial() else {
+                log::warn!(
+                    "Skipping Wayland primary selection ownership request because no keyboard or pointer press serial has been received"
+                );
+                return;
+            };
             let data_source = primary_selection_manager.create_source(&state.globals.qh, ());
             for mime_type in TEXT_MIME_TYPES {
                 data_source.offer(mime_type.to_string());
             }
             data_source.offer(state.clipboard.self_mime());
-            primary_selection.set_selection(Some(&data_source), serial);
+            primary_selection.set_selection(Some(&data_source), serial.as_raw());
         }
     }
 
@@ -1234,15 +1236,18 @@ impl LinuxClient for WaylandClient {
         };
         if state.mouse_focused_window.is_some() || state.keyboard_focused_window.is_some() {
             state.clipboard.set(item);
-            let serial = state
-                .serial_tracker
-                .latest_of(&[SerialKind::KeyPress, SerialKind::MousePress]);
+            let Some(serial) = state.serial_tracker.selection_serial() else {
+                log::warn!(
+                    "Skipping Wayland clipboard ownership request because no keyboard or pointer press serial has been received"
+                );
+                return;
+            };
             let data_source = data_device_manager.create_data_source(&state.globals.qh, ());
             for mime_type in TEXT_MIME_TYPES {
                 data_source.offer(mime_type.to_string());
             }
             data_source.offer(state.clipboard.self_mime());
-            data_device.set_selection(Some(&data_source), serial);
+            data_device.set_selection(Some(&data_source), serial.as_raw());
         }
     }
 
@@ -1838,7 +1843,9 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                 state: WEnum::Value(key_state),
                 ..
             } => {
-                state.serial_tracker.update(SerialKind::KeyPress, serial);
+                if key_state == wl_keyboard::KeyState::Pressed {
+                    state.serial_tracker.update(SerialKind::KeyPress, serial);
+                }
 
                 let focused_window = state.keyboard_focused_window.clone();
                 let Some(focused_window) = focused_window else {
@@ -2024,7 +2031,7 @@ impl Dispatch<zwp_text_input_v3::ZwpTextInputV3, ()> for WaylandClientStatePtr {
                             text_input,
                             &mut state.last_ime_cursor_rectangle,
                             area,
-                            last_serial == serial,
+                            last_serial.as_raw() == serial,
                         );
                     }
                 } else {
@@ -2151,7 +2158,8 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
                             state.cursor_style = Some(default_style);
 
                             if let Some(cursor_shape_device) = &state.cursor_shape_device {
-                                cursor_shape_device.set_shape(serial, to_shape(default_style));
+                                cursor_shape_device
+                                    .set_shape(serial.as_raw(), to_shape(default_style));
                             } else {
                                 // cursor-shape-v1 isn't supported, set the cursor using a surface.
                                 let wl_pointer = state
@@ -2161,7 +2169,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
                                 let scale = window.primary_output_scale();
                                 state.cursor.set_icon(
                                     &wl_pointer,
-                                    serial,
+                                    serial.as_raw(),
                                     cursor_style_to_icon_names(default_style),
                                     scale,
                                 );
@@ -2710,7 +2718,7 @@ impl Dispatch<wl_data_offer::WlDataOffer, ()> for WaylandClientStatePtr {
             if mime_type == FILE_LIST_MIME_TYPE {
                 let serial = state.serial_tracker.get(SerialKind::DataDevice);
                 let mime_type = mime_type.clone();
-                data_offer.accept(serial, Some(mime_type));
+                data_offer.accept(serial.as_raw(), Some(mime_type));
             }
 
             // Clipboard

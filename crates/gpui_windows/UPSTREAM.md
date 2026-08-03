@@ -1,7 +1,7 @@
 # Zetta GPUI Windows fork
 
 This crate is synchronized with `zed/crates/gpui_windows` at Zed revision
-`c9e8e611dbc279afa0914d28c4d37ad07f38c03b`. Zetta owns the fork so Windows
+`849ec5898a321eefbeb1d1beda130cc50ef43f10`. Zetta owns the fork so Windows
 platform fixes can be carried without modifying the upstream submodule.
 
 Retain this Zetta patch when synchronizing:
@@ -15,5 +15,10 @@ Retain this Zetta patch when synchronizing:
   without this patch, growing a pane after the window had been maximized (and
   then shrunk back to a floating size, which does not clear `WS_MAXIMIZE`)
   gets stuck calling `SW_MAXIMIZE` on an already-maximized window forever.
+
+Also retain the synchronized upstream changes for DirectX scene annotations,
+one-shot attention flashing, inactive popup activation, and input activation.
+The manifest is local so the application can select the fork through
+`gpui_platform`.
 
 See `../UPSTREAM_AUDIT.md` for the reviewed upstream commit list.

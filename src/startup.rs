@@ -2145,6 +2145,8 @@ fn zetta_window_options(cx: &App) -> WindowOptions {
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         window_min_size: Some(ZETTA_MINIMUM_WINDOW_SIZE),
+        is_resizable: true,
+        is_minimizable: true,
         app_id: Some(ZETTA_APP_ID.to_owned()),
         titlebar: Some(TitlebarOptions {
             title: Some("Zetta".into()),

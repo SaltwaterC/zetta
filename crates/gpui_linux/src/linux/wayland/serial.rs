@@ -9,16 +9,40 @@ pub(crate) enum SerialKind {
     KeyPress,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Serial(u32);
+
+impl Serial {
+    pub(super) fn as_raw(self) -> u32 {
+        self.0
+    }
+}
+
+/// A serial produced by an eligible keyboard or pointer press.
+///
+/// Wayland accepts these serials for selection ownership and interactive
+/// requests such as popup grabs. Keeping them distinct from other protocol
+/// serials prevents a data-device, IME, or pointer-enter event from being used
+/// accidentally.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SelectionSerial(Serial);
+
+impl SelectionSerial {
+    pub(super) fn as_raw(self) -> u32 {
+        self.0.as_raw()
+    }
+}
+
 #[derive(Debug)]
 struct SerialData {
-    serial: u32,
+    serial: Serial,
     observed_at: u64,
 }
 
 impl SerialData {
-    fn new(value: u32, observed_at: u64) -> Self {
+    fn new(serial: Serial, observed_at: u64) -> Self {
         Self {
-            serial: value,
+            serial,
             observed_at,
         }
     }
@@ -42,59 +66,43 @@ impl SerialTracker {
     pub fn update(&mut self, kind: SerialKind, value: u32) {
         self.observation_count = self.observation_count.wrapping_add(1);
         self.serials
-            .insert(kind, SerialData::new(value, self.observation_count));
+            .insert(kind, SerialData::new(Serial(value), self.observation_count));
     }
 
     /// Returns the latest tracked serial of the provided [`SerialKind`]
     ///
-    /// Will return 0 if not tracked.
-    pub fn get(&self, kind: SerialKind) -> u32 {
+    /// Returns a serial with a raw value of 0 if the kind has not been tracked.
+    pub fn get(&self, kind: SerialKind) -> Serial {
         self.serials
             .get(&kind)
             .map(|serial_data| serial_data.serial)
-            .unwrap_or(0)
+            .unwrap_or(Serial(0))
     }
 
     /// Returns the most recently observed serial of the provided [`SerialKind`]s.
     ///
     /// Comparing serial values is not sufficient because Wayland serials are
     /// 32-bit values and can wrap while the client is running.
-    pub fn latest_of(&self, kinds: &[SerialKind]) -> u32 {
+    fn latest_of(&self, kinds: &[SerialKind]) -> Option<Serial> {
         kinds
             .iter()
             .filter_map(|kind| self.serials.get(kind))
             .max_by_key(|serial_data| serial_data.observed_at)
             .map(|serial_data| serial_data.serial)
-            .unwrap_or(0)
+    }
+
+    /// Returns the newest keyboard or pointer press serial, if one has been
+    /// observed.
+    ///
+    /// Arrival order is intentional: Wayland serials are 32-bit values and
+    /// comparing their numeric values breaks after compositor rollover.
+    /// `Some(Serial(0))` is distinct from no eligible input having arrived.
+    pub fn selection_serial(&self) -> Option<SelectionSerial> {
+        self.latest_of(&[SerialKind::KeyPress, SerialKind::MousePress])
+            .map(SelectionSerial)
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn latest_of_uses_observation_order_after_serial_wraparound() {
-        let mut tracker = SerialTracker::new();
-        tracker.update(SerialKind::KeyPress, u32::MAX);
-        tracker.update(SerialKind::MousePress, 1);
-
-        assert_eq!(
-            tracker.latest_of(&[SerialKind::KeyPress, SerialKind::MousePress]),
-            1
-        );
-    }
-
-    #[test]
-    fn latest_of_ignores_newer_unrequested_serial_kinds() {
-        let mut tracker = SerialTracker::new();
-        tracker.update(SerialKind::MousePress, 10);
-        tracker.update(SerialKind::InputMethod, 20);
-        tracker.update(SerialKind::DataDevice, 30);
-
-        assert_eq!(
-            tracker.latest_of(&[SerialKind::KeyPress, SerialKind::MousePress]),
-            10
-        );
-    }
-}
+#[path = "tests/serial.rs"]
+mod tests;

@@ -193,9 +193,18 @@ impl Render for Zetta {
         let background_session_count = process_background_sessions.len();
         let supported_controls = window.window_controls();
         let is_maximized = window.is_maximized();
+        let is_resizable = window.is_resizable();
+        let is_minimizable = window.is_minimizable();
         let (client_decorations, tiling) = match window.window_decorations() {
             Decorations::Client { tiling } => (true, tiling),
             Decorations::Server => (false, Tiling::default()),
+        };
+        let window_control_state = WindowControlState {
+            supported_controls,
+            is_maximized,
+            is_resizable,
+            is_minimizable,
+            client_decorations,
         };
         let rounded_top_left = cfg!(any(target_os = "linux", target_os = "freebsd"))
             && client_decorations
@@ -215,22 +224,10 @@ impl Render for Zetta {
             && !tiling.right;
         let bottom_corner_radius = theme::CLIENT_SIDE_DECORATION_ROUNDING - px(1.);
         let tab_close_button_on_left = window_close_button_on_left(self.button_layout);
-        let left_window_controls = render_window_controls(
-            self.button_layout.left,
-            supported_controls,
-            is_maximized,
-            false,
-            client_decorations,
-            cx,
-        );
-        let right_window_controls = render_window_controls(
-            self.button_layout.right,
-            supported_controls,
-            is_maximized,
-            true,
-            client_decorations,
-            cx,
-        );
+        let left_window_controls =
+            render_window_controls(self.button_layout.left, window_control_state, false, cx);
+        let right_window_controls =
+            render_window_controls(self.button_layout.right, window_control_state, true, cx);
         let title_bar_background = if cfg!(any(target_os = "linux", target_os = "freebsd"))
             && !window.is_window_active()
         {
@@ -731,7 +728,7 @@ impl Render for Zetta {
                 if event.click_count() == 2 {
                     if cfg!(target_os = "macos") {
                         window.titlebar_double_click();
-                    } else {
+                    } else if window.is_resizable() {
                         window.zoom_window();
                     }
                 }

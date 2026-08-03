@@ -106,6 +106,7 @@ struct HighlightedRangeLine {
 pub struct LayoutState {
     hitbox: Hitbox,
     batched_text_runs: Vec<BatchedTextRun>,
+    block_element_rects: Vec<BlockElementLayoutRect>,
     rects: Vec<LayoutRect>,
     relative_highlighted_ranges: Vec<(Range, Hsla)>,
     cursor: Option<CursorLayout>,
@@ -242,6 +243,51 @@ impl BatchedTextRun {
     }
 }
 
+/// Block-element glyphs are painted on a subcell grid. Eight columns cover
+/// eighth blocks, while 24 rows are the least common multiple of eighth and
+/// sextant vertical subdivisions.
+const BLOCK_SUBCELL_COLUMNS: i32 = 8;
+const BLOCK_SUBCELL_LINES: i32 = 24;
+
+#[derive(Clone, Debug)]
+pub struct BlockElementLayoutRect {
+    point: LayoutPoint,
+    num_of_columns: usize,
+    num_of_lines: usize,
+    color: Hsla,
+}
+
+impl BlockElementLayoutRect {
+    fn new(point: LayoutPoint, num_of_columns: usize, num_of_lines: usize, color: Hsla) -> Self {
+        Self {
+            point,
+            num_of_columns,
+            num_of_lines,
+            color,
+        }
+    }
+
+    pub fn paint(
+        &self,
+        origin: GpuiPoint<Pixels>,
+        dimensions: &TerminalBounds,
+        window: &mut Window,
+    ) {
+        let subcell_width = dimensions.cell_width / BLOCK_SUBCELL_COLUMNS as f32;
+        let subcell_height = dimensions.line_height / BLOCK_SUBCELL_LINES as f32;
+        let left = origin.x + self.point.column as f32 * subcell_width;
+        let top = origin.y + self.point.line as f32 * subcell_height;
+        let right = left + self.num_of_columns as f32 * subcell_width;
+        let bottom = top + self.num_of_lines as f32 * subcell_height;
+        let bounds = window.pixel_snap_bounds(Bounds::new(
+            point(left, top),
+            size(right - left, bottom - top),
+        ));
+
+        window.paint_quad(fill(bounds, self.color));
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct LayoutRect {
     point: LayoutPoint,
@@ -298,6 +344,22 @@ impl BackgroundRegion {
             start_col: col,
             end_line: line,
             end_col: col,
+            color,
+        }
+    }
+
+    fn with_extents(
+        start_line: i32,
+        start_col: i32,
+        end_line: i32,
+        end_col: i32,
+        color: Hsla,
+    ) -> Self {
+        Self {
+            start_line,
+            start_col,
+            end_line,
+            end_col,
             color,
         }
     }
@@ -387,6 +449,76 @@ fn merge_background_regions(regions: Vec<BackgroundRegion>) -> Vec<BackgroundReg
     merged
 }
 
+/// Merges block-element regions without the quadratic background-region pass.
+///
+/// Sextants may emit up to six rectangles per terminal cell, so a dense image
+/// must not turn layout into an O(n²) scan. Horizontal and vertical passes
+/// preserve the same merge rules while remaining O(n log n) for sorting.
+fn merge_block_element_regions(mut regions: Vec<BackgroundRegion>) -> Vec<BackgroundRegion> {
+    if regions.is_empty() {
+        return regions;
+    }
+
+    fn color_key(color: Hsla) -> (u32, u32, u32, u32) {
+        (
+            color.h.to_bits(),
+            color.s.to_bits(),
+            color.l.to_bits(),
+            color.a.to_bits(),
+        )
+    }
+
+    regions.sort_by_key(|region| {
+        (
+            region.start_line,
+            region.end_line,
+            region.start_col,
+            region.end_col,
+            color_key(region.color),
+        )
+    });
+
+    let mut horizontally_merged: Vec<BackgroundRegion> = Vec::with_capacity(regions.len());
+    for region in regions {
+        if let Some(last) = horizontally_merged.last_mut()
+            && last.color == region.color
+            && last.start_line == region.start_line
+            && last.end_line == region.end_line
+            && last.end_col + 1 == region.start_col
+        {
+            last.end_col = region.end_col;
+        } else {
+            horizontally_merged.push(region);
+        }
+    }
+
+    horizontally_merged.sort_by_key(|region| {
+        (
+            region.start_col,
+            region.end_col,
+            region.start_line,
+            region.end_line,
+            color_key(region.color),
+        )
+    });
+
+    let mut merged: Vec<BackgroundRegion> = Vec::with_capacity(horizontally_merged.len());
+    for region in horizontally_merged {
+        if let Some(last) = merged.last_mut()
+            && last.color == region.color
+            && last.start_col == region.start_col
+            && last.end_col == region.end_col
+            && last.end_line + 1 == region.start_line
+        {
+            last.end_line = region.end_line;
+        } else {
+            merged.push(region);
+        }
+    }
+
+    merged
+}
+
 /// The GPUI element that paints the terminal.
 /// We need to keep a reference to the model for mouse events, do we need it for any other terminal stuff, or can we move that to connection?
 pub struct TerminalElement {
@@ -452,7 +584,11 @@ impl TerminalElement {
         hyperlink: Option<(HighlightStyle, &Range)>,
         minimum_contrast: f32,
         theme: &Theme,
-    ) -> (Vec<LayoutRect>, Vec<BatchedTextRun>) {
+    ) -> (
+        Vec<LayoutRect>,
+        Vec<BatchedTextRun>,
+        Vec<BlockElementLayoutRect>,
+    ) {
         let start_time = Instant::now();
 
         // Pre-allocate with estimated capacity to reduce reallocations
@@ -461,6 +597,9 @@ impl TerminalElement {
         let estimated_regions = estimated_cells / 20; // Estimate ~20 cells per background region
 
         let mut batched_runs = Vec::with_capacity(estimated_runs);
+        // Keep the normal text-only render path allocation-free. Terminal art
+        // grows this lazily when it actually contains a custom-painted glyph.
+        let mut block_element_regions = Vec::new();
         let mut cell_count = 0;
 
         // Collect background regions for efficient merging
@@ -535,6 +674,20 @@ impl TerminalElement {
                         );
 
                         let cell_point = LayoutPoint::new(display_line, point.column as i32);
+                        if Self::is_custom_block_element(cell.character())
+                            && Self::collect_block_element_regions(
+                                cell_point,
+                                cell.character(),
+                                cell_style.color,
+                                &mut block_element_regions,
+                            )
+                        {
+                            if let Some(batch) = current_batch.take() {
+                                batched_runs.push(batch);
+                            }
+                            continue;
+                        }
+
                         let zero_width_chars = cell.zerowidth();
 
                         // Try to batch with existing run
@@ -603,20 +756,24 @@ impl TerminalElement {
             }
         }
 
+        let block_element_region_count = block_element_regions.len();
+        let block_element_rects = Self::block_element_regions_to_rects(block_element_regions);
         let layout_time = start_time.elapsed();
 
         log::debug!(
             "Terminal layout_grid: {} cells processed, \
-            {} batched runs created, {} rects (from {} merged regions), \
+            {} batched runs created, {} block element rects (from {} regions), {} rects (from {} merged regions), \
             layout took {:?}",
             cell_count,
             batched_runs.len(),
+            block_element_rects.len(),
+            block_element_region_count,
             rects.len(),
             region_count,
             layout_time
         );
 
-        (rects, batched_runs)
+        (rects, batched_runs, block_element_rects)
     }
 
     /// Computes the cursor position based on the cursor point and terminal dimensions.
@@ -650,6 +807,7 @@ impl TerminalElement {
             0x2500..=0x257F // Box Drawing (└ ┐ ─ │ etc.)
             | 0x2580..=0x259F // Block Elements (▀ ▄ █ ░ ▒ ▓ etc.)
             | 0x25A0..=0x25FF // Geometric Shapes (■ ▶ ● etc. - includes triangular/circular separators)
+            | 0x1FB00..=0x1FB3B // Symbols for Legacy Computing sextants used by terminal QR renderers
 
             // Private Use Area - Powerline separator symbols only
             | 0xE0B0..=0xE0B7 // Powerline separators: triangles (E0B0-E0B3) and half circles (E0B4-E0B7)
@@ -668,6 +826,181 @@ impl TerminalElement {
     /// theme-defined ANSI colors that can clash with the theme background.
     fn is_app_chosen_exact_color(fg: &Color) -> bool {
         terminal_is_app_chosen_exact_color(*fg)
+    }
+
+    /// Returns the filled subcells of a sextant character as a bitmap, where
+    /// bit `row * 2 + column` is set when that 2×3 subcell is filled.
+    ///
+    /// U+1FB00..=U+1FB3B enumerate all 2×3 fill combinations except the four
+    /// that already exist as Block Elements (empty, `▌`, `▐`, and `█`).
+    fn sextant_char_to_filled_bits(ch: char) -> Option<u8> {
+        let offset = (ch as u32).checked_sub(0x1FB00)?;
+        if offset > 0x3B {
+            return None;
+        }
+
+        Some((offset + 1 + u32::from(offset >= 20) + u32::from(offset >= 40)) as u8)
+    }
+
+    /// Returns the filled quadrants of a quadrant character as a bitmap, where
+    /// bit `row * 2 + column` is set when that 2×2 subcell is filled.
+    fn quadrant_char_to_filled_bits(ch: char) -> Option<u8> {
+        Some(match ch {
+            '▘' => 0b0001,
+            '▝' => 0b0010,
+            '▖' => 0b0100,
+            '▗' => 0b1000,
+            '▚' => 0b1001,
+            '▞' => 0b0110,
+            '▛' => 0b0111,
+            '▜' => 0b1011,
+            '▙' => 0b1101,
+            '▟' => 0b1110,
+            _ => return None,
+        })
+    }
+
+    /// Returns `(column, line, width, height)` in subcell units for block
+    /// element characters that occupy one rectangle.
+    fn block_char_to_rect(ch: char) -> Option<(i32, i32, i32, i32)> {
+        let codepoint = ch as u32;
+        Some(match codepoint {
+            // ▀ upper half
+            0x2580 => (0, 0, 8, 12),
+            // ▁▂▃▄▅▆▇█ lower blocks of 1..=8 eighths
+            0x2581..=0x2588 => {
+                let eighths = (codepoint - 0x2580) as i32;
+                (0, 24 - eighths * 3, 8, eighths * 3)
+            }
+            // ▉▊▋▌▍▎▏ left blocks of 7..=1 eighths
+            0x2589..=0x258F => (0, 0, (0x2590 - codepoint) as i32, 24),
+            // ▐ right half
+            0x2590 => (4, 0, 4, 24),
+            // ▔ upper eighth
+            0x2594 => (0, 0, 8, 3),
+            // ▕ right eighth
+            0x2595 => (7, 0, 1, 24),
+            _ => return None,
+        })
+    }
+
+    /// Approximates `░▒▓` with foreground-color opacity rather than a
+    /// font-dependent stipple pattern, preserving seamless cell coverage.
+    fn shade_char_to_opacity(ch: char) -> Option<f32> {
+        match ch {
+            '░' => Some(0.25),
+            '▒' => Some(0.5),
+            '▓' => Some(0.75),
+            _ => None,
+        }
+    }
+
+    fn is_custom_block_element(ch: char) -> bool {
+        matches!(ch as u32, 0x2580..=0x259F | 0x1FB00..=0x1FB3B)
+    }
+
+    fn collect_block_element_regions(
+        point: LayoutPoint,
+        ch: char,
+        color: Hsla,
+        regions: &mut Vec<BackgroundRegion>,
+    ) -> bool {
+        if let Some((column, line, width, height)) = Self::block_char_to_rect(ch) {
+            Self::push_block_element_region(point, column, line, width, height, color, regions);
+            return true;
+        }
+
+        if let Some(filled) = Self::quadrant_char_to_filled_bits(ch) {
+            for row in 0..2 {
+                for column in 0..2 {
+                    if filled & (1 << (row * 2 + column)) != 0 {
+                        Self::push_block_element_region(
+                            point,
+                            column * 4,
+                            row * 12,
+                            4,
+                            12,
+                            color,
+                            regions,
+                        );
+                    }
+                }
+            }
+            return true;
+        }
+
+        if let Some(filled) = Self::sextant_char_to_filled_bits(ch) {
+            for row in 0..3 {
+                for column in 0..2 {
+                    if filled & (1 << (row * 2 + column)) != 0 {
+                        Self::push_block_element_region(
+                            point,
+                            column * 4,
+                            row * 8,
+                            4,
+                            8,
+                            color,
+                            regions,
+                        );
+                    }
+                }
+            }
+            return true;
+        }
+
+        if let Some(opacity) = Self::shade_char_to_opacity(ch) {
+            Self::push_block_element_region(point, 0, 0, 8, 24, color.opacity(opacity), regions);
+            return true;
+        }
+
+        false
+    }
+
+    fn push_block_element_region(
+        point: LayoutPoint,
+        column: i32,
+        line: i32,
+        width: i32,
+        height: i32,
+        color: Hsla,
+        regions: &mut Vec<BackgroundRegion>,
+    ) {
+        let start_line = point.line * BLOCK_SUBCELL_LINES + line;
+        let start_col = point.column * BLOCK_SUBCELL_COLUMNS + column;
+        let end_line = start_line + height - 1;
+        let end_col = start_col + width - 1;
+
+        // Fast-path long same-color runs (for example, QR-code backgrounds)
+        // before the full non-quadratic merge pass.
+        if let Some(last) = regions.last_mut()
+            && last.color == color
+            && last.start_line == start_line
+            && last.end_line == end_line
+            && last.end_col + 1 == start_col
+        {
+            last.end_col = end_col;
+            return;
+        }
+
+        regions.push(BackgroundRegion::with_extents(
+            start_line, start_col, end_line, end_col, color,
+        ));
+    }
+
+    fn block_element_regions_to_rects(
+        regions: Vec<BackgroundRegion>,
+    ) -> Vec<BlockElementLayoutRect> {
+        merge_block_element_regions(regions)
+            .into_iter()
+            .map(|region| {
+                BlockElementLayoutRect::new(
+                    LayoutPoint::new(region.start_line, region.start_col),
+                    (region.end_col - region.start_col + 1) as usize,
+                    (region.end_line - region.start_line + 1) as usize,
+                    region.color,
+                )
+            })
+            .collect()
     }
 
     /// Converts terminal cell styles to GPUI text styles and background color.
@@ -1000,7 +1333,11 @@ impl Element for TerminalElement {
                 let rem_size = window.rem_size();
                 let line_height = f32::from(window.text_style().font_size.to_pixels(rem_size))
                     * TerminalSettings::get_global(cx).line_height.value();
-                px(displayed_lines as f32 * line_height).into()
+                // Round up to a whole device pixel to prevent pixel snapping from rounding down,
+                // which would result in the terminal being one row short after flooring.
+                let scale_factor = window.scale_factor().max(1.);
+                let height = displayed_lines as f32 * line_height;
+                px((height * scale_factor).ceil() / scale_factor).into()
             }
             ContentMode::Scrollable => {
                 if let TerminalMode::Embedded { .. } = &self.mode {
@@ -1153,7 +1490,8 @@ impl Element for TerminalElement {
                     if matches!(self.terminal_view.read(cx).mode, TerminalMode::Standalone) {
                         let should_anchor_to_bottom = {
                             let content = self.terminal.read(cx).last_content();
-                            content.scrolled_to_bottom && content.bottom_row_occupied
+                            content.mode.contains(Modes::ALT_SCREEN)
+                                || (content.scrolled_to_bottom && content.bottom_row_occupied)
                         };
                         let scale_factor = window.scale_factor();
                         let line_height_pixels = px(line_height);
@@ -1288,10 +1626,11 @@ impl Element for TerminalElement {
                 // This handles the case where the terminal has been scrolled past (above or
                 // below the viewport), similar to the editor fix in PR #45077 where start_row
                 // could exceed max_row when the editor was positioned above the viewport.
-                let (rects, batched_text_runs) = if intersection.size.height <= px(0.)
+                let (rects, batched_text_runs, block_element_rects) = if intersection.size.height
+                    <= px(0.)
                     || intersection.size.width <= px(0.)
                 {
-                    (Vec::new(), Vec::new())
+                    (Vec::new(), Vec::new(), Vec::new())
                 } else if intersection == content_bounds {
                     // Fast path: terminal fully visible, no clipping needed.
                     // Avoid grouping/allocation overhead by streaming cells directly.
@@ -1434,6 +1773,7 @@ impl Element for TerminalElement {
                 LayoutState {
                     hitbox,
                     batched_text_runs,
+                    block_element_rects,
                     cursor,
                     ime_cursor_bounds,
                     background_color,
@@ -1563,6 +1903,9 @@ impl Element for TerminalElement {
                     for batch in &layout.batched_text_runs {
                         batch.paint(origin, &layout.dimensions, window, cx);
                     }
+                    for block_element_rect in &layout.block_element_rects {
+                        block_element_rect.paint(origin, &layout.dimensions, window);
+                    }
                     let text_paint_time = text_paint_start.elapsed();
 
                     if let Some(text_to_mark) = &marked_text_cloned
@@ -1625,9 +1968,10 @@ impl Element for TerminalElement {
                     }
 
                     log::debug!(
-                        "Terminal paint: {} text runs, {} rects, \
+                        "Terminal paint: {} text runs, {} block element rects, {} rects, \
                         text paint took {:?}, total paint took {total_paint_time:?}",
                         layout.batched_text_runs.len(),
+                        layout.block_element_rects.len(),
                         layout.rects.len(),
                         text_paint_time,
                         total_paint_time = paint_start.elapsed()
@@ -2646,3 +2990,7 @@ mod tests {
         assert_eq!(negative_filtered.last().unwrap().point.line, -4);
     }
 }
+
+#[cfg(test)]
+#[path = "tests/terminal_element.rs"]
+mod regression_tests;

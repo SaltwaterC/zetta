@@ -84,13 +84,33 @@ pub(crate) fn platform_title_bar_height(window: &Window) -> Pixels {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct WindowControlState {
+    pub(crate) supported_controls: WindowControls,
+    pub(crate) is_maximized: bool,
+    pub(crate) is_resizable: bool,
+    pub(crate) is_minimizable: bool,
+    pub(crate) client_decorations: bool,
+}
+
+fn window_button_enabled(
+    button: WindowButton,
+    supported_controls: WindowControls,
+    is_resizable: bool,
+    is_minimizable: bool,
+) -> bool {
+    match button {
+        WindowButton::Minimize => supported_controls.minimize && is_minimizable,
+        WindowButton::Maximize => supported_controls.maximize && is_resizable,
+        WindowButton::Close => true,
+    }
+}
+
 #[cfg(target_os = "windows")]
 pub(crate) fn render_window_controls(
     buttons: [Option<WindowButton>; MAX_BUTTONS_PER_SIDE],
-    _supported_controls: WindowControls,
-    is_maximized: bool,
+    state: WindowControlState,
     right_aligned: bool,
-    _client_decorations: bool,
     cx: &App,
 ) -> AnyElement {
     if !right_aligned || buttons.iter().all(Option::is_none) {
@@ -147,18 +167,46 @@ pub(crate) fn render_window_controls(
         .ml_auto()
         .flex_none()
         .font_family("Segoe Fluent Icons")
-        .child(caption_button(
-            "minimize",
-            "\u{e921}",
-            WindowControlArea::Min,
-            false,
-        ))
-        .child(caption_button(
-            if is_maximized { "restore" } else { "maximize" },
-            if is_maximized { "\u{e923}" } else { "\u{e922}" },
-            WindowControlArea::Max,
-            false,
-        ))
+        .when(
+            window_button_enabled(
+                WindowButton::Minimize,
+                state.supported_controls,
+                state.is_resizable,
+                state.is_minimizable,
+            ),
+            |controls| {
+                controls.child(caption_button(
+                    "minimize",
+                    "\u{e921}",
+                    WindowControlArea::Min,
+                    false,
+                ))
+            },
+        )
+        .when(
+            window_button_enabled(
+                WindowButton::Maximize,
+                state.supported_controls,
+                state.is_resizable,
+                state.is_minimizable,
+            ),
+            |controls| {
+                controls.child(caption_button(
+                    if state.is_maximized {
+                        "restore"
+                    } else {
+                        "maximize"
+                    },
+                    if state.is_maximized {
+                        "\u{e923}"
+                    } else {
+                        "\u{e922}"
+                    },
+                    WindowControlArea::Max,
+                    false,
+                ))
+            },
+        )
         .child(caption_button(
             "close",
             "\u{e8bb}",
@@ -171,36 +219,35 @@ pub(crate) fn render_window_controls(
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub(crate) fn render_window_controls(
     buttons: [Option<WindowButton>; MAX_BUTTONS_PER_SIDE],
-    supported_controls: WindowControls,
-    is_maximized: bool,
+    state: WindowControlState,
     right_aligned: bool,
-    client_decorations: bool,
     cx: &App,
 ) -> AnyElement {
-    if !client_decorations {
+    if !state.client_decorations {
         return div().into_any_element();
     }
 
     let colors = cx.theme().colors();
     let controls = buttons.into_iter().flatten().filter_map(|button| {
-        let (icon, area, enabled) = match button {
-            WindowButton::Minimize => (
-                IconName::GenericMinimize,
-                WindowControlArea::Min,
-                supported_controls.minimize,
-            ),
+        let (icon, area) = match button {
+            WindowButton::Minimize => (IconName::GenericMinimize, WindowControlArea::Min),
             WindowButton::Maximize => (
-                if is_maximized {
+                if state.is_maximized {
                     IconName::GenericRestore
                 } else {
                     IconName::GenericMaximize
                 },
                 WindowControlArea::Max,
-                supported_controls.maximize,
             ),
-            WindowButton::Close => (IconName::GenericClose, WindowControlArea::Close, true),
+            WindowButton::Close => (IconName::GenericClose, WindowControlArea::Close),
         };
-        enabled.then(|| {
+        window_button_enabled(
+            button,
+            state.supported_controls,
+            state.is_resizable,
+            state.is_minimizable,
+        )
+        .then(|| {
             let action_button = button;
             h_flex()
                 .id(button.id())
@@ -255,10 +302,8 @@ pub(crate) fn render_window_controls(
 #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "freebsd")))]
 pub(crate) fn render_window_controls(
     _buttons: [Option<WindowButton>; MAX_BUTTONS_PER_SIDE],
-    _supported_controls: WindowControls,
-    _is_maximized: bool,
+    _state: WindowControlState,
     _right_aligned: bool,
-    _client_decorations: bool,
     _cx: &App,
 ) -> AnyElement {
     div().into_any_element()
@@ -270,6 +315,7 @@ pub(crate) fn client_window_frame(
     cx: &mut App,
 ) -> impl IntoElement {
     let decorations = window.window_decorations();
+    let is_resizable = window.is_resizable();
     let tiling = match decorations {
         Decorations::Server => Tiling::default(),
         Decorations::Client { tiling } => tiling,
@@ -293,12 +339,14 @@ pub(crate) fn client_window_frame(
                 .when(!tiling.bottom, |frame| frame.pb(CLIENT_FRAME_INSET))
                 .when(!tiling.left, |frame| frame.pl(CLIENT_FRAME_INSET))
                 .when(!tiling.right, |frame| frame.pr(CLIENT_FRAME_INSET))
-                .on_mouse_down(MouseButton::Left, move |event, window, cx| {
-                    let size = window.window_bounds().get_bounds().size;
-                    if let Some(edge) = resize_edge(event.position, size, tiling) {
-                        window.start_window_resize(edge);
-                        cx.stop_propagation();
-                    }
+                .when(is_resizable, |frame| {
+                    frame.on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                        let size = window.window_bounds().get_bounds().size;
+                        if let Some(edge) = resize_edge(event.position, size, tiling) {
+                            window.start_window_resize(edge);
+                            cx.stop_propagation();
+                        }
+                    })
                 }),
         })
         .child(
@@ -337,43 +385,48 @@ pub(crate) fn client_window_frame(
                 .size_full()
                 .child(content),
         )
-        .when(matches!(decorations, Decorations::Client { .. }), |frame| {
-            frame.child(
-                canvas(
-                    |_bounds, window, _| {
-                        window.insert_hitbox(
-                            Bounds::new(
-                                point(px(0.), px(0.)),
+        .when(
+            matches!(decorations, Decorations::Client { .. }) && is_resizable,
+            |frame| {
+                frame.child(
+                    canvas(
+                        |_bounds, window, _| {
+                            window.insert_hitbox(
+                                Bounds::new(
+                                    point(px(0.), px(0.)),
+                                    window.window_bounds().get_bounds().size,
+                                ),
+                                HitboxBehavior::Normal,
+                            )
+                        },
+                        move |_bounds, hitbox, window, _| {
+                            let Some(edge) = resize_edge(
+                                window.mouse_position(),
                                 window.window_bounds().get_bounds().size,
-                            ),
-                            HitboxBehavior::Normal,
-                        )
-                    },
-                    move |_bounds, hitbox, window, _| {
-                        let Some(edge) = resize_edge(
-                            window.mouse_position(),
-                            window.window_bounds().get_bounds().size,
-                            tiling,
-                        ) else {
-                            return;
-                        };
-                        let cursor = match edge {
-                            ResizeEdge::Top | ResizeEdge::Bottom => CursorStyle::ResizeUpDown,
-                            ResizeEdge::Left | ResizeEdge::Right => CursorStyle::ResizeLeftRight,
-                            ResizeEdge::TopLeft | ResizeEdge::BottomRight => {
-                                CursorStyle::ResizeUpLeftDownRight
-                            }
-                            ResizeEdge::TopRight | ResizeEdge::BottomLeft => {
-                                CursorStyle::ResizeUpRightDownLeft
-                            }
-                        };
-                        window.set_cursor_style(cursor, &hitbox);
-                    },
+                                tiling,
+                            ) else {
+                                return;
+                            };
+                            let cursor = match edge {
+                                ResizeEdge::Top | ResizeEdge::Bottom => CursorStyle::ResizeUpDown,
+                                ResizeEdge::Left | ResizeEdge::Right => {
+                                    CursorStyle::ResizeLeftRight
+                                }
+                                ResizeEdge::TopLeft | ResizeEdge::BottomRight => {
+                                    CursorStyle::ResizeUpLeftDownRight
+                                }
+                                ResizeEdge::TopRight | ResizeEdge::BottomLeft => {
+                                    CursorStyle::ResizeUpRightDownLeft
+                                }
+                            };
+                            window.set_cursor_style(cursor, &hitbox);
+                        },
+                    )
+                    .absolute()
+                    .size_full(),
                 )
-                .absolute()
-                .size_full(),
-            )
-        })
+            },
+        )
 }
 
 pub(crate) fn resize_edge(
