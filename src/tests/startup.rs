@@ -175,6 +175,10 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     assert!(help.contains("  System\n  Operations"));
     assert!(help.contains("Select one of the profiles listed above"));
     assert!(help.contains("zetta terminal-size [--json | --resize"));
+    assert!(help.contains("zetta vi [OPTIONS] [FILE ...]"));
+    assert!(
+        help.contains("vi                                  Edit files with Zetta's built-in vi")
+    );
     assert!(
         help.contains(
             "terminal-size                       Print or resize the current terminal pane"
@@ -248,6 +252,22 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
         assert!(!help.contains("Desktop notifications"));
         assert!(!help.contains("zetta notify"));
     }
+}
+
+#[test]
+fn vi_subcommand_bypasses_application_startup_and_preserves_arguments() {
+    let args = parse_args_from([
+        OsString::from("vi"),
+        OsString::from("-R"),
+        OsString::from("notes.txt"),
+    ])
+    .unwrap();
+
+    assert_eq!(
+        args.mode,
+        StartupMode::Vi(vec!["-R".into(), "notes.txt".into()])
+    );
+    assert!(!should_handoff_to_existing_process(&args));
 }
 
 #[cfg(feature = "serial-console")]

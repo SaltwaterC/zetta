@@ -454,12 +454,49 @@ pub(crate) fn shell_integration_help() -> &'static str {
 }
 
 const BASH_INTEGRATION: &str = r#"# Zetta shell integration for Bash.
+if [[ -z ${EDITOR+x} ]]; then
+    export EDITOR='zetta vi'
+fi
+
+if ! type -t vi >/dev/null 2>&1; then
+    eval 'vi() { command zetta vi "$@"; }'
+    complete -F _zetta_complete vi
+fi
+
+_zetta_option_used() {
+    local option=$1 index
+    for (( index = 1; index < COMP_CWORD; index++ )); do
+        [[ ${COMP_WORDS[index]} == "$option" ]] && return 0
+    done
+    return 1
+}
+
+_zetta_compgen() {
+    local options=$1 candidate
+    local -a available=()
+    for candidate in $options; do
+        if [[ $candidate != -* ]] || ! _zetta_option_used "$candidate"; then
+            available+=("$candidate")
+        fi
+    done
+    COMPREPLY=( $(compgen -W "${available[*]}" -- "$current") )
+}
+
 _zetta_complete() {
     local current previous command
     local -a profiles=(ZETTA_PROFILES)
     current=${COMP_WORDS[COMP_CWORD]}
     previous=${COMP_WORDS[COMP_CWORD-1]}
     command=${COMP_WORDS[1]}
+
+    if [[ ${COMP_WORDS[0]} == vi ]]; then
+        if [[ $current == -* ]]; then
+            _zetta_compgen '--help'
+        else
+            COMPREPLY=( $(compgen -f -- "$current") )
+        fi
+        return
+    fi
 
     _zetta_complete_profiles() {
         COMPREPLY=()
@@ -489,7 +526,7 @@ _zetta_complete() {
             ;;
         -p)
             if [[ $command == serial ]]; then
-                COMPREPLY=( $(compgen -W 'none odd even' -- "$current") )
+                _zetta_compgen 'none odd even'
             elif [[ $command != tftp && $command != http && $command != notify ]]; then
                 _zetta_complete_profiles
             else
@@ -515,19 +552,19 @@ _zetta_complete() {
             ;;
         --data-bits|-D)
             if [[ $command == serial ]]; then
-                COMPREPLY=( $(compgen -W '5 6 7 8' -- "$current") )
+                _zetta_compgen '5 6 7 8'
             else
                 COMPREPLY=()
             fi
             return
             ;;
         --parity)
-            COMPREPLY=( $(compgen -W 'none odd even' -- "$current") )
+            _zetta_compgen 'none odd even'
             return
             ;;
         --stop-bits|-s)
             if [[ $command == serial ]]; then
-                COMPREPLY=( $(compgen -W '1 2' -- "$current") )
+                _zetta_compgen '1 2'
             elif [[ $command == notify ]]; then
                 _zetta_complete_sound_names
             else
@@ -536,15 +573,15 @@ _zetta_complete() {
             return
             ;;
         --flow-control|-f)
-            COMPREPLY=( $(compgen -W 'none software hardware' -- "$current") )
+            _zetta_compgen 'none software hardware'
             return
             ;;
         --pboard|-pboard)
-            COMPREPLY=( $(compgen -W 'general ruler find font' -- "$current") )
+            _zetta_compgen 'general ruler find font'
             return
             ;;
         --prefer|-prefer|--Prefer|-Prefer)
-            COMPREPLY=( $(compgen -W 'txt rtf ps' -- "$current") )
+            _zetta_compgen 'txt rtf ps'
             return
             ;;
         --app-name|-a)
@@ -560,7 +597,7 @@ _zetta_complete() {
             return
             ;;
         --timeout)
-            COMPREPLY=( $(compgen -W 'default never' -- "$current") )
+            _zetta_compgen 'default never'
             return
             ;;
         --config|--keymap|-k|--profile-report)
@@ -587,9 +624,9 @@ _zetta_complete() {
             ;;
         --output-type|-t)
             if [[ $command == notify ]]; then
-                COMPREPLY=( $(compgen -W 'default never' -- "$current") )
+                _zetta_compgen 'default never'
             else
-                COMPREPLY=( $(compgen -W 'repeated unique' -- "$current") )
+                _zetta_compgen 'repeated unique'
             fi
             return
             ;;
@@ -600,63 +637,70 @@ _zetta_complete() {
     esac
 
     if (( COMP_CWORD == 1 )); then
-        COMPREPLY=( $(compgen -W 'benchmark benchmark-output terminal-size sessions init serial http tftp notify copy paste --help --version --config --keymap --profile' -- "$current") )
+        _zetta_compgen 'benchmark benchmark-output terminal-size sessions vi init serial http tftp notify copy paste --help --version --config --keymap --profile'
         return
     fi
 
     case "$command" in
         benchmark)
-            COMPREPLY=( $(compgen -W '--terminal-render-workload --terminal-checkerboard-workload --terminal-sparse-update-workload --profile-report --profile-duration --profile-pane-stress --profile-background-stress --profile-sparse-updates --profile-external-terminal --help' -- "$current") )
+            _zetta_compgen '--terminal-render-workload --terminal-checkerboard-workload --terminal-sparse-update-workload --profile-report --profile-duration --profile-pane-stress --profile-background-stress --profile-sparse-updates --profile-external-terminal --help'
             ;;
         benchmark-output)
-            COMPREPLY=( $(compgen -W '--size --output-type --help' -- "$current") )
+            _zetta_compgen '--size --output-type --help'
             ;;
         terminal-size)
-            COMPREPLY=( $(compgen -W '--json --resize --columns --rows --help' -- "$current") )
+            _zetta_compgen '--json --resize --columns --rows --help'
+            ;;
+        vi)
+            if [[ $current == -* ]]; then
+                _zetta_compgen '--help'
+            else
+                COMPREPLY=( $(compgen -f -- "$current") )
+            fi
             ;;
         sessions)
             if (( COMP_CWORD == 2 )); then
-                COMPREPLY=( $(compgen -W 'reconnect --json --help' -- "$current") )
+                _zetta_compgen 'reconnect --json --help'
             elif [[ ${COMP_WORDS[2]} == reconnect ]]; then
                 if [[ $previous == --session || $previous == -s ]]; then
                     COMPREPLY=()
                 elif (( COMP_CWORD == 3 )); then
                     _zetta_complete_session_ids
                 else
-                    COMPREPLY=( $(compgen -W '--session --help' -- "$current") )
+                    _zetta_compgen '--session --help'
                 fi
             else
-                COMPREPLY=( $(compgen -W '--json --help' -- "$current") )
+                _zetta_compgen '--json --help'
             fi
             ;;
         init)
-            COMPREPLY=( $(compgen -W 'bash fish powershell pwsh zsh --help' -- "$current") )
+            _zetta_compgen 'bash fish powershell pwsh zsh --help'
             ;;
         serial)
             if (( COMP_CWORD == 2 )); then
-                COMPREPLY=( $(compgen -W 'console list --help' -- "$current") )
+                _zetta_compgen 'console list --help'
             elif [[ ${COMP_WORDS[2]} == console ]]; then
-                COMPREPLY=( $(compgen -W '--device --baud-rate --data-bits --parity --stop-bits --flow-control --help' -- "$current") )
+                _zetta_compgen '--device --baud-rate --data-bits --parity --stop-bits --flow-control --help'
             fi
             ;;
         http)
             if (( COMP_CWORD == 2 )); then
-                COMPREPLY=( $(compgen -W 'server --help' -- "$current") )
+                _zetta_compgen 'server --help'
             else
-                COMPREPLY=( $(compgen -W '--root --port --config --help' -- "$current") )
+                _zetta_compgen '--root --port --config --help'
             fi
             ;;
         tftp)
             _zetta_tftp_complete 2
             ;;
         notify)
-            COMPREPLY=( $(compgen -W '--app-name --icon --sound --timeout --help' -- "$current") )
+            _zetta_compgen '--app-name --icon --sound --timeout --help'
             ;;
         copy)
-            COMPREPLY=( $(compgen -W '--pboard --help' -- "$current") )
+            _zetta_compgen '--pboard --help'
             ;;
         paste)
-            COMPREPLY=( $(compgen -W '--pboard --prefer --help' -- "$current") )
+            _zetta_compgen '--pboard --prefer --help'
             ;;
     esac
 }
@@ -668,18 +712,18 @@ _zetta_tftp_complete() {
     previous=${COMP_WORDS[COMP_CWORD-1]}
 
     if (( COMP_CWORD == operation_index )); then
-        COMPREPLY=( $(compgen -W 'get put server --help' -- "$current") )
+        _zetta_compgen 'get put server --help'
         return
     fi
     operation=${COMP_WORDS[operation_index]}
     if [[ $operation == server ]]; then
         if [[ $current == -* || -z $current ]]; then
-            COMPREPLY=( $(compgen -W '--root --port --config --help' -- "$current") )
+            _zetta_compgen '--root --port --config --help'
         fi
         return
     fi
     if [[ $current == -* ]]; then
-        COMPREPLY=( $(compgen -W '--port --help' -- "$current") )
+        _zetta_compgen '--port --help'
         return
     fi
     if [[ $previous == '--port' || $previous == '-p' ]]; then
@@ -758,33 +802,33 @@ _zntfy_complete() {
             return
             ;;
     esac
-    COMPREPLY=( $(compgen -W '--app-name --icon --sound --timeout --help' -- "$current") )
+    _zetta_compgen '--app-name --icon --sound --timeout --help'
 }
 
 _zcopy_complete() {
     local current=${COMP_WORDS[COMP_CWORD]} previous=${COMP_WORDS[COMP_CWORD-1]}
     case "$previous" in
         --pboard|-pboard)
-            COMPREPLY=( $(compgen -W 'general ruler find font' -- "$current") )
+            _zetta_compgen 'general ruler find font'
             return
             ;;
     esac
-    COMPREPLY=( $(compgen -W '--pboard --help' -- "$current") )
+    _zetta_compgen '--pboard --help'
 }
 
 _zpaste_complete() {
     local current=${COMP_WORDS[COMP_CWORD]} previous=${COMP_WORDS[COMP_CWORD-1]}
     case "$previous" in
         --pboard|-pboard)
-            COMPREPLY=( $(compgen -W 'general ruler find font' -- "$current") )
+            _zetta_compgen 'general ruler find font'
             return
             ;;
         --prefer|-prefer|--Prefer|-Prefer)
-            COMPREPLY=( $(compgen -W 'txt rtf ps' -- "$current") )
+            _zetta_compgen 'txt rtf ps'
             return
             ;;
     esac
-    COMPREPLY=( $(compgen -W '--pboard --prefer --help' -- "$current") )
+    _zetta_compgen '--pboard --prefer --help'
 }
 
 ztftp() { zetta tftp "$@"; }
@@ -814,6 +858,19 @@ esac
 "#;
 
 const FISH_INTEGRATION: &str = r#"# Zetta shell integration for Fish.
+if not set -q EDITOR
+    set -gx EDITOR 'zetta vi'
+end
+
+if not type -q vi
+    if not abbr --query vi
+        function vi --wraps 'zetta vi' --description 'Zetta vi editor'
+            command zetta vi $argv
+        end
+        complete -c vi -F
+    end
+end
+
 function ztftp --wraps 'zetta tftp' --description 'Zetta TFTP client'
     zetta tftp $argv
 end
@@ -911,8 +968,23 @@ end
 # Fish only considers options registered with `-l` after the user has typed a
 # dash. Emit the same long options as ordinary completion candidates too, so
 # they appear alongside subcommands at every valid argument position.
+function __zetta_option_unused
+    set -l words (commandline -opc)
+    not contains -- $argv[1] $words[2..-1]
+end
+
+function __zetta_filter_long_options
+    while read -l line
+        set -l option (string split \t -- $line)[1]
+        if __zetta_option_unused $option
+            printf '%s\n' "$line"
+        end
+    end
+end
+
 function __zetta_long_options
-    switch $argv[1]
+    begin
+        switch $argv[1]
         case root
             printf '%s\t%s\n' \
                 --help 'Print help' \
@@ -929,6 +1001,8 @@ function __zetta_long_options
                 --columns 'Set pane width in columns' \
                 --rows 'Set pane height in rows' \
                 --help 'Print help'
+        case vi
+            printf '%s\t%s\n' --help 'Print help'
         case sessions
             printf '%s\t%s\n' --json 'Print machine-readable JSON' --help 'Print help'
         case benchmark-output
@@ -979,7 +1053,8 @@ function __zetta_long_options
                 --pboard 'Pasteboard to use' \
                 --prefer 'Preferred clipboard format' \
                 --help 'Print help'
-    end
+        end
+    end | __zetta_filter_long_options
 end
 
 complete -c zetta -f
@@ -987,6 +1062,7 @@ complete -c zetta -n '__fish_use_subcommand' -a benchmark -d 'Profile terminal r
 complete -c zetta -n '__fish_use_subcommand' -a benchmark-output -d 'Write and time a text payload'
 complete -c zetta -n '__fish_use_subcommand' -a terminal-size -d 'Print the current terminal size'
 complete -c zetta -n '__fish_use_subcommand' -a sessions -d 'List detached background sessions'
+complete -c zetta -n '__fish_use_subcommand' -a vi -d "Edit files with Zetta's built-in vi"
 complete -c zetta -n '__fish_use_subcommand' -a init -d 'Generate shell integration'
 complete -c zetta -n '__fish_use_subcommand' -a serial -d 'List or connect to serial devices'
 complete -c zetta -n '__fish_use_subcommand' -a http -d 'Serve static files over HTTP'
@@ -1026,6 +1102,9 @@ complete -c zetta -n '__fish_seen_subcommand_from sessions' -l help -d 'Print he
 complete -c zetta -n '__fish_seen_subcommand_from sessions' -a '(__zetta_long_options sessions)'
 complete -c zetta -n '__fish_seen_subcommand_from sessions; and __fish_seen_subcommand_from reconnect' -a '(__zetta_session_ids)'
 complete -c zetta -n '__fish_seen_subcommand_from sessions; and __fish_seen_subcommand_from reconnect' -l session -r -d 'Session ID to reconnect'
+complete -c zetta -n '__fish_seen_subcommand_from vi' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from vi' -a '(__zetta_long_options vi)'
+complete -c zetta -n '__fish_seen_subcommand_from vi' -F
 complete -c zetta -n '__fish_seen_subcommand_from benchmark-output' -l size -r -d 'Set the output size in MiB'
 complete -c zetta -n '__fish_seen_subcommand_from benchmark-output' -l output-type -r -a 'repeated unique'
 complete -c zetta -n '__fish_seen_subcommand_from benchmark-output' -l help -d 'Print help'
@@ -1137,6 +1216,15 @@ end
 "#;
 
 const POWERSHELL_INTEGRATION: &str = r#"# Zetta shell integration for PowerShell.
+if (-not (Test-Path Env:EDITOR)) {
+    $env:EDITOR = 'zetta vi'
+}
+
+$zettaViMissing = -not (Get-Command vi -ErrorAction SilentlyContinue)
+if ($zettaViMissing) {
+    function vi { & zetta vi @args }
+}
+
 function ztftp { & zetta tftp @args }
 function zntfy { & zetta notify @args }
 function zcopy { & zetta copy @args }
@@ -1189,7 +1277,7 @@ $zettaCompletions = {
     $previous = if ($words.Count -gt 1) { $words[$words.Count - 2] } else { '' }
     $last = if ($words.Count -gt 1) { $words[$words.Count - 1] } else { '' }
     $subcommand = $words | Where-Object {
-        $_ -in 'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste'
+        $_ -in 'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste'
     } | Select-Object -First 1
 
     $candidates = if ($commandName -eq 'ztftp') {
@@ -1232,6 +1320,12 @@ $zettaCompletions = {
         'general', 'ruler', 'find', 'font'
     } elseif ($previous -in '--prefer', '-prefer', '--Prefer', '-Prefer') {
         'txt', 'rtf', 'ps'
+    } elseif ($commandName -eq 'vi' -or $subcommand -eq 'vi') {
+        if ($wordToComplete -like '-*') {
+            '--help'
+        } else {
+            @(Get-ChildItem -Name -Path "$wordToComplete*" -ErrorAction SilentlyContinue)
+        }
     } elseif (
         $previous -in '--columns', '--rows', '-R' -or
         ($previous -eq '-c' -and $subcommand -eq 'terminal-size')
@@ -1240,12 +1334,13 @@ $zettaCompletions = {
     } elseif ($subcommand -eq 'sessions' -and $words.Count -ge 3 -and $words[2] -eq 'reconnect') {
         if ($previous -in '--session', '-s') { @() } else { & $zettaSessionIds }
     } elseif ($null -eq $subcommand) {
-        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste', '--help', '--version', '--config', '--keymap', '--profile'
+        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste', '--help', '--version', '--config', '--keymap', '--profile'
     } else {
         switch ($subcommand) {
             'benchmark' { '--terminal-render-workload', '--terminal-checkerboard-workload', '--terminal-sparse-update-workload', '--profile-report', '--profile-duration', '--profile-pane-stress', '--profile-background-stress', '--profile-sparse-updates', '--profile-external-terminal', '--help' }
             'benchmark-output' { '--size', '--output-type', '--help' }
             'terminal-size' { '--json', '--resize', '--columns', '--rows', '--help' }
+            'vi' { '--help' }
             'sessions' {
                 if ($words.Count -le 2 -or ($words.Count -eq 3 -and $words[2] -ne 'reconnect')) {
                     'reconnect', '--json', '--help'
@@ -1272,6 +1367,9 @@ $zettaCompletions = {
         }
     }
 
+    $candidates = @($candidates | Where-Object {
+        if ($_ -like '-*') { $_ -notin $words } else { $true }
+    })
     $candidates | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
         [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
     }
@@ -1282,6 +1380,9 @@ Register-ArgumentCompleter -CommandName ztftp -ScriptBlock $zettaCompletions
 Register-ArgumentCompleter -CommandName zntfy -ScriptBlock $zettaCompletions
 Register-ArgumentCompleter -CommandName zcopy -ScriptBlock $zettaCompletions
 Register-ArgumentCompleter -CommandName zpaste -ScriptBlock $zettaCompletions
+if ($zettaViMissing) {
+    Register-ArgumentCompleter -CommandName vi -ScriptBlock $zettaCompletions
+}
 if (-not $IsMacOS) {
     Register-ArgumentCompleter -CommandName pbcopy -ScriptBlock $zettaCompletions
     Register-ArgumentCompleter -CommandName pbpaste -ScriptBlock $zettaCompletions
@@ -1289,10 +1390,40 @@ if (-not $IsMacOS) {
 "#;
 
 const ZSH_INTEGRATION: &str = r#"# Zetta shell integration for Zsh.
+if (( ! ${+EDITOR} )); then
+    export EDITOR='zetta vi'
+fi
+
+if (( ! $+commands[vi] && ! $+aliases[vi] && ! $+functions[vi] && ! $+builtins[vi] )); then
+    function vi { command zetta vi "$@"; }
+    _zetta_vi_missing=1
+else
+    _zetta_vi_missing=0
+fi
+
 if ! (( $+functions[compdef] )); then
     autoload -Uz compinit
     compinit
 fi
+
+_zetta_option_unused() {
+    local option=$1 index
+    for (( index = 2; index < CURRENT; index++ )); do
+        [[ ${words[index]} == "$option" ]] && return 1
+    done
+    return 0
+}
+
+_zetta_options() {
+    local -a candidates=()
+    local candidate
+    for candidate in "$@"; do
+        if [[ $candidate != -* ]] || _zetta_option_unused "$candidate"; then
+            candidates+=("$candidate")
+        fi
+    done
+    builtin compadd -- "${candidates[@]}"
+}
 
 ztftp() { zetta tftp "$@"; }
 zntfy() { zetta notify "$@"; }
@@ -1353,9 +1484,18 @@ _zetta_sound_names() {
 _zetta() {
     local previous=${words[CURRENT-1]}
 
+    if [[ $words[1] == vi ]]; then
+        if [[ $words[CURRENT] == -* ]]; then
+            _zetta_options --help
+        else
+            _files
+        fi
+        return
+    fi
+
     if (( CURRENT == 2 )); then
-        compadd -S ' ' -- benchmark benchmark-output terminal-size sessions init serial http tftp notify copy paste
-        compadd -- --help --version --config --keymap --profile
+        compadd -S ' ' -- benchmark benchmark-output terminal-size sessions vi init serial http tftp notify copy paste
+        _zetta_options --help --version --config --keymap --profile
         return
     fi
 
@@ -1468,31 +1608,38 @@ _zetta() {
 
     case $words[2] in
         benchmark)
-            compadd -- --terminal-render-workload --terminal-checkerboard-workload \
+            _zetta_options --terminal-render-workload --terminal-checkerboard-workload \
                 --terminal-sparse-update-workload --profile-report --profile-duration \
                 --profile-pane-stress --profile-background-stress --profile-sparse-updates \
                 --profile-external-terminal --help
             ;;
         benchmark-output)
-            compadd -- --size --output-type --help
+            _zetta_options --size --output-type --help
             ;;
         terminal-size)
-            compadd -- --json --resize --columns --rows --help
+            _zetta_options --json --resize --columns --rows --help
+            ;;
+        vi)
+            if [[ $words[CURRENT] == -* ]]; then
+                _zetta_options --help
+            else
+                _files
+            fi
             ;;
         sessions)
             if (( CURRENT == 3 )); then
                 compadd -S ' ' -- reconnect
-                compadd -- --json --help
+                _zetta_options --json --help
             elif [[ $words[3] == reconnect ]]; then
                 if [[ $previous != --session && $previous != -s ]]; then
                     if (( CURRENT == 4 )); then
                         _zetta_session_ids
                     else
-                        compadd -- --session --help
+                        _zetta_options --session --help
                     fi
                 fi
             else
-                compadd -- --json --help
+                _zetta_options --json --help
             fi
             ;;
         init)
@@ -1501,30 +1648,30 @@ _zetta() {
         serial)
             if (( CURRENT == 3 )); then
                 compadd -S ' ' -- console list
-                compadd -- --help
+                _zetta_options --help
             elif [[ $words[3] == console ]]; then
-                compadd -- --device --baud-rate --data-bits --parity --stop-bits --flow-control --help
+                _zetta_options --device --baud-rate --data-bits --parity --stop-bits --flow-control --help
             fi
             ;;
         http)
             if (( CURRENT == 3 )); then
                 compadd -S ' ' -- server
-                compadd -- --help
+                _zetta_options --help
             else
-                compadd -- --root --port --config --help
+                _zetta_options --root --port --config --help
             fi
             ;;
         tftp)
             _zetta_tftp
             ;;
         notify)
-            compadd -- --app-name --icon --sound --timeout --help
+            _zetta_options --app-name --icon --sound --timeout --help
             ;;
         copy)
-            compadd -- --pboard --help
+            _zetta_options --pboard --help
             ;;
         paste)
-            compadd -- --pboard --prefer --help
+            _zetta_options --pboard --prefer --help
             ;;
     esac
 }
@@ -1541,20 +1688,20 @@ _zetta_tftp() {
 
     if (( CURRENT == operation_index )); then
         compadd -S ' ' -- get put server
-        compadd -- --help
+        _zetta_options --help
         return
     fi
 
     operation=${words[operation_index]}
     if [[ $operation == server ]]; then
         if [[ $current == -* || -z $current ]]; then
-            compadd -- --root --port --config --help
+            _zetta_options --root --port --config --help
         fi
         return
     fi
 
     if [[ $current == -* ]]; then
-        compadd -- --port --help
+        _zetta_options --port --help
         return
     fi
     if [[ $words[CURRENT-1] == --port || $words[CURRENT-1] == -p ]]; then
@@ -1603,7 +1750,7 @@ _zntfy() {
             return
             ;;
     esac
-    compadd -- --app-name --icon --sound --timeout --help
+    _zetta_options --app-name --icon --sound --timeout --help
 }
 
 _zcopy() {
@@ -1614,7 +1761,7 @@ _zcopy() {
             return
             ;;
     esac
-    compadd -- --pboard --help
+    _zetta_options --pboard --help
 }
 
 _zpaste() {
@@ -1629,7 +1776,7 @@ _zpaste() {
             return
             ;;
     esac
-    compadd -- --pboard --prefer --help
+    _zetta_options --pboard --prefer --help
 }
 
 compdef _zetta zetta
@@ -1637,6 +1784,9 @@ compdef _ztftp ztftp
 compdef _zntfy zntfy
 compdef _zcopy zcopy
 compdef _zpaste zpaste
+if (( _zetta_vi_missing )); then
+    compdef _zetta vi
+fi
 case "$OSTYPE" in
     darwin*) ;;
     *)

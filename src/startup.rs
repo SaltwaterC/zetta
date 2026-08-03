@@ -86,6 +86,7 @@ pub(crate) enum StartupMode {
     TerminalRenderingProfile,
     TerminalRenderingWorkload,
     TerminalCheckerboardWorkload,
+    Vi(Vec<String>),
     TerminalSparseUpdateWorkload,
 }
 
@@ -194,11 +195,11 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
     );
     help.replace(
         "       zetta sessions [--json]",
-        "       zetta sessions [--json]\n       zetta sessions reconnect SESSION_ID",
+        "       zetta sessions [--json]\n       zetta sessions reconnect SESSION_ID\n       zetta vi [OPTIONS] [FILE ...]",
     )
     .replace(
         "sessions                            List detached background sessions",
-        "sessions                            List or reconnect detached background sessions",
+        "sessions                            List or reconnect detached background sessions\n  vi                                  Edit files with Zetta's built-in vi",
     )
 }
 
@@ -434,6 +435,26 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             keymap_path: None,
             profile: None,
             mode: StartupMode::ListBackgroundSessions { json },
+            profile_report: None,
+            profile_duration: None,
+            profile_pane_stress: false,
+            profile_background_stress: false,
+            profile_sparse_updates: false,
+            profile_external_terminal: false,
+            tftp_command: None,
+        });
+    }
+    if arguments.first().is_some_and(|argument| argument == "vi") {
+        return Ok(StartupArgs {
+            config_path: None,
+            keymap_path: None,
+            profile: None,
+            mode: StartupMode::Vi(
+                arguments[1..]
+                    .iter()
+                    .map(|argument| argument.to_string_lossy().into_owned())
+                    .collect(),
+            ),
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,
@@ -2402,6 +2423,9 @@ fn selected_performance_workload(args: &StartupArgs) -> PerformanceWorkload {
 
 pub(crate) fn run() -> Result<()> {
     let args = parse_args()?;
+    if let StartupMode::Vi(arguments) = &args.mode {
+        std::process::exit(busy_v::run(arguments.clone()));
+    }
     if let StartupMode::OutputBenchmark {
         size_mib,
         output_type,

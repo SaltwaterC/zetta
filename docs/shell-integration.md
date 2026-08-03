@@ -6,8 +6,12 @@ names from Zetta's current configuration, so `zetta --profile <Tab>` completes
 them as well. The script also provides `ztftp`, a shortcut for the built-in
 TFTP client, `zntfy`, a shortcut for sending desktop notifications, and
 `zcopy`/`zpaste`, shortcuts for the clipboard; each has the same completion as
-its `zetta tftp`/`zetta notify`/`zetta copy`/`zetta paste` counterpart. On
-every platform other than macOS, the script also defines `pbcopy` and
+its `zetta tftp`/`zetta notify`/`zetta copy`/`zetta paste` counterpart.
+
+If `EDITOR` is not already set, it defaults to `zetta vi`. When no `vi`
+command, alias, function, or other executable is already available, the
+integration adds `vi` as a wrapper for Zetta's built-in editor.
+On every platform other than macOS, the script also defines `pbcopy` and
 `pbpaste` as the same shortcuts as `zcopy`/`zpaste`, taking priority over any
 preexisting `pbcopy`/`pbpaste` alias so that muscle memory from macOS keeps
 working there too; macOS already has real `pbcopy`/`pbpaste`, so Zetta leaves

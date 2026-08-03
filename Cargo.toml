@@ -26,6 +26,7 @@ required-features = ["windows-gui"]
 anyhow = "1"
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"], optional = true }
 argon2 = "0.5"
+busy-v = { path = "busy-v" }
 libc = "0.2"
 async-compression = { version = "0.4", features = ["gzip", "futures-io"] }
 async-tar = "0.6"

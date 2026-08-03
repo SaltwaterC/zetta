@@ -30,7 +30,75 @@ fn supported_shells_generate_completion_and_tftp_shortcut() {
         assert!(script.contains("serial"));
         assert!(script.contains("http"));
         assert!(script.contains("init"));
+        assert!(script.contains("EDITOR"));
+        assert!(script.contains("zetta vi"));
     }
+}
+
+#[test]
+fn vi_integration_is_conditional_and_has_cli_completion() {
+    let profiles = profiles();
+
+    let bash = ShellIntegration::Bash.script(&profiles);
+    assert!(bash.contains("if ! type -t vi >/dev/null 2>&1"));
+    assert!(bash.contains("eval 'vi() { command zetta vi \"$@\"; }'"));
+    assert!(bash.contains("vi)\n            if [[ $current == -* ]]; then"));
+
+    let fish = ShellIntegration::Fish.script(&profiles);
+    assert!(fish.contains("if not type -q vi"));
+    assert!(fish.contains("complete -c vi -F"));
+    assert!(fish.contains("function __zetta_option_unused"));
+
+    let powershell = ShellIntegration::PowerShell.script(&profiles);
+    assert!(powershell.contains("$zettaViMissing = -not (Get-Command vi"));
+    assert!(powershell.contains("if ($zettaViMissing)"));
+    assert!(powershell.contains("Get-ChildItem -Name -Path \"$wordToComplete*\""));
+    assert!(powershell.contains("$_ -notin $words"));
+
+    let zsh = ShellIntegration::Zsh.script(&profiles);
+    assert!(zsh.contains("$+commands[vi]"));
+    assert!(zsh.contains("compdef _zetta vi"));
+    assert!(zsh.contains("_zetta_option_unused"));
+    assert!(zsh.contains("_zetta_options()"));
+    assert!(zsh.contains("_files"));
+}
+
+#[test]
+fn bash_does_not_repeat_options_and_completes_vi_files() {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let script = ShellIntegration::Bash.script(&profiles());
+    let driver = format!(
+        "{script}\nCOMP_WORDS=(zetta vi --)\nCOMP_CWORD=2\n_zetta_complete\nprintf 'option:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta vi --help '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'file:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta vi Carg)\nCOMP_CWORD=2\n_zetta_complete\nprintf 'file:%s\\n' \"${{COMPREPLY[@]}}\"\n"
+    );
+    let mut child = Command::new("bash")
+        .args(["--noprofile", "--norc"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(driver.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "Bash completion script failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let completions = String::from_utf8_lossy(&output.stdout);
+    assert!(completions.lines().any(|line| line == "option:--help"));
+    assert!(!completions.lines().any(|line| line == "file:--help"));
+    assert!(completions.lines().any(|line| line == "file:Cargo.toml"));
 }
 
 #[test]
@@ -253,9 +321,9 @@ fn notify_timeout_completion_does_not_leak_into_other_short_t_flags() {
 
     let bash = ShellIntegration::Bash.script(&profiles);
     assert!(bash.contains(
-        "--output-type|-t)\n            if [[ $command == notify ]]; then\n                COMPREPLY=( $(compgen -W 'default never'"
+        "--output-type|-t)\n            if [[ $command == notify ]]; then\n                _zetta_compgen 'default never'"
     ));
-    assert!(bash.contains("COMPREPLY=( $(compgen -W 'repeated unique'"));
+    assert!(bash.contains("_zetta_compgen 'repeated unique'"));
 
     let zsh = ShellIntegration::Zsh.script(&profiles);
     assert!(zsh.contains(
@@ -291,7 +359,9 @@ fn service_completion_uses_command_local_short_options() {
     let bash = ShellIntegration::Bash.script(&profiles);
     assert!(bash.contains("--device)\n            _zetta_complete_serial_devices"));
     assert!(bash.contains("--data-bits|-D)"));
-    assert!(bash.contains("if [[ $command == serial ]]; then\n                COMPREPLY=( $(compgen -W 'none odd even'"));
+    assert!(bash.contains(
+        "if [[ $command == serial ]]; then\n                _zetta_compgen 'none odd even'"
+    ));
     assert!(bash.contains(
         "if [[ $command == http || ( $command == tftp && ${COMP_WORDS[2]} == server ) ]]; then"
     ));
@@ -311,7 +381,7 @@ fn service_completion_uses_command_local_short_options() {
     let zsh = ShellIntegration::Zsh.script(&profiles);
     assert!(zsh.contains("--data-bits|-D)"));
     assert!(zsh.contains("$words[2] == serial"));
-    assert!(zsh.contains("compadd -- --root --port --config --help"));
+    assert!(zsh.contains("_zetta_options --root --port --config --help"));
 }
 
 // Regression test: commit 72afe3b ("Add serial console, and HTTP, TFTP
@@ -340,9 +410,9 @@ fn service_subcommand_completions_only_offer_long_form_flags() {
     assert!(!zsh.contains("compadd -- -r --root -p --port -c --config -h --help"));
     assert!(!zsh.contains("compadd -- -p --port -h --help"));
     assert!(zsh.contains(
-        "compadd -- --device --baud-rate --data-bits --parity --stop-bits --flow-control --help"
+        "_zetta_options --device --baud-rate --data-bits --parity --stop-bits --flow-control --help"
     ));
-    assert!(zsh.contains("compadd -- --root --port --config --help"));
+    assert!(zsh.contains("_zetta_options --root --port --config --help"));
 
     let powershell = ShellIntegration::PowerShell.script(&profiles);
     assert!(!powershell.contains("'-d', '--device', '-b', '--baud-rate'"));
@@ -366,7 +436,7 @@ fn service_subcommand_completions_only_offer_long_form_flags() {
     assert!(!bash.contains("'-a --app-name -i --icon -s --sound -t --timeout --help'"));
     assert!(bash.contains("'--app-name --icon --sound --timeout --help'"));
     assert!(!zsh.contains("compadd -- -a --app-name -i --icon -s --sound -t --timeout --help"));
-    assert!(zsh.contains("compadd -- --app-name --icon --sound --timeout --help"));
+    assert!(zsh.contains("_zetta_options --app-name --icon --sound --timeout --help"));
     assert!(!powershell.contains("'-a', '--app-name'"));
     assert!(powershell.contains("'--app-name', '--icon', '--sound', '--timeout', '--help'"));
     assert!(!fish.contains("-s a -l app-name"));
@@ -718,7 +788,7 @@ fn generated_scripts_only_offer_long_form_flags() {
         let script = shell.script(&profiles);
         match shell {
             ShellIntegration::Bash => assert!(script.contains(
-                "terminal-size sessions init serial http tftp notify copy paste --help --version --config --keymap --profile'"
+                "terminal-size sessions vi init serial http tftp notify copy paste --help --version --config --keymap --profile'"
             )),
             ShellIntegration::Fish => {
                 assert!(script.contains("-l profile -r"));
@@ -727,9 +797,8 @@ fn generated_scripts_only_offer_long_form_flags() {
             ShellIntegration::PowerShell => assert!(
                 script.contains("'--help', '--version', '--config', '--keymap', '--profile'")
             ),
-            ShellIntegration::Zsh => {
-                assert!(script.contains("compadd -- --help --version --config --keymap --profile"))
-            }
+            ShellIntegration::Zsh => assert!(script
+                .contains("_zetta_options --help --version --config --keymap --profile")),
         }
     }
 }
@@ -809,6 +878,8 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
             &["--json", "--resize", "--columns", "--rows", "--help"][..],
         ),
         ("zetta sessions ", &["--json", "--help"][..]),
+        ("zetta vi ", &["--help", "Cargo.toml"][..]),
+        ("zetta vi Carg", &["Cargo.toml"][..]),
         ("zetta init ", &["--help"][..]),
         ("zetta init fish ", &["--help"][..]),
         ("zetta serial ", &["--help"][..]),
@@ -895,6 +966,75 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
             "did not expect short-form options in Fish completions for {line:?}: {completions}"
         );
     }
+}
+
+#[test]
+fn fish_does_not_repeat_options_and_completes_vi_files() {
+    use std::process::Command;
+
+    if Command::new("fish").arg("--version").output().is_err() {
+        return;
+    }
+
+    let script = ShellIntegration::Fish.script(&profiles());
+    let script_file = tempfile::NamedTempFile::new().unwrap();
+    fs::write(script_file.path(), script).unwrap();
+
+    for line in ["zetta vi --help ", "zetta copy --help ", "zcopy --help "] {
+        let output = Command::new("fish")
+            .args([
+                "--no-config",
+                "-c",
+                "source $argv[1]; complete -C \"$argv[2]\"",
+                "--",
+                script_file.path().to_str().unwrap(),
+                line,
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let completions = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !completions.lines().any(|line| line.starts_with("--help\t")),
+            "repeated --help completion for {line:?}: {completions}"
+        );
+    }
+
+    let output = Command::new("fish")
+        .args([
+            "--no-config",
+            "-c",
+            "source $argv[1]; complete -C \"$argv[2]\"",
+            "--",
+            script_file.path().to_str().unwrap(),
+            "zetta vi --",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let completions = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        completions.lines().any(|line| line.starts_with("--help\t")),
+        "missing --help completion for zetta vi --: {completions}"
+    );
+
+    let output = Command::new("fish")
+        .args([
+            "--no-config",
+            "-c",
+            "source $argv[1]; complete -C \"$argv[2]\"",
+            "--",
+            script_file.path().to_str().unwrap(),
+            "zetta vi Carg",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| line.starts_with("Cargo.toml"))
+    );
 }
 
 #[test]
