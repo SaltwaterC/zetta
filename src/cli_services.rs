@@ -27,6 +27,11 @@ use std::path::Path;
 use std::path::PathBuf;
 #[cfg(all(feature = "notifications", target_os = "macos"))]
 use std::process::Command;
+#[cfg(all(
+    feature = "notifications",
+    any(target_os = "linux", target_os = "freebsd")
+))]
+use std::process::{Command, Stdio};
 #[cfg(feature = "serial-console")]
 use std::sync::{
     Arc,
@@ -779,6 +784,159 @@ fn default_notification_icon_path() -> Result<PathBuf> {
     write_default_notification_icon(&crate::config::platform_config_dir())
 }
 
+#[cfg(feature = "notifications")]
+fn notification_app_name(command: &NotifyCommand) -> &str {
+    command.app_name.as_deref().unwrap_or(crate::ZETTA_APP_ID)
+}
+
+#[cfg(all(feature = "notifications", not(target_os = "macos")))]
+fn notification_icon_path(command: &NotifyCommand) -> Result<String> {
+    Ok(match &command.icon {
+        Some(icon) => icon.clone(),
+        None => default_notification_icon_path()?
+            .to_string_lossy()
+            .into_owned(),
+    })
+}
+
+#[cfg(all(
+    feature = "notifications",
+    not(any(target_os = "macos", target_os = "windows"))
+))]
+fn set_unix_notification_identity(
+    notification: &mut notify_rust::Notification,
+    command: &NotifyCommand,
+) -> Result<()> {
+    let icon = notification_icon_path(command)?;
+    if command.app_name.is_none() && command.icon.is_none() {
+        notification.hint(notify_rust::Hint::DesktopEntry(
+            crate::ZETTA_APP_ID.to_owned(),
+        ));
+    }
+    notification.icon(&icon);
+    Ok(())
+}
+
+#[cfg(all(
+    feature = "notifications",
+    any(target_os = "linux", target_os = "freebsd")
+))]
+fn try_show_portal_notification(command: &NotifyCommand) -> Result<bool> {
+    // Unlike org.freedesktop.Notifications, the portal contract explicitly
+    // requires notifications to outlive the process that submitted them.
+    // The portal does not expose the millisecond timeout supported by
+    // notify-rust, and it cannot override the application identity, so keep
+    // those cases on the D-Bus fallback below.
+    if command.app_name.is_some()
+        || command.icon.is_some()
+        || matches!(
+            command.timeout,
+            Some(notify_rust::Timeout::Milliseconds(_)) | Some(notify_rust::Timeout::Never)
+        )
+        || command
+            .sound
+            .as_deref()
+            .is_some_and(|sound| crate::notification_sounds::BuiltinSound::parse(sound).is_none())
+    {
+        return Ok(false);
+    }
+
+    let icon = notification_icon_path(command)?;
+    let icon_uri = match url::Url::from_file_path(&icon) {
+        Ok(icon_uri) => icon_uri,
+        Err(()) => return Ok(false),
+    };
+    let portal_notification = ashpd::desktop::notification::Notification::new(&command.summary)
+        .body(command.body.as_deref())
+        .icon(ashpd::desktop::Icon::Uri(ashpd::Uri::parse(
+            icon_uri.as_str(),
+        )?));
+    let notification_id = format!("zetta-{}", std::process::id());
+    let sent = futures::executor::block_on(async {
+        let proxy = ashpd::desktop::notification::NotificationProxy::new().await?;
+        proxy
+            .add_notification(&notification_id, portal_notification)
+            .await
+    });
+    Ok(sent.is_ok())
+}
+
+#[cfg(all(
+    feature = "notifications",
+    any(target_os = "linux", target_os = "freebsd")
+))]
+const NOTIFICATION_DAEMON_ENV: &str = "ZETTA_NOTIFICATION_DAEMON";
+
+#[cfg(all(
+    feature = "notifications",
+    any(target_os = "linux", target_os = "freebsd")
+))]
+fn spawn_notification_daemon() -> Result<()> {
+    let executable = std::env::current_exe().context("locating the zetta executable")?;
+    let mut command = Command::new(executable);
+    command
+        .args(std::env::args_os().skip(1))
+        .env(NOTIFICATION_DAEMON_ENV, "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // Detach the notification worker from the terminal that invoked the CLI.
+    // It must keep its D-Bus connection alive after this parent exits so GNOME
+    // does not withdraw the notification with the sender process.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        // SAFETY: setsid(2) is async-signal-safe and is the only call made in
+        // the forked child before it execs.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    command
+        .spawn()
+        .context("spawning the desktop notification worker")?;
+    Ok(())
+}
+
+#[cfg(all(
+    feature = "notifications",
+    any(target_os = "linux", target_os = "freebsd")
+))]
+fn keep_notification_worker_alive(timeout: Option<notify_rust::Timeout>) {
+    let timeout = timeout.unwrap_or_default();
+    match timeout {
+        // GNOME's default is commonly five seconds. Keep the sender alive a
+        // little longer so the server can expire and archive the notification
+        // instead of treating the worker's exit as a dismissal.
+        notify_rust::Timeout::Default => std::thread::sleep(std::time::Duration::from_secs(10)),
+        notify_rust::Timeout::Milliseconds(milliseconds) => {
+            if milliseconds == 0 {
+                // A never-expiring notification needs a live sender. This is
+                // intentionally indefinite, matching the notification's
+                // lifetime.
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(60));
+                }
+            } else {
+                std::thread::sleep(
+                    std::time::Duration::from_millis(u64::from(milliseconds))
+                        + std::time::Duration::from_secs(1),
+                );
+            }
+        }
+        // A never-expiring notification needs a live sender. This is
+        // intentionally indefinite, matching the notification's lifetime.
+        notify_rust::Timeout::Never => loop {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        },
+    }
+}
+
 // Without an explicit `App User Model ID`, notify-rust's Windows backend
 // (tauri-winrt-notification) falls back to `Toast::POWERSHELL_APP_ID` - a
 // built-in Windows AUMID whose own doc comment warns the toast "will
@@ -1002,14 +1160,31 @@ impl NotifyCommand {
 
     #[cfg(not(target_os = "macos"))]
     fn run_non_macos(&self) -> Result<()> {
+        let bundled_sound = self
+            .sound
+            .as_deref()
+            .and_then(crate::notification_sounds::BuiltinSound::parse);
+
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if (bundled_sound.is_some() || self.sound.is_none()) && try_show_portal_notification(self)?
+        {
+            if let Some(bundled_sound) = bundled_sound {
+                bundled_sound.play()?;
+            }
+            return Ok(());
+        }
+
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if std::env::var_os(NOTIFICATION_DAEMON_ENV).is_none() {
+            return spawn_notification_daemon();
+        }
+
         let mut notification = notify_rust::Notification::new();
         notification.summary(&self.summary);
         if let Some(body) = &self.body {
             notification.body(body);
         }
-        if let Some(app_name) = &self.app_name {
-            notification.appname(app_name);
-        }
+        notification.appname(notification_app_name(self));
         #[cfg(target_os = "windows")]
         {
             // notify-rust's Windows backend has no small "app logo" placement -
@@ -1030,18 +1205,9 @@ impl NotifyCommand {
         }
         #[cfg(not(target_os = "windows"))]
         {
-            let icon = match &self.icon {
-                Some(icon) => icon.clone(),
-                None => default_notification_icon_path()?
-                    .to_string_lossy()
-                    .into_owned(),
-            };
-            notification.image_path(&icon);
+            #[cfg(not(target_os = "macos"))]
+            set_unix_notification_identity(&mut notification, self)?;
         }
-        let bundled_sound = self
-            .sound
-            .as_deref()
-            .and_then(crate::notification_sounds::BuiltinSound::parse);
         let notification_sound = self.sound.as_deref().filter(|_| bundled_sound.is_none());
         if let Some(sound) = notification_sound {
             notification.sound_name(sound);
@@ -1055,6 +1221,10 @@ impl NotifyCommand {
             .context("showing the desktop notification")?;
         if let Some(bundled_sound) = bundled_sound {
             bundled_sound.play()?;
+        }
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if std::env::var_os(NOTIFICATION_DAEMON_ENV).is_some() {
+            keep_notification_worker_alive(self.timeout);
         }
         Ok(())
     }

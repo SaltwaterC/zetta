@@ -36,7 +36,7 @@ serial-console = ["dep:serialport"]
 http-server = []
 tftp-server = []
 tftp-client = []
-notifications = ["dep:notify-rust", "dep:cpal", "dep:mac-usernotifications"]
+notifications = ["dep:notify-rust", "dep:cpal", "dep:mac-usernotifications", "dep:ashpd"]
 clipboard = ["dep:arboard"]
 
 [[bin]]
@@ -118,6 +118,10 @@ windows = { version = "0.61", features = [
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 cpal = { version = "0.16", optional = true }
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "notification"], optional = true }
+url = "2.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"

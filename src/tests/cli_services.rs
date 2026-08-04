@@ -82,6 +82,57 @@ fn notify_requires_a_summary_and_rejects_invalid_options() {
 
 #[cfg(feature = "notifications")]
 #[test]
+fn notifications_default_to_zetta_identity() {
+    let command = NotifyCommand {
+        summary: "Build finished".to_owned(),
+        body: None,
+        app_name: None,
+        icon: None,
+        sound: None,
+        timeout: None,
+    };
+    let mut notification = notify_rust::Notification::new();
+    notification.appname(notification_app_name(&command));
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    set_unix_notification_identity(&mut notification, &command).unwrap();
+
+    assert_eq!(notification.appname, "Zetta");
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        assert!(
+            notification
+                .hints
+                .contains(&notify_rust::Hint::DesktopEntry("Zetta".to_owned()))
+        );
+    }
+}
+
+#[cfg(feature = "notifications")]
+#[test]
+fn custom_notification_identity_is_not_replaced_by_zetta_desktop_entry() {
+    let command = NotifyCommand {
+        summary: "Build finished".to_owned(),
+        body: None,
+        app_name: Some("wibble".to_owned()),
+        icon: Some("custom.png".to_owned()),
+        sound: None,
+        timeout: None,
+    };
+    let mut notification = notify_rust::Notification::new();
+    notification.appname(notification_app_name(&command));
+    set_unix_notification_identity(&mut notification, &command).unwrap();
+
+    assert_eq!(notification.appname, "wibble");
+    assert_eq!(notification.icon, "custom.png");
+    assert!(
+        !notification
+            .hints
+            .contains(&notify_rust::Hint::DesktopEntry("Zetta".to_owned()))
+    );
+}
+
+#[cfg(feature = "notifications")]
+#[test]
 fn default_notification_icon_is_cached_and_kept_up_to_date() {
     let directory = tempfile::tempdir().unwrap();
     let config_dir = directory.path().join("zetta");
