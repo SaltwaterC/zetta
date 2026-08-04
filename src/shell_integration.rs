@@ -450,7 +450,7 @@ fn shell_single_quote(value: &str) -> String {
 }
 
 pub(crate) fn shell_integration_help() -> &'static str {
-    "Configure or generate shell integration\n\nUsage: zetta init [SHELL]\n\nWithout SHELL, detects the active supported shell process (falling back to SHELL when process inspection cannot identify it) and adds the integration command to its startup file. On Windows, Unix-style HOME paths from MSYS2 and similar environments are resolved with cygpath; when SHELL is unavailable, Zetta detects the launching PowerShell and writes to its $PROFILE. Running it again leaves an existing integration unchanged. With SHELL, prints the integration script for use in a shell startup file.\n\nSupported shells:\n  bash        Bash\n  fish        Fish\n  powershell  PowerShell (also accepted as pwsh)\n  zsh         Z shell\n\nThe generated script adds command completion, including live serial-device completion, the ztftp shortcut when the TFTP client is enabled, and the zntfy and zcopy/zpaste shortcuts when desktop notifications and clipboard access are enabled. zcopy/zpaste are also available as pbcopy/pbpaste on platforms other than macOS, taking priority over any existing pbcopy/pbpaste alias so pbcopy/pbpaste muscle memory keeps working there too."
+    "Configure or generate shell integration\n\nUsage: zetta init [SHELL]\n\nWithout SHELL, detects the active supported shell process (falling back to SHELL when process inspection cannot identify it) and adds the integration command to its startup file. On Windows, Unix-style HOME paths from MSYS2 and similar environments are resolved with cygpath; when SHELL is unavailable, Zetta detects the launching PowerShell and writes to its $PROFILE. Running it again leaves an existing integration unchanged. With SHELL, prints the integration script for use in a shell startup file.\n\nSupported shells:\n  bash        Bash\n  fish        Fish\n  powershell  PowerShell (also accepted as pwsh)\n  zsh         Z shell\n\nThe generated script adds command completion, including live serial-device completion, the zvi shortcut for the built-in vi editor, the ztftp shortcut when the TFTP client is enabled, and the zntfy and zcopy/zpaste shortcuts when desktop notifications and clipboard access are enabled. zcopy/zpaste are also available as pbcopy/pbpaste on platforms other than macOS, taking priority over any existing pbcopy/pbpaste alias so pbcopy/pbpaste muscle memory keeps working there too."
 }
 
 const BASH_INTEGRATION: &str = r#"# Zetta shell integration for Bash.
@@ -462,6 +462,8 @@ if ! type -t vi >/dev/null 2>&1; then
     eval 'vi() { command zetta vi "$@"; }'
     complete -F _zetta_complete vi
 fi
+
+zvi() { command zetta vi "$@"; }
 
 _zetta_option_used() {
     local option=$1 index
@@ -489,7 +491,7 @@ _zetta_complete() {
     previous=${COMP_WORDS[COMP_CWORD-1]}
     command=${COMP_WORDS[1]}
 
-    if [[ ${COMP_WORDS[0]} == vi ]]; then
+    if [[ ${COMP_WORDS[0]} == vi || ${COMP_WORDS[0]} == zvi ]]; then
         if [[ $current == -* ]]; then
             _zetta_compgen '--help'
         else
@@ -843,6 +845,7 @@ zntfy() { zetta notify "$@"; }
 zcopy() { zetta copy "$@"; }
 zpaste() { zetta paste "$@"; }
 complete -F _zetta_complete zetta
+complete -F _zetta_complete zvi
 complete -F _ztftp_complete ztftp
 complete -F _zntfy_complete zntfy
 complete -F _zcopy_complete zcopy
@@ -877,6 +880,11 @@ if not type -q vi
         complete -c vi -F
     end
 end
+
+function zvi --wraps 'zetta vi' --description 'Zetta vi editor'
+    command zetta vi $argv
+end
+complete -c zvi -F
 
 function ztftp --wraps 'zetta tftp' --description 'Zetta TFTP client'
     zetta tftp $argv
@@ -1240,6 +1248,8 @@ if ($zettaViMissing) {
     function vi { & zetta vi @args }
 }
 
+function zvi { & zetta vi @args }
+
 function ztftp { & zetta tftp @args }
 function zntfy { & zetta notify @args }
 function zcopy { & zetta copy @args }
@@ -1335,7 +1345,7 @@ $zettaCompletions = {
         'general', 'ruler', 'find', 'font'
     } elseif ($previous -in '--prefer', '-prefer', '--Prefer', '-Prefer') {
         'txt', 'rtf', 'ps'
-    } elseif ($commandName -eq 'vi' -or $subcommand -in 'edit', 'vi') {
+    } elseif ($commandName -in 'vi', 'zvi' -or $subcommand -in 'edit', 'vi') {
         if ($wordToComplete -like '-*') {
             '--help'
         } else {
@@ -1396,6 +1406,7 @@ Register-ArgumentCompleter -CommandName ztftp -ScriptBlock $zettaCompletions
 Register-ArgumentCompleter -CommandName zntfy -ScriptBlock $zettaCompletions
 Register-ArgumentCompleter -CommandName zcopy -ScriptBlock $zettaCompletions
 Register-ArgumentCompleter -CommandName zpaste -ScriptBlock $zettaCompletions
+Register-ArgumentCompleter -CommandName zvi -ScriptBlock $zettaCompletions
 if ($zettaViMissing) {
     Register-ArgumentCompleter -CommandName vi -ScriptBlock $zettaCompletions
 }
@@ -1416,6 +1427,8 @@ if (( ! $+commands[vi] && ! $+aliases[vi] && ! $+functions[vi] && ! $+builtins[v
 else
     _zetta_vi_missing=0
 fi
+
+function zvi { command zetta vi "$@"; }
 
 if ! (( $+functions[compdef] )); then
     autoload -Uz compinit
@@ -1509,7 +1522,7 @@ _zetta() {
         return
     fi
 
-    if [[ $words[1] == vi ]]; then
+    if [[ $words[1] == vi || $words[1] == zvi ]]; then
         if [[ $words[CURRENT] == -* ]]; then
             _zetta_options --help
         else
@@ -1816,6 +1829,7 @@ compdef _ztftp ztftp
 compdef _zntfy zntfy
 compdef _zcopy zcopy
 compdef _zpaste zpaste
+compdef _zetta zvi
 if (( _zetta_vi_missing )); then
     compdef _zetta vi
 fi

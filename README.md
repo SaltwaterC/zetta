@@ -25,7 +25,8 @@ for active development.
   CLI
 - Cross-platform desktop notifications from the CLI
 - A small syntax-highlighted built-in [vi editor](https://github.com/SaltwaterC/busy-v),
-  available as `zetta vi` and conditionally as `vi` through shell integration;
+  available as `zetta vi`, unconditionally as `zvi`, and conditionally as `vi`
+  through shell integration;
   see the [supported grammars](docs/usage.md#built-in-vi-syntax-highlighting)
 
 ## Quick start
@@ -100,7 +101,7 @@ built, how it should behave, and when the result was good enough.
 - [Background sessions](docs/background-sessions.md): detach, protect, inspect,
   and reconnect sessions
 - [Shell integration](docs/shell-integration.md): command completion and the
-  `ztftp`/`zntfy`/`vi` shortcuts
+  `zvi`/`ztftp`/`zntfy`/`vi` shortcuts
 - [Serial and network tools](docs/tools.md): serial consoles, HTTP and TFTP
   servers, the TFTP client, and desktop notifications
 - [Performance profiling](docs/performance.md): overlays, automated reports,

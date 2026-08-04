@@ -42,22 +42,30 @@ fn vi_integration_is_conditional_and_has_cli_completion() {
     let bash = ShellIntegration::Bash.script(&profiles);
     assert!(bash.contains("if ! type -t vi >/dev/null 2>&1"));
     assert!(bash.contains("eval 'vi() { command zetta vi \"$@\"; }'"));
+    assert!(bash.contains("zvi() { command zetta vi \"$@\"; }"));
+    assert!(bash.contains("complete -F _zetta_complete zvi"));
     assert!(bash.contains("vi)\n            if [[ $current == -* ]]; then"));
 
     let fish = ShellIntegration::Fish.script(&profiles);
     assert!(fish.contains("if not type -q vi"));
     assert!(fish.contains("complete -c vi -F"));
+    assert!(fish.contains("function zvi --wraps 'zetta vi'"));
+    assert!(fish.contains("complete -c zvi -F"));
     assert!(fish.contains("function __zetta_option_unused"));
 
     let powershell = ShellIntegration::PowerShell.script(&profiles);
     assert!(powershell.contains("$zettaViMissing = -not (Get-Command vi"));
     assert!(powershell.contains("if ($zettaViMissing)"));
+    assert!(powershell.contains("function zvi { & zetta vi @args }"));
+    assert!(powershell.contains("Register-ArgumentCompleter -CommandName zvi"));
     assert!(powershell.contains("Get-ChildItem -Name -Path \"$wordToComplete*\""));
     assert!(powershell.contains("$_ -notin $words"));
 
     let zsh = ShellIntegration::Zsh.script(&profiles);
     assert!(zsh.contains("$+commands[vi]"));
     assert!(zsh.contains("compdef _zetta vi"));
+    assert!(zsh.contains("function zvi { command zetta vi \"$@\"; }"));
+    assert!(zsh.contains("compdef _zetta zvi"));
     assert!(zsh.contains("_zetta_option_unused"));
     assert!(zsh.contains("_zetta_options()"));
     assert!(zsh.contains("_files"));
