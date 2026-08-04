@@ -825,7 +825,13 @@ impl Render for Zetta {
                                     ""
                                 },
                             )
-                            .start_icon(Icon::new(IconName::Keyboard).size(IconSize::Small))
+                            .start_icon(Icon::new(IconName::Keyboard).size(IconSize::Small).color(
+                                if broadcast_input {
+                                    Color::Selected
+                                } else {
+                                    Color::Default
+                                },
+                            ))
                             .style(ButtonStyle::Subtle)
                             .size(ButtonSize::Large)
                             .toggle_state(broadcast_input)
