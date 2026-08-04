@@ -159,6 +159,62 @@ fn highlights_jsonc_tsx_and_git_commits() {
 }
 
 #[test]
+fn highlights_toml_and_makefiles_from_extension_grammars() {
+    let mut highlighter = ZedSyntaxHighlighter::new(syntax_theme(&[
+        "comment",
+        "function",
+        "keyword",
+        "number",
+        "operator",
+        "property",
+        "string",
+        "string.special.path",
+        "string.special.symbol",
+        "type",
+    ]))
+    .expect("load Zed and extension grammars");
+
+    for (path, source, token) in [
+        (
+            "Cargo.toml",
+            b"[package]\nname = \"zetta\"\nversion = 1\n".as_slice(),
+            b"package".as_slice(),
+        ),
+        (
+            "Makefile",
+            b"CC := cc\nall: app\n\t$(CC) main.c -o app\n".as_slice(),
+            b"CC".as_slice(),
+        ),
+    ] {
+        let spans = highlighter.highlight_path(Some(Path::new(path)), source);
+        assert!(
+            spans
+                .iter()
+                .any(|span| source[span.start..span.end] == *token),
+            "expected {path} to highlight {token:?}; got {spans:?}",
+        );
+    }
+}
+
+#[test]
+fn recognizes_common_makefile_and_toml_paths() {
+    let highlighter =
+        ZedSyntaxHighlighter::new(syntax_theme(&[])).expect("load extension grammars");
+
+    for path in ["Makefile", "GNUmakefile", "build.mk"] {
+        assert_eq!(
+            highlighter.language_index(Some(Path::new(path)), b"all:\n"),
+            highlighter.language_names.get("makefile").copied(),
+            "expected {path} to use Makefile syntax",
+        );
+    }
+    assert_eq!(
+        highlighter.language_index(Some(Path::new("Cargo.toml")), b"[package]\n"),
+        highlighter.language_names.get("toml").copied(),
+    );
+}
+
+#[test]
 fn resolves_capture_styles_with_zeds_prefix_rules() {
     let theme = SyntaxTheme::new([(
         "operator".to_owned(),
@@ -226,5 +282,19 @@ fn keeps_the_exact_zed_native_grammar_registry() {
             "yaml",
             "gitcommit",
         ]
+    );
+}
+
+#[test]
+fn registers_extension_grammars_separately_from_zeds_native_registry() {
+    let grammar_ids: Vec<_> = extension_grammars()
+        .into_iter()
+        .map(|(grammar_id, _)| grammar_id)
+        .collect();
+    assert_eq!(grammar_ids, ["makefile", "toml"]);
+    assert!(
+        native_grammars()
+            .into_iter()
+            .all(|(grammar_id, _)| !grammar_ids.contains(&grammar_id))
     );
 }

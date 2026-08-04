@@ -33,6 +33,10 @@ use crate::{
 #[exclude = "*.rs"]
 struct GrammarAssets;
 
+#[derive(RustEmbed)]
+#[folder = "src/grammar_extensions/"]
+struct ExtensionGrammarAssets;
+
 #[derive(Deserialize)]
 struct GrammarConfig {
     name: String,
@@ -49,7 +53,7 @@ struct GrammarConfig {
 
 fn load_config(name: &str) -> anyhow::Result<GrammarConfig> {
     let path = format!("{name}/config.toml");
-    let bytes = GrammarAssets::get(&path)
+    let bytes = grammar_asset(&path)
         .ok_or_else(|| anyhow::anyhow!("missing grammar config for {name:?}"))?;
     toml::from_str(std::str::from_utf8(&bytes.data)?)
         .with_context(|| format!("parsing embedded grammar config {path:?}"))
@@ -58,6 +62,7 @@ fn load_config(name: &str) -> anyhow::Result<GrammarConfig> {
 fn load_query(name: &str, prefix: &str) -> anyhow::Result<String> {
     let path_prefix = format!("{name}/{prefix}");
     let mut paths: Vec<String> = GrammarAssets::iter()
+        .chain(ExtensionGrammarAssets::iter())
         .filter(|path| path.starts_with(&path_prefix) && path.ends_with(".scm"))
         .map(|path| path.to_string())
         .collect();
@@ -65,7 +70,7 @@ fn load_query(name: &str, prefix: &str) -> anyhow::Result<String> {
 
     let mut query = String::new();
     for path in paths {
-        let bytes = GrammarAssets::get(&path)
+        let bytes = grammar_asset(&path)
             .ok_or_else(|| anyhow::anyhow!("missing embedded grammar query {path:?}"))?
             .data;
         query.push_str(
@@ -74,6 +79,10 @@ fn load_query(name: &str, prefix: &str) -> anyhow::Result<String> {
         );
     }
     Ok(query)
+}
+
+fn grammar_asset(path: &str) -> Option<rust_embed::EmbeddedFile> {
+    GrammarAssets::get(path).or_else(|| ExtensionGrammarAssets::get(path))
 }
 
 /// Keep this list synchronized with Zed's native grammars registry while
@@ -106,6 +115,15 @@ fn native_grammars() -> Vec<(&'static str, tree_sitter::Language)> {
     ]
 }
 
+/// Grammars maintained outside Zed's upstream grammar bundle. Each entry is
+/// paired with config/query assets under `src/grammar_extensions/{name}`.
+fn extension_grammars() -> Vec<(&'static str, tree_sitter::Language)> {
+    vec![
+        ("makefile", tree_sitter_make::LANGUAGE.into()),
+        ("toml", tree_sitter_toml_ng::LANGUAGE.into()),
+    ]
+}
+
 struct LanguageHighlighter {
     name: &'static str,
     language: tree_sitter::Language,
@@ -116,8 +134,8 @@ struct LanguageHighlighter {
 
 /// A small Tree-sitter adapter for the standalone vi editor.
 ///
-/// Native grammar functions come directly from the Tree-sitter crates that
-/// Zed registers, while Zed's grammar configs and queries are embedded
+/// Grammar functions come directly from Tree-sitter crates, while Zed's
+/// upstream grammar configs and Zetta's extension configs/queries are embedded
 /// locally. The adapter owns only Tree-sitter's parser/highlighter state and
 /// language configurations; it does not depend on Zed's language buffer or
 /// syntax map.
@@ -135,7 +153,7 @@ impl ZedSyntaxHighlighter {
         let mut languages = Vec::new();
         let mut language_names = HashMap::new();
 
-        for (name, language) in native_grammars() {
+        for (name, language) in native_grammars().into_iter().chain(extension_grammars()) {
             let language_config = load_config(name)?;
             if language_config.grammar != name {
                 anyhow::bail!(

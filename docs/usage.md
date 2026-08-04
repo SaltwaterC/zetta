@@ -212,7 +212,7 @@ the default build), `zetta vi` uses bundled Tree-sitter grammars and Zed's
 highlight queries. Language selection follows the bundled Zed grammar metadata
 for file names, suffixes, and first-line patterns.
 
-The supported native grammar registry is:
+The supported upstream grammar registry is:
 
 - Bash
 - C and C++
@@ -228,6 +228,11 @@ The supported native grammar registry is:
 - Rust
 - TSX and TypeScript
 - YAML
+
+Zetta also provides pluggable grammar extensions for Makefiles (including
+`Makefile`, `GNUmakefile`, `.mk`, and `.mak`) and TOML files. These use the
+same embedded config/query setup without modifying Zed's upstream grammar
+bundle.
 
 Markdown fenced code blocks can use the other registered grammars, such as
 Rust, JSONC, TSX, and TypeScript. `Markdown Inline`, JSDoc, and regular

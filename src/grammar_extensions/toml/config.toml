@@ -1,0 +1,6 @@
+name = "TOML"
+grammar = "toml"
+path_suffixes = ["toml"]
+modeline_aliases = ["toml"]
+line_comments = ["# "]
+

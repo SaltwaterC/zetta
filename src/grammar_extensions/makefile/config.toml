@@ -1,0 +1,7 @@
+name = "Makefile"
+grammar = "makefile"
+path_suffixes = ["Makefile", "makefile", "GNUmakefile", "mk", "mak"]
+modeline_aliases = ["make", "makefile"]
+line_comments = ["# "]
+hard_tabs = true
+
