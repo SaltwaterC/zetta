@@ -742,7 +742,7 @@ fn editor_path_argument(
         return wsl_editor_path_argument(path, path_style);
     }
     #[cfg(not(windows))]
-    let _ = shell;
+    let _ = (shell, path_style);
     shell_kind.try_quote(path).map(Into::into)
 }
 
