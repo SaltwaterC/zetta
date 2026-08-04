@@ -82,6 +82,27 @@ fn window_controls_respect_window_capabilities() {
     ));
 }
 
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[test]
+fn empty_client_window_button_sides_do_not_reserve_space() {
+    let state = WindowControlState {
+        supported_controls: WindowControls::default(),
+        is_maximized: false,
+        is_resizable: true,
+        is_minimizable: true,
+        client_decorations: true,
+    };
+
+    assert!(!has_enabled_window_button(
+        [None; MAX_BUTTONS_PER_SIDE],
+        state
+    ));
+    assert!(has_enabled_window_button(
+        [Some(WindowButton::Close), None, None],
+        state
+    ));
+}
+
 #[test]
 #[cfg(target_os = "linux")]
 fn parses_quoted_gsettings_button_layout() {

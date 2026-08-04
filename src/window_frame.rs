@@ -107,6 +107,21 @@ fn window_button_enabled(
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn has_enabled_window_button(
+    buttons: [Option<WindowButton>; MAX_BUTTONS_PER_SIDE],
+    state: WindowControlState,
+) -> bool {
+    buttons.into_iter().flatten().any(|button| {
+        window_button_enabled(
+            button,
+            state.supported_controls,
+            state.is_resizable,
+            state.is_minimizable,
+        )
+    })
+}
+
 #[cfg(target_os = "windows")]
 pub(crate) fn render_window_controls(
     buttons: [Option<WindowButton>; MAX_BUTTONS_PER_SIDE],
@@ -165,7 +180,6 @@ pub(crate) fn render_window_controls(
     h_flex()
         .id("windows-window-controls")
         .h_full()
-        .ml_auto()
         .flex_none()
         .font_family("Segoe Fluent Icons")
         .when(
@@ -229,60 +243,68 @@ pub(crate) fn render_window_controls(
     }
 
     let colors = cx.theme().colors();
-    let controls = buttons.into_iter().flatten().filter_map(|button| {
-        let (icon, area) = match button {
-            WindowButton::Minimize => (IconName::GenericMinimize, WindowControlArea::Min),
-            WindowButton::Maximize => (
-                if state.is_maximized {
-                    IconName::GenericRestore
-                } else {
-                    IconName::GenericMaximize
-                },
-                WindowControlArea::Max,
-            ),
-            WindowButton::Close => (IconName::GenericClose, WindowControlArea::Close),
-        };
-        window_button_enabled(
-            button,
-            state.supported_controls,
-            state.is_resizable,
-            state.is_minimizable,
-        )
-        .then(|| {
-            let action_button = button;
-            h_flex()
-                .id(button.id())
-                .group("")
-                .h_5()
-                .w_5()
-                .flex_none()
-                .cursor_pointer()
-                .justify_center()
-                .content_center()
-                .rounded_2xl()
-                .hover(move |style| style.bg(colors.ghost_element_hover))
-                .active(move |style| style.bg(colors.ghost_element_hover))
-                .window_control_area(area)
-                .child(
-                    svg()
-                        .size_4()
-                        .flex_none()
-                        .path(icon.path())
-                        .text_color(colors.icon)
-                        .group_hover("", move |style| style.text_color(colors.icon_muted)),
-                )
-                .on_mouse_move(|_, _, cx| cx.stop_propagation())
-                .on_click(move |_, window, cx| {
-                    cx.stop_propagation();
-                    match action_button {
-                        WindowButton::Minimize => window.minimize_window(),
-                        WindowButton::Maximize => window.zoom_window(),
-                        WindowButton::Close => window.remove_window(),
-                    }
-                })
-                .into_any_element()
+    if !has_enabled_window_button(buttons, state) {
+        return div().into_any_element();
+    }
+
+    let controls = buttons
+        .into_iter()
+        .flatten()
+        .filter_map(|button| {
+            let (icon, area) = match button {
+                WindowButton::Minimize => (IconName::GenericMinimize, WindowControlArea::Min),
+                WindowButton::Maximize => (
+                    if state.is_maximized {
+                        IconName::GenericRestore
+                    } else {
+                        IconName::GenericMaximize
+                    },
+                    WindowControlArea::Max,
+                ),
+                WindowButton::Close => (IconName::GenericClose, WindowControlArea::Close),
+            };
+            window_button_enabled(
+                button,
+                state.supported_controls,
+                state.is_resizable,
+                state.is_minimizable,
+            )
+            .then(|| {
+                let action_button = button;
+                h_flex()
+                    .id(button.id())
+                    .group("")
+                    .h_5()
+                    .w_5()
+                    .flex_none()
+                    .cursor_pointer()
+                    .justify_center()
+                    .content_center()
+                    .rounded_2xl()
+                    .hover(move |style| style.bg(colors.ghost_element_hover))
+                    .active(move |style| style.bg(colors.ghost_element_hover))
+                    .window_control_area(area)
+                    .child(
+                        svg()
+                            .size_4()
+                            .flex_none()
+                            .path(icon.path())
+                            .text_color(colors.icon)
+                            .group_hover("", move |style| style.text_color(colors.icon_muted)),
+                    )
+                    .on_mouse_move(|_, _, cx| cx.stop_propagation())
+                    .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        match action_button {
+                            WindowButton::Minimize => window.minimize_window(),
+                            WindowButton::Maximize => window.zoom_window(),
+                            WindowButton::Close => window.remove_window(),
+                        }
+                    })
+                    .into_any_element()
+            })
         })
-    });
+        .collect::<Vec<_>>();
 
     h_flex()
         .id(if right_aligned {
@@ -294,7 +316,6 @@ pub(crate) fn render_window_controls(
         .flex_none()
         .gap_3()
         .px_3()
-        .when(right_aligned, |controls| controls.ml_auto())
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .children(controls)
         .into_any_element()

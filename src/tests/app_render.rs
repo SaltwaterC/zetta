@@ -50,17 +50,12 @@ fn compact_mode_always_keeps_broadcast_visible() {
 }
 
 #[test]
-fn compact_mode_keeps_background_indicator_on_the_right() {
-    assert!(title_bar_background_indicator_on_right(
-        !title_bar_buttons_visible(true, false),
-        1
-    ));
-    assert!(title_bar_background_indicator_on_right(
-        !title_bar_buttons_visible(true, true),
-        1
-    ));
-    assert!(!title_bar_background_indicator_on_right(false, 1));
-    assert!(!title_bar_background_indicator_on_right(true, 0));
+fn reconnect_control_moves_to_the_right_when_title_bar_buttons_are_hidden() {
+    assert!(title_bar_background_indicator_on_right(true, false, 1));
+    assert!(title_bar_background_indicator_on_right(true, true, 1));
+    assert!(title_bar_background_indicator_on_right(false, true, 1));
+    assert!(!title_bar_background_indicator_on_right(false, false, 1));
+    assert!(!title_bar_background_indicator_on_right(true, true, 0));
 }
 
 #[test]

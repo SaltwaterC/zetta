@@ -50,10 +50,11 @@ fn title_bar_broadcast_visible(compact_mode: bool, hide_buttons: bool) -> bool {
 }
 
 fn title_bar_background_indicator_on_right(
+    compact_mode: bool,
     hide_buttons: bool,
     background_session_count: usize,
 ) -> bool {
-    hide_buttons && background_session_count > 0
+    (compact_mode || hide_buttons) && background_session_count > 0
 }
 
 fn title_bar_pane_size_visible(compact_mode: bool, hide_pane_size: bool) -> bool {
@@ -1012,7 +1013,8 @@ impl Render for Zetta {
             None
         };
         let right_reconnect_control = if title_bar_background_indicator_on_right(
-            !show_title_bar_buttons,
+            compact_mode,
+            self.launch_config.hide_title_bar_buttons,
             background_session_count,
         ) {
             // This control is outside the regular controls row, so it must
@@ -1027,6 +1029,19 @@ impl Render for Zetta {
         } else {
             None
         };
+
+        // Keep a reconnect control immediately next to the native/client window controls. The
+        // group owns the trailing auto-margin so the two controls cannot be separated by free
+        // space when the title-bar controls are hidden or compact mode is enabled.
+        let right_title_bar_controls = h_flex()
+            .id("title-bar-right-controls")
+            .h_full()
+            .flex_none()
+            .ml_auto()
+            .when_some(right_reconnect_control, |controls, reconnect_control| {
+                controls.child(reconnect_control)
+            })
+            .child(right_window_controls);
 
         let application_menu_dismiss_handle = handle.clone();
         // The popover receives focus while it is open. Retain the active
@@ -1253,10 +1268,7 @@ impl Render for Zetta {
                     ),
                 )
             })
-            .when_some(right_reconnect_control, |title_bar, reconnect_control| {
-                title_bar.child(reconnect_control)
-            })
-            .child(right_window_controls);
+            .child(right_title_bar_controls);
 
         let body = match self.tabs.get(self.active_tab) {
             Some(tab) => {
