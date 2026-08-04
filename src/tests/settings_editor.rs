@@ -15,11 +15,22 @@ fn keymap_round_trip_preserves_parameterized_actions_and_section_metadata() {
         r#"[{"context":"Zetta","use_key_equivalents":true,"bindings":{"ctrl-!":["zetta::OpenProfile",{"slot":1}]}}]"#,
     )
     .unwrap();
-    let form = KeymapForm::load(&root).unwrap();
+    let mut form = KeymapForm::load(&root).unwrap();
+    assert_eq!(form.sections[0].bindings[0].keystroke.text, "Ctrl+Shift+1");
     let output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
-    fs::remove_file(root).unwrap();
     assert_eq!(output[0]["use_key_equivalents"], true);
-    assert_eq!(output[0]["bindings"]["ctrl-!"][1]["slot"], 1);
+    assert_eq!(output[0]["bindings"]["Ctrl+Shift+1"][1]["slot"], 1);
+
+    form.sections[0].bindings[0].keystroke.text = "Ctrl+Shift+3".to_owned();
+    let alias_output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
+    form.sections[0].bindings[0].keystroke.text = "Ctrl+Shift+0".to_owned();
+    let tenth_alias_output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
+    fs::remove_file(root).unwrap();
+    assert_eq!(alias_output[0]["bindings"]["Ctrl+Shift+3"][1]["slot"], 1);
+    assert_eq!(
+        tenth_alias_output[0]["bindings"]["Ctrl+Shift+0"][1]["slot"],
+        1
+    );
 }
 
 #[test]

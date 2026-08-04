@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::startup::keymap_keystroke_display;
+
 impl Zetta {
     pub(crate) fn render_settings_overlay(
         &self,
@@ -1436,6 +1438,20 @@ impl Zetta {
             }
             SettingsPage::Keymap => {
                 let mut sections = Vec::new();
+                sections.push(
+                    div()
+                        .mb_3()
+                        .text_sm()
+                        .child("Type an accelerator in the field, or click Record to capture one from your keyboard.")
+                        .child(
+                            div()
+                                .mt_1()
+                                .text_xs()
+                                .text_color(colors.text_muted)
+                                .child("Recording opens a confirmation dialog: press Return to use the captured shortcut or Esc to cancel."),
+                        )
+                        .into_any_element(),
+                );
                 for (section_index, section) in editor.keymap.sections.iter().enumerate() {
                     let section_focused = matches!(
                         editor.focused_control.as_ref(),
@@ -1454,6 +1470,10 @@ impl Zetta {
                                 == Some(SettingsControl::RemoveBinding(
                                     section_index,
                                     binding_index,
+                                ))
+                            || editor.focused_control
+                                == Some(SettingsControl::CaptureKeymap(
+                                    KeymapTextField::Keystroke(section_index, binding_index),
                                 ));
                         let action = dropdown(
                             format!("settings-binding-{section_index}-{binding_index}-action"),
@@ -1491,6 +1511,7 @@ impl Zetta {
                             )
                         });
                         let remove_handle = handle.clone();
+                        let capture_handle = handle.clone();
                         bindings.push(
                             h_flex()
                                 .mb_2()
@@ -1507,8 +1528,9 @@ impl Zetta {
                                     row.bg(colors.element_selected)
                                 })
                                 .child(
-                                    div()
-                                        .w(px(220.))
+                                    h_flex()
+                                        .w(px(330.))
+                                        .gap_1()
                                         .flex_none()
                                         .child(text_input(
                                             format!(
@@ -1521,7 +1543,31 @@ impl Zetta {
                                                     binding_index,
                                                 ),
                                             ),
-                                        )),
+                                        ))
+                                        .child(
+                                            Button::new(
+                                                format!(
+                                                    "record-settings-binding-{section_index}-{binding_index}"
+                                                ),
+                                                "Record",
+                                            )
+                                            .style(ButtonStyle::Outlined)
+                                            .size(ButtonSize::Compact)
+                                            .on_click(move |_, window, cx| {
+                                                capture_handle
+                                                    .update(cx, |this, cx| {
+                                                        this.start_keymap_capture(
+                                                            KeymapTextField::Keystroke(
+                                                                section_index,
+                                                                binding_index,
+                                                            ),
+                                                            window,
+                                                            cx,
+                                                        )
+                                                    })
+                                                    .ok();
+                                            }),
+                                        ),
                                 )
                                 .child(div().min_w_0().flex_1().child(action))
                                 .when_some(template, |row, template| {
@@ -2010,6 +2056,109 @@ impl Zetta {
                 .into_any_element()
         });
 
+        let keymap_capture_modal = editor.keymap_capture.as_ref().map(|capture| {
+            let target = capture.target;
+            let captured = capture
+                .keystroke
+                .as_ref()
+                .map(|keystroke| keymap_keystroke_display(&keystroke.unparse()))
+                .unwrap_or_else(|| "Waiting for a key combination…".to_owned());
+            let has_capture = capture.keystroke.is_some();
+            let cancel_handle = handle.clone();
+            let confirm_handle = handle.clone();
+            div()
+                .id("keymap-capture-modal")
+                .absolute()
+                .inset_0()
+                .p_8()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(transparent_black().opacity(0.55))
+                .occlude()
+                .child(
+                    div()
+                        .id("keymap-capture-dialog")
+                        .w_full()
+                        .max_w(px(520.))
+                        .p_6()
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_color(colors.border_focused)
+                        .bg(colors.elevated_surface_background)
+                        .shadow_lg()
+                        .child(
+                            div()
+                                .text_lg()
+                                .child("Record keyboard shortcut"),
+                        )
+                        .child(
+                            div()
+                                .mt_2()
+                                .text_sm()
+                                .text_color(colors.text_muted)
+                                .child("Press and hold the desired key combination. The shortcut will be shown below before it changes the keymap."),
+                        )
+                        .child(
+                            div()
+                                .mt_5()
+                                .min_h(px(64.))
+                                .px_4()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(4.))
+                                .border_1()
+                                .border_color(colors.border)
+                                .bg(colors.editor_background)
+                                .text_lg()
+                                .child(captured),
+                        )
+                        .child(
+                            div()
+                                .mt_3()
+                                .text_xs()
+                                .text_color(colors.text_muted)
+                                .child("Return: confirm and put it in the accelerator field · Esc: cancel")
+                                .child(
+                                    div()
+                                        .mt_1()
+                                        .child("To bind plain Esc or Return, type escape or enter in the field instead."),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .mt_5()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    Button::new("cancel-keymap-capture", "Cancel")
+                                        .style(ButtonStyle::Outlined)
+                                        .on_click(move |_, window, cx| {
+                                            cancel_handle
+                                                .update(cx, |this, cx| {
+                                                    this.cancel_keymap_capture(target, window, cx)
+                                                })
+                                                .ok();
+                                        }),
+                                )
+                                .child(
+                                    Button::new("confirm-keymap-capture", "Use shortcut")
+                                        .style(ButtonStyle::Filled)
+                                        .disabled(!has_capture)
+                                        .on_click(move |_, window, cx| {
+                                            confirm_handle
+                                                .update(cx, |this, cx| {
+                                                    this.commit_keymap_capture(target, window, cx)
+                                                })
+                                                .ok();
+                                        }),
+                                ),
+                        ),
+                )
+                .into_any_element()
+        });
+
         let config_handle = handle.clone();
         let themes_handle = handle.clone();
         let keymap_handle = handle.clone();
@@ -2255,7 +2404,8 @@ impl Zetta {
                             )
                         })
                         .when_some(font_modal, |dialog, modal| dialog.child(modal))
-                        .when_some(profile_modal, |dialog, modal| dialog.child(modal)),
+                        .when_some(profile_modal, |dialog, modal| dialog.child(modal))
+                        .when_some(keymap_capture_modal, |dialog, modal| dialog.child(modal)),
                 )
                 .into_any_element(),
         )

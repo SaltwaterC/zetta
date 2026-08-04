@@ -1230,7 +1230,7 @@ fn linux_desktop_entry_matches_app_id() {
 
 #[test]
 fn profile_shortcuts_match_the_shifted_number_row() {
-    const SHIFTED_DIGITS: [&str; 9] = ["!", "@", "#", "$", "%", "^", "&", "*", "("];
+    const SHIFTED_DIGITS: [&str; 10] = ["!", "@", "#", "$", "%", "^", "&", "*", "(", ")"];
     let keyboard_mapper = gpui::DummyKeyboardMapper;
     for (index, symbol) in SHIFTED_DIGITS.into_iter().enumerate() {
         let slot = index + 1;
@@ -1246,6 +1246,7 @@ fn profile_shortcut_labels_use_number_row_aliases() {
     let keyboard_mapper = gpui::DummyKeyboardMapper;
     let slot_one = profile_keybindings(1, &keyboard_mapper)[0].clone();
     let slot_nine = profile_keybindings(9, &keyboard_mapper)[0].clone();
+    let slot_ten = profile_keybindings(10, &keyboard_mapper)[0].clone();
     let remapped = KeyBinding::new("alt-p", OpenProfile { slot: 1 }, Some("Zetta > Terminal"));
 
     assert_eq!(
@@ -1256,6 +1257,11 @@ fn profile_shortcut_labels_use_number_row_aliases() {
         profile_shortcut_label(9, &slot_nine, &slot_nine).as_deref(),
         Some("Ctrl+Shift+9")
     );
+    assert_eq!(
+        profile_shortcut_label(10, &slot_ten, &slot_ten).as_deref(),
+        Some("Ctrl+Shift+0")
+    );
+    assert_eq!(profile_shortcut_label(11, &slot_ten, &slot_ten), None);
     assert_eq!(profile_shortcut_label(1, &remapped, &slot_one), None);
 }
 
@@ -1499,6 +1505,16 @@ fn normalizes_hyphenated_page_key_names() {
     assert_eq!(
         normalize_keymap_key_names(keymap),
         r#"{"ctrl-pageup":"zetta::NextTab","ctrl-pagedown":"zetta::PreviousTab"}"#
+    );
+}
+
+#[test]
+fn normalizes_keymap_aliases_for_runtime_loading() {
+    let keymap =
+        r#"[{"bindings":{"Ctrl+Shift+1":"zetta::NextTab","Ctrl+Shift+0":"zetta::PreviousTab"}}]"#;
+    assert_eq!(
+        normalize_keymap_key_names(keymap),
+        r#"[{"bindings":{"ctrl-!":"zetta::NextTab","ctrl-)":"zetta::PreviousTab"}}]"#
     );
 }
 

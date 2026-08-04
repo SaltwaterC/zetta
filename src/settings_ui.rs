@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::startup::keymap_keystroke_display;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SettingsInput {
     Configuration(ConfigTextField),
@@ -60,6 +62,7 @@ pub(crate) enum SettingsControl {
     Save,
     Close,
     Input(SettingsInput),
+    CaptureKeymap(KeymapTextField),
     Dropdown(SettingsDropdown),
     Toggle(SettingsToggle),
     Numeric(NumericSetting),
@@ -105,12 +108,48 @@ pub(crate) struct SettingsEditor {
     pub(crate) scroll_geometry_initialized: bool,
     pub(crate) focused_input: Option<SettingsInput>,
     pub(crate) focused_control: Option<SettingsControl>,
+    pub(crate) keymap_capture: Option<KeymapCapture>,
     pub(crate) open_dropdown: Option<SettingsDropdown>,
     pub(crate) dropdown_index: usize,
     pub(crate) dropdown_query: String,
     pub(crate) configuration_dirty: bool,
     pub(crate) keymap_dirty: bool,
     pub(crate) message: Option<(bool, String)>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct KeymapCapture {
+    pub(crate) target: KeymapTextField,
+    pub(crate) keystroke: Option<KeybindingKeystroke>,
+}
+
+pub(crate) fn is_modifier_key(key: &str) -> bool {
+    matches!(
+        key,
+        "alt"
+            | "control"
+            | "ctrl"
+            | "fn"
+            | "function"
+            | "meta"
+            | "platform"
+            | "shift"
+            | "super"
+            | "win"
+            | "command"
+            | "cmd"
+    )
+}
+
+fn is_unmodified_capture_control(key: &str, modifiers: &gpui::Modifiers) -> bool {
+    !modifiers.modified() && matches!(key, "escape" | "enter")
+}
+
+fn keybinding_for_capture(
+    keystroke: &gpui::Keystroke,
+    keyboard_mapper: &dyn PlatformKeyboardMapper,
+) -> KeybindingKeystroke {
+    KeybindingKeystroke::new_with_mapper(keystroke.clone(), false, keyboard_mapper)
 }
 
 pub(crate) fn previous_char_boundary(text: &str, cursor: usize) -> usize {
@@ -350,6 +389,7 @@ impl Zetta {
             scroll_geometry_initialized: false,
             focused_input: None,
             focused_control: Some(SettingsControl::Tab(SettingsPage::Configuration)),
+            keymap_capture: None,
             open_dropdown: None,
             dropdown_index: 0,
             dropdown_query: String::new(),
@@ -381,6 +421,9 @@ impl Zetta {
     }
 
     pub(crate) fn dismiss_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(editor) = self.settings_editor.as_mut() {
+            editor.keymap_capture = None;
+        }
         self.settings_editor = None;
         self.focus_active(window, cx);
     }
@@ -636,6 +679,7 @@ impl Zetta {
             editor.message = None;
             editor.focused_input = None;
             editor.focused_control = Some(SettingsControl::Tab(page));
+            editor.keymap_capture = None;
             editor.open_dropdown = None;
             editor.dropdown_query.clear();
             editor.font_query = None;
@@ -712,6 +756,81 @@ impl Zetta {
         cx.notify();
     }
 
+    pub(crate) fn start_keymap_capture(
+        &mut self,
+        target: KeymapTextField,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self.settings_editor.as_mut() else {
+            return;
+        };
+        if editor.keymap.text_mut(target).is_none() {
+            return;
+        }
+        editor.keymap_capture = Some(KeymapCapture {
+            target,
+            keystroke: None,
+        });
+        editor.focused_input = None;
+        editor.focused_control = Some(SettingsControl::CaptureKeymap(target));
+        editor.open_dropdown = None;
+        editor.dropdown_query.clear();
+        editor.message = None;
+        self.settings_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_keymap_capture(
+        &mut self,
+        target: KeymapTextField,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self.settings_editor.as_mut() else {
+            return;
+        };
+        if editor
+            .keymap_capture
+            .as_ref()
+            .is_some_and(|capture| capture.target == target)
+        {
+            editor.keymap_capture = None;
+            self.focus_settings_input(SettingsInput::Keymap(target), window, cx);
+        }
+    }
+
+    pub(crate) fn commit_keymap_capture(
+        &mut self,
+        target: KeymapTextField,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self.settings_editor.as_mut() else {
+            return;
+        };
+        let Some(capture) = editor.keymap_capture.take() else {
+            return;
+        };
+        if capture.target != target {
+            editor.keymap_capture = Some(capture);
+            return;
+        }
+        let Some(keystroke) = capture.keystroke else {
+            editor.keymap_capture = Some(capture);
+            return;
+        };
+        let text = keymap_keystroke_display(&keystroke.unparse());
+        if let Some(field) = editor.keymap.text_mut(target) {
+            field.text = text;
+            field.cursor = field.text.len();
+            field.select_all = false;
+            editor.keymap_dirty = true;
+            editor.message = None;
+        }
+        self.focus_settings_input(SettingsInput::Keymap(target), window, cx);
+    }
+
     fn settings_controls(editor: &SettingsEditor) -> Vec<SettingsControl> {
         if let Some(query) = editor.font_query.as_ref() {
             let mut controls = vec![
@@ -735,6 +854,10 @@ impl Zetta {
                 SettingsControl::Dropdown(SettingsDropdown::ProfileDraftTheme),
                 SettingsControl::CreateProfile,
             ];
+        }
+
+        if editor.keymap_capture.is_some() {
+            return Vec::new();
         }
 
         let mut controls = vec![
@@ -830,6 +953,10 @@ impl Zetta {
                         controls.extend([
                             SettingsControl::Input(SettingsInput::Keymap(
                                 KeymapTextField::Keystroke(section_index, binding_index),
+                            )),
+                            SettingsControl::CaptureKeymap(KeymapTextField::Keystroke(
+                                section_index,
+                                binding_index,
                             )),
                             SettingsControl::Dropdown(SettingsDropdown::BindingAction(
                                 section_index,
@@ -1169,6 +1296,7 @@ impl Zetta {
             SettingsControl::Save => self.save_settings(window, cx),
             SettingsControl::Close => self.dismiss_settings(window, cx),
             SettingsControl::Input(input) => self.focus_settings_input(input, window, cx),
+            SettingsControl::CaptureKeymap(target) => self.start_keymap_capture(target, window, cx),
             SettingsControl::Dropdown(dropdown) => self.open_settings_dropdown(dropdown, cx),
             SettingsControl::Toggle(toggle) => {
                 let value = self.settings_editor.as_ref().map(|editor| match toggle {
@@ -1712,6 +1840,36 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         let command = event.keystroke.modifiers.control || event.keystroke.modifiers.platform;
+        if let Some(capture) = self
+            .settings_editor
+            .as_ref()
+            .and_then(|editor| editor.keymap_capture.as_ref())
+            .cloned()
+        {
+            let modifiers = event.keystroke.modifiers;
+            match event.keystroke.key.as_str() {
+                "escape" if is_unmodified_capture_control("escape", &modifiers) => {
+                    self.cancel_keymap_capture(capture.target, window, cx)
+                }
+                "enter" if is_unmodified_capture_control("enter", &modifiers) => {
+                    self.commit_keymap_capture(capture.target, window, cx)
+                }
+                key if !is_modifier_key(key) => {
+                    if let Some(editor) = self.settings_editor.as_mut()
+                        && let Some(active_capture) = editor.keymap_capture.as_mut()
+                    {
+                        active_capture.keystroke = Some(keybinding_for_capture(
+                            &event.keystroke,
+                            cx.keyboard_mapper().as_ref(),
+                        ));
+                        cx.notify();
+                    }
+                }
+                _ => {}
+            }
+            cx.stop_propagation();
+            return;
+        }
         if self
             .settings_editor
             .as_ref()

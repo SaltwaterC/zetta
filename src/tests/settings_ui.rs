@@ -68,3 +68,57 @@ fn scroll_history_steps_cover_the_full_range_without_jumping_to_max() {
     );
     assert_eq!(adjusted_scroll_history(maximum - 1, 1, maximum), maximum);
 }
+
+#[test]
+fn keymap_capture_keeps_modified_escape_and_return_available() {
+    assert!(is_unmodified_capture_control(
+        "escape",
+        &gpui::Modifiers::none()
+    ));
+    assert!(is_unmodified_capture_control(
+        "enter",
+        &gpui::Modifiers::none()
+    ));
+    assert!(!is_unmodified_capture_control(
+        "escape",
+        &gpui::Modifiers::shift()
+    ));
+    assert!(!is_unmodified_capture_control(
+        "enter",
+        &gpui::Modifiers::control()
+    ));
+}
+
+#[test]
+fn keymap_capture_ignores_modifier_only_events() {
+    assert!(is_modifier_key("shift"));
+    assert!(is_modifier_key("control"));
+    assert!(!is_modifier_key("escape"));
+    assert!(!is_modifier_key("f12"));
+}
+
+#[test]
+fn captured_keymap_shortcuts_use_keymap_text_syntax() {
+    let keystroke = gpui::Keystroke::parse("shift-escape").unwrap();
+    assert_eq!(keystroke.unparse(), "shift-escape");
+}
+
+#[test]
+fn captured_shifted_number_row_uses_gpui_keymap_normalization() {
+    let keystroke = gpui::Keystroke::parse("ctrl-!").unwrap();
+    let keyboard_mapper = gpui::DummyKeyboardMapper;
+    let captured = keybinding_for_capture(&keystroke, &keyboard_mapper);
+    assert_eq!(captured.unparse(), "ctrl-!");
+    assert_eq!(
+        keymap_keystroke_display(&captured.unparse()),
+        "Ctrl+Shift+1"
+    );
+
+    assert_eq!(keymap_keystroke_display("ctrl-)"), "Ctrl+Shift+0");
+    assert_eq!(keymap_keystroke_display("ctrl-shift-0"), "Ctrl+Shift+0");
+    assert_eq!(
+        keymap_keystroke_alias("ctrl-shift-0"),
+        Some("Ctrl+Shift+0".to_owned())
+    );
+    assert_eq!(keymap_keystroke_display("ctrl-shift-10"), "ctrl-shift-10");
+}

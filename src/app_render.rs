@@ -105,7 +105,7 @@ fn profile_menu_shortcut(
         .or_else(|| window.highest_precedence_binding_for_action(&action));
     let binding = binding?;
 
-    if slot <= 9 {
+    if slot <= PROFILE_SHORTCUT_KEYS.len() {
         let expected_binding = profile_keybindings(slot, keyboard_mapper)[0].clone();
         if let Some(label) = profile_shortcut_label(slot, &binding, &expected_binding) {
             return Some(profile_shortcut_alias(slot, label));
@@ -119,7 +119,8 @@ fn profile_menu_shortcut(
 
 #[cfg(target_os = "macos")]
 fn profile_shortcut_alias_keystroke(slot: usize) -> gpui::KeybindingKeystroke {
-    let keystroke = gpui::Keystroke::parse(&format!("ctrl-shift-{slot}"))
+    let key = PROFILE_SHORTCUT_KEYS[slot - 1];
+    let keystroke = gpui::Keystroke::parse(&format!("ctrl-shift-{key}"))
         .expect("profile shortcut alias must be a valid keystroke");
     gpui::KeybindingKeystroke::from_keystroke(keystroke)
 }

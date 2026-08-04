@@ -30,15 +30,16 @@
       "ctrl--": "zetta::DecreaseTerminalFontSize",
       "ctrl-0": "zetta::ResetTerminalFontSize",
       "ctrl-shift-f12": "zetta::TogglePerformanceOverlay",
-      "ctrl-!": ["zetta::OpenProfile", { "slot": 1 }],
-      "ctrl-@": ["zetta::OpenProfile", { "slot": 2 }],
-      "ctrl-#": ["zetta::OpenProfile", { "slot": 3 }],
-      "ctrl-$": ["zetta::OpenProfile", { "slot": 4 }],
-      "ctrl-%": ["zetta::OpenProfile", { "slot": 5 }],
-      "ctrl-^": ["zetta::OpenProfile", { "slot": 6 }],
-      "ctrl-&": ["zetta::OpenProfile", { "slot": 7 }],
-      "ctrl-*": ["zetta::OpenProfile", { "slot": 8 }],
-      "ctrl-(": ["zetta::OpenProfile", { "slot": 9 }]
+      "Ctrl+Shift+1": ["zetta::OpenProfile", { "slot": 1 }],
+      "Ctrl+Shift+2": ["zetta::OpenProfile", { "slot": 2 }],
+      "Ctrl+Shift+3": ["zetta::OpenProfile", { "slot": 3 }],
+      "Ctrl+Shift+4": ["zetta::OpenProfile", { "slot": 4 }],
+      "Ctrl+Shift+5": ["zetta::OpenProfile", { "slot": 5 }],
+      "Ctrl+Shift+6": ["zetta::OpenProfile", { "slot": 6 }],
+      "Ctrl+Shift+7": ["zetta::OpenProfile", { "slot": 7 }],
+      "Ctrl+Shift+8": ["zetta::OpenProfile", { "slot": 8 }],
+      "Ctrl+Shift+9": ["zetta::OpenProfile", { "slot": 9 }],
+      "Ctrl+Shift+0": ["zetta::OpenProfile", { "slot": 10 }]
     }
   },
   {

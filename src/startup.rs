@@ -23,6 +23,7 @@ use gpui::{Menu, MenuItem};
 use objc2::MainThreadMarker;
 #[cfg(target_os = "macos")]
 use objc2_app_kit::{NSApplication, NSEvent, NSEventMask, NSEventModifierFlags};
+use serde_json::Value;
 
 #[cfg(not(feature = "tftp-client"))]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1011,7 +1012,6 @@ pub(crate) fn profile_keybindings(
     slot: usize,
     keyboard_mapper: &dyn PlatformKeyboardMapper,
 ) -> [KeyBinding; 1] {
-    const SHIFTED_DIGITS: [&str; 9] = ["!", "@", "#", "$", "%", "^", "&", "*", "("];
     let action = OpenProfile { slot };
     let context = Some(
         KeyBindingContextPredicate::parse("Zetta > Terminal")
@@ -1030,9 +1030,58 @@ pub(crate) fn profile_keybindings(
         .expect("built-in profile keystroke must be valid")
     };
     [binding(
-        &format!("ctrl-{}", SHIFTED_DIGITS[slot - 1]),
+        &format!("ctrl-{}", PROFILE_SHORTCUT_SYMBOLS[slot - 1]),
         action,
     )]
+}
+
+pub(crate) const PROFILE_SHORTCUT_SYMBOLS: [&str; 10] =
+    ["!", "@", "#", "$", "%", "^", "&", "*", "(", ")"];
+pub(crate) const PROFILE_SHORTCUT_KEYS: [&str; 10] =
+    ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"];
+
+/// Converts GPUI's normalized number-row key names to the user-facing
+/// physical-key aliases used by menus and the keymap editor.
+pub(crate) fn keymap_keystroke_alias(keystroke: &str) -> Option<String> {
+    let keystroke = keystroke.trim().to_ascii_lowercase();
+    let key_index = keystroke
+        .strip_prefix("ctrl-shift-")
+        .and_then(|key| {
+            PROFILE_SHORTCUT_KEYS
+                .iter()
+                .position(|candidate| *candidate == key)
+        })
+        .or_else(|| {
+            keystroke.strip_prefix("ctrl-").and_then(|symbol| {
+                PROFILE_SHORTCUT_SYMBOLS
+                    .iter()
+                    .position(|candidate| *candidate == symbol)
+            })
+        })?;
+    Some(format!("Ctrl+Shift+{}", PROFILE_SHORTCUT_KEYS[key_index]))
+}
+
+/// Converts a user-facing number-row alias back to GPUI's normalized keymap
+/// spelling for storage and keymap loading.
+pub(crate) fn keymap_keystroke_storage(keystroke: &str) -> String {
+    let normalized = keystroke.trim().to_ascii_lowercase();
+    let key_index = normalized
+        .strip_prefix("ctrl+shift+")
+        .or_else(|| normalized.strip_prefix("ctrl-shift-"))
+        .and_then(|key| {
+            PROFILE_SHORTCUT_KEYS
+                .iter()
+                .position(|candidate| *candidate == key)
+        });
+    if let Some(key_index) = key_index {
+        return format!("ctrl-{}", PROFILE_SHORTCUT_SYMBOLS[key_index]);
+    }
+    keystroke.to_owned()
+}
+
+pub(crate) fn keymap_keystroke_display(keystroke: &str) -> String {
+    let storage = keymap_keystroke_storage(keystroke);
+    keymap_keystroke_alias(&storage).unwrap_or(storage)
 }
 
 /// Returns the user-facing alias for a built-in number-row profile shortcut.
@@ -1045,10 +1094,8 @@ pub(crate) fn profile_shortcut_label(
     binding: &KeyBinding,
     expected_binding: &KeyBinding,
 ) -> Option<String> {
-    if !(1..=9).contains(&slot) {
-        return None;
-    }
-    (binding.keystrokes() == expected_binding.keystrokes()).then(|| format!("Ctrl+Shift+{slot}"))
+    let key = PROFILE_SHORTCUT_KEYS.get(slot.checked_sub(1)?)?;
+    (binding.keystrokes() == expected_binding.keystrokes()).then(|| format!("Ctrl+Shift+{key}"))
 }
 
 pub(crate) fn pane_template_keybindings() -> [KeyBinding; 2] {
@@ -1635,9 +1682,34 @@ pub(crate) fn selected_theme_name(configured_theme: Option<&str>) -> &str {
 }
 
 pub(crate) fn normalize_keymap_key_names(content: &str) -> String {
-    content
+    let content = content
         .replace("page-up", "pageup")
-        .replace("page-down", "pagedown")
+        .replace("page-down", "pagedown");
+    let Ok(mut root) = serde_json::from_str::<Value>(&content) else {
+        return content;
+    };
+    let Some(sections) = root.as_array_mut() else {
+        return content;
+    };
+
+    let mut changed = false;
+    for section in sections {
+        let Some(bindings) = section.get_mut("bindings").and_then(Value::as_object_mut) else {
+            continue;
+        };
+        let entries = std::mem::take(bindings);
+        for (keystroke, action) in entries {
+            let normalized = keymap_keystroke_storage(&keystroke);
+            changed |= normalized != keystroke;
+            bindings.insert(normalized, action);
+        }
+    }
+
+    if changed {
+        serde_json::to_string(&root).unwrap_or(content)
+    } else {
+        content
+    }
 }
 
 pub(crate) fn validate_keymap_contents(content: &str, cx: &mut App) -> Result<()> {
@@ -2009,7 +2081,7 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
     bindings.extend(macos_keybindings());
     let keyboard_mapper = cx.keyboard_mapper().clone();
     bindings.extend(
-        (1..=profile_count.min(9))
+        (1..=profile_count.min(PROFILE_SHORTCUT_SYMBOLS.len()))
             .flat_map(|slot| profile_keybindings(slot, keyboard_mapper.as_ref())),
     );
     cx.bind_keys(bindings);

@@ -6,6 +6,7 @@ use serde_json::{Map, Value, json};
 use crate::config::{
     Config, NewTabProfile, PaneControlsPosition, WorkingDirectoryScope, profile_is_hidden,
 };
+use crate::startup::keymap_keystroke_display;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsPage {
@@ -492,7 +493,7 @@ impl KeymapForm {
                     .unwrap_or_default()
                     .into_iter()
                     .map(|(keystroke, action)| BindingForm {
-                        keystroke: TextField::new(keystroke),
+                        keystroke: TextField::new(keymap_keystroke_display(&keystroke)),
                         action,
                     })
                     .collect();
@@ -533,7 +534,12 @@ impl KeymapForm {
                         section
                             .bindings
                             .iter()
-                            .map(|binding| (binding.keystroke.text.clone(), binding.action.clone()))
+                            .map(|binding| {
+                                (
+                                    keymap_keystroke_display(&binding.keystroke.text),
+                                    binding.action.clone(),
+                                )
+                            })
                             .collect(),
                     ),
                 );

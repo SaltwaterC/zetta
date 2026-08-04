@@ -30,10 +30,10 @@ use dispatch2::DispatchQueue;
 use futures::channel::oneshot;
 use gpui::{
     Action, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, ForegroundExecutor,
-    KeyContext, Keymap, Menu, MenuItem, OsMenu, OwnedMenu, PathPromptOptions, Platform,
-    PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
-    PlatformWindow, Result, SystemMenuType, Task, ThermalState, WindowAppearance, WindowKind,
-    WindowParams, popup::PopupNotSupportedError,
+    KeyContext, KeybindingKeystroke, Keymap, Keystroke, Menu, MenuItem, OsMenu, OwnedMenu,
+    PathPromptOptions, Platform, PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper,
+    PlatformTextSystem, PlatformWindow, Result, SystemMenuType, Task, ThermalState,
+    WindowAppearance, WindowKind, WindowParams, popup::PopupNotSupportedError,
 };
 use gpui_util::{ResultExt, new_std_command};
 use itertools::Itertools;
@@ -71,6 +71,43 @@ const MAC_PLATFORM_IVAR: &str = "platform";
 const NS_NOTIFICATION_SUSPENSION_BEHAVIOR_DELIVER_IMMEDIATELY: NSUInteger = 4;
 static mut APP_CLASS: *const Class = ptr::null();
 static mut APP_DELEGATE_CLASS: *const Class = ptr::null();
+
+fn menu_action_keystrokes<'a>(
+    keymap: &'a Keymap,
+    action: &'a dyn Action,
+) -> Option<&'a [KeybindingKeystroke]> {
+    static DEFAULT_CONTEXT: OnceLock<Vec<KeyContext>> = OnceLock::new();
+
+    keymap
+        .bindings_for_action(action)
+        .find_or_first(|binding| {
+            binding.predicate().is_none_or(|predicate| {
+                predicate.eval(DEFAULT_CONTEXT.get_or_init(|| {
+                    let mut workspace_context = KeyContext::new_with_defaults();
+                    workspace_context.add("Workspace");
+                    let mut pane_context = KeyContext::new_with_defaults();
+                    pane_context.add("Pane");
+                    let mut editor_context = KeyContext::new_with_defaults();
+                    editor_context.add("Editor");
+
+                    pane_context.extend(&editor_context);
+                    workspace_context.extend(&pane_context);
+                    vec![workspace_context]
+                }))
+            })
+        })
+        .map(|binding| binding.keystrokes())
+}
+
+fn profile_menu_alias_keystroke(
+    slot: usize,
+    keyboard_mapper: &dyn PlatformKeyboardMapper,
+) -> KeybindingKeystroke {
+    const SHIFTED_DIGITS: [&str; 10] = ["!", "@", "#", "$", "%", "^", "&", "*", "(", ")"];
+    let keystroke = Keystroke::parse(&format!("ctrl-{}", SHIFTED_DIGITS[slot - 1]))
+        .expect("profile shortcut alias must be a valid keystroke");
+    KeybindingKeystroke::new_with_mapper(keystroke, true, keyboard_mapper)
+}
 
 #[ctor(unsafe)]
 unsafe fn build_classes() {
@@ -308,12 +345,24 @@ impl MacPlatform {
                 menu.setDelegate_(delegate);
 
                 for (item_index, item_config) in menu_config.items.iter().enumerate() {
-                    let item = Self::create_menu_item(item_config, delegate, actions, keymap);
-                    if menu_config.name == "Profile"
-                        && item_index < 9
-                        && matches!(item_config, MenuItem::Action { .. })
+                    let use_profile_alias = if menu_config.name == "Profile"
+                        && item_index < 10
+                        && let MenuItem::Action { action, .. } = item_config
                     {
-                        let key_equivalent = (item_index + 1).to_string();
+                        let expected = profile_menu_alias_keystroke(
+                            item_index + 1,
+                            self.keyboard_mapper.as_ref(),
+                        );
+                        menu_action_keystrokes(keymap, action.as_ref()).is_some_and(|keystrokes| {
+                            keystrokes.len() == 1 && keystrokes[0] == expected
+                        })
+                    } else {
+                        false
+                    };
+                    let item = Self::create_menu_item(item_config, delegate, actions, keymap);
+                    if use_profile_alias {
+                        let key_equivalent =
+                            ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"][item_index];
                         let modifier_mask = NSEventModifierFlags::NSControlKeyMask
                             | NSEventModifierFlags::NSShiftKeyMask;
                         let _: () = msg_send![
@@ -372,8 +421,6 @@ impl MacPlatform {
         actions: &mut Vec<Box<dyn Action>>,
         keymap: &Keymap,
     ) -> id {
-        static DEFAULT_CONTEXT: OnceLock<Vec<KeyContext>> = OnceLock::new();
-
         unsafe {
             match item {
                 MenuItem::Separator => NSMenuItem::separatorItem(nil),
@@ -387,25 +434,7 @@ impl MacPlatform {
                     // Note that this is intentionally using earlier bindings, whereas typically
                     // later ones take display precedence. See the discussion on
                     // https://github.com/zed-industries/zed/issues/23621
-                    let keystrokes = keymap
-                        .bindings_for_action(action.as_ref())
-                        .find_or_first(|binding| {
-                            binding.predicate().is_none_or(|predicate| {
-                                predicate.eval(DEFAULT_CONTEXT.get_or_init(|| {
-                                    let mut workspace_context = KeyContext::new_with_defaults();
-                                    workspace_context.add("Workspace");
-                                    let mut pane_context = KeyContext::new_with_defaults();
-                                    pane_context.add("Pane");
-                                    let mut editor_context = KeyContext::new_with_defaults();
-                                    editor_context.add("Editor");
-
-                                    pane_context.extend(&editor_context);
-                                    workspace_context.extend(&pane_context);
-                                    vec![workspace_context]
-                                }))
-                            })
-                        })
-                        .map(|binding| binding.keystrokes());
+                    let keystrokes = menu_action_keystrokes(keymap, action.as_ref());
 
                     let selector = match os_action {
                         Some(gpui::OsAction::Cut) => selector("cut:"),

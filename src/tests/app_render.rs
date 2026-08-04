@@ -72,3 +72,15 @@ fn profile_shortcut_alias_uses_unmapped_number_row_modifiers() {
     assert!(inner.modifiers.shift);
     assert!(!inner.modifiers.platform);
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn tenth_profile_shortcut_alias_uses_zero() {
+    let keystroke = profile_shortcut_alias_keystroke(10);
+    let inner = keystroke.inner();
+
+    assert_eq!(inner.key, "0");
+    assert!(inner.modifiers.control);
+    assert!(inner.modifiers.shift);
+    assert!(!inner.modifiers.platform);
+}

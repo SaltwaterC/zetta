@@ -156,10 +156,18 @@ defaults. Key names accept both `pageup`/`pagedown` and the common
 `page-up`/`page-down` spellings. See [Using Zetta](usage.md) for the complete
 default shortcut table.
 
-GPUI represents shifted number-row keys by their US ASCII symbols. Use
-`ctrl-!`, `ctrl-@`, through `ctrl-(` in custom keymaps and set
+The Settings > Keymap editor and keymap JSON use physical-key aliases:
+`Ctrl+Shift+1` through `Ctrl+Shift+9`, plus `Ctrl+Shift+0` for profile 10. The
+recorder produces the aliases too, so the display and examples stay stable
+across keyboard layouts. Older normalized key names remain accepted for
+backward compatibility, but are not written by the editor. Set
 `"use_key_equivalents": true` on that keymap section, as demonstrated in
 `keymap.example.json`.
+
+These aliases refer to the number-row key position, not the character printed
+by the active layout. For example, on a British layout `Ctrl+Shift+3` may type
+`£`, while the alias remains `Ctrl+Shift+3` and the shortcut still opens profile
+3.
 
 Zetta normalizes these physical keys on Linux so the shortcuts work with
 layouts whose shifted characters differ. On Windows and macOS, shortcuts
