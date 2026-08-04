@@ -828,6 +828,9 @@ impl Render for Zetta {
             .flex()
             .items_center()
             .bg(colors.tab_bar_background)
+            .when(compact_mode && rounded_top_right, |tab_bar| {
+                tab_bar.rounded_tr(bottom_corner_radius)
+            })
             .when(!compact_mode, |tab_bar| {
                 tab_bar
                     .border_t_1()
