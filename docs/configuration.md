@@ -33,6 +33,14 @@ percentage slider. Settings and font lists have independent scrollbars, and new
 profiles are created in a labeled modal. Key bindings are grouped by context
 with action dropdowns.
 
+All configuration dropdowns support fuzzy type-to-search. Open a dropdown and
+type letters to filter its entries; matching is case-insensitive and supports
+subsequences, so `ond` can find `One Dark`. The query stays visible above the
+scrollable results, while the selected match is scrolled into view. Use
+Backspace to revise the query, the arrow keys to move among matches, and
+Enter or Space to select an entry. Escape or Tab closes the dropdown, and a
+query with no matches leaves the current value unchanged.
+
 Saving validates the active page, persists and applies it without restarting,
 closes the dialog, and returns focus to the terminal. Invalid settings or
 bindings are reported without replacing the existing file. Custom `--config`

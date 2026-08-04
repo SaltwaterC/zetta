@@ -107,6 +107,7 @@ pub(crate) struct SettingsEditor {
     pub(crate) focused_control: Option<SettingsControl>,
     pub(crate) open_dropdown: Option<SettingsDropdown>,
     pub(crate) dropdown_index: usize,
+    pub(crate) dropdown_query: String,
     pub(crate) configuration_dirty: bool,
     pub(crate) keymap_dirty: bool,
     pub(crate) message: Option<(bool, String)>,
@@ -128,6 +129,69 @@ pub(crate) fn matching_font_indices(normalized_fonts: &[String], query: &str) ->
         .filter_map(|(index, font)| (search.is_empty() || font.contains(&search)).then_some(index))
         .collect::<Vec<_>>()
         .into()
+}
+
+fn fuzzy_score(candidate: &str, query: &str) -> Option<i32> {
+    let candidate = candidate.to_lowercase();
+    let query = query.to_lowercase();
+    if query.is_empty() {
+        return Some(0);
+    }
+
+    let mut characters = query.chars();
+    let mut wanted = characters.next()?;
+    let mut score = 0;
+    let mut previous_match = None;
+    for (index, character) in candidate.char_indices() {
+        if character != wanted {
+            continue;
+        }
+        score += 10;
+        if previous_match.is_some_and(|previous| previous + character.len_utf8() == index) {
+            score += 8;
+        }
+        if index == 0
+            || candidate[..index]
+                .chars()
+                .next_back()
+                .is_some_and(|previous| matches!(previous, ' ' | ':' | '_' | '-'))
+        {
+            score += 5;
+        }
+        previous_match = Some(index);
+        match characters.next() {
+            Some(next) => wanted = next,
+            None => return Some(score - candidate.len() as i32 / 8),
+        }
+    }
+    None
+}
+
+fn fuzzy_match_index(options: &[String], query: &str) -> Option<usize> {
+    if query.is_empty() {
+        return (!options.is_empty()).then_some(0);
+    }
+    options
+        .iter()
+        .enumerate()
+        .filter_map(|(index, option)| fuzzy_score(option, query).map(|score| (index, score)))
+        .max_by(|(left_index, left_score), (right_index, right_score)| {
+            left_score
+                .cmp(right_score)
+                .then_with(|| right_index.cmp(left_index))
+        })
+        .map(|(index, _)| index)
+}
+
+pub(crate) fn fuzzy_match_indices(options: &[String], query: &str) -> Vec<usize> {
+    if query.is_empty() {
+        return (0..options.len()).collect();
+    }
+    options
+        .iter()
+        .enumerate()
+        .filter_map(|(index, option)| fuzzy_score(option, query).map(|_| index))
+        .collect()
 }
 
 pub(crate) fn adjusted_scroll_history(current: u64, direction: i32, maximum: u64) -> u64 {
@@ -288,6 +352,7 @@ impl Zetta {
             focused_control: Some(SettingsControl::Tab(SettingsPage::Configuration)),
             open_dropdown: None,
             dropdown_index: 0,
+            dropdown_query: String::new(),
             configuration_dirty: false,
             keymap_dirty: false,
             message: None,
@@ -572,6 +637,7 @@ impl Zetta {
             editor.focused_input = None;
             editor.focused_control = Some(SettingsControl::Tab(page));
             editor.open_dropdown = None;
+            editor.dropdown_query.clear();
             editor.font_query = None;
             editor.profile_draft = None;
             editor.numeric_repeat_generation = editor.numeric_repeat_generation.wrapping_add(1);
@@ -622,6 +688,7 @@ impl Zetta {
         editor.focused_input = Some(input);
         editor.focused_control = Some(SettingsControl::Input(input));
         editor.open_dropdown = None;
+        editor.dropdown_query.clear();
         let field = match input {
             SettingsInput::Configuration(field) => editor.configuration.text_mut(field),
             SettingsInput::Keymap(field) => editor.keymap.text_mut(field),
@@ -978,6 +1045,7 @@ impl Zetta {
             .iter()
             .position(|option| option == &selected)
             .unwrap_or(0);
+        editor.dropdown_query.clear();
         editor.dropdown_scroll.scroll_to_item(editor.dropdown_index);
         editor.open_dropdown = Some(dropdown);
         cx.notify();
@@ -991,18 +1059,59 @@ impl Zetta {
             return false;
         };
         let (_, options) = Self::settings_dropdown_options(editor, dropdown);
-        if options.is_empty() {
+        let matching_indices = fuzzy_match_indices(&options, &editor.dropdown_query);
+        if matching_indices.is_empty() {
             return false;
         }
-        editor.dropdown_index = if direction < 0 {
-            editor
-                .dropdown_index
-                .checked_sub(1)
-                .unwrap_or(options.len() - 1)
+        let current = matching_indices
+            .iter()
+            .position(|index| *index == editor.dropdown_index)
+            .unwrap_or(0);
+        let next = if direction < 0 {
+            current.checked_sub(1).unwrap_or(matching_indices.len() - 1)
         } else {
-            (editor.dropdown_index + 1) % options.len()
+            (current + 1) % matching_indices.len()
         };
+        editor.dropdown_index = matching_indices[next];
         editor.dropdown_scroll.scroll_to_item(editor.dropdown_index);
+        cx.notify();
+        true
+    }
+
+    fn type_into_open_settings_dropdown(
+        &mut self,
+        event: &KeyDownEvent,
+        command: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(editor) = self.settings_editor.as_mut() else {
+            return false;
+        };
+        let Some(dropdown) = editor.open_dropdown else {
+            return false;
+        };
+
+        let changed = if event.keystroke.key == "backspace" {
+            editor.dropdown_query.pop().is_some()
+        } else if !command
+            && !event.keystroke.modifiers.alt
+            && let Some(text) = event.keystroke.key_char.as_ref()
+            && !text.chars().any(char::is_control)
+        {
+            editor.dropdown_query.push_str(text);
+            true
+        } else {
+            false
+        };
+        if !changed {
+            return false;
+        }
+
+        let (_, options) = Self::settings_dropdown_options(editor, dropdown);
+        if let Some(index) = fuzzy_match_index(&options, &editor.dropdown_query) {
+            editor.dropdown_index = index;
+            editor.dropdown_scroll.scroll_to_item(index);
+        }
         cx.notify();
         true
     }
@@ -1011,6 +1120,12 @@ impl Zetta {
         let Some((dropdown, value)) = self.settings_editor.as_mut().and_then(|editor| {
             let dropdown = editor.open_dropdown.take()?;
             let (_, options) = Self::settings_dropdown_options(editor, dropdown);
+            if !editor.dropdown_query.is_empty()
+                && fuzzy_match_indices(&options, &editor.dropdown_query).is_empty()
+            {
+                editor.open_dropdown = Some(dropdown);
+                return None;
+            }
             options
                 .get(editor.dropdown_index)
                 .cloned()
@@ -1187,6 +1302,7 @@ impl Zetta {
             return;
         };
         editor.open_dropdown = None;
+        editor.dropdown_query.clear();
         let Some(input) = editor.focused_input else {
             return;
         };
@@ -1253,6 +1369,7 @@ impl Zetta {
             return;
         };
         editor.open_dropdown = None;
+        editor.dropdown_query.clear();
         match dropdown {
             SettingsDropdown::DefaultProfile => {
                 editor.configuration.default_profile = value;
@@ -1584,6 +1701,7 @@ impl Zetta {
                 "escape" => {
                     if let Some(editor) = self.settings_editor.as_mut() {
                         editor.open_dropdown = None;
+                        editor.dropdown_query.clear();
                         cx.notify();
                     }
                 }
@@ -1602,15 +1720,25 @@ impl Zetta {
                 "enter" | "space" => {
                     self.commit_open_settings_dropdown(cx);
                 }
+                "backspace" => {
+                    self.type_into_open_settings_dropdown(event, command, cx);
+                }
                 "tab" => {
                     if let Some(editor) = self.settings_editor.as_mut() {
                         editor.open_dropdown = None;
+                        editor.dropdown_query.clear();
                     }
                     self.focus_adjacent_settings_control(
                         event.keystroke.modifiers.shift,
                         window,
                         cx,
                     );
+                }
+                _ if !command
+                    && !event.keystroke.modifiers.alt
+                    && event.keystroke.key_char.is_some() =>
+                {
+                    self.type_into_open_settings_dropdown(event, command, cx);
                 }
                 _ => {
                     cx.stop_propagation();

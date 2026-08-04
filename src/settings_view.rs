@@ -168,6 +168,12 @@ impl Zetta {
             let focused = editor.focused_control == Some(SettingsControl::Dropdown(selection));
             let open = editor.open_dropdown == Some(selection);
             let active_index = editor.dropdown_index.min(options.len().saturating_sub(1));
+            let dropdown_query = editor.dropdown_query.clone();
+            let matching_indices = (!dropdown_query.is_empty())
+                .then(|| fuzzy_match_indices(&options, &dropdown_query));
+            let no_matches = matching_indices
+                .as_ref()
+                .is_some_and(|indices| indices.is_empty());
             let trigger = ButtonLike::new(id.clone())
                 .style(ButtonStyle::Outlined)
                 .toggle_state(focused)
@@ -193,35 +199,46 @@ impl Zetta {
                         .ok();
                 });
             let option_handle = handle.clone();
-            let option_rows = options
-                .iter()
-                .enumerate()
-                .map(|(index, option)| {
-                    let value = option.clone();
-                    let selected = index == active_index;
-                    let handle = option_handle.clone();
-                    div()
-                        .id(format!("{id}-option-{index}"))
-                        .px_2()
-                        .py_1()
-                        .rounded(px(3.))
-                        .cursor_pointer()
-                        .when(selected, |row| row.bg(colors.element_selected))
-                        .hover(|style| style.bg(colors.element_hover))
-                        .child(option.clone())
-                        .on_click(move |_, _, cx| {
-                            handle
-                                .update(cx, |this, cx| {
-                                    this.set_settings_dropdown(selection, value.clone(), cx);
-                                    if let Some(editor) = this.settings_editor.as_mut() {
-                                        editor.open_dropdown = None;
-                                    }
-                                    cx.notify();
-                                })
-                                .ok();
-                        })
+            let option_row = |index: usize, option: &String| {
+                let value = option.clone();
+                let selected = index == active_index;
+                let handle = option_handle.clone();
+                div()
+                    .id(format!("{id}-option-{index}"))
+                    .px_2()
+                    .py_1()
+                    .rounded(px(3.))
+                    .cursor_pointer()
+                    .when(selected, |row| row.bg(colors.element_selected))
+                    .hover(|style| style.bg(colors.element_hover))
+                    .child(value.clone())
+                    .on_click(move |_, _, cx| {
+                        handle
+                            .update(cx, |this, cx| {
+                                this.set_settings_dropdown(selection, value.clone(), cx);
+                                if let Some(editor) = this.settings_editor.as_mut() {
+                                    editor.open_dropdown = None;
+                                }
+                                cx.notify();
+                            })
+                            .ok();
+                    })
+            };
+            let option_rows = matching_indices
+                .as_ref()
+                .map(|indices| {
+                    indices
+                        .iter()
+                        .map(|index| option_row(*index, &options[*index]))
+                        .collect::<Vec<_>>()
                 })
-                .collect::<Vec<_>>();
+                .unwrap_or_else(|| {
+                    options
+                        .iter()
+                        .enumerate()
+                        .map(|(index, option)| option_row(index, option))
+                        .collect::<Vec<_>>()
+                });
             div()
                 .relative()
                 .flex()
@@ -232,16 +249,40 @@ impl Zetta {
                         div()
                             .id(format!("{id}-options"))
                             .mt_1()
-                            .max_h(px(260.))
-                            .overflow_y_scroll()
-                            .track_scroll(&editor.dropdown_scroll)
-                            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                            .p_1()
                             .rounded(px(4.))
                             .border_1()
                             .border_color(colors.border_focused)
                             .bg(colors.elevated_surface_background)
-                            .children(option_rows),
+                            .overflow_hidden()
+                            .when(!dropdown_query.is_empty(), |menu| {
+                                menu.child(
+                                    div()
+                                        .px_2()
+                                        .py_1()
+                                        .text_xs()
+                                        .text_color(colors.text_muted)
+                                        .child(format!("Search: {dropdown_query}")),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .id(format!("{id}-options-list"))
+                                    .max_h(px(260.))
+                                    .overflow_y_scroll()
+                                    .track_scroll(&editor.dropdown_scroll)
+                                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                                    .p_1()
+                                    .when(no_matches, |list| {
+                                        list.child(
+                                            div()
+                                                .px_2()
+                                                .py_1()
+                                                .text_color(colors.text_muted)
+                                                .child("No matches"),
+                                        )
+                                    })
+                                    .children(option_rows),
+                            ),
                     )
                 })
                 .into_any_element()
