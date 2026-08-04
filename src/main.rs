@@ -54,15 +54,16 @@ use config::{
 };
 use futures::StreamExt as _;
 use gpui::{
-    Action, Anchor, AnyElement, App, AppContext as _, Bounds, Context, CursorStyle, Decorations,
-    DismissEvent, Entity, Focusable, FrameTiming, FrameTimingCollector, Global, HitboxBehavior,
-    InteractiveElement as _, IntoElement, KeyBinding, KeyBindingContextPredicate, KeyDownEvent,
-    KeyUpEvent, ListSizingBehavior, MAX_BUTTONS_PER_SIDE, MouseButton, Pixels,
-    PlatformKeyboardMapper, Point, Render, ResizeEdge, ScrollHandle, SharedString, Size,
-    Subscription, Task, Tiling, TitlebarOptions, UniformListScrollHandle, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowButton, WindowButtonLayout, WindowControlArea,
-    WindowControls, WindowDecorations, WindowId, WindowOptions, actions, canvas, container_query,
-    div, point, profiler, px, size, svg, transparent_black, uniform_list,
+    Action, Anchor, AnchoredPositionMode, AnyElement, App, AppContext as _, Bounds, Context,
+    CursorStyle, Decorations, DismissEvent, Entity, Focusable, FrameTiming, FrameTimingCollector,
+    Global, HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding,
+    KeyBindingContextPredicate, KeyDownEvent, KeyUpEvent, ListSizingBehavior, MAX_BUTTONS_PER_SIDE,
+    MouseButton, Pixels, PlatformKeyboardMapper, Point, Render, ResizeEdge, ScrollHandle,
+    SharedString, Size, Subscription, Task, Tiling, TitlebarOptions, UniformListScrollHandle,
+    Window, WindowBackgroundAppearance, WindowBounds, WindowButton, WindowButtonLayout,
+    WindowControlArea, WindowControls, WindowDecorations, WindowId, WindowOptions, actions,
+    anchored, canvas, container_query, deferred, div, point, profiler, px, size, svg,
+    transparent_black, uniform_list,
 };
 use process_control::{
     ProcessControlCommand, ProcessControlServer, ReconnectSessionResult,

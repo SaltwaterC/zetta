@@ -189,7 +189,7 @@ impl Zetta {
                 .on_click(move |_, window, cx| {
                     menu_handle
                         .update(cx, |this, cx| {
-                            this.focus_settings_control(
+                            this.focus_settings_control_without_scroll(
                                 SettingsControl::Dropdown(selection),
                                 window,
                                 cx,
@@ -246,43 +246,52 @@ impl Zetta {
                 .child(trigger)
                 .when(open, |dropdown| {
                     dropdown.child(
-                        div()
-                            .id(format!("{id}-options"))
-                            .mt_1()
-                            .rounded(px(4.))
-                            .border_1()
-                            .border_color(colors.border_focused)
-                            .bg(colors.elevated_surface_background)
-                            .overflow_hidden()
-                            .when(!dropdown_query.is_empty(), |menu| {
-                                menu.child(
+                        deferred(
+                            anchored()
+                                .position_mode(AnchoredPositionMode::Local)
+                                .position(point(px(0.), px(40.)))
+                                .snap_to_window_with_margin(px(8.))
+                                .child(
                                     div()
-                                        .px_2()
-                                        .py_1()
-                                        .text_xs()
-                                        .text_color(colors.text_muted)
-                                        .child(format!("Search: {dropdown_query}")),
-                                )
-                            })
-                            .child(
-                                div()
-                                    .id(format!("{id}-options-list"))
-                                    .max_h(px(260.))
-                                    .overflow_y_scroll()
-                                    .track_scroll(&editor.dropdown_scroll)
-                                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                                    .p_1()
-                                    .when(no_matches, |list| {
-                                        list.child(
+                                        .id(format!("{id}-options"))
+                                        .min_w(px(180.))
+                                        .rounded(px(4.))
+                                        .border_1()
+                                        .border_color(colors.border_focused)
+                                        .bg(colors.elevated_surface_background)
+                                        .overflow_hidden()
+                                        .when(!dropdown_query.is_empty(), |menu| {
+                                            menu.child(
+                                                div()
+                                                    .px_2()
+                                                    .py_1()
+                                                    .text_xs()
+                                                    .text_color(colors.text_muted)
+                                                    .child(format!("Search: {dropdown_query}")),
+                                            )
+                                        })
+                                        .child(
                                             div()
-                                                .px_2()
-                                                .py_1()
-                                                .text_color(colors.text_muted)
-                                                .child("No matches"),
-                                        )
-                                    })
-                                    .children(option_rows),
-                            ),
+                                                .id(format!("{id}-options-list"))
+                                                .max_h(px(260.))
+                                                .overflow_y_scroll()
+                                                .track_scroll(&editor.dropdown_scroll)
+                                                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                                                .p_1()
+                                                .when(no_matches, |list| {
+                                                    list.child(
+                                                        div()
+                                                            .px_2()
+                                                            .py_1()
+                                                            .text_color(colors.text_muted)
+                                                            .child("No matches"),
+                                                    )
+                                                })
+                                                .children(option_rows),
+                                        ),
+                                ),
+                        )
+                        .with_priority(1),
                     )
                 })
                 .into_any_element()

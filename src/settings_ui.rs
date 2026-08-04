@@ -887,6 +887,25 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.focus_settings_control_with_scroll(control, window, cx, true);
+    }
+
+    pub(crate) fn focus_settings_control_without_scroll(
+        &mut self,
+        control: SettingsControl,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus_settings_control_with_scroll(control, window, cx, false);
+    }
+
+    fn focus_settings_control_with_scroll(
+        &mut self,
+        control: SettingsControl,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        scroll: bool,
+    ) {
         if let SettingsControl::Input(input) = control {
             self.focus_settings_input(input, window, cx);
             return;
@@ -895,7 +914,9 @@ impl Zetta {
             editor.focused_input = None;
             editor.focused_control = Some(control.clone());
         }
-        self.scroll_settings_control_into_view(&control);
+        if scroll {
+            self.scroll_settings_control_into_view(&control);
+        }
         self.settings_focus.focus(window, cx);
         cx.notify();
     }
