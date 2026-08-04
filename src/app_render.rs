@@ -1433,60 +1433,71 @@ impl Render for Zetta {
             let query_empty = palette.query.is_empty();
             let query_selected = palette.select_all;
             let matches = palette.matches();
-            let selected = palette.selected;
             let result_count = matches.len();
-            let visible_start = selected.saturating_sub(9);
-            let rows = matches
-                .iter()
-                .copied()
-                .skip(visible_start)
-                .take(10)
-                .enumerate()
-                .map(|(position, command_index)| {
-                    let command = &palette.commands[command_index];
-                    let row_handle = handle.clone();
-                    div()
-                        .id(("command-palette-row", command_index))
-                        .h_9()
-                        .w_full()
-                        .px_3()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_3()
-                        .cursor_pointer()
-                        .text_sm()
-                        .text_color(colors.text)
-                        .when(visible_start + position == selected, |row| {
-                            row.bg(colors.element_selected)
-                        })
-                        .hover(|style| style.bg(colors.element_hover))
-                        .on_click(move |_, window, cx| {
-                            row_handle
-                                .update(cx, |this, cx| {
-                                    this.run_palette_command(command_index, window, cx)
-                                })
-                                .ok();
-                        })
-                        .child(
+            let row_handle = handle.clone();
+            let row_colors = colors.clone();
+            let rows = uniform_list(
+                "command-palette-list",
+                result_count,
+                cx.processor(move |this, range: std::ops::Range<usize>, _, _| {
+                    let Some(palette) = this.command_palette.as_ref() else {
+                        return Vec::new();
+                    };
+                    range
+                        .map(|position| {
+                            let command_index = palette.matches()[position];
+                            let command = &palette.commands[command_index];
+                            let command_name = command.name.clone();
+                            let shortcut = command.shortcut.clone();
+                            let row_handle = row_handle.clone();
                             div()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .child(command.name.clone()),
-                        )
-                        .when_some(command.shortcut.clone(), |row, shortcut| {
-                            row.child(
-                                div()
-                                    .flex_none()
-                                    .text_xs()
-                                    .text_color(colors.text_muted)
-                                    .child(shortcut),
-                            )
+                                .id(("command-palette-row", command_index))
+                                .h_9()
+                                .w_full()
+                                .px_3()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_3()
+                                .cursor_pointer()
+                                .text_sm()
+                                .text_color(row_colors.text)
+                                .when(position == palette.selected, |row| {
+                                    row.bg(row_colors.element_selected)
+                                })
+                                .hover(|style| style.bg(row_colors.element_hover))
+                                .on_click(move |_, window, cx| {
+                                    row_handle
+                                        .update(cx, |this, cx| {
+                                            this.run_palette_command(command_index, window, cx)
+                                        })
+                                        .ok();
+                                })
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .child(command_name),
+                                )
+                                .when_some(shortcut, |row, shortcut| {
+                                    row.child(
+                                        div()
+                                            .flex_none()
+                                            .text_xs()
+                                            .text_color(row_colors.text_muted)
+                                            .child(shortcut),
+                                    )
+                                })
                         })
-                })
-                .collect::<Vec<_>>();
+                        .collect()
+                }),
+            )
+            .with_sizing_behavior(ListSizingBehavior::Infer)
+            .max_h(px(360.))
+            .track_scroll(&palette.scroll)
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation());
             let dismiss_handle = handle.clone();
 
             div()
@@ -1570,7 +1581,7 @@ impl Render for Zetta {
                                             .child("No matching commands"),
                                     )
                                 })
-                                .children(rows),
+                                .when(result_count > 0, |list| list.child(rows)),
                         )
                         .child(
                             div()

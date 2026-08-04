@@ -133,11 +133,13 @@ impl Zetta {
             "escape" => self.dismiss_command_palette(window, cx),
             "up" => {
                 palette.selected = palette.selected.saturating_sub(1);
+                palette.scroll_to_selected();
                 cx.notify();
             }
             "down" => {
                 palette.selected =
                     (palette.selected + 1).min(palette.matches().len().saturating_sub(1));
+                palette.scroll_to_selected();
                 cx.notify();
             }
             "enter" => {
@@ -159,6 +161,7 @@ impl Zetta {
                 }
                 palette.select_all = false;
                 palette.selected = 0;
+                palette.scroll_to_selected();
                 cx.notify();
             }
             "delete" => {
@@ -173,6 +176,7 @@ impl Zetta {
                 }
                 palette.select_all = false;
                 palette.selected = 0;
+                palette.scroll_to_selected();
                 cx.notify();
             }
             "left" => {
@@ -221,6 +225,7 @@ impl Zetta {
                     palette.cursor += text.len();
                     palette.refresh_matches();
                     palette.selected = 0;
+                    palette.scroll_to_selected();
                     cx.notify();
                 }
             }

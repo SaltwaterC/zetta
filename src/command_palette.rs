@@ -1,4 +1,4 @@
-use gpui::Action;
+use gpui::{Action, ScrollStrategy, UniformListScrollHandle};
 
 pub struct PaletteCommand {
     pub name: String,
@@ -12,6 +12,7 @@ pub struct CommandPalette {
     pub select_all: bool,
     pub selected: usize,
     pub commands: Vec<PaletteCommand>,
+    pub scroll: UniformListScrollHandle,
     normalized_names: Vec<String>,
     matches: Vec<usize>,
 }
@@ -31,6 +32,7 @@ impl CommandPalette {
             cursor: 0,
             selected: 0,
             commands,
+            scroll: UniformListScrollHandle::new(),
             normalized_names,
             matches,
         }
@@ -38,6 +40,13 @@ impl CommandPalette {
 
     pub fn matches(&self) -> &[usize] {
         &self.matches
+    }
+
+    pub fn scroll_to_selected(&self) {
+        if !self.matches.is_empty() {
+            self.scroll
+                .scroll_to_item(self.selected, ScrollStrategy::Nearest);
+        }
     }
 
     pub fn refresh_matches(&mut self) {
