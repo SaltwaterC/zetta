@@ -48,7 +48,10 @@ use background_sessions::{
     print_session_catalogs,
 };
 use command_palette::{CommandPalette, PaletteCommand, humanize_action_name};
-use config::{Config, PaneControlsPosition, PaneSplitAxis, PaneSplitTemplate, Profile};
+use config::{
+    Config, PaneControlsPosition, PaneSplitAxis, PaneSplitTemplate, Profile, profile_is_hidden,
+    visible_profile_count, visible_profile_index,
+};
 use futures::StreamExt as _;
 use gpui::{
     Action, Anchor, AnyElement, App, AppContext as _, Bounds, Context, CursorStyle, Decorations,

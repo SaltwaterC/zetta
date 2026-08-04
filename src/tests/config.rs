@@ -316,6 +316,7 @@ fn configured_profiles_extend_detected_profiles() {
             name: "Login Zsh".to_owned(),
             command: Some(Shell::Program("/bin/zsh".to_owned())),
             theme: None,
+            hidden: None,
         }],
     )
     .unwrap();
@@ -349,6 +350,7 @@ fn configured_profiles_override_detected_profiles_by_name() {
                 title_override: Some("zsh".to_owned()),
             }),
             theme: Some("Solarized Dark".to_owned()),
+            hidden: None,
         }],
     )
     .unwrap();
@@ -378,6 +380,67 @@ fn profile_theme_override_does_not_require_a_program() {
 
     assert!(matches!(profiles[0].command, Shell::Program(ref program) if program == "zsh"));
     assert_eq!(profiles[0].theme.as_deref(), Some("Solarized Dark"));
+}
+
+#[test]
+fn configured_profiles_can_hide_detected_profiles_by_name() {
+    let config = Config::parse(
+        r#"{
+            "profiles": [
+                { "name": "system", "hidden": true }
+            ]
+        }"#,
+        None,
+        None,
+    )
+    .unwrap();
+
+    assert!(profile_is_hidden(
+        &config.profiles[0],
+        &config.hidden_profiles
+    ));
+}
+
+#[test]
+fn hidden_profiles_do_not_consume_visible_profile_slots() {
+    let profiles = vec![
+        Profile {
+            name: "System".to_owned(),
+            command: Shell::System,
+            theme: None,
+        },
+        Profile {
+            name: "Hidden".to_owned(),
+            command: Shell::Program("hidden-shell".to_owned()),
+            theme: None,
+        },
+        Profile {
+            name: "Visible".to_owned(),
+            command: Shell::Program("visible-shell".to_owned()),
+            theme: None,
+        },
+    ];
+    let hidden = HashSet::from(["hidden".to_owned()]);
+
+    assert_eq!(visible_profile_count(&profiles, &hidden), 2);
+    assert_eq!(visible_profile_index(&profiles, &hidden, 1), Some(0));
+    assert_eq!(visible_profile_index(&profiles, &hidden, 2), Some(2));
+    assert_eq!(visible_profile_index(&profiles, &hidden, 3), None);
+}
+
+#[test]
+fn profile_hidden_must_be_boolean() {
+    let error = Config::parse(
+        r#"{"profiles":[{"name":"System","hidden":"yes"}]}"#,
+        None,
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("profile.hidden must be a boolean")
+    );
 }
 
 #[test]

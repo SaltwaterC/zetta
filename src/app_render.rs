@@ -435,6 +435,7 @@ impl Render for Zetta {
             .and_then(|pane| pane.view.as_ref())
             .map(|view| view.focus_handle(cx));
         let profile_menu_profiles = self.profiles.clone();
+        let hidden_profiles = self.launch_config.hidden_profiles.clone();
         let default_profile = self.launch_config.default_profile;
         let profile_menu_handle = handle.clone();
         let profile_menu_dismiss_handle = handle.clone();
@@ -460,17 +461,23 @@ impl Render for Zetta {
             .anchor(Anchor::TopRight)
             .menu(move |window, cx| {
                 let profiles = profile_menu_profiles.clone();
+                let hidden_profiles = hidden_profiles.clone();
                 let handle = profile_menu_handle.clone();
                 let dismiss_handle = profile_menu_dismiss_handle.clone();
                 let terminal_focus = profile_menu_terminal_focus.clone();
                 let keyboard_mapper = profile_menu_keyboard_mapper.clone();
                 let menu = ui::ContextMenu::build(window, cx, move |mut menu, window, _| {
-                    for (index, profile) in profiles.iter().enumerate() {
+                    for (visible_index, (index, profile)) in profiles
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, profile)| !profile_is_hidden(profile, &hidden_profiles))
+                        .enumerate()
+                    {
                         let is_default = index == default_profile;
                         let label = profile.name.clone();
                         let label_for_row = label.clone();
                         let shortcut = profile_menu_shortcut(
-                            index + 1,
+                            visible_index + 1,
                             terminal_focus.as_ref(),
                             window,
                             keyboard_mapper.as_ref(),

@@ -141,6 +141,33 @@ fn configuration_form_round_trip_uses_typed_values_and_profiles() {
     assert_eq!(output["profiles"][0]["args"], json!(["-l", "-i"]));
 }
 
+#[test]
+fn configuration_form_round_trip_preserves_hidden_detected_profiles() {
+    let root = std::env::temp_dir().join(format!(
+        "zetta-hidden-profile-form-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::write(&root, r#"{"profiles":[{"name":"System","hidden":true}]}"#).unwrap();
+    let config = Config::load(Some(&root), None).unwrap();
+    let form = ConfigurationForm::load(&root, &config).unwrap();
+    let output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
+    fs::remove_file(root).unwrap();
+
+    assert_eq!(
+        output["profiles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|profile| profile["name"] == "System")
+            .and_then(|profile| profile.get("hidden")),
+        Some(&json!(true))
+    );
+}
+
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn non_macos_configuration_preserves_macos_title_bar_setting() {

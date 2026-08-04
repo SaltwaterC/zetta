@@ -34,6 +34,7 @@ pub(crate) enum SettingsToggle {
     PaneSize,
     TitleBarLabels,
     TitleBarButtons,
+    ProfileVisibility(usize),
     #[cfg(target_os = "macos")]
     TitleBarMenus,
 }
@@ -712,6 +713,10 @@ impl Zetta {
                                 ConfigTextField::ProfileArguments(index),
                             )),
                         ]);
+                    } else {
+                        controls.push(SettingsControl::Toggle(SettingsToggle::ProfileVisibility(
+                            index,
+                        )));
                     }
                     controls.push(SettingsControl::Dropdown(SettingsDropdown::ProfileTheme(
                         index,
@@ -1018,6 +1023,11 @@ impl Zetta {
                     SettingsToggle::PaneSize => editor.configuration.hide_pane_size,
                     SettingsToggle::TitleBarLabels => editor.configuration.hide_title_bar_labels,
                     SettingsToggle::TitleBarButtons => editor.configuration.hide_title_bar_buttons,
+                    SettingsToggle::ProfileVisibility(index) => editor
+                        .configuration
+                        .profiles
+                        .get(index)
+                        .is_some_and(|profile| !profile.hidden),
                     #[cfg(target_os = "macos")]
                     SettingsToggle::TitleBarMenus => editor.configuration.hide_title_bar_menus,
                 });
@@ -1040,6 +1050,7 @@ impl Zetta {
                         program: TextField::default(),
                         arguments: TextField::default(),
                         theme: None,
+                        hidden: false,
                         detected: false,
                     });
                     editor.message = None;
@@ -1336,6 +1347,11 @@ impl Zetta {
             SettingsToggle::PaneSize => editor.configuration.hide_pane_size = value,
             SettingsToggle::TitleBarLabels => editor.configuration.hide_title_bar_labels = value,
             SettingsToggle::TitleBarButtons => editor.configuration.hide_title_bar_buttons = value,
+            SettingsToggle::ProfileVisibility(index) => {
+                if let Some(profile) = editor.configuration.profiles.get_mut(index) {
+                    profile.hidden = !value;
+                }
+            }
             #[cfg(target_os = "macos")]
             SettingsToggle::TitleBarMenus => editor.configuration.hide_title_bar_menus = value,
         }

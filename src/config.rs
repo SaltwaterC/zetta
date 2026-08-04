@@ -78,6 +78,7 @@ struct ProfileConfig {
     name: String,
     command: Option<Shell>,
     theme: Option<String>,
+    hidden: Option<bool>,
 }
 
 #[derive(Clone, Debug)]
@@ -85,6 +86,7 @@ pub struct Config {
     pub config_path: PathBuf,
     pub keymap_override: Option<PathBuf>,
     pub profiles: Vec<Profile>,
+    pub(crate) hidden_profiles: HashSet<String>,
     pub default_profile: usize,
     pub working_directory: Option<PathBuf>,
     pub working_directory_configured: bool,
@@ -115,6 +117,7 @@ impl Config {
             config_path: config_path.clone(),
             keymap_override: keymap_path.clone(),
             profiles: discovered_profiles(),
+            hidden_profiles: HashSet::new(),
             default_profile: 0,
             working_directory: Some(home_dir()),
             working_directory_configured: false,
@@ -271,7 +274,8 @@ impl Config {
                 .iter()
                 .map(parse_profile)
                 .collect::<Result<Vec<_>>>()?;
-            merge_profiles(&mut config.profiles, parsed)?;
+            merge_profiles(&mut config.profiles, &parsed)?;
+            merge_profile_visibility(&mut config.hidden_profiles, &parsed);
         }
 
         if let Some(default_profile) = root.get("default_profile") {
@@ -408,33 +412,82 @@ fn resolve_default_profile(profiles: &[Profile], name: &str) -> Result<usize> {
         .with_context(|| format!("default profile {name:?} is not available"))
 }
 
-fn merge_profiles(profiles: &mut Vec<Profile>, configured: Vec<ProfileConfig>) -> Result<()> {
+fn merge_profiles(
+    profiles: &mut Vec<Profile>,
+    configured: impl AsRef<[ProfileConfig]>,
+) -> Result<()> {
+    let configured = configured.as_ref();
     for profile in configured {
         if let Some(index) = profiles
             .iter()
             .position(|existing| existing.name.eq_ignore_ascii_case(&profile.name))
         {
-            if let Some(command) = profile.command {
+            if let Some(command) = profile.command.clone() {
                 profiles[index].command = command;
             }
-            if let Some(theme) = profile.theme {
+            if let Some(theme) = profile.theme.clone() {
                 profiles[index].theme = Some(theme);
             }
         } else {
-            let command = profile.command.with_context(|| {
+            let command = profile.command.clone().with_context(|| {
                 format!(
                     "profile {:?} must specify program because it was not detected",
                     profile.name
                 )
             })?;
             profiles.push(Profile {
-                name: profile.name,
+                name: profile.name.clone(),
                 command,
-                theme: profile.theme,
+                theme: profile.theme.clone(),
             });
         }
     }
     Ok(())
+}
+
+fn profile_name_key(name: &str) -> String {
+    name.to_ascii_lowercase()
+}
+
+fn merge_profile_visibility(hidden_profiles: &mut HashSet<String>, configured: &[ProfileConfig]) {
+    for profile in configured {
+        let Some(hidden) = profile.hidden else {
+            continue;
+        };
+        let key = profile_name_key(&profile.name);
+        if hidden {
+            hidden_profiles.insert(key);
+        } else {
+            hidden_profiles.remove(&key);
+        }
+    }
+}
+
+pub(crate) fn profile_is_hidden(profile: &Profile, hidden_profiles: &HashSet<String>) -> bool {
+    hidden_profiles.contains(&profile_name_key(&profile.name))
+}
+
+pub(crate) fn visible_profile_count(
+    profiles: &[Profile],
+    hidden_profiles: &HashSet<String>,
+) -> usize {
+    profiles
+        .iter()
+        .filter(|profile| !profile_is_hidden(profile, hidden_profiles))
+        .count()
+}
+
+pub(crate) fn visible_profile_index(
+    profiles: &[Profile],
+    hidden_profiles: &HashSet<String>,
+    slot: usize,
+) -> Option<usize> {
+    profiles
+        .iter()
+        .enumerate()
+        .filter(|(_, profile)| !profile_is_hidden(profile, hidden_profiles))
+        .nth(slot.checked_sub(1)?)
+        .map(|(index, _)| index)
 }
 
 fn parse_inactive_pane_opacity(value: &Value) -> Result<f32> {
@@ -463,7 +516,7 @@ fn parse_profile(value: &Value) -> Result<ProfileConfig> {
     let object = value
         .as_object()
         .context("each profile must be an object")?;
-    const FIELDS: &[&str] = &["name", "program", "args", "theme"];
+    const FIELDS: &[&str] = &["name", "program", "args", "theme", "hidden"];
     if let Some(field) = object
         .keys()
         .find(|field| !FIELDS.contains(&field.as_str()))
@@ -523,10 +576,15 @@ fn parse_profile(value: &Value) -> Result<ProfileConfig> {
                 .map(str::to_owned)
         })
         .transpose()?;
+    let hidden = object
+        .get("hidden")
+        .map(|hidden| hidden.as_bool().context("profile.hidden must be a boolean"))
+        .transpose()?;
     Ok(ProfileConfig {
         name,
         command,
         theme,
+        hidden,
     })
 }
 

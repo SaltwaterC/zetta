@@ -2036,12 +2036,27 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
 }
 
 #[cfg(target_os = "macos")]
-fn native_macos_menus(profiles: &[Profile], default_profile: usize) -> [Menu; 3] {
-    let profile_menu =
-        Menu::new("Profile").items(profiles.iter().enumerate().map(|(index, profile)| {
-            MenuItem::action(profile.name.clone(), OpenProfile { slot: index + 1 })
+fn native_macos_menus(
+    profiles: &[Profile],
+    hidden_profiles: &HashSet<String>,
+    default_profile: usize,
+) -> [Menu; 3] {
+    let profile_menu = Menu::new("Profile").items(
+        profiles
+            .iter()
+            .enumerate()
+            .filter(|(_, profile)| !profile_is_hidden(profile, hidden_profiles))
+            .enumerate()
+            .map(|(visible_index, (index, profile))| {
+                MenuItem::action(
+                    profile.name.clone(),
+                    OpenProfile {
+                        slot: visible_index + 1,
+                    },
+                )
                 .checked(index == default_profile)
-        }));
+            }),
+    );
 
     // Keep Window separate from the first, application-owned menu and preserve
     // the standard Minimize/Zoom/separator shape that AppKit augments with its
@@ -2072,14 +2087,24 @@ fn native_macos_menus(profiles: &[Profile], default_profile: usize) -> [Menu; 3]
 pub(crate) fn update_native_macos_menus(
     cx: &mut App,
     profiles: &[Profile],
+    hidden_profiles: &HashSet<String>,
     default_profile: usize,
 ) {
-    cx.set_menus(native_macos_menus(profiles, default_profile));
+    cx.set_menus(native_macos_menus(
+        profiles,
+        hidden_profiles,
+        default_profile,
+    ));
 }
 
 #[cfg(target_os = "macos")]
-fn install_native_macos_menus(cx: &mut App, profiles: &[Profile], default_profile: usize) {
-    update_native_macos_menus(cx, profiles, default_profile);
+fn install_native_macos_menus(
+    cx: &mut App,
+    profiles: &[Profile],
+    hidden_profiles: &HashSet<String>,
+    default_profile: usize,
+) {
+    update_native_macos_menus(cx, profiles, hidden_profiles, default_profile);
     install_native_macos_window_menu_key_equivalents();
 }
 
@@ -2656,7 +2681,7 @@ pub(crate) fn run() -> Result<()> {
     };
     let initial_profile = select_launch_profile(&config, args.profile.as_deref())?;
     let keymap_path = config.keymap_path.clone();
-    let profile_count = config.profiles.len();
+    let profile_count = visible_profile_count(&config.profiles, &config.hidden_profiles);
     let http_client = Arc::new(
         reqwest_client::ReqwestClient::user_agent(concat!("Zetta/", env!("CARGO_PKG_VERSION")))
             .context("initializing HTTP client")?,
@@ -2682,7 +2707,12 @@ pub(crate) fn run() -> Result<()> {
             apply_config_settings(&config, cx).expect("failed to apply Zetta configuration");
             load_keybindings(&keymap_path, profile_count, cx);
             #[cfg(target_os = "macos")]
-            install_native_macos_menus(cx, &config.profiles, config.default_profile);
+            install_native_macos_menus(
+                cx,
+                &config.profiles,
+                &config.hidden_profiles,
+                config.default_profile,
+            );
             let (control_tx, mut control_rx) = futures::channel::mpsc::unbounded();
             let control_server = ProcessControlServer::start(control_tx)
                 .expect("failed to start Zetta process control");

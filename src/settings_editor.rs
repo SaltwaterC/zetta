@@ -3,7 +3,7 @@ use std::{fs, io, path::Path};
 use anyhow::{Context as _, Result};
 use serde_json::{Map, Value, json};
 
-use crate::config::{Config, PaneControlsPosition};
+use crate::config::{Config, PaneControlsPosition, profile_is_hidden};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsPage {
@@ -110,6 +110,7 @@ pub struct ProfileForm {
     pub program: TextField,
     pub arguments: TextField,
     pub theme: Option<String>,
+    pub hidden: bool,
     pub detected: bool,
 }
 
@@ -187,6 +188,10 @@ impl ConfigurationForm {
                         .and_then(Value::as_str)
                         .map(str::to_owned)
                         .or_else(|| resolved.theme.clone()),
+                    hidden: configured
+                        .and_then(|profile| profile.get("hidden"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or_else(|| profile_is_hidden(resolved, &config.hidden_profiles)),
                     detected,
                 }
             })
@@ -339,7 +344,9 @@ impl ConfigurationForm {
                 Value::Array(
                     self.profiles
                         .iter()
-                        .filter(|profile| !profile.detected || profile.theme.is_some())
+                        .filter(|profile| {
+                            !profile.detected || profile.theme.is_some() || profile.hidden
+                        })
                         .map(|profile| {
                             let mut value = Map::new();
                             value.insert("name".into(), json!(profile.name.text));
@@ -361,6 +368,9 @@ impl ConfigurationForm {
                             }
                             if let Some(theme) = &profile.theme {
                                 value.insert("theme".into(), json!(theme));
+                            }
+                            if profile.hidden {
+                                value.insert("hidden".into(), json!(true));
                             }
                             Value::Object(value)
                         })

@@ -746,6 +746,10 @@ impl Zetta {
                             == Some(SettingsControl::Input(SettingsInput::Configuration(
                                 ConfigTextField::ProfileArguments(index),
                             )))
+                        || editor.focused_control
+                            == Some(SettingsControl::Toggle(SettingsToggle::ProfileVisibility(
+                                index,
+                            )))
                         || editor.focused_control == Some(SettingsControl::RemoveProfile(index));
                     let mut theme_options = vec!["Use application theme".to_owned()];
                     theme_options.extend(editor.themes.iter().cloned());
@@ -762,6 +766,26 @@ impl Zetta {
                         cx,
                     );
                     let card = if profile.detected {
+                        let visibility_handle = handle.clone();
+                        let profile_visibility = switch(
+                            format!("settings-profile-{index}-visibility"),
+                            (!profile.hidden).into(),
+                        )
+                        .label(if profile.hidden { "Hidden" } else { "Visible" })
+                        .full_width(true)
+                        .aria_label("Show profile in Profiles menu")
+                        .on_click(move |state, window, cx| {
+                            visibility_handle
+                                .update(cx, |this, cx| {
+                                    this.set_settings_toggle(
+                                        SettingsToggle::ProfileVisibility(index),
+                                        state.selected(),
+                                        window,
+                                        cx,
+                                    );
+                                })
+                                .ok();
+                        });
                         h_flex()
                             .p_3()
                             .mb_2()
@@ -796,7 +820,14 @@ impl Zetta {
                                             .child("Detected profile"),
                                     ),
                             )
-                            .child(div().w(px(330.)).flex_none().child(profile_theme))
+                            .child(
+                                h_flex()
+                                    .w(px(480.))
+                                    .flex_none()
+                                    .gap_3()
+                                    .child(profile_visibility)
+                                    .child(div().w(px(330.)).flex_none().child(profile_theme)),
+                            )
                             .into_any_element()
                     } else {
                         let remove_handle = handle.clone();
@@ -970,6 +1001,7 @@ impl Zetta {
                                             program: TextField::default(),
                                             arguments: TextField::default(),
                                             theme: None,
+                                            hidden: false,
                                             detected: false,
                                         });
                                         editor.message = None;

@@ -1255,12 +1255,13 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(index) = action.slot.checked_sub(1) else {
+        let Some(index) = visible_profile_index(
+            &self.profiles,
+            &self.launch_config.hidden_profiles,
+            action.slot,
+        ) else {
             return;
         };
-        if index >= self.profiles.len() {
-            return;
-        }
         let profile = self.profiles[index].clone();
         self.open_tab_with_profile(profile, window, cx);
     }
@@ -3260,7 +3261,8 @@ impl Zetta {
                 view.update(cx, |view, cx| view.set_theme(theme, cx));
             }
         }
-        load_keybindings(&config.keymap_path, config.profiles.len(), cx);
+        let profile_count = visible_profile_count(&config.profiles, &config.hidden_profiles);
+        load_keybindings(&config.keymap_path, profile_count, cx);
 
         #[cfg(windows)]
         windows_integration::update_profile_jump_list(config.profiles.clone());
@@ -3281,7 +3283,12 @@ impl Zetta {
         self.working_directory = config.working_directory.clone();
         self.launch_config = config;
         #[cfg(target_os = "macos")]
-        update_native_macos_menus(cx, &self.profiles, self.launch_config.default_profile);
+        update_native_macos_menus(
+            cx,
+            &self.profiles,
+            &self.launch_config.hidden_profiles,
+            self.launch_config.default_profile,
+        );
         self.configuration_error = None;
         self.focus_active(window, cx);
         cx.notify();

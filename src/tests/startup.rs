@@ -1864,7 +1864,8 @@ fn native_macos_menus_duplicate_the_title_bar_menus() {
             theme: None,
         },
     ];
-    let [application_menu, profile_menu, window_menu] = native_macos_menus(&profiles, 1);
+    let [application_menu, profile_menu, window_menu] =
+        native_macos_menus(&profiles, &HashSet::new(), 1);
     assert_eq!(application_menu.name, "Zetta");
     assert_eq!(profile_menu.name, "Profile");
     assert_eq!(window_menu.name, "Window");

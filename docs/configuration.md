@@ -25,7 +25,7 @@ and their scrollback are retained.
 Press `Ctrl-,` or use the tab-bar settings button to open typed controls for
 the active configuration and keymap files. Profiles and themes use checked
 dropdowns, the font picker searches installed families, and detected profiles
-expose theme overrides.
+expose theme overrides and individual visibility toggles for the Profiles menu.
 
 Font size and scrollback accept typed values and press-and-hold steppers;
 scrollback also supports a `Max` sentinel. Inactive-pane opacity uses a
@@ -75,6 +75,20 @@ name as a detected profile overrides it in place. Set `default_profile` to any
 displayed name; matching is case-insensitive. Opening a profile from the menu
 or a shortcut makes it the selection for subsequent `Ctrl-Shift-T` tabs.
 Missing shortcut slots have no effect.
+
+To keep an individual detected profile out of the Profiles menu, use its
+visibility toggle in the settings editor or set `hidden` on that profile. A
+hidden profile remains available to `default_profile` and `--profile`; hidden
+profiles do not consume the numbered menu shortcuts, so later visible profiles
+move into the released shortcut slot:
+
+```json
+{
+  "profiles": [
+    { "name": "PowerShell 7", "hidden": true }
+  ]
+}
+```
 
 The first tab starts in the user's home directory unless `working_directory`
 is set. Setting it to `"~"` is equivalent to leaving it unset. Later native
