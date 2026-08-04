@@ -9,6 +9,7 @@
   "terminal_font_family": "MesloLGS NF",
   "max_scroll_history_lines": 2147483647,
   "inactive_pane_opacity": 0.8,
+  "compact_mode": false,
   "hide_pane_size": true,
   "hide_title_bar_labels": false,
   "hide_title_bar_buttons": false,

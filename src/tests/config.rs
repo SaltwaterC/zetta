@@ -86,6 +86,7 @@ fn default_working_directory_is_the_user_home() {
     assert!(!config.pane_controls_hidden_by_default);
     assert_eq!(config.working_directory_scope, WorkingDirectoryScope::Tab);
     assert_eq!(config.new_tab_profile, NewTabProfile::Default);
+    assert!(!config.compact_mode);
     assert!(config.hide_pane_size);
     assert!(!config.hide_title_bar_labels);
     assert!(!config.hide_title_bar_buttons);
@@ -176,6 +177,7 @@ fn validates_title_bar_visibility_settings() {
     let config = Config::parse(
         r#"{
             "hide_pane_size": false,
+            "compact_mode": true,
             "hide_title_bar_labels": true,
             "hide_title_bar_buttons": true,
             "hide_title_bar_menus": false
@@ -184,12 +186,14 @@ fn validates_title_bar_visibility_settings() {
         None,
     )
     .unwrap();
+    assert!(config.compact_mode);
     assert!(!config.hide_pane_size);
     assert!(config.hide_title_bar_labels);
     assert!(config.hide_title_bar_buttons);
     assert!(!config.hide_title_bar_menus);
 
     for field in [
+        "compact_mode",
         "hide_pane_size",
         "hide_title_bar_labels",
         "hide_title_bar_buttons",

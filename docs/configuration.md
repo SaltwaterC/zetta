@@ -187,6 +187,7 @@ appearance settings include:
   "terminal_font_size": 14,
   "terminal_font_family": "MesloLGS NF",
   "inactive_pane_opacity": 0.8,
+  "compact_mode": false,
   "hide_pane_size": true,
   "hide_title_bar_labels": false,
   "hide_title_bar_buttons": false,
@@ -202,6 +203,10 @@ appearance settings include:
 `default_tab_icon` accepts any built-in icon name, or `null` to hide icons on
 new tabs. It can also be changed through Settings > Configuration.
 `inactive_pane_opacity` accepts values from 0 through 1 and defaults to 0.8.
+`compact_mode` defaults to `false`. When enabled, tabs move into the title bar,
+title-bar labels and pane size are hidden, and only Menu, Profile, and
+Broadcast remain on the left. If background sessions exist, the reconnect
+indicator always appears at the end of the title bar in compact mode.
 `hide_pane_size` defaults to `true` and hides the active pane dimensions from
 the title bar. `hide_title_bar_labels` and `hide_title_bar_buttons` default to
 `false`; they hide title-bar text and controls respectively. On macOS,

@@ -35,6 +35,7 @@ pub(crate) enum SettingsDropdown {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SettingsToggle {
+    CompactMode,
     PaneSize,
     TitleBarLabels,
     TitleBarButtons,
@@ -893,6 +894,7 @@ impl Zetta {
                     SettingsControl::Dropdown(SettingsDropdown::WorkingDirectoryScope),
                     SettingsControl::Numeric(NumericSetting::ScrollHistory),
                     SettingsControl::Opacity,
+                    SettingsControl::Toggle(SettingsToggle::CompactMode),
                     SettingsControl::Toggle(SettingsToggle::PaneSize),
                     SettingsControl::Toggle(SettingsToggle::TitleBarLabels),
                     SettingsControl::Toggle(SettingsToggle::TitleBarButtons),
@@ -1323,6 +1325,7 @@ impl Zetta {
             SettingsControl::Dropdown(dropdown) => self.open_settings_dropdown(dropdown, cx),
             SettingsControl::Toggle(toggle) => {
                 let value = self.settings_editor.as_ref().map(|editor| match toggle {
+                    SettingsToggle::CompactMode => editor.configuration.compact_mode,
                     SettingsToggle::PaneSize => editor.configuration.hide_pane_size,
                     SettingsToggle::TitleBarLabels => editor.configuration.hide_title_bar_labels,
                     SettingsToggle::TitleBarButtons => editor.configuration.hide_title_bar_buttons,
@@ -1666,6 +1669,7 @@ impl Zetta {
             return;
         };
         match toggle {
+            SettingsToggle::CompactMode => editor.configuration.compact_mode = value,
             SettingsToggle::PaneSize => editor.configuration.hide_pane_size = value,
             SettingsToggle::TitleBarLabels => editor.configuration.hide_title_bar_labels = value,
             SettingsToggle::TitleBarButtons => editor.configuration.hide_title_bar_buttons = value,

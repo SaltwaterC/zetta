@@ -106,6 +106,7 @@ fn configuration_form_round_trip_uses_typed_values_and_profiles() {
     form.terminal_font_size.text = "16".to_owned();
     form.max_scroll_history_lines.text = "123456789".to_owned();
     form.inactive_pane_opacity = 0.65;
+    form.compact_mode = true;
     form.hide_pane_size = false;
     form.hide_title_bar_labels = true;
     form.hide_title_bar_buttons = true;
@@ -141,6 +142,7 @@ fn configuration_form_round_trip_uses_typed_values_and_profiles() {
     assert_eq!(output["default_tab_icon"], "terminal");
     assert_eq!(output["max_scroll_history_lines"], 123_456_789);
     assert_eq!(output["inactive_pane_opacity"], 0.65);
+    assert_eq!(output["compact_mode"], true);
     assert_eq!(output["hide_pane_size"], false);
     assert_eq!(output["hide_title_bar_labels"], true);
     assert_eq!(output["hide_title_bar_buttons"], true);

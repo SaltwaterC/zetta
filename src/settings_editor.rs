@@ -131,6 +131,7 @@ pub struct ConfigurationForm {
     pub terminal_font_family: String,
     pub max_scroll_history_lines: TextField,
     pub inactive_pane_opacity: f32,
+    pub compact_mode: bool,
     pub hide_pane_size: bool,
     pub hide_title_bar_labels: bool,
     pub hide_title_bar_buttons: bool,
@@ -227,6 +228,7 @@ impl ConfigurationForm {
                 },
             ),
             inactive_pane_opacity: config.inactive_pane_opacity,
+            compact_mode: config.compact_mode,
             hide_pane_size: config.hide_pane_size,
             hide_title_bar_labels: config.hide_title_bar_labels,
             hide_title_bar_buttons: config.hide_title_bar_buttons,
@@ -318,6 +320,7 @@ impl ConfigurationForm {
             .parse::<f64>()
             .context("formatting inactive pane opacity")?;
         root.insert("inactive_pane_opacity".into(), json!(inactive_pane_opacity));
+        root.insert("compact_mode".into(), json!(self.compact_mode));
         root.insert("hide_pane_size".into(), json!(self.hide_pane_size));
         root.insert(
             "hide_title_bar_labels".into(),

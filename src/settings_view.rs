@@ -768,6 +768,17 @@ impl Zetta {
                         opacity_slider(configuration.inactive_pane_opacity),
                     ),
                     setting_row(
+                        "Compact mode",
+                        "Move tabs into the title bar and reduce its controls",
+                        editor.focused_control
+                            == Some(SettingsControl::Toggle(SettingsToggle::CompactMode)),
+                        setting_toggle(
+                            "settings-compact-mode",
+                            configuration.compact_mode,
+                            SettingsToggle::CompactMode,
+                        ),
+                    ),
+                    setting_row(
                         "Hide pane size",
                         "Hide the active pane dimensions from the title bar",
                         editor.focused_control

@@ -2,11 +2,72 @@ use super::*;
 
 #[test]
 fn title_bar_controls_hide_labels_before_they_crowd_the_window() {
-    assert!(!title_bar_shows_control_labels(px(719.), false, false));
-    assert!(title_bar_shows_control_labels(px(720.), false, false));
-    assert!(!title_bar_shows_control_labels(px(799.), true, false));
-    assert!(title_bar_shows_control_labels(px(800.), true, false));
-    assert!(!title_bar_shows_control_labels(px(1000.), false, true));
+    assert!(!title_bar_shows_control_labels(
+        px(719.),
+        false,
+        false,
+        false
+    ));
+    assert!(title_bar_shows_control_labels(
+        px(720.),
+        false,
+        false,
+        false
+    ));
+    assert!(!title_bar_shows_control_labels(
+        px(799.),
+        true,
+        false,
+        false
+    ));
+    assert!(title_bar_shows_control_labels(px(800.), true, false, false));
+    assert!(!title_bar_shows_control_labels(
+        px(1000.),
+        false,
+        true,
+        false
+    ));
+}
+
+#[test]
+fn compact_mode_hides_labels_and_regular_title_bar_buttons() {
+    assert!(!title_bar_shows_control_labels(
+        px(1000.),
+        true,
+        false,
+        true
+    ));
+    assert!(!title_bar_buttons_visible(true, false));
+    assert!(title_bar_buttons_visible(false, false));
+    assert!(!title_bar_buttons_visible(false, true));
+}
+
+#[test]
+fn compact_mode_always_keeps_broadcast_visible() {
+    assert!(title_bar_broadcast_visible(false, false));
+    assert!(!title_bar_broadcast_visible(false, true));
+    assert!(title_bar_broadcast_visible(true, true));
+}
+
+#[test]
+fn compact_mode_keeps_background_indicator_on_the_right() {
+    assert!(title_bar_background_indicator_on_right(
+        !title_bar_buttons_visible(true, false),
+        1
+    ));
+    assert!(title_bar_background_indicator_on_right(
+        !title_bar_buttons_visible(true, true),
+        1
+    ));
+    assert!(!title_bar_background_indicator_on_right(false, 1));
+    assert!(!title_bar_background_indicator_on_right(true, 0));
+}
+
+#[test]
+fn compact_mode_hides_pane_size() {
+    assert!(!title_bar_pane_size_visible(true, false));
+    assert!(title_bar_pane_size_visible(false, false));
+    assert!(!title_bar_pane_size_visible(false, true));
 }
 
 #[test]
@@ -16,13 +77,6 @@ fn title_bar_menu_visibility_is_platform_specific() {
         cfg!(not(target_os = "macos"))
     );
     assert!(title_bar_menus_visible(false));
-}
-
-#[test]
-fn background_session_indicator_moves_right_when_buttons_are_hidden() {
-    assert!(!title_bar_background_indicator_on_right(false, 1));
-    assert!(!title_bar_background_indicator_on_right(true, 0));
-    assert!(title_bar_background_indicator_on_right(true, 1));
 }
 
 #[test]
@@ -63,7 +117,7 @@ fn minimized_shelf_resolves_metadata_only_for_visible_entries() {
 
 #[test]
 fn tab_container_keeps_responsive_flex_constraints() {
-    let mut container = responsive_tab_container(div());
+    let mut container = responsive_tab_container(div(), false, px(32.));
     let style = container.style();
 
     assert_eq!(style.size.width, Some(TAB_MAX_WIDTH.into()));

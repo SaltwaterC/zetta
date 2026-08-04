@@ -10,9 +10,14 @@ const TITLE_BAR_RECONNECT_LABEL_MIN_WIDTH: Pixels = px(800.);
 // Keep the responsive sizing on a native flex item. Elements such as
 // `right_click_menu` are custom layout elements and cannot receive the flex
 // constraints that control how tabs shrink inside the scroll container.
-fn responsive_tab_container(child: impl IntoElement + 'static) -> gpui::Div {
+fn responsive_tab_container(
+    child: impl IntoElement + 'static,
+    compact_mode: bool,
+    compact_height: Pixels,
+) -> gpui::Div {
     div()
         .h_8()
+        .when(compact_mode, |container| container.h(compact_height))
         .w(TAB_MAX_WIDTH)
         .min_w(TAB_MIN_WIDTH)
         .max_w(TAB_MAX_WIDTH)
@@ -24,8 +29,10 @@ fn title_bar_shows_control_labels(
     viewport_width: Pixels,
     has_reconnect_control: bool,
     hide_labels: bool,
+    compact_mode: bool,
 ) -> bool {
-    !hide_labels
+    !compact_mode
+        && !hide_labels
         && viewport_width
             >= if has_reconnect_control {
                 TITLE_BAR_RECONNECT_LABEL_MIN_WIDTH
@@ -34,8 +41,12 @@ fn title_bar_shows_control_labels(
             }
 }
 
-fn title_bar_menus_visible(hide_menus: bool) -> bool {
-    cfg!(not(target_os = "macos")) || !hide_menus
+fn title_bar_buttons_visible(compact_mode: bool, hide_buttons: bool) -> bool {
+    !compact_mode && !hide_buttons
+}
+
+fn title_bar_broadcast_visible(compact_mode: bool, hide_buttons: bool) -> bool {
+    compact_mode || !hide_buttons
 }
 
 fn title_bar_background_indicator_on_right(
@@ -43,6 +54,14 @@ fn title_bar_background_indicator_on_right(
     background_session_count: usize,
 ) -> bool {
     hide_buttons && background_session_count > 0
+}
+
+fn title_bar_pane_size_visible(compact_mode: bool, hide_pane_size: bool) -> bool {
+    !compact_mode && !hide_pane_size
+}
+
+fn title_bar_menus_visible(hide_menus: bool) -> bool {
+    cfg!(not(target_os = "macos")) || !hide_menus
 }
 
 fn reconnect_control_label(show_label: bool) -> &'static str {
@@ -499,18 +518,21 @@ impl Render for Zetta {
         } else {
             colors.title_bar_background
         };
-        let active_pane_size = (!self.launch_config.hide_pane_size)
-            .then(|| {
-                self.tabs
-                    .get(self.active_tab)
-                    .and_then(|tab| tab.active_pane())
-                    .and_then(|pane| pane.terminal.as_ref())
-                    .map(|terminal| {
-                        let bounds = terminal.read(cx).last_content().terminal_bounds;
-                        terminal_size_label(bounds.num_columns(), bounds.num_lines())
-                    })
-            })
-            .flatten();
+        let compact_mode = self.launch_config.compact_mode;
+        let title_bar_height = platform_title_bar_height(window);
+        let active_pane_size =
+            title_bar_pane_size_visible(compact_mode, self.launch_config.hide_pane_size)
+                .then(|| {
+                    self.tabs
+                        .get(self.active_tab)
+                        .and_then(|tab| tab.active_pane())
+                        .and_then(|pane| pane.terminal.as_ref())
+                        .map(|terminal| {
+                            let bounds = terminal.read(cx).last_content().terminal_bounds;
+                            terminal_size_label(bounds.num_columns(), bounds.num_lines())
+                        })
+                })
+                .flatten();
         let active_terminal_focus = self
             .tabs
             .get(self.active_tab)
@@ -627,6 +649,7 @@ impl Render for Zetta {
                 let tab_element = div()
                     .id(("tab", tab.id as usize))
                     .h_8()
+                    .when(compact_mode, |tab| tab.h(title_bar_height))
                     .w_full()
                     .min_w_0()
                     .px_2()
@@ -637,7 +660,7 @@ impl Render for Zetta {
                     .border_r_1()
                     .border_color(tab_colors.border)
                     .bg(tab_background)
-                    .when(selected, |this| {
+                    .when(selected && !compact_mode, |this| {
                         this.border_t_2().border_color(tab_colors.text_accent)
                     })
                     .on_click(move |event, window, cx| {
@@ -710,17 +733,95 @@ impl Render for Zetta {
                         })
                         .trigger(move |_, _, _| tab_element)
                         .into_any_element();
-                responsive_tab_container(tab_element).into_any_element()
+                responsive_tab_container(tab_element, compact_mode, title_bar_height)
+                    .into_any_element()
             })
             .collect::<Vec<_>>();
+
+        let render_new_tab_button = || {
+            div()
+                .ml_1()
+                .mr_2()
+                .h_8()
+                .when(compact_mode, |button| button.h(title_bar_height))
+                .flex_none()
+                .flex()
+                .items_center()
+                .child(
+                    IconButton::new("new-tab", IconName::Plus)
+                        .shape(IconButtonShape::Wide)
+                        .size(ButtonSize::Large)
+                        .width(px(32.))
+                        .icon_size(IconSize::Small)
+                        .aria_label("New tab")
+                        .tooltip(move |_window, cx| Tooltip::for_action("New tab", &NewTab, cx))
+                        .on_click(|_, window, cx| {
+                            cx.stop_propagation();
+                            window.dispatch_action(Box::new(NewTab), cx)
+                        }),
+                )
+        };
+        let tabs_scroll = div()
+            .id("tabs-scroll")
+            .when(compact_mode, |tabs| tabs.h(title_bar_height))
+            .when(!compact_mode, |tabs| tabs.h_full())
+            .min_w_0()
+            .flex_shrink_1()
+            .flex()
+            .items_center()
+            .overflow_x_scroll()
+            .children(tabs);
+        let tabs_scroll = tabs_scroll.into_any_element();
+
+        let tab_bar = div()
+            .id("tab-bar")
+            .h_8()
+            .flex_none()
+            .when(compact_mode, |tab_bar| {
+                tab_bar
+                    .h(title_bar_height)
+                    .flex_grow_1()
+                    .flex_shrink_1()
+                    .flex_basis(gpui::relative(0.))
+                    .min_w_0()
+                    .occlude()
+                    .border_l_1()
+                    .border_color(colors.border)
+            })
+            .flex()
+            .items_center()
+            .bg(colors.tab_bar_background)
+            .when(!compact_mode, |tab_bar| {
+                tab_bar
+                    .border_t_1()
+                    .border_b_1()
+                    .border_color(colors.border)
+            })
+            .on_click(|event, window, cx| {
+                cx.stop_propagation();
+                if event.click_count() == 2 {
+                    window.dispatch_action(Box::new(NewTab), cx)
+                }
+            })
+            .child(tabs_scroll)
+            .child(render_new_tab_button());
+        let (compact_tab_bar, regular_tab_bar) = if compact_mode {
+            (Some(tab_bar.into_any_element()), None)
+        } else {
+            (None, Some(tab_bar.into_any_element()))
+        };
 
         let show_title_bar_control_labels = title_bar_shows_control_labels(
             window.viewport_size().width,
             background_session_count > 0,
             self.launch_config.hide_title_bar_labels,
+            compact_mode,
         );
         let show_title_bar_menus = title_bar_menus_visible(self.launch_config.hide_title_bar_menus);
-        let show_title_bar_buttons = !self.launch_config.hide_title_bar_buttons;
+        let show_title_bar_buttons =
+            title_bar_buttons_visible(compact_mode, self.launch_config.hide_title_bar_buttons);
+        let show_broadcast_control =
+            title_bar_broadcast_visible(compact_mode, self.launch_config.hide_title_bar_buttons);
         let profile_menu_profiles = self.profiles.clone();
         let hidden_profiles = self.launch_config.hidden_profiles.clone();
         let default_profile = self.launch_config.default_profile;
@@ -986,7 +1087,7 @@ impl Render for Zetta {
             .id("zetta-title-bar")
             .window_control_area(WindowControlArea::Drag)
             .relative()
-            .h(platform_title_bar_height(window))
+            .h(title_bar_height)
             .w_full()
             .flex_none()
             .flex()
@@ -1102,7 +1203,7 @@ impl Render for Zetta {
                     .when_some(reconnect_control, |controls, reconnect_control| {
                         controls.child(reconnect_control)
                     })
-                    .when(show_title_bar_buttons, |controls| {
+                    .when(show_broadcast_control, |controls| {
                         controls.child(
                             Button::new(
                                 "toggle-broadcast-input",
@@ -1137,7 +1238,12 @@ impl Render for Zetta {
                         )
                     }),
             )
-            .child(div().min_w_0().flex_1())
+            .when_some(compact_tab_bar, |title_bar, tab_bar| {
+                title_bar.child(tab_bar)
+            })
+            .when(!compact_mode, |title_bar| {
+                title_bar.child(div().min_w_0().flex_1())
+            })
             .when_some(active_pane_size, |title_bar, active_pane_size| {
                 title_bar.child(
                     div().flex_none().px_2().child(
@@ -2142,58 +2248,7 @@ impl Render for Zetta {
             .capture_key_up(cx.listener(Self::pane_resize_key_up))
             .on_key_down(cx.listener(Self::command_palette_key_down))
             .child(title_bar)
-            .child(
-                div()
-                    .id("tab-bar")
-                    .h_8()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .bg(colors.tab_bar_background)
-                    .border_t_1()
-                    .border_b_1()
-                    .border_color(colors.border)
-                    .on_click(|event, window, cx| {
-                        if event.click_count() == 2 {
-                            window.dispatch_action(Box::new(NewTab), cx)
-                        }
-                    })
-                    .child(
-                        div()
-                            .id("tabs-scroll")
-                            .h_full()
-                            .min_w_0()
-                            .flex_shrink_1()
-                            .flex()
-                            .items_center()
-                            .overflow_x_scroll()
-                            .children(tabs),
-                    )
-                    .child(
-                        div()
-                            .ml_1()
-                            .mr_2()
-                            .h_8()
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .child(
-                                IconButton::new("new-tab", IconName::Plus)
-                                    .shape(IconButtonShape::Wide)
-                                    .size(ButtonSize::Large)
-                                    .width(px(32.))
-                                    .icon_size(IconSize::Small)
-                                    .aria_label("New tab")
-                                    .tooltip(move |_window, cx| {
-                                        Tooltip::for_action("New tab", &NewTab, cx)
-                                    })
-                                    .on_click(|_, window, cx| {
-                                        cx.stop_propagation();
-                                        window.dispatch_action(Box::new(NewTab), cx)
-                                    }),
-                            ),
-                    ),
-            )
+            .when_some(regular_tab_bar, |content, tab_bar| content.child(tab_bar))
             .when_some(self.configuration_error.clone(), |content, error| {
                 content.child(
                     div().px_2().py_1().child(

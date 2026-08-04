@@ -157,6 +157,7 @@ pub struct Config {
     pub terminal_font_family: String,
     pub max_scroll_history_lines: usize,
     pub inactive_pane_opacity: f32,
+    pub compact_mode: bool,
     pub hide_pane_size: bool,
     pub hide_title_bar_labels: bool,
     pub hide_title_bar_buttons: bool,
@@ -191,6 +192,7 @@ impl Config {
             terminal_font_family: DEFAULT_TERMINAL_FONT_FAMILY.to_owned(),
             max_scroll_history_lines: DEFAULT_MAX_SCROLL_HISTORY_LINES,
             inactive_pane_opacity: DEFAULT_INACTIVE_PANE_OPACITY,
+            compact_mode: false,
             hide_pane_size: true,
             hide_title_bar_labels: false,
             hide_title_bar_buttons: false,
@@ -307,6 +309,11 @@ impl Config {
         if let Some(opacity) = root.get("inactive_pane_opacity") {
             config.inactive_pane_opacity = parse_inactive_pane_opacity(opacity)?;
         }
+        if let Some(compact) = root.get("compact_mode") {
+            config.compact_mode = compact
+                .as_bool()
+                .context("compact_mode must be a boolean")?;
+        }
         if let Some(hidden) = root.get("hide_pane_size") {
             config.hide_pane_size = hidden
                 .as_bool()
@@ -400,6 +407,7 @@ fn validate_config_fields(root: &Value) -> Result<()> {
         "terminal_font_family",
         "max_scroll_history_lines",
         "inactive_pane_opacity",
+        "compact_mode",
         "hide_pane_size",
         "hide_title_bar_labels",
         "hide_title_bar_buttons",
