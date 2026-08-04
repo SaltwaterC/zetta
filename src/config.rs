@@ -42,6 +42,40 @@ impl PaneControlsPosition {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WorkingDirectoryScope {
+    None,
+    Pane,
+    #[default]
+    Tab,
+}
+
+impl WorkingDirectoryScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Pane => "pane",
+            Self::Tab => "tab",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Pane => "Pane",
+            Self::Tab => "Tab",
+        }
+    }
+
+    pub fn inherits_for_new_tab(self) -> bool {
+        matches!(self, Self::Tab)
+    }
+
+    pub fn inherits_for_new_pane(self) -> bool {
+        matches!(self, Self::Pane | Self::Tab)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PaneSplitTemplate {
     Pane,
@@ -90,6 +124,7 @@ pub struct Config {
     pub default_profile: usize,
     pub working_directory: Option<PathBuf>,
     pub working_directory_configured: bool,
+    pub working_directory_scope: WorkingDirectoryScope,
     pub keymap_path: PathBuf,
     pub theme: Option<String>,
     pub terminal_font_size: Option<f32>,
@@ -121,6 +156,7 @@ impl Config {
             default_profile: 0,
             working_directory: Some(home_dir()),
             working_directory_configured: false,
+            working_directory_scope: WorkingDirectoryScope::default(),
             keymap_path: keymap_path.unwrap_or_else(|| config_dir.join("keymap.json")),
             theme: None,
             terminal_font_size: None,
@@ -178,6 +214,19 @@ impl Config {
             // Windows-side cwd, while the default must be passed as `--cd ~`
             // so WSL resolves the Linux user's home directory.
             config.working_directory_configured = !matches!(directory, "~" | "~/");
+        }
+        if let Some(scope) = root.get("working_directory_scope") {
+            config.working_directory_scope = match scope
+                .as_str()
+                .context("working_directory_scope must be \"none\", \"pane\", or \"tab\"")?
+            {
+                "none" => WorkingDirectoryScope::None,
+                "pane" => WorkingDirectoryScope::Pane,
+                "tab" => WorkingDirectoryScope::Tab,
+                _ => {
+                    anyhow::bail!("working_directory_scope must be \"none\", \"pane\", or \"tab\"")
+                }
+            };
         }
         if let Some(theme) = root.get("theme") {
             config.theme = Some(theme.as_str().context("theme must be a string")?.to_owned());
@@ -293,6 +342,7 @@ fn validate_config_fields(root: &Value) -> Result<()> {
     const FIELDS: &[&str] = &[
         "default_profile",
         "working_directory",
+        "working_directory_scope",
         "theme",
         "terminal_font_size",
         "terminal_font_family",

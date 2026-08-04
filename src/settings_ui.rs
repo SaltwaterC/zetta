@@ -20,6 +20,7 @@ pub(crate) enum ProfileDraftField {
 pub(crate) enum SettingsDropdown {
     DefaultProfile,
     Theme,
+    WorkingDirectoryScope,
     PaneControlsPosition,
     PaneControlsDefaultVisibility,
     ProfileTheme(usize),
@@ -685,6 +686,7 @@ impl Zetta {
                     SettingsControl::Input(SettingsInput::Configuration(
                         ConfigTextField::WorkingDirectory,
                     )),
+                    SettingsControl::Dropdown(SettingsDropdown::WorkingDirectoryScope),
                     SettingsControl::Numeric(NumericSetting::ScrollHistory),
                     SettingsControl::Opacity,
                     SettingsControl::Toggle(SettingsToggle::PaneSize),
@@ -869,6 +871,14 @@ impl Zetta {
                 (editor.configuration.default_profile.clone(), options)
             }
             SettingsDropdown::Theme => (editor.configuration.theme.clone(), editor.themes.to_vec()),
+            SettingsDropdown::WorkingDirectoryScope => (
+                editor
+                    .configuration
+                    .working_directory_scope
+                    .label()
+                    .to_owned(),
+                vec!["None".to_owned(), "Pane".to_owned(), "Tab".to_owned()],
+            ),
             SettingsDropdown::PaneControlsPosition => (
                 editor
                     .configuration
@@ -1242,6 +1252,13 @@ impl Zetta {
                 editor.configuration.default_profile = value;
             }
             SettingsDropdown::Theme => editor.configuration.theme = value,
+            SettingsDropdown::WorkingDirectoryScope => {
+                editor.configuration.working_directory_scope = match value.as_str() {
+                    "None" => WorkingDirectoryScope::None,
+                    "Pane" => WorkingDirectoryScope::Pane,
+                    _ => WorkingDirectoryScope::Tab,
+                };
+            }
             SettingsDropdown::PaneControlsPosition => {
                 editor.configuration.pane_controls_position = if value == "Left" {
                     PaneControlsPosition::Left

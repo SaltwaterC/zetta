@@ -86,13 +86,20 @@ impl Zetta {
         let tab_id = tab.id;
         let active_pane_id = tab.active_pane;
         let active_pane = tab.active_pane();
+        let inherit_working_directory = self
+            .launch_config
+            .working_directory_scope
+            .inherits_for_new_pane();
         let inherited_working_directory = active_pane
+            .filter(|_| inherit_working_directory)
             .filter(|pane| !is_wsl_shell(&pane.profile.command))
             .and_then(|pane| pane.working_directory(cx));
         let Some(profile) = tab.active_profile().cloned() else {
             return;
         };
-        let inherited_wsl_directory = active_pane.and_then(|pane| pane.wsl_working_directory(cx));
+        let inherited_wsl_directory = active_pane
+            .filter(|_| inherit_working_directory)
+            .and_then(|pane| pane.wsl_working_directory(cx));
         let (working_directory, wsl_directory) = launch_working_directory(
             &profile,
             inherited_working_directory,

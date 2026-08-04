@@ -1,6 +1,7 @@
 {
   "default_profile": "System",
   "working_directory": "~",
+  "working_directory_scope": "tab",
   "theme": "One Dark",
   "terminal_font_size": 14,
   "terminal_font_family": "MesloLGS NF",

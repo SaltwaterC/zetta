@@ -92,7 +92,10 @@ move into the released shortcut slot:
 
 The first tab starts in the user's home directory unless `working_directory`
 is set. Setting it to `"~"` is equivalent to leaving it unset. Later native
-tabs and splits inherit the active pane's current directory.
+tabs and splits inherit the active pane's current directory by default. Set
+`working_directory_scope` to `"none"` to always use the configured directory,
+or to `"pane"` to inherit only for new shells in the same tab. The default
+`"tab"` scope inherits for both new panes and new tabs.
 
 Detected WSL profiles start in the selected distribution's Linux home. Zetta
 tracks the Linux directory for bash, fish, and zsh, with a fallback for other

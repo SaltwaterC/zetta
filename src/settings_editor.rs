@@ -3,7 +3,7 @@ use std::{fs, io, path::Path};
 use anyhow::{Context as _, Result};
 use serde_json::{Map, Value, json};
 
-use crate::config::{Config, PaneControlsPosition, profile_is_hidden};
+use crate::config::{Config, PaneControlsPosition, WorkingDirectoryScope, profile_is_hidden};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsPage {
@@ -119,6 +119,7 @@ pub struct ConfigurationForm {
     root: Map<String, Value>,
     pub default_profile: String,
     pub working_directory: TextField,
+    pub working_directory_scope: WorkingDirectoryScope,
     pub theme: String,
     pub terminal_font_size: TextField,
     pub terminal_font_family: String,
@@ -201,6 +202,7 @@ impl ConfigurationForm {
             working_directory: TextField::new(
                 string("working_directory").unwrap_or_else(|| "~".to_owned()),
             ),
+            working_directory_scope: config.working_directory_scope,
             theme: config
                 .theme
                 .clone()
@@ -260,6 +262,10 @@ impl ConfigurationForm {
         root.insert(
             "working_directory".into(),
             json!(self.working_directory.text),
+        );
+        root.insert(
+            "working_directory_scope".into(),
+            json!(self.working_directory_scope.as_str()),
         );
         root.insert("theme".into(), json!(self.theme));
         let terminal_font_size = self

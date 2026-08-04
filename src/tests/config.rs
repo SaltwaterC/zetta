@@ -82,10 +82,52 @@ fn default_working_directory_is_the_user_home() {
     assert_eq!(config.tftp_server_port, DEFAULT_TFTP_SERVER_PORT);
     assert_eq!(config.pane_controls_position, PaneControlsPosition::Right);
     assert!(!config.pane_controls_hidden_by_default);
+    assert_eq!(config.working_directory_scope, WorkingDirectoryScope::Tab);
     assert!(config.hide_pane_size);
     assert!(!config.hide_title_bar_labels);
     assert!(!config.hide_title_bar_buttons);
     assert_eq!(config.hide_title_bar_menus, cfg!(target_os = "macos"));
+}
+
+#[test]
+fn validates_working_directory_scope() {
+    for (value, expected) in [
+        ("none", WorkingDirectoryScope::None),
+        ("pane", WorkingDirectoryScope::Pane),
+        ("tab", WorkingDirectoryScope::Tab),
+    ] {
+        assert_eq!(
+            Config::parse(
+                &format!(r#"{{"working_directory_scope":"{value}"}}"#),
+                None,
+                None,
+            )
+            .unwrap()
+            .working_directory_scope,
+            expected
+        );
+    }
+    for value in [r#""#, "true", "null", r#""window""#] {
+        assert!(
+            Config::parse(
+                &format!(r#"{{"working_directory_scope":{value}}}"#),
+                None,
+                None,
+            )
+            .is_err(),
+            "accepted invalid working directory scope {value}"
+        );
+    }
+}
+
+#[test]
+fn working_directory_scope_controls_inheritance_boundaries() {
+    assert!(!WorkingDirectoryScope::None.inherits_for_new_tab());
+    assert!(!WorkingDirectoryScope::None.inherits_for_new_pane());
+    assert!(!WorkingDirectoryScope::Pane.inherits_for_new_tab());
+    assert!(WorkingDirectoryScope::Pane.inherits_for_new_pane());
+    assert!(WorkingDirectoryScope::Tab.inherits_for_new_tab());
+    assert!(WorkingDirectoryScope::Tab.inherits_for_new_pane());
 }
 
 #[test]

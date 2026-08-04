@@ -498,6 +498,14 @@ impl Zetta {
                     window,
                     cx,
                 );
+                let working_directory_scope = dropdown(
+                    "settings-working-directory-scope".to_owned(),
+                    configuration.working_directory_scope.label().to_owned(),
+                    vec!["None".to_owned(), "Pane".to_owned(), "Tab".to_owned()].into(),
+                    SettingsDropdown::WorkingDirectoryScope,
+                    window,
+                    cx,
+                );
                 let pane_controls_position = dropdown(
                     "settings-pane-controls-position".to_owned(),
                     configuration.pane_controls_position.label().to_owned(),
@@ -611,6 +619,15 @@ impl Zetta {
                             configuration.working_directory.clone(),
                             SettingsInput::Configuration(ConfigTextField::WorkingDirectory),
                         ),
+                    ),
+                    setting_row(
+                        "Inherit working directory scope",
+                        "Choose which new shells inherit the active pane's current directory",
+                        editor.focused_control
+                            == Some(SettingsControl::Dropdown(
+                                SettingsDropdown::WorkingDirectoryScope,
+                            )),
+                        working_directory_scope,
                     ),
                     setting_row(
                         "Scrollback history",

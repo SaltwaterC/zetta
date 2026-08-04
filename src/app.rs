@@ -654,10 +654,16 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         let active_pane = self.tabs.get(self.active_tab).and_then(Tab::active_pane);
+        let inherit_working_directory = self
+            .launch_config
+            .working_directory_scope
+            .inherits_for_new_tab();
         let inherited_working_directory = active_pane
+            .filter(|_| inherit_working_directory)
             .filter(|pane| !is_wsl_shell(&pane.profile.command))
             .and_then(|pane| pane.working_directory(cx));
         let inherited_wsl_directory = active_pane
+            .filter(|_| inherit_working_directory)
             .filter(|pane| pane.profile.name.eq_ignore_ascii_case(&profile.name))
             .and_then(|pane| pane.wsl_working_directory(cx));
         let (working_directory, wsl_directory) = launch_working_directory(
@@ -1163,13 +1169,20 @@ impl Zetta {
         let tab_id = tab.id;
         let active_pane_id = tab.active_pane;
         let active_pane = tab.active_pane();
+        let inherit_working_directory = self
+            .launch_config
+            .working_directory_scope
+            .inherits_for_new_pane();
         let inherited_working_directory = active_pane
+            .filter(|_| inherit_working_directory)
             .filter(|pane| !is_wsl_shell(&pane.profile.command))
             .and_then(|pane| pane.working_directory(cx));
         let Some(profile) = tab.active_profile().cloned() else {
             return;
         };
-        let inherited_wsl_directory = active_pane.and_then(|pane| pane.wsl_working_directory(cx));
+        let inherited_wsl_directory = active_pane
+            .filter(|_| inherit_working_directory)
+            .and_then(|pane| pane.wsl_working_directory(cx));
         let (working_directory, wsl_directory) = launch_working_directory(
             &profile,
             inherited_working_directory,
@@ -2244,7 +2257,12 @@ impl Zetta {
         let tab_id = tab.id;
         let active_pane_id = tab.active_pane;
         let active_pane = tab.active_pane();
+        let inherit_working_directory = self
+            .launch_config
+            .working_directory_scope
+            .inherits_for_new_pane();
         let inherited_working_directory = active_pane
+            .filter(|_| inherit_working_directory)
             .filter(|pane| !is_wsl_shell(&pane.profile.command))
             .and_then(|pane| pane.working_directory(cx));
         let Some(profile) = tab.active_profile().cloned() else {
@@ -2261,7 +2279,9 @@ impl Zetta {
             }
         };
         let mut terminal_settings = TerminalSpawnSettings::current(cx);
-        let inherited_wsl_directory = active_pane.and_then(|pane| pane.wsl_working_directory(cx));
+        let inherited_wsl_directory = active_pane
+            .filter(|_| inherit_working_directory)
+            .and_then(|pane| pane.wsl_working_directory(cx));
         let (working_directory, wsl_directory) = launch_working_directory(
             &profile,
             inherited_working_directory,
