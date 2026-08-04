@@ -64,6 +64,8 @@ actions!(
     ]
 );
 
+actions!(zetta, [SavePaneOutput]);
+
 #[derive(Clone, Debug)]
 pub enum TerminalViewEvent {
     Close,
@@ -1048,6 +1050,7 @@ impl TerminalView {
                 .action("Paste Trimmed", Box::new(PasteTrimmed))
                 .action("Select All", Box::new(SelectAll))
                 .action("Edit Scrollback", Box::new(EditScrollback))
+                .action("Save Pane Output", Box::new(SavePaneOutput))
                 .separator()
                 .action("Clear Clipboard", Box::new(ClearClipboard))
                 .action("Clear", Box::new(Clear))
