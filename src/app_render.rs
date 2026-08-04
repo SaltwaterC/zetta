@@ -2,8 +2,23 @@ use super::*;
 
 const MINIMIZED_PANE_ENTRY_MIN_WIDTH: Pixels = px(180.);
 const MINIMIZED_PANE_ENTRY_GAP: Pixels = px(4.);
+const TAB_MIN_WIDTH: Pixels = px(80.);
+const TAB_MAX_WIDTH: Pixels = px(180.);
 const TITLE_BAR_CONTROL_LABEL_MIN_WIDTH: Pixels = px(720.);
 const TITLE_BAR_RECONNECT_LABEL_MIN_WIDTH: Pixels = px(800.);
+
+// Keep the responsive sizing on a native flex item. Elements such as
+// `right_click_menu` are custom layout elements and cannot receive the flex
+// constraints that control how tabs shrink inside the scroll container.
+fn responsive_tab_container(child: impl IntoElement + 'static) -> gpui::Div {
+    div()
+        .h_8()
+        .w(TAB_MAX_WIDTH)
+        .min_w(TAB_MIN_WIDTH)
+        .max_w(TAB_MAX_WIDTH)
+        .flex_shrink_1()
+        .child(child)
+}
 
 fn title_bar_shows_control_labels(
     viewport_width: Pixels,
@@ -612,10 +627,8 @@ impl Render for Zetta {
                 let tab_element = div()
                     .id(("tab", tab.id as usize))
                     .h_8()
-                    .w(px(180.))
-                    .min_w(px(80.))
-                    .max_w(px(180.))
-                    .flex_shrink_1()
+                    .w_full()
+                    .min_w_0()
                     .px_2()
                     .flex()
                     .when(tab_close_button_on_left, |tab| tab.flex_row_reverse())
@@ -671,25 +684,33 @@ impl Render for Zetta {
                             }),
                     );
                 let menu_handle = handle.clone();
-                let action_context = active_terminal_focus.clone();
-                ui::right_click_menu::<ui::ContextMenu>(("tab-context-menu", tab.id as usize))
-                    .menu(move |window, cx| {
-                        menu_handle
-                            .update(cx, |this, cx| {
-                                this.active_tab = index;
-                                cx.notify();
+                // The context menu activates this tab before it is rendered. Use
+                // the clicked tab's focus so its key context remains valid after
+                // that switch, including when the tab was previously inactive.
+                let action_context = tab
+                    .active_pane()
+                    .and_then(|pane| pane.view.as_ref())
+                    .map(|view| view.focus_handle(cx));
+                let tab_element =
+                    ui::right_click_menu::<ui::ContextMenu>(("tab-context-menu", tab.id as usize))
+                        .menu(move |window, cx| {
+                            menu_handle
+                                .update(cx, |this, cx| {
+                                    this.active_tab = index;
+                                    cx.notify();
+                                })
+                                .ok();
+                            let action_context = action_context.clone();
+                            ui::ContextMenu::build(window, cx, move |menu, _, _| {
+                                let menu = menu
+                                    .when_some(action_context, |menu, focus| menu.context(focus));
+                                menu.action("Rename Tab", Box::new(RenameTab))
+                                    .action("Change Tab Icon", Box::new(ChangeTabIcon))
                             })
-                            .ok();
-                        let action_context = action_context.clone();
-                        ui::ContextMenu::build(window, cx, move |menu, _, _| {
-                            let menu =
-                                menu.when_some(action_context, |menu, focus| menu.context(focus));
-                            menu.action("Rename Tab", Box::new(RenameTab))
-                                .action("Change Tab Icon", Box::new(ChangeTabIcon))
                         })
-                    })
-                    .trigger(move |_, _, _| tab_element)
-                    .into_any_element()
+                        .trigger(move |_, _, _| tab_element)
+                        .into_any_element();
+                responsive_tab_container(tab_element).into_any_element()
             })
             .collect::<Vec<_>>();
 

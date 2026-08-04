@@ -61,6 +61,17 @@ fn minimized_shelf_resolves_metadata_only_for_visible_entries() {
     assert_eq!(resolved, [60, 61, 62]);
 }
 
+#[test]
+fn tab_container_keeps_responsive_flex_constraints() {
+    let mut container = responsive_tab_container(div());
+    let style = container.style();
+
+    assert_eq!(style.size.width, Some(TAB_MAX_WIDTH.into()));
+    assert_eq!(style.min_size.width, Some(TAB_MIN_WIDTH.into()));
+    assert_eq!(style.max_size.width, Some(TAB_MAX_WIDTH.into()));
+    assert_eq!(style.flex_shrink, Some(1.));
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn profile_shortcut_alias_uses_unmapped_number_row_modifiers() {
