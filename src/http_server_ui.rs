@@ -143,6 +143,9 @@ impl Zetta {
                     this.close_pane(tab_id, pane_id, window, cx)
                 }
                 TerminalViewEvent::Input(_) => {}
+                TerminalViewEvent::OpenEditor(request) => {
+                    this.open_editor_in_new_pane(tab_id, pane_id, request.clone(), window, cx);
+                }
             },
         )
         .detach();

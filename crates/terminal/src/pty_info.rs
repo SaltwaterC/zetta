@@ -243,6 +243,14 @@ impl PtyProcessInfo {
         Some(current)
     }
 
+    /// Returns whether the process currently owning the terminal is the shell
+    /// process that was created for the PTY. Unknown process state is treated
+    /// as non-shell so callers can choose the safe fallback.
+    pub(crate) fn foreground_process_is_shell(&self) -> bool {
+        self.resolve_foreground_pid()
+            .is_some_and(|foreground| foreground == self.pid_getter.fallback_pid())
+    }
+
     fn refresh(&self) -> Option<MappedRwLockReadGuard<'_, Process>> {
         let pid = self.resolve_foreground_pid()?;
         let fallback_pid = self.pid_getter.fallback_pid();
@@ -384,6 +392,16 @@ impl PtyProcessInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn foreground_process_identity_matches_the_pty_shell_pid() {
+        let shell = PtyProcessInfo::new(ProcessIdGetter::new(-1, std::process::id()));
+        assert!(shell.foreground_process_is_shell());
+
+        let unknown = PtyProcessInfo::new(ProcessIdGetter::new(-1, 0));
+        assert!(!unknown.foreground_process_is_shell());
+    }
 
     #[test]
     fn process_refreshes_are_throttled() {

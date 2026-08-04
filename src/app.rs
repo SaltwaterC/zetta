@@ -902,6 +902,15 @@ impl Zetta {
                                 TerminalViewEvent::Input(input) => {
                                     this.broadcast_input(tab_id, pane_id, input, cx);
                                 }
+                                TerminalViewEvent::OpenEditor(request) => {
+                                    this.open_editor_in_new_pane(
+                                        tab_id,
+                                        pane_id,
+                                        request.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                }
                             },
                         )
                         .detach();
@@ -1173,12 +1182,36 @@ impl Zetta {
         let Some(tab) = self.tabs.get(self.active_tab) else {
             return;
         };
+        self.split_pane_with_pending_command(
+            tab.id,
+            tab.active_pane,
+            None,
+            axis,
+            position,
+            window,
+            cx,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn split_pane_with_pending_command(
+        &mut self,
+        tab_id: u64,
+        active_pane_id: u64,
+        pending_command: Option<String>,
+        axis: SplitAxis,
+        position: SplitPosition,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(tab_index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            return false;
+        };
+        let tab = &self.tabs[tab_index];
         if !can_add_panes(tab.panes.len(), 1) {
-            return;
+            return false;
         }
-        let tab_id = tab.id;
-        let active_pane_id = tab.active_pane;
-        let active_pane = tab.active_pane();
+        let active_pane = tab.pane(active_pane_id);
         let inherit_working_directory = self
             .launch_config
             .working_directory_scope
@@ -1187,8 +1220,8 @@ impl Zetta {
             .filter(|_| inherit_working_directory)
             .filter(|pane| !is_wsl_shell(&pane.profile.command))
             .and_then(|pane| pane.working_directory(cx));
-        let Some(profile) = tab.active_profile().cloned() else {
-            return;
+        let Some(profile) = active_pane.map(|pane| pane.profile.clone()) else {
+            return false;
         };
         let inherited_wsl_directory = active_pane
             .filter(|_| inherit_working_directory)
@@ -1224,11 +1257,12 @@ impl Zetta {
             terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
         }
 
-        let tab = &mut self.tabs[self.active_tab];
+        let tab = &mut self.tabs[tab_index];
         tab.maximized_pane = None;
         if !tab.layout.split(active_pane_id, axis, pane_id, position) {
-            return;
+            return false;
         }
+        self.active_tab = tab_index;
         tab.push_pane(TerminalPane {
             id: pane_id,
             label_number: 0,
@@ -1239,7 +1273,7 @@ impl Zetta {
             view: None,
             error: None,
             wsl_cwd_file: wsl_cwd_file.clone(),
-            pending_command: None,
+            pending_command,
         });
         tab.activate_pane(pane_id);
         self.spawn_terminal(
@@ -1253,6 +1287,29 @@ impl Zetta {
             cx,
         );
         cx.notify();
+        true
+    }
+
+    pub(crate) fn open_editor_in_new_pane(
+        &mut self,
+        tab_id: u64,
+        pane_id: u64,
+        request: terminal_view::EditorRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let opened = self.split_pane_with_pending_command(
+            tab_id,
+            pane_id,
+            Some(request.command),
+            SplitAxis::Vertical,
+            SplitPosition::After,
+            window,
+            cx,
+        );
+        if !opened && let Some(path) = request.temporary_path {
+            terminal_view::remove_scrollback_file(&path);
+        }
     }
 
     pub(crate) fn new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -2083,6 +2140,9 @@ impl Zetta {
                 }
                 TerminalViewEvent::Input(input) => {
                     this.broadcast_input(tab_id, pane_id, input, cx);
+                }
+                TerminalViewEvent::OpenEditor(request) => {
+                    this.open_editor_in_new_pane(tab_id, pane_id, request.clone(), window, cx);
                 }
             },
         )

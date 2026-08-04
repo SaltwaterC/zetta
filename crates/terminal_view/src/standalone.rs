@@ -71,6 +71,13 @@ pub enum TerminalViewEvent {
     Close,
     TitleChanged,
     Input(TerminalInput),
+    OpenEditor(EditorRequest),
+}
+
+#[derive(Clone, Debug)]
+pub struct EditorRequest {
+    pub command: String,
+    pub temporary_path: Option<PathBuf>,
 }
 
 fn enabled_input_event(
@@ -403,9 +410,21 @@ impl TerminalView {
 
     fn edit_path_like_target(&mut self, target: terminal::PathLikeTarget, cx: &mut Context<Self>) {
         let path = resolve_local_path(&target);
-        self.terminal.update(cx, |terminal, _| {
-            terminal.open_path_in_editor_with_path_style(&path, target.path_style)
+        let request = self.terminal.update(cx, |terminal, _| {
+            let command = terminal.editor_command_for_path(&path, target.path_style)?;
+            if terminal.editor_should_open_in_new_pane() {
+                Some(EditorRequest {
+                    command,
+                    temporary_path: None,
+                })
+            } else {
+                terminal.submit_editor_command(command);
+                None
+            }
         });
+        if let Some(request) = request {
+            cx.emit(TerminalViewEvent::OpenEditor(request));
+        }
     }
 
     fn edit_scrollback(&mut self, _: &EditScrollback, _: &mut Window, cx: &mut Context<Self>) {
@@ -421,9 +440,21 @@ impl TerminalView {
                 Ok(path) => {
                     scrollback_temp::start_cleanup_monitor();
                     let update = this.update(cx, |this, cx| {
-                        this.terminal.update(cx, |terminal, _| {
-                            terminal.open_temporary_path_in_editor(&path)
+                        let request = this.terminal.update(cx, |terminal, _| {
+                            let command = terminal.editor_command_for_temporary_path(&path)?;
+                            if terminal.editor_should_open_in_new_pane() {
+                                Some(EditorRequest {
+                                    command,
+                                    temporary_path: Some(path.clone()),
+                                })
+                            } else {
+                                terminal.submit_editor_command(command);
+                                None
+                            }
                         });
+                        if let Some(request) = request {
+                            cx.emit(TerminalViewEvent::OpenEditor(request));
+                        }
                     });
                     if update.is_err() {
                         let _ = scrollback_temp::remove_managed(&path);

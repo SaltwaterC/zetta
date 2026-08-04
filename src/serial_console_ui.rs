@@ -400,6 +400,9 @@ impl Zetta {
                 TerminalViewEvent::Close => this.close_pane(tab_id, pane_id, window, cx),
                 TerminalViewEvent::TitleChanged => cx.notify(),
                 TerminalViewEvent::Input(input) => this.broadcast_input(tab_id, pane_id, input, cx),
+                TerminalViewEvent::OpenEditor(request) => {
+                    this.open_editor_in_new_pane(tab_id, pane_id, request.clone(), window, cx);
+                }
             },
         )
         .detach();

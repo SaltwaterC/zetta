@@ -1426,6 +1426,7 @@ impl TerminalBuilder {
             reported_theme: None,
             reported_working_directory: None,
             reported_foreground_command: None,
+            reported_shell_command: None,
             #[cfg(any(test, feature = "test-support"))]
             input_log: Vec::new(),
             #[cfg(any(test, feature = "test-support"))]
@@ -1757,6 +1758,7 @@ impl TerminalBuilder {
                 reported_theme: None,
                 reported_working_directory: None,
                 reported_foreground_command: None,
+                reported_shell_command: None,
                 #[cfg(any(test, feature = "test-support"))]
                 input_log: Vec::new(),
                 #[cfg(any(test, feature = "test-support"))]
@@ -1954,6 +1956,10 @@ pub struct Terminal {
     reported_theme: Option<Arc<Theme>>,
     reported_working_directory: Option<String>,
     reported_foreground_command: Option<String>,
+    /// The first command reported by the WSL/MSYS2 shell integration is its
+    /// idle shell marker. Later markers can then be classified without a
+    /// platform-specific shell-name list.
+    reported_shell_command: Option<String>,
     #[cfg(any(test, feature = "test-support"))]
     input_log: Vec<Vec<u8>>,
     #[cfg(any(test, feature = "test-support"))]
@@ -2048,6 +2054,8 @@ impl Terminal {
                 }
 
                 if let Some(command) = reported_foreground_command_from_title(&title) {
+                    self.reported_shell_command
+                        .get_or_insert_with(|| command.clone());
                     if self.reported_foreground_command.as_deref() != Some(command.as_str()) {
                         self.reported_foreground_command = Some(command);
                         cx.emit(Event::TitleChanged);
@@ -2592,43 +2600,83 @@ impl Terminal {
         self.open_path_in_editor_with_path_style(path, self.path_style);
     }
 
+    /// Builds the shell command used to open a path in Zetta's editor.
+    pub fn editor_command_for_path(&self, path: &Path, path_style: PathStyle) -> Option<String> {
+        let shell_kind = interaction_shell_kind(&self.template.shell, self.path_style);
+        let zetta_command = zetta_command_for_shell(&self.template.shell)?;
+        let path_argument =
+            editor_path_argument(shell_kind, &self.template.shell, path, path_style)?;
+        Some(editor_invocation_command(
+            &zetta_command,
+            &path_argument,
+            false,
+        ))
+    }
+
     /// Opens a path emitted by a shell that may use a different path syntax
     /// than the native Zetta host, such as WSL on Windows.
     pub fn open_path_in_editor_with_path_style(&mut self, path: &Path, path_style: PathStyle) {
-        let shell_kind = interaction_shell_kind(&self.template.shell, self.path_style);
-        let Some(zetta_command) = zetta_command_for_shell(&self.template.shell) else {
+        let Some(command) = self.editor_command_for_path(path, path_style) else {
             log::error!("cannot determine the native Zetta executable for the pane editor");
             return;
         };
-        let Some(path_argument) =
-            editor_path_argument(shell_kind, &self.template.shell, path, path_style)
-        else {
-            log::error!("cannot open a non-UTF-8 path in the pane editor: {path:?}");
-            return;
-        };
-        let command = editor_invocation_command(&zetta_command, &path_argument, false);
         self.submit_editor_command(command);
+    }
+
+    /// Builds the shell command used to open and remove a managed scrollback
+    /// snapshot in Zetta's editor.
+    pub fn editor_command_for_temporary_path(&self, path: &Path) -> Option<String> {
+        let shell_kind = interaction_shell_kind(&self.template.shell, self.path_style);
+        let zetta_command = zetta_command_for_shell(&self.template.shell)?;
+        let path_argument =
+            editor_path_argument(shell_kind, &self.template.shell, path, self.path_style)?;
+        Some(editor_invocation_command(
+            &zetta_command,
+            &path_argument,
+            true,
+        ))
     }
 
     /// Opens a managed scrollback snapshot and asks the editor dispatcher to
     /// remove it as soon as the editor command returns.
     pub fn open_temporary_path_in_editor(&mut self, path: &Path) {
-        let shell_kind = interaction_shell_kind(&self.template.shell, self.path_style);
-        let Some(zetta_command) = zetta_command_for_shell(&self.template.shell) else {
+        let Some(command) = self.editor_command_for_temporary_path(path) else {
             log::error!("cannot determine the native Zetta executable for the pane editor");
             return;
         };
-        let Some(path_argument) =
-            editor_path_argument(shell_kind, &self.template.shell, path, self.path_style)
-        else {
-            log::error!("cannot open a non-UTF-8 path in the pane editor: {path:?}");
-            return;
-        };
-        let command = editor_invocation_command(&zetta_command, &path_argument, true);
         self.submit_editor_command(command);
     }
 
-    fn submit_editor_command(&mut self, command: String) {
+    /// Returns whether sending an editor command to this terminal would send
+    /// it to a foreground program instead of the shell.
+    pub fn editor_should_open_in_new_pane(&self) -> bool {
+        if !self.is_pty() || self.last_content.mode.contains(Modes::ALT_SCREEN) {
+            return true;
+        }
+
+        match &self.terminal_type {
+            TerminalType::Pty { info, .. } => {
+                #[cfg(windows)]
+                if posix_host(&self.template.shell).is_some() {
+                    return !self
+                        .reported_foreground_command
+                        .as_deref()
+                        .zip(self.reported_shell_command.as_deref())
+                        .is_some_and(|(foreground, shell)| foreground == shell);
+                }
+
+                !info.foreground_process_is_shell()
+            }
+            TerminalType::DisplayOnly => true,
+        }
+    }
+
+    /// Sends an already-built editor command through this terminal's shell.
+    pub fn submit_editor_command(&mut self, command: String) {
+        self.submit_editor_command_inner(command);
+    }
+
+    fn submit_editor_command_inner(&mut self, command: String) {
         self.input(command.into_bytes());
         // Keep Enter in its own write. WSL's ConPTY path can otherwise leave
         // a generated command at the prompt for the next editor action to
@@ -4597,6 +4645,25 @@ mod tests {
         assert_eq!(normalize_path_command_name("zsh"), Some("zsh".into()));
         assert_eq!(normalize_path_command_name("-zsh"), None);
         assert_eq!(normalize_path_command_name("pwsh.exe"), Some("pwsh".into()));
+    }
+
+    #[gpui::test]
+    async fn display_only_terminals_require_a_new_editor_pane(cx: &mut TestAppContext) {
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+
+        assert!(terminal.read_with(cx, |terminal, _| {
+            terminal.editor_should_open_in_new_pane()
+        }));
     }
 
     #[test]
