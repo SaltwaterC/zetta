@@ -43,6 +43,29 @@ impl PaneControlsPosition {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NewTabProfile {
+    #[default]
+    Default,
+    Inherit,
+}
+
+impl NewTabProfile {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Inherit => "inherit",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Default => "Default",
+            Self::Inherit => "Inherit",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum WorkingDirectoryScope {
     None,
     Pane,
@@ -122,6 +145,7 @@ pub struct Config {
     pub profiles: Vec<Profile>,
     pub(crate) hidden_profiles: HashSet<String>,
     pub default_profile: usize,
+    pub new_tab_profile: NewTabProfile,
     pub working_directory: Option<PathBuf>,
     pub working_directory_configured: bool,
     pub working_directory_scope: WorkingDirectoryScope,
@@ -154,6 +178,7 @@ impl Config {
             profiles: discovered_profiles(),
             hidden_profiles: HashSet::new(),
             default_profile: 0,
+            new_tab_profile: NewTabProfile::default(),
             working_directory: Some(home_dir()),
             working_directory_configured: false,
             working_directory_scope: WorkingDirectoryScope::default(),
@@ -226,6 +251,16 @@ impl Config {
                 _ => {
                     anyhow::bail!("working_directory_scope must be \"none\", \"pane\", or \"tab\"")
                 }
+            };
+        }
+        if let Some(profile) = root.get("new_tab_profile") {
+            config.new_tab_profile = match profile
+                .as_str()
+                .context("new_tab_profile must be \"default\" or \"inherit\"")?
+            {
+                "default" => NewTabProfile::Default,
+                "inherit" => NewTabProfile::Inherit,
+                _ => anyhow::bail!("new_tab_profile must be \"default\" or \"inherit\""),
             };
         }
         if let Some(theme) = root.get("theme") {
@@ -341,6 +376,7 @@ impl Config {
 fn validate_config_fields(root: &Value) -> Result<()> {
     const FIELDS: &[&str] = &[
         "default_profile",
+        "new_tab_profile",
         "working_directory",
         "working_directory_scope",
         "theme",

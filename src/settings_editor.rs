@@ -3,7 +3,9 @@ use std::{fs, io, path::Path};
 use anyhow::{Context as _, Result};
 use serde_json::{Map, Value, json};
 
-use crate::config::{Config, PaneControlsPosition, WorkingDirectoryScope, profile_is_hidden};
+use crate::config::{
+    Config, NewTabProfile, PaneControlsPosition, WorkingDirectoryScope, profile_is_hidden,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsPage {
@@ -118,6 +120,7 @@ pub struct ProfileForm {
 pub struct ConfigurationForm {
     root: Map<String, Value>,
     pub default_profile: String,
+    pub new_tab_profile: NewTabProfile,
     pub working_directory: TextField,
     pub working_directory_scope: WorkingDirectoryScope,
     pub theme: String,
@@ -199,6 +202,7 @@ impl ConfigurationForm {
             .collect();
         Ok(Self {
             default_profile: config.profiles[config.default_profile].name.clone(),
+            new_tab_profile: config.new_tab_profile,
             working_directory: TextField::new(
                 string("working_directory").unwrap_or_else(|| "~".to_owned()),
             ),
@@ -259,6 +263,10 @@ impl ConfigurationForm {
     pub fn to_json(&self) -> Result<String> {
         let mut root = self.root.clone();
         root.insert("default_profile".into(), json!(self.default_profile));
+        root.insert(
+            "new_tab_profile".into(),
+            json!(self.new_tab_profile.as_str()),
+        );
         root.insert(
             "working_directory".into(),
             json!(self.working_directory.text),

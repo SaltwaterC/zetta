@@ -122,10 +122,14 @@ fn new_tab_profile(
     active_profile: Option<&Profile>,
     profiles: &[Profile],
     default_profile: usize,
+    new_tab_profile: NewTabProfile,
 ) -> Option<Profile> {
-    active_profile
-        .cloned()
-        .or_else(|| profiles.get(default_profile).cloned())
+    match new_tab_profile {
+        NewTabProfile::Default => profiles.get(default_profile).cloned(),
+        NewTabProfile::Inherit => active_profile
+            .cloned()
+            .or_else(|| profiles.get(default_profile).cloned()),
+    }
 }
 
 fn resize_cell_count(current: usize, delta: isize, minimum: usize) -> usize {
@@ -641,6 +645,7 @@ impl Zetta {
             active_profile,
             &self.profiles,
             self.launch_config.default_profile,
+            self.launch_config.new_tab_profile,
         ) else {
             return;
         };

@@ -490,6 +490,14 @@ impl Zetta {
                     window,
                     cx,
                 );
+                let new_tab_profile = dropdown(
+                    "settings-new-tab-profile".to_owned(),
+                    configuration.new_tab_profile.label().to_owned(),
+                    vec!["Default".to_owned(), "Inherit".to_owned()].into(),
+                    SettingsDropdown::NewTabProfile,
+                    window,
+                    cx,
+                );
                 let theme = dropdown(
                     "settings-theme".to_owned(),
                     configuration.theme.clone(),
@@ -581,6 +589,13 @@ impl Zetta {
                         editor.focused_control
                             == Some(SettingsControl::Dropdown(SettingsDropdown::DefaultProfile)),
                         default_profile,
+                    ),
+                    setting_row(
+                        "New Tab profile",
+                        "Profile selected when opening a new tab",
+                        editor.focused_control
+                            == Some(SettingsControl::Dropdown(SettingsDropdown::NewTabProfile)),
+                        new_tab_profile,
                     ),
                     setting_row(
                         "Theme",

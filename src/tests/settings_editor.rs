@@ -105,6 +105,7 @@ fn configuration_form_round_trip_uses_typed_values_and_profiles() {
     form.pane_controls_position = PaneControlsPosition::Left;
     form.pane_controls_hidden_by_default = true;
     form.working_directory_scope = WorkingDirectoryScope::Pane;
+    form.new_tab_profile = NewTabProfile::Inherit;
     #[cfg(feature = "http-server")]
     {
         form.http_server_port.text = "8080".to_owned();
@@ -136,6 +137,7 @@ fn configuration_form_round_trip_uses_typed_values_and_profiles() {
     assert_eq!(output["pane_controls_position"], "left");
     assert_eq!(output["pane_controls_hidden_by_default"], true);
     assert_eq!(output["working_directory_scope"], "pane");
+    assert_eq!(output["new_tab_profile"], "inherit");
     #[cfg(feature = "http-server")]
     assert_eq!(output["http_server_port"], 8080);
     #[cfg(feature = "tftp-server")]

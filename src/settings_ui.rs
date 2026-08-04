@@ -19,6 +19,7 @@ pub(crate) enum ProfileDraftField {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SettingsDropdown {
     DefaultProfile,
+    NewTabProfile,
     Theme,
     WorkingDirectoryScope,
     PaneControlsPosition,
@@ -680,6 +681,7 @@ impl Zetta {
             SettingsPage::Configuration => {
                 controls.extend([
                     SettingsControl::Dropdown(SettingsDropdown::DefaultProfile),
+                    SettingsControl::Dropdown(SettingsDropdown::NewTabProfile),
                     SettingsControl::Dropdown(SettingsDropdown::Theme),
                     SettingsControl::Numeric(NumericSetting::FontSize),
                     SettingsControl::FontPicker,
@@ -870,6 +872,10 @@ impl Zetta {
                 options.dedup();
                 (editor.configuration.default_profile.clone(), options)
             }
+            SettingsDropdown::NewTabProfile => (
+                editor.configuration.new_tab_profile.label().to_owned(),
+                vec!["Default".to_owned(), "Inherit".to_owned()],
+            ),
             SettingsDropdown::Theme => (editor.configuration.theme.clone(), editor.themes.to_vec()),
             SettingsDropdown::WorkingDirectoryScope => (
                 editor
@@ -1250,6 +1256,13 @@ impl Zetta {
         match dropdown {
             SettingsDropdown::DefaultProfile => {
                 editor.configuration.default_profile = value;
+            }
+            SettingsDropdown::NewTabProfile => {
+                editor.configuration.new_tab_profile = if value == "Inherit" {
+                    NewTabProfile::Inherit
+                } else {
+                    NewTabProfile::Default
+                };
             }
             SettingsDropdown::Theme => editor.configuration.theme = value,
             SettingsDropdown::WorkingDirectoryScope => {

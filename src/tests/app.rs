@@ -216,7 +216,13 @@ fn new_tab_inherits_the_active_profile_after_an_explicit_profile_tab_closes() {
         theme: None,
     };
 
-    let profile = new_tab_profile(Some(&system), &[system.clone(), alternate], 0).unwrap();
+    let profile = new_tab_profile(
+        Some(&system),
+        &[system.clone(), alternate],
+        0,
+        NewTabProfile::Inherit,
+    )
+    .unwrap();
 
     assert_eq!(profile.name, "System");
 }
@@ -234,9 +240,33 @@ fn first_tab_uses_the_configured_default_profile() {
         theme: None,
     };
 
-    let profile = new_tab_profile(None, &[system, alternate], 1).unwrap();
+    let profile = new_tab_profile(None, &[system, alternate], 1, NewTabProfile::Default).unwrap();
 
     assert_eq!(profile.name, "Alternate");
+}
+
+#[test]
+fn default_new_tabs_ignore_the_active_profile() {
+    let system = Profile {
+        name: "System".to_owned(),
+        command: Shell::System,
+        theme: None,
+    };
+    let alternate = Profile {
+        name: "Alternate".to_owned(),
+        command: Shell::Program("alternate-shell".to_owned()),
+        theme: None,
+    };
+
+    let profile = new_tab_profile(
+        Some(&alternate),
+        &[system, alternate.clone()],
+        0,
+        NewTabProfile::Default,
+    )
+    .unwrap();
+
+    assert_eq!(profile.name, "System");
 }
 
 #[test]

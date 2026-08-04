@@ -1,5 +1,6 @@
 {
   "default_profile": "System",
+  "new_tab_profile": "default",
   "working_directory": "~",
   "working_directory_scope": "tab",
   "theme": "One Dark",

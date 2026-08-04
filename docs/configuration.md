@@ -73,7 +73,18 @@ Profile 1 is `System`, followed by detected profiles and configured `profiles`
 in the order displayed by the profile menu. A configured profile with the same
 name as a detected profile overrides it in place. Set `default_profile` to any
 displayed name; matching is case-insensitive. Opening a profile from the menu
-or a shortcut makes it the selection for subsequent `Ctrl-Shift-T` tabs.
+or a shortcut does not change the profile used by subsequent new tabs by
+default. New tabs use `default_profile`; set `new_tab_profile` to `"inherit"`
+to use the active tab's profile instead. The same setting is available as
+**New Tab profile** under **Default profile** in the Configuration panel:
+
+```json
+{
+  "default_profile": "System",
+  "new_tab_profile": "inherit"
+}
+```
+
 Missing shortcut slots have no effect.
 
 To keep an individual detected profile out of the Profiles menu, use its

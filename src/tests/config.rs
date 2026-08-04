@@ -46,6 +46,7 @@ fn configuration_uses_profile_terminology() {
     assert!(
         validate_config_fields(&serde_json::json!({
             "default_profile": "System",
+            "new_tab_profile": "default",
             "profiles": []
         }))
         .is_ok()
@@ -83,6 +84,7 @@ fn default_working_directory_is_the_user_home() {
     assert_eq!(config.pane_controls_position, PaneControlsPosition::Right);
     assert!(!config.pane_controls_hidden_by_default);
     assert_eq!(config.working_directory_scope, WorkingDirectoryScope::Tab);
+    assert_eq!(config.new_tab_profile, NewTabProfile::Default);
     assert!(config.hide_pane_size);
     assert!(!config.hide_title_bar_labels);
     assert!(!config.hide_title_bar_buttons);
@@ -116,6 +118,27 @@ fn validates_working_directory_scope() {
             )
             .is_err(),
             "accepted invalid working directory scope {value}"
+        );
+    }
+}
+
+#[test]
+fn validates_new_tab_profile() {
+    for (value, expected) in [
+        ("default", NewTabProfile::Default),
+        ("inherit", NewTabProfile::Inherit),
+    ] {
+        assert_eq!(
+            Config::parse(&format!(r#"{{"new_tab_profile":"{value}"}}"#), None, None,)
+                .unwrap()
+                .new_tab_profile,
+            expected
+        );
+    }
+    for value in [r#""#, "true", "null", r#""current""#] {
+        assert!(
+            Config::parse(&format!(r#"{{"new_tab_profile":{value}}}"#), None, None,).is_err(),
+            "accepted invalid new tab profile {value}"
         );
     }
 }
