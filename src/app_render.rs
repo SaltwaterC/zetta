@@ -30,6 +30,10 @@ fn title_bar_background_indicator_on_right(
     hide_buttons && background_session_count > 0
 }
 
+fn reconnect_control_label(show_label: bool) -> &'static str {
+    if show_label { "Reconnect" } else { "" }
+}
+
 fn minimized_pane_capacity(available_width: Pixels, pane_count: usize) -> usize {
     if pane_count == 0 {
         return 0;
@@ -534,24 +538,17 @@ impl Render for Zetta {
         } else {
             Vec::new()
         };
-        let make_reconnect_control = || {
+        let make_reconnect_control = |show_label| {
             let reconnect_menu_entries = reconnect_menu_entries.clone();
             let reconnect_menu_handle = handle.clone();
             let reconnect_menu = PopoverMenu::new("reconnect-session-menu")
                 .with_handle(self.reconnect_menu_handle.clone())
                 .trigger_with_tooltip(
-                    Button::new(
-                        "reconnect-session",
-                        if show_title_bar_control_labels {
-                            "Reconnect"
-                        } else {
-                            ""
-                        },
-                    )
-                    .start_icon(Icon::new(IconName::RotateCw).size(IconSize::Small))
-                    .style(ButtonStyle::Subtle)
-                    .size(ButtonSize::Large)
-                    .aria_label("Choose background session to reconnect"),
+                    Button::new("reconnect-session", reconnect_control_label(show_label))
+                        .start_icon(Icon::new(IconName::RotateCw).size(IconSize::Small))
+                        .style(ButtonStyle::Subtle)
+                        .size(ButtonSize::Large)
+                        .aria_label("Choose background session to reconnect"),
                     Tooltip::for_action_title(
                         format!(
                             "Choose background session to reconnect ({background_session_count})"
@@ -597,30 +594,25 @@ impl Render for Zetta {
                     }))
                 });
             if background_session_count == 1 {
-                Button::new(
-                    "reconnect-session",
-                    if show_title_bar_control_labels {
-                        "Reconnect"
-                    } else {
-                        ""
-                    },
-                )
-                .start_icon(Icon::new(IconName::RotateCw).size(IconSize::Small))
-                .style(ButtonStyle::Subtle)
-                .size(ButtonSize::Large)
-                .aria_label("Reconnect background session")
-                .tooltip(Tooltip::for_action_title(
-                    "Reconnect background session",
-                    &ReconnectSession,
-                ))
-                .on_click(|_, window, cx| window.dispatch_action(Box::new(ReconnectSession), cx))
-                .into_any_element()
+                Button::new("reconnect-session", reconnect_control_label(show_label))
+                    .start_icon(Icon::new(IconName::RotateCw).size(IconSize::Small))
+                    .style(ButtonStyle::Subtle)
+                    .size(ButtonSize::Large)
+                    .aria_label("Reconnect background session")
+                    .tooltip(Tooltip::for_action_title(
+                        "Reconnect background session",
+                        &ReconnectSession,
+                    ))
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(Box::new(ReconnectSession), cx)
+                    })
+                    .into_any_element()
             } else {
                 reconnect_menu.into_any_element()
             }
         };
         let reconnect_control = if show_title_bar_buttons && background_session_count > 0 {
-            Some(make_reconnect_control())
+            Some(make_reconnect_control(show_title_bar_control_labels))
         } else {
             None
         };
@@ -628,7 +620,15 @@ impl Render for Zetta {
             !show_title_bar_buttons,
             background_session_count,
         ) {
-            Some(make_reconnect_control())
+            // This control is outside the regular controls row, so it must
+            // block the draggable title-bar hitbox on platforms that use
+            // native hit testing for client-side decorations.
+            Some(
+                div()
+                    .occlude()
+                    .child(make_reconnect_control(false))
+                    .into_any_element(),
+            )
         } else {
             None
         };

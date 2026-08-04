@@ -26,6 +26,12 @@ fn background_session_indicator_moves_right_when_buttons_are_hidden() {
 }
 
 #[test]
+fn fallback_reconnect_control_is_icon_only() {
+    assert_eq!(reconnect_control_label(false), "");
+    assert_eq!(reconnect_control_label(true), "Reconnect");
+}
+
+#[test]
 fn minimized_shelf_capacity_fits_only_complete_entries() {
     assert_eq!(minimized_pane_capacity(px(0.), 4), 1);
     assert_eq!(minimized_pane_capacity(px(180.), 4), 1);
