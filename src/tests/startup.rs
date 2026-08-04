@@ -1560,6 +1560,19 @@ fn pane_layout_rotation_uses_the_requested_shortcut() {
 }
 
 #[test]
+fn counter_clockwise_pane_layout_rotation_uses_the_requested_shortcut() {
+    assert_eq!(
+        ROTATE_PANE_LAYOUT_COUNTER_CLOCKWISE_KEYBINDING,
+        platform_keystroke("alt-shift-k")
+    );
+    let shortcut = gpui::Keystroke::parse(ROTATE_PANE_LAYOUT_COUNTER_CLOCKWISE_KEYBINDING).unwrap();
+    assert_eq!(
+        rotate_pane_layout_counter_clockwise_keybinding().match_keystrokes(&[shortcut]),
+        Some(false)
+    );
+}
+
+#[test]
 fn pane_resize_mode_uses_a_dedicated_ctrl_shift_shortcut() {
     assert_eq!(TOGGLE_PANE_RESIZE_MODE_KEYBINDING, "ctrl-shift-j");
     let shortcut = gpui::Keystroke::parse(TOGGLE_PANE_RESIZE_MODE_KEYBINDING).unwrap();
@@ -1602,6 +1615,7 @@ fn alt_shortcuts_use_the_platform_equivalent() {
     for (shortcut, expected) in [
         ("alt-left", "cmd-left"),
         ("alt-shift-l", "cmd-shift-l"),
+        ("alt-shift-k", "cmd-shift-k"),
         ("alt-shift-o", "cmd-shift-o"),
         ("alt-shift-e", "cmd-shift-e"),
         ("alt-shift-a", "cmd-shift-a"),

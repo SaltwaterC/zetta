@@ -2219,13 +2219,31 @@ impl Zetta {
     pub(crate) fn rotate_pane_layout(
         &mut self,
         _: &RotatePaneLayout,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.rotate_pane_layout_in_direction(PaneRotationDirection::Clockwise, window, cx);
+    }
+
+    pub(crate) fn rotate_pane_layout_counter_clockwise(
+        &mut self,
+        _: &RotatePaneLayoutCounterClockwise,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.rotate_pane_layout_in_direction(PaneRotationDirection::CounterClockwise, window, cx);
+    }
+
+    fn rotate_pane_layout_in_direction(
+        &mut self,
+        direction: PaneRotationDirection,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(tab) = self.tabs.get_mut(self.active_tab) else {
             return;
         };
-        if !tab.layout.rotate_two_pane_split() {
+        if !tab.layout.rotate_pane(tab.active_pane, direction) {
             return;
         }
         for terminal in tab.panes.iter().filter_map(|pane| pane.terminal.as_ref()) {

@@ -1812,6 +1812,7 @@ impl Render for Zetta {
             .on_action(cx.listener(Self::split_vertical_right))
             .on_action(cx.listener(Self::split_vertical_left))
             .on_action(cx.listener(Self::rotate_pane_layout))
+            .on_action(cx.listener(Self::rotate_pane_layout_counter_clockwise))
             .on_action(cx.listener(Self::toggle_pane_resize_mode))
             .on_action(cx.listener(Self::resize_pane_left))
             .on_action(cx.listener(Self::resize_pane_right))

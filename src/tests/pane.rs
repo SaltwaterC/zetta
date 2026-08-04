@@ -6,7 +6,7 @@ fn terminal_size_label_uses_columns_before_rows() {
 }
 
 #[test]
-fn two_pane_layout_rotates_between_axes() {
+fn two_pane_layout_rotates_clockwise_and_counter_clockwise() {
     let mut layout = PaneLayout::Split {
         axis: SplitAxis::Horizontal,
         first_ratio: DEFAULT_PANE_SPLIT_RATIO,
@@ -14,22 +14,102 @@ fn two_pane_layout_rotates_between_axes() {
         second: Box::new(PaneLayout::Pane(2)),
     };
 
-    assert!(layout.rotate_two_pane_split());
+    assert!(layout.rotate_pane(1, PaneRotationDirection::Clockwise));
+    assert_eq!(
+        layout,
+        PaneLayout::Split {
+            axis: SplitAxis::Vertical,
+            first_ratio: DEFAULT_PANE_SPLIT_RATIO,
+            first: Box::new(PaneLayout::Pane(2)),
+            second: Box::new(PaneLayout::Pane(1)),
+        }
+    );
+    assert!(layout.rotate_pane(1, PaneRotationDirection::CounterClockwise));
+    assert_eq!(
+        layout,
+        PaneLayout::Split {
+            axis: SplitAxis::Horizontal,
+            first_ratio: DEFAULT_PANE_SPLIT_RATIO,
+            first: Box::new(PaneLayout::Pane(1)),
+            second: Box::new(PaneLayout::Pane(2)),
+        }
+    );
+
+    let mut clockwise = PaneLayout::Split {
+        axis: SplitAxis::Horizontal,
+        first_ratio: DEFAULT_PANE_SPLIT_RATIO,
+        first: Box::new(PaneLayout::Pane(1)),
+        second: Box::new(PaneLayout::Pane(2)),
+    };
+    assert!(clockwise.rotate_pane(1, PaneRotationDirection::Clockwise));
+    assert!(clockwise.rotate_pane(1, PaneRotationDirection::Clockwise));
+    assert_eq!(clockwise.first_pane(), 2);
+
+    let mut counter_clockwise = PaneLayout::Split {
+        axis: SplitAxis::Horizontal,
+        first_ratio: DEFAULT_PANE_SPLIT_RATIO,
+        first: Box::new(PaneLayout::Pane(1)),
+        second: Box::new(PaneLayout::Pane(2)),
+    };
+    assert!(counter_clockwise.rotate_pane(1, PaneRotationDirection::CounterClockwise));
+    assert!(counter_clockwise.rotate_pane(1, PaneRotationDirection::CounterClockwise));
+    assert_eq!(counter_clockwise.first_pane(), 2);
+}
+
+#[test]
+fn pane_rotation_rejects_missing_panes() {
+    let mut single = PaneLayout::Pane(1);
+    let layout = PaneLayout::tiled(&[1, 2, 3]).unwrap();
+
+    assert!(!single.rotate_pane(1, PaneRotationDirection::Clockwise));
+    assert!(
+        !layout
+            .clone()
+            .rotate_pane(99, PaneRotationDirection::Clockwise)
+    );
+    assert_eq!(single, PaneLayout::Pane(1));
+}
+
+#[test]
+fn pane_rotation_stays_with_the_equal_local_pair() {
+    let mut layout = PaneLayout::tiled(&[1, 2, 3]).unwrap();
+    let outer = layout.clone();
+
+    assert!(layout.rotate_pane(2, PaneRotationDirection::Clockwise));
     assert_eq!(
         layout,
         PaneLayout::Split {
             axis: SplitAxis::Vertical,
             first_ratio: DEFAULT_PANE_SPLIT_RATIO,
             first: Box::new(PaneLayout::Pane(1)),
-            second: Box::new(PaneLayout::Pane(2)),
+            second: Box::new(PaneLayout::Split {
+                axis: SplitAxis::Vertical,
+                first_ratio: DEFAULT_PANE_SPLIT_RATIO,
+                first: Box::new(PaneLayout::Pane(3)),
+                second: Box::new(PaneLayout::Pane(2)),
+            }),
         }
     );
-    assert!(layout.rotate_two_pane_split());
+
+    assert!(layout.rotate_pane(2, PaneRotationDirection::CounterClockwise));
+    assert_eq!(layout, outer);
+}
+
+#[test]
+fn pane_rotation_preserves_resized_two_pane_support() {
+    let mut layout = PaneLayout::Split {
+        axis: SplitAxis::Vertical,
+        first_ratio: 700,
+        first: Box::new(PaneLayout::Pane(1)),
+        second: Box::new(PaneLayout::Pane(2)),
+    };
+
+    assert!(layout.rotate_pane(2, PaneRotationDirection::Clockwise));
     assert_eq!(
         layout,
         PaneLayout::Split {
             axis: SplitAxis::Horizontal,
-            first_ratio: DEFAULT_PANE_SPLIT_RATIO,
+            first_ratio: 700,
             first: Box::new(PaneLayout::Pane(1)),
             second: Box::new(PaneLayout::Pane(2)),
         }
@@ -37,43 +117,84 @@ fn two_pane_layout_rotates_between_axes() {
 }
 
 #[test]
-fn non_two_pane_layouts_do_not_rotate() {
-    let mut single = PaneLayout::Pane(1);
-    let mut three_right = PaneLayout::Split {
-        axis: SplitAxis::Vertical,
-        first_ratio: DEFAULT_PANE_SPLIT_RATIO,
-        first: Box::new(PaneLayout::Pane(1)),
-        second: Box::new(PaneLayout::Split {
-            axis: SplitAxis::Horizontal,
-            first_ratio: DEFAULT_PANE_SPLIT_RATIO,
-            first: Box::new(PaneLayout::Pane(2)),
-            second: Box::new(PaneLayout::Pane(3)),
-        }),
-    };
-    let mut three_left = PaneLayout::Split {
-        axis: SplitAxis::Vertical,
-        first_ratio: DEFAULT_PANE_SPLIT_RATIO,
-        first: Box::new(PaneLayout::Split {
+fn pane_rotation_rotates_a_focused_dominant_three_pane_group() {
+    let mut layout = PaneLayout::tiled(&[1, 2, 3]).unwrap();
+
+    assert!(layout.rotate_pane(1, PaneRotationDirection::Clockwise));
+    assert_eq!(
+        layout,
+        PaneLayout::Split {
             axis: SplitAxis::Horizontal,
             first_ratio: DEFAULT_PANE_SPLIT_RATIO,
             first: Box::new(PaneLayout::Pane(1)),
-            second: Box::new(PaneLayout::Pane(2)),
-        }),
-        second: Box::new(PaneLayout::Pane(3)),
-    };
-    let mut quarters = PaneLayout::tiled(&[1, 2, 3, 4]).unwrap();
-    let original_three_right = three_right.clone();
-    let original_three_left = three_left.clone();
-    let original_quarters = quarters.clone();
+            second: Box::new(PaneLayout::Split {
+                axis: SplitAxis::Vertical,
+                first_ratio: DEFAULT_PANE_SPLIT_RATIO,
+                first: Box::new(PaneLayout::Pane(3)),
+                second: Box::new(PaneLayout::Pane(2)),
+            }),
+        }
+    );
+}
 
-    assert!(!single.rotate_two_pane_split());
-    assert!(!three_right.rotate_two_pane_split());
-    assert!(!three_left.rotate_two_pane_split());
-    assert!(!quarters.rotate_two_pane_split());
-    assert_eq!(single, PaneLayout::Pane(1));
-    assert_eq!(three_right, original_three_right);
-    assert_eq!(three_left, original_three_left);
-    assert_eq!(quarters, original_quarters);
+#[test]
+fn pane_rotation_rotates_equal_quarters_as_one_group() {
+    let mut layout = PaneLayout::tiled(&[1, 2, 3, 4]).unwrap();
+
+    assert!(layout.rotate_pane(1, PaneRotationDirection::Clockwise));
+    assert_eq!(
+        layout,
+        PaneLayout::Split {
+            axis: SplitAxis::Horizontal,
+            first_ratio: DEFAULT_PANE_SPLIT_RATIO,
+            first: Box::new(PaneLayout::Split {
+                axis: SplitAxis::Vertical,
+                first_ratio: DEFAULT_PANE_SPLIT_RATIO,
+                first: Box::new(PaneLayout::Pane(2)),
+                second: Box::new(PaneLayout::Pane(1)),
+            }),
+            second: Box::new(PaneLayout::Split {
+                axis: SplitAxis::Vertical,
+                first_ratio: DEFAULT_PANE_SPLIT_RATIO,
+                first: Box::new(PaneLayout::Pane(4)),
+                second: Box::new(PaneLayout::Pane(3)),
+            }),
+        }
+    );
+
+    assert!(layout.rotate_pane(1, PaneRotationDirection::CounterClockwise));
+    assert_eq!(layout, PaneLayout::tiled(&[1, 2, 3, 4]).unwrap());
+}
+
+#[test]
+fn pane_rotation_recurses_only_into_the_active_group() {
+    let mut layout = PaneLayout::Split {
+        axis: SplitAxis::Horizontal,
+        first_ratio: DEFAULT_PANE_SPLIT_RATIO,
+        first: Box::new(PaneLayout::tiled(&[1, 2, 3]).unwrap()),
+        second: Box::new(PaneLayout::Pane(4)),
+    };
+
+    assert!(layout.rotate_pane(2, PaneRotationDirection::Clockwise));
+    assert_eq!(
+        layout,
+        PaneLayout::Split {
+            axis: SplitAxis::Horizontal,
+            first_ratio: DEFAULT_PANE_SPLIT_RATIO,
+            first: Box::new(PaneLayout::Split {
+                axis: SplitAxis::Vertical,
+                first_ratio: DEFAULT_PANE_SPLIT_RATIO,
+                first: Box::new(PaneLayout::Pane(1)),
+                second: Box::new(PaneLayout::Split {
+                    axis: SplitAxis::Vertical,
+                    first_ratio: DEFAULT_PANE_SPLIT_RATIO,
+                    first: Box::new(PaneLayout::Pane(3)),
+                    second: Box::new(PaneLayout::Pane(2)),
+                }),
+            }),
+            second: Box::new(PaneLayout::Pane(4)),
+        }
+    );
 }
 
 #[test]

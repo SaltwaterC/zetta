@@ -66,6 +66,16 @@ window controls.
 A maximized pane has a status strip below it. Restore it from that strip or
 with `Shift-Escape`.
 
+Rotate the layout around the active pane with `Alt-Shift-L` clockwise or
+`Alt-Shift-K` counter-clockwise on Windows/Linux. macOS uses the corresponding
+`Cmd-Shift-L` and `Cmd-Shift-K` shortcuts. Rotation is recursive: a focused
+pane in an equal local pair rotates that pair without changing the surrounding
+layout; a focused dominant pane rotates with the panes occupying the matching
+area on the other side of its split. Equal four-pane groups, such as the
+`quarters` template, rotate as a complete group. These rules apply at any
+nested level. Split proportions are preserved during rotation; two turns in
+either direction swap a two-pane pair in the view.
+
 Minimized panes appear on a shelf at the bottom of the tab. The shelf displays
 as many complete entries as fit, including each pane's label and profile. Use
 these shortcuts to operate it:
@@ -276,7 +286,8 @@ become `Ctrl-Cmd`; for example, paste-trim is `Ctrl-Cmd-V` on macOS and
 | `Ctrl-Shift-O` | Split active pane horizontally, adding a pane below |
 | `Ctrl-Shift-E` | Split active pane vertically, adding a pane on the right |
 | `Alt-Space` | Open Zetta's title-bar menu |
-| `Cmd-Shift-L` (macOS) / `Alt-Shift-L` (Windows/Linux) | Rotate a two-pane layout |
+| `Cmd-Shift-L` (macOS) / `Alt-Shift-L` (Windows/Linux) | Rotate the active pane layout clockwise, recursively |
+| `Cmd-Shift-K` (macOS) / `Alt-Shift-K` (Windows/Linux) | Rotate the active pane layout counter-clockwise, recursively |
 | `Ctrl-Shift-J`, then Arrow keys or a split gutter drag | Toggle pane-resize mode; resize panes |
 | `Cmd-Shift-X` (macOS) / `Alt-Shift-X` (Windows/Linux) | Close the active pane or its final tab |
 | `PageUp` / `PageDown` | Send page navigation to the foreground program |

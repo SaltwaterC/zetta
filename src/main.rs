@@ -131,6 +131,7 @@ actions!(
         SplitVerticalRight,
         SplitVerticalLeft,
         RotatePaneLayout,
+        RotatePaneLayoutCounterClockwise,
         TogglePaneResizeMode,
         ResizePaneLeft,
         ResizePaneRight,

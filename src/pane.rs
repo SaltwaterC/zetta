@@ -6,6 +6,7 @@ pub(crate) const TERMINAL_SPAWN_NOTIFY_INTERVAL: Duration = Duration::from_milli
 pub(crate) const PANE_OUTPUT_DEFAULT_FILENAME: &str = "terminal-output.txt";
 pub(crate) const PANE_SPLIT_RATIO_SCALE: u16 = 1_000;
 pub(crate) const DEFAULT_PANE_SPLIT_RATIO: u16 = PANE_SPLIT_RATIO_SCALE / 2;
+const PANE_ROTATION_AREA_EPSILON: f64 = 1e-9;
 
 pub(crate) fn terminal_size_label(columns: usize, rows: usize) -> String {
     format!("{columns} × {rows}")
@@ -220,6 +221,12 @@ pub(crate) enum PaneDirection {
     Down,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PaneRotationDirection {
+    Clockwise,
+    CounterClockwise,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PaneRegion {
     pub(crate) id: u64,
@@ -276,24 +283,158 @@ pub(crate) fn background_pane_layout(layout: &PaneLayout) -> BackgroundPaneLayou
 }
 
 impl PaneLayout {
-    pub(crate) fn rotate_two_pane_split(&mut self) -> bool {
+    pub(crate) fn rotate_pane(
+        &mut self,
+        active_pane: u64,
+        direction: PaneRotationDirection,
+    ) -> bool {
+        let Some(active_area) = self.pane_area(active_pane, 1.) else {
+            return false;
+        };
+        let Some(path) = self.rotation_target(active_pane, active_area, 1.) else {
+            return false;
+        };
+        self.rotate_at_path(&path, direction);
+        true
+    }
+
+    fn pane_area(&self, pane_id: u64, area: f64) -> Option<f64> {
+        match self {
+            Self::Pane(id) => (*id == pane_id).then_some(area),
+            Self::Split {
+                first_ratio,
+                first,
+                second,
+                ..
+            } => {
+                let first_area = area * f64::from(*first_ratio) / f64::from(PANE_SPLIT_RATIO_SCALE);
+                first
+                    .pane_area(pane_id, first_area)
+                    .or_else(|| second.pane_area(pane_id, area - first_area))
+            }
+        }
+    }
+
+    fn rotation_target(&self, active_pane: u64, active_area: f64, area: f64) -> Option<Vec<bool>> {
+        if self.has_four_equal_panes(area) || self.is_two_pane_split() {
+            return Some(Vec::new());
+        }
+
         let Self::Split {
-            axis,
+            first_ratio,
             first,
             second,
             ..
         } = self
         else {
-            return false;
+            return None;
         };
-        if !matches!(first.as_ref(), Self::Pane(_)) || !matches!(second.as_ref(), Self::Pane(_)) {
-            return false;
+
+        let first_area = area * f64::from(*first_ratio) / f64::from(PANE_SPLIT_RATIO_SCALE);
+        let (child, child_area, sibling_area, child_is_first) = if first.contains_pane(active_pane)
+        {
+            (first, first_area, area - first_area, true)
+        } else if second.contains_pane(active_pane) {
+            (second, area - first_area, first_area, false)
+        } else {
+            return None;
+        };
+
+        if let Some(mut path) = child.rotation_target(active_pane, active_area, child_area) {
+            path.insert(0, child_is_first);
+            return Some(path);
         }
+
+        // A pane can rotate with the complete subtree on the other side only
+        // when it is at least as large as that subtree. This is what makes a
+        // focused large pane dominate a three-pane layout while allowing a
+        // focused small pane to rotate its local equal split instead.
+        (active_area + PANE_ROTATION_AREA_EPSILON >= sibling_area).then_some(Vec::new())
+    }
+
+    fn is_two_pane_split(&self) -> bool {
+        matches!(
+            self,
+            Self::Split {
+                first,
+                second,
+                ..
+            } if matches!(first.as_ref(), Self::Pane(_)) && matches!(second.as_ref(), Self::Pane(_))
+        )
+    }
+
+    fn has_four_equal_panes(&self, area: f64) -> bool {
+        let mut areas = Vec::with_capacity(4);
+        self.collect_leaf_areas(area, &mut areas);
+        areas.len() == 4
+            && areas
+                .iter()
+                .all(|candidate| (*candidate - areas[0]).abs() <= PANE_ROTATION_AREA_EPSILON)
+    }
+
+    fn collect_leaf_areas(&self, area: f64, areas: &mut Vec<f64>) {
+        match self {
+            Self::Pane(_) => areas.push(area),
+            Self::Split {
+                first_ratio,
+                first,
+                second,
+                ..
+            } => {
+                let first_area = area * f64::from(*first_ratio) / f64::from(PANE_SPLIT_RATIO_SCALE);
+                first.collect_leaf_areas(first_area, areas);
+                second.collect_leaf_areas(area - first_area, areas);
+            }
+        }
+    }
+
+    fn rotate_at_path(&mut self, path: &[bool], direction: PaneRotationDirection) {
+        if let Some((first, second)) = path.split_first() {
+            if let Self::Split {
+                first: first_child,
+                second: second_child,
+                ..
+            } = self
+            {
+                if *first {
+                    first_child.rotate_at_path(second, direction);
+                } else {
+                    second_child.rotate_at_path(second, direction);
+                }
+            }
+            return;
+        }
+
+        self.rotate_geometry(direction);
+    }
+
+    fn rotate_geometry(&mut self, direction: PaneRotationDirection) {
+        let Self::Split {
+            axis,
+            first_ratio,
+            first,
+            second,
+        } = self
+        else {
+            return;
+        };
+
+        first.rotate_geometry(direction);
+        second.rotate_geometry(direction);
+
+        let reverse_children = matches!(
+            (direction, *axis),
+            (PaneRotationDirection::Clockwise, SplitAxis::Horizontal)
+                | (PaneRotationDirection::CounterClockwise, SplitAxis::Vertical)
+        );
         *axis = match axis {
             SplitAxis::Horizontal => SplitAxis::Vertical,
             SplitAxis::Vertical => SplitAxis::Horizontal,
         };
-        true
+        if reverse_children {
+            std::mem::swap(first, second);
+            *first_ratio = PANE_SPLIT_RATIO_SCALE - *first_ratio;
+        }
     }
 
     fn remap_pane_ids(&mut self, pane_ids: &HashMap<u64, u64>) {

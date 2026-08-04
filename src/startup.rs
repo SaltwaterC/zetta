@@ -1766,6 +1766,10 @@ pub(crate) const AUTO_BACKGROUND_TAB_KEYBINDING: &str = "ctrl-shift-b";
 pub(crate) const ROTATE_PANE_LAYOUT_KEYBINDING: &str = "cmd-shift-l";
 #[cfg(not(target_os = "macos"))]
 pub(crate) const ROTATE_PANE_LAYOUT_KEYBINDING: &str = "alt-shift-l";
+#[cfg(target_os = "macos")]
+pub(crate) const ROTATE_PANE_LAYOUT_COUNTER_CLOCKWISE_KEYBINDING: &str = "cmd-shift-k";
+#[cfg(not(target_os = "macos"))]
+pub(crate) const ROTATE_PANE_LAYOUT_COUNTER_CLOCKWISE_KEYBINDING: &str = "alt-shift-k";
 pub(crate) const TOGGLE_PANE_RESIZE_MODE_KEYBINDING: &str = "ctrl-shift-j";
 pub(crate) const APPLICATION_MENU_KEYBINDING: &str = "alt-space";
 
@@ -1883,6 +1887,14 @@ pub(crate) fn rotate_pane_layout_keybinding() -> KeyBinding {
     )
 }
 
+pub(crate) fn rotate_pane_layout_counter_clockwise_keybinding() -> KeyBinding {
+    KeyBinding::new(
+        ROTATE_PANE_LAYOUT_COUNTER_CLOCKWISE_KEYBINDING,
+        RotatePaneLayoutCounterClockwise,
+        Some("Zetta > Terminal"),
+    )
+}
+
 pub(crate) fn pane_resize_mode_keybinding() -> KeyBinding {
     KeyBinding::new(
         TOGGLE_PANE_RESIZE_MODE_KEYBINDING,
@@ -1967,6 +1979,7 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
         ),
         KeyBinding::new("ctrl-shift-e", SplitVerticalRight, Some("Zetta > Terminal")),
         rotate_pane_layout_keybinding(),
+        rotate_pane_layout_counter_clockwise_keybinding(),
         pane_resize_mode_keybinding(),
         select_all_keybinding(),
         edit_scrollback_keybinding(),
