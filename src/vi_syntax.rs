@@ -583,6 +583,10 @@ impl SyntaxHighlighter for BackgroundZedSyntaxHighlighter {
         self.dispatch_pending();
         completed
     }
+
+    fn has_pending_work(&self) -> bool {
+        self.in_flight || self.pending.is_some()
+    }
 }
 
 fn run_syntax_worker(
