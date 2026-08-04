@@ -774,6 +774,42 @@ impl Render for Zetta {
             .children(tabs);
         let tabs_scroll = tabs_scroll.into_any_element();
 
+        // Compact mode places the tab bar inside the title bar. Keep a portion of
+        // that bar available for moving the window without making tab hitboxes
+        // draggable as well.
+        let compact_tab_bar_drag_area = compact_mode.then(|| {
+            div()
+                .id("compact-title-bar-drag-area")
+                .h(title_bar_height)
+                .flex_1()
+                .min_w_0()
+                .window_control_area(WindowControlArea::Drag)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        this.titlebar_dragging = true;
+                        this.focus_active(window, cx);
+                    }),
+                )
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        this.titlebar_dragging = false;
+                        this.focus_active(window, cx);
+                    }),
+                )
+                .on_mouse_down_out(cx.listener(|this, _, _, _| {
+                    this.titlebar_dragging = false;
+                }))
+                .on_mouse_move(cx.listener(|this, _, window, _| {
+                    if this.titlebar_dragging {
+                        this.titlebar_dragging = false;
+                        window.start_window_move();
+                    }
+                }))
+                .into_any_element()
+        });
+
         let tab_bar = div()
             .id("tab-bar")
             .h_8()
@@ -805,7 +841,10 @@ impl Render for Zetta {
                 }
             })
             .child(tabs_scroll)
-            .child(render_new_tab_button());
+            .child(render_new_tab_button())
+            .when_some(compact_tab_bar_drag_area, |tab_bar, drag_area| {
+                tab_bar.child(drag_area)
+            });
         let (compact_tab_bar, regular_tab_bar) = if compact_mode {
             (Some(tab_bar.into_any_element()), None)
         } else {
