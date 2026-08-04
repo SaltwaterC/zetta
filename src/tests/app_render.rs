@@ -43,10 +43,9 @@ fn compact_mode_hides_labels_and_regular_title_bar_buttons() {
 }
 
 #[test]
-fn compact_mode_always_keeps_broadcast_visible() {
-    assert!(title_bar_broadcast_visible(false, false));
-    assert!(!title_bar_broadcast_visible(false, true));
-    assert!(title_bar_broadcast_visible(true, true));
+fn hiding_title_bar_buttons_hides_broadcast_in_compact_mode() {
+    assert!(title_bar_broadcast_visible(false));
+    assert!(!title_bar_broadcast_visible(true));
 }
 
 #[test]

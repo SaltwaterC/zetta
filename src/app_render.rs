@@ -45,8 +45,8 @@ fn title_bar_buttons_visible(compact_mode: bool, hide_buttons: bool) -> bool {
     !compact_mode && !hide_buttons
 }
 
-fn title_bar_broadcast_visible(compact_mode: bool, hide_buttons: bool) -> bool {
-    compact_mode || !hide_buttons
+fn title_bar_broadcast_visible(hide_buttons: bool) -> bool {
+    !hide_buttons
 }
 
 fn title_bar_background_indicator_on_right(
@@ -822,7 +822,7 @@ impl Render for Zetta {
         let show_title_bar_buttons =
             title_bar_buttons_visible(compact_mode, self.launch_config.hide_title_bar_buttons);
         let show_broadcast_control =
-            title_bar_broadcast_visible(compact_mode, self.launch_config.hide_title_bar_buttons);
+            title_bar_broadcast_visible(self.launch_config.hide_title_bar_buttons);
         let profile_menu_profiles = self.profiles.clone();
         let hidden_profiles = self.launch_config.hidden_profiles.clone();
         let default_profile = self.launch_config.default_profile;
