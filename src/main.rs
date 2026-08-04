@@ -59,7 +59,7 @@ use gpui::{
     Global, HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding,
     KeyBindingContextPredicate, KeyDownEvent, KeyUpEvent, KeybindingKeystroke, ListSizingBehavior,
     MAX_BUTTONS_PER_SIDE, MouseButton, Pixels, PlatformKeyboardMapper, Point, Render, ResizeEdge,
-    ScrollHandle, SharedString, Size, Subscription, Task, Tiling, TitlebarOptions,
+    ScrollHandle, ScrollStrategy, SharedString, Size, Subscription, Task, Tiling, TitlebarOptions,
     UniformListScrollHandle, Window, WindowBackgroundAppearance, WindowBounds, WindowButton,
     WindowButtonLayout, WindowControlArea, WindowControls, WindowDecorations, WindowId,
     WindowOptions, actions, anchored, canvas, container_query, deferred, div, point, profiler, px,

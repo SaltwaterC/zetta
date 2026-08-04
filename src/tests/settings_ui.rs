@@ -12,6 +12,19 @@ fn font_filter_uses_pre_normalized_names_and_preserves_indices() {
 }
 
 #[test]
+fn font_picker_positions_filtered_rows_by_source_index() {
+    let fonts = vec![
+        "jetbrains mono".to_owned(),
+        "fira code".to_owned(),
+        "fira mono".to_owned(),
+    ];
+
+    assert_eq!(matching_font_position(&fonts, "FIRA", 1), Some(0));
+    assert_eq!(matching_font_position(&fonts, "FIRA", 2), Some(1));
+    assert_eq!(matching_font_position(&fonts, "FIRA", 0), None);
+}
+
+#[test]
 fn dropdown_matching_is_case_insensitive_and_supports_subsequences() {
     let options = vec![
         "Use application theme".to_owned(),

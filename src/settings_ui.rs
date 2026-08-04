@@ -171,6 +171,16 @@ pub(crate) fn matching_font_indices(normalized_fonts: &[String], query: &str) ->
         .into()
 }
 
+fn matching_font_position(
+    normalized_fonts: &[String],
+    query: &str,
+    font_index: usize,
+) -> Option<usize> {
+    matching_font_indices(normalized_fonts, query)
+        .iter()
+        .position(|index| *index == font_index)
+}
+
 fn fuzzy_score(candidate: &str, query: &str) -> Option<i32> {
     let candidate = candidate.to_lowercase();
     let query = query.to_lowercase();
@@ -989,7 +999,18 @@ impl Zetta {
         let Some(editor) = self.settings_editor.as_ref() else {
             return;
         };
-        if editor.font_query.is_some() || editor.profile_draft.is_some() {
+        if let Some(query) = editor.font_query.as_ref() {
+            if let SettingsControl::Font(index) = control
+                && let Some(row_index) =
+                    matching_font_position(&editor.normalized_fonts, &query.text, *index)
+            {
+                editor
+                    .font_scroll
+                    .scroll_to_item(row_index, ScrollStrategy::Nearest);
+            }
+            return;
+        }
+        if editor.profile_draft.is_some() {
             return;
         }
         let controls = Self::settings_controls(editor);
