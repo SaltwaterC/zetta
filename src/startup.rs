@@ -1314,6 +1314,23 @@ fn windows_path_to_msys(path: &Path) -> Option<String> {
         .or_else(|| path.starts_with('/').then_some(path))
 }
 
+fn path_for_external_editor(path: &str) -> String {
+    #[cfg(windows)]
+    {
+        if env::var_os("MSYSTEM").is_some() {
+            return windows_path_to_msys(Path::new(path)).unwrap_or_else(|| path.to_owned());
+        }
+    }
+    path.to_owned()
+}
+
+fn paths_for_external_editor(arguments: &[String]) -> Vec<String> {
+    arguments
+        .iter()
+        .map(|path| path_for_external_editor(path))
+        .collect()
+}
+
 #[cfg(windows)]
 const MSYS2_BASH_TRACKER: &str = r#"__zetta_preexec() {
     [[ "$__zetta_at_prompt" == 1 ]] || return
@@ -2519,7 +2536,7 @@ pub(crate) fn run() -> Result<()> {
                 let program = editor_parts.remove(0);
                 std::process::Command::new(&program)
                     .args(editor_parts)
-                    .args(&arguments)
+                    .args(paths_for_external_editor(&arguments))
                     .status()
                     .with_context(|| format!("failed to start editor {program:?}"))
                     .map(|status| status.code().unwrap_or(1))

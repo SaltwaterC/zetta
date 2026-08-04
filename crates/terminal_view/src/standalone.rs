@@ -401,8 +401,9 @@ impl TerminalView {
 
     fn edit_path_like_target(&mut self, target: terminal::PathLikeTarget, cx: &mut Context<Self>) {
         let path = resolve_local_path(&target);
-        self.terminal
-            .update(cx, |terminal, _| terminal.open_path_in_editor(&path));
+        self.terminal.update(cx, |terminal, _| {
+            terminal.open_path_in_editor_with_path_style(&path, target.path_style)
+        });
     }
 
     fn edit_scrollback(&mut self, _: &EditScrollback, _: &mut Window, cx: &mut Context<Self>) {
@@ -1440,7 +1441,25 @@ fn local_path_open_action(target: &terminal::PathLikeTarget) -> LocalPathOpenAct
 }
 
 fn resolve_local_path(target: &terminal::PathLikeTarget) -> PathBuf {
-    let path = normalize_local_path(PathWithPosition::parse_str(&target.maybe_path).path);
+    let path = PathWithPosition::parse_str(&target.maybe_path).path;
+    if target.path_style.is_posix() {
+        return if is_posix_absolute_path(&path) || path.is_absolute() {
+            path
+        } else if let Some(terminal_dir) = target
+            .terminal_dir
+            .as_deref()
+            .filter(|directory| is_posix_absolute_path(directory))
+        {
+            join_posix_path(terminal_dir, &path)
+        } else {
+            // Keep the relative path for the WSL editor dispatcher. It
+            // resolves it against `pwd` before passing the Windows helper a
+            // converted absolute path, so it never falls back to C:\WINDOWS.
+            path
+        };
+    }
+
+    let path = normalize_local_path(path);
     if path.is_absolute() {
         path
     } else if let Some(terminal_dir) = &target.terminal_dir {
@@ -1448,6 +1467,20 @@ fn resolve_local_path(target: &terminal::PathLikeTarget) -> PathBuf {
     } else {
         path
     }
+}
+
+fn is_posix_absolute_path(path: &std::path::Path) -> bool {
+    path.to_str().is_some_and(|path| path.starts_with('/'))
+}
+
+fn join_posix_path(directory: &std::path::Path, path: &std::path::Path) -> PathBuf {
+    let directory = directory.to_string_lossy();
+    let path = path.to_string_lossy();
+    PathBuf::from(format!(
+        "{}/{}",
+        directory.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    ))
 }
 
 #[cfg(target_os = "windows")]
@@ -1490,6 +1523,7 @@ mod tests {
     use gpui::Modifiers;
     use std::path::PathBuf;
     use terminal::{PathLikeTarget, is_hyperlink_modifier};
+    use util::paths::PathStyle;
 
     #[test]
     fn trimmed_paste_removes_only_outer_whitespace() {
@@ -1537,6 +1571,7 @@ mod tests {
         let target = PathLikeTarget {
             maybe_path: "src/main.rs:12:4".to_owned(),
             terminal_dir: Some(terminal_dir.clone()),
+            path_style: PathStyle::local(),
         };
 
         assert_eq!(
@@ -1545,12 +1580,60 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn wsl_relative_file_links_preserve_the_linux_working_directory() {
+        let target = PathLikeTarget {
+            maybe_path: "ssh/sshd_config".to_owned(),
+            terminal_dir: Some(PathBuf::from("/etc")),
+            path_style: PathStyle::Unix,
+        };
+
+        assert_eq!(
+            resolve_local_path(&target),
+            PathBuf::from("/etc/ssh/sshd_config")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn wsl_absolute_paths_do_not_require_a_reported_directory() {
+        for path in [
+            "/",
+            "/etc/hosts",
+            "/usr/local/bin/zsh",
+            "/opt/service/config.toml",
+            "/var/log/messages",
+            "/mnt/c/Users/saltw/Desktop/notes.txt",
+        ] {
+            let target = PathLikeTarget {
+                maybe_path: path.to_owned(),
+                terminal_dir: None,
+                path_style: PathStyle::Unix,
+            };
+            assert_eq!(resolve_local_path(&target), PathBuf::from(path));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn wsl_relative_paths_without_a_reported_directory_are_left_for_the_shell() {
+        let target = PathLikeTarget {
+            maybe_path: "../etc/hosts".to_owned(),
+            terminal_dir: None,
+            path_style: PathStyle::Unix,
+        };
+
+        assert_eq!(resolve_local_path(&target), PathBuf::from("../etc/hosts"));
+    }
+
     #[test]
     fn absolute_file_links_do_not_use_the_terminal_directory() {
         let absolute_path = std::env::temp_dir().join("zetta-absolute-link.rs");
         let target = PathLikeTarget {
             maybe_path: absolute_path.to_string_lossy().into_owned(),
             terminal_dir: Some(PathBuf::from("ignored")),
+            path_style: PathStyle::local(),
         };
 
         assert_eq!(resolve_local_path(&target), absolute_path);
@@ -1590,6 +1673,7 @@ mod tests {
         let target = PathLikeTarget {
             maybe_path: directory.to_string_lossy().into_owned(),
             terminal_dir: None,
+            path_style: PathStyle::local(),
         };
 
         assert_eq!(
@@ -1604,6 +1688,7 @@ mod tests {
         let target = PathLikeTarget {
             maybe_path: file.to_string_lossy().into_owned(),
             terminal_dir: None,
+            path_style: PathStyle::local(),
         };
 
         assert_eq!(

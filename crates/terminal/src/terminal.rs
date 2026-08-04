@@ -705,6 +705,8 @@ pub struct PathLikeTarget {
     pub maybe_path: String,
     /// Current working directory of the terminal
     pub terminal_dir: Option<PathBuf>,
+    /// Syntax of paths emitted by the terminal shell.
+    pub path_style: PathStyle,
 }
 
 /// A string inside terminal, potentially useful as a URI that can be opened.
@@ -718,15 +720,124 @@ pub enum MaybeNavigationTarget {
 }
 
 fn editor_invocation_command(
-    shell_kind: ShellKind,
-    path: &Path,
+    zetta_command: &str,
+    path_argument: &str,
     delete_after: bool,
-) -> Option<String> {
-    let path = shell_kind.try_quote(path.to_str()?)?;
+) -> String {
     let delete_after = delete_after
         .then_some("--delete-after ")
         .unwrap_or_default();
-    Some(format!("zetta edit {delete_after}-- {path}\r"))
+    format!("{zetta_command} edit {delete_after}-- {path_argument}")
+}
+
+fn editor_path_argument(
+    shell_kind: ShellKind,
+    shell: &Shell,
+    path: &Path,
+    path_style: PathStyle,
+) -> Option<String> {
+    let path = path.to_str()?;
+    #[cfg(windows)]
+    if matches!(posix_host(shell), Some(PosixHost::Wsl)) {
+        return wsl_editor_path_argument(path, path_style);
+    }
+    #[cfg(not(windows))]
+    let _ = shell;
+    shell_kind.try_quote(path).map(Into::into)
+}
+
+#[cfg(windows)]
+fn wsl_editor_path_argument(path: &str, path_style: PathStyle) -> Option<String> {
+    if path.starts_with('/') {
+        let path = ShellKind::Posix.try_quote(path)?;
+        return Some(format!("\"$(wslpath -w {path})\""));
+    }
+
+    if path_style.is_posix() && !PathStyle::Windows.is_absolute(path) {
+        return wsl_relative_editor_path_argument(path);
+    }
+
+    ShellKind::Posix.try_quote(path).map(Into::into)
+}
+
+#[cfg(windows)]
+fn wsl_relative_editor_path_argument(path: &str) -> Option<String> {
+    if path == "~" {
+        return Some("\"$(wslpath -w \"$HOME\")\"".to_owned());
+    }
+
+    if let Some(path) = path.strip_prefix("~/") {
+        let path = ShellKind::Posix.try_quote(path)?;
+        return Some(format!("\"$(wslpath -w \"$HOME/$(printf %s {path})\")\""));
+    }
+
+    let path = ShellKind::Posix.try_quote(path)?;
+    Some(format!(
+        "\"$(wslpath -w \"$(pwd -P)/$(printf %s {path})\")\""
+    ))
+}
+
+fn interaction_shell_kind(shell: &Shell, path_style: PathStyle) -> ShellKind {
+    #[cfg(windows)]
+    if posix_host(shell).is_some() {
+        return ShellKind::Posix;
+    }
+    shell.shell_kind(path_style.is_windows())
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PosixHost {
+    Msys2,
+    Wsl,
+}
+
+#[cfg(windows)]
+fn posix_host(shell: &Shell) -> Option<PosixHost> {
+    let (program, arguments) = match shell {
+        Shell::System => return None,
+        Shell::Program(program) => (program, &[][..]),
+        Shell::WithArguments { program, args, .. } => (program, args.as_slice()),
+    };
+    if program.rsplit(['/', '\\']).next().is_some_and(|name| {
+        name.eq_ignore_ascii_case("wsl.exe") || name.eq_ignore_ascii_case("wsl")
+    }) {
+        return Some(PosixHost::Wsl);
+    }
+    arguments
+        .iter()
+        .any(|argument| argument.to_ascii_lowercase().contains("msys2_shell.cmd"))
+        .then_some(PosixHost::Msys2)
+}
+
+fn zetta_command_for_shell(shell: &Shell) -> Option<String> {
+    #[cfg(windows)]
+    if let Some(host) = posix_host(shell) {
+        return native_zetta_command_for_posix_host(host, &std::env::current_exe().ok()?);
+    }
+    #[cfg(not(windows))]
+    let _ = shell;
+    Some("zetta".to_owned())
+}
+
+#[cfg(windows)]
+fn native_zetta_command_for_posix_host(host: PosixHost, executable: &Path) -> Option<String> {
+    let converter = match host {
+        PosixHost::Wsl => "wslpath",
+        PosixHost::Msys2 => "cygpath",
+    };
+    let executable = ShellKind::Posix.try_quote(executable.to_str()?)?;
+    Some(format!("\"$({converter} -u {executable})\""))
+}
+
+#[cfg(windows)]
+fn wsl_editor_working_directory(shell: &Shell, directory: Option<&str>) -> Option<PathBuf> {
+    if !matches!(posix_host(shell), Some(PosixHost::Wsl)) {
+        return None;
+    }
+    directory
+        .filter(|directory| directory.starts_with('/'))
+        .map(PathBuf::from)
 }
 
 /// Whether the modifiers should activate a terminal hyperlink.
@@ -2198,6 +2309,7 @@ impl Terminal {
                 MaybeNavigationTarget::PathLike(PathLikeTarget {
                     maybe_path: decoded_path,
                     terminal_dir: self.working_directory(),
+                    path_style: self.path_style,
                 })
             } else {
                 MaybeNavigationTarget::Url(maybe_url_or_path.clone())
@@ -2206,6 +2318,7 @@ impl Terminal {
             MaybeNavigationTarget::PathLike(PathLikeTarget {
                 maybe_path: maybe_url_or_path.clone(),
                 terminal_dir: self.working_directory(),
+                path_style: self.path_style,
             })
         };
 
@@ -2216,14 +2329,22 @@ impl Terminal {
         }
     }
 
-    fn find_hyperlink_at_point(&mut self, point: Point) -> Option<HyperlinkMatch> {
+    fn find_hyperlink_at_point_with_path_style(
+        &mut self,
+        point: Point,
+        path_style: PathStyle,
+    ) -> Option<HyperlinkMatch> {
         let term_lock = self.term.lock();
         find_from_terminal_point(
             &term_lock,
             point,
             &mut self.hyperlink_regex_searches,
-            self.path_style,
+            path_style,
         )
+    }
+
+    fn find_hyperlink_at_point(&mut self, point: Point) -> Option<HyperlinkMatch> {
+        self.find_hyperlink_at_point_with_path_style(point, self.path_style)
     }
 
     fn update_selected_word(
@@ -2468,23 +2589,51 @@ impl Terminal {
     /// Runs Zetta's editor dispatcher through the active shell so it inherits
     /// this pane's current environment and remains attached to this pane's PTY.
     pub fn open_path_in_editor(&mut self, path: &Path) {
-        let shell_kind = self.template.shell.shell_kind(self.path_style.is_windows());
-        let Some(command) = editor_invocation_command(shell_kind, path, false) else {
+        self.open_path_in_editor_with_path_style(path, self.path_style);
+    }
+
+    /// Opens a path emitted by a shell that may use a different path syntax
+    /// than the native Zetta host, such as WSL on Windows.
+    pub fn open_path_in_editor_with_path_style(&mut self, path: &Path, path_style: PathStyle) {
+        let shell_kind = interaction_shell_kind(&self.template.shell, self.path_style);
+        let Some(zetta_command) = zetta_command_for_shell(&self.template.shell) else {
+            log::error!("cannot determine the native Zetta executable for the pane editor");
+            return;
+        };
+        let Some(path_argument) =
+            editor_path_argument(shell_kind, &self.template.shell, path, path_style)
+        else {
             log::error!("cannot open a non-UTF-8 path in the pane editor: {path:?}");
             return;
         };
-        self.input(command.into_bytes());
+        let command = editor_invocation_command(&zetta_command, &path_argument, false);
+        self.submit_editor_command(command);
     }
 
     /// Opens a managed scrollback snapshot and asks the editor dispatcher to
     /// remove it as soon as the editor command returns.
     pub fn open_temporary_path_in_editor(&mut self, path: &Path) {
-        let shell_kind = self.template.shell.shell_kind(self.path_style.is_windows());
-        let Some(command) = editor_invocation_command(shell_kind, path, true) else {
+        let shell_kind = interaction_shell_kind(&self.template.shell, self.path_style);
+        let Some(zetta_command) = zetta_command_for_shell(&self.template.shell) else {
+            log::error!("cannot determine the native Zetta executable for the pane editor");
+            return;
+        };
+        let Some(path_argument) =
+            editor_path_argument(shell_kind, &self.template.shell, path, self.path_style)
+        else {
             log::error!("cannot open a non-UTF-8 path in the pane editor: {path:?}");
             return;
         };
+        let command = editor_invocation_command(&zetta_command, &path_argument, true);
+        self.submit_editor_command(command);
+    }
+
+    fn submit_editor_command(&mut self, command: String) {
         self.input(command.into_bytes());
+        // Keep Enter in its own write. WSL's ConPTY path can otherwise leave
+        // a generated command at the prompt for the next editor action to
+        // concatenate with it.
+        self.write_to_pty(b"\x0d");
     }
 
     /// Sends a shell-level marker command and returns a task that completes when
@@ -2514,7 +2663,7 @@ impl Terminal {
         self.init_command_startup_marker = Some(init_command_startup_marker(marker_id));
         self.init_command_startup_tx = Some(startup_tx);
 
-        let shell_kind = self.template.shell.shell_kind(self.path_style.is_windows());
+        let shell_kind = interaction_shell_kind(&self.template.shell, self.path_style);
         let mut input = init_command_startup_marker_command(shell_kind, marker_id).into_bytes();
         input.push(b'\x0d');
         self.write_to_pty(input);
@@ -2921,7 +3070,8 @@ impl Terminal {
             self.last_content.terminal_bounds,
             self.last_content.display_offset,
         );
-        let hyperlink = self.find_hyperlink_at_point(point)?;
+        let hyperlink =
+            self.find_hyperlink_at_point_with_path_style(point, self.editor_path_style())?;
         let maybe_path = if hyperlink.is_url {
             let path = hyperlink.text.strip_prefix("file://")?;
             urlencoding::decode(path)
@@ -2933,8 +3083,28 @@ impl Terminal {
 
         Some(PathLikeTarget {
             maybe_path,
-            terminal_dir: self.working_directory(),
+            terminal_dir: self.editor_path_working_directory(),
+            path_style: self.editor_path_style(),
         })
+    }
+
+    fn editor_path_working_directory(&self) -> Option<PathBuf> {
+        #[cfg(windows)]
+        if matches!(posix_host(&self.template.shell), Some(PosixHost::Wsl)) {
+            return wsl_editor_working_directory(
+                &self.template.shell,
+                self.reported_working_directory.as_deref(),
+            );
+        }
+        self.working_directory()
+    }
+
+    fn editor_path_style(&self) -> PathStyle {
+        #[cfg(windows)]
+        if matches!(posix_host(&self.template.shell), Some(PosixHost::Wsl)) {
+            return PathStyle::Unix;
+        }
+        self.path_style
     }
 
     pub fn begin_editor_click(&mut self) {
@@ -4227,26 +4397,148 @@ mod tests {
     #[test]
     fn editor_invocation_quotes_paths_for_the_active_shell() {
         let path = Path::new("/tmp/zetta scrollback.txt");
+        let shell = Shell::System;
+        let posix_path_argument =
+            editor_path_argument(ShellKind::Posix, &shell, path, PathStyle::local()).unwrap();
         assert_eq!(
-            editor_invocation_command(ShellKind::Posix, path, false).as_deref(),
-            Some("zetta edit -- '/tmp/zetta scrollback.txt'\r")
+            editor_invocation_command("zetta", &posix_path_argument, false),
+            "zetta edit -- '/tmp/zetta scrollback.txt'"
+        );
+        let powershell_path_argument =
+            editor_path_argument(ShellKind::PowerShell, &shell, path, PathStyle::local()).unwrap();
+        assert_eq!(
+            editor_invocation_command("zetta", &powershell_path_argument, false),
+            "zetta edit -- '/tmp/zetta scrollback.txt'"
+        );
+        let cmd_path_argument = editor_path_argument(
+            ShellKind::Cmd,
+            &shell,
+            Path::new(r"C:\Temp\zetta scrollback.txt"),
+            PathStyle::local(),
+        )
+        .unwrap();
+        assert_eq!(
+            editor_invocation_command("zetta", &cmd_path_argument, false),
+            "zetta edit -- ^\"C:\\Temp\\zetta scrollback.txt^\""
         );
         assert_eq!(
-            editor_invocation_command(ShellKind::PowerShell, path, false).as_deref(),
-            Some("zetta edit -- '/tmp/zetta scrollback.txt'\r")
+            editor_invocation_command("zetta", &posix_path_argument, true),
+            "zetta edit --delete-after -- '/tmp/zetta scrollback.txt'"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_posix_host_shells_invoke_the_native_zetta_executable() {
+        let executable = Path::new(r"C:\Program Files\Zetta\zetta.exe");
+        assert_eq!(
+            native_zetta_command_for_posix_host(PosixHost::Wsl, executable),
+            Some("\"$(wslpath -u \"C:\\\\Program Files\\\\Zetta\\\\zetta.exe\")\"".to_owned())
+        );
+        assert_eq!(
+            native_zetta_command_for_posix_host(PosixHost::Msys2, executable),
+            Some("\"$(cygpath -u \"C:\\\\Program Files\\\\Zetta\\\\zetta.exe\")\"".to_owned())
+        );
+
+        let wsl = Shell::Program(r"C:\Windows\System32\wsl.exe".to_owned());
+        assert_eq!(
+            interaction_shell_kind(&wsl, PathStyle::local()),
+            ShellKind::Posix
+        );
+        assert_eq!(
+            wsl_editor_working_directory(&wsl, Some("/home/saltw/source/zetta")),
+            Some(PathBuf::from("/home/saltw/source/zetta"))
+        );
+        assert_eq!(
+            wsl_editor_working_directory(&wsl, Some("/etc")),
+            Some(PathBuf::from("/etc"))
+        );
+        let msys2 = Shell::WithArguments {
+            program: "cmd.exe".to_owned(),
+            args: vec![r#""C:\msys64\msys2_shell.cmd" -shell bash"#.to_owned()],
+            title_override: None,
+        };
+        assert_eq!(
+            interaction_shell_kind(&msys2, PathStyle::local()),
+            ShellKind::Posix
+        );
+        let wsl_path_argument = editor_path_argument(
+            ShellKind::Posix,
+            &wsl,
+            Path::new("/home/saltw/source/zetta/LICENSE-APACHE"),
+            PathStyle::Unix,
+        )
+        .unwrap();
+        assert_eq!(
+            wsl_path_argument,
+            "\"$(wslpath -w /home/saltw/source/zetta/LICENSE-APACHE)\""
+        );
+        assert_eq!(
+            editor_path_argument(
+                ShellKind::Posix,
+                &wsl,
+                Path::new("/etc/ssh/sshd_config"),
+                PathStyle::Unix,
+            ),
+            Some("\"$(wslpath -w /etc/ssh/sshd_config)\"".to_owned())
+        );
+        for path in [
+            "/",
+            "/etc/hosts",
+            "/usr/local/bin/zsh",
+            "/opt/service/config.toml",
+            "/var/log/messages",
+            "/mnt/c/Users/saltw/Desktop/notes.txt",
+        ] {
+            assert_eq!(
+                editor_path_argument(ShellKind::Posix, &wsl, Path::new(path), PathStyle::Unix),
+                Some(format!("\"$(wslpath -w {path})\""))
+            );
+        }
+        assert_eq!(
+            editor_path_argument(
+                ShellKind::Posix,
+                &wsl,
+                Path::new("../etc/hosts"),
+                PathStyle::Unix,
+            ),
+            Some("\"$(wslpath -w \"$(pwd -P)/$(printf %s ../etc/hosts)\")\"".to_owned())
+        );
+        assert_eq!(
+            editor_path_argument(
+                ShellKind::Posix,
+                &wsl,
+                Path::new("~/source with spaces/README.md"),
+                PathStyle::Unix,
+            ),
+            Some(
+                "\"$(wslpath -w \"$HOME/$(printf %s 'source with spaces/README.md')\")\""
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            editor_path_argument(ShellKind::Posix, &wsl, Path::new("~"), PathStyle::Unix),
+            Some("\"$(wslpath -w \"$HOME\")\"".to_owned())
         );
         assert_eq!(
             editor_invocation_command(
-                ShellKind::Cmd,
-                Path::new(r"C:\Temp\zetta scrollback.txt"),
+                "\"$(wslpath -u \"C:\\\\Program Files\\\\Zetta\\\\zetta.exe\")\"",
+                &wsl_path_argument,
                 false,
-            )
-            .as_deref(),
-            Some("zetta edit -- ^\"C:\\Temp\\zetta scrollback.txt^\"\r")
+            ),
+            "\"$(wslpath -u \"C:\\\\Program Files\\\\Zetta\\\\zetta.exe\")\" edit -- \"$(wslpath -w /home/saltw/source/zetta/LICENSE-APACHE)\""
         );
+
+        let scrollback_path_argument = editor_path_argument(
+            ShellKind::Posix,
+            &wsl,
+            Path::new(r"C:\Users\saltw\AppData\Local\Temp\zetta\scrollback.txt"),
+            PathStyle::Windows,
+        )
+        .unwrap();
         assert_eq!(
-            editor_invocation_command(ShellKind::Posix, path, true).as_deref(),
-            Some("zetta edit --delete-after -- '/tmp/zetta scrollback.txt'\r")
+            scrollback_path_argument,
+            r#""C:\\Users\\saltw\\AppData\\Local\\Temp\\zetta\\scrollback.txt""#
         );
     }
 
@@ -5739,7 +6031,100 @@ mod tests {
             terminal.open_path_in_editor(Path::new(&target.maybe_path));
             assert_eq!(
                 terminal.take_pty_write_log(),
-                vec![b"zetta edit -- /tmp/notes.txt\r".to_vec()]
+                vec![b"zetta edit -- /tmp/notes.txt".to_vec(), b"\r".to_vec()]
+            );
+        });
+    }
+
+    #[cfg(windows)]
+    #[gpui::test]
+    async fn editor_click_uses_the_reported_wsl_directory(cx: &mut TestAppContext) {
+        let terminal =
+            init_ctrl_click_hyperlink_test(cx, b"Visit file:///tmp/notes.txt for more\r\n");
+
+        terminal.update(cx, |terminal, _| {
+            terminal.template.shell = Shell::Program(r"C:\Windows\System32\wsl.exe".to_owned());
+            terminal.reported_working_directory = Some("/etc".to_owned());
+            let event = MouseDownEvent {
+                button: MouseButton::Left,
+                position: point(px(80.0), px(10.0)),
+                modifiers: Modifiers {
+                    control: true,
+                    shift: true,
+                    ..Default::default()
+                },
+                click_count: 1,
+                first_mouse: true,
+            };
+            let target = terminal
+                .path_like_target_at_event_position(&event)
+                .expect("file URL should be recognized under the editor click");
+            assert_eq!(target.terminal_dir, Some(PathBuf::from("/etc")));
+        });
+    }
+
+    #[cfg(windows)]
+    #[gpui::test]
+    async fn editor_click_marks_wsl_paths_without_a_reported_directory(cx: &mut TestAppContext) {
+        let terminal =
+            init_ctrl_click_hyperlink_test(cx, b"Visit file:///etc/ssh/sshd_config for more\r\n");
+
+        terminal.update(cx, |terminal, _| {
+            terminal.template.shell = Shell::Program(r"C:\Windows\System32\wsl.exe".to_owned());
+            let event = MouseDownEvent {
+                button: MouseButton::Left,
+                position: point(px(80.0), px(10.0)),
+                modifiers: Modifiers {
+                    control: true,
+                    shift: true,
+                    ..Default::default()
+                },
+                click_count: 1,
+                first_mouse: true,
+            };
+            let target = terminal
+                .path_like_target_at_event_position(&event)
+                .expect("file URL should be recognized under the editor click");
+            assert_eq!(target.maybe_path, "/etc/ssh/sshd_config");
+            assert_eq!(target.terminal_dir, None);
+            assert_eq!(target.path_style, PathStyle::Unix);
+        });
+    }
+
+    #[cfg(windows)]
+    #[gpui::test]
+    async fn editor_click_dispatches_unreported_wsl_relative_paths(cx: &mut TestAppContext) {
+        let terminal = init_ctrl_click_hyperlink_test(cx, b"README.md\r\n");
+
+        terminal.update(cx, |terminal, _| {
+            terminal.template.shell = Shell::Program(r"C:\Windows\System32\wsl.exe".to_owned());
+            let zetta_command = zetta_command_for_shell(&terminal.template.shell).unwrap();
+            terminal.open_path_in_editor_with_path_style(Path::new("README.md"), PathStyle::Unix);
+            assert_eq!(
+                terminal.take_pty_write_log(),
+                vec![
+                    format!(
+                        "{zetta_command} edit -- \"$(wslpath -w \"$(pwd -P)/$(printf %s README.md)\")\""
+                    )
+                    .into_bytes(),
+                    b"\r".to_vec(),
+                ]
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn editor_scrollback_command_submits_enter_separately(cx: &mut TestAppContext) {
+        let terminal = init_ctrl_click_hyperlink_test(cx, b"scrollback\r\n");
+
+        terminal.update(cx, |terminal, _| {
+            terminal.open_temporary_path_in_editor(Path::new("/tmp/zetta-scrollback.txt"));
+            assert_eq!(
+                terminal.take_pty_write_log(),
+                vec![
+                    b"zetta edit --delete-after -- /tmp/zetta-scrollback.txt".to_vec(),
+                    b"\r".to_vec(),
+                ]
             );
         });
     }

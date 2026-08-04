@@ -4,7 +4,7 @@ use editor::Editor;
 use gpui::{Context, Task, TaskExt, WeakEntity, Window};
 use std::path::PathBuf;
 use terminal::PathLikeTarget;
-use util::{ResultExt, debug_panic};
+use util::{ResultExt, debug_panic, paths::PathStyle};
 #[cfg(not(test))]
 use workspace::path_link::possible_open_target;
 #[cfg(test)]
@@ -333,6 +333,7 @@ mod tests {
             PathLikeTarget {
                 maybe_path: maybe_path.to_string(),
                 terminal_dir,
+                path_style: PathStyle::local(),
             },
             background_path_checks,
         )

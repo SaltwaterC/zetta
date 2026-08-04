@@ -300,8 +300,29 @@ fn fallback_root() -> PathBuf {
         if let Some(home) = env::var_os("HOME").filter(|path| !path.is_empty()) {
             return PathBuf::from(home).join(".cache").join("zetta");
         }
+        return env::temp_dir().join("zetta");
     }
+    #[cfg(windows)]
+    {
+        // MSYS2 can set TMP to its Unix-style temporary directory. The GUI
+        // and the `zetta edit` helper must instead agree on one native path.
+        return windows_fallback_root(
+            env::var_os("LOCALAPPDATA")
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from),
+            env::temp_dir(),
+        );
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
     env::temp_dir().join("zetta")
+}
+
+#[cfg(windows)]
+fn windows_fallback_root(local_app_data: Option<PathBuf>, temporary_directory: PathBuf) -> PathBuf {
+    local_app_data
+        .map(|path| path.join("Temp"))
+        .unwrap_or(temporary_directory)
+        .join("zetta")
 }
 
 #[cfg(target_os = "linux")]
@@ -419,5 +440,33 @@ mod tests {
         let _ = cleanup_stale();
 
         assert!(!stale_path.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_scrollback_root_ignores_an_msys_temporary_directory() {
+        assert_eq!(
+            windows_fallback_root(
+                Some(PathBuf::from(r"C:\Users\saltw\AppData\Local")),
+                PathBuf::from(r"C:\msys64\tmp"),
+            ),
+            PathBuf::from(r"C:\Users\saltw\AppData\Local\Temp\zetta"),
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_helper_claims_a_file_created_in_the_gui_scrollback_root() {
+        let pending = create("scrollback").unwrap();
+        let claimed = claim_for_editor(&pending).unwrap();
+
+        assert!(claimed.exists());
+        assert!(
+            claimed
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("zetta-scrollback-editor-"))
+        );
+        assert!(remove_managed(&claimed));
     }
 }

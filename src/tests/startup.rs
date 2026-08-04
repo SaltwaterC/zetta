@@ -43,6 +43,15 @@ fn recognizes_detected_msys2_profiles_and_their_custom_root() {
 
 #[cfg(windows)]
 #[test]
+fn translates_windows_paths_for_msys2_editors() {
+    assert_eq!(
+        windows_path_to_msys(Path::new(r"C:\Users\saltw\source\repos\zetta\AGENTS.md")),
+        Some("/c/Users/saltw/source/repos/zetta/AGENTS.md".to_owned())
+    );
+}
+
+#[cfg(windows)]
+#[test]
 fn converts_reported_msys2_directories_to_native_windows_paths() {
     let root = Path::new(r"D:\Applications\MSYS2");
 
