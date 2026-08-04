@@ -789,7 +789,10 @@ fn notification_app_name(command: &NotifyCommand) -> &str {
     command.app_name.as_deref().unwrap_or(crate::ZETTA_APP_ID)
 }
 
-#[cfg(all(feature = "notifications", not(target_os = "macos")))]
+#[cfg(all(
+    feature = "notifications",
+    not(any(target_os = "macos", target_os = "windows"))
+))]
 fn notification_icon_path(command: &NotifyCommand) -> Result<String> {
     Ok(match &command.icon {
         Some(icon) => icon.clone(),

@@ -77,7 +77,11 @@ fn bash_does_not_repeat_options_and_completes_vi_files() {
     use std::io::Write as _;
     use std::process::{Command, Stdio};
 
-    if Command::new("bash").arg("--version").output().is_err() {
+    if !Command::new("bash")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
         return;
     }
 

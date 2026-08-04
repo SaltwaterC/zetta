@@ -107,7 +107,10 @@ fn notifications_default_to_zetta_identity() {
     }
 }
 
-#[cfg(feature = "notifications")]
+#[cfg(all(
+    feature = "notifications",
+    not(any(target_os = "macos", target_os = "windows"))
+))]
 #[test]
 fn custom_notification_identity_is_not_replaced_by_zetta_desktop_entry() {
     let command = NotifyCommand {
