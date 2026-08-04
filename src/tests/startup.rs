@@ -188,6 +188,8 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     assert!(help.contains("  System\n  Operations"));
     assert!(help.contains("Select one of the profiles listed above"));
     assert!(help.contains("zetta terminal-size [--json | --resize"));
+    assert!(help.contains("zetta tabicon [OPTIONS] ICON"));
+    assert!(help.contains("tabicon                             Set the active tab icon"));
     assert!(help.contains("zetta vi [OPTIONS] [FILE ...]"));
     assert!(help.contains("zetta edit [OPTIONS] [--] FILE ..."));
     assert!(help.contains("edit                                Edit files with $EDITOR"));
@@ -267,6 +269,36 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
         assert!(!help.contains("Desktop notifications"));
         assert!(!help.contains("zetta notify"));
     }
+}
+
+#[test]
+fn tabicon_subcommand_parses_icons_and_dynamic_listing() {
+    assert_eq!(
+        parse_args_from([OsString::from("tabicon"), OsString::from("terminal")])
+            .unwrap()
+            .mode,
+        StartupMode::SetTabIcon {
+            icon: Some(IconName::Terminal)
+        }
+    );
+    assert_eq!(
+        parse_args_from([
+            OsString::from("tabicon"),
+            OsString::from("--icon"),
+            OsString::from("none")
+        ])
+        .unwrap()
+        .mode,
+        StartupMode::SetTabIcon { icon: None }
+    );
+    assert_eq!(
+        parse_args_from([OsString::from("tabicon"), OsString::from("--list")])
+            .unwrap()
+            .mode,
+        StartupMode::ListTabIcons
+    );
+    assert!(parse_args_from([OsString::from("tabicon")]).is_err());
+    assert!(parse_args_from([OsString::from("tabicon"), OsString::from("not-an-icon")]).is_err());
 }
 
 #[test]

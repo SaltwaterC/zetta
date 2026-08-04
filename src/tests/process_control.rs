@@ -8,6 +8,7 @@ fn request(token: &str, command: &str) -> ControlRequest {
         runner_id: None,
         session_id: None,
         secret: None,
+        icon: None,
     }
 }
 
@@ -29,6 +30,28 @@ fn unknown_control_commands_are_rejected() {
         decode_control_request(&mut request("token", "delete_sessions"), "token"),
         None
     );
+}
+
+#[test]
+fn tab_icon_control_requests_decode_names_and_allow_clearing() {
+    let mut icon_request = request("token", "set_tab_icon");
+    icon_request.icon = Some("terminal".to_owned());
+    assert_eq!(
+        decode_control_request(&mut icon_request, "token"),
+        Some(ControlRequestCommand::SetTabIcon {
+            icon: Some(ui::IconName::Terminal)
+        })
+    );
+
+    let mut clear_request = request("token", "set_tab_icon");
+    assert_eq!(
+        decode_control_request(&mut clear_request, "token"),
+        Some(ControlRequestCommand::SetTabIcon { icon: None })
+    );
+
+    let mut invalid_request = request("token", "set_tab_icon");
+    invalid_request.icon = Some("not-an-icon".to_owned());
+    assert_eq!(decode_control_request(&mut invalid_request, "token"), None);
 }
 
 #[test]
@@ -55,6 +78,7 @@ fn reconnect_requests_carry_a_session_target_and_optional_secret() {
         runner_id: Some(7),
         session_id: Some(42),
         secret: Some("not-an-argument".to_owned()),
+        icon: None,
     };
     assert_eq!(
         decode_control_request(&mut request, "token"),

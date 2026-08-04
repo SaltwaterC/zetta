@@ -32,6 +32,7 @@ fn supported_shells_generate_completion_and_tftp_shortcut() {
         assert!(script.contains("init"));
         assert!(script.contains("EDITOR"));
         assert!(script.contains("zetta vi"));
+        assert!(script.contains("zetta tabicon --list"));
     }
 }
 
@@ -811,7 +812,7 @@ fn generated_scripts_only_offer_long_form_flags() {
         let script = shell.script(&profiles);
         match shell {
             ShellIntegration::Bash => assert!(script.contains(
-                "terminal-size sessions edit vi init serial http tftp notify copy paste --help --version --config --keymap --profile'"
+                "terminal-size sessions edit vi init serial http tftp notify copy paste tabicon --help --version --config --keymap --profile'"
             )),
             ShellIntegration::Fish => {
                 assert!(script.contains("-l profile -r"));
@@ -847,6 +848,7 @@ fn fish_script_emits_long_option_candidates_for_every_command_context() {
         "notify",
         "copy",
         "paste",
+        "tabicon",
         "ztftp",
         "zntfy",
         "zcopy",
@@ -901,6 +903,8 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
             &["--json", "--resize", "--columns", "--rows", "--help"][..],
         ),
         ("zetta sessions ", &["--json", "--help"][..]),
+        ("zetta tabicon ", &["--icon", "--list", "--help"][..]),
+        ("zetta tabicon -i ", &[][..]),
         ("zetta vi ", &["--help", "Cargo.toml"][..]),
         ("zetta vi Carg", &["Cargo.toml"][..]),
         ("zetta init ", &["--help"][..]),

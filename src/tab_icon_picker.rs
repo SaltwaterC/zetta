@@ -53,6 +53,20 @@ pub(crate) fn matching_tab_icon_options(query: &str) -> Vec<Option<IconName>> {
     options
 }
 
+pub(crate) fn tab_icon_completion_names() -> impl Iterator<Item = &'static str> {
+    std::iter::once("none").chain(IconName::iter().map(|icon| {
+        let name: &'static str = icon.into();
+        name
+    }))
+}
+
+pub(crate) fn parse_tab_icon_name(name: &str) -> Option<IconName> {
+    IconName::iter().find(|icon| {
+        let cli_name: &'static str = (*icon).into();
+        cli_name.eq_ignore_ascii_case(name) || tab_icon_label(*icon).eq_ignore_ascii_case(name)
+    })
+}
+
 #[cfg(test)]
 #[path = "tests/tab_icon_picker.rs"]
 mod tests;

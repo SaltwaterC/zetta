@@ -450,7 +450,7 @@ fn shell_single_quote(value: &str) -> String {
 }
 
 pub(crate) fn shell_integration_help() -> &'static str {
-    "Configure or generate shell integration\n\nUsage: zetta init [SHELL]\n\nWithout SHELL, detects the active supported shell process (falling back to SHELL when process inspection cannot identify it) and adds the integration command to its startup file. On Windows, Unix-style HOME paths from MSYS2 and similar environments are resolved with cygpath; when SHELL is unavailable, Zetta detects the launching PowerShell and writes to its $PROFILE. Running it again leaves an existing integration unchanged. With SHELL, prints the integration script for use in a shell startup file.\n\nSupported shells:\n  bash        Bash\n  fish        Fish\n  powershell  PowerShell (also accepted as pwsh)\n  zsh         Z shell\n\nThe generated script adds command completion, including live serial-device completion, the zvi shortcut for the built-in vi editor, the ztftp shortcut when the TFTP client is enabled, and the zntfy and zcopy/zpaste shortcuts when desktop notifications and clipboard access are enabled. zcopy/zpaste are also available as pbcopy/pbpaste on platforms other than macOS, taking priority over any existing pbcopy/pbpaste alias so pbcopy/pbpaste muscle memory keeps working there too."
+    "Configure or generate shell integration\n\nUsage: zetta init [SHELL]\n\nWithout SHELL, detects the active supported shell process (falling back to SHELL when process inspection cannot identify it) and adds the integration command to its startup file. On Windows, Unix-style HOME paths from MSYS2 and similar environments are resolved with cygpath; when SHELL is unavailable, Zetta detects the launching PowerShell and writes to its $PROFILE. Running it again leaves an existing integration unchanged. With SHELL, prints the integration script for use in a shell startup file.\n\nSupported shells:\n  bash        Bash\n  fish        Fish\n  powershell  PowerShell (also accepted as pwsh)\n  zsh         Z shell\n\nThe generated script adds command completion, including live serial-device and tab-icon completion, the zvi shortcut for the built-in vi editor, the ztftp shortcut when the TFTP client is enabled, and the zntfy and zcopy/zpaste shortcuts when desktop notifications and clipboard access are enabled. zcopy/zpaste are also available as pbcopy/pbpaste on platforms other than macOS, taking priority over any existing pbcopy/pbpaste alias so pbcopy/pbpaste muscle memory keeps working there too."
 }
 
 const BASH_INTEGRATION: &str = r#"# Zetta shell integration for Bash.
@@ -519,6 +519,12 @@ _zetta_complete() {
             /"id"[[:space:]]*:/ { match($0, /[0-9]+/); session=substr($0, RSTART, RLENGTH) }
             /"authentication_required"[[:space:]]*:/ { print process ":" runner ":" session }
         ')
+    }
+
+    _zetta_complete_tab_icons() {
+        local icons
+        icons=$(zetta tabicon --list 2>/dev/null)
+        COMPREPLY=( $(compgen -W "$icons" -- "$current") )
     }
 
     case "$previous" in
@@ -591,7 +597,11 @@ _zetta_complete() {
             return
             ;;
         --icon|-i)
-            COMPREPLY=( $(compgen -f -- "$current") )
+            if [[ $command == tabicon ]]; then
+                _zetta_complete_tab_icons
+            else
+                COMPREPLY=( $(compgen -f -- "$current") )
+            fi
             return
             ;;
         --sound)
@@ -639,7 +649,7 @@ _zetta_complete() {
     esac
 
     if (( COMP_CWORD == 1 )); then
-        _zetta_compgen 'benchmark benchmark-output terminal-size sessions edit vi init serial http tftp notify copy paste --help --version --config --keymap --profile'
+        _zetta_compgen 'benchmark benchmark-output terminal-size sessions edit vi init serial http tftp notify copy paste tabicon --help --version --config --keymap --profile'
         return
     fi
 
@@ -710,6 +720,13 @@ _zetta_complete() {
             ;;
         paste)
             _zetta_compgen '--pboard --prefer --help'
+            ;;
+        tabicon)
+            if [[ $current == -* ]]; then
+                _zetta_compgen '--icon --list --help'
+            else
+                _zetta_complete_tab_icons
+            fi
             ;;
     esac
 }
@@ -926,6 +943,10 @@ function __zetta_serial_devices
     zetta serial list 2>/dev/null
 end
 
+function __zetta_tab_icons
+    zetta tabicon --list 2>/dev/null
+end
+
 # zetta-default/zetta-ok/zetta-alarm are bundled tones Zetta plays itself, so
 # they always work; the rest are the current platform's own system sound
 # names, which only work on that platform, so only that platform's names are
@@ -1009,6 +1030,11 @@ function __zetta_long_options
                 --profile 'Select a profile'
         case init serial http tftp
             printf '%s\t%s\n' --help 'Print help'
+        case tabicon
+            printf '%s\t%s\n' \
+                --icon 'Set the tab icon' \
+                --list 'Print built-in icon names' \
+                --help 'Print help'
         case terminal-size
             printf '%s\t%s\n' \
                 --json 'Print machine-readable JSON' \
@@ -1088,6 +1114,7 @@ complete -c zetta -n '__fish_use_subcommand' -a tftp -d 'Transfer a file with TF
 complete -c zetta -n '__fish_use_subcommand' -a notify -d 'Show a desktop notification'
 complete -c zetta -n '__fish_use_subcommand' -a copy -d 'Copy standard input to the clipboard'
 complete -c zetta -n '__fish_use_subcommand' -a paste -d "Print the clipboard's contents"
+complete -c zetta -n '__fish_use_subcommand' -a tabicon -d 'Set the active tab icon'
 complete -c zetta -n '__fish_use_subcommand' -l help -d 'Print help'
 complete -c zetta -n '__fish_use_subcommand' -l version -d 'Print version'
 complete -c zetta -n '__fish_use_subcommand' -l config -r -d 'Use a configuration file'
@@ -1181,6 +1208,8 @@ complete -c zetta -s p -r -n '__zetta_tftp_server; and __zetta_short_option -p'
 complete -c zetta -s c -r -n '__zetta_tftp_server; and __zetta_short_option -c'
 complete -c zetta -n '__fish_seen_subcommand_from notify' -l app-name -r -d 'Application name'
 complete -c zetta -n '__fish_seen_subcommand_from notify' -l icon -r -d 'Image to show with the notification'
+complete -c zetta -n '__fish_seen_subcommand_from tabicon' -l icon -r -a '(__zetta_tab_icons)' -d 'Set the tab icon'
+complete -c zetta -s i -r -a '(__zetta_tab_icons)' -n '__fish_seen_subcommand_from tabicon; and __zetta_short_option -i'
 complete -c zetta -n '__fish_seen_subcommand_from notify' -l sound -r -a '(__zetta_sound_names)' -d 'Sound name'
 complete -c zetta -n '__fish_seen_subcommand_from notify' -l timeout -r -a 'default never' -d 'Timeout'
 complete -c zetta -n '__fish_seen_subcommand_from notify' -l help -d 'Print help'
@@ -1199,6 +1228,10 @@ complete -c zetta -n '__fish_seen_subcommand_from paste' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from paste' -a '(__zetta_long_options paste)'
 complete -c zetta -n '__fish_seen_subcommand_from paste; and __zetta_short_option -pboard' -a 'general ruler find font'
 complete -c zetta -n '__fish_seen_subcommand_from paste; and __zetta_short_option -prefer' -a 'txt rtf ps'
+complete -c zetta -n '__fish_seen_subcommand_from tabicon' -l list -d 'Print built-in icon names'
+complete -c zetta -n '__fish_seen_subcommand_from tabicon' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from tabicon' -a '(__zetta_long_options tabicon)'
+complete -c zetta -n '__fish_seen_subcommand_from tabicon' -a '(__zetta_tab_icons)'
 complete -c ztftp -f -a 'get put'
 complete -c ztftp -l port -r -d 'Server port'
 complete -c ztftp -l help -d 'Print help'
@@ -1267,6 +1300,7 @@ if (-not $IsMacOS) {
 }
 
 $zettaProfiles = @(ZETTA_PROFILES)
+$zettaTabIcons = { @(& zetta tabicon --list 2>$null) }
 
 # zetta-default/zetta-ok/zetta-alarm are bundled tones Zetta plays itself, so
 # they always work; the rest are the current platform's own system sound
@@ -1302,7 +1336,7 @@ $zettaCompletions = {
     $previous = if ($words.Count -gt 1) { $words[$words.Count - 2] } else { '' }
     $last = if ($words.Count -gt 1) { $words[$words.Count - 1] } else { '' }
     $subcommand = $words | Where-Object {
-        $_ -in 'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste'
+        $_ -in 'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste', 'tabicon'
     } | Select-Object -First 1
 
     $candidates = if ($commandName -eq 'ztftp') {
@@ -1356,10 +1390,14 @@ $zettaCompletions = {
         ($previous -eq '-c' -and $subcommand -eq 'terminal-size')
     ) {
         @()
+    } elseif ($subcommand -eq 'tabicon' -and (
+        $previous -in '--icon', '-i' -or $wordToComplete -notlike '-*'
+    )) {
+        & $zettaTabIcons
     } elseif ($subcommand -eq 'sessions' -and $words.Count -ge 3 -and $words[2] -eq 'reconnect') {
         if ($previous -in '--session', '-s') { @() } else { & $zettaSessionIds }
     } elseif ($null -eq $subcommand) {
-        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste', '--help', '--version', '--config', '--keymap', '--profile'
+        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste', 'tabicon', '--help', '--version', '--config', '--keymap', '--profile'
     } else {
         switch ($subcommand) {
             'benchmark' { '--terminal-render-workload', '--terminal-checkerboard-workload', '--terminal-sparse-update-workload', '--profile-report', '--profile-duration', '--profile-pane-stress', '--profile-background-stress', '--profile-sparse-updates', '--profile-external-terminal', '--help' }
@@ -1390,6 +1428,7 @@ $zettaCompletions = {
             'notify' { '--app-name', '--icon', '--sound', '--timeout', '--help' }
             'copy' { '--pboard', '--help' }
             'paste' { '--pboard', '--prefer', '--help' }
+            'tabicon' { '--icon', '--list', '--help' }
         }
     }
 
@@ -1490,6 +1529,10 @@ _zetta_session_ids() {
     ')}"
 }
 
+_zetta_tab_icons() {
+    compadd -- "${(@f)$(zetta tabicon --list 2>/dev/null)}"
+}
+
 # zetta-default/zetta-ok/zetta-alarm are bundled tones Zetta plays itself, so
 # they always work; the rest are the current platform's own system sound
 # names, which only work on that platform, so only that platform's names are
@@ -1532,7 +1575,7 @@ _zetta() {
     fi
 
     if (( CURRENT == 2 )); then
-        compadd -S ' ' -- benchmark benchmark-output terminal-size sessions edit vi init serial http tftp notify copy paste
+        compadd -S ' ' -- benchmark benchmark-output terminal-size sessions edit vi init serial http tftp notify copy paste tabicon
         _zetta_options --help --version --config --keymap --profile
         return
     fi
@@ -1602,7 +1645,11 @@ _zetta() {
             return
             ;;
         --icon|-i)
-            _files
+            if [[ $words[2] == tabicon ]]; then
+                _zetta_tab_icons
+            else
+                _files
+            fi
             return
             ;;
         --sound)
@@ -1717,6 +1764,13 @@ _zetta() {
             ;;
         paste)
             _zetta_options --pboard --prefer --help
+            ;;
+        tabicon)
+            if [[ $words[CURRENT] == -* ]]; then
+                _zetta_options --icon --list --help
+            else
+                _zetta_tab_icons
+            fi
             ;;
     esac
 }

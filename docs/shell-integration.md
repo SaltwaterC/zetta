@@ -23,6 +23,12 @@ runs `zetta serial list` at completion time. A serial device connected after
 the integration was generated is therefore available without rerunning
 `zetta init`.
 
+Tab-icon completion is dynamic too: completing `zetta tabicon` runs
+`zetta tabicon --list` at completion time, so the generated script does not
+embed the built-in icon list. Use `zetta tabicon ICON` (or
+`zetta tabicon --icon ICON`) from a Zetta pane; `none` hides the active tab
+icon.
+
 It also completes the full-length `zetta terminal-size` resize flags, which
 resize the current Zetta pane while retaining an omitted dimension. Completion
 lists full-length option names alongside valid subcommands without requiring a

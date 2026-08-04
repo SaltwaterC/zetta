@@ -21,6 +21,7 @@ use anyhow::{Context as _, Result};
 use futures::channel::mpsc::UnboundedSender;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sysinfo::{Pid, ProcessesToUpdate, System};
+use ui::IconName;
 
 const CONTROL_VERSION: u32 = 3;
 const MAX_CONTROL_MESSAGE_BYTES: usize = 4096;
@@ -47,6 +48,10 @@ pub(crate) enum ProcessControlCommand {
         secret: Option<String>,
         completion: Sender<ReconnectSessionResult>,
     },
+    SetTabIcon {
+        icon: Option<IconName>,
+        completion: Sender<bool>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,6 +61,9 @@ enum ControlRequestCommand {
         runner_id: u64,
         session_id: u64,
         secret: Option<String>,
+    },
+    SetTabIcon {
+        icon: Option<IconName>,
     },
 }
 
@@ -74,6 +82,7 @@ struct ControlRequest {
     runner_id: Option<u64>,
     session_id: Option<u64>,
     secret: Option<String>,
+    icon: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -155,6 +164,17 @@ impl ProcessControlServer {
                                 })
                                 .unwrap_or(ReconnectSessionResult::Rejected);
                             reconnect_session_status(result)
+                        }
+                        Some(ControlRequestCommand::SetTabIcon { icon }) => {
+                            let (completion, completed) = channel();
+                            let accepted = commands
+                                .unbounded_send(ProcessControlCommand::SetTabIcon {
+                                    icon,
+                                    completion,
+                                })
+                                .is_ok()
+                                && wait_for_control_completion(&completed, &stopping_for_thread);
+                            if accepted { "ok" } else { "rejected" }
                         }
                         None => "rejected",
                     };
@@ -281,6 +301,17 @@ fn decode_control_request(
                     },
                 )
         }
+        "set_tab_icon"
+            if request.runner_id.is_none()
+                && request.session_id.is_none()
+                && request.secret.is_none() =>
+        {
+            let icon = match request.icon.take() {
+                Some(icon) => Some(icon.parse().ok()?),
+                None => None,
+            };
+            Some(ControlRequestCommand::SetTabIcon { icon })
+        }
         _ => None,
     };
     if command.is_none()
@@ -337,6 +368,41 @@ pub(crate) fn request_existing_process_window() -> Result<bool> {
     Ok(false)
 }
 
+pub(crate) fn request_existing_process_tab_icon(icon: Option<IconName>) -> Result<bool> {
+    let directory = crate::background_sessions::session_catalog_dir();
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).context("reading Zetta process control endpoints"),
+    };
+    for entry in entries {
+        let path = entry?.path();
+        if !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("control-") && name.ends_with(".json"))
+        {
+            continue;
+        }
+        let endpoint = match fs::read(&path)
+            .ok()
+            .and_then(|contents| serde_json::from_slice::<ControlEndpoint>(&contents).ok())
+        {
+            Some(endpoint) if endpoint.version == CONTROL_VERSION => endpoint,
+            _ => continue,
+        };
+        if !process_is_running(endpoint.process_id) {
+            let _ = fs::remove_file(path);
+            let _ = fs::remove_file(endpoint.socket_path);
+            continue;
+        }
+        if send_set_tab_icon_request(&endpoint, icon).unwrap_or(false) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub(crate) fn request_reconnect_session(
     process_id: u32,
     runner_id: u64,
@@ -371,6 +437,29 @@ fn send_open_window_request(endpoint: &ControlEndpoint) -> Result<bool> {
             runner_id: None,
             session_id: None,
             secret: None,
+            icon: None,
+        },
+    )?;
+    let response = read_message::<ControlResponse>(&mut stream)?;
+    Ok(response.status == "ok")
+}
+
+fn send_set_tab_icon_request(endpoint: &ControlEndpoint, icon: Option<IconName>) -> Result<bool> {
+    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
+    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    write_message(
+        &mut stream,
+        &ControlRequest {
+            token: endpoint.token.clone(),
+            command: "set_tab_icon".to_owned(),
+            runner_id: None,
+            session_id: None,
+            secret: None,
+            icon: icon.map(|icon| {
+                let name: &'static str = icon.into();
+                name.to_owned()
+            }),
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
@@ -392,6 +481,7 @@ fn send_reconnect_session_request(
         runner_id: Some(runner_id),
         session_id: Some(session_id),
         secret: secret.take(),
+        icon: None,
     };
     let result = write_message(&mut stream, &request).and_then(|()| {
         let response = read_message::<ControlResponse>(&mut stream)?;

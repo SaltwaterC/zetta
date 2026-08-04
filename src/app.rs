@@ -3385,6 +3385,19 @@ impl Zetta {
         self.open_tab_icon_picker(self.active_tab, window, cx);
     }
 
+    pub(crate) fn set_active_tab_icon_from_cli(
+        &mut self,
+        icon: Option<IconName>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            return false;
+        };
+        tab.icon = icon;
+        cx.notify();
+        true
+    }
+
     pub(crate) fn begin_tab_rename(
         &mut self,
         tab_index: usize,

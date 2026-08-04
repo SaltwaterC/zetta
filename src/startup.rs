@@ -16,6 +16,7 @@ use crate::cli_services::{notify_help, parse_notify_args};
 use crate::cli_services::{parse_serial_args, serial_help};
 #[cfg(feature = "tftp-server")]
 use crate::cli_services::{parse_tftp_server_args, tftp_server_help};
+use crate::process_control::request_existing_process_tab_icon;
 
 #[cfg(target_os = "macos")]
 use gpui::{Menu, MenuItem};
@@ -82,6 +83,10 @@ pub(crate) enum StartupMode {
     ReconnectBackgroundSession {
         identifier: String,
     },
+    SetTabIcon {
+        icon: Option<IconName>,
+    },
+    ListTabIcons,
     #[cfg(windows)]
     RegisterWindowsShell(PathBuf),
     TerminalRenderingProfile,
@@ -204,11 +209,11 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
     );
     help.replace(
         "       zetta sessions [--json]",
-        "       zetta sessions [--json]\n       zetta sessions reconnect SESSION_ID\n       zetta edit [OPTIONS] [--] FILE ...\n       zetta vi [OPTIONS] [FILE ...]",
+        "       zetta sessions [--json]\n       zetta sessions reconnect SESSION_ID\n       zetta tabicon [OPTIONS] ICON\n       zetta tabicon --list\n       zetta edit [OPTIONS] [--] FILE ...\n       zetta vi [OPTIONS] [FILE ...]",
     )
     .replace(
         "sessions                            List detached background sessions",
-        "sessions                            List or reconnect detached background sessions\n  edit                                Edit files with $EDITOR, falling back to Zetta vi\n  vi                                  Edit files with Zetta's built-in vi",
+        "sessions                            List or reconnect detached background sessions\n  tabicon                             Set the active tab icon\n  edit                                Edit files with $EDITOR, falling back to Zetta vi\n  vi                                  Edit files with Zetta's built-in vi",
     )
 }
 
@@ -230,8 +235,82 @@ fn parse_terminal_resize_dimension(argument: &OsString, option: &str) -> Result<
     Ok(value)
 }
 
+pub(crate) fn tab_icon_help() -> &'static str {
+    "Set the active tab icon through the running Zetta process\n\nUsage: zetta tabicon [OPTIONS] ICON\n       zetta tabicon --list\n\nICON is a built-in icon name. Use none to hide the icon. The icon list is fetched dynamically with --list.\n\nOptions:\n  -i, --icon NAME  Set the icon by option instead of as a positional argument\n  -l, --list       Print built-in icon names, including none\n  -h, --help       Print help"
+}
+
+fn parse_tab_icon_args(args: &[OsString]) -> Result<StartupMode> {
+    let mut icon_name = None;
+    let mut list = false;
+    let mut arguments = args.iter();
+    while let Some(argument) = arguments.next() {
+        match argument.to_string_lossy().as_ref() {
+            "--help" | "-h" => {
+                println!("{}", tab_icon_help());
+                std::process::exit(0);
+            }
+            "--list" | "-l" => {
+                anyhow::ensure!(!list, "--list may only be specified once");
+                list = true;
+            }
+            "--icon" | "-i" => {
+                anyhow::ensure!(icon_name.is_none(), "--icon may only be specified once");
+                icon_name = Some(
+                    arguments
+                        .next()
+                        .context("--icon requires an icon name")?
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+            value if value.starts_with('-') => {
+                anyhow::bail!("unknown tabicon option {value:?}")
+            }
+            value => {
+                anyhow::ensure!(icon_name.is_none(), "only one tab icon may be specified");
+                icon_name = Some(value.to_owned());
+            }
+        }
+    }
+    if list {
+        anyhow::ensure!(
+            icon_name.is_none(),
+            "--list cannot be combined with an icon name"
+        );
+        return Ok(StartupMode::ListTabIcons);
+    }
+    let icon_name = icon_name
+        .context("zetta tabicon requires an icon name; run zetta tabicon --help for usage")?;
+    let icon = if icon_name.eq_ignore_ascii_case("none") {
+        None
+    } else {
+        Some(parse_tab_icon_name(&icon_name).with_context(|| {
+            format!("unknown tab icon {icon_name:?}; run zetta tabicon --list for available icons")
+        })?)
+    };
+    Ok(StartupMode::SetTabIcon { icon })
+}
+
 pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Result<StartupArgs> {
     let arguments = args.into_iter().collect::<Vec<_>>();
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "tabicon")
+    {
+        return Ok(StartupArgs {
+            config_path: None,
+            keymap_path: None,
+            profile: None,
+            mode: parse_tab_icon_args(&arguments[1..])?,
+            profile_report: None,
+            profile_duration: None,
+            profile_pane_stress: false,
+            profile_background_stress: false,
+            profile_sparse_updates: false,
+            profile_external_terminal: false,
+            tftp_command: None,
+        });
+    }
     if arguments
         .first()
         .is_some_and(|argument| argument == "benchmark-output")
@@ -2708,6 +2787,19 @@ pub(crate) fn run() -> Result<()> {
         );
         return Ok(());
     }
+    if args.mode == StartupMode::ListTabIcons {
+        for icon in tab_icon_completion_names() {
+            println!("{icon}");
+        }
+        return Ok(());
+    }
+    if let StartupMode::SetTabIcon { icon } = args.mode {
+        anyhow::ensure!(
+            request_existing_process_tab_icon(icon)?,
+            "no running Zetta process accepted the tab icon request"
+        );
+        return Ok(());
+    }
     match &args.mode {
         StartupMode::ListBackgroundSessions { json } => return print_session_catalogs(*json),
         StartupMode::ReconnectBackgroundSession { identifier } => {
@@ -2853,6 +2945,37 @@ pub(crate) fn run() -> Result<()> {
                                 }
                             });
                             let _ = completion.send(opened);
+                        }
+                        ProcessControlCommand::SetTabIcon { icon, completion } => {
+                            let accepted = cx.update(|cx| {
+                                if !cx
+                                    .global::<ZettaProcessState>()
+                                    .control_server
+                                    .is_accepting()
+                                {
+                                    return false;
+                                }
+                                if cx.global::<ZettaProcessState>().windows.is_empty()
+                                    && open_dormant_or_new_window(cx).is_err()
+                                {
+                                    return false;
+                                }
+                                let Some(window_id) = cx
+                                    .global::<ZettaProcessState>()
+                                    .windows
+                                    .keys()
+                                    .next()
+                                    .copied()
+                                else {
+                                    return false;
+                                };
+                                gpui::WindowHandle::<Zetta>::new(window_id)
+                                    .update(cx, |zetta, _, cx| {
+                                        zetta.set_active_tab_icon_from_cli(icon, cx)
+                                    })
+                                    .unwrap_or(false)
+                            });
+                            let _ = completion.send(accepted);
                         }
                         ProcessControlCommand::ReconnectSession {
                             runner_id,

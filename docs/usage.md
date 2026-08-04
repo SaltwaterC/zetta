@@ -32,6 +32,9 @@ zetta -p "PROFILE"
 Tab names follow the active terminal process. Press `Ctrl-Shift-R` or double-click
 a tab to set a persistent name. Use `Ctrl-Shift-Y` or the tab context menu
 to choose a tab icon. Submit an empty name to resume automatic naming.
+From a Zetta pane, `zetta tabicon ICON` changes the active tab icon;
+`zetta tabicon none` hides it, and `zetta tabicon --list` prints the available
+built-in icon names.
 Tabs retain a fixed width as their names change.
 
 ## Panes
