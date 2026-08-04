@@ -183,6 +183,7 @@ appearance settings include:
 ```json
 {
   "theme": "One Dark",
+  "default_tab_icon": "terminal",
   "terminal_font_size": 14,
   "terminal_font_family": "MesloLGS NF",
   "inactive_pane_opacity": 0.8,
@@ -198,6 +199,8 @@ appearance settings include:
 
 `terminal_font_size` accepts values from 6 through 100.
 `terminal_font_family` accepts bundled and system-installed fonts.
+`default_tab_icon` accepts any built-in icon name, or `null` to hide icons on
+new tabs. It can also be changed through Settings > Configuration.
 `inactive_pane_opacity` accepts values from 0 through 1 and defaults to 0.8.
 `hide_pane_size` defaults to `true` and hides the active pane dimensions from
 the title bar. `hide_title_bar_labels` and `hide_title_bar_buttons` default to

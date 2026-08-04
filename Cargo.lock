@@ -10739,6 +10739,7 @@ dependencies = [
  "serde_json",
  "serialport",
  "settings",
+ "strum",
  "sysinfo 0.37.2",
  "task",
  "tempfile",

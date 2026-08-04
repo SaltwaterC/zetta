@@ -81,6 +81,7 @@ fn default_working_directory_is_the_user_home() {
     assert!(!config.working_directory_configured);
     assert_eq!(config.http_server_port, DEFAULT_HTTP_PORT);
     assert_eq!(config.tftp_server_port, DEFAULT_TFTP_SERVER_PORT);
+    assert_eq!(config.default_tab_icon, Some(IconName::Terminal));
     assert_eq!(config.pane_controls_position, PaneControlsPosition::Right);
     assert!(!config.pane_controls_hidden_by_default);
     assert_eq!(config.working_directory_scope, WorkingDirectoryScope::Tab);
@@ -89,6 +90,23 @@ fn default_working_directory_is_the_user_home() {
     assert!(!config.hide_title_bar_labels);
     assert!(!config.hide_title_bar_buttons);
     assert_eq!(config.hide_title_bar_menus, cfg!(target_os = "macos"));
+}
+
+#[test]
+fn default_tab_icon_accepts_an_icon_or_null() {
+    assert_eq!(
+        Config::parse(r#"{"default_tab_icon":"star"}"#, None, None)
+            .unwrap()
+            .default_tab_icon,
+        Some(IconName::Star)
+    );
+    assert_eq!(
+        Config::parse(r#"{"default_tab_icon":null}"#, None, None)
+            .unwrap()
+            .default_tab_icon,
+        None
+    );
+    assert!(Config::parse(r#"{"default_tab_icon":"missing"}"#, None, None).is_err());
 }
 
 #[test]

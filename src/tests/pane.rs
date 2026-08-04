@@ -445,6 +445,7 @@ fn tab_pane_index_resolves_panes_without_scanning() {
         broadcast_input: false,
         close_policy: TabClosePolicy::Close,
         custom_title: None,
+        icon: Some(IconName::Terminal),
         renaming_pane: None,
         rename_buffer: None,
         rename_cursor: 0,
@@ -588,6 +589,7 @@ fn split_profile_comes_from_the_active_pane() {
         broadcast_input: false,
         close_policy: TabClosePolicy::Close,
         custom_title: None,
+        icon: Some(IconName::Terminal),
         renaming_pane: None,
         rename_buffer: None,
         rename_cursor: 0,
@@ -632,6 +634,7 @@ fn closing_active_pane_restores_previous_focus() {
         broadcast_input: false,
         close_policy: TabClosePolicy::Close,
         custom_title: None,
+        icon: Some(IconName::Terminal),
         renaming_pane: None,
         rename_buffer: None,
         rename_cursor: 0,
@@ -678,6 +681,7 @@ fn closing_inactive_pane_preserves_focus() {
         broadcast_input: false,
         close_policy: TabClosePolicy::Close,
         custom_title: None,
+        icon: Some(IconName::Terminal),
         renaming_pane: None,
         rename_buffer: None,
         rename_cursor: 0,
@@ -830,6 +834,7 @@ fn pane_management_tab() -> Tab {
         broadcast_input: false,
         close_policy: TabClosePolicy::Close,
         custom_title: None,
+        icon: Some(IconName::Terminal),
         renaming_pane: None,
         rename_buffer: None,
         rename_cursor: 0,
@@ -970,6 +975,11 @@ fn custom_pane_labels_replace_the_fallback_and_render_while_editing() {
     tab.renaming_pane = None;
     tab.rename_buffer = None;
     assert_eq!(tab.pane(2).unwrap().label(), "dev · eu-west");
+}
+
+#[test]
+fn tabs_use_the_terminal_icon_by_default() {
+    assert_eq!(pane_management_tab().icon, Some(IconName::Terminal));
 }
 
 #[test]

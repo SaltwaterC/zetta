@@ -138,6 +138,249 @@ fn profile_shortcut_alias(_slot: usize, label: String) -> ProfileMenuShortcut {
     ProfileMenuShortcut::Alias(label)
 }
 
+impl Zetta {
+    pub(crate) fn render_tab_icon_picker_overlay(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let picker = self.tab_icon_picker.as_ref()?;
+        let colors = cx.theme().colors().clone();
+        let handle = cx.entity().downgrade();
+        let query = picker.query.clone();
+        let query_empty = query.text.is_empty();
+        let (query_before, query_after) = if query.select_all {
+            (query.text.clone(), String::new())
+        } else {
+            let cursor = query.cursor.min(query.text.len());
+            let (before, after) = query.text.split_at(cursor);
+            (before.to_owned(), after.to_owned())
+        };
+        let options = matching_tab_icon_options(&query.text);
+        let has_options = !options.is_empty();
+        let selected_icon = match picker.target {
+            TabIconPickerTarget::Tab(tab_index) => {
+                self.tabs.get(tab_index).and_then(|tab| tab.icon)
+            }
+            TabIconPickerTarget::Default => self
+                .settings_editor
+                .as_ref()
+                .and_then(|editor| editor.configuration.default_tab_icon),
+        };
+        let search_handle = handle.clone();
+        let close_handle = handle.clone();
+        let search = div()
+            .id("tab-icon-search")
+            .h_9()
+            .min_w_0()
+            .flex_1()
+            .px_2()
+            .flex()
+            .items_center()
+            .overflow_hidden()
+            .rounded(px(4.))
+            .border_1()
+            .border_color(colors.border_focused)
+            .bg(colors.editor_background)
+            .when(query.select_all, |input| {
+                input.bg(colors.element_selection_background)
+            })
+            .text_color(colors.text)
+            .child(
+                h_flex()
+                    .min_w_0()
+                    .when(!query.select_all, |input| {
+                        input.child(div().whitespace_nowrap().child(query_before.clone()))
+                    })
+                    .when(!query.select_all, |input| {
+                        input.child(
+                            div()
+                                .flex_none()
+                                .w(px(1.))
+                                .h(px(16.))
+                                .bg(colors.text_accent),
+                        )
+                    })
+                    .when(query.select_all, |input| {
+                        input
+                            .text_color(colors.text)
+                            .child(div().whitespace_nowrap().child(query_before.clone()))
+                    })
+                    .child(div().whitespace_nowrap().child(query_after))
+                    .when(query_empty, |input| {
+                        input
+                            .text_color(colors.text_placeholder)
+                            .child("Search icons…")
+                    }),
+            )
+            .on_click(move |_, window, cx| {
+                search_handle
+                    .update(cx, |this, cx| {
+                        this.tab_icon_picker_focus.focus(window, cx);
+                    })
+                    .ok();
+            });
+        let icon_cells = options.into_iter().enumerate().map(|(index, option)| {
+            let label = option
+                .map(tab_icon_label)
+                .unwrap_or_else(|| "None".to_owned());
+            let selected = option == selected_icon;
+            let keyboard_selected = index == picker.selected;
+            let icon_handle = handle.clone();
+            div()
+                .id(("tab-icon-option", index))
+                .w(px(84.))
+                .h(px(68.))
+                .p_1()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_1()
+                .rounded(px(4.))
+                .cursor_pointer()
+                .when(selected, |cell| cell.bg(colors.element_selected))
+                .when(keyboard_selected, |cell| {
+                    cell.border_1().border_color(colors.border_focused)
+                })
+                .hover(|cell| cell.bg(colors.element_hover))
+                .when_some(option, |cell, icon| {
+                    cell.child(Icon::new(icon).size(IconSize::Medium))
+                })
+                .when(option.is_none(), |cell| {
+                    cell.child(Icon::new(IconName::Dash).size(IconSize::Medium))
+                })
+                .child(Label::new(label.clone()).size(LabelSize::XSmall).truncate())
+                .tooltip(Tooltip::text(label))
+                .on_click(move |_, window, cx| {
+                    icon_handle
+                        .update(cx, |this, cx| {
+                            this.set_tab_icon(option, window, cx);
+                        })
+                        .ok();
+                })
+        });
+        let scroll = picker.scroll.clone();
+        let viewport = scroll.bounds().size.height;
+        let maximum = scroll.max_offset().y;
+        let content_height = viewport + maximum;
+        let thumb_fraction = if content_height > px(0.) {
+            (viewport / content_height).clamp(0.08, 1.)
+        } else {
+            1.
+        };
+        let progress = if maximum > px(0.) {
+            (-scroll.offset().y / maximum).clamp(0., 1.)
+        } else {
+            0.
+        };
+        let top_fraction = progress * (1. - thumb_fraction);
+        let click_scroll = scroll.clone();
+        let click_handle = handle.clone();
+        let scrollbar = div()
+            .id("tab-icon-scrollbar")
+            .absolute()
+            .top_1()
+            .right_0()
+            .bottom_1()
+            .w(px(8.))
+            .bg(colors.scrollbar_track_background)
+            .when(maximum <= px(0.), |bar| bar.invisible())
+            .child(
+                div()
+                    .absolute()
+                    .right(px(2.))
+                    .top(gpui::relative(top_fraction))
+                    .h(gpui::relative(thumb_fraction))
+                    .w(px(4.))
+                    .rounded_full()
+                    .bg(colors.scrollbar_thumb_background),
+            )
+            .on_click(move |event, _, cx| {
+                if maximum > px(0.) {
+                    let bounds = click_scroll.bounds();
+                    let progress =
+                        ((event.position().y - bounds.top()) / bounds.size.height).clamp(0., 1.);
+                    let offset = click_scroll.offset();
+                    click_scroll.set_offset(point(offset.x, -(maximum * progress)));
+                    click_handle.update(cx, |_, cx| cx.notify()).ok();
+                }
+                cx.stop_propagation();
+            });
+        let icon_grid = div()
+            .id("tab-icon-grid")
+            .size_full()
+            .track_scroll(&picker.scroll)
+            .overflow_y_scroll()
+            .p_1()
+            .pr_3()
+            .flex()
+            .flex_wrap()
+            .content_start()
+            .gap_1()
+            .children(icon_cells);
+        let icon_grid = div()
+            .relative()
+            .min_h_0()
+            .flex_1()
+            .child(icon_grid.when(!has_options, |grid| {
+                grid.child(
+                    div()
+                        .w_full()
+                        .py_6()
+                        .flex()
+                        .justify_center()
+                        .text_color(colors.text_muted)
+                        .child("No icons match your search"),
+                )
+            }))
+            .child(scrollbar);
+        Some(
+            div()
+                .id("tab-icon-picker-modal")
+                .absolute()
+                .inset_0()
+                .p_8()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(transparent_black().opacity(0.55))
+                .occlude()
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(px(720.))
+                        .h_full()
+                        .max_h(px(600.))
+                        .p_3()
+                        .flex()
+                        .flex_col()
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_color(colors.border)
+                        .bg(colors.elevated_surface_background)
+                        .shadow_lg()
+                        .child(
+                            h_flex().mb_3().gap_2().child(search).child(
+                                IconButton::new("close-tab-icon-picker", IconName::Close)
+                                    .icon_size(IconSize::Small)
+                                    .tooltip(Tooltip::text("Close icon picker"))
+                                    .on_click(move |_, window, cx| {
+                                        close_handle
+                                            .update(cx, |this, cx| {
+                                                this.dismiss_tab_icon_picker(window, cx);
+                                            })
+                                            .ok();
+                                    }),
+                            ),
+                        )
+                        .child(icon_grid),
+                )
+                .into_any_element(),
+        )
+    }
+}
+
 impl Render for Zetta {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Native mouse resizing is constrained by WindowOptions where the
@@ -253,6 +496,12 @@ impl Render for Zetta {
                     })
             })
             .flatten();
+        let active_terminal_focus = self
+            .tabs
+            .get(self.active_tab)
+            .and_then(Tab::active_pane)
+            .and_then(|pane| pane.view.as_ref())
+            .map(|view| view.focus_handle(cx));
         let tabs = self
             .tabs
             .iter()
@@ -332,13 +581,15 @@ impl Render for Zetta {
                             )
                         },
                     )
-                    .child(
-                        svg()
-                            .path(IconName::Terminal.path())
-                            .size(px(14.))
-                            .flex_none()
-                            .text_color(tab_icon),
-                    )
+                    .when_some(tab.icon, |content, icon| {
+                        content.child(
+                            svg()
+                                .path(icon.path())
+                                .size(px(14.))
+                                .flex_none()
+                                .text_color(tab_icon),
+                        )
+                    })
                     .child(
                         div()
                             .id(("tab-title", tab.id as usize))
@@ -358,7 +609,7 @@ impl Render for Zetta {
                             .child(title),
                     )
                     .into_any_element();
-                div()
+                let tab_element = div()
                     .id(("tab", tab.id as usize))
                     .h_8()
                     .w(px(180.))
@@ -418,7 +669,27 @@ impl Render for Zetta {
                                     .update(cx, |this, cx| this.close_tab_at(index, window, cx))
                                     .ok();
                             }),
-                    )
+                    );
+                let menu_handle = handle.clone();
+                let action_context = active_terminal_focus.clone();
+                ui::right_click_menu::<ui::ContextMenu>(("tab-context-menu", tab.id as usize))
+                    .menu(move |window, cx| {
+                        menu_handle
+                            .update(cx, |this, cx| {
+                                this.active_tab = index;
+                                cx.notify();
+                            })
+                            .ok();
+                        let action_context = action_context.clone();
+                        ui::ContextMenu::build(window, cx, move |menu, _, _| {
+                            let menu =
+                                menu.when_some(action_context, |menu, focus| menu.context(focus));
+                            menu.action("Rename Tab", Box::new(RenameTab))
+                                .action("Change Tab Icon", Box::new(ChangeTabIcon))
+                        })
+                    })
+                    .trigger(move |_, _, _| tab_element)
+                    .into_any_element()
             })
             .collect::<Vec<_>>();
 
@@ -429,12 +700,6 @@ impl Render for Zetta {
         );
         let show_title_bar_menus = title_bar_menus_visible(self.launch_config.hide_title_bar_menus);
         let show_title_bar_buttons = !self.launch_config.hide_title_bar_buttons;
-        let active_terminal_focus = self
-            .tabs
-            .get(self.active_tab)
-            .and_then(Tab::active_pane)
-            .and_then(|pane| pane.view.as_ref())
-            .map(|view| view.focus_handle(cx));
         let profile_menu_profiles = self.profiles.clone();
         let hidden_profiles = self.launch_config.hidden_profiles.clone();
         let default_profile = self.launch_config.default_profile;
@@ -1768,6 +2033,7 @@ impl Render for Zetta {
         });
 
         let settings_overlay = self.render_settings_overlay(window, cx);
+        let tab_icon_picker_overlay = self.render_tab_icon_picker_overlay(window, cx);
         #[cfg(feature = "serial-console")]
         let serial_console_overlay = self.render_serial_console_overlay(cx);
         #[cfg(not(feature = "serial-console"))]
@@ -1804,6 +2070,7 @@ impl Render for Zetta {
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::rename_tab))
+            .on_action(cx.listener(Self::change_tab_icon))
             .on_action(cx.listener(Self::rename_pane))
             .on_action(cx.listener(Self::toggle_pane_controls))
             .on_action(cx.listener(Self::toggle_tab_pane_controls))
@@ -1847,6 +2114,9 @@ impl Render for Zetta {
             .on_action(cx.listener(Self::toggle_performance_overlay))
             .when(self.is_renaming(), |content| {
                 content.track_focus(&self.rename_focus)
+            })
+            .when(self.tab_icon_picker.is_some(), |content| {
+                content.track_focus(&self.tab_icon_picker_focus)
             })
             .capture_key_up(cx.listener(Self::pane_resize_key_up))
             .on_key_down(cx.listener(Self::command_palette_key_down))
@@ -1944,6 +2214,9 @@ impl Render for Zetta {
             });
         let content =
             content.when_some(settings_overlay, |content, overlay| content.child(overlay));
+        let content = content.when_some(tab_icon_picker_overlay, |content, overlay| {
+            content.child(overlay)
+        });
         let content = content.when_some(serial_console_overlay, |content, overlay| {
             content.child(overlay)
         });

@@ -10,8 +10,9 @@ for active development.
 
 ## Highlights
 
-- Tabs, recursive pane splits and pane rotation, pane templates, pane
-  minimization, input broadcasting, and modal keyboard or mouse pane resizing
+- Tabs with renameable titles and selectable icons, recursive pane splits and
+  pane rotation, pane templates, pane minimization, input broadcasting, and
+  modal keyboard or mouse pane resizing
 - Automatically detected shells, including Homebrew-installed shells on
   macOS and Linux, plus first-class WSL/MSYS2 profiles with working directory
   tracking

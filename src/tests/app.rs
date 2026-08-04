@@ -301,6 +301,7 @@ fn background_session_is_reaped_after_its_final_pane_exits() {
         broadcast_input: false,
         close_policy: TabClosePolicy::Close,
         custom_title: None,
+        icon: Some(IconName::Terminal),
         renaming_pane: None,
         rename_buffer: None,
         rename_cursor: 0,

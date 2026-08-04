@@ -1521,6 +1521,7 @@ fn normalizes_keymap_aliases_for_runtime_loading() {
 #[test]
 fn tab_rename_and_configuration_reload_shortcuts_are_swapped() {
     assert_eq!(RENAME_TAB_KEYBINDING, "ctrl-shift-r");
+    assert_eq!(CHANGE_TAB_ICON_KEYBINDING, "ctrl-shift-y");
     assert_eq!(
         RELOAD_CONFIGURATION_KEYBINDING,
         platform_keystroke("ctrl-alt-r")

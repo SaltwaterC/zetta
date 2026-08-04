@@ -2,6 +2,7 @@ use std::{fs, io, path::Path};
 
 use anyhow::{Context as _, Result};
 use serde_json::{Map, Value, json};
+use ui::IconName;
 
 use crate::config::{
     Config, NewTabProfile, PaneControlsPosition, WorkingDirectoryScope, profile_is_hidden,
@@ -125,6 +126,7 @@ pub struct ConfigurationForm {
     pub working_directory: TextField,
     pub working_directory_scope: WorkingDirectoryScope,
     pub theme: String,
+    pub default_tab_icon: Option<IconName>,
     pub terminal_font_size: TextField,
     pub terminal_font_family: String,
     pub max_scroll_history_lines: TextField,
@@ -212,6 +214,7 @@ impl ConfigurationForm {
                 .theme
                 .clone()
                 .unwrap_or_else(|| "One Light".to_owned()),
+            default_tab_icon: config.default_tab_icon,
             terminal_font_size: TextField::new(
                 config.terminal_font_size.unwrap_or(14.).to_string(),
             ),
@@ -277,6 +280,14 @@ impl ConfigurationForm {
             json!(self.working_directory_scope.as_str()),
         );
         root.insert("theme".into(), json!(self.theme));
+        let default_tab_icon = self.default_tab_icon.map(|icon| {
+            let name: &'static str = icon.into();
+            Value::String(name.to_owned())
+        });
+        root.insert(
+            "default_tab_icon".into(),
+            default_tab_icon.unwrap_or(Value::Null),
+        );
         let terminal_font_size = self
             .terminal_font_size
             .text

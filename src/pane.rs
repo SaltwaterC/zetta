@@ -939,6 +939,7 @@ pub(crate) struct Tab {
     pub(crate) broadcast_input: bool,
     pub(crate) close_policy: TabClosePolicy,
     pub(crate) custom_title: Option<String>,
+    pub(crate) icon: Option<IconName>,
     pub(crate) renaming_pane: Option<u64>,
     pub(crate) rename_buffer: Option<String>,
     pub(crate) rename_cursor: usize,

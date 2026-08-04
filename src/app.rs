@@ -387,6 +387,8 @@ pub(crate) struct Zetta {
     pub(crate) multi_command_launches: BoundedLaunchQueue<QueuedTerminalLaunch>,
     pub(crate) settings_focus: gpui::FocusHandle,
     pub(crate) settings_editor: Option<SettingsEditor>,
+    pub(crate) tab_icon_picker_focus: gpui::FocusHandle,
+    pub(crate) tab_icon_picker: Option<TabIconPicker>,
     #[cfg(feature = "serial-console")]
     pub(crate) serial_console_focus: gpui::FocusHandle,
     #[cfg(feature = "serial-console")]
@@ -589,6 +591,8 @@ impl Zetta {
             multi_command_launches: BoundedLaunchQueue::new(MAX_CONCURRENT_MULTI_COMMAND_SPAWNS),
             settings_focus: cx.focus_handle(),
             settings_editor: None,
+            tab_icon_picker_focus: cx.focus_handle(),
+            tab_icon_picker: None,
             #[cfg(feature = "serial-console")]
             serial_console_focus: cx.focus_handle(),
             #[cfg(feature = "serial-console")]
@@ -713,6 +717,7 @@ impl Zetta {
             broadcast_input: false,
             close_policy: TabClosePolicy::Close,
             custom_title: None,
+            icon: self.launch_config.default_tab_icon,
             renaming_pane: None,
             rename_buffer: None,
             rename_cursor: 0,
@@ -3368,14 +3373,212 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let view = self
+        self.begin_tab_rename(self.active_tab, window, cx);
+    }
+
+    pub(crate) fn change_tab_icon(
+        &mut self,
+        _: &ChangeTabIcon,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_tab_icon_picker(self.active_tab, window, cx);
+    }
+
+    pub(crate) fn begin_tab_rename(
+        &mut self,
+        tab_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let automatic_title = self
             .tabs
-            .get(self.active_tab)
+            .get(tab_index)
             .and_then(Tab::active_pane)
             .and_then(|pane| pane.view.as_ref())
-            .cloned();
-        if let Some(view) = view {
-            self.begin_rename(view, window, cx);
+            .map(|view| view.read(cx).tab_content_text(0, cx).to_string())
+            .or_else(|| {
+                self.tabs
+                    .get(tab_index)
+                    .and_then(Tab::active_pane)
+                    .map(|pane| pane.profile.name.clone())
+            })
+            .unwrap_or_else(|| "Terminal".to_owned());
+        self.active_tab = tab_index;
+        self.begin_rename_with_title(tab_index, automatic_title, window, cx);
+    }
+
+    pub(crate) fn open_tab_icon_picker(
+        &mut self,
+        tab_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if tab_index >= self.tabs.len() {
+            return;
+        }
+        let current_icon = self.tabs.get(tab_index).and_then(|tab| tab.icon);
+        self.tab_icon_picker = Some(TabIconPicker::new(
+            TabIconPickerTarget::Tab(tab_index),
+            current_icon,
+        ));
+        if let Some(picker) = self.tab_icon_picker.as_ref() {
+            picker.scroll.scroll_to_item(picker.selected);
+        }
+        self.tab_icon_picker_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn open_default_tab_icon_picker(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings_editor.is_none() {
+            return;
+        }
+        if let Some(editor) = self.settings_editor.as_mut() {
+            editor.focused_control = Some(SettingsControl::DefaultTabIconPicker);
+            editor.focused_input = None;
+        }
+        let current_icon = self
+            .settings_editor
+            .as_ref()
+            .and_then(|editor| editor.configuration.default_tab_icon);
+        self.tab_icon_picker = Some(TabIconPicker::new(
+            TabIconPickerTarget::Default,
+            current_icon,
+        ));
+        if let Some(picker) = self.tab_icon_picker.as_ref() {
+            picker.scroll.scroll_to_item(picker.selected);
+        }
+        self.tab_icon_picker_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn dismiss_tab_icon_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let target = self.tab_icon_picker.take().map(|picker| picker.target);
+        if target == Some(TabIconPickerTarget::Default) {
+            self.settings_focus.focus(window, cx);
+        } else {
+            self.focus_active(window, cx);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn set_tab_icon(
+        &mut self,
+        icon: Option<IconName>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(picker) = self.tab_icon_picker.as_ref() else {
+            return;
+        };
+        match picker.target {
+            TabIconPickerTarget::Tab(tab_index) => {
+                if let Some(tab) = self.tabs.get_mut(tab_index) {
+                    tab.icon = icon;
+                }
+            }
+            TabIconPickerTarget::Default => {
+                if let Some(editor) = self.settings_editor.as_mut() {
+                    editor.configuration.default_tab_icon = icon;
+                    editor.configuration_dirty = true;
+                    editor.message = None;
+                }
+            }
+        }
+        self.dismiss_tab_icon_picker(window, cx);
+    }
+
+    pub(crate) fn tab_icon_picker_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let command = event.keystroke.modifiers.control || event.keystroke.modifiers.platform;
+        if self.tab_icon_picker.is_none() {
+            return;
+        }
+        cx.stop_propagation();
+        if event.keystroke.key == "escape" {
+            self.dismiss_tab_icon_picker(window, cx);
+            return;
+        }
+        let activate = {
+            let mut activate = None;
+            let mut query_changed = false;
+            let mut selection_changed = false;
+            let Some(picker) = self.tab_icon_picker.as_mut() else {
+                return;
+            };
+            let options = matching_tab_icon_options(&picker.query.text);
+            match event.keystroke.key.as_str() {
+                "left" if !command => picker.query.move_left(),
+                "right" if !command => picker.query.move_right(),
+                "up" if !command => {
+                    picker.selected = picker.selected.saturating_sub(7);
+                    selection_changed = true;
+                }
+                "down" if !command => {
+                    picker.selected = (picker.selected + 7).min(options.len().saturating_sub(1));
+                    selection_changed = true;
+                }
+                "tab" if !command => {
+                    if event.keystroke.modifiers.shift {
+                        picker.selected = picker.selected.saturating_sub(1);
+                    } else {
+                        picker.selected =
+                            (picker.selected + 1).min(options.len().saturating_sub(1));
+                    }
+                    selection_changed = true;
+                }
+                "enter" if !command => {
+                    activate = options.get(picker.selected).copied();
+                }
+                "backspace" => {
+                    picker.query.backspace();
+                    query_changed = true;
+                }
+                "delete" => {
+                    picker.query.delete();
+                    query_changed = true;
+                }
+                "home" => {
+                    picker.query.cursor = 0;
+                    picker.query.select_all = false;
+                }
+                "end" => {
+                    picker.query.cursor = picker.query.text.len();
+                    picker.query.select_all = false;
+                }
+                "a" if command => picker.query.select_all(),
+                _ if !command
+                    && !event.keystroke.modifiers.alt
+                    && event.keystroke.key_char.is_some() =>
+                {
+                    if let Some(text) = event.keystroke.key_char.as_ref() {
+                        picker.query.insert(text);
+                        query_changed = true;
+                    }
+                }
+                _ => return,
+            }
+            if query_changed {
+                picker.selected = 0;
+                selection_changed = true;
+            }
+            if selection_changed {
+                picker.scroll.scroll_to_item(picker.selected);
+            }
+            activate
+        };
+        if let Some(icon) = activate {
+            self.set_tab_icon(icon, window, cx);
+        } else {
+            cx.notify();
         }
     }
 
@@ -3386,7 +3589,17 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         let automatic_title = view.read(cx).tab_content_text(0, cx).to_string();
-        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+        self.begin_rename_with_title(self.active_tab, automatic_title, window, cx);
+    }
+
+    fn begin_rename_with_title(
+        &mut self,
+        tab_index: usize,
+        automatic_title: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tab) = self.tabs.get_mut(tab_index) {
             let title = tab.custom_title.clone().unwrap_or(automatic_title);
             tab.renaming_pane = None;
             tab.rename_cursor = title.len();

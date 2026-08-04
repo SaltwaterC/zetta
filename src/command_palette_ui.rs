@@ -51,6 +51,25 @@ impl Zetta {
                 }
             })
             .collect::<Vec<_>>();
+        let change_tab_icon = ChangeTabIcon;
+        let change_tab_icon_shortcut = terminal_focus
+            .as_ref()
+            .and_then(|focus| {
+                window.highest_precedence_binding_for_action_in(&change_tab_icon, focus)
+            })
+            .map(|binding| {
+                binding
+                    .keystrokes()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            });
+        commands.push(PaletteCommand {
+            name: humanize_action_name(change_tab_icon.name()),
+            shortcut: change_tab_icon_shortcut,
+            action: Box::new(change_tab_icon),
+        });
         commands.extend(self.launch_config.pane_split_templates.keys().map(|name| {
             let action = ApplyPaneSplitTemplate { name: name.clone() };
             let shortcut = terminal_focus
@@ -111,6 +130,10 @@ impl Zetta {
         }
         #[cfg(feature = "serial-console")]
         if self.serial_console_key_down(event, window, cx) {
+            return;
+        }
+        if self.tab_icon_picker.is_some() {
+            self.tab_icon_picker_key_down(event, window, cx);
             return;
         }
         if self.settings_editor.is_some() {

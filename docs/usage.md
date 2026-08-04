@@ -30,7 +30,8 @@ zetta -p "PROFILE"
 ```
 
 Tab names follow the active terminal process. Press `Ctrl-Shift-R` or double-click
-a tab to set a persistent name. Submit an empty name to resume automatic naming.
+a tab to set a persistent name. Use `Ctrl-Shift-Y` or the tab context menu
+to choose a tab icon. Submit an empty name to resume automatic naming.
 Tabs retain a fixed width as their names change.
 
 ## Panes
@@ -312,6 +313,7 @@ become `Ctrl-Cmd`; for example, paste-trim is `Ctrl-Cmd-V` on macOS and
 | `Ctrl-,` | Open the configuration and keymap editor |
 | `Ctrl-Shift-S` | Open a serial console in a new pane |
 | `Ctrl-Shift-R` | Rename the active tab |
+| `Ctrl-Shift-Y` | Change the active tab icon |
 | `Cmd-Shift-R` (macOS) / `Alt-Shift-R` (Windows/Linux) | Label the active pane |
 | `Ctrl-=` / `Ctrl-+` | Increase font size globally |
 | `Ctrl--` | Decrease font size globally |

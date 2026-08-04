@@ -122,6 +122,7 @@ actions!(
         NextTab,
         PreviousTab,
         RenameTab,
+        ChangeTabIcon,
         RenamePane,
         TogglePaneControls,
         ToggleTabPaneControls,
@@ -214,6 +215,8 @@ use performance::*;
 mod command_palette_ui;
 mod tab_search;
 use tab_search::*;
+mod tab_icon_picker;
+use tab_icon_picker::*;
 mod settings_ui;
 mod settings_view;
 #[cfg(feature = "http-server")]

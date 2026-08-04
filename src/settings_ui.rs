@@ -67,6 +67,7 @@ pub(crate) enum SettingsControl {
     Toggle(SettingsToggle),
     Numeric(NumericSetting),
     FontPicker,
+    DefaultTabIconPicker,
     Opacity,
     AddProfile,
     RemoveProfile(usize),
@@ -873,6 +874,7 @@ impl Zetta {
                     SettingsControl::Dropdown(SettingsDropdown::DefaultProfile),
                     SettingsControl::Dropdown(SettingsDropdown::NewTabProfile),
                     SettingsControl::Dropdown(SettingsDropdown::Theme),
+                    SettingsControl::DefaultTabIconPicker,
                     SettingsControl::Numeric(NumericSetting::FontSize),
                     SettingsControl::FontPicker,
                     SettingsControl::Input(SettingsInput::Configuration(
@@ -1321,6 +1323,9 @@ impl Zetta {
                     editor.scroll_geometry_initialized = false;
                 }
                 self.focus_settings_input(SettingsInput::FontSearch, window, cx);
+            }
+            SettingsControl::DefaultTabIconPicker => {
+                self.open_default_tab_icon_picker(window, cx);
             }
             SettingsControl::Numeric(_) | SettingsControl::Opacity => {}
             SettingsControl::AddProfile => {

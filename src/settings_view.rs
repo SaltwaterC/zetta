@@ -558,6 +558,53 @@ impl Zetta {
                     window,
                     cx,
                 );
+                let current_default_tab_icon = configuration.default_tab_icon;
+                let default_tab_icon_handle = handle.clone();
+                let default_tab_icon = h_flex()
+                    .id("default-tab-icon-picker-trigger")
+                    .h_9()
+                    .w_full()
+                    .min_w(px(180.))
+                    .px_3()
+                    .justify_between()
+                    .rounded(px(4.))
+                    .border_1()
+                    .border_color(
+                        if editor.focused_control == Some(SettingsControl::DefaultTabIconPicker) {
+                            colors.border_focused
+                        } else {
+                            colors.border
+                        },
+                    )
+                    .bg(colors.editor_background)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(colors.element_hover))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(Icon::new(
+                                current_default_tab_icon.unwrap_or(IconName::Dash),
+                            ))
+                            .child(
+                                current_default_tab_icon
+                                    .map(tab_icon_label)
+                                    .unwrap_or_else(|| "None".to_owned()),
+                            ),
+                    )
+                    .child(
+                        svg()
+                            .path(IconName::ChevronDown.path())
+                            .size(px(14.))
+                            .text_color(colors.icon_muted),
+                    )
+                    .on_click(move |_, window, cx| {
+                        default_tab_icon_handle
+                            .update(cx, |this, cx| {
+                                this.open_default_tab_icon_picker(window, cx);
+                            })
+                            .ok();
+                    })
+                    .into_any_element();
                 let working_directory_scope = dropdown(
                     "settings-working-directory-scope".to_owned(),
                     configuration.working_directory_scope.label().to_owned(),
@@ -655,6 +702,12 @@ impl Zetta {
                         editor.focused_control
                             == Some(SettingsControl::Dropdown(SettingsDropdown::Theme)),
                         theme,
+                    ),
+                    setting_row(
+                        "Default tab icon",
+                        "Icon shown on new tabs; choose None to hide it",
+                        editor.focused_control == Some(SettingsControl::DefaultTabIconPicker),
+                        default_tab_icon,
                     ),
                     setting_row(
                         "Terminal font size",

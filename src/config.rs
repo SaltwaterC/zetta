@@ -8,10 +8,11 @@ use std::{
 #[cfg(windows)]
 use std::{os::windows::process::CommandExt as _, process::Command};
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, anyhow};
 use serde_json::Value;
 use task::Shell;
 use terminal::MAX_SCROLL_HISTORY_LINES;
+use ui::IconName;
 
 const DEFAULT_TERMINAL_FONT_FAMILY: &str = "MesloLGS NF";
 const DEFAULT_MAX_SCROLL_HISTORY_LINES: usize = MAX_SCROLL_HISTORY_LINES;
@@ -151,6 +152,7 @@ pub struct Config {
     pub working_directory_scope: WorkingDirectoryScope,
     pub keymap_path: PathBuf,
     pub theme: Option<String>,
+    pub default_tab_icon: Option<IconName>,
     pub terminal_font_size: Option<f32>,
     pub terminal_font_family: String,
     pub max_scroll_history_lines: usize,
@@ -184,6 +186,7 @@ impl Config {
             working_directory_scope: WorkingDirectoryScope::default(),
             keymap_path: keymap_path.unwrap_or_else(|| config_dir.join("keymap.json")),
             theme: None,
+            default_tab_icon: Some(IconName::Terminal),
             terminal_font_size: None,
             terminal_font_family: DEFAULT_TERMINAL_FONT_FAMILY.to_owned(),
             max_scroll_history_lines: DEFAULT_MAX_SCROLL_HISTORY_LINES,
@@ -265,6 +268,18 @@ impl Config {
         }
         if let Some(theme) = root.get("theme") {
             config.theme = Some(theme.as_str().context("theme must be a string")?.to_owned());
+        }
+        if let Some(icon) = root.get("default_tab_icon") {
+            config.default_tab_icon = if icon.is_null() {
+                None
+            } else {
+                let name = icon
+                    .as_str()
+                    .context("default_tab_icon must be an icon name or null")?;
+                Some(name.parse().map_err(|_| {
+                    anyhow!("default_tab_icon must be a built-in icon name, got {name:?}")
+                })?)
+            };
         }
         if let Some(font_size) = root.get("terminal_font_size") {
             let font_size = font_size
@@ -380,6 +395,7 @@ fn validate_config_fields(root: &Value) -> Result<()> {
         "working_directory",
         "working_directory_scope",
         "theme",
+        "default_tab_icon",
         "terminal_font_size",
         "terminal_font_family",
         "max_scroll_history_lines",

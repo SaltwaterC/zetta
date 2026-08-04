@@ -1726,6 +1726,7 @@ pub(crate) fn validate_keymap_contents(content: &str, cx: &mut App) -> Result<()
 }
 
 pub(crate) const RENAME_TAB_KEYBINDING: &str = "ctrl-shift-r";
+pub(crate) const CHANGE_TAB_ICON_KEYBINDING: &str = "ctrl-shift-y";
 #[cfg(target_os = "macos")]
 pub(crate) const RELOAD_CONFIGURATION_KEYBINDING: &str = "ctrl-cmd-r";
 #[cfg(not(target_os = "macos"))]
@@ -2051,6 +2052,11 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
         ),
         KeyBinding::new("ctrl-,", ToggleSettings, Some("Zetta > Terminal")),
         KeyBinding::new(RENAME_TAB_KEYBINDING, RenameTab, Some("Zetta > Terminal")),
+        KeyBinding::new(
+            CHANGE_TAB_ICON_KEYBINDING,
+            ChangeTabIcon,
+            Some("Zetta > Terminal"),
+        ),
         KeyBinding::new(RENAME_PANE_KEYBINDING, RenamePane, Some("Zetta > Terminal")),
         KeyBinding::new(
             TOGGLE_PANE_CONTROLS_KEYBINDING,
