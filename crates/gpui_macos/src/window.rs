@@ -2377,10 +2377,8 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: 
                     drop(lock);
                 }
 
-                let handled: BOOL = unsafe {
-                    let input_context: id = msg_send![this, inputContext];
-                    msg_send![input_context, handleEvent: native_event]
-                };
+                let handled: BOOL =
+                    unsafe { forward_event_to_input_context(this, native_event).unwrap_or(NO) };
                 window_state.as_ref().lock().keystroke_for_do_command.take();
                 if let Some(handled) = window_state.as_ref().lock().do_command_handled.take() {
                     return handled as BOOL;
@@ -2418,10 +2416,7 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: 
                 return NO;
             }
 
-            unsafe {
-                let input_context: id = msg_send![this, inputContext];
-                msg_send![input_context, handleEvent: native_event]
-            }
+            unsafe { forward_event_to_input_context(this, native_event).unwrap_or(NO) }
         }
 
         PlatformInput::KeyUp(_) => {
@@ -2517,8 +2512,7 @@ extern "C" fn handle_view_event(this: &Object, _: Sel, native_event: id) {
             PlatformInput::MouseDown(_) => {
                 drop(lock);
                 unsafe {
-                    let input_context: id = msg_send![this, inputContext];
-                    msg_send![input_context, handleEvent: native_event]
+                    let _ = forward_event_to_input_context(this, native_event);
                 }
                 lock = window_state.as_ref().lock();
             }
@@ -2576,6 +2570,21 @@ extern "C" fn handle_view_event(this: &Object, _: Sel, native_event: id) {
             window_state.lock().event_callback = Some(callback);
         }
     }
+}
+
+/// Forwards an event to the GPUI-owned text input context when one is available.
+///
+/// The input context is intentionally unavailable while the application is inactive or while
+/// macOS is replacing its keyboard input source. Objective-C can message `nil`, but the legacy
+/// `objc` macro dereferences its receiver before dispatching, so passing a nil `id` to it would
+/// panic in Rust instead of being a harmless no-op.
+unsafe fn forward_event_to_input_context(this: &Object, native_event: id) -> Option<BOOL> {
+    let input_context: id = msg_send![this, inputContext];
+    if input_context.is_null() {
+        return None;
+    }
+
+    Some(msg_send![input_context, handleEvent: native_event])
 }
 
 extern "C" fn window_did_change_occlusion_state(this: &Object, _: Sel, _: id) {

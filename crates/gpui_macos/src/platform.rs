@@ -26,7 +26,7 @@ use core_foundation::{
     string::{CFString, CFStringRef},
 };
 use ctor::ctor;
-use dispatch2::DispatchQueue;
+use dispatch2::{DispatchQueue, DispatchTime};
 use futures::channel::oneshot;
 use gpui::{
     Action, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, ForegroundExecutor,
@@ -57,7 +57,7 @@ use std::{
     slice, str,
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
     },
 };
 
@@ -69,6 +69,7 @@ const MAC_PLATFORM_IVAR: &str = "platform";
 // Registering with this behavior keeps source-loss handling live while the app
 // is transitioning between active and inactive states.
 const NS_NOTIFICATION_SUSPENSION_BEHAVIOR_DELIVER_IMMEDIATELY: NSUInteger = 4;
+pub(crate) const MAX_INPUT_CONTEXT_RESUME_RETRIES: u8 = 20;
 static mut APP_CLASS: *const Class = ptr::null();
 static mut APP_DELEGATE_CLASS: *const Class = ptr::null();
 
@@ -216,26 +217,50 @@ pub struct MacPlatform(Mutex<MacPlatformState>);
 
 pub(crate) struct InputContextGate {
     enabled: AtomicBool,
+    resume_pending: AtomicBool,
+    resume_attempts: AtomicU8,
 }
 
 impl InputContextGate {
     pub(crate) fn new(enabled: bool) -> Self {
         Self {
             enabled: AtomicBool::new(enabled),
+            resume_pending: AtomicBool::new(false),
+            resume_attempts: AtomicU8::new(0),
         }
     }
 
     pub(crate) fn suspend(&self) {
         self.enabled.store(false, Ordering::Release);
+        self.resume_pending.store(false, Ordering::Release);
+        self.resume_attempts.store(0, Ordering::Release);
+    }
+
+    pub(crate) fn request_resume(&self) -> bool {
+        self.resume_pending
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    pub(crate) fn finish_resume(&self) {
+        self.resume_pending.store(false, Ordering::Release);
+        self.resume_attempts.store(0, Ordering::Release);
+    }
+
+    pub(crate) fn should_retry_resume(&self) -> bool {
+        self.resume_attempts.fetch_add(1, Ordering::AcqRel) < MAX_INPUT_CONTEXT_RESUME_RETRIES
     }
 
     pub(crate) fn resume_if_active(
         &self,
         application_is_active: bool,
         input_source_is_available: impl FnOnce() -> bool,
-    ) {
+    ) -> bool {
         if application_is_active && input_source_is_available() {
             self.enabled.store(true, Ordering::Release);
+            true
+        } else {
+            false
         }
     }
 
@@ -1475,9 +1500,27 @@ extern "C" fn application_will_resign_active(this: &mut Object, _: Sel, _: id) {
 extern "C" fn application_did_become_active(this: &mut Object, _: Sel, _: id) {
     let platform = unsafe { get_mac_platform(this) };
     let input_context_gate = platform.0.lock().input_context_gate.clone();
+    if input_context_gate.request_resume() {
+        schedule_input_context_resume(input_context_gate, false);
+    }
+}
+
+const INPUT_CONTEXT_RESUME_RETRY_NS: i64 = 100_000_000;
+
+fn schedule_input_context_resume(input_context_gate: Arc<InputContextGate>, retry: bool) {
     let context = Arc::into_raw(input_context_gate) as *mut c_void;
     unsafe {
-        DispatchQueue::main().exec_async_f(context, resume_input_contexts);
+        if retry {
+            let when = DispatchTime::NOW.time(INPUT_CONTEXT_RESUME_RETRY_NS);
+            DispatchQueue::exec_after_f(
+                when,
+                DispatchQueue::main(),
+                context,
+                resume_input_contexts,
+            );
+        } else {
+            DispatchQueue::main().exec_async_f(context, resume_input_contexts);
+        }
     }
 }
 
@@ -1485,8 +1528,18 @@ extern "C" fn resume_input_contexts(context: *mut c_void) {
     let input_context_gate = unsafe { Arc::from_raw(context as *const InputContextGate) };
     let app: id = unsafe { msg_send![APP_CLASS, sharedApplication] };
     let is_active: BOOL = unsafe { msg_send![app, isActive] };
-    input_context_gate
-        .resume_if_active(is_active == YES, || MacKeyboardLayout::try_new().is_some());
+    if input_context_gate
+        .resume_if_active(is_active == YES, || MacKeyboardLayout::try_new().is_some())
+        || is_active != YES
+    {
+        input_context_gate.finish_resume();
+    } else {
+        if input_context_gate.should_retry_resume() {
+            schedule_input_context_resume(input_context_gate, true);
+        } else {
+            input_context_gate.finish_resume();
+        }
+    }
 }
 
 extern "C" fn on_keyboard_layout_change(this: &mut Object, _: Sel, _: id) {
