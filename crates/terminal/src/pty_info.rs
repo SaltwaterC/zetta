@@ -147,6 +147,18 @@ pub(crate) struct PtyProcessInfo {
 
 const PROCESS_INFO_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 
+#[cfg(target_os = "macos")]
+fn is_macos_login_shell(
+    login_name: Option<&str>,
+    login_pid: Pid,
+    foreground_pid: Pid,
+    foreground_parent: Option<Pid>,
+) -> bool {
+    login_name == Some("login")
+        && foreground_pid != login_pid
+        && foreground_parent == Some(login_pid)
+}
+
 fn process_refresh_due(last_refresh: Option<Instant>, now: Instant) -> bool {
     process_refresh_delay(last_refresh, now).is_zero()
 }
@@ -247,8 +259,48 @@ impl PtyProcessInfo {
     /// process that was created for the PTY. Unknown process state is treated
     /// as non-shell so callers can choose the safe fallback.
     pub(crate) fn foreground_process_is_shell(&self) -> bool {
-        self.resolve_foreground_pid()
-            .is_some_and(|foreground| foreground == self.pid_getter.fallback_pid())
+        let Some(foreground) = self.resolve_foreground_pid() else {
+            return false;
+        };
+
+        let shell = self.pid_getter.fallback_pid();
+        if foreground == shell {
+            return true;
+        }
+
+        #[cfg(target_os = "macos")]
+        return self.foreground_process_is_macos_login_shell(foreground, shell);
+
+        #[cfg(not(target_os = "macos"))]
+        false
+    }
+
+    #[cfg(target_os = "macos")]
+    fn foreground_process_is_macos_login_shell(&self, foreground: Pid, shell: Pid) -> bool {
+        // The default macOS shell is started as `/usr/bin/login ... /bin/zsh`.
+        // `login` can remain as the PTY child while the shell it starts owns
+        // the foreground process group, so the two PIDs are not always equal.
+        let mut system = self.system.write();
+        let pids = [foreground, shell];
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&pids),
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+
+        let Some(login) = system.process(shell) else {
+            return false;
+        };
+        let Some(foreground_process) = system.process(foreground) else {
+            return false;
+        };
+
+        is_macos_login_shell(
+            login.name().to_str(),
+            shell,
+            foreground,
+            foreground_process.parent(),
+        )
     }
 
     fn refresh(&self) -> Option<MappedRwLockReadGuard<'_, Process>> {
@@ -401,6 +453,33 @@ mod tests {
 
         let unknown = PtyProcessInfo::new(ProcessIdGetter::new(-1, 0));
         assert!(!unknown.foreground_process_is_shell());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_login_wrapper_is_only_an_interactive_shell_when_its_child_owns_the_tty() {
+        let login_pid = Pid::from_u32(10);
+        let shell_pid = Pid::from_u32(11);
+        let command_pid = Pid::from_u32(12);
+
+        assert!(is_macos_login_shell(
+            Some("login"),
+            login_pid,
+            shell_pid,
+            Some(login_pid)
+        ));
+        assert!(!is_macos_login_shell(
+            Some("login"),
+            login_pid,
+            command_pid,
+            Some(shell_pid)
+        ));
+        assert!(!is_macos_login_shell(
+            Some("zsh"),
+            login_pid,
+            shell_pid,
+            Some(login_pid)
+        ));
     }
 
     #[test]
