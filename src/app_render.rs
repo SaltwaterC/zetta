@@ -856,12 +856,6 @@ impl Render for Zetta {
             .when_some(compact_tab_bar_drag_area, |tab_bar, drag_area| {
                 tab_bar.child(drag_area)
             });
-        let (compact_tab_bar, regular_tab_bar) = if compact_mode {
-            (Some(tab_bar.into_any_element()), None)
-        } else {
-            (None, Some(tab_bar.into_any_element()))
-        };
-
         let show_title_bar_control_labels = title_bar_shows_control_labels(
             window.viewport_size().width,
             background_session_count > 0,
@@ -873,6 +867,16 @@ impl Render for Zetta {
             title_bar_buttons_visible(compact_mode, self.launch_config.hide_title_bar_buttons);
         let show_broadcast_control =
             title_bar_broadcast_visible(self.launch_config.hide_title_bar_buttons);
+        // Leave room after macOS's native traffic lights when compact tabs follow hidden menus.
+        let tab_bar = tab_bar.when(
+            cfg!(target_os = "macos") && compact_mode && !show_title_bar_menus,
+            |tab_bar| tab_bar.ml(px(8.)),
+        );
+        let (compact_tab_bar, regular_tab_bar) = if compact_mode {
+            (Some(tab_bar.into_any_element()), None)
+        } else {
+            (None, Some(tab_bar.into_any_element()))
+        };
         let profile_menu_profiles = self.profiles.clone();
         let hidden_profiles = self.launch_config.hidden_profiles.clone();
         let default_profile = self.launch_config.default_profile;
