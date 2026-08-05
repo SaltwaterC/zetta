@@ -10,6 +10,12 @@ fn main() {
         return;
     }
 
+    // Increase stack size for Windows to avoid stack overflow in debug builds
+    // Default is 1MB, increase to 8MB
+    if env::var("PROFILE").as_deref() == Ok("debug") {
+        println!("cargo:rustc-link-arg=/STACK:8388608");
+    }
+
     let icon = "assets/icons/zetta-terminal-icon.ico";
     let resource = "resources/windows/zetta.rc";
 
