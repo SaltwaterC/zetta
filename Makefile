@@ -126,28 +126,28 @@ build:
 	cmd.exe /d /c scripts\build-windows.cmd $(CARGO_PROFILE_ARGS)
 
 install: build
-	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Action Install -SourceBinary "$(BUILD_TARGET_DIR)\zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)\zetta-gui.exe"
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action Install -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe"
 
 install-binary:
-	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Action InstallBinary -SourceBinary "$(BUILD_TARGET_DIR)\zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)\zetta-gui.exe"
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action InstallBinary -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe"
 
 install-capabilities:
 
 install-assets:
-	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Action InstallShortcut
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action InstallShortcut
 
 install-user-path:
 
 uninstall-user-path:
 
 uninstall:
-	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Action Uninstall
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action Uninstall
 
 uninstall-binary:
-	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Action UninstallBinary
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action UninstallBinary
 
 uninstall-assets:
-	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Action UninstallShortcut
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action UninstallShortcut
 
 refresh-desktop-caches:
 else ifeq ($(UNAME_S),Darwin)
