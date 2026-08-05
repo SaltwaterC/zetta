@@ -24,5 +24,5 @@ if [ "$build_status" -ne 0 ]; then
     exit "$build_status"
 fi
 
-notify zetta-ok "Zetta checks succeeded" "Tests and the release build completed successfully."
+notify zetta-ok "Zetta checks succeeded" "Tests and the development build completed successfully."
 printf '%s\n' '{"continue":true}'

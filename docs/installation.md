@@ -10,9 +10,17 @@ git submodule update --init
 cargo run
 ```
 
-Use `cargo check` for the fastest feedback while editing. Release builds use
-incremental compilation to reduce rebuild time between local changes and emit
-a stripped executable.
+Use `cargo check` for the fastest feedback while editing. `make build` uses an
+incremental development build to reduce rebuild time. To build and install an
+optimized release binary, set `RELEASE=1` on both commands:
+
+```sh
+make build RELEASE=1
+make install RELEASE=1
+```
+
+GNU Make reserves options beginning with `--`, so `RELEASE=1` is the portable
+Makefile equivalent of Cargo's `--release` flag.
 
 ## Linux build requirements
 
@@ -108,7 +116,7 @@ make install
 ```
 
 This installs `~/Applications/Zetta.app`, including the Zetta icon and the
-release binary, and creates `~/.local/bin/zetta` as a command-line launcher
+development binary, and creates `~/.local/bin/zetta` as a command-line launcher
 for the bundled executable. It also adds `~/.local/bin` to the installing
 user's shell startup file so new shells can invoke `zetta` directly. Native
 panes prepend the running executable's directory to `PATH` as before. `make
@@ -119,7 +127,7 @@ MAC_APPLICATIONS_DIR=/Applications`.
 
 ## Windows
 
-Build a release executable from PowerShell with Chocolatey's GNU Make:
+Build a development executable from PowerShell with Chocolatey's GNU Make:
 
 ```powershell
 make build
@@ -129,7 +137,7 @@ The build target locates the Visual Studio C++ toolchain with `vswhere.exe` and
 initializes its x64 build environment automatically. The **Desktop development
 with C++** workload must be installed.
 
-The build produces the following runtime files in `target\release`:
+The build produces the following runtime files in `target\debug`:
 
 - `zetta.exe`, the console executable
 - `zetta-gui.exe`, the no-console launcher used by the Start Menu shortcut
@@ -143,6 +151,9 @@ Install Zetta for the current user without administrator privileges:
 ```powershell
 make install
 ```
+
+For an optimized release build, use `make build RELEASE=1` and
+`make install RELEASE=1`; those commands use `target\release`.
 
 This copies the runtime to `%LOCALAPPDATA%\Programs\Zetta`, adds that directory
 to the user `PATH`, and creates a Start Menu shortcut. New console sessions can
@@ -169,7 +180,7 @@ Additional installation targets are:
 ## Linux desktop integration
 
 Zetta uses `Zetta` as its Wayland application ID and X11 `WM_CLASS`. Build and
-install the release binary, desktop entry, and icons for the current user with:
+install the development binary, desktop entry, and icons for the current user with:
 
 ```sh
 make build
@@ -206,7 +217,7 @@ Disabled tools are omitted from the command palette, default keybindings, and
 their implementation is not compiled into the binary. A build without the
 TFTP server does not request `cap_net_bind_service` during installation.
 
-When invoked through `sudo`, `make install` uses the existing release artifact
+When invoked through `sudo`, `make install` uses the existing build artifact
 and does not run Cargo again. A user-local install cannot grant the
 `cap_net_bind_service` capability needed by the TFTP server to bind UDP port
 69, so the TFTP server will not be able to bind that port without additional

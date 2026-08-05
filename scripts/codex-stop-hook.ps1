@@ -69,7 +69,7 @@ if ($buildExitCode -ne 0) {
 Show-ZettaNotification `
     -Sound "zetta-ok" `
     -Summary "Zetta checks succeeded" `
-    -Body "Tests and the release build completed successfully."
+    -Body "Tests and the development build completed successfully."
 
 [Console]::Out.WriteLine('{"continue":true}')
 exit 0

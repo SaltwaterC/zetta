@@ -26,7 +26,7 @@ if (-not $env:APPDATA) {
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 if (-not $SourceBinary) {
-    $SourceBinary = Join-Path $repositoryRoot "target\release\zetta.exe"
+    $SourceBinary = Join-Path $repositoryRoot "target\debug\zetta.exe"
 }
 if (-not $SourceGuiBinary) {
     $SourceGuiBinary = Join-Path (Split-Path -Parent $SourceBinary) "zetta-gui.exe"

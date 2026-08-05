@@ -12,6 +12,17 @@ if not defined NOTIFY set "NOTIFY=1"
 if not defined SYNTAX_HIGHLIGHTING set "SYNTAX_HIGHLIGHTING=1"
 
 set "FEATURES=windows-gui"
+set "PROFILE_ARGS="
+set "TARGET_DIR=target\debug"
+if /i "%~1"=="--release" (
+    set "PROFILE_ARGS=--release"
+    set "TARGET_DIR=target\release"
+)
+
+if not defined CARGO_BUILD_JOBS (
+    for /f %%I in ('powershell.exe -NoProfile -Command "[Environment]::ProcessorCount"') do set "CARGO_BUILD_JOBS=%%I"
+)
+
 call :append_feature "%SERIAL%" serial-console
 call :append_feature "%HTTP%" http-server
 call :append_feature "%TFTP_SERVER%" tftp-server
@@ -41,10 +52,10 @@ if not defined VSCMD_VER (
     if errorlevel 1 exit /b !errorlevel!
 )
 
-%CARGO% build --release --locked --no-default-features --features %FEATURES% --bin zetta --bin zetta-gui
+%CARGO% build %PROFILE_ARGS% --jobs %CARGO_BUILD_JOBS% --locked --no-default-features --features %FEATURES% --bin zetta --bin zetta-gui
 if errorlevel 1 exit /b !errorlevel!
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\verify-windows-binary.ps1 -ConsoleBinaryPath target\release\zetta.exe -GuiBinaryPath target\release\zetta-gui.exe
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\verify-windows-binary.ps1 -ConsoleBinaryPath !TARGET_DIR!\zetta.exe -GuiBinaryPath !TARGET_DIR!\zetta-gui.exe
 exit /b !errorlevel!
 
 :append_feature

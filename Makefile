@@ -12,6 +12,7 @@ NOTIFY ?= 1
 CLIPBOARD ?= 1
 SYNTAX_HIGHLIGHTING ?= 1
 X11 ?= 0
+RELEASE ?= 0
 
 UNAME_S := $(shell uname -s)
 ifneq ($(OS),Windows_NT)
@@ -35,6 +36,29 @@ PREFIX ?= $(HOME)/.local/zetta.app
 endif
 else
 PREFIX ?= /usr
+endif
+
+ifneq ($(filter 1 true yes on,$(strip $(RELEASE))),)
+BUILD_PROFILE := release
+CARGO_PROFILE_ARGS := --release
+else
+BUILD_PROFILE := debug
+CARGO_PROFILE_ARGS :=
+endif
+BUILD_TARGET_DIR := target/$(BUILD_PROFILE)
+
+ifeq ($(OS),Windows_NT)
+CARGO_BUILD_JOBS ?= $(shell powershell.exe -NoProfile -Command "[Environment]::ProcessorCount")
+else ifeq ($(UNAME_S),Darwin)
+CARGO_BUILD_JOBS ?= $(shell sysctl -n hw.ncpu)
+else ifeq ($(UNAME_S),Linux)
+CARGO_BUILD_JOBS ?= $(shell nproc)
+else
+CARGO_BUILD_JOBS ?= $(shell getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
+endif
+CARGO_BUILD_JOBS := $(strip $(CARGO_BUILD_JOBS))
+ifeq ($(CARGO_BUILD_JOBS),)
+CARGO_BUILD_JOBS := 1
 endif
 
 # Set any of SERIAL, HTTP, TFTP, TFTP_SERVER, TFTP_CLIENT, NOTIFY, CLIPBOARD,
@@ -70,6 +94,7 @@ BUILD_FEATURES += x11
 endif
 
 export SERIAL HTTP TFTP TFTP_SERVER TFTP_CLIENT NOTIFY CLIPBOARD SYNTAX_HIGHLIGHTING X11
+export CARGO_BUILD_JOBS
 
 export CARGO
 
@@ -98,13 +123,13 @@ test:
 
 ifeq ($(OS),Windows_NT)
 build:
-	cmd.exe /d /c scripts\build-windows.cmd
+	cmd.exe /d /c scripts\build-windows.cmd $(CARGO_PROFILE_ARGS)
 
 install: build
-	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Action Install
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Action Install -SourceBinary "$(BUILD_TARGET_DIR)\zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)\zetta-gui.exe"
 
 install-binary:
-	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Action InstallBinary
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Action InstallBinary -SourceBinary "$(BUILD_TARGET_DIR)\zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)\zetta-gui.exe"
 
 install-capabilities:
 
@@ -127,12 +152,12 @@ uninstall-assets:
 refresh-desktop-caches:
 else ifeq ($(UNAME_S),Darwin)
 build:
-	$(ENV) -u DESTDIR $(CARGO) build --release --locked --no-default-features --features "$(BUILD_FEATURES)"
+	$(ENV) -u DESTDIR $(CARGO) build $(CARGO_PROFILE_ARGS) --locked --no-default-features --features "$(BUILD_FEATURES)"
 
 install:
 	@if [ "$$(id -u)" -eq 0 ]; then \
-		test -x target/release/zetta || { \
-			echo "target/release/zetta is missing; run 'make build' without sudo first" >&2; \
+		test -x "$(BUILD_TARGET_DIR)/zetta" || { \
+			echo "$(BUILD_TARGET_DIR)/zetta is missing; run 'make build$(if $(filter release,$(BUILD_PROFILE)), RELEASE=1,)' without sudo first" >&2; \
 			exit 1; \
 		}; \
 	else \
@@ -145,7 +170,7 @@ install:
 
 install-binary:
 	mkdir -p "$(MAC_BUNDLE)/Contents/MacOS" "$(BINDIR)"
-	$(INSTALL) -m 755 target/release/zetta "$(MAC_BUNDLE)/Contents/MacOS/zetta"
+	$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/zetta" "$(MAC_BUNDLE)/Contents/MacOS/zetta"
 	$(RM) "$(MAC_CLI_PATH)"
 	sed 's|@MAC_RUNTIME_BUNDLE@|$(MAC_RUNTIME_BUNDLE)|g' resources/macos/zetta-cli.in > "$(MAC_CLI_PATH)"
 	chmod 755 "$(MAC_CLI_PATH)"
@@ -188,12 +213,12 @@ uninstall-assets:
 refresh-desktop-caches:
 else
 build:
-	$(ENV) -u DESTDIR $(CARGO) build --release --locked --no-default-features --features "$(BUILD_FEATURES)"
+	$(ENV) -u DESTDIR $(CARGO) build $(CARGO_PROFILE_ARGS) --locked --no-default-features --features "$(BUILD_FEATURES)"
 
 install:
 	@if [ "$$(id -u)" -eq 0 ]; then \
-		test -x target/release/zetta || { \
-			echo "target/release/zetta is missing; run 'make build' without sudo first" >&2; \
+		test -x "$(BUILD_TARGET_DIR)/zetta" || { \
+			echo "$(BUILD_TARGET_DIR)/zetta is missing; run 'make build$(if $(filter release,$(BUILD_PROFILE)), RELEASE=1,)' without sudo first" >&2; \
 			exit 1; \
 		}; \
 	else \
@@ -205,7 +230,7 @@ install:
 	$(MAKE) install-user-path
 
 install-binary:
-	$(INSTALL) -Dm755 target/release/zetta $(BINDIR)/zetta
+	$(INSTALL) -Dm755 "$(BUILD_TARGET_DIR)/zetta" $(BINDIR)/zetta
 ifneq ($(LINUX_USER_INSTALL),)
 	mkdir -p "$(LINUX_USER_BIN_DIR)"
 	$(RM) "$(LINUX_USER_CLI_PATH)"

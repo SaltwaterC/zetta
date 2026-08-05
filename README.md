@@ -44,6 +44,8 @@ cargo run
 Linux defaults to Wayland. Use `make build X11=1` to include the X11 backend
 as well. Linux system dependencies and platform-specific build and desktop
 installation instructions are in the [installation guide](docs/installation.md).
+`make build` uses an incremental development build; use `RELEASE=1` for an
+optimized release build.
 
 Corporate or otherwise restricted deployments can omit the serial console,
 network tools, and desktop notifications at build time. For example, `make
