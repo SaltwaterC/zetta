@@ -669,9 +669,6 @@ impl Render for Zetta {
                     .border_r_1()
                     .border_color(tab_colors.border)
                     .bg(tab_background)
-                    .when(selected && !compact_mode, |this| {
-                        this.border_t_2().border_color(tab_colors.text_accent)
-                    })
                     .on_click(move |event, window, cx| {
                         cx.stop_propagation();
                         select_handle
