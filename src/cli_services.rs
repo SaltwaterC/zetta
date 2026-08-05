@@ -784,7 +784,7 @@ fn default_notification_icon_path() -> Result<PathBuf> {
     write_default_notification_icon(&crate::config::platform_config_dir())
 }
 
-#[cfg(feature = "notifications")]
+#[cfg(all(feature = "notifications", any(not(target_os = "macos"), test)))]
 fn notification_app_name(command: &NotifyCommand) -> &str {
     command.app_name.as_deref().unwrap_or(crate::ZETTA_APP_ID)
 }

@@ -474,18 +474,26 @@ impl Render for Zetta {
             .unwrap_or_default();
         let process_background_sessions = self.process_background_session_picker_entries(cx);
         let background_session_count = process_background_sessions.len();
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
         let supported_controls = window.window_controls();
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
         let is_maximized = window.is_maximized();
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
         let is_resizable = window.is_resizable();
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
         let is_minimizable = window.is_minimizable();
         let (client_decorations, tiling) = match window.window_decorations() {
             Decorations::Client { tiling } => (true, tiling),
             Decorations::Server => (false, Tiling::default()),
         };
         let window_control_state = WindowControlState {
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
             supported_controls,
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
             is_maximized,
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
             is_resizable,
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
             is_minimizable,
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             client_decorations,

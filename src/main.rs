@@ -53,6 +53,8 @@ use config::{
     WorkingDirectoryScope, profile_is_hidden, visible_profile_count, visible_profile_index,
 };
 use futures::StreamExt as _;
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+use gpui::WindowControls;
 use gpui::{
     Action, Anchor, AnchoredPositionMode, AnyElement, App, AppContext as _, Bounds, Context,
     CursorStyle, Decorations, DismissEvent, Entity, Focusable, FrameTiming, FrameTimingCollector,
@@ -61,9 +63,9 @@ use gpui::{
     MAX_BUTTONS_PER_SIDE, MouseButton, Pixels, PlatformKeyboardMapper, Point, Render, ResizeEdge,
     ScrollHandle, ScrollStrategy, SharedString, Size, Subscription, Task, Tiling, TitlebarOptions,
     UniformListScrollHandle, Window, WindowBackgroundAppearance, WindowBounds, WindowButton,
-    WindowButtonLayout, WindowControlArea, WindowControls, WindowDecorations, WindowId,
-    WindowOptions, actions, anchored, canvas, container_query, deferred, div, point, profiler, px,
-    size, svg, transparent_black, uniform_list,
+    WindowButtonLayout, WindowControlArea, WindowDecorations, WindowId, WindowOptions, actions,
+    anchored, canvas, container_query, deferred, div, point, profiler, px, size, svg,
+    transparent_black, uniform_list,
 };
 use process_control::{
     ProcessControlCommand, ProcessControlServer, ReconnectSessionResult,

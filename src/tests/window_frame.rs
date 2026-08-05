@@ -29,6 +29,7 @@ fn custom_window_border_matches_platform_conventions() {
 }
 
 #[test]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
 fn window_controls_respect_window_capabilities() {
     let supported = WindowControls::default();
 

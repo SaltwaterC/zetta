@@ -328,11 +328,11 @@ impl MacPlatform {
     }
 
     unsafe fn create_menu_bar(
-        &self,
         menus: &Vec<Menu>,
         delegate: id,
         actions: &mut Vec<Box<dyn Action>>,
         keymap: &Keymap,
+        keyboard_mapper: &dyn PlatformKeyboardMapper,
     ) -> id {
         unsafe {
             let application_menu = NSMenu::new(nil).autorelease();
@@ -349,10 +349,8 @@ impl MacPlatform {
                         && item_index < 10
                         && let MenuItem::Action { action, .. } = item_config
                     {
-                        let expected = profile_menu_alias_keystroke(
-                            item_index + 1,
-                            self.keyboard_mapper.as_ref(),
-                        );
+                        let expected =
+                            profile_menu_alias_keystroke(item_index + 1, keyboard_mapper);
                         menu_action_keystrokes(keymap, action.as_ref()).is_some_and(|keystrokes| {
                             keystrokes.len() == 1 && keystrokes[0] == expected
                         })
@@ -1133,8 +1131,15 @@ impl Platform for MacPlatform {
         unsafe {
             let app: id = msg_send![APP_CLASS, sharedApplication];
             let mut state = self.0.lock();
+            let keyboard_mapper = state.keyboard_mapper.clone();
             let actions = &mut state.menu_actions;
-            let menu = self.create_menu_bar(&menus, NSWindow::delegate(app), actions, keymap);
+            let menu = Self::create_menu_bar(
+                &menus,
+                NSWindow::delegate(app),
+                actions,
+                keymap,
+                keyboard_mapper.as_ref(),
+            );
             drop(state);
             app.setMainMenu_(menu);
         }

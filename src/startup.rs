@@ -19,7 +19,7 @@ use crate::cli_services::{parse_tftp_server_args, tftp_server_help};
 use crate::process_control::request_existing_process_tab_icon;
 
 #[cfg(target_os = "macos")]
-use gpui::{Menu, MenuItem};
+use gpui::{Menu, MenuItem, Unbind};
 #[cfg(target_os = "macos")]
 use objc2::MainThreadMarker;
 #[cfg(target_os = "macos")]

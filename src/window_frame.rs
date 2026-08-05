@@ -86,14 +86,19 @@ pub(crate) fn platform_title_bar_height(window: &Window) -> Pixels {
 
 #[derive(Clone, Copy)]
 pub(crate) struct WindowControlState {
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
     pub(crate) supported_controls: WindowControls,
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
     pub(crate) is_maximized: bool,
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
     pub(crate) is_resizable: bool,
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
     pub(crate) is_minimizable: bool,
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub(crate) client_decorations: bool,
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
 fn window_button_enabled(
     button: WindowButton,
     supported_controls: WindowControls,
