@@ -262,6 +262,9 @@ impl Zetta {
                                         .border_color(colors.border_focused)
                                         .bg(colors.elevated_surface_background)
                                         .overflow_hidden()
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
                                         .when(!dropdown_query.is_empty(), |menu| {
                                             menu.child(
                                                 div()
