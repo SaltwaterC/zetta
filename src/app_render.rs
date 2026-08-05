@@ -867,11 +867,6 @@ impl Render for Zetta {
             title_bar_buttons_visible(compact_mode, self.launch_config.hide_title_bar_buttons);
         let show_broadcast_control =
             title_bar_broadcast_visible(self.launch_config.hide_title_bar_buttons);
-        // Leave room after macOS's native traffic lights when compact tabs follow hidden menus.
-        let tab_bar = tab_bar.when(
-            cfg!(target_os = "macos") && compact_mode && !show_title_bar_menus,
-            |tab_bar| tab_bar.ml(px(8.)),
-        );
         let (compact_tab_bar, regular_tab_bar) = if compact_mode {
             (Some(tab_bar.into_any_element()), None)
         } else {
@@ -1211,6 +1206,11 @@ impl Render for Zetta {
                     .gap_1()
                     // The traffic lights are native controls even with a client title bar.
                     .when(cfg!(target_os = "macos"), |controls| controls.ml(px(72.)))
+                    // Leave room between the traffic lights and compact-mode controls when menus are hidden.
+                    .when(
+                        cfg!(target_os = "macos") && compact_mode && !show_title_bar_menus,
+                        |controls| controls.ml(px(80.)),
+                    )
                     .when(show_title_bar_menus, |controls| {
                         controls.child(application_menu).child(profile_menu)
                     })
