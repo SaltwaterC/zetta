@@ -111,13 +111,116 @@ fn minimized_shelf_resolves_metadata_only_for_visible_entries() {
 
 #[test]
 fn tab_container_keeps_responsive_flex_constraints() {
-    let mut container = responsive_tab_container(div(), false, px(32.));
+    let mut container = responsive_tab_container(div(), false, px(32.), false);
     let style = container.style();
 
     assert_eq!(style.size.width, Some(TAB_MAX_WIDTH.into()));
     assert_eq!(style.min_size.width, Some(TAB_MIN_WIDTH.into()));
     assert_eq!(style.max_size.width, Some(TAB_MAX_WIDTH.into()));
     assert_eq!(style.flex_shrink, Some(1.));
+}
+
+#[test]
+fn renaming_tab_restores_its_original_width() {
+    let mut container = responsive_tab_container(div(), false, px(32.), true);
+    let style = container.style();
+
+    assert_eq!(style.min_size.width, Some(TAB_MAX_WIDTH.into()));
+    assert_eq!(style.max_size.width, Some(TAB_MAX_WIDTH.into()));
+    assert_eq!(style.flex_shrink, Some(0.));
+}
+
+#[test]
+fn tabs_grow_to_fill_the_bar_in_compact_mode() {
+    let mut container = responsive_tab_container(div(), true, px(32.), false);
+    let style = container.style();
+
+    assert_eq!(style.min_size.width, Some(TAB_MIN_WIDTH.into()));
+    assert_eq!(style.max_size.width, Some(TAB_MAX_WIDTH.into()));
+    assert_eq!(style.flex_grow, Some(1.));
+    assert_eq!(style.flex_shrink, Some(1.));
+}
+
+#[test]
+fn a_renamed_tab_does_not_grow_even_in_compact_mode() {
+    let mut container = responsive_tab_container(div(), true, px(32.), true);
+    let style = container.style();
+
+    assert_eq!(style.max_size.width, Some(TAB_MAX_WIDTH.into()));
+    assert_eq!(style.flex_grow, None);
+    assert_eq!(style.flex_shrink, Some(0.));
+}
+
+#[test]
+fn tab_overflow_reserves_room_for_the_trigger() {
+    assert_eq!(
+        tab_bar_visible_tab_range(px(520.), false, 6, 0, false, None),
+        0..5
+    );
+    assert_eq!(
+        tab_bar_visible_tab_range(px(520.), false, 5, 0, false, None),
+        0..5
+    );
+    assert_eq!(
+        tab_bar_visible_tab_range(px(520.), true, 6, 0, false, None),
+        0..2
+    );
+    assert_eq!(
+        tab_bar_visible_tab_range(px(160.), true, 4, 0, false, None),
+        0..1
+    );
+    assert_eq!(
+        tab_bar_visible_tab_range(px(520.), false, 0, 0, false, None),
+        0..0
+    );
+}
+
+#[test]
+fn tab_icons_hide_when_tabs_start_shrinking() {
+    assert!(!tab_bar_tabs_are_shrinking(px(764.), false, 4));
+    assert!(tab_bar_tabs_are_shrinking(px(763.), false, 4));
+    assert!(tab_bar_tabs_are_shrinking(px(1000.), true, 5));
+    assert!(!tab_bar_tabs_are_shrinking(px(1000.), false, 0));
+}
+
+#[test]
+fn renaming_tab_reserves_its_full_width() {
+    assert_eq!(
+        tab_bar_visible_tab_range(px(520.), false, 6, 5, true, None),
+        2..6
+    );
+    assert_eq!(
+        tab_bar_visible_tab_range(px(520.), false, 3, 0, true, None),
+        0..3
+    );
+    assert_eq!(
+        tab_bar_visible_tab_range(px(160.), true, 4, 0, true, None),
+        0..1
+    );
+}
+
+#[test]
+fn renaming_a_hidden_tab_temporarily_renders_it_in_the_tab_bar() {
+    assert_eq!(
+        tab_bar_visible_tab_range(px(520.), false, 6, 5, true, None),
+        2..6
+    );
+    assert_eq!(
+        tab_bar_visible_tab_range(px(520.), false, 6, 0, true, None),
+        0..4
+    );
+}
+
+#[test]
+fn overflow_selection_places_tabs_at_the_selected_side() {
+    assert_eq!(
+        tab_bar_visible_tab_range(px(520.), false, 10, 7, false, Some(true)),
+        3..8
+    );
+    assert_eq!(
+        tab_bar_visible_tab_range(px(520.), false, 10, 2, false, Some(false)),
+        2..7
+    );
 }
 
 #[cfg(target_os = "macos")]

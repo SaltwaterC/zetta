@@ -368,6 +368,16 @@ pub(crate) struct Zetta {
     pub(crate) application_menu_handle: PopoverMenuHandle<ui::ContextMenu>,
     pub(crate) profile_menu_handle: PopoverMenuHandle<ui::ContextMenu>,
     pub(crate) reconnect_menu_handle: PopoverMenuHandle<ui::ContextMenu>,
+    pub(crate) tab_overflow_left_menu_handle: PopoverMenuHandle<ui::ContextMenu>,
+    pub(crate) tab_overflow_right_menu_handle: PopoverMenuHandle<ui::ContextMenu>,
+    /// Which edge's overflow menu is currently open, so plain Tab/PageUp/PageDown
+    /// (otherwise claimed by the menu's own list navigation) can keep cycling the
+    /// active tab instead of just moving the popover's highlighted row.
+    pub(crate) tab_overflow_keyboard_menu_edge: Option<bool>,
+    /// Which side's overflow menu the current `active_tab` was picked from, so the
+    /// visible tab range keeps it anchored at the edge it slid in from instead of
+    /// jumping to whichever edge the default (unhinted) placement would choose.
+    pub(crate) tab_overflow_selection_side: Option<bool>,
     pub(crate) application_menu_switch_pending: bool,
     pub(crate) session_authentication_focus: gpui::FocusHandle,
     pub(crate) session_authentication: Option<SessionAuthenticationPrompt>,
@@ -572,6 +582,10 @@ impl Zetta {
             application_menu_handle: PopoverMenuHandle::default(),
             profile_menu_handle: PopoverMenuHandle::default(),
             reconnect_menu_handle: PopoverMenuHandle::default(),
+            tab_overflow_left_menu_handle: PopoverMenuHandle::default(),
+            tab_overflow_right_menu_handle: PopoverMenuHandle::default(),
+            tab_overflow_keyboard_menu_edge: None,
+            tab_overflow_selection_side: None,
             application_menu_switch_pending: false,
             session_authentication_focus: cx.focus_handle(),
             session_authentication: None,
@@ -3408,6 +3422,8 @@ impl Zetta {
         }
         if !self.tabs.is_empty() {
             self.active_tab = (self.active_tab + 1) % self.tabs.len();
+            self.tab_overflow_selection_side = None;
+            self.dismiss_tab_overflow_menus(cx);
             self.focus_active(window, cx);
         }
     }
@@ -3423,8 +3439,41 @@ impl Zetta {
         }
         if !self.tabs.is_empty() {
             self.active_tab = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
+            self.tab_overflow_selection_side = None;
+            self.dismiss_tab_overflow_menus(cx);
             self.focus_active(window, cx);
         }
+    }
+
+    /// Closes any open tab-overflow popover before the active tab changes underneath
+    /// it. Without this, wrapping past the edge of the tab bar while a keyboard-opened
+    /// overflow menu is still showing leaves that (now stale) popover holding focus,
+    /// so the terminal never gets it back.
+    fn dismiss_tab_overflow_menus(&mut self, cx: &mut App) {
+        if self.tab_overflow_keyboard_menu_edge.take().is_some() {
+            self.tab_overflow_left_menu_handle.hide(cx);
+            self.tab_overflow_right_menu_handle.hide(cx);
+        }
+    }
+
+    pub(crate) fn select_overflow_tab(
+        &mut self,
+        action: &SelectOverflowTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let index = action.index;
+        if index >= self.tabs.len() || index == self.active_tab {
+            return;
+        }
+        // Any overflowed tab is either entirely left of the visible range (index <
+        // active_tab) or entirely right of it (index > active_tab); keep the tab
+        // bar anchored on the side the user picked it from.
+        let side_is_right = index > self.active_tab;
+        self.active_tab = index;
+        self.tab_overflow_selection_side = Some(side_is_right);
+        self.dismiss_tab_overflow_menus(cx);
+        self.focus_active(window, cx);
     }
 
     pub(crate) fn rename_tab(

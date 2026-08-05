@@ -58,14 +58,14 @@ use gpui::WindowControls;
 use gpui::{
     Action, Anchor, AnchoredPositionMode, AnyElement, App, AppContext as _, Bounds, Context,
     CursorStyle, Decorations, DismissEvent, Entity, Focusable, FrameTiming, FrameTimingCollector,
-    Global, HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding,
+    Global, HitboxBehavior, Hsla, InteractiveElement as _, IntoElement, KeyBinding,
     KeyBindingContextPredicate, KeyDownEvent, KeyUpEvent, KeybindingKeystroke, ListSizingBehavior,
     MAX_BUTTONS_PER_SIDE, MouseButton, Pixels, PlatformKeyboardMapper, Point, Render, ResizeEdge,
     ScrollHandle, ScrollStrategy, SharedString, Size, Subscription, Task, Tiling, TitlebarOptions,
-    UniformListScrollHandle, Window, WindowBackgroundAppearance, WindowBounds, WindowButton,
-    WindowButtonLayout, WindowControlArea, WindowDecorations, WindowId, WindowOptions, actions,
-    anchored, canvas, container_query, deferred, div, point, profiler, px, size, svg,
-    transparent_black, uniform_list,
+    UniformListScrollHandle, WeakEntity, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowButton, WindowButtonLayout, WindowControlArea, WindowDecorations, WindowId,
+    WindowOptions, actions, anchored, canvas, container_query, deferred, div, point, profiler, px,
+    size, svg, transparent_black, uniform_list,
 };
 use process_control::{
     ProcessControlCommand, ProcessControlServer, ReconnectSessionResult,
@@ -182,6 +182,12 @@ fn action_is_enabled_in_build(name: &str) -> bool {
 #[serde(deny_unknown_fields)]
 struct ApplyPaneSplitTemplate {
     name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = zetta, no_json, no_register)]
+struct SelectOverflowTab {
+    index: usize,
 }
 
 static PERFORMANCE_OVERLAY_COUNT: AtomicUsize = AtomicUsize::new(0);

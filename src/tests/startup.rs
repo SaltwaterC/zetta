@@ -1854,6 +1854,27 @@ fn application_menu_navigation_shortcuts_apply_while_a_menu_is_focused() {
 }
 
 #[test]
+fn tab_navigation_shortcuts_apply_while_a_menu_is_focused() {
+    let shortcuts = ["ctrl-tab", "ctrl-shift-tab", "ctrl-pageup", "ctrl-pagedown"];
+    for (binding, shortcut) in tab_menu_navigation_keybindings().into_iter().zip(shortcuts) {
+        assert_eq!(
+            binding.match_keystrokes(&[gpui::Keystroke::parse(shortcut).unwrap()]),
+            Some(false)
+        );
+        assert!(
+            binding
+                .predicate()
+                .expect("tab navigation should be scoped to menus")
+                .depth_of(&[
+                    gpui::KeyContext::parse("Zetta").unwrap(),
+                    gpui::KeyContext::parse("menu").unwrap(),
+                ])
+                .is_some()
+        );
+    }
+}
+
+#[test]
 fn pane_font_size_shortcuts_use_pane_control_modifiers() {
     let bindings = pane_font_size_keybindings();
     for (binding, shortcut) in

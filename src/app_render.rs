@@ -4,8 +4,14 @@ const MINIMIZED_PANE_ENTRY_MIN_WIDTH: Pixels = px(180.);
 const MINIMIZED_PANE_ENTRY_GAP: Pixels = px(4.);
 const TAB_MIN_WIDTH: Pixels = px(80.);
 const TAB_MAX_WIDTH: Pixels = px(180.);
+// Matches the new-tab button's own footprint (ml_1 + a 32px button + mr_2), so a
+// trigger reserved at the edge of the tab bar takes up the same visual space.
+const TAB_OVERFLOW_TRIGGER_WIDTH: Pixels = px(44.);
 const TITLE_BAR_CONTROL_LABEL_MIN_WIDTH: Pixels = px(720.);
 const TITLE_BAR_RECONNECT_LABEL_MIN_WIDTH: Pixels = px(800.);
+// Compact mode always keeps at least this much of the tab bar draggable, even
+// when tabs grow to fill the rest of it, so the window stays movable from there.
+const COMPACT_DRAG_AREA_MIN_WIDTH: Pixels = px(60.);
 
 // Keep the responsive sizing on a native flex item. Elements such as
 // `right_click_menu` are custom layout elements and cannot receive the flex
@@ -14,15 +20,71 @@ fn responsive_tab_container(
     child: impl IntoElement + 'static,
     compact_mode: bool,
     compact_height: Pixels,
+    is_renaming: bool,
 ) -> gpui::Div {
+    // In compact mode, tabs grow to fill any width left over after the visible
+    // tabs, the new-tab button, and the drag strip — otherwise that space would
+    // just sit empty. They still cap out at the same TAB_MAX_WIDTH as normal
+    // mode, so leftover space beyond that goes to the drag strip instead of
+    // making tabs balloon wider than usual. A renamed tab keeps its fixed,
+    // non-growing width so the editable title doesn't reflow mid-edit.
+    let grows_to_fill = compact_mode && !is_renaming;
     div()
         .h_8()
         .when(compact_mode, |container| container.h(compact_height))
         .w(TAB_MAX_WIDTH)
-        .min_w(TAB_MIN_WIDTH)
+        .min_w(if is_renaming { TAB_MAX_WIDTH } else { TAB_MIN_WIDTH })
         .max_w(TAB_MAX_WIDTH)
-        .flex_shrink_1()
+        .when(grows_to_fill, |container| container.flex_grow(1.))
+        .flex_shrink(if is_renaming { 0. } else { 1. })
         .child(child)
+}
+
+/// Whether the tab bar no longer has room to give every tab (plus, while a
+/// rename is in progress, the extra full-width room that tab needs) its max
+/// width — used to hide tab icons before labels start getting clipped.
+fn tab_bar_tabs_are_shrinking(available_width: Pixels, is_renaming: bool, tab_count: usize) -> bool {
+    let needed = TAB_MAX_WIDTH * (tab_count + is_renaming as usize) + TAB_OVERFLOW_TRIGGER_WIDTH;
+    available_width < needed
+}
+
+/// Which tabs fit in the tab bar without needing to overflow into a left/right
+/// dropdown menu. The selected tab is always included in the returned range:
+/// - `overflow_selection` is `Some(false)`/`Some(true)` right after the user picks
+///   a tab from the left/right overflow menu, anchoring it at the edge it slid in
+///   from instead of jumping to wherever the default placement would put it.
+/// - Otherwise (plain clicks, keyboard cycling) the range keeps the selected tab
+///   visible with the least possible movement.
+fn tab_bar_visible_tab_range(
+    available_width: Pixels,
+    compact_mode: bool,
+    tab_count: usize,
+    selected_index: usize,
+    is_renaming: bool,
+    overflow_selection: Option<bool>,
+) -> std::ops::Range<usize> {
+    if tab_count == 0 {
+        return 0..0;
+    }
+
+    let effective_width = (available_width - TAB_OVERFLOW_TRIGGER_WIDTH).max(px(0.));
+    let capacity = if compact_mode {
+        (effective_width / TAB_MAX_WIDTH).floor() as usize
+    } else if is_renaming {
+        let remaining = (effective_width - (TAB_MAX_WIDTH - TAB_MIN_WIDTH)).max(px(0.));
+        (remaining / TAB_MIN_WIDTH).floor() as usize
+    } else {
+        (effective_width / TAB_MIN_WIDTH).floor() as usize
+    };
+    let capacity = capacity.clamp(1, tab_count);
+
+    let selected_index = selected_index.min(tab_count - 1);
+    let max_start = tab_count - capacity;
+    let start = match overflow_selection {
+        Some(false) => selected_index.min(max_start),
+        _ => selected_index.saturating_sub(capacity - 1).min(max_start),
+    };
+    start..start + capacity
 }
 
 fn title_bar_shows_control_labels(
@@ -106,6 +168,181 @@ fn resolve_visible_minimized_panes<T>(
     let mut entries = Vec::with_capacity(range.len());
     entries.extend(range.filter_map(&mut resolve));
     entries
+}
+
+/// The label shown for a tab that has overflowed into a left/right dropdown menu.
+/// Unlike the in-bar tab title, this never needs the rename-in-progress branch:
+/// `tab_bar_visible_tab_range` always keeps the tab being renamed in the visible
+/// range, so a hidden tab can never be the one currently being renamed.
+fn tab_overflow_entry_label(tab: &Tab, cx: &App) -> SharedString {
+    if let Some(custom_title) = tab.custom_title.as_ref() {
+        custom_title.clone().into()
+    } else if let Some(view) = tab.active_pane().and_then(|pane| pane.view.as_ref()) {
+        view.read(cx).tab_content_text(1, cx)
+    } else {
+        tab.active_pane()
+            .map(|pane| pane.profile.name.clone())
+            .unwrap_or_else(|| "Terminal".to_string())
+            .into()
+    }
+}
+
+fn render_tab_overflow_trigger(
+    is_right: bool,
+    entries: Vec<(usize, SharedString)>,
+    compact_mode: bool,
+    compact_height: Pixels,
+    border_color: Hsla,
+    menu_handle: PopoverMenuHandle<ui::ContextMenu>,
+    zetta_handle: WeakEntity<Zetta>,
+) -> AnyElement {
+    let icon = if is_right {
+        IconName::ChevronRight
+    } else {
+        IconName::ChevronLeft
+    };
+    let count = entries.len();
+    let tooltip_label: SharedString = if is_right {
+        format!("{count} more tabs to the right")
+    } else {
+        format!("{count} more tabs to the left")
+    }
+    .into();
+
+    div()
+        .h_8()
+        .when(compact_mode, |el| el.h(compact_height))
+        .flex_none()
+        .flex()
+        .items_center()
+        // The tabs each draw their own divider on their right edge, so the left
+        // overflow trigger needs its own to keep it from looking fused to the
+        // first visible tab; the right trigger already inherits one from the
+        // last visible tab's right-edge divider.
+        .when(!is_right, |el| el.border_r_1().border_color(border_color))
+        .child(
+            PopoverMenu::new(("tab-overflow-menu", is_right as usize))
+                .with_handle(menu_handle)
+                .trigger_with_tooltip(
+                    IconButton::new(("tab-overflow-trigger", is_right as usize), icon)
+                        .size(ButtonSize::Large)
+                        .icon_size(IconSize::Small)
+                        .aria_label(tooltip_label.clone()),
+                    Tooltip::text(tooltip_label.clone()),
+                )
+                .anchor(if is_right {
+                    Anchor::TopRight
+                } else {
+                    Anchor::TopLeft
+                })
+                .menu(move |window, cx| {
+                    let entries = entries.clone();
+                    let dismiss_handle = zetta_handle.clone();
+                    zetta_handle
+                        .update(cx, |this, cx| {
+                            this.tab_overflow_keyboard_menu_edge = Some(is_right);
+                            cx.notify();
+                        })
+                        .ok();
+                    let menu = ui::ContextMenu::build(window, cx, move |mut menu, _, _| {
+                        for (index, label) in entries.iter().cloned() {
+                            menu = menu.action(label, Box::new(SelectOverflowTab { index }));
+                        }
+                        menu
+                    });
+                    // Register before PopoverMenu's dismissal listener, matching the
+                    // other tab-bar menus, so a menu reached through keyboard
+                    // navigation cannot restore focus to the menu it replaced.
+                    window
+                        .subscribe(&menu, cx, move |menu, _: &DismissEvent, window, cx| {
+                            if menu.focus_handle(cx).is_focused(window) {
+                                dismiss_handle
+                                    .update(cx, |this, cx| {
+                                        this.tab_overflow_keyboard_menu_edge = None;
+                                        this.focus_active(window, cx);
+                                    })
+                                    .ok();
+                            }
+                        })
+                        .detach();
+                    Some(menu)
+                }),
+        )
+        .into_any_element()
+}
+
+fn render_new_tab_button(compact_mode: bool, compact_height: Pixels) -> AnyElement {
+    div()
+        .ml_1()
+        .mr_2()
+        .h_8()
+        .when(compact_mode, |button| button.h(compact_height))
+        .flex_none()
+        .flex()
+        .items_center()
+        .child(
+            IconButton::new("new-tab", IconName::Plus)
+                .shape(IconButtonShape::Wide)
+                .size(ButtonSize::Large)
+                .width(px(32.))
+                .icon_size(IconSize::Small)
+                .aria_label("New tab")
+                .tooltip(move |_window, cx| Tooltip::for_action("New tab", &NewTab, cx))
+                .on_click(|_, window, cx| {
+                    cx.stop_propagation();
+                    window.dispatch_action(Box::new(NewTab), cx)
+                }),
+        )
+        .into_any_element()
+}
+
+/// Compact mode places the tab bar inside the title bar. Keep a portion of it
+/// available for moving the window without making tab hitboxes draggable too.
+/// This has to follow the tabs and new-tab button (inside the same measured
+/// row) rather than sit outside it, so it only claims the width genuinely left
+/// over after them instead of pushing them apart from the rest of the bar.
+fn render_compact_drag_area(compact_height: Pixels, zetta_handle: WeakEntity<Zetta>) -> AnyElement {
+    let down_handle = zetta_handle.clone();
+    let up_handle = zetta_handle.clone();
+    let out_handle = zetta_handle.clone();
+    div()
+        .id("compact-title-bar-drag-area")
+        .h(compact_height)
+        .flex_1()
+        .min_w(COMPACT_DRAG_AREA_MIN_WIDTH)
+        .window_control_area(WindowControlArea::Drag)
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            down_handle
+                .update(cx, |this, cx| {
+                    this.titlebar_dragging = true;
+                    this.focus_active(window, cx);
+                })
+                .ok();
+        })
+        .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+            up_handle
+                .update(cx, |this, cx| {
+                    this.titlebar_dragging = false;
+                    this.focus_active(window, cx);
+                })
+                .ok();
+        })
+        .on_mouse_down_out(move |_, _, cx| {
+            out_handle
+                .update(cx, |this, _| this.titlebar_dragging = false)
+                .ok();
+        })
+        .on_mouse_move(move |_, window, cx| {
+            zetta_handle
+                .update(cx, |this, _cx| {
+                    if this.titlebar_dragging {
+                        this.titlebar_dragging = false;
+                        window.start_window_move();
+                    }
+                })
+                .ok();
+        })
+        .into_any_element()
 }
 
 #[derive(Clone)]
@@ -548,272 +785,318 @@ impl Render for Zetta {
             .and_then(Tab::active_pane)
             .and_then(|pane| pane.view.as_ref())
             .map(|view| view.focus_handle(cx));
-        let tabs = self
-            .tabs
-            .iter()
-            .enumerate()
-            .map(|(index, tab)| {
-                let selected = index == self.active_tab;
-                let tab_theme = tab.theme(cx);
-                let tab_colors = tab_theme.colors();
-                let tab_background = if selected {
-                    tab_colors.tab_active_background
-                } else {
-                    tab_colors.tab_inactive_background
-                };
-                let tab_text = if selected {
-                    tab_colors.text
-                } else {
-                    tab_colors.text_muted
-                };
-                let tab_icon = if selected {
-                    tab_colors.icon
-                } else {
-                    tab_colors.icon_muted
-                };
-                let select_handle = handle.clone();
-                let close_handle = handle.clone();
-                let rename_view = tab.active_pane().and_then(|pane| pane.view.clone());
-                let title = if let Some(buffer) = tab
-                    .rename_buffer
-                    .as_ref()
-                    .filter(|_| tab.renaming_pane.is_none())
-                {
-                    if tab.rename_select_all {
-                        buffer.clone().into()
-                    } else {
-                        let cursor = tab.rename_cursor.min(buffer.len());
-                        let (before, after) = buffer.split_at(cursor);
-                        format!("{before}|{after}").into()
-                    }
-                } else if let Some(custom_title) = tab.custom_title.as_ref() {
-                    custom_title.clone().into()
-                } else if let Some(view) = tab.active_pane().and_then(|pane| pane.view.as_ref()) {
-                    view.read(cx).tab_content_text(0, cx)
-                } else {
-                    tab.active_pane()
-                        .map(|pane| pane.profile.name.clone())
-                        .unwrap_or_else(|| "Terminal".to_string())
-                        .into()
-                };
-                let full_title = if let Some(buffer) = tab
-                    .rename_buffer
-                    .as_ref()
-                    .filter(|_| tab.renaming_pane.is_none())
-                {
-                    buffer.clone().into()
-                } else if let Some(custom_title) = tab.custom_title.as_ref() {
-                    custom_title.clone().into()
-                } else if let Some(view) = tab.active_pane().and_then(|pane| pane.view.as_ref()) {
-                    view.read(cx).tab_content_text(1, cx)
-                } else {
-                    tab.active_pane()
-                        .map(|pane| pane.profile.name.clone())
-                        .unwrap_or_else(|| "Terminal".to_string())
-                        .into()
-                };
-                let content = h_flex()
-                    .min_w_0()
-                    .gap_1()
-                    .when(
-                        matches!(tab.close_policy, TabClosePolicy::Background { .. }),
-                        |content| {
-                            content.child(
-                                svg()
-                                    .path(IconName::Pin.path())
-                                    .size(px(12.))
-                                    .flex_none()
-                                    .text_color(tab_icon),
-                            )
-                        },
-                    )
-                    .when_some(tab.icon, |content, icon| {
-                        content.child(
-                            svg()
-                                .path(icon.path())
-                                .size(px(14.))
-                                .flex_none()
-                                .text_color(tab_icon),
-                        )
-                    })
-                    .child(
-                        div()
-                            .id(("tab-title", tab.id as usize))
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_sm()
-                            .when(
-                                tab.rename_buffer.is_some()
-                                    && tab.renaming_pane.is_none()
-                                    && tab.rename_select_all,
-                                |title| title.bg(tab_colors.element_selection_background),
-                            )
-                            .tooltip(Tooltip::text(full_title))
-                            .text_color(tab_text)
-                            .child(title),
-                    )
-                    .into_any_element();
-                let tab_element = div()
-                    .id(("tab", tab.id as usize))
-                    .h_8()
-                    .when(compact_mode, |tab| tab.h(title_bar_height))
-                    .w_full()
-                    .min_w_0()
-                    .px_2()
-                    .flex()
-                    .when(tab_close_button_on_left, |tab| tab.flex_row_reverse())
-                    .items_center()
-                    .gap_1()
-                    .border_r_1()
-                    .border_color(tab_colors.border)
-                    .bg(tab_background)
-                    .on_click(move |event, window, cx| {
-                        cx.stop_propagation();
-                        select_handle
-                            .update(cx, |this, cx| {
-                                this.active_tab = index;
-                                if event.click_count() == 2
-                                    && let Some(view) = rename_view.as_ref()
-                                {
-                                    this.begin_rename(view.clone(), window, cx);
-                                } else {
-                                    this.focus_active(window, cx);
-                                }
-                            })
-                            .ok();
-                    })
-                    .child(div().min_w_0().flex_1().overflow_hidden().child(content))
-                    .child(
-                        div()
-                            .id(("close-tab", tab.id as usize))
-                            .size(px(24.))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .hover(|style| style.bg(tab_colors.element_hover))
-                            .aria_label("Close tab")
-                            .tooltip(move |_window, cx| {
-                                Tooltip::for_action("Close tab", &CloseTab, cx)
-                            })
-                            .child(
-                                svg()
-                                    .path(IconName::Close.path())
-                                    .size(px(12.))
-                                    .text_color(tab_icon),
-                            )
-                            .on_click(move |_, window, cx| {
-                                cx.stop_propagation();
-                                close_handle
-                                    .update(cx, |this, cx| this.close_tab_at(index, window, cx))
-                                    .ok();
-                            }),
-                    );
-                let menu_handle = handle.clone();
-                // The context menu activates this tab before it is rendered. Use
-                // the clicked tab's focus so its key context remains valid after
-                // that switch, including when the tab was previously inactive.
-                let action_context = tab
-                    .active_pane()
-                    .and_then(|pane| pane.view.as_ref())
-                    .map(|view| view.focus_handle(cx));
-                let tab_element =
-                    ui::right_click_menu::<ui::ContextMenu>(("tab-context-menu", tab.id as usize))
-                        .menu(move |window, cx| {
-                            menu_handle
-                                .update(cx, |this, cx| {
-                                    this.active_tab = index;
-                                    cx.notify();
-                                })
-                                .ok();
-                            let action_context = action_context.clone();
-                            ui::ContextMenu::build(window, cx, move |menu, _, _| {
-                                let menu = menu
-                                    .when_some(action_context, |menu, focus| menu.context(focus));
-                                menu.action("Rename Tab", Box::new(RenameTab))
-                                    .action("Change Tab Icon", Box::new(ChangeTabIcon))
-                            })
-                        })
-                        .trigger(move |_, _, _| tab_element)
-                        .into_any_element();
-                responsive_tab_container(tab_element, compact_mode, title_bar_height)
-                    .into_any_element()
-            })
-            .collect::<Vec<_>>();
+        let tab_count = self.tabs.len();
+        let selected_tab_index = self.active_tab;
+        let is_renaming_tab = self.is_renaming();
+        let overflow_selection = self.tab_overflow_selection_side;
+        let tab_bar_handle = handle.clone();
+        let tab_overflow_border_color = colors.border;
+        let tab_overflow_left_menu_handle = self.tab_overflow_left_menu_handle.clone();
+        let tab_overflow_right_menu_handle = self.tab_overflow_right_menu_handle.clone();
 
-        let render_new_tab_button = || {
+        let tabs_row = container_query(move |size, _window, cx| {
+            // The new-tab button now renders inside this same measured row (right
+            // after the tabs/right overflow trigger) so it stays snug against them
+            // instead of sitting at the edge of the bar. Reserve its footprint here,
+            // on top of whatever an overflow trigger itself needs, so it can never
+            // get pushed out of the measured width and clipped. In compact mode also
+            // reserve the drag strip's guaranteed minimum, so tabs growing to fill
+            // the bar can't force it to eat into their own width instead.
+            let reserved_chrome_width = TAB_OVERFLOW_TRIGGER_WIDTH
+                + if compact_mode {
+                    COMPACT_DRAG_AREA_MIN_WIDTH
+                } else {
+                    px(0.)
+                };
+            let available_for_tabs = (size.width - reserved_chrome_width).max(px(0.));
+            let is_shrinking =
+                tab_bar_tabs_are_shrinking(available_for_tabs, is_renaming_tab, tab_count);
+            let visible_range = tab_bar_visible_tab_range(
+                available_for_tabs,
+                compact_mode,
+                tab_count,
+                selected_tab_index,
+                is_renaming_tab,
+                overflow_selection,
+            );
+
+            let (tabs, left_overflow, right_overflow) = tab_bar_handle
+                .read_with(cx, |this, cx| {
+                    let overflow_entries = |range: std::ops::Range<usize>| {
+                        range
+                            .filter_map(|index| {
+                                let tab = this.tabs.get(index)?;
+                                Some((index, tab_overflow_entry_label(tab, cx)))
+                            })
+                            .collect::<Vec<_>>()
+                    };
+                    let left_overflow = overflow_entries(0..visible_range.start);
+                    let right_overflow = overflow_entries(visible_range.end..tab_count);
+
+                    let tabs = this
+                        .tabs
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| visible_range.contains(index))
+                        .map(|(index, tab)| {
+                            let selected = index == this.active_tab;
+                            let tab_theme = tab.theme(cx);
+                            let tab_colors = tab_theme.colors();
+                            let tab_background = if selected {
+                                tab_colors.tab_active_background
+                            } else {
+                                tab_colors.tab_inactive_background
+                            };
+                            let tab_text = if selected {
+                                tab_colors.text
+                            } else {
+                                tab_colors.text_muted
+                            };
+                            let tab_icon = if selected {
+                                tab_colors.icon
+                            } else {
+                                tab_colors.icon_muted
+                            };
+                            let select_handle = tab_bar_handle.clone();
+                            let close_handle = tab_bar_handle.clone();
+                            let rename_view = tab.active_pane().and_then(|pane| pane.view.clone());
+                            let title = if let Some(buffer) = tab
+                                .rename_buffer
+                                .as_ref()
+                                .filter(|_| tab.renaming_pane.is_none())
+                            {
+                                if tab.rename_select_all {
+                                    buffer.clone().into()
+                                } else {
+                                    let cursor = tab.rename_cursor.min(buffer.len());
+                                    let (before, after) = buffer.split_at(cursor);
+                                    format!("{before}|{after}").into()
+                                }
+                            } else if let Some(custom_title) = tab.custom_title.as_ref() {
+                                custom_title.clone().into()
+                            } else if let Some(view) =
+                                tab.active_pane().and_then(|pane| pane.view.as_ref())
+                            {
+                                view.read(cx).tab_content_text(0, cx)
+                            } else {
+                                tab.active_pane()
+                                    .map(|pane| pane.profile.name.clone())
+                                    .unwrap_or_else(|| "Terminal".to_string())
+                                    .into()
+                            };
+                            let full_title = if let Some(buffer) = tab
+                                .rename_buffer
+                                .as_ref()
+                                .filter(|_| tab.renaming_pane.is_none())
+                            {
+                                buffer.clone().into()
+                            } else {
+                                tab_overflow_entry_label(tab, cx)
+                            };
+                            let content = h_flex()
+                                .min_w_0()
+                                .gap_1()
+                                .when(
+                                    matches!(tab.close_policy, TabClosePolicy::Background { .. }),
+                                    |content| {
+                                        content.child(
+                                            svg()
+                                                .path(IconName::Pin.path())
+                                                .size(px(12.))
+                                                .flex_none()
+                                                .text_color(tab_icon),
+                                        )
+                                    },
+                                )
+                                // The tab being renamed always keeps its icon, even if the
+                                // rest of the bar is shrinking enough to hide everyone else's.
+                                .when(!is_shrinking || (is_renaming_tab && selected), |content| {
+                                    content.when_some(tab.icon, |content, icon| {
+                                        content.child(
+                                            svg()
+                                                .path(icon.path())
+                                                .size(px(14.))
+                                                .flex_none()
+                                                .text_color(tab_icon),
+                                        )
+                                    })
+                                })
+                                .child(
+                                    div()
+                                        .id(("tab-title", tab.id as usize))
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .text_sm()
+                                        .when(
+                                            tab.rename_buffer.is_some()
+                                                && tab.renaming_pane.is_none()
+                                                && tab.rename_select_all,
+                                            |title| {
+                                                title.bg(tab_colors.element_selection_background)
+                                            },
+                                        )
+                                        .tooltip(Tooltip::text(full_title))
+                                        .text_color(tab_text)
+                                        .child(title),
+                                )
+                                .into_any_element();
+                            let tab_element = div()
+                                .id(("tab", tab.id as usize))
+                                .h_8()
+                                .when(compact_mode, |tab| tab.h(title_bar_height))
+                                .w_full()
+                                .min_w_0()
+                                .px_2()
+                                .flex()
+                                .when(tab_close_button_on_left, |tab| tab.flex_row_reverse())
+                                .items_center()
+                                .gap_1()
+                                .border_r_1()
+                                .border_color(tab_colors.border)
+                                .bg(tab_background)
+                                .on_click(move |event, window, cx| {
+                                    cx.stop_propagation();
+                                    select_handle
+                                        .update(cx, |this, cx| {
+                                            this.active_tab = index;
+                                            this.tab_overflow_selection_side = None;
+                                            if event.click_count() == 2
+                                                && let Some(view) = rename_view.as_ref()
+                                            {
+                                                this.begin_rename(view.clone(), window, cx);
+                                            } else {
+                                                this.focus_active(window, cx);
+                                            }
+                                        })
+                                        .ok();
+                                })
+                                .child(div().min_w_0().flex_1().overflow_hidden().child(content))
+                                .child(
+                                    div()
+                                        .id(("close-tab", tab.id as usize))
+                                        .size(px(24.))
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(tab_colors.element_hover))
+                                        .aria_label("Close tab")
+                                        .tooltip(move |_window, cx| {
+                                            Tooltip::for_action("Close tab", &CloseTab, cx)
+                                        })
+                                        .child(
+                                            svg()
+                                                .path(IconName::Close.path())
+                                                .size(px(12.))
+                                                .text_color(tab_icon),
+                                        )
+                                        .on_click(move |_, window, cx| {
+                                            cx.stop_propagation();
+                                            close_handle
+                                                .update(cx, |this, cx| {
+                                                    this.close_tab_at(index, window, cx)
+                                                })
+                                                .ok();
+                                        }),
+                                );
+                            let menu_handle = tab_bar_handle.clone();
+                            // The context menu activates this tab before it is rendered. Use
+                            // the clicked tab's focus so its key context remains valid after
+                            // that switch, including when the tab was previously inactive.
+                            let action_context = tab
+                                .active_pane()
+                                .and_then(|pane| pane.view.as_ref())
+                                .map(|view| view.focus_handle(cx));
+                            let tab_element = ui::right_click_menu::<ui::ContextMenu>((
+                                "tab-context-menu",
+                                tab.id as usize,
+                            ))
+                            .menu(move |window, cx| {
+                                menu_handle
+                                    .update(cx, |this, cx| {
+                                        this.active_tab = index;
+                                        this.tab_overflow_selection_side = None;
+                                        cx.notify();
+                                    })
+                                    .ok();
+                                let action_context = action_context.clone();
+                                ui::ContextMenu::build(window, cx, move |menu, _, _| {
+                                    let menu = menu.when_some(action_context, |menu, focus| {
+                                        menu.context(focus)
+                                    });
+                                    menu.action("Rename Tab", Box::new(RenameTab))
+                                        .action("Change Tab Icon", Box::new(ChangeTabIcon))
+                                })
+                            })
+                            .trigger(move |_, _, _| tab_element)
+                            .into_any_element();
+                            responsive_tab_container(
+                                tab_element,
+                                compact_mode,
+                                title_bar_height,
+                                is_renaming_tab && selected,
+                            )
+                            .into_any_element()
+                        })
+                        .collect::<Vec<_>>();
+
+                    (tabs, left_overflow, right_overflow)
+                })
+                .unwrap_or_default();
+
             div()
-                .ml_1()
-                .mr_2()
-                .h_8()
-                .when(compact_mode, |button| button.h(title_bar_height))
-                .flex_none()
+                .id("tabs-scroll")
+                .when(compact_mode, |tabs| tabs.h(title_bar_height))
+                .when(!compact_mode, |tabs| tabs.h_full())
+                .w_full()
+                .min_w_0()
                 .flex()
                 .items_center()
-                .child(
-                    IconButton::new("new-tab", IconName::Plus)
-                        .shape(IconButtonShape::Wide)
-                        .size(ButtonSize::Large)
-                        .width(px(32.))
-                        .icon_size(IconSize::Small)
-                        .aria_label("New tab")
-                        .tooltip(move |_window, cx| Tooltip::for_action("New tab", &NewTab, cx))
-                        .on_click(|_, window, cx| {
-                            cx.stop_propagation();
-                            window.dispatch_action(Box::new(NewTab), cx)
-                        }),
-                )
-        };
-        let tabs_scroll = div()
-            .id("tabs-scroll")
-            .when(compact_mode, |tabs| tabs.h(title_bar_height))
-            .when(!compact_mode, |tabs| tabs.h_full())
-            .min_w_0()
-            .flex_shrink_1()
-            .flex()
-            .items_center()
-            .overflow_x_scroll()
-            .children(tabs);
-        let tabs_scroll = tabs_scroll.into_any_element();
+                .overflow_hidden()
+                // Buttons form one contiguous area with no dividers between them, so
+                // this separator (matching the tab bar's own former left border) only
+                // belongs here when a tab, not the left overflow trigger, sits first.
+                .when(compact_mode && left_overflow.is_empty(), |tabs| {
+                    tabs.border_l_1().border_color(tab_overflow_border_color)
+                })
+                .when(!left_overflow.is_empty(), |bar| {
+                    bar.child(render_tab_overflow_trigger(
+                        false,
+                        left_overflow,
+                        compact_mode,
+                        title_bar_height,
+                        tab_overflow_border_color,
+                        tab_overflow_left_menu_handle.clone(),
+                        tab_bar_handle.clone(),
+                    ))
+                })
+                .children(tabs)
+                .when(!right_overflow.is_empty(), |bar| {
+                    bar.child(render_tab_overflow_trigger(
+                        true,
+                        right_overflow,
+                        compact_mode,
+                        title_bar_height,
+                        tab_overflow_border_color,
+                        tab_overflow_right_menu_handle.clone(),
+                        tab_bar_handle.clone(),
+                    ))
+                })
+                .child(render_new_tab_button(compact_mode, title_bar_height))
+                .when(compact_mode, |bar| {
+                    bar.child(render_compact_drag_area(
+                        title_bar_height,
+                        tab_bar_handle.clone(),
+                    ))
+                })
+        })
+        .min_w_0()
+        .flex_shrink_1();
 
-        // Compact mode places the tab bar inside the title bar. Keep a portion of
-        // that bar available for moving the window without making tab hitboxes
-        // draggable as well.
-        let compact_tab_bar_drag_area = compact_mode.then(|| {
-            div()
-                .id("compact-title-bar-drag-area")
-                .h(title_bar_height)
-                .flex_1()
-                .min_w_0()
-                .window_control_area(WindowControlArea::Drag)
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, window, cx| {
-                        this.titlebar_dragging = true;
-                        this.focus_active(window, cx);
-                    }),
-                )
-                .on_mouse_up(
-                    MouseButton::Left,
-                    cx.listener(|this, _, window, cx| {
-                        this.titlebar_dragging = false;
-                        this.focus_active(window, cx);
-                    }),
-                )
-                .on_mouse_down_out(cx.listener(|this, _, _, _| {
-                    this.titlebar_dragging = false;
-                }))
-                .on_mouse_move(cx.listener(|this, _, window, _| {
-                    if this.titlebar_dragging {
-                        this.titlebar_dragging = false;
-                        window.start_window_move();
-                    }
-                }))
-                .into_any_element()
-        });
+        let tabs_scroll = tabs_row.into_any_element();
 
         let tab_bar = div()
             .id("tab-bar")
@@ -827,8 +1110,6 @@ impl Render for Zetta {
                     .flex_basis(gpui::relative(0.))
                     .min_w_0()
                     .occlude()
-                    .border_l_1()
-                    .border_color(colors.border)
             })
             .flex()
             .items_center()
@@ -848,11 +1129,7 @@ impl Render for Zetta {
                     window.dispatch_action(Box::new(NewTab), cx)
                 }
             })
-            .child(tabs_scroll)
-            .child(render_new_tab_button())
-            .when_some(compact_tab_bar_drag_area, |tab_bar, drag_area| {
-                tab_bar.child(drag_area)
-            });
+            .child(tabs_scroll);
         let show_title_bar_control_labels = title_bar_shows_control_labels(
             window.viewport_size().width,
             background_session_count > 0,
@@ -2259,6 +2536,7 @@ impl Render for Zetta {
             .on_action(cx.listener(Self::close_active_pane))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
+            .on_action(cx.listener(Self::select_overflow_tab))
             .on_action(cx.listener(Self::rename_tab))
             .on_action(cx.listener(Self::change_tab_icon))
             .on_action(cx.listener(Self::rename_pane))

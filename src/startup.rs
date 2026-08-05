@@ -1918,6 +1918,15 @@ pub(crate) fn application_menu_navigation_keybindings() -> [KeyBinding; 2] {
     ]
 }
 
+pub(crate) fn tab_menu_navigation_keybindings() -> [KeyBinding; 4] {
+    [
+        KeyBinding::new("ctrl-tab", NextTab, Some("Zetta > menu")),
+        KeyBinding::new("ctrl-shift-tab", PreviousTab, Some("Zetta > menu")),
+        KeyBinding::new("ctrl-pageup", NextTab, Some("Zetta > menu")),
+        KeyBinding::new("ctrl-pagedown", PreviousTab, Some("Zetta > menu")),
+    ]
+}
+
 pub(crate) fn detach_tab_keybinding() -> KeyBinding {
     KeyBinding::new(DETACH_TAB_KEYBINDING, DetachTab, Some("Zetta > Terminal"))
 }
@@ -2168,6 +2177,7 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
     bindings.push(serial_console_keybinding());
     bindings.extend(application_menu_keybinding());
     bindings.extend(application_menu_navigation_keybindings());
+    bindings.extend(tab_menu_navigation_keybindings());
     bindings.extend(focus_pane_keybindings());
     bindings.extend(minimized_pane_keybindings());
     bindings.extend(pane_resize_keybindings());
@@ -2917,6 +2927,44 @@ pub(crate) fn run() -> Result<()> {
                 control_server,
                 _quit_subscription: quit_subscription,
             });
+            cx.intercept_keystrokes(|event, _window, cx| {
+                let reverse = match event.keystroke.key.as_str() {
+                    "tab" => event.keystroke.modifiers.shift,
+                    "pageup" => false,
+                    "pagedown" => true,
+                    _ => return,
+                };
+                let Some(window_handle) = cx.active_window() else {
+                    return;
+                };
+                let should_cycle = window_handle
+                    .update(cx, |view, _window, cx| {
+                        view.downcast::<Zetta>().is_ok_and(|zetta| {
+                            zetta.read(cx).tab_overflow_keyboard_menu_edge.is_some()
+                        })
+                    })
+                    .unwrap_or(false);
+                if !should_cycle {
+                    return;
+                }
+
+                cx.stop_propagation();
+                cx.defer(move |cx| {
+                    let _ = window_handle.update(cx, |view, window, cx| {
+                        let Ok(zetta) = view.downcast::<Zetta>() else {
+                            return;
+                        };
+                        let _ = zetta.update(cx, |zetta, cx| {
+                            if reverse {
+                                zetta.previous_tab(&PreviousTab, window, cx);
+                            } else {
+                                zetta.next_tab(&NextTab, window, cx);
+                            }
+                        });
+                    });
+                });
+            })
+            .detach();
             #[cfg(target_os = "macos")]
             cx.on_action(|_: &NewWindow, cx| {
                 open_dormant_or_new_window(cx).log_err();
