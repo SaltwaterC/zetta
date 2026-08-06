@@ -1312,14 +1312,13 @@ impl Tab {
         self.activate_pane(next);
     }
 
+    /// Chrome shared across a tab's panes (tab bar, pane borders, error
+    /// banners) always follows the active pane's *configured* profile theme,
+    /// never a pane's non-persistent theme override — an ephemeral,
+    /// single-pane preview should not repaint the rest of the tab.
     pub(crate) fn theme(&self, cx: &App) -> Arc<Theme> {
-        self.active_pane()
-            .and_then(|pane| pane.view.as_ref())
-            .and_then(|view| view.read(cx).theme().cloned())
-            .or_else(|| {
-                self.active_profile()
-                    .and_then(|profile| resolve_profile_theme(profile, cx).ok().flatten())
-            })
+        self.active_profile()
+            .and_then(|profile| resolve_profile_theme(profile, cx).ok().flatten())
             .unwrap_or_else(|| cx.theme().clone())
     }
 }

@@ -302,6 +302,59 @@ fn tabicon_subcommand_parses_icons_and_dynamic_listing() {
 }
 
 #[test]
+fn panetheme_subcommand_parses_names_resets_and_dynamic_listing() {
+    assert_eq!(
+        parse_args_from([OsString::from("panetheme"), OsString::from("Dracula")])
+            .unwrap()
+            .mode,
+        StartupMode::SetPaneTheme {
+            theme: Some("Dracula".to_owned())
+        }
+    );
+    assert_eq!(
+        parse_args_from([
+            OsString::from("panetheme"),
+            OsString::from("--theme"),
+            OsString::from("One Light"),
+        ])
+        .unwrap()
+        .mode,
+        StartupMode::SetPaneTheme {
+            theme: Some("One Light".to_owned())
+        }
+    );
+    assert_eq!(
+        parse_args_from([OsString::from("panetheme"), OsString::from("--reset")])
+            .unwrap()
+            .mode,
+        StartupMode::SetPaneTheme { theme: None }
+    );
+    assert_eq!(
+        parse_args_from([OsString::from("panetheme"), OsString::from("--list")])
+            .unwrap()
+            .mode,
+        StartupMode::ListPaneThemes
+    );
+    assert!(parse_args_from([OsString::from("panetheme")]).is_err());
+    assert!(
+        parse_args_from([
+            OsString::from("panetheme"),
+            OsString::from("--list"),
+            OsString::from("--reset"),
+        ])
+        .is_err()
+    );
+    assert!(
+        parse_args_from([
+            OsString::from("panetheme"),
+            OsString::from("--reset"),
+            OsString::from("Dracula"),
+        ])
+        .is_err()
+    );
+}
+
+#[test]
 fn vi_subcommand_bypasses_application_startup_and_preserves_arguments() {
     let args = parse_args_from([
         OsString::from("vi"),
@@ -797,6 +850,7 @@ fn benchmark_subcommand_arguments_are_cross_platform() {
             config_path: None,
             keymap_path: None,
             profile: None,
+            theme_override: None,
             mode: StartupMode::TerminalRenderingProfile,
             profile_report: None,
             profile_duration: None,
@@ -817,6 +871,7 @@ fn benchmark_subcommand_arguments_are_cross_platform() {
             config_path: None,
             keymap_path: None,
             profile: None,
+            theme_override: None,
             mode: StartupMode::TerminalRenderingWorkload,
             profile_report: None,
             profile_duration: None,
@@ -887,6 +942,28 @@ fn shorthand_options_match_long_options() {
     assert_eq!(shorthand.profile.as_deref(), Some("WSL: Ubuntu"));
 
     let shorthand = parse_args_from([
+        OsString::from("-p"),
+        OsString::from("WSL: Ubuntu"),
+        OsString::from("-t"),
+        OsString::from("Dracula"),
+    ])
+    .unwrap();
+    let longhand = parse_args_from([
+        OsString::from("--profile"),
+        OsString::from("WSL: Ubuntu"),
+        OsString::from("--theme"),
+        OsString::from("Dracula"),
+    ])
+    .unwrap();
+    assert_eq!(shorthand, longhand);
+    assert_eq!(shorthand.theme_override.as_deref(), Some("Dracula"));
+
+    assert!(
+        parse_args_from([OsString::from("--theme"), OsString::from("Dracula")]).is_err(),
+        "--theme without --profile must be rejected"
+    );
+
+    let shorthand = parse_args_from([
         OsString::from("-c"),
         OsString::from("config.json"),
         OsString::from("-k"),
@@ -923,6 +1000,7 @@ fn launch_profile_selects_an_available_profile_without_changing_the_configured_d
         .unwrap()
         .unwrap();
     assert_eq!(profile.name, "WSL: Ubuntu");
+    assert_eq!(profile.theme, None);
     assert_eq!(config.default_profile, 0);
 
     let error = select_launch_profile(&config, Some("Missing")).unwrap_err();

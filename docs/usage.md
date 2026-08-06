@@ -29,6 +29,12 @@ zetta --profile "PROFILE"
 zetta -p "PROFILE"
 ```
 
+Add `--theme "THEME"` (or `-t "THEME"`) alongside `--profile` to
+non-persistently override that profile's theme for this launch only. The
+override is never written to `config.json` or the profile itself, so the
+Settings UI keeps showing the profile's real configured theme and the next
+launch uses it again.
+
 Tab names follow the active terminal process. Press `Ctrl-Shift-R` or double-click
 a tab to set a persistent name. Use `Ctrl-Shift-Y` or the tab context menu
 to choose a tab icon. Submit an empty name to resume automatic naming.
@@ -83,6 +89,23 @@ separate Escape binding.
 
 A maximized pane has a status strip below it. Restore it from that strip or
 with `Shift-Escape`.
+
+Press `Alt-Shift-T`, or `Cmd-Shift-T` on macOS, or run **Change Pane Theme**
+from the command palette to open a searchable list of registered themes.
+Selecting one non-persistently changes only the active pane's theme; type to
+filter, use the arrow keys and `Enter` to apply, or `Escape` to cancel. The
+list always shows a checkmark next to the pane's current theme and pins
+**Reset to profile default** at the top to clear the override and go back to
+the profile's configured theme (or the global default, if the profile has
+none). The override is not saved: it is not written to `config.json`, the
+profile, or the settings view, so it disappears when the pane closes or the
+configuration reloads.
+
+The same change is available from any Zetta pane, or a script, with
+`zetta panetheme THEME`; `zetta panetheme --reset` clears the override, and
+`zetta panetheme --list` prints the theme names registered in the running
+process (built-in and user-installed). Shell integration completes pane
+theme names dynamically, the same way it does for `zetta tabicon`.
 
 Rotate the layout around the active pane with `Alt-Shift-L` clockwise or
 `Alt-Shift-K` counter-clockwise on Windows/Linux. macOS uses the corresponding
@@ -332,6 +355,7 @@ become `Ctrl-Cmd`; for example, paste-trim is `Ctrl-Cmd-V` on macOS and
 | `Ctrl-Shift-S` | Open a serial console in a new pane |
 | `Ctrl-Shift-R` | Rename the active tab |
 | `Ctrl-Shift-Y` | Change the active tab icon |
+| `Cmd-Shift-T` (macOS) / `Alt-Shift-T` (Windows/Linux) | Change the active pane's theme (non-persistent) |
 | `Cmd-Shift-R` (macOS) / `Alt-Shift-R` (Windows/Linux) | Label the active pane |
 | `Ctrl-=` / `Ctrl-+` | Increase font size globally |
 | `Ctrl--` | Decrease font size globally |

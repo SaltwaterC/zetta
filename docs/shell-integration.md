@@ -29,6 +29,16 @@ embed the built-in icon list. Use `zetta tabicon ICON` (or
 `zetta tabicon --icon ICON`) from a Zetta pane; `none` hides the active tab
 icon.
 
+Pane-theme completion works the same way: completing `zetta panetheme` runs
+`zetta panetheme --list` at completion time against the running Zetta
+process, so the generated script does not embed a theme list and always
+offers whatever that process has registered, including user-installed
+themes. Use `zetta panetheme THEME` (or `zetta panetheme --theme THEME`) from
+a Zetta pane to non-persistently change the active pane's theme;
+`zetta panetheme --reset` restores the profile's configured theme. `--theme`
+(or `-t`) also completes pane themes when typed after `--profile` at launch,
+since it non-persistently overrides that profile's theme for the new window.
+
 It also completes the full-length `zetta terminal-size` resize flags, which
 resize the current Zetta pane while retaining an omitted dimension. Completion
 lists full-length option names alongside valid subcommands without requiring a

@@ -44,3 +44,50 @@ fn matches_are_cached_until_the_query_changes() {
         "terminal: paste"
     );
 }
+
+#[test]
+fn pinned_first_command_stays_ahead_of_the_alphabetized_rest() {
+    let palette = CommandPalette::with_pinned_first(
+        PaletteCommand {
+            name: "Reset to profile default".into(),
+            shortcut: None,
+            action: Box::new(First),
+        },
+        vec![
+            PaletteCommand {
+                name: "Zenburn".into(),
+                shortcut: None,
+                action: Box::new(Second),
+            },
+            PaletteCommand {
+                name: "Dracula".into(),
+                shortcut: None,
+                action: Box::new(Second),
+            },
+        ],
+    );
+    let names = palette
+        .commands
+        .iter()
+        .map(|command| command.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["Reset to profile default", "Dracula", "Zenburn"]);
+}
+
+#[test]
+fn pinned_first_command_replaces_a_same_named_entry_in_the_rest() {
+    let palette = CommandPalette::with_pinned_first(
+        PaletteCommand {
+            name: "Dracula".into(),
+            shortcut: None,
+            action: Box::new(First),
+        },
+        vec![PaletteCommand {
+            name: "Dracula".into(),
+            shortcut: None,
+            action: Box::new(Second),
+        }],
+    );
+    assert_eq!(palette.commands.len(), 1);
+    assert_eq!(palette.commands[0].name, "Dracula");
+}

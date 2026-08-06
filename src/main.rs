@@ -127,6 +127,8 @@ actions!(
         PreviousTab,
         RenameTab,
         ChangeTabIcon,
+        ChangePaneTheme,
+        ResetPaneTheme,
         RenamePane,
         TogglePaneControls,
         ToggleTabPaneControls,
@@ -188,6 +190,13 @@ fn action_is_enabled_in_build(name: &str) -> bool {
 #[action(namespace = zetta)]
 #[serde(deny_unknown_fields)]
 struct ApplyPaneSplitTemplate {
+    name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = zetta)]
+#[serde(deny_unknown_fields)]
+struct ApplyPaneTheme {
     name: String,
 }
 

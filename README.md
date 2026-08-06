@@ -57,10 +57,12 @@ Tree-sitter grammar set from the vi editor. The flags also accept `false`,
 
 The tools are available directly when enabled: `zetta serial console --device
 PATH`, `zetta http server`, `zetta tftp server`, and `zetta notify`.
-From a Zetta pane, `zetta tabicon ICON` changes the active tab icon.
-Shell integration completes the current serial-device and tab-icon lists
-dynamically. See [Serial and network tools](docs/tools.md) for flags and safety
-notes.
+From a Zetta pane, `zetta tabicon ICON` changes the active tab icon, and
+`zetta panetheme THEME` non-persistently changes the active pane's theme
+(`zetta panetheme --reset` restores the profile's configured theme).
+Shell integration completes the current serial-device, tab-icon, and
+pane-theme lists dynamically. See [Serial and network tools](docs/tools.md)
+for flags and safety notes.
 
 ## Multi-command prompt
 

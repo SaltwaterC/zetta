@@ -52,6 +52,13 @@ pub(crate) enum ProcessControlCommand {
         icon: Option<IconName>,
         completion: Sender<bool>,
     },
+    SetPaneTheme {
+        theme: Option<String>,
+        completion: Sender<bool>,
+    },
+    ListPaneThemes {
+        completion: Sender<Vec<String>>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,6 +72,10 @@ enum ControlRequestCommand {
     SetTabIcon {
         icon: Option<IconName>,
     },
+    SetPaneTheme {
+        theme: Option<String>,
+    },
+    ListPaneThemes,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -83,11 +94,14 @@ struct ControlRequest {
     session_id: Option<u64>,
     secret: Option<String>,
     icon: Option<String>,
+    pane_theme: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
 struct ControlResponse {
     status: String,
+    #[serde(default)]
+    themes: Vec<String>,
 }
 
 pub(crate) struct ProcessControlServer {
@@ -136,6 +150,7 @@ impl ProcessControlServer {
                     };
                     let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
                     let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+                    let mut response_themes = Vec::new();
                     let status = match handle_control_request(&mut stream, &token) {
                         Some(ControlRequestCommand::OpenWindow) => {
                             let (completion, completed) = channel();
@@ -176,6 +191,37 @@ impl ProcessControlServer {
                                 && wait_for_control_completion(&completed, &stopping_for_thread);
                             if accepted { "ok" } else { "rejected" }
                         }
+                        Some(ControlRequestCommand::SetPaneTheme { theme }) => {
+                            let (completion, completed) = channel();
+                            let accepted = commands
+                                .unbounded_send(ProcessControlCommand::SetPaneTheme {
+                                    theme,
+                                    completion,
+                                })
+                                .is_ok()
+                                && wait_for_control_completion(&completed, &stopping_for_thread);
+                            if accepted { "ok" } else { "rejected" }
+                        }
+                        Some(ControlRequestCommand::ListPaneThemes) => {
+                            let (completion, completed) = channel();
+                            let accepted = commands
+                                .unbounded_send(ProcessControlCommand::ListPaneThemes {
+                                    completion,
+                                })
+                                .is_ok();
+                            match accepted
+                                .then(|| {
+                                    wait_for_theme_list_completion(&completed, &stopping_for_thread)
+                                })
+                                .flatten()
+                            {
+                                Some(themes) => {
+                                    response_themes = themes;
+                                    "ok"
+                                }
+                                None => "rejected",
+                            }
+                        }
                         None => "rejected",
                     };
                     let status = if status == "ok" && stopping_for_thread.load(Ordering::Acquire) {
@@ -187,6 +233,7 @@ impl ProcessControlServer {
                         &mut stream,
                         &ControlResponse {
                             status: status.to_owned(),
+                            themes: response_themes,
                         },
                     );
                 }
@@ -231,6 +278,27 @@ fn wait_for_control_completion(completed: &Receiver<bool>, stopping: &AtomicBool
             Ok(accepted) => return accepted && !stopping.load(Ordering::Acquire),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return false,
+        }
+    }
+}
+
+fn wait_for_theme_list_completion(
+    completed: &Receiver<Vec<String>>,
+    stopping: &AtomicBool,
+) -> Option<Vec<String>> {
+    let deadline = Instant::now() + CONTROL_COMPLETION_TIMEOUT;
+    loop {
+        if stopping.load(Ordering::Acquire) {
+            return None;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        match completed.recv_timeout(remaining.min(CONTROL_COMPLETION_POLL_INTERVAL)) {
+            Ok(themes) => return (!stopping.load(Ordering::Acquire)).then_some(themes),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return None,
         }
     }
 }
@@ -311,6 +379,23 @@ fn decode_control_request(
                 None => None,
             };
             Some(ControlRequestCommand::SetTabIcon { icon })
+        }
+        "set_pane_theme"
+            if request.runner_id.is_none()
+                && request.session_id.is_none()
+                && request.secret.is_none() =>
+        {
+            Some(ControlRequestCommand::SetPaneTheme {
+                theme: request.pane_theme.take(),
+            })
+        }
+        "list_pane_themes"
+            if request.runner_id.is_none()
+                && request.session_id.is_none()
+                && request.secret.is_none()
+                && request.pane_theme.is_none() =>
+        {
+            Some(ControlRequestCommand::ListPaneThemes)
         }
         _ => None,
     };
@@ -403,6 +488,76 @@ pub(crate) fn request_existing_process_tab_icon(icon: Option<IconName>) -> Resul
     Ok(false)
 }
 
+pub(crate) fn request_existing_process_pane_theme(theme: Option<String>) -> Result<bool> {
+    let directory = crate::background_sessions::session_catalog_dir();
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).context("reading Zetta process control endpoints"),
+    };
+    for entry in entries {
+        let path = entry?.path();
+        if !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("control-") && name.ends_with(".json"))
+        {
+            continue;
+        }
+        let endpoint = match fs::read(&path)
+            .ok()
+            .and_then(|contents| serde_json::from_slice::<ControlEndpoint>(&contents).ok())
+        {
+            Some(endpoint) if endpoint.version == CONTROL_VERSION => endpoint,
+            _ => continue,
+        };
+        if !process_is_running(endpoint.process_id) {
+            let _ = fs::remove_file(path);
+            let _ = fs::remove_file(endpoint.socket_path);
+            continue;
+        }
+        if send_set_pane_theme_request(&endpoint, theme.clone()).unwrap_or(false) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+pub(crate) fn request_existing_process_pane_theme_list() -> Result<Option<Vec<String>>> {
+    let directory = crate::background_sessions::session_catalog_dir();
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("reading Zetta process control endpoints"),
+    };
+    for entry in entries {
+        let path = entry?.path();
+        if !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("control-") && name.ends_with(".json"))
+        {
+            continue;
+        }
+        let endpoint = match fs::read(&path)
+            .ok()
+            .and_then(|contents| serde_json::from_slice::<ControlEndpoint>(&contents).ok())
+        {
+            Some(endpoint) if endpoint.version == CONTROL_VERSION => endpoint,
+            _ => continue,
+        };
+        if !process_is_running(endpoint.process_id) {
+            let _ = fs::remove_file(path);
+            let _ = fs::remove_file(endpoint.socket_path);
+            continue;
+        }
+        if let Some(themes) = send_list_pane_themes_request(&endpoint).unwrap_or(None) {
+            return Ok(Some(themes));
+        }
+    }
+    Ok(None)
+}
+
 pub(crate) fn request_reconnect_session(
     process_id: u32,
     runner_id: u64,
@@ -438,6 +593,7 @@ fn send_open_window_request(endpoint: &ControlEndpoint) -> Result<bool> {
             session_id: None,
             secret: None,
             icon: None,
+            pane_theme: None,
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
@@ -460,10 +616,51 @@ fn send_set_tab_icon_request(endpoint: &ControlEndpoint, icon: Option<IconName>)
                 let name: &'static str = icon.into();
                 name.to_owned()
             }),
+            pane_theme: None,
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
     Ok(response.status == "ok")
+}
+
+fn send_set_pane_theme_request(endpoint: &ControlEndpoint, theme: Option<String>) -> Result<bool> {
+    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
+    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    write_message(
+        &mut stream,
+        &ControlRequest {
+            token: endpoint.token.clone(),
+            command: "set_pane_theme".to_owned(),
+            runner_id: None,
+            session_id: None,
+            secret: None,
+            icon: None,
+            pane_theme: theme,
+        },
+    )?;
+    let response = read_message::<ControlResponse>(&mut stream)?;
+    Ok(response.status == "ok")
+}
+
+fn send_list_pane_themes_request(endpoint: &ControlEndpoint) -> Result<Option<Vec<String>>> {
+    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
+    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    write_message(
+        &mut stream,
+        &ControlRequest {
+            token: endpoint.token.clone(),
+            command: "list_pane_themes".to_owned(),
+            runner_id: None,
+            session_id: None,
+            secret: None,
+            icon: None,
+            pane_theme: None,
+        },
+    )?;
+    let response = read_message::<ControlResponse>(&mut stream)?;
+    Ok((response.status == "ok").then_some(response.themes))
 }
 
 fn send_reconnect_session_request(
@@ -482,6 +679,7 @@ fn send_reconnect_session_request(
         session_id: Some(session_id),
         secret: secret.take(),
         icon: None,
+        pane_theme: None,
     };
     let result = write_message(&mut stream, &request).and_then(|()| {
         let response = read_message::<ControlResponse>(&mut stream)?;

@@ -1,6 +1,42 @@
 use super::*;
 
 #[test]
+fn launch_theme_override_applies_case_insensitively_by_name_only() {
+    let mut profile = Profile {
+        name: "System".to_owned(),
+        command: Shell::System,
+        theme: Some("Configured Theme".to_owned()),
+    };
+    apply_launch_theme_override(
+        &mut profile,
+        Some(&("system".to_owned(), "Override Theme".to_owned())),
+    );
+    assert_eq!(profile.theme, Some("Override Theme".to_owned()));
+
+    let mut other_profile = Profile {
+        name: "Other".to_owned(),
+        command: Shell::System,
+        theme: Some("Configured Theme".to_owned()),
+    };
+    apply_launch_theme_override(
+        &mut other_profile,
+        Some(&("system".to_owned(), "Override Theme".to_owned())),
+    );
+    assert_eq!(other_profile.theme, Some("Configured Theme".to_owned()));
+
+    let mut unaffected_profile = Profile {
+        name: "System".to_owned(),
+        command: Shell::System,
+        theme: Some("Configured Theme".to_owned()),
+    };
+    apply_launch_theme_override(&mut unaffected_profile, None);
+    assert_eq!(
+        unaffected_profile.theme,
+        Some("Configured Theme".to_owned())
+    );
+}
+
+#[test]
 fn pane_controls_idle_delay_resets_and_expires() {
     let start = Instant::now();
 

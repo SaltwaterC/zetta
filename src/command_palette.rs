@@ -21,6 +21,23 @@ impl CommandPalette {
     pub fn new(mut commands: Vec<PaletteCommand>) -> Self {
         commands.sort_by(|a, b| a.name.cmp(&b.name));
         commands.dedup_by(|a, b| a.name == b.name);
+        Self::from_sorted_commands(commands)
+    }
+
+    /// Like [`Self::new`], but `pinned` is kept first instead of being sorted
+    /// alphabetically with the rest — for a "reset to default" style entry
+    /// that should stay at the top of the list regardless of its name.
+    pub fn with_pinned_first(pinned: PaletteCommand, mut rest: Vec<PaletteCommand>) -> Self {
+        rest.retain(|command| command.name != pinned.name);
+        rest.sort_by(|a, b| a.name.cmp(&b.name));
+        rest.dedup_by(|a, b| a.name == b.name);
+        let mut commands = Vec::with_capacity(rest.len() + 1);
+        commands.push(pinned);
+        commands.extend(rest);
+        Self::from_sorted_commands(commands)
+    }
+
+    fn from_sorted_commands(commands: Vec<PaletteCommand>) -> Self {
         let normalized_names = commands
             .iter()
             .map(|command| command.name.to_lowercase())

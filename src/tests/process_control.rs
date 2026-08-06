@@ -9,6 +9,7 @@ fn request(token: &str, command: &str) -> ControlRequest {
         session_id: None,
         secret: None,
         icon: None,
+        pane_theme: None,
     }
 }
 
@@ -55,6 +56,36 @@ fn tab_icon_control_requests_decode_names_and_allow_clearing() {
 }
 
 #[test]
+fn pane_theme_control_requests_decode_names_and_allow_resetting() {
+    let mut theme_request = request("token", "set_pane_theme");
+    theme_request.pane_theme = Some("Dracula".to_owned());
+    assert_eq!(
+        decode_control_request(&mut theme_request, "token"),
+        Some(ControlRequestCommand::SetPaneTheme {
+            theme: Some("Dracula".to_owned())
+        })
+    );
+
+    let mut reset_request = request("token", "set_pane_theme");
+    assert_eq!(
+        decode_control_request(&mut reset_request, "token"),
+        Some(ControlRequestCommand::SetPaneTheme { theme: None })
+    );
+}
+
+#[test]
+fn pane_theme_list_requests_carry_no_arguments() {
+    assert_eq!(
+        decode_control_request(&mut request("token", "list_pane_themes"), "token"),
+        Some(ControlRequestCommand::ListPaneThemes)
+    );
+
+    let mut invalid_request = request("token", "list_pane_themes");
+    invalid_request.pane_theme = Some("Dracula".to_owned());
+    assert_eq!(decode_control_request(&mut invalid_request, "token"), None);
+}
+
+#[test]
 fn reconnect_results_use_distinct_control_statuses() {
     assert_eq!(
         reconnect_session_status(ReconnectSessionResult::AuthenticationFailed),
@@ -79,6 +110,7 @@ fn reconnect_requests_carry_a_session_target_and_optional_secret() {
         session_id: Some(42),
         secret: Some("not-an-argument".to_owned()),
         icon: None,
+        pane_theme: None,
     };
     assert_eq!(
         decode_control_request(&mut request, "token"),
@@ -125,6 +157,29 @@ fn control_client_continues_startup_when_window_open_is_rejected() {
     };
     completion.send(false).unwrap();
     assert!(!client.join().unwrap());
+}
+
+#[test]
+fn control_server_delivers_the_registered_theme_names() {
+    let directory = tempfile::tempdir().unwrap();
+    let endpoint_path = directory.path().join("control.json");
+    let (commands, mut received) = futures::channel::mpsc::unbounded();
+    let _server = ProcessControlServer::start_at(commands, endpoint_path.clone()).unwrap();
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&fs::read(endpoint_path).unwrap()).unwrap();
+
+    let client = thread::spawn(move || send_list_pane_themes_request(&endpoint).unwrap());
+    let command = futures::executor::block_on(received.next()).unwrap();
+    let ProcessControlCommand::ListPaneThemes { completion } = command else {
+        panic!("unexpected process control command");
+    };
+    completion
+        .send(vec!["Dracula".to_owned(), "One Light".to_owned()])
+        .unwrap();
+    assert_eq!(
+        client.join().unwrap(),
+        Some(vec!["Dracula".to_owned(), "One Light".to_owned()])
+    );
 }
 
 #[test]

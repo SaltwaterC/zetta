@@ -70,6 +70,25 @@ impl Zetta {
             shortcut: change_tab_icon_shortcut,
             action: Box::new(change_tab_icon),
         });
+        let change_pane_theme = ChangePaneTheme;
+        let change_pane_theme_shortcut = terminal_focus
+            .as_ref()
+            .and_then(|focus| {
+                window.highest_precedence_binding_for_action_in(&change_pane_theme, focus)
+            })
+            .map(|binding| {
+                binding
+                    .keystrokes()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            });
+        commands.push(PaletteCommand {
+            name: humanize_action_name(change_pane_theme.name()),
+            shortcut: change_pane_theme_shortcut,
+            action: Box::new(change_pane_theme),
+        });
         commands.extend(self.launch_config.pane_split_templates.keys().map(|name| {
             let action = ApplyPaneSplitTemplate { name: name.clone() };
             let shortcut = terminal_focus
@@ -134,6 +153,10 @@ impl Zetta {
         }
         if self.tab_icon_picker.is_some() {
             self.tab_icon_picker_key_down(event, window, cx);
+            return;
+        }
+        if self.theme_picker.is_some() {
+            self.theme_picker_key_down(event, window, cx);
             return;
         }
         if self.settings_editor.is_some() {

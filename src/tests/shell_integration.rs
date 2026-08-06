@@ -33,6 +33,7 @@ fn supported_shells_generate_completion_and_tftp_shortcut() {
         assert!(script.contains("EDITOR"));
         assert!(script.contains("zetta vi"));
         assert!(script.contains("zetta tabicon --list"));
+        assert!(script.contains("zetta panetheme --list"));
     }
 }
 
@@ -325,8 +326,9 @@ fn sound_completion_is_scoped_to_the_detected_platform() {
 }
 
 // Regression guard: --timeout shares its short form (-t) with
-// benchmark-output's --output-type. Completion after -t/--output-type must
-// stay scoped to the active subcommand instead of always suggesting
+// benchmark-output's --output-type, and the top-level/panetheme --theme flag
+// now shares it too. Completion after -t/--output-type/--theme must stay
+// scoped to the active subcommand instead of always suggesting
 // benchmark-output's repeated/unique values.
 #[test]
 fn notify_timeout_completion_does_not_leak_into_other_short_t_flags() {
@@ -334,20 +336,94 @@ fn notify_timeout_completion_does_not_leak_into_other_short_t_flags() {
 
     let bash = ShellIntegration::Bash.script(&profiles);
     assert!(bash.contains(
-        "--output-type|-t)\n            if [[ $command == notify ]]; then\n                _zetta_compgen 'default never'"
+        "--output-type|-t|--theme)\n            if [[ $command == panetheme || $command == -* ]]; then\n                _zetta_complete_pane_themes\n            elif [[ $command == notify ]]; then\n                _zetta_compgen 'default never'"
     ));
     assert!(bash.contains("_zetta_compgen 'repeated unique'"));
 
     let zsh = ShellIntegration::Zsh.script(&profiles);
     assert!(zsh.contains(
-        "--output-type|-t)\n            if [[ $words[2] == notify ]]; then\n                compadd -- default never"
+        "--output-type|-t|--theme)\n            if [[ $words[2] == panetheme || $words[2] == -* ]]; then\n                _zetta_pane_themes\n            elif [[ $words[2] == notify ]]; then\n                compadd -- default never"
     ));
     assert!(zsh.contains("compadd -- repeated unique"));
 
     let powershell = ShellIntegration::PowerShell.script(&profiles);
     assert!(powershell.contains(
-        "elseif ($previous -in '--output-type', '-t') {\n        if ($subcommand -eq 'notify') { 'default', 'never' } else { 'repeated', 'unique' }"
+        "elseif ($previous -in '--output-type', '-t', '--theme') {\n        if ($subcommand -eq 'panetheme' -or $null -eq $subcommand) { & $zettaPaneThemes }\n        elseif ($subcommand -eq 'notify') { 'default', 'never' }\n        else { 'repeated', 'unique' }"
     ));
+}
+
+// Regression test: --theme requires --profile, so completing one must keep
+// offering the other. Both are root flags handled by the same "$command ==
+// -*" branch that also stops the script from falling through to a
+// subcommand's (empty) completions once any root flag has been typed.
+#[test]
+fn profile_and_theme_root_flags_keep_completing_each_other_in_bash() {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+
+    if !Command::new("bash")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return;
+    }
+
+    let script = ShellIntegration::Bash.script(&profiles());
+    let driver = format!(
+        "{script}\nCOMP_WORDS=(zetta --profile System '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'after-profile:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta --theme Dracula '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'after-theme:%s\\n' \"${{COMPREPLY[@]}}\"\n"
+    );
+    let mut child = Command::new("bash")
+        .args(["--noprofile", "--norc"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(driver.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "Bash completion script failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let completions = String::from_utf8_lossy(&output.stdout);
+    // printf recycles its format string per remaining argument, so each
+    // COMPREPLY entry lands on its own "after-profile:"/"after-theme:" line
+    // rather than one space-joined line.
+    let after_profile = completions
+        .lines()
+        .filter_map(|line| line.strip_prefix("after-profile:"))
+        .collect::<Vec<_>>();
+    let after_theme = completions
+        .lines()
+        .filter_map(|line| line.strip_prefix("after-theme:"))
+        .collect::<Vec<_>>();
+    assert!(
+        after_profile.contains(&"--theme"),
+        "expected --theme after --profile: {after_profile:?}"
+    );
+    assert!(
+        !after_profile.contains(&"--profile"),
+        "did not expect --profile repeated after --profile: {after_profile:?}"
+    );
+    assert!(
+        !after_profile.contains(&"benchmark"),
+        "did not expect a subcommand after a root flag: {after_profile:?}"
+    );
+    assert!(
+        after_theme.contains(&"--profile"),
+        "expected --profile after --theme: {after_theme:?}"
+    );
+    assert!(
+        !after_theme.contains(&"--theme"),
+        "did not expect --theme repeated after --theme: {after_theme:?}"
+    );
 }
 
 #[test]
@@ -816,15 +892,15 @@ fn generated_scripts_only_offer_long_form_flags() {
         let script = shell.script(&profiles);
         match shell {
             ShellIntegration::Bash => assert!(script.contains(
-                "terminal-size sessions edit vi init serial http tftp notify copy paste tabicon --help --version --config --keymap --profile'"
+                "terminal-size sessions edit vi init serial http tftp notify copy paste tabicon panetheme --help --version --config --keymap --profile --theme'"
             )),
             ShellIntegration::Fish => {
                 assert!(script.contains("-l profile -r"));
                 assert!(!script.contains("-s p -l profile"));
             }
-            ShellIntegration::PowerShell => assert!(
-                script.contains("'--help', '--version', '--config', '--keymap', '--profile'")
-            ),
+            ShellIntegration::PowerShell => assert!(script.contains(
+                "'--help', '--version', '--config', '--keymap', '--profile', '--theme'"
+            )),
             ShellIntegration::Zsh => assert!(script
                 .contains("_zetta_options --help --version --config --keymap --profile")),
         }
@@ -853,6 +929,7 @@ fn fish_script_emits_long_option_candidates_for_every_command_context() {
         "copy",
         "paste",
         "tabicon",
+        "panetheme",
         "ztftp",
         "zntfy",
         "zcopy",
@@ -881,7 +958,14 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
     for (line, expected) in [
         (
             "zetta ",
-            &["--help", "--version", "--config", "--keymap", "--profile"][..],
+            &[
+                "--help",
+                "--version",
+                "--config",
+                "--keymap",
+                "--profile",
+                "--theme",
+            ][..],
         ),
         (
             "zetta benchmark ",
@@ -909,6 +993,11 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
         ("zetta sessions ", &["--json", "--help"][..]),
         ("zetta tabicon ", &["--icon", "--list", "--help"][..]),
         ("zetta tabicon -i ", &[][..]),
+        (
+            "zetta panetheme ",
+            &["--theme", "--reset", "--list", "--help"][..],
+        ),
+        ("zetta panetheme -t ", &[][..]),
         ("zetta vi ", &["--help", "Cargo.toml"][..]),
         ("zetta vi Carg", &["Cargo.toml"][..]),
         ("zetta init ", &["--help"][..]),
@@ -996,6 +1085,73 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
                 .any(|candidate| candidate.starts_with('-') && !candidate.starts_with("--")),
             "did not expect short-form options in Fish completions for {line:?}: {completions}"
         );
+    }
+}
+
+// Regression test: --theme requires --profile, but each is a plain root
+// flag that fish's builtin __fish_use_subcommand cannot tell apart from a
+// subcommand once its value has been typed (it treats any non-flag word as
+// proof a subcommand was given). Without __zetta_use_subcommand accounting
+// for consumed flag values, --profile NAME would stop completing --theme
+// and vice versa, and typing either would also incorrectly keep offering
+// subcommand names, which are only valid as the very first argument.
+#[test]
+fn profile_and_theme_root_flags_keep_completing_each_other() {
+    use std::process::Command;
+
+    if Command::new("fish").arg("--version").output().is_err() {
+        return;
+    }
+
+    let script = ShellIntegration::Fish.script(&profiles());
+    let script_file = tempfile::NamedTempFile::new().unwrap();
+    fs::write(script_file.path(), script).unwrap();
+
+    for (line, expected, unexpected) in [
+        (
+            "zetta --profile System ",
+            &["--theme"][..],
+            &["--profile", "benchmark"][..],
+        ),
+        (
+            "zetta --theme Dracula ",
+            &["--profile"][..],
+            &["--theme", "benchmark"][..],
+        ),
+    ] {
+        let output = Command::new("fish")
+            .args([
+                "--no-config",
+                "-c",
+                "source $argv[1]; complete -C \"$argv[2]\"",
+                "--",
+                script_file.path().to_str().unwrap(),
+                line,
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let completions = String::from_utf8_lossy(&output.stdout);
+        let candidates = completions
+            .lines()
+            .map(|completion| {
+                completion
+                    .split_once('\t')
+                    .map_or(completion, |(name, _)| name)
+            })
+            .collect::<Vec<_>>();
+        for name in expected {
+            assert!(
+                candidates.contains(name),
+                "expected {name:?} in Fish completions for {line:?}: {completions}"
+            );
+        }
+        for name in unexpected {
+            assert!(
+                !candidates.contains(name),
+                "did not expect {name:?} in Fish completions for {line:?}: {completions}"
+            );
+        }
     }
 }
 

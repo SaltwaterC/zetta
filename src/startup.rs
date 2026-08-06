@@ -16,7 +16,10 @@ use crate::cli_services::{notify_help, parse_notify_args};
 use crate::cli_services::{parse_serial_args, serial_help};
 #[cfg(feature = "tftp-server")]
 use crate::cli_services::{parse_tftp_server_args, tftp_server_help};
-use crate::process_control::request_existing_process_tab_icon;
+use crate::process_control::{
+    request_existing_process_pane_theme, request_existing_process_pane_theme_list,
+    request_existing_process_tab_icon,
+};
 
 #[cfg(target_os = "macos")]
 use gpui::{Menu, MenuItem, Unbind};
@@ -87,6 +90,10 @@ pub(crate) enum StartupMode {
         icon: Option<IconName>,
     },
     ListTabIcons,
+    SetPaneTheme {
+        theme: Option<String>,
+    },
+    ListPaneThemes,
     #[cfg(windows)]
     RegisterWindowsShell(PathBuf),
     TerminalRenderingProfile,
@@ -111,6 +118,8 @@ pub(crate) struct StartupArgs {
     pub(crate) config_path: Option<PathBuf>,
     pub(crate) keymap_path: Option<PathBuf>,
     pub(crate) profile: Option<String>,
+    /// Non-persistently overrides `profile`'s configured theme for this launch only.
+    pub(crate) theme_override: Option<String>,
     pub(crate) mode: StartupMode,
     pub(crate) profile_report: Option<PathBuf>,
     pub(crate) profile_duration: Option<Duration>,
@@ -204,16 +213,16 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         .collect::<Vec<_>>()
         .join("\n  ");
     let help = format!(
-        "Zetta Terminal\n\nUsage: zetta [OPTIONS]\n       zetta benchmark [OPTIONS]\n       zetta benchmark-output [OPTIONS]\n       zetta terminal-size [--json | --resize [--columns COLUMNS] [--rows ROWS]]\n       zetta sessions [--json]\n       zetta init [SHELL]{serial_usage}{http_usage}{tftp_usage}{notify_usage}{clipboard_usage}\n\nCommands:\n  benchmark                           Profile terminal rendering\n  benchmark-output                    Write and time a text payload (default: 10 MiB)\n  terminal-size                       Print or resize the current terminal pane\n  sessions                            List detached background sessions\n  init                                Configure or generate shell integration{serial_command}{http_command}{tftp_command}{notify_command}{clipboard_command}\n\nBuilt-in features:\n  {}\n\nProfiles accepted by --profile NAME (case-insensitive):\n  {profiles}\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Select one of the profiles listed above",
+        "Zetta Terminal\n\nUsage: zetta [OPTIONS]\n       zetta benchmark [OPTIONS]\n       zetta benchmark-output [OPTIONS]\n       zetta terminal-size [--json | --resize [--columns COLUMNS] [--rows ROWS]]\n       zetta sessions [--json]\n       zetta init [SHELL]{serial_usage}{http_usage}{tftp_usage}{notify_usage}{clipboard_usage}\n\nCommands:\n  benchmark                           Profile terminal rendering\n  benchmark-output                    Write and time a text payload (default: 10 MiB)\n  terminal-size                       Print or resize the current terminal pane\n  sessions                            List detached background sessions\n  init                                Configure or generate shell integration{serial_command}{http_command}{tftp_command}{notify_command}{clipboard_command}\n\nBuilt-in features:\n  {}\n\nProfiles accepted by --profile NAME (case-insensitive):\n  {profiles}\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Select one of the profiles listed above\n  -t, --theme NAME                    Non-persistently override --profile's theme for this launch",
         features.join("\n  "),
     );
     help.replace(
         "       zetta sessions [--json]",
-        "       zetta sessions [--json]\n       zetta sessions reconnect SESSION_ID\n       zetta tabicon [OPTIONS] ICON\n       zetta tabicon --list\n       zetta edit [OPTIONS] [--] FILE ...\n       zetta vi [OPTIONS] [FILE ...]",
+        "       zetta sessions [--json]\n       zetta sessions reconnect SESSION_ID\n       zetta tabicon [OPTIONS] ICON\n       zetta tabicon --list\n       zetta panetheme [OPTIONS] THEME\n       zetta panetheme --reset\n       zetta panetheme --list\n       zetta edit [OPTIONS] [--] FILE ...\n       zetta vi [OPTIONS] [FILE ...]",
     )
     .replace(
         "sessions                            List detached background sessions",
-        "sessions                            List or reconnect detached background sessions\n  tabicon                             Set the active tab icon\n  edit                                Edit files with $EDITOR, falling back to Zetta vi\n  vi                                  Edit files with Zetta's built-in vi",
+        "sessions                            List or reconnect detached background sessions\n  tabicon                             Set the active tab icon\n  panetheme                           Non-persistently change the active pane's theme\n  edit                                Edit files with $EDITOR, falling back to Zetta vi\n  vi                                  Edit files with Zetta's built-in vi",
     )
 }
 
@@ -291,6 +300,69 @@ fn parse_tab_icon_args(args: &[OsString]) -> Result<StartupMode> {
     Ok(StartupMode::SetTabIcon { icon })
 }
 
+pub(crate) fn pane_theme_help() -> &'static str {
+    "Non-persistently change the active pane's theme through the running Zetta process\n\nUsage: zetta panetheme [OPTIONS] THEME\n       zetta panetheme --reset\n       zetta panetheme --list\n\nTHEME is a theme name registered in the running Zetta process (built-in or user-installed). The theme list is fetched dynamically with --list. The change is never written to the configuration file: it is lost when the pane closes or the configuration reloads.\n\nOptions:\n  -t, --theme NAME  Set the theme by option instead of as a positional argument\n  -r, --reset       Restore the active pane's profile-configured theme\n  -l, --list        Print the running process's registered theme names\n  -h, --help        Print help"
+}
+
+fn parse_pane_theme_args(args: &[OsString]) -> Result<StartupMode> {
+    let mut theme_name = None;
+    let mut reset = false;
+    let mut list = false;
+    let mut arguments = args.iter();
+    while let Some(argument) = arguments.next() {
+        match argument.to_string_lossy().as_ref() {
+            "--help" | "-h" => {
+                println!("{}", pane_theme_help());
+                std::process::exit(0);
+            }
+            "--reset" | "-r" => {
+                anyhow::ensure!(!reset, "--reset may only be specified once");
+                reset = true;
+            }
+            "--list" | "-l" => {
+                anyhow::ensure!(!list, "--list may only be specified once");
+                list = true;
+            }
+            "--theme" | "-t" => {
+                anyhow::ensure!(theme_name.is_none(), "--theme may only be specified once");
+                theme_name = Some(
+                    arguments
+                        .next()
+                        .context("--theme requires a theme name")?
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+            value if value.starts_with('-') => {
+                anyhow::bail!("unknown panetheme option {value:?}")
+            }
+            value => {
+                anyhow::ensure!(theme_name.is_none(), "only one theme may be specified");
+                theme_name = Some(value.to_owned());
+            }
+        }
+    }
+    if list {
+        anyhow::ensure!(
+            theme_name.is_none() && !reset,
+            "--list cannot be combined with a theme name or --reset"
+        );
+        return Ok(StartupMode::ListPaneThemes);
+    }
+    if reset {
+        anyhow::ensure!(
+            theme_name.is_none(),
+            "--reset cannot be combined with a theme name"
+        );
+        return Ok(StartupMode::SetPaneTheme { theme: None });
+    }
+    let theme_name = theme_name
+        .context("zetta panetheme requires a theme name; run zetta panetheme --help for usage")?;
+    Ok(StartupMode::SetPaneTheme {
+        theme: Some(theme_name),
+    })
+}
+
 pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Result<StartupArgs> {
     let arguments = args.into_iter().collect::<Vec<_>>();
     if arguments
@@ -301,7 +373,27 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             config_path: None,
             keymap_path: None,
             profile: None,
+            theme_override: None,
             mode: parse_tab_icon_args(&arguments[1..])?,
+            profile_report: None,
+            profile_duration: None,
+            profile_pane_stress: false,
+            profile_background_stress: false,
+            profile_sparse_updates: false,
+            profile_external_terminal: false,
+            tftp_command: None,
+        });
+    }
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "panetheme")
+    {
+        return Ok(StartupArgs {
+            config_path: None,
+            keymap_path: None,
+            profile: None,
+            theme_override: None,
+            mode: parse_pane_theme_args(&arguments[1..])?,
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,
@@ -361,6 +453,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             config_path: None,
             keymap_path: None,
             profile: None,
+            theme_override: None,
             mode: StartupMode::OutputBenchmark {
                 size_mib: size_mib.unwrap_or(DEFAULT_OUTPUT_BENCHMARK_MIB),
                 output_type,
@@ -433,6 +526,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             config_path: None,
             keymap_path: None,
             profile: None,
+            theme_override: None,
             mode: StartupMode::PrintTerminalSize {
                 json,
                 resize: resize.then_some(TerminalResize { columns, rows }),
@@ -491,6 +585,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 config_path: None,
                 keymap_path: None,
                 profile: None,
+                theme_override: None,
                 mode: StartupMode::ReconnectBackgroundSession {
                     identifier: identifier.context(
                         "sessions reconnect requires a session ID; run `zetta sessions reconnect --help` for usage",
@@ -522,6 +617,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             config_path: None,
             keymap_path: None,
             profile: None,
+            theme_override: None,
             mode: StartupMode::ListBackgroundSessions { json },
             profile_report: None,
             profile_duration: None,
@@ -565,6 +661,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             config_path: None,
             keymap_path: None,
             profile: None,
+            theme_override: None,
             mode: StartupMode::Edit {
                 arguments: paths,
                 delete_after,
@@ -583,6 +680,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             config_path: None,
             keymap_path: None,
             profile: None,
+            theme_override: None,
             mode: StartupMode::Vi(
                 arguments[1..]
                     .iter()
@@ -616,6 +714,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 config_path: None,
                 keymap_path: None,
                 profile: None,
+                theme_override: None,
                 mode: StartupMode::ConfigureCurrentShellIntegration,
                 profile_report: None,
                 profile_duration: None,
@@ -633,6 +732,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             config_path: None,
             keymap_path: None,
             profile: None,
+            theme_override: None,
             mode: StartupMode::PrintShellIntegration(ShellIntegration::parse(shell)?),
             profile_report: None,
             profile_duration: None,
@@ -661,6 +761,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 config_path: None,
                 keymap_path: None,
                 profile: None,
+                theme_override: None,
                 mode: StartupMode::CliService(parse_serial_args(serial_arguments.iter().cloned())?),
                 profile_report: None,
                 profile_duration: None,
@@ -689,6 +790,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 config_path: None,
                 keymap_path: None,
                 profile: None,
+                theme_override: None,
                 mode: StartupMode::CliService(parse_http_args(http_arguments.iter().cloned())?),
                 profile_report: None,
                 profile_duration: None,
@@ -722,6 +824,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                     config_path: None,
                     keymap_path: None,
                     profile: None,
+                    theme_override: None,
                     mode: StartupMode::CliService(parse_tftp_server_args(
                         server_arguments.iter().cloned(),
                     )?),
@@ -748,6 +851,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             config_path: None,
             keymap_path: None,
             profile: None,
+            theme_override: None,
             mode: StartupMode::Application,
             profile_report: None,
             profile_duration: None,
@@ -776,6 +880,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 config_path: None,
                 keymap_path: None,
                 profile: None,
+                theme_override: None,
                 mode: StartupMode::CliService(parse_notify_args(notify_arguments.iter().cloned())?),
                 profile_report: None,
                 profile_duration: None,
@@ -806,6 +911,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 config_path: None,
                 keymap_path: None,
                 profile: None,
+                theme_override: None,
                 mode: StartupMode::CliService(parse_copy_args(copy_arguments.iter().cloned())?),
                 profile_report: None,
                 profile_duration: None,
@@ -839,6 +945,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 config_path: None,
                 keymap_path: None,
                 profile: None,
+                theme_override: None,
                 mode: StartupMode::CliService(parse_paste_args(paste_arguments.iter().cloned())?),
                 profile_report: None,
                 profile_duration: None,
@@ -867,6 +974,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
     let mut config = None;
     let mut keymap = None;
     let mut profile = None;
+    let mut theme_override = None;
     #[cfg(windows)]
     let mut mode = StartupMode::Application;
     #[cfg(not(windows))]
@@ -893,6 +1001,14 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                         .into_owned(),
                 )
             }
+            "--theme" | "-t" => {
+                theme_override = Some(
+                    args.next()
+                        .context("--theme requires a theme name")?
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            }
             #[cfg(windows)]
             "--register-windows-shell" => {
                 mode = StartupMode::RegisterWindowsShell(
@@ -909,10 +1025,15 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
         profile.is_none() || mode == StartupMode::Application,
         "--profile cannot be combined with another startup mode"
     );
+    anyhow::ensure!(
+        theme_override.is_none() || profile.is_some(),
+        "--theme requires --profile"
+    );
     Ok(StartupArgs {
         config_path: config,
         keymap_path: keymap,
         profile,
+        theme_override,
         mode,
         profile_report: None,
         profile_duration: None,
@@ -998,6 +1119,7 @@ fn parse_benchmark_args(arguments: &[OsString]) -> Result<StartupArgs> {
         config_path: None,
         keymap_path: None,
         profile: None,
+        theme_override: None,
         mode,
         profile_report,
         profile_duration,
@@ -2164,6 +2286,7 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
             ChangeTabIcon,
             Some("Zetta > Terminal"),
         ),
+        platform_keybinding("alt-shift-t", ChangePaneTheme, Some("Zetta > Terminal")),
         KeyBinding::new(RENAME_PANE_KEYBINDING, RenamePane, Some("Zetta > Terminal")),
         KeyBinding::new(
             TOGGLE_PANE_CONTROLS_KEYBINDING,
@@ -2348,10 +2471,12 @@ fn install_native_macos_window_menu_key_equivalents() {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn open_zetta_window(
     config: Config,
     configuration_error: Option<String>,
     initial_profile: Option<Profile>,
+    launch_theme_override: Option<(String, String)>,
     enable_performance_overlay: bool,
     performance_report: Option<(PerformanceReportOptions, PerformanceReportStatus)>,
     profile_pane_stress: bool,
@@ -2360,8 +2485,16 @@ pub(crate) fn open_zetta_window(
     let options = zetta_window_options(cx);
     cx.open_window(options, move |window, cx| {
         window.set_window_title("Zetta");
-        let zetta =
-            cx.new(|cx| Zetta::new(config, configuration_error, initial_profile, window, cx));
+        let zetta = cx.new(|cx| {
+            Zetta::new(
+                config,
+                configuration_error,
+                initial_profile,
+                launch_theme_override,
+                window,
+                cx,
+            )
+        });
         track_zetta_window(&zetta, window, cx);
         prepare_background_tabs_before_window_close(&zetta, window, cx);
         if profile_pane_stress {
@@ -2554,7 +2687,16 @@ pub(crate) fn open_dormant_or_new_window(cx: &mut App) -> Result<()> {
         cx.activate(true);
         Ok(())
     } else {
-        open_zetta_window(config, configuration_error, None, false, None, false, cx)
+        open_zetta_window(
+            config,
+            configuration_error,
+            None,
+            None,
+            false,
+            None,
+            false,
+            cx,
+        )
     }
 }
 
@@ -2830,6 +2972,21 @@ pub(crate) fn run() -> Result<()> {
         );
         return Ok(());
     }
+    if let StartupMode::SetPaneTheme { theme } = args.mode {
+        anyhow::ensure!(
+            request_existing_process_pane_theme(theme)?,
+            "no running Zetta process accepted the pane theme request"
+        );
+        return Ok(());
+    }
+    if args.mode == StartupMode::ListPaneThemes {
+        let themes = request_existing_process_pane_theme_list()?
+            .context("no running Zetta process accepted the pane theme list request")?;
+        for theme in themes {
+            println!("{theme}");
+        }
+        return Ok(());
+    }
     match &args.mode {
         StartupMode::ListBackgroundSessions { json } => return print_session_catalogs(*json),
         StartupMode::ReconnectBackgroundSession { identifier } => {
@@ -2893,6 +3050,15 @@ pub(crate) fn run() -> Result<()> {
         load_startup_config(args.config_path.as_deref(), args.keymap_path)
     };
     let initial_profile = select_launch_profile(&config, args.profile.as_deref())?;
+    // Keyed by profile name (case-insensitive) rather than baked into
+    // `initial_profile.theme`, so every tab opened with this profile for the
+    // rest of the process gets the override too, not just the first one.
+    // Applied in `Zetta::open_tab_with_profile`; never written back to
+    // `config.profiles` or the settings UI.
+    let launch_theme_override = initial_profile
+        .as_ref()
+        .zip(args.theme_override.as_ref())
+        .map(|(profile, theme)| (profile.name.to_lowercase(), theme.clone()));
     let keymap_path = config.keymap_path.clone();
     let profile_count = visible_profile_count(&config.profiles, &config.hidden_profiles);
     let http_client = Arc::new(
@@ -3045,6 +3211,57 @@ pub(crate) fn run() -> Result<()> {
                             });
                             let _ = completion.send(accepted);
                         }
+                        ProcessControlCommand::SetPaneTheme { theme, completion } => {
+                            let accepted = cx.update(|cx| {
+                                if !cx
+                                    .global::<ZettaProcessState>()
+                                    .control_server
+                                    .is_accepting()
+                                {
+                                    return false;
+                                }
+                                if cx.global::<ZettaProcessState>().windows.is_empty()
+                                    && open_dormant_or_new_window(cx).is_err()
+                                {
+                                    return false;
+                                }
+                                let Some(window_id) = cx
+                                    .global::<ZettaProcessState>()
+                                    .windows
+                                    .keys()
+                                    .next()
+                                    .copied()
+                                else {
+                                    return false;
+                                };
+                                gpui::WindowHandle::<Zetta>::new(window_id)
+                                    .update(cx, |zetta, _, cx| {
+                                        zetta.set_active_pane_theme(theme, cx)
+                                    })
+                                    .unwrap_or(false)
+                            });
+                            let _ = completion.send(accepted);
+                        }
+                        ProcessControlCommand::ListPaneThemes { completion } => {
+                            let themes = cx.update(|cx| {
+                                if !cx
+                                    .global::<ZettaProcessState>()
+                                    .control_server
+                                    .is_accepting()
+                                {
+                                    return Vec::new();
+                                }
+                                let mut names = ThemeRegistry::global(cx)
+                                    .list()
+                                    .into_iter()
+                                    .map(|theme| theme.name.to_string())
+                                    .collect::<Vec<_>>();
+                                names.sort();
+                                names.dedup();
+                                names
+                            });
+                            let _ = completion.send(themes);
+                        }
                         ProcessControlCommand::ReconnectSession {
                             runner_id,
                             session_id,
@@ -3109,6 +3326,7 @@ pub(crate) fn run() -> Result<()> {
                 config,
                 configuration_error,
                 initial_profile,
+                launch_theme_override,
                 profiling,
                 report_options.map(|options| (options, report_status_for_app)),
                 args.profile_pane_stress,
