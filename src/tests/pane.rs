@@ -756,6 +756,148 @@ fn pane_resize_boundary_moves_the_nearest_matching_split() {
 }
 
 #[test]
+fn moving_into_a_two_pane_split_swaps_the_leaves() {
+    let mut layout = PaneLayout::Split {
+        axis: SplitAxis::Vertical,
+        first_ratio: 700,
+        first: Box::new(PaneLayout::Pane(1)),
+        second: Box::new(PaneLayout::Pane(2)),
+    };
+
+    assert!(layout.move_pane(1, PaneDirection::Right));
+    assert_eq!(
+        layout,
+        PaneLayout::Split {
+            axis: SplitAxis::Vertical,
+            first_ratio: PANE_SPLIT_RATIO_SCALE - 700,
+            first: Box::new(PaneLayout::Pane(2)),
+            second: Box::new(PaneLayout::Pane(1)),
+        }
+    );
+
+    // 1 is already the rightmost pane, so moving it further right is a no-op.
+    assert!(!layout.move_pane(1, PaneDirection::Right));
+
+    assert!(layout.move_pane(1, PaneDirection::Left));
+    assert_eq!(
+        layout,
+        PaneLayout::Split {
+            axis: SplitAxis::Vertical,
+            first_ratio: 700,
+            first: Box::new(PaneLayout::Pane(1)),
+            second: Box::new(PaneLayout::Pane(2)),
+        }
+    );
+}
+
+#[test]
+fn moving_a_small_pane_flips_the_three_pane_layout() {
+    // One big pane on the left, two small panes stacked on the right - the
+    // default three-pane layout from `PaneLayout::tiled`.
+    let mut layout = PaneLayout::Split {
+        axis: SplitAxis::Vertical,
+        first_ratio: 700,
+        first: Box::new(PaneLayout::Pane(1)),
+        second: Box::new(PaneLayout::Split {
+            axis: SplitAxis::Horizontal,
+            first_ratio: DEFAULT_PANE_SPLIT_RATIO,
+            first: Box::new(PaneLayout::Pane(2)),
+            second: Box::new(PaneLayout::Pane(3)),
+        }),
+    };
+
+    // The inner split's axis never matches a left/right move, so the search
+    // bubbles up and swaps the whole stack with the big pane.
+    assert!(layout.move_pane(2, PaneDirection::Left));
+    assert_eq!(
+        layout,
+        PaneLayout::Split {
+            axis: SplitAxis::Vertical,
+            first_ratio: PANE_SPLIT_RATIO_SCALE - 700,
+            first: Box::new(PaneLayout::Split {
+                axis: SplitAxis::Horizontal,
+                first_ratio: DEFAULT_PANE_SPLIT_RATIO,
+                first: Box::new(PaneLayout::Pane(2)),
+                second: Box::new(PaneLayout::Pane(3)),
+            }),
+            second: Box::new(PaneLayout::Pane(1)),
+        }
+    );
+}
+
+#[test]
+fn moving_prefers_the_innermost_matching_boundary_before_bubbling_up() {
+    // Quarters layout: left column {1 over 2}, right column {3 over 4}.
+    let mut layout = PaneLayout::Split {
+        axis: SplitAxis::Vertical,
+        first_ratio: DEFAULT_PANE_SPLIT_RATIO,
+        first: Box::new(PaneLayout::Split {
+            axis: SplitAxis::Horizontal,
+            first_ratio: 300,
+            first: Box::new(PaneLayout::Pane(1)),
+            second: Box::new(PaneLayout::Pane(2)),
+        }),
+        second: Box::new(PaneLayout::Split {
+            axis: SplitAxis::Horizontal,
+            first_ratio: DEFAULT_PANE_SPLIT_RATIO,
+            first: Box::new(PaneLayout::Pane(3)),
+            second: Box::new(PaneLayout::Pane(4)),
+        }),
+    };
+
+    // Moving down swaps pane 1 with its own column sibling only; the right
+    // column is untouched.
+    assert!(layout.move_pane(1, PaneDirection::Down));
+    assert_eq!(
+        layout,
+        PaneLayout::Split {
+            axis: SplitAxis::Vertical,
+            first_ratio: DEFAULT_PANE_SPLIT_RATIO,
+            first: Box::new(PaneLayout::Split {
+                axis: SplitAxis::Horizontal,
+                first_ratio: PANE_SPLIT_RATIO_SCALE - 300,
+                first: Box::new(PaneLayout::Pane(2)),
+                second: Box::new(PaneLayout::Pane(1)),
+            }),
+            second: Box::new(PaneLayout::Split {
+                axis: SplitAxis::Horizontal,
+                first_ratio: DEFAULT_PANE_SPLIT_RATIO,
+                first: Box::new(PaneLayout::Pane(3)),
+                second: Box::new(PaneLayout::Pane(4)),
+            }),
+        }
+    );
+
+    // Moving right has no local boundary to use (the only vertical-axis
+    // split is the outer one), so it swaps the whole column - pane 2 (now
+    // on top of the left column) travels along with pane 1.
+    assert!(layout.move_pane(1, PaneDirection::Right));
+    assert_eq!(layout.first_pane(), 3);
+}
+
+#[test]
+fn moving_is_a_no_op_when_no_matching_axis_ancestor_exists() {
+    let mut single = PaneLayout::Pane(1);
+    assert!(!single.move_pane(1, PaneDirection::Left));
+    assert!(!single.move_pane(1, PaneDirection::Up));
+
+    // Two panes side by side have no horizontal-axis split, so vertical
+    // moves are no-ops, as is moving further past an edge.
+    let mut side_by_side = PaneLayout::Split {
+        axis: SplitAxis::Vertical,
+        first_ratio: DEFAULT_PANE_SPLIT_RATIO,
+        first: Box::new(PaneLayout::Pane(1)),
+        second: Box::new(PaneLayout::Pane(2)),
+    };
+    assert!(!side_by_side.move_pane(1, PaneDirection::Up));
+    assert!(!side_by_side.move_pane(1, PaneDirection::Down));
+    assert!(!side_by_side.move_pane(2, PaneDirection::Right));
+
+    // A pane id that isn't in the layout is a no-op rather than a panic.
+    assert!(!side_by_side.move_pane(99, PaneDirection::Left));
+}
+
+#[test]
 fn pane_resize_gutter_targets_its_exact_split() {
     let mut layout = PaneLayout::Split {
         axis: SplitAxis::Vertical,

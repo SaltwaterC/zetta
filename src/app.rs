@@ -140,8 +140,8 @@ fn resize_cell_count(current: usize, delta: isize, minimum: usize) -> usize {
     }
 }
 
-fn pane_input_enabled(pane_resize_mode: bool) -> bool {
-    !pane_resize_mode
+fn pane_input_enabled(modal_pane_mode_active: bool) -> bool {
+    !modal_pane_mode_active
 }
 
 fn pane_resize_menu_entry_available(pane_count: usize) -> bool {
@@ -416,6 +416,7 @@ pub(crate) struct Zetta {
     pane_resize_keys: PaneResizeKeys,
     pane_resize_repeat_generation: u64,
     pane_resize_drag: Option<PaneResizeDrag>,
+    pub(crate) pane_move_mode: bool,
     pub(crate) titlebar_dragging: bool,
     pub(crate) button_layout: WindowButtonLayout,
     pub(crate) performance_overlay: Option<PerformanceOverlay>,
@@ -624,6 +625,7 @@ impl Zetta {
             pane_resize_keys: PaneResizeKeys::default(),
             pane_resize_repeat_generation: 0,
             pane_resize_drag: None,
+            pane_move_mode: false,
             titlebar_dragging: false,
             button_layout,
             performance_overlay: None,
@@ -934,7 +936,8 @@ impl Zetta {
                             .iter()
                             .find(|tab| tab.id == tab_id)
                             .is_some_and(|tab| tab.broadcast_input);
-                        let input_enabled = pane_input_enabled(this.pane_resize_mode);
+                        let input_enabled =
+                            pane_input_enabled(this.pane_resize_mode || this.pane_move_mode);
                         view.update(cx, |view, cx| {
                             view.set_emit_input_events(emit_input_events);
                             view.set_input_enabled(input_enabled, cx);
@@ -2544,7 +2547,10 @@ impl Zetta {
         self.pane_resize_keys.clear();
         self.cancel_pane_resize_repeat();
         self.pane_resize_drag = None;
-        let input_enabled = pane_input_enabled(self.pane_resize_mode);
+        if self.pane_resize_mode {
+            self.pane_move_mode = false;
+        }
+        let input_enabled = pane_input_enabled(self.pane_resize_mode || self.pane_move_mode);
         for view in self
             .tabs
             .iter()
@@ -2552,6 +2558,98 @@ impl Zetta {
             .filter_map(|pane| pane.view.as_ref())
         {
             view.update(cx, |view, cx| view.set_input_enabled(input_enabled, cx));
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_pane_move_mode(
+        &mut self,
+        _: &TogglePaneMoveMode,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .tabs
+            .get(self.active_tab)
+            .is_none_or(|tab| tab.active_pane().is_none())
+        {
+            return;
+        }
+        self.pane_move_mode = !self.pane_move_mode;
+        if self.pane_move_mode {
+            self.pane_resize_mode = false;
+            self.pane_resize_keys.clear();
+            self.cancel_pane_resize_repeat();
+            self.pane_resize_drag = None;
+        }
+        let input_enabled = pane_input_enabled(self.pane_resize_mode || self.pane_move_mode);
+        for view in self
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.panes.iter())
+            .filter_map(|pane| pane.view.as_ref())
+        {
+            view.update(cx, |view, cx| view.set_input_enabled(input_enabled, cx));
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn move_pane_left(
+        &mut self,
+        _: &MovePaneLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_active_pane(PaneDirection::Left, window, cx);
+    }
+
+    pub(crate) fn move_pane_right(
+        &mut self,
+        _: &MovePaneRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_active_pane(PaneDirection::Right, window, cx);
+    }
+
+    pub(crate) fn move_pane_up(
+        &mut self,
+        _: &MovePaneUp,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_active_pane(PaneDirection::Up, window, cx);
+    }
+
+    pub(crate) fn move_pane_down(
+        &mut self,
+        _: &MovePaneDown,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_active_pane(PaneDirection::Down, window, cx);
+    }
+
+    fn move_active_pane(
+        &mut self,
+        direction: PaneDirection,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.pane_move_mode {
+            return;
+        }
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            return;
+        };
+        if tab.maximized_pane.is_some() {
+            return;
+        }
+        if !tab.layout.move_pane(tab.active_pane, direction) {
+            return;
+        }
+        for terminal in tab.panes.iter().filter_map(|pane| pane.terminal.as_ref()) {
+            terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
         }
         cx.notify();
     }
@@ -3962,6 +4060,7 @@ impl Zetta {
             .when(self.pane_resize_mode, |layout| {
                 layout.key_context("PaneResize")
             })
+            .when(self.pane_move_mode, |layout| layout.key_context("PaneMove"))
             .size_full()
             .min_w_0()
             .min_h_0()
@@ -4141,6 +4240,21 @@ impl Zetta {
                             )
                         },
                     )
+                    .when(self.pane_move_mode && tab.active_pane == *pane_id, |pane| {
+                        pane.child(
+                            div()
+                                .absolute()
+                                .right(px(6.))
+                                .bottom(px(6.))
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .bg(colors.status_bar_background)
+                                .text_sm()
+                                .text_color(colors.text)
+                                .child("Move mode"),
+                        )
+                    })
                     .when(
                         tab.maximized_pane.is_none()
                             && (tab.renaming_pane == Some(*pane_id)

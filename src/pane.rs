@@ -875,6 +875,54 @@ impl PaneLayout {
         }
     }
 
+    /// Moves `active_pane` one step in `direction`, swapping it (and, when
+    /// nested, its whole subtree) with the sibling subtree that occupies the
+    /// nearest ancestor split on the matching axis. Returns `false` if there
+    /// is no such ancestor (the pane is already at that edge of the layout).
+    pub(crate) fn move_pane(&mut self, active_pane: u64, direction: PaneDirection) -> bool {
+        let (axis, toward_first) = match direction {
+            PaneDirection::Left => (SplitAxis::Vertical, true),
+            PaneDirection::Right => (SplitAxis::Vertical, false),
+            PaneDirection::Up => (SplitAxis::Horizontal, true),
+            PaneDirection::Down => (SplitAxis::Horizontal, false),
+        };
+        self.move_pane_inner(active_pane, axis, toward_first)
+            .unwrap_or(false)
+    }
+
+    fn move_pane_inner(&mut self, pane_id: u64, axis: SplitAxis, toward_first: bool) -> Option<bool> {
+        let Self::Split {
+            axis: split_axis,
+            first_ratio,
+            first,
+            second,
+        } = self
+        else {
+            return None;
+        };
+        if first.contains_pane(pane_id) {
+            if let Some(handled) = first.move_pane_inner(pane_id, axis, toward_first) {
+                return Some(handled);
+            }
+            (*split_axis == axis && !toward_first).then(|| {
+                std::mem::swap(first, second);
+                *first_ratio = PANE_SPLIT_RATIO_SCALE - *first_ratio;
+                true
+            })
+        } else if second.contains_pane(pane_id) {
+            if let Some(handled) = second.move_pane_inner(pane_id, axis, toward_first) {
+                return Some(handled);
+            }
+            (*split_axis == axis && toward_first).then(|| {
+                std::mem::swap(first, second);
+                *first_ratio = PANE_SPLIT_RATIO_SCALE - *first_ratio;
+                true
+            })
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn adjacent_pane(&self, active: u64, direction: PaneDirection) -> Option<u64> {
         let regions = self.regions();
         let source = regions.iter().find(|region| region.id == active)?;

@@ -12,7 +12,7 @@ for active development.
 
 - Tabs with renameable titles and selectable icons, recursive pane splits and
   pane rotation, pane templates, pane minimization, input broadcasting, and
-  modal keyboard or mouse pane resizing
+  modal keyboard or mouse pane resizing and moving
 - Automatically detected shells, including Homebrew-installed shells on
   macOS and Linux, plus first-class WSL/MSYS2 profiles with working directory
   tracking

@@ -67,6 +67,16 @@ display's usable bounds; a maximized or full-screen window is the hard growth
 limit. The native client window never shrinks below the size required for its
 window controls.
 
+Press `Alt-Shift-M`, or `Cmd-Shift-M` on macOS, to enter or leave pane-move
+mode. While it is active, the active pane shows a "Move mode" label and normal
+terminal input is paused. Arrow keys then move the active pane one step in
+that direction: it swaps with whichever pane, or group of panes, occupies the
+nearest matching side of the layout, so the tiling always stays valid — for
+example, moving one of the two stacked panes in the `three-right` template
+towards the large pane flips the whole layout to `three-left`. If there is no
+neighboring pane or group in that direction, the arrow key does nothing. Leave
+move mode with the same shortcut; there is no separate Escape binding.
+
 A maximized pane has a status strip below it. Restore it from that strip or
 with `Shift-Escape`.
 
@@ -293,6 +303,7 @@ become `Ctrl-Cmd`; for example, paste-trim is `Ctrl-Cmd-V` on macOS and
 | `Cmd-Shift-L` (macOS) / `Alt-Shift-L` (Windows/Linux) | Rotate the active pane layout clockwise, recursively |
 | `Cmd-Shift-K` (macOS) / `Alt-Shift-K` (Windows/Linux) | Rotate the active pane layout counter-clockwise, recursively |
 | `Ctrl-Shift-J`, then Arrow keys or a split gutter drag | Toggle pane-resize mode; resize panes |
+| `Cmd-Shift-M` (macOS) / `Alt-Shift-M` (Windows/Linux), then Arrow keys | Toggle pane-move mode; move panes |
 | `Cmd-Shift-X` (macOS) / `Alt-Shift-X` (Windows/Linux) | Close the active pane or its final tab |
 | `PageUp` / `PageDown` | Send page navigation to the foreground program |
 | `Shift-PageUp` / `Shift-PageDown` | Scroll history by one page |

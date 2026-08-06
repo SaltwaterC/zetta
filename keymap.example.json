@@ -12,6 +12,7 @@
       "ctrl-shift-o": "zetta::SplitHorizontalDown",
       "ctrl-shift-e": "zetta::SplitVerticalRight",
       "ctrl-shift-j": "zetta::TogglePaneResizeMode",
+      "alt-shift-m": "zetta::TogglePaneMoveMode",
       "ctrl-shift-backspace": "terminal_view::ClearClipboard",
       "shift-escape": "zetta::ToggleMaximizePane",
       "ctrl-shift-i": "zetta::ToggleBroadcastInput",
@@ -49,6 +50,15 @@
       "right": "zetta::ResizePaneRight",
       "up": "zetta::ResizePaneUp",
       "down": "zetta::ResizePaneDown"
+    }
+  },
+  {
+    "context": "Zetta > PaneMove > Terminal",
+    "bindings": {
+      "left": "zetta::MovePaneLeft",
+      "right": "zetta::MovePaneRight",
+      "up": "zetta::MovePaneUp",
+      "down": "zetta::MovePaneDown"
     }
   },
   {

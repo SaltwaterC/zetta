@@ -1851,6 +1851,7 @@ pub(crate) const ROTATE_PANE_LAYOUT_COUNTER_CLOCKWISE_KEYBINDING: &str = "cmd-sh
 #[cfg(not(target_os = "macos"))]
 pub(crate) const ROTATE_PANE_LAYOUT_COUNTER_CLOCKWISE_KEYBINDING: &str = "alt-shift-k";
 pub(crate) const TOGGLE_PANE_RESIZE_MODE_KEYBINDING: &str = "ctrl-shift-j";
+pub(crate) const TOGGLE_PANE_MOVE_MODE_KEYBINDING: &str = "alt-shift-m";
 pub(crate) const APPLICATION_MENU_KEYBINDING: &str = "alt-space";
 
 #[cfg(target_os = "macos")]
@@ -2013,6 +2014,23 @@ pub(crate) fn pane_resize_keybindings() -> [KeyBinding; 4] {
     ]
 }
 
+pub(crate) fn pane_move_mode_keybinding() -> KeyBinding {
+    platform_keybinding(
+        TOGGLE_PANE_MOVE_MODE_KEYBINDING,
+        TogglePaneMoveMode,
+        Some("Zetta > Terminal"),
+    )
+}
+
+pub(crate) fn pane_move_keybindings() -> [KeyBinding; 4] {
+    [
+        KeyBinding::new("left", MovePaneLeft, Some("Zetta > PaneMove > Terminal")),
+        KeyBinding::new("right", MovePaneRight, Some("Zetta > PaneMove > Terminal")),
+        KeyBinding::new("up", MovePaneUp, Some("Zetta > PaneMove > Terminal")),
+        KeyBinding::new("down", MovePaneDown, Some("Zetta > PaneMove > Terminal")),
+    ]
+}
+
 pub(crate) fn focus_pane_keybindings() -> [KeyBinding; 4] {
     let shortcuts = ["alt-left", "alt-right", "alt-up", "alt-down"];
 
@@ -2070,6 +2088,7 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
         rotate_pane_layout_keybinding(),
         rotate_pane_layout_counter_clockwise_keybinding(),
         pane_resize_mode_keybinding(),
+        pane_move_mode_keybinding(),
         select_all_keybinding(),
         edit_scrollback_keybinding(),
         KeyBinding::new(
@@ -2181,6 +2200,7 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
     bindings.extend(focus_pane_keybindings());
     bindings.extend(minimized_pane_keybindings());
     bindings.extend(pane_resize_keybindings());
+    bindings.extend(pane_move_keybindings());
     bindings.extend(pane_template_keybindings());
     bindings.extend(pane_font_size_keybindings());
     #[cfg(target_os = "macos")]
