@@ -4236,11 +4236,16 @@ impl Zetta {
                                     .bg(colors.status_bar_background)
                                     .text_sm()
                                     .text_color(colors.text)
-                                    .child(pane_size),
+                                    .child(format!("{pane_label} {pane_size}")),
                             )
                         },
                     )
-                    .when(self.pane_move_mode && tab.active_pane == *pane_id, |pane| {
+                    .when(self.pane_move_mode, |pane| {
+                        let overlay_label = if tab.active_pane == *pane_id {
+                            format!("{pane_label} Move mode")
+                        } else {
+                            pane_label.clone()
+                        };
                         pane.child(
                             div()
                                 .absolute()
@@ -4252,7 +4257,7 @@ impl Zetta {
                                 .bg(colors.status_bar_background)
                                 .text_sm()
                                 .text_color(colors.text)
-                                .child("Move mode"),
+                                .child(overlay_label),
                         )
                     })
                     .when(
