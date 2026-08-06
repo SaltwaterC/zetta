@@ -12,6 +12,9 @@ const TITLE_BAR_RECONNECT_LABEL_MIN_WIDTH: Pixels = px(800.);
 // Compact mode always keeps at least this much of the tab bar draggable, even
 // when tabs grow to fill the rest of it, so the window stays movable from there.
 const COMPACT_DRAG_AREA_MIN_WIDTH: Pixels = px(60.);
+// Two Large buttons (32px each) plus the gap_1 (4px) between them — see the
+// `title-bar-controls` reserve this backs on macOS.
+const COMPACT_LEADING_CONTROLS_RESERVE: Pixels = px(68.);
 
 /// The tab bar's row height: `compact_height` (the platform title bar's own
 /// height) in compact mode, since the tab bar shares that row there, or the
@@ -1480,11 +1483,15 @@ impl Render for Zetta {
                     .gap_1()
                     // The traffic lights are native controls even with a client title bar.
                     .when(cfg!(target_os = "macos"), |controls| controls.ml(px(72.)))
-                    // Leave room between the traffic lights and compact-mode controls when menus are hidden.
-                    .when(
-                        cfg!(target_os = "macos") && compact_mode && !show_title_bar_menus,
-                        |controls| controls.ml(px(80.)),
-                    )
+                    // Reserve a minimal, constant gap next to the traffic lights sized for
+                    // two Large buttons (e.g. the application and profile menu triggers) —
+                    // enough that tabs don't crowd the traffic lights when nothing else is
+                    // there, but a `min_w` rather than extra margin so that any menus or the
+                    // broadcast button which do render here expand into that reserve instead
+                    // of pushing further out.
+                    .when(cfg!(target_os = "macos") && compact_mode, |controls| {
+                        controls.min_w(COMPACT_LEADING_CONTROLS_RESERVE)
+                    })
                     .when(show_title_bar_menus, |controls| {
                         controls.child(application_menu).child(profile_menu)
                     })
