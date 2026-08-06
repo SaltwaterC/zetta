@@ -130,6 +130,7 @@ actions!(
         ChangePaneTheme,
         ResetPaneTheme,
         RenamePane,
+        SetPaneOverlay,
         TogglePaneControls,
         ToggleTabPaneControls,
         ClosePane,

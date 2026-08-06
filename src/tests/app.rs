@@ -327,6 +327,10 @@ fn background_session_is_reaped_after_its_final_pane_exits() {
             label_number: 1,
             generated_label: None,
             custom_label: None,
+            overlay_text: None,
+            overlay_font_size: None,
+            overlay_opacity: None,
+            overlay_color: None,
             profile,
             terminal: None,
             view: None,
@@ -350,6 +354,10 @@ fn background_session_is_reaped_after_its_final_pane_exits() {
         rename_buffer: None,
         rename_cursor: 0,
         rename_select_all: false,
+        editing_overlay_pane: None,
+        overlay_buffer: None,
+        overlay_cursor: 0,
+        overlay_select_all: false,
     };
     let mut sessions = BackgroundSessionRunner::default();
     sessions.detach(tab, None);

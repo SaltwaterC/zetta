@@ -89,6 +89,25 @@ impl Zetta {
             shortcut: change_pane_theme_shortcut,
             action: Box::new(change_pane_theme),
         });
+        let set_pane_overlay = SetPaneOverlay;
+        let set_pane_overlay_shortcut = terminal_focus
+            .as_ref()
+            .and_then(|focus| {
+                window.highest_precedence_binding_for_action_in(&set_pane_overlay, focus)
+            })
+            .map(|binding| {
+                binding
+                    .keystrokes()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            });
+        commands.push(PaletteCommand {
+            name: humanize_action_name(set_pane_overlay.name()),
+            shortcut: set_pane_overlay_shortcut,
+            action: Box::new(set_pane_overlay),
+        });
         commands.extend(self.launch_config.pane_split_templates.keys().map(|name| {
             let action = ApplyPaneSplitTemplate { name: name.clone() };
             let shortcut = terminal_focus
@@ -172,7 +191,11 @@ impl Zetta {
             return;
         }
         let Some(palette) = self.command_palette.as_mut() else {
-            self.rename_key_down(event, window, cx);
+            if self.is_editing_pane_overlay() {
+                self.overlay_key_down(event, window, cx);
+            } else {
+                self.rename_key_down(event, window, cx);
+            }
             return;
         };
         match event.keystroke.key.as_str() {
@@ -379,6 +402,112 @@ impl Zetta {
                     }
                     buffer.insert_str(tab.rename_cursor, text);
                     tab.rename_cursor += text.len();
+                    cx.notify();
+                }
+            }
+            _ => {}
+        }
+        cx.stop_propagation();
+    }
+
+    pub(crate) fn overlay_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            return;
+        };
+        let Some(buffer) = tab.overlay_buffer.as_mut() else {
+            return;
+        };
+        match event.keystroke.key.as_str() {
+            "enter" => {
+                let text = buffer.trim().to_string();
+                let text = (!text.is_empty()).then_some(text);
+                if let Some(pane_id) = tab.editing_overlay_pane.take()
+                    && let Some(pane) = tab.pane_mut(pane_id)
+                {
+                    pane.overlay_text = text;
+                }
+                tab.overlay_buffer = None;
+                tab.overlay_select_all = false;
+                self.focus_active(window, cx);
+            }
+            "escape" => {
+                tab.editing_overlay_pane = None;
+                tab.overlay_buffer = None;
+                tab.overlay_select_all = false;
+                self.focus_active(window, cx);
+            }
+            "backspace" => {
+                if tab.overlay_select_all {
+                    buffer.clear();
+                    tab.overlay_cursor = 0;
+                    tab.overlay_select_all = false;
+                } else if tab.overlay_cursor > 0 {
+                    let previous = previous_char_boundary(buffer, tab.overlay_cursor);
+                    buffer.replace_range(previous..tab.overlay_cursor, "");
+                    tab.overlay_cursor = previous;
+                }
+                cx.notify();
+            }
+            "delete" => {
+                if tab.overlay_select_all {
+                    buffer.clear();
+                    tab.overlay_cursor = 0;
+                    tab.overlay_select_all = false;
+                } else if tab.overlay_cursor < buffer.len() {
+                    let next = next_char_boundary(buffer, tab.overlay_cursor);
+                    buffer.replace_range(tab.overlay_cursor..next, "");
+                }
+                cx.notify();
+            }
+            "left" => {
+                tab.overlay_cursor = if tab.overlay_select_all {
+                    0
+                } else {
+                    previous_char_boundary(buffer, tab.overlay_cursor)
+                };
+                tab.overlay_select_all = false;
+                cx.notify();
+            }
+            "right" => {
+                tab.overlay_cursor = if tab.overlay_select_all {
+                    buffer.len()
+                } else {
+                    next_char_boundary(buffer, tab.overlay_cursor)
+                };
+                tab.overlay_select_all = false;
+                cx.notify();
+            }
+            "home" => {
+                tab.overlay_cursor = 0;
+                tab.overlay_select_all = false;
+                cx.notify();
+            }
+            "end" => {
+                tab.overlay_cursor = buffer.len();
+                tab.overlay_select_all = false;
+                cx.notify();
+            }
+            "a" if event.keystroke.modifiers.control || event.keystroke.modifiers.platform => {
+                tab.overlay_select_all = !buffer.is_empty();
+                cx.notify();
+            }
+            _ if !event.keystroke.modifiers.control
+                && !event.keystroke.modifiers.platform
+                && !event.keystroke.modifiers.alt =>
+            {
+                if let Some(text) = event.keystroke.key_char.as_ref() {
+                    if tab.overlay_select_all {
+                        buffer.clear();
+                        tab.overlay_cursor = 0;
+                        tab.overlay_select_all = false;
+                    }
+                    buffer.insert_str(tab.overlay_cursor, text);
+                    tab.overlay_cursor += text.len();
                     cx.notify();
                 }
             }

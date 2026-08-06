@@ -67,11 +67,84 @@ pub(crate) struct OpenProfile {
     pub(crate) slot: usize,
 }
 
+/// Named font-size steps for a pane's overlay text, matching the values
+/// accepted by `zetta overlay --size`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OverlayFontSize {
+    Small,
+    Base,
+    Large,
+    ExtraLarge,
+    ExtraExtraLarge,
+    ExtraExtraExtraLarge,
+}
+
+impl OverlayFontSize {
+    pub(crate) const DEFAULT: Self = Self::ExtraLarge;
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "sm" => Some(Self::Small),
+            "base" => Some(Self::Base),
+            "lg" => Some(Self::Large),
+            "xl" => Some(Self::ExtraLarge),
+            "2xl" => Some(Self::ExtraExtraLarge),
+            "3xl" => Some(Self::ExtraExtraExtraLarge),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn cli_name(self) -> &'static str {
+        match self {
+            Self::Small => "sm",
+            Self::Base => "base",
+            Self::Large => "lg",
+            Self::ExtraLarge => "xl",
+            Self::ExtraExtraLarge => "2xl",
+            Self::ExtraExtraExtraLarge => "3xl",
+        }
+    }
+
+    pub(crate) const CLI_NAMES: [&'static str; 6] = ["sm", "base", "lg", "xl", "2xl", "3xl"];
+}
+
+/// Raw `zetta overlay` request values, before `color` is resolved from its
+/// hex string into a color and `opacity` from a 0-100 percentage into a
+/// 0.0-1.0 fraction. Shared by the CLI parser and the process-control client
+/// so neither has to thread four separate parameters around.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PaneOverlayRequest {
+    pub(crate) text: Option<String>,
+    pub(crate) font_size: Option<OverlayFontSize>,
+    /// A percentage from `0` to `100`.
+    pub(crate) opacity: Option<u8>,
+    /// An `rgb`, `rgba`, `rrggbb`, or `rrggbbaa` hex color, with or without
+    /// a leading `#`.
+    pub(crate) color: Option<String>,
+}
+
+/// Adds back the leading `#` that [`gpui::Rgba`]'s hex parser requires. The
+/// `zetta overlay --color` value never needs one from the user, since `#`
+/// starts a comment in most shells and would otherwise always need quoting.
+pub(crate) fn normalize_overlay_color_hex(value: &str) -> String {
+    format!("#{}", value.trim_start_matches('#'))
+}
+
 pub(crate) struct TerminalPane {
     pub(crate) id: u64,
     pub(crate) label_number: usize,
     pub(crate) generated_label: Option<String>,
     pub(crate) custom_label: Option<String>,
+    /// Free-form text shown over this pane's terminal content. Ephemeral:
+    /// never written to `config.json`, so it is lost when the pane closes.
+    pub(crate) overlay_text: Option<String>,
+    /// Font size for `overlay_text`; falls back to [`OverlayFontSize::DEFAULT`].
+    pub(crate) overlay_font_size: Option<OverlayFontSize>,
+    /// Opacity for `overlay_text`, from `0.0` to `1.0`; falls back to a
+    /// partly transparent default.
+    pub(crate) overlay_opacity: Option<f32>,
+    /// Text color for `overlay_text`; falls back to the theme's text color.
+    pub(crate) overlay_color: Option<gpui::Hsla>,
     pub(crate) profile: Profile,
     pub(crate) terminal: Option<Entity<Terminal>>,
     pub(crate) view: Option<Entity<TerminalView>>,
@@ -1024,6 +1097,10 @@ pub(crate) struct Tab {
     pub(crate) rename_buffer: Option<String>,
     pub(crate) rename_cursor: usize,
     pub(crate) rename_select_all: bool,
+    pub(crate) editing_overlay_pane: Option<u64>,
+    pub(crate) overlay_buffer: Option<String>,
+    pub(crate) overlay_cursor: usize,
+    pub(crate) overlay_select_all: bool,
 }
 
 impl Tab {
@@ -1065,6 +1142,8 @@ impl Tab {
             .and_then(|pane_id| pane_ids.get(&pane_id).copied());
         self.renaming_pane = None;
         self.rename_buffer = None;
+        self.editing_overlay_pane = None;
+        self.overlay_buffer = None;
     }
 
     pub(crate) fn displayed_pane_label(&self, id: u64) -> Option<String> {
@@ -1077,6 +1156,23 @@ impl Tab {
             return Some(buffer.clone());
         }
         let cursor = self.rename_cursor.min(buffer.len());
+        let (before, after) = buffer.split_at(cursor);
+        Some(format!("{before}|{after}"))
+    }
+
+    /// The pane's overlay text: the committed `overlay_text` normally, or the
+    /// in-progress edit buffer (with a `|` cursor marker) while it is being
+    /// edited. `None` means no overlay should be shown for this pane.
+    pub(crate) fn displayed_pane_overlay(&self, id: u64) -> Option<String> {
+        let pane = self.pane(id)?;
+        if self.editing_overlay_pane != Some(id) {
+            return pane.overlay_text.clone();
+        }
+        let buffer = self.overlay_buffer.as_ref()?;
+        if self.overlay_select_all {
+            return Some(buffer.clone());
+        }
+        let cursor = self.overlay_cursor.min(buffer.len());
         let (before, after) = buffer.split_at(cursor);
         Some(format!("{before}|{after}"))
     }

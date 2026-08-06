@@ -336,19 +336,19 @@ fn notify_timeout_completion_does_not_leak_into_other_short_t_flags() {
 
     let bash = ShellIntegration::Bash.script(&profiles);
     assert!(bash.contains(
-        "--output-type|-t|--theme)\n            if [[ $command == panetheme || $command == -* ]]; then\n                _zetta_complete_pane_themes\n            elif [[ $command == notify ]]; then\n                _zetta_compgen 'default never'"
+        "--output-type|-t|--theme|--text)\n            if [[ $command == panetheme || $command == -* ]]; then\n                _zetta_complete_pane_themes\n            elif [[ $command == notify ]]; then\n                _zetta_compgen 'default never'\n            elif [[ $command == overlay ]]; then\n                COMPREPLY=()"
     ));
     assert!(bash.contains("_zetta_compgen 'repeated unique'"));
 
     let zsh = ShellIntegration::Zsh.script(&profiles);
     assert!(zsh.contains(
-        "--output-type|-t|--theme)\n            if [[ $words[2] == panetheme || $words[2] == -* ]]; then\n                _zetta_pane_themes\n            elif [[ $words[2] == notify ]]; then\n                compadd -- default never"
+        "--output-type|-t|--theme|--text)\n            if [[ $words[2] == panetheme || $words[2] == -* ]]; then\n                _zetta_pane_themes\n            elif [[ $words[2] == notify ]]; then\n                compadd -- default never\n            elif [[ $words[2] == overlay ]]; then\n                return"
     ));
     assert!(zsh.contains("compadd -- repeated unique"));
 
     let powershell = ShellIntegration::PowerShell.script(&profiles);
     assert!(powershell.contains(
-        "elseif ($previous -in '--output-type', '-t', '--theme') {\n        if ($subcommand -eq 'panetheme' -or $null -eq $subcommand) { & $zettaPaneThemes }\n        elseif ($subcommand -eq 'notify') { 'default', 'never' }\n        else { 'repeated', 'unique' }"
+        "elseif ($previous -in '--output-type', '-t', '--theme', '--text') {\n        if ($subcommand -eq 'panetheme' -or $null -eq $subcommand) { & $zettaPaneThemes }\n        elseif ($subcommand -eq 'notify') { 'default', 'never' }\n        elseif ($subcommand -eq 'overlay') { @() }\n        else { 'repeated', 'unique' }"
     ));
 }
 
@@ -892,7 +892,7 @@ fn generated_scripts_only_offer_long_form_flags() {
         let script = shell.script(&profiles);
         match shell {
             ShellIntegration::Bash => assert!(script.contains(
-                "terminal-size sessions edit vi init serial http tftp notify copy paste tabicon panetheme --help --version --config --keymap --profile --theme'"
+                "terminal-size sessions edit vi init serial http tftp notify copy paste tabicon panetheme overlay --help --version --config --keymap --profile --theme'"
             )),
             ShellIntegration::Fish => {
                 assert!(script.contains("-l profile -r"));
@@ -930,6 +930,7 @@ fn fish_script_emits_long_option_candidates_for_every_command_context() {
         "paste",
         "tabicon",
         "panetheme",
+        "overlay",
         "ztftp",
         "zntfy",
         "zcopy",
@@ -998,6 +999,24 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
             &["--theme", "--reset", "--list", "--help"][..],
         ),
         ("zetta panetheme -t ", &[][..]),
+        (
+            "zetta overlay ",
+            &[
+                "--text",
+                "--size",
+                "--opacity",
+                "--color",
+                "--reset",
+                "--help",
+            ][..],
+        ),
+        ("zetta overlay -t ", &[][..]),
+        (
+            "zetta overlay -s ",
+            &["sm", "base", "lg", "xl", "2xl", "3xl"][..],
+        ),
+        ("zetta overlay -o ", &[][..]),
+        ("zetta overlay -c ", &[][..]),
         ("zetta vi ", &["--help", "Cargo.toml"][..]),
         ("zetta vi Carg", &["Cargo.toml"][..]),
         ("zetta init ", &["--help"][..]),

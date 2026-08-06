@@ -190,6 +190,10 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     assert!(help.contains("zetta terminal-size [--json | --resize"));
     assert!(help.contains("zetta tabicon [OPTIONS] ICON"));
     assert!(help.contains("tabicon                             Set the active tab icon"));
+    assert!(help.contains("zetta overlay [OPTIONS] TEXT"));
+    assert!(help.contains(
+        "overlay                             Non-persistently show text over the active pane"
+    ));
     assert!(help.contains("zetta vi [OPTIONS] [FILE ...]"));
     assert!(help.contains("zetta edit [OPTIONS] [--] FILE ..."));
     assert!(help.contains("edit                                Edit files with $EDITOR"));
@@ -349,6 +353,135 @@ fn panetheme_subcommand_parses_names_resets_and_dynamic_listing() {
             OsString::from("panetheme"),
             OsString::from("--reset"),
             OsString::from("Dracula"),
+        ])
+        .is_err()
+    );
+}
+
+#[test]
+fn overlay_subcommand_parses_text_and_reset() {
+    assert_eq!(
+        parse_args_from([OsString::from("overlay"), OsString::from("Prod")])
+            .unwrap()
+            .mode,
+        StartupMode::SetPaneOverlay(PaneOverlayRequest {
+            text: Some("Prod".to_owned()),
+            font_size: None,
+            opacity: None,
+            color: None,
+        })
+    );
+    assert_eq!(
+        parse_args_from([
+            OsString::from("overlay"),
+            OsString::from("--text"),
+            OsString::from("Staging box"),
+        ])
+        .unwrap()
+        .mode,
+        StartupMode::SetPaneOverlay(PaneOverlayRequest {
+            text: Some("Staging box".to_owned()),
+            font_size: None,
+            opacity: None,
+            color: None,
+        })
+    );
+    assert_eq!(
+        parse_args_from([OsString::from("overlay"), OsString::from("--reset")])
+            .unwrap()
+            .mode,
+        StartupMode::SetPaneOverlay(PaneOverlayRequest {
+            text: None,
+            font_size: None,
+            opacity: None,
+            color: None,
+        })
+    );
+    assert!(parse_args_from([OsString::from("overlay")]).is_err());
+    assert!(
+        parse_args_from([
+            OsString::from("overlay"),
+            OsString::from("--reset"),
+            OsString::from("Prod"),
+        ])
+        .is_err()
+    );
+}
+
+#[test]
+fn overlay_subcommand_parses_style_options_and_rejects_invalid_values() {
+    assert_eq!(
+        parse_args_from([
+            OsString::from("overlay"),
+            OsString::from("Prod"),
+            OsString::from("--size"),
+            OsString::from("2xl"),
+            OsString::from("--opacity"),
+            OsString::from("50"),
+            OsString::from("--color"),
+            OsString::from("ff8800"),
+        ])
+        .unwrap()
+        .mode,
+        StartupMode::SetPaneOverlay(PaneOverlayRequest {
+            text: Some("Prod".to_owned()),
+            font_size: Some(OverlayFontSize::ExtraExtraLarge),
+            opacity: Some(50),
+            color: Some("ff8800".to_owned()),
+        })
+    );
+    assert!(
+        parse_args_from([
+            OsString::from("overlay"),
+            OsString::from("Prod"),
+            OsString::from("--color"),
+            OsString::from("#ff8800"),
+        ])
+        .is_ok(),
+        "a leading # must still be accepted"
+    );
+    assert!(
+        parse_args_from([
+            OsString::from("overlay"),
+            OsString::from("Prod"),
+            OsString::from("--size"),
+            OsString::from("huge"),
+        ])
+        .is_err()
+    );
+    assert!(
+        parse_args_from([
+            OsString::from("overlay"),
+            OsString::from("Prod"),
+            OsString::from("--opacity"),
+            OsString::from("101"),
+        ])
+        .is_err()
+    );
+    assert!(
+        parse_args_from([
+            OsString::from("overlay"),
+            OsString::from("Prod"),
+            OsString::from("--opacity"),
+            OsString::from("not-a-number"),
+        ])
+        .is_err()
+    );
+    assert!(
+        parse_args_from([
+            OsString::from("overlay"),
+            OsString::from("Prod"),
+            OsString::from("--color"),
+            OsString::from("not-a-color"),
+        ])
+        .is_err()
+    );
+    assert!(
+        parse_args_from([
+            OsString::from("overlay"),
+            OsString::from("--reset"),
+            OsString::from("--size"),
+            OsString::from("xl"),
         ])
         .is_err()
     );

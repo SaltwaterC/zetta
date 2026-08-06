@@ -39,6 +39,16 @@ a Zetta pane to non-persistently change the active pane's theme;
 (or `-t`) also completes pane themes when typed after `--profile` at launch,
 since it non-persistently overrides that profile's theme for the new window.
 
+`zetta overlay`'s text (`--text`/`-t`), opacity (`--opacity`/`-o`), and color
+(`--color`/`-c`) flags have no dynamic value list, since they take free-form
+values rather than a name from a fixed set. Its size flag (`--size`/`-s`) is
+a fixed, compile-time set of names (`sm`, `base`, `lg`, `xl`, `2xl`, `3xl`),
+so the generated script completes those directly. Use `zetta overlay TEXT`
+(or `zetta overlay --text TEXT`) from a Zetta pane to non-persistently show
+text over the active pane's terminal content, and add `--size`, `--opacity`,
+or `--color` to customize its font size, transparency, or text color;
+`zetta overlay --reset` clears it.
+
 It also completes the full-length `zetta terminal-size` resize flags, which
 resize the current Zetta pane while retaining an omitted dimension. Completion
 lists full-length option names alongside valid subcommands without requiring a

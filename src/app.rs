@@ -570,6 +570,10 @@ impl Zetta {
                 label_number: 0,
                 generated_label: Some(format!("Stress {:02}", index + 2)),
                 custom_label: None,
+                overlay_text: None,
+                overlay_font_size: None,
+                overlay_opacity: None,
+                overlay_color: None,
                 profile: profile.clone(),
                 terminal: None,
                 view: None,
@@ -759,6 +763,10 @@ impl Zetta {
                 label_number: 1,
                 generated_label: None,
                 custom_label: None,
+                overlay_text: None,
+                overlay_font_size: None,
+                overlay_opacity: None,
+                overlay_color: None,
                 profile: profile.clone(),
                 terminal: None,
                 view: None,
@@ -782,6 +790,10 @@ impl Zetta {
             rename_buffer: None,
             rename_cursor: 0,
             rename_select_all: false,
+            editing_overlay_pane: None,
+            overlay_buffer: None,
+            overlay_cursor: 0,
+            overlay_select_all: false,
         });
         self.active_tab = self.tabs.len() - 1;
 
@@ -1329,6 +1341,10 @@ impl Zetta {
             label_number: 0,
             generated_label: None,
             custom_label: None,
+            overlay_text: None,
+            overlay_font_size: None,
+            overlay_opacity: None,
+            overlay_color: None,
             profile: profile.clone(),
             terminal: None,
             view: None,
@@ -2474,6 +2490,10 @@ impl Zetta {
                 label_number: 0,
                 generated_label: None,
                 custom_label: None,
+                overlay_text: None,
+                overlay_font_size: None,
+                overlay_opacity: None,
+                overlay_color: None,
                 profile: profile.clone(),
                 terminal: None,
                 view: None,
@@ -4249,6 +4269,69 @@ impl Zetta {
         cx.notify();
     }
 
+    pub(crate) fn set_pane_overlay(
+        &mut self,
+        _: &SetPaneOverlay,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pane_id) = self.tabs.get(self.active_tab).map(|tab| tab.active_pane) else {
+            return;
+        };
+        self.begin_pane_overlay_edit(pane_id, window, cx);
+    }
+
+    pub(crate) fn begin_pane_overlay_edit(
+        &mut self,
+        pane_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            return;
+        };
+        let Some(pane) = tab.pane(pane_id) else {
+            return;
+        };
+        let text = pane.overlay_text.clone().unwrap_or_default();
+        tab.activate_pane(pane_id);
+        tab.editing_overlay_pane = Some(pane_id);
+        tab.overlay_cursor = text.len();
+        tab.overlay_buffer = Some(text);
+        tab.overlay_select_all = true;
+        self.rename_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Sets the active pane's overlay text and style directly, bypassing the
+    /// inline edit buffer. Shared by the `overlay` CLI command and its
+    /// process-control handler; never touches `config.json`, so the overlay
+    /// is lost when the pane closes or the configuration reloads. `text:
+    /// None` clears the overlay along with its style. Every call fully
+    /// replaces the previous text and style rather than merging with it.
+    pub(crate) fn set_active_pane_overlay(
+        &mut self,
+        text: Option<String>,
+        font_size: Option<OverlayFontSize>,
+        opacity: Option<f32>,
+        color: Option<gpui::Hsla>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            return false;
+        };
+        let active_pane = tab.active_pane;
+        let Some(pane) = tab.pane_mut(active_pane) else {
+            return false;
+        };
+        pane.overlay_text = text;
+        pane.overlay_font_size = font_size;
+        pane.overlay_opacity = opacity;
+        pane.overlay_color = color;
+        cx.notify();
+        true
+    }
+
     pub(crate) fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.get(self.active_tab) {
             let active_is_visible = tab.pane_is_visible(tab.active_pane);
@@ -4365,6 +4448,12 @@ impl Zetta {
             .is_some_and(|tab| tab.rename_buffer.is_some())
     }
 
+    pub(crate) fn is_editing_pane_overlay(&self) -> bool {
+        self.tabs
+            .get(self.active_tab)
+            .is_some_and(|tab| tab.overlay_buffer.is_some())
+    }
+
     pub(crate) fn render_pane_layout(
         &self,
         tab: &Tab,
@@ -4470,6 +4559,7 @@ impl Zetta {
                 let pane_label = tab
                     .displayed_pane_label(*pane_id)
                     .unwrap_or_else(|| pane.label());
+                let pane_overlay = tab.displayed_pane_overlay(*pane_id);
                 let pane_terminal = pane.terminal.as_ref();
                 let pane_size = pane_terminal.map(|terminal| {
                     let bounds = terminal.read(cx).last_content().terminal_bounds;
@@ -4478,6 +4568,11 @@ impl Zetta {
                 let pane_label_selected = tab.renaming_pane == Some(*pane_id)
                     && tab.rename_select_all
                     && tab.rename_buffer.is_some();
+                let pane_overlay_editing = tab.editing_overlay_pane == Some(*pane_id);
+                let pane_overlay_font_size =
+                    pane.overlay_font_size.unwrap_or(OverlayFontSize::DEFAULT);
+                let pane_overlay_base_opacity = pane.overlay_opacity.unwrap_or(0.85);
+                let pane_overlay_color = pane.overlay_color.unwrap_or(colors.text);
                 let active = pane.view.as_ref().is_some_and(|view| {
                     view.focus_handle(cx).is_focused(window)
                         || view.read(cx).has_open_context_menu()
@@ -4585,6 +4680,32 @@ impl Zetta {
                                 .text_sm()
                                 .text_color(colors.text)
                                 .child(overlay_label),
+                        )
+                    })
+                    .when_some(pane_overlay, |pane, overlay| {
+                        pane.child(
+                            div()
+                                .id(("terminal-pane-overlay", *pane_id as usize))
+                                .absolute()
+                                .right(px(6.))
+                                .top(px(6.))
+                                .max_w(px(320.))
+                                .map(|element| match pane_overlay_font_size {
+                                    OverlayFontSize::Small => element.text_sm(),
+                                    OverlayFontSize::Base => element.text_base(),
+                                    OverlayFontSize::Large => element.text_lg(),
+                                    OverlayFontSize::ExtraLarge => element.text_xl(),
+                                    OverlayFontSize::ExtraExtraLarge => element.text_2xl(),
+                                    OverlayFontSize::ExtraExtraExtraLarge => element.text_3xl(),
+                                })
+                                .text_color(pane_overlay_color)
+                                .opacity(if pane_overlay_editing {
+                                    1.
+                                } else {
+                                    pane_overlay_base_opacity
+                                })
+                                .overflow_hidden()
+                                .child(overlay),
                         )
                     })
                     .when(

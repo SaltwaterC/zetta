@@ -423,6 +423,10 @@ fn tab_pane_index_resolves_panes_without_scanning() {
             label_number: id as usize,
             generated_label: None,
             custom_label: None,
+            overlay_text: None,
+            overlay_font_size: None,
+            overlay_opacity: None,
+            overlay_color: None,
             profile: profile.clone(),
             terminal: None,
             view: None,
@@ -450,6 +454,10 @@ fn tab_pane_index_resolves_panes_without_scanning() {
         rename_buffer: None,
         rename_cursor: 0,
         rename_select_all: false,
+        editing_overlay_pane: None,
+        overlay_buffer: None,
+        overlay_cursor: 0,
+        overlay_select_all: false,
     };
     for pane in &tab.panes {
         assert!(std::ptr::eq(tab.pane(pane.id).unwrap(), pane));
@@ -464,6 +472,10 @@ fn tab_pane_index_resolves_panes_without_scanning() {
         label_number: 0,
         generated_label: None,
         custom_label: None,
+        overlay_text: None,
+        overlay_font_size: None,
+        overlay_opacity: None,
+        overlay_color: None,
         profile,
         terminal: None,
         view: None,
@@ -553,6 +565,10 @@ fn split_profile_comes_from_the_active_pane() {
                 label_number: 1,
                 generated_label: None,
                 custom_label: None,
+                overlay_text: None,
+                overlay_font_size: None,
+                overlay_opacity: None,
+                overlay_color: None,
                 profile: system,
                 terminal: None,
                 view: None,
@@ -565,6 +581,10 @@ fn split_profile_comes_from_the_active_pane() {
                 label_number: 2,
                 generated_label: None,
                 custom_label: None,
+                overlay_text: None,
+                overlay_font_size: None,
+                overlay_opacity: None,
+                overlay_color: None,
                 profile: zsh,
                 terminal: None,
                 view: None,
@@ -594,6 +614,10 @@ fn split_profile_comes_from_the_active_pane() {
         rename_buffer: None,
         rename_cursor: 0,
         rename_select_all: false,
+        editing_overlay_pane: None,
+        overlay_buffer: None,
+        overlay_cursor: 0,
+        overlay_select_all: false,
     };
 
     let profile = tab.active_profile().unwrap();
@@ -613,6 +637,10 @@ fn closing_active_pane_restores_previous_focus() {
         label_number: id as usize,
         generated_label: None,
         custom_label: None,
+        overlay_text: None,
+        overlay_font_size: None,
+        overlay_opacity: None,
+        overlay_color: None,
         profile: profile.clone(),
         terminal: None,
         view: None,
@@ -639,6 +667,10 @@ fn closing_active_pane_restores_previous_focus() {
         rename_buffer: None,
         rename_cursor: 0,
         rename_select_all: false,
+        editing_overlay_pane: None,
+        overlay_buffer: None,
+        overlay_cursor: 0,
+        overlay_select_all: false,
     };
 
     tab.remove_pane(3);
@@ -660,6 +692,10 @@ fn closing_inactive_pane_preserves_focus() {
         label_number: id as usize,
         generated_label: None,
         custom_label: None,
+        overlay_text: None,
+        overlay_font_size: None,
+        overlay_opacity: None,
+        overlay_color: None,
         profile: profile.clone(),
         terminal: None,
         view: None,
@@ -686,6 +722,10 @@ fn closing_inactive_pane_preserves_focus() {
         rename_buffer: None,
         rename_cursor: 0,
         rename_select_all: false,
+        editing_overlay_pane: None,
+        overlay_buffer: None,
+        overlay_cursor: 0,
+        overlay_select_all: false,
     };
 
     tab.remove_pane(1);
@@ -990,6 +1030,10 @@ fn pane_management_tab() -> Tab {
         label_number: id as usize,
         generated_label: None,
         custom_label: None,
+        overlay_text: None,
+        overlay_font_size: None,
+        overlay_opacity: None,
+        overlay_color: None,
         profile: profile.clone(),
         terminal: None,
         view: None,
@@ -1027,6 +1071,10 @@ fn pane_management_tab() -> Tab {
         rename_buffer: None,
         rename_cursor: 0,
         rename_select_all: false,
+        editing_overlay_pane: None,
+        overlay_buffer: None,
+        overlay_cursor: 0,
+        overlay_select_all: false,
     }
 }
 
@@ -1131,6 +1179,10 @@ fn pane_labels_remain_stable_and_are_not_reused() {
         label_number: 0,
         generated_label: None,
         custom_label: None,
+        overlay_text: None,
+        overlay_font_size: None,
+        overlay_opacity: None,
+        overlay_color: None,
         profile,
         terminal: None,
         view: None,
@@ -1163,6 +1215,32 @@ fn custom_pane_labels_replace_the_fallback_and_render_while_editing() {
     tab.renaming_pane = None;
     tab.rename_buffer = None;
     assert_eq!(tab.pane(2).unwrap().label(), "dev · eu-west");
+}
+
+#[test]
+fn pane_overlay_is_hidden_by_default_and_renders_while_editing() {
+    let mut tab = pane_management_tab();
+
+    assert_eq!(tab.displayed_pane_overlay(2), None);
+
+    tab.pane_mut(2).unwrap().overlay_text = Some("Prod".to_owned());
+    assert_eq!(tab.displayed_pane_overlay(2).as_deref(), Some("Prod"));
+
+    tab.editing_overlay_pane = Some(2);
+    tab.overlay_buffer = Some("Staging".to_owned());
+    tab.overlay_cursor = 4;
+    assert_eq!(tab.displayed_pane_overlay(2).as_deref(), Some("Stag|ing"));
+
+    tab.overlay_select_all = true;
+    assert_eq!(tab.displayed_pane_overlay(2).as_deref(), Some("Staging"));
+
+    tab.editing_overlay_pane = None;
+    tab.overlay_buffer = None;
+    tab.overlay_select_all = false;
+    assert_eq!(tab.displayed_pane_overlay(2).as_deref(), Some("Prod"));
+
+    tab.pane_mut(2).unwrap().overlay_text = None;
+    assert_eq!(tab.displayed_pane_overlay(2), None);
 }
 
 #[test]

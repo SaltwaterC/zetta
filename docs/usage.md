@@ -107,6 +107,28 @@ The same change is available from any Zetta pane, or a script, with
 process (built-in and user-installed). Shell integration completes pane
 theme names dynamically, the same way it does for `zetta tabicon`.
 
+Press `Alt-Shift-B`, or `Cmd-Shift-B` on macOS, or run **Set Pane Overlay**
+from the command palette to edit text shown over the active pane's terminal
+content. It renders as larger, translucent text in the pane's top-right
+corner, with no background box, so it reads as a watermark rather than
+obscuring the terminal underneath. The text is edited in place over the
+pane, at full opacity while editing; type to change it, use the arrow keys
+to move the cursor, and `Enter` to apply or `Escape` to cancel without
+changing it. Submitting empty text clears the overlay. The overlay is not
+saved: it is not written to `config.json`, so it disappears when the pane
+closes or the configuration reloads.
+
+The same change is available from any Zetta pane, or a script, with
+`zetta overlay TEXT`; `zetta overlay --reset` clears the overlay. Add
+`--size SIZE` (`sm`, `base`, `lg`, `xl` (default), `2xl`, or `3xl`),
+`--opacity PERCENT` (`0`-`100`, default `85`), and `--color COLOR` (an
+`rgb`, `rgba`, `rrggbb`, or `rrggbbaa` hex value, with or without a leading
+`#`) to customize the font size, transparency, and text color. The leading
+`#` is optional and can be omitted, since most shells treat it as a comment
+and would otherwise require quoting it. These apply together with the text in
+the same invocation; running `zetta overlay` again fully replaces the
+previous text and style rather than merging with it.
+
 Rotate the layout around the active pane with `Alt-Shift-L` clockwise or
 `Alt-Shift-K` counter-clockwise on Windows/Linux. macOS uses the corresponding
 `Cmd-Shift-L` and `Cmd-Shift-K` shortcuts. Rotation is recursive: a focused
@@ -357,6 +379,7 @@ become `Ctrl-Cmd`; for example, paste-trim is `Ctrl-Cmd-V` on macOS and
 | `Ctrl-Shift-Y` | Change the active tab icon |
 | `Cmd-Shift-T` (macOS) / `Alt-Shift-T` (Windows/Linux) | Change the active pane's theme (non-persistent) |
 | `Cmd-Shift-R` (macOS) / `Alt-Shift-R` (Windows/Linux) | Label the active pane |
+| `Cmd-Shift-B` (macOS) / `Alt-Shift-B` (Windows/Linux) | Set the active pane's overlay text (non-persistent) |
 | `Ctrl-=` / `Ctrl-+` | Increase font size globally |
 | `Ctrl--` | Decrease font size globally |
 | `Ctrl-0` | Reset font size globally |

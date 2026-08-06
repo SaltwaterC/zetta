@@ -578,11 +578,13 @@ _zetta_complete() {
             _zetta_compgen 'none odd even'
             return
             ;;
-        --stop-bits|-s)
+        --stop-bits|-s|--size)
             if [[ $command == serial ]]; then
                 _zetta_compgen '1 2'
             elif [[ $command == notify ]]; then
                 _zetta_complete_sound_names
+            elif [[ $command == overlay ]]; then
+                _zetta_compgen 'sm base lg xl 2xl 3xl'
             else
                 COMPREPLY=()
             fi
@@ -620,16 +622,24 @@ _zetta_complete() {
             _zetta_compgen 'default never'
             return
             ;;
+        --opacity|-o)
+            COMPREPLY=()
+            return
+            ;;
         --config|--keymap|-k|--profile-report)
             COMPREPLY=( $(compgen -f -- "$current") )
             return
             ;;
         -c)
-            if [[ $command == terminal-size ]]; then
+            if [[ $command == terminal-size || $command == overlay ]]; then
                 COMPREPLY=()
             else
                 COMPREPLY=( $(compgen -f -- "$current") )
             fi
+            return
+            ;;
+        --color)
+            COMPREPLY=()
             return
             ;;
         -r)
@@ -642,24 +652,26 @@ _zetta_complete() {
             fi
             return
             ;;
-        --output-type|-t|--theme)
+        --output-type|-t|--theme|--text)
             if [[ $command == panetheme || $command == -* ]]; then
                 _zetta_complete_pane_themes
             elif [[ $command == notify ]]; then
                 _zetta_compgen 'default never'
+            elif [[ $command == overlay ]]; then
+                COMPREPLY=()
             else
                 _zetta_compgen 'repeated unique'
             fi
             return
             ;;
-        --port|-p|--baud-rate|-b|--size|--profile-duration|--columns|--rows|-R)
+        --port|-p|--baud-rate|-b|--profile-duration|--columns|--rows|-R)
             COMPREPLY=()
             return
             ;;
     esac
 
     if (( COMP_CWORD == 1 )); then
-        _zetta_compgen 'benchmark benchmark-output terminal-size sessions edit vi init serial http tftp notify copy paste tabicon panetheme --help --version --config --keymap --profile --theme'
+        _zetta_compgen 'benchmark benchmark-output terminal-size sessions edit vi init serial http tftp notify copy paste tabicon panetheme overlay --help --version --config --keymap --profile --theme'
         return
     fi
 
@@ -753,6 +765,9 @@ _zetta_complete() {
             else
                 _zetta_complete_pane_themes
             fi
+            ;;
+        overlay)
+            _zetta_compgen '--text --size --opacity --color --reset --help'
             ;;
     esac
 }
@@ -1106,6 +1121,14 @@ function __zetta_long_options
                 --icon 'Set the tab icon' \
                 --list 'Print built-in icon names' \
                 --help 'Print help'
+        case overlay
+            printf '%s\t%s\n' \
+                --text 'Set the overlay text' \
+                --size 'Set the font size' \
+                --opacity 'Set the opacity percentage (0-100)' \
+                --color 'Set the text color (hex)' \
+                --reset 'Clear the overlay' \
+                --help 'Print help'
         case terminal-size
             printf '%s\t%s\n' \
                 --json 'Print machine-readable JSON' \
@@ -1187,6 +1210,7 @@ complete -c zetta -n '__zetta_at_root' -a copy -d 'Copy standard input to the cl
 complete -c zetta -n '__zetta_at_root' -a paste -d "Print the clipboard's contents"
 complete -c zetta -n '__zetta_at_root' -a tabicon -d 'Set the active tab icon'
 complete -c zetta -n '__zetta_at_root' -a panetheme -d "Non-persistently change the active pane's theme"
+complete -c zetta -n '__zetta_at_root' -a overlay -d 'Non-persistently show text over the active pane'
 complete -c zetta -n '__zetta_use_subcommand' -l help -d 'Print help'
 complete -c zetta -n '__zetta_use_subcommand' -l version -d 'Print version'
 complete -c zetta -n '__zetta_use_subcommand' -l config -r -d 'Use a configuration file'
@@ -1313,6 +1337,17 @@ complete -c zetta -n '__fish_seen_subcommand_from panetheme' -l list -d 'Print t
 complete -c zetta -n '__fish_seen_subcommand_from panetheme' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from panetheme' -a '(__zetta_long_options panetheme)'
 complete -c zetta -n '__fish_seen_subcommand_from panetheme' -a '(__zetta_pane_themes)'
+complete -c zetta -n '__fish_seen_subcommand_from overlay' -l text -r -d 'Set the overlay text'
+complete -c zetta -s t -r -n '__fish_seen_subcommand_from overlay; and __zetta_short_option -t'
+complete -c zetta -n '__fish_seen_subcommand_from overlay' -l size -r -a 'sm base lg xl 2xl 3xl' -d 'Set the font size'
+complete -c zetta -s s -r -a 'sm base lg xl 2xl 3xl' -n '__fish_seen_subcommand_from overlay; and __zetta_short_option -s'
+complete -c zetta -n '__fish_seen_subcommand_from overlay' -l opacity -r -d 'Set the opacity percentage (0-100)'
+complete -c zetta -s o -r -n '__fish_seen_subcommand_from overlay; and __zetta_short_option -o'
+complete -c zetta -n '__fish_seen_subcommand_from overlay' -l color -r -d 'Set the text color (hex)'
+complete -c zetta -s c -r -n '__fish_seen_subcommand_from overlay; and __zetta_short_option -c'
+complete -c zetta -n '__fish_seen_subcommand_from overlay' -l reset -d 'Clear the overlay'
+complete -c zetta -n '__fish_seen_subcommand_from overlay' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from overlay' -a '(__zetta_long_options overlay)'
 complete -c ztftp -f -a 'get put'
 complete -c ztftp -l port -r -d 'Server port'
 complete -c ztftp -l help -d 'Print help'
@@ -1418,7 +1453,7 @@ $zettaCompletions = {
     $previous = if ($words.Count -gt 1) { $words[$words.Count - 2] } else { '' }
     $last = if ($words.Count -gt 1) { $words[$words.Count - 1] } else { '' }
     $subcommand = $words | Where-Object {
-        $_ -in 'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste', 'tabicon', 'panetheme'
+        $_ -in 'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay'
     } | Select-Object -First 1
 
     $candidates = if ($commandName -eq 'ztftp') {
@@ -1441,9 +1476,10 @@ $zettaCompletions = {
         $zettaProfiles
     } elseif ($previous -eq '--timeout') {
         'default', 'never'
-    } elseif ($previous -in '--output-type', '-t', '--theme') {
+    } elseif ($previous -in '--output-type', '-t', '--theme', '--text') {
         if ($subcommand -eq 'panetheme' -or $null -eq $subcommand) { & $zettaPaneThemes }
         elseif ($subcommand -eq 'notify') { 'default', 'never' }
+        elseif ($subcommand -eq 'overlay') { @() }
         else { 'repeated', 'unique' }
     } elseif ($previous -in '--device', '-d') {
         if ($subcommand -eq 'serial') { @(& zetta serial list 2>$null) } else { @() }
@@ -1451,9 +1487,10 @@ $zettaCompletions = {
         if ($subcommand -eq 'serial') { '5', '6', '7', '8' } else { @() }
     } elseif ($previous -eq '--parity' -or ($previous -eq '-p' -and $subcommand -eq 'serial')) {
         'none', 'odd', 'even'
-    } elseif ($previous -in '--stop-bits', '-s') {
+    } elseif ($previous -in '--stop-bits', '-s', '--size') {
         if ($subcommand -eq 'serial') { '1', '2' }
         elseif ($subcommand -eq 'notify') { $zettaSoundNames }
+        elseif ($subcommand -eq 'overlay') { 'sm', 'base', 'lg', 'xl', '2xl', '3xl' }
         else { @() }
     } elseif ($previous -eq '--sound') {
         $zettaSoundNames
@@ -1463,6 +1500,10 @@ $zettaCompletions = {
         'general', 'ruler', 'find', 'font'
     } elseif ($previous -in '--prefer', '-prefer', '--Prefer', '-Prefer') {
         'txt', 'rtf', 'ps'
+    } elseif ($previous -in '--opacity', '-o') {
+        @()
+    } elseif ($previous -eq '--color') {
+        @()
     } elseif ($commandName -in 'vi', 'zvi' -or $subcommand -in 'edit', 'vi') {
         if ($wordToComplete -like '-*') {
             '--help'
@@ -1471,7 +1512,7 @@ $zettaCompletions = {
         }
     } elseif (
         $previous -in '--columns', '--rows', '-R' -or
-        ($previous -eq '-c' -and $subcommand -eq 'terminal-size')
+        ($previous -eq '-c' -and ($subcommand -eq 'terminal-size' -or $subcommand -eq 'overlay'))
     ) {
         @()
     } elseif ($subcommand -eq 'tabicon' -and (
@@ -1483,7 +1524,7 @@ $zettaCompletions = {
     } elseif ($subcommand -eq 'sessions' -and $words.Count -ge 3 -and $words[2] -eq 'reconnect') {
         if ($previous -in '--session', '-s') { @() } else { & $zettaSessionIds }
     } elseif ($null -eq $subcommand) {
-        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste', 'tabicon', 'panetheme', '--help', '--version', '--config', '--keymap', '--profile', '--theme'
+        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', '--help', '--version', '--config', '--keymap', '--profile', '--theme'
     } else {
         switch ($subcommand) {
             'benchmark' { '--terminal-render-workload', '--terminal-checkerboard-workload', '--terminal-sparse-update-workload', '--profile-report', '--profile-duration', '--profile-pane-stress', '--profile-background-stress', '--profile-sparse-updates', '--profile-external-terminal', '--help' }
@@ -1516,6 +1557,7 @@ $zettaCompletions = {
             'paste' { '--pboard', '--prefer', '--help' }
             'tabicon' { '--icon', '--list', '--help' }
             'panetheme' { '--theme', '--reset', '--list', '--help' }
+            'overlay' { '--text', '--size', '--opacity', '--color', '--reset', '--help' }
         }
     }
 
@@ -1666,7 +1708,7 @@ _zetta() {
     fi
 
     if (( CURRENT == 2 )); then
-        compadd -S ' ' -- benchmark benchmark-output terminal-size sessions edit vi init serial http tftp notify copy paste tabicon panetheme
+        compadd -S ' ' -- benchmark benchmark-output terminal-size sessions edit vi init serial http tftp notify copy paste tabicon panetheme overlay
         _zetta_options --help --version --config --keymap --profile --theme
         return
     fi
@@ -1712,11 +1754,13 @@ _zetta() {
             compadd -- none odd even
             return
             ;;
-        --stop-bits|-s)
+        --stop-bits|-s|--size)
             if [[ $words[2] == serial ]]; then
                 compadd -- 1 2
             elif [[ $words[2] == notify ]]; then
                 _zetta_sound_names
+            elif [[ $words[2] == overlay ]]; then
+                compadd -- sm base lg xl 2xl 3xl
             fi
             return
             ;;
@@ -1751,11 +1795,17 @@ _zetta() {
             compadd -- default never
             return
             ;;
+        --opacity|-o)
+            return
+            ;;
         -c)
-            if [[ $words[2] == terminal-size ]]; then
+            if [[ $words[2] == terminal-size || $words[2] == overlay ]]; then
                 return
             fi
             _files
+            return
+            ;;
+        --color)
             return
             ;;
         -r)
@@ -1769,17 +1819,19 @@ _zetta() {
             _files
             return
             ;;
-        --output-type|-t|--theme)
+        --output-type|-t|--theme|--text)
             if [[ $words[2] == panetheme || $words[2] == -* ]]; then
                 _zetta_pane_themes
             elif [[ $words[2] == notify ]]; then
                 compadd -- default never
+            elif [[ $words[2] == overlay ]]; then
+                return
             else
                 compadd -- repeated unique
             fi
             return
             ;;
-        --port|-p|--baud-rate|-b|--size|--profile-duration|--columns|--rows|-R)
+        --port|-p|--baud-rate|-b|--profile-duration|--columns|--rows|-R)
             return
             ;;
     esac
@@ -1880,6 +1932,9 @@ _zetta() {
             else
                 _zetta_pane_themes
             fi
+            ;;
+        overlay)
+            _zetta_options --text --size --opacity --color --reset --help
             ;;
     esac
 }

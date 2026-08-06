@@ -17,8 +17,8 @@ use crate::cli_services::{parse_serial_args, serial_help};
 #[cfg(feature = "tftp-server")]
 use crate::cli_services::{parse_tftp_server_args, tftp_server_help};
 use crate::process_control::{
-    request_existing_process_pane_theme, request_existing_process_pane_theme_list,
-    request_existing_process_tab_icon,
+    request_existing_process_pane_overlay, request_existing_process_pane_theme,
+    request_existing_process_pane_theme_list, request_existing_process_tab_icon,
 };
 
 #[cfg(target_os = "macos")]
@@ -94,6 +94,7 @@ pub(crate) enum StartupMode {
         theme: Option<String>,
     },
     ListPaneThemes,
+    SetPaneOverlay(PaneOverlayRequest),
     #[cfg(windows)]
     RegisterWindowsShell(PathBuf),
     TerminalRenderingProfile,
@@ -218,11 +219,11 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
     );
     help.replace(
         "       zetta sessions [--json]",
-        "       zetta sessions [--json]\n       zetta sessions reconnect SESSION_ID\n       zetta tabicon [OPTIONS] ICON\n       zetta tabicon --list\n       zetta panetheme [OPTIONS] THEME\n       zetta panetheme --reset\n       zetta panetheme --list\n       zetta edit [OPTIONS] [--] FILE ...\n       zetta vi [OPTIONS] [FILE ...]",
+        "       zetta sessions [--json]\n       zetta sessions reconnect SESSION_ID\n       zetta tabicon [OPTIONS] ICON\n       zetta tabicon --list\n       zetta panetheme [OPTIONS] THEME\n       zetta panetheme --reset\n       zetta panetheme --list\n       zetta overlay [OPTIONS] TEXT\n       zetta overlay --reset\n       zetta edit [OPTIONS] [--] FILE ...\n       zetta vi [OPTIONS] [FILE ...]",
     )
     .replace(
         "sessions                            List detached background sessions",
-        "sessions                            List or reconnect detached background sessions\n  tabicon                             Set the active tab icon\n  panetheme                           Non-persistently change the active pane's theme\n  edit                                Edit files with $EDITOR, falling back to Zetta vi\n  vi                                  Edit files with Zetta's built-in vi",
+        "sessions                            List or reconnect detached background sessions\n  tabicon                             Set the active tab icon\n  panetheme                           Non-persistently change the active pane's theme\n  overlay                             Non-persistently show text over the active pane\n  edit                                Edit files with $EDITOR, falling back to Zetta vi\n  vi                                  Edit files with Zetta's built-in vi",
     )
 }
 
@@ -363,6 +364,106 @@ fn parse_pane_theme_args(args: &[OsString]) -> Result<StartupMode> {
     })
 }
 
+pub(crate) fn overlay_help() -> &'static str {
+    "Non-persistently show text over the active pane's terminal content through the running Zetta process\n\nUsage: zetta overlay [OPTIONS] TEXT\n       zetta overlay --reset\n\nTEXT is free-form text, shown over the top-right corner of the active pane. The change is never written to the configuration file: it is lost when the pane closes or the configuration reloads.\n\nOptions:\n  -t, --text TEXT        Set the overlay text by option instead of as a positional argument\n  -s, --size SIZE        Set the font size: sm, base, lg, xl (default), 2xl, or 3xl\n  -o, --opacity PERCENT  Set the opacity as a percentage from 0 to 100 (default: 85)\n  -c, --color COLOR      Set the text color as an rgb, rgba, rrggbb, or rrggbbaa hex value (no leading #)\n  -r, --reset            Clear the active pane's overlay\n  -h, --help             Print help"
+}
+
+fn parse_overlay_args(args: &[OsString]) -> Result<StartupMode> {
+    let mut text = None;
+    let mut reset = false;
+    let mut font_size = None;
+    let mut opacity = None;
+    let mut color = None;
+    let mut arguments = args.iter();
+    while let Some(argument) = arguments.next() {
+        match argument.to_string_lossy().as_ref() {
+            "--help" | "-h" => {
+                println!("{}", overlay_help());
+                std::process::exit(0);
+            }
+            "--reset" | "-r" => {
+                anyhow::ensure!(!reset, "--reset may only be specified once");
+                reset = true;
+            }
+            "--text" | "-t" => {
+                anyhow::ensure!(text.is_none(), "--text may only be specified once");
+                text = Some(
+                    arguments
+                        .next()
+                        .context("--text requires overlay text")?
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+            "--size" | "-s" => {
+                anyhow::ensure!(font_size.is_none(), "--size may only be specified once");
+                let value = arguments
+                    .next()
+                    .context("--size requires a font size")?
+                    .to_string_lossy()
+                    .into_owned();
+                font_size = Some(OverlayFontSize::parse(&value).with_context(|| {
+                    format!(
+                        "unknown overlay size {value:?}; expected one of {}",
+                        OverlayFontSize::CLI_NAMES.join(", ")
+                    )
+                })?);
+            }
+            "--opacity" | "-o" => {
+                anyhow::ensure!(opacity.is_none(), "--opacity may only be specified once");
+                let value = arguments
+                    .next()
+                    .context("--opacity requires a percentage from 0 to 100")?
+                    .to_string_lossy()
+                    .into_owned();
+                let percent = value
+                    .parse::<u8>()
+                    .with_context(|| format!("--opacity {value:?} must be a whole number"))?;
+                anyhow::ensure!(percent <= 100, "--opacity must be between 0 and 100");
+                opacity = Some(percent);
+            }
+            "--color" | "-c" => {
+                anyhow::ensure!(color.is_none(), "--color may only be specified once");
+                let value = arguments
+                    .next()
+                    .context("--color requires a hex color")?
+                    .to_string_lossy()
+                    .into_owned();
+                gpui::Rgba::try_from(normalize_overlay_color_hex(&value).as_str())
+                    .with_context(|| format!("invalid overlay color {value:?}"))?;
+                color = Some(value);
+            }
+            value if value.starts_with('-') => {
+                anyhow::bail!("unknown overlay option {value:?}")
+            }
+            value => {
+                anyhow::ensure!(text.is_none(), "only one overlay text may be specified");
+                text = Some(value.to_owned());
+            }
+        }
+    }
+    if reset {
+        anyhow::ensure!(
+            text.is_none() && font_size.is_none() && opacity.is_none() && color.is_none(),
+            "--reset cannot be combined with overlay text or a style option"
+        );
+        return Ok(StartupMode::SetPaneOverlay(PaneOverlayRequest {
+            text: None,
+            font_size: None,
+            opacity: None,
+            color: None,
+        }));
+    }
+    let text =
+        text.context("zetta overlay requires overlay text; run zetta overlay --help for usage")?;
+    Ok(StartupMode::SetPaneOverlay(PaneOverlayRequest {
+        text: Some(text),
+        font_size,
+        opacity,
+        color,
+    }))
+}
+
 pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Result<StartupArgs> {
     let arguments = args.into_iter().collect::<Vec<_>>();
     if arguments
@@ -394,6 +495,25 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             profile: None,
             theme_override: None,
             mode: parse_pane_theme_args(&arguments[1..])?,
+            profile_report: None,
+            profile_duration: None,
+            profile_pane_stress: false,
+            profile_background_stress: false,
+            profile_sparse_updates: false,
+            profile_external_terminal: false,
+            tftp_command: None,
+        });
+    }
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "overlay")
+    {
+        return Ok(StartupArgs {
+            config_path: None,
+            keymap_path: None,
+            profile: None,
+            theme_override: None,
+            mode: parse_overlay_args(&arguments[1..])?,
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,
@@ -2288,6 +2408,7 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
         ),
         platform_keybinding("alt-shift-t", ChangePaneTheme, Some("Zetta > Terminal")),
         KeyBinding::new(RENAME_PANE_KEYBINDING, RenamePane, Some("Zetta > Terminal")),
+        platform_keybinding("alt-shift-b", SetPaneOverlay, Some("Zetta > Terminal")),
         KeyBinding::new(
             TOGGLE_PANE_CONTROLS_KEYBINDING,
             TogglePaneControls,
@@ -2987,6 +3108,13 @@ pub(crate) fn run() -> Result<()> {
         }
         return Ok(());
     }
+    if let StartupMode::SetPaneOverlay(request) = args.mode {
+        anyhow::ensure!(
+            request_existing_process_pane_overlay(request)?,
+            "no running Zetta process accepted the pane overlay request"
+        );
+        return Ok(());
+    }
     match &args.mode {
         StartupMode::ListBackgroundSessions { json } => return print_session_catalogs(*json),
         StartupMode::ReconnectBackgroundSession { identifier } => {
@@ -3261,6 +3389,45 @@ pub(crate) fn run() -> Result<()> {
                                 names
                             });
                             let _ = completion.send(themes);
+                        }
+                        ProcessControlCommand::SetPaneOverlay {
+                            text,
+                            font_size,
+                            opacity,
+                            color,
+                            completion,
+                        } => {
+                            let accepted = cx.update(|cx| {
+                                if !cx
+                                    .global::<ZettaProcessState>()
+                                    .control_server
+                                    .is_accepting()
+                                {
+                                    return false;
+                                }
+                                if cx.global::<ZettaProcessState>().windows.is_empty()
+                                    && open_dormant_or_new_window(cx).is_err()
+                                {
+                                    return false;
+                                }
+                                let Some(window_id) = cx
+                                    .global::<ZettaProcessState>()
+                                    .windows
+                                    .keys()
+                                    .next()
+                                    .copied()
+                                else {
+                                    return false;
+                                };
+                                gpui::WindowHandle::<Zetta>::new(window_id)
+                                    .update(cx, |zetta, _, cx| {
+                                        zetta.set_active_pane_overlay(
+                                            text, font_size, opacity, color, cx,
+                                        )
+                                    })
+                                    .unwrap_or(false)
+                            });
+                            let _ = completion.send(accepted);
                         }
                         ProcessControlCommand::ReconnectSession {
                             runner_id,

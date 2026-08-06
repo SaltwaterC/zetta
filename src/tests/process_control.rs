@@ -10,6 +10,10 @@ fn request(token: &str, command: &str) -> ControlRequest {
         secret: None,
         icon: None,
         pane_theme: None,
+        pane_overlay: None,
+        pane_overlay_font_size: None,
+        pane_overlay_opacity: None,
+        pane_overlay_color: None,
     }
 }
 
@@ -86,6 +90,68 @@ fn pane_theme_list_requests_carry_no_arguments() {
 }
 
 #[test]
+fn pane_overlay_control_requests_decode_text_and_allow_clearing() {
+    let mut overlay_request = request("token", "set_overlay");
+    overlay_request.pane_overlay = Some("Prod".to_owned());
+    assert_eq!(
+        decode_control_request(&mut overlay_request, "token"),
+        Some(ControlRequestCommand::SetPaneOverlay {
+            text: Some("Prod".to_owned()),
+            font_size: None,
+            opacity: None,
+            color: None,
+        })
+    );
+
+    let mut clear_request = request("token", "set_overlay");
+    assert_eq!(
+        decode_control_request(&mut clear_request, "token"),
+        Some(ControlRequestCommand::SetPaneOverlay {
+            text: None,
+            font_size: None,
+            opacity: None,
+            color: None,
+        })
+    );
+}
+
+#[test]
+fn pane_overlay_control_requests_decode_style_and_reject_invalid_values() {
+    let mut styled_request = request("token", "set_overlay");
+    styled_request.pane_overlay = Some("Prod".to_owned());
+    styled_request.pane_overlay_font_size = Some("2xl".to_owned());
+    styled_request.pane_overlay_opacity = Some(50);
+    styled_request.pane_overlay_color = Some("ff8800".to_owned());
+    assert_eq!(
+        decode_control_request(&mut styled_request, "token"),
+        Some(ControlRequestCommand::SetPaneOverlay {
+            text: Some("Prod".to_owned()),
+            font_size: Some(OverlayFontSize::ExtraExtraLarge),
+            opacity: Some(0.5),
+            color: Some("ff8800".to_owned()),
+        })
+    );
+
+    let mut prefixed_color_request = request("token", "set_overlay");
+    prefixed_color_request.pane_overlay_color = Some("#ff8800".to_owned());
+    assert!(decode_control_request(&mut prefixed_color_request, "token").is_some());
+
+    let mut invalid_size_request = request("token", "set_overlay");
+    invalid_size_request.pane_overlay_font_size = Some("huge".to_owned());
+    assert_eq!(
+        decode_control_request(&mut invalid_size_request, "token"),
+        None
+    );
+
+    let mut invalid_color_request = request("token", "set_overlay");
+    invalid_color_request.pane_overlay_color = Some("not-a-color".to_owned());
+    assert_eq!(
+        decode_control_request(&mut invalid_color_request, "token"),
+        None
+    );
+}
+
+#[test]
 fn reconnect_results_use_distinct_control_statuses() {
     assert_eq!(
         reconnect_session_status(ReconnectSessionResult::AuthenticationFailed),
@@ -111,6 +177,10 @@ fn reconnect_requests_carry_a_session_target_and_optional_secret() {
         secret: Some("not-an-argument".to_owned()),
         icon: None,
         pane_theme: None,
+        pane_overlay: None,
+        pane_overlay_font_size: None,
+        pane_overlay_opacity: None,
+        pane_overlay_color: None,
     };
     assert_eq!(
         decode_control_request(&mut request, "token"),
@@ -180,6 +250,42 @@ fn control_server_delivers_the_registered_theme_names() {
         client.join().unwrap(),
         Some(vec!["Dracula".to_owned(), "One Light".to_owned()])
     );
+}
+
+#[test]
+fn control_server_delivers_a_pane_overlay_request() {
+    let directory = tempfile::tempdir().unwrap();
+    let endpoint_path = directory.path().join("control.json");
+    let (commands, mut received) = futures::channel::mpsc::unbounded();
+    let _server = ProcessControlServer::start_at(commands, endpoint_path.clone()).unwrap();
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&fs::read(endpoint_path).unwrap()).unwrap();
+
+    let overlay_request = PaneOverlayRequest {
+        text: Some("Prod".to_owned()),
+        font_size: Some(OverlayFontSize::Large),
+        opacity: Some(50),
+        color: Some("#ff8800".to_owned()),
+    };
+    let client =
+        thread::spawn(move || send_set_overlay_request(&endpoint, &overlay_request).unwrap());
+    let command = futures::executor::block_on(received.next()).unwrap();
+    let ProcessControlCommand::SetPaneOverlay {
+        text,
+        font_size,
+        opacity,
+        color,
+        completion,
+    } = command
+    else {
+        panic!("unexpected process control command");
+    };
+    assert_eq!(text, Some("Prod".to_owned()));
+    assert_eq!(font_size, Some(OverlayFontSize::Large));
+    assert_eq!(opacity, Some(0.5));
+    assert!(color.is_some());
+    completion.send(true).unwrap();
+    assert!(client.join().unwrap());
 }
 
 #[test]

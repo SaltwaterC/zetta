@@ -2739,6 +2739,7 @@ impl Render for Zetta {
             .on_action(cx.listener(Self::apply_pane_theme))
             .on_action(cx.listener(Self::reset_pane_theme))
             .on_action(cx.listener(Self::rename_pane))
+            .on_action(cx.listener(Self::set_pane_overlay))
             .on_action(cx.listener(Self::toggle_pane_controls))
             .on_action(cx.listener(Self::toggle_tab_pane_controls))
             .on_action(cx.listener(Self::split_horizontal_down))
@@ -2784,9 +2785,10 @@ impl Render for Zetta {
             .on_action(cx.listener(Self::start_http_server))
             .on_action(cx.listener(Self::start_tftp_server))
             .on_action(cx.listener(Self::toggle_performance_overlay))
-            .when(self.is_renaming(), |content| {
-                content.track_focus(&self.rename_focus)
-            })
+            .when(
+                self.is_renaming() || self.is_editing_pane_overlay(),
+                |content| content.track_focus(&self.rename_focus),
+            )
             .when(self.tab_icon_picker.is_some(), |content| {
                 content.track_focus(&self.tab_icon_picker_focus)
             })
