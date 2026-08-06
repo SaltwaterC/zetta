@@ -104,6 +104,7 @@ fn configuration_form_round_trip_uses_typed_values_and_profiles() {
     let config = Config::load(Some(&root), None).unwrap();
     let mut form = ConfigurationForm::load(&root, &config).unwrap();
     form.terminal_font_size.text = "16".to_owned();
+    form.default_tab_icon = Some(IconName::Folder);
     form.max_scroll_history_lines.text = "123456789".to_owned();
     form.inactive_pane_opacity = 0.65;
     form.compact_mode = true;
@@ -139,7 +140,7 @@ fn configuration_form_round_trip_uses_typed_values_and_profiles() {
     fs::remove_file(root).unwrap();
 
     assert_eq!(output["terminal_font_size"], 16.);
-    assert_eq!(output["default_tab_icon"], "terminal");
+    assert_eq!(output["default_tab_icon"], "folder");
     assert_eq!(output["max_scroll_history_lines"], 123_456_789);
     assert_eq!(output["inactive_pane_opacity"], 0.65);
     assert_eq!(output["compact_mode"], true);
@@ -220,9 +221,13 @@ fn max_scrollback_is_displayed_symbolically_but_serialized_numerically() {
     let form = ConfigurationForm::load(&missing, &config).unwrap();
     assert_eq!(form.max_scroll_history_lines.text, "Max");
     let output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
-    assert_eq!(
-        output["max_scroll_history_lines"],
-        terminal::MAX_SCROLL_HISTORY_LINES as u64
+    // "Max" is the built-in default, so it's omitted from the saved file rather
+    // than being pinned as an explicit override.
+    assert!(
+        !output
+            .as_object()
+            .unwrap()
+            .contains_key("max_scroll_history_lines")
     );
 }
 
@@ -275,6 +280,94 @@ fn text_field_edits_unicode_and_replaces_selection() {
     field.select_all();
     field.insert("Zetta");
     assert_eq!(field.text, "Zetta");
+}
+
+#[test]
+fn configuration_defaults_round_trip_produces_minimal_output() {
+    let config = Config::defaults(None, None);
+    let missing = std::env::temp_dir().join(format!(
+        "zetta-default-config-form-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let form = ConfigurationForm::load(&missing, &config).unwrap();
+    let output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
+    let object = output.as_object().unwrap();
+    for key in object.keys() {
+        // `terminal_font_size` has no fixed default (it falls back to a
+        // theme-dependent size at runtime), so it's intentionally always
+        // written rather than filtered — see the design notes in to_json.
+        assert!(
+            matches!(key.as_str(), "profiles" | "terminal_font_size"),
+            "unexpected default-valued key {key:?}"
+        );
+    }
+    if let Some(profiles) = object.get("profiles") {
+        assert_eq!(profiles, &json!([]));
+    }
+}
+
+#[test]
+fn keymap_defaults_round_trip_produces_empty_array() {
+    let missing = std::env::temp_dir().join(format!(
+        "zetta-default-keymap-form-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let form = KeymapForm::load(&missing).unwrap();
+    let output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
+    assert_eq!(output, json!([]));
+}
+
+#[test]
+fn keymap_single_rebind_is_preserved_others_dropped() {
+    let missing = std::env::temp_dir().join(format!(
+        "zetta-keymap-rebind-form-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let mut form = KeymapForm::load(&missing).unwrap();
+    let section = form
+        .sections
+        .iter_mut()
+        .find(|section| section.context.text == "Zetta > Terminal")
+        .unwrap();
+    let binding = section
+        .bindings
+        .iter_mut()
+        .find(|binding| binding.keystroke.text == "ctrl-shift-t")
+        .unwrap();
+    binding.keystroke.text = "ctrl-shift-x".to_owned();
+
+    let output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
+    let sections = output.as_array().unwrap();
+    assert_eq!(sections.len(), 1);
+    let bindings = sections[0]["bindings"].as_object().unwrap();
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings["ctrl-shift-x"], "zetta::NewTab");
+}
+
+#[test]
+fn keymap_template_matches_hardcoded_default_constant() {
+    let template: Vec<Value> = serde_json::from_str(include_str!("../../keymap.example.json"))
+        .expect("parsing bundled keymap template");
+    let terminal = template
+        .iter()
+        .find(|section| section["context"] == "Zetta > Terminal")
+        .expect("bundled template must define the Zetta > Terminal context");
+    assert_eq!(
+        terminal["bindings"][crate::startup::RENAME_TAB_KEYBINDING],
+        "zetta::RenameTab"
+    );
 }
 
 #[test]

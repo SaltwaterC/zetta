@@ -1,4 +1,4 @@
-use std::{fs, io, path::Path};
+use std::{collections::HashMap, fs, io, path::Path};
 
 use anyhow::{Context as _, Result};
 use serde_json::{Map, Value, json};
@@ -7,7 +7,7 @@ use ui::IconName;
 use crate::config::{
     Config, NewTabProfile, PaneControlsPosition, WorkingDirectoryScope, profile_is_hidden,
 };
-use crate::startup::keymap_keystroke_display;
+use crate::startup::{keymap_keystroke_display, keymap_keystroke_storage};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsPage {
@@ -214,7 +214,7 @@ impl ConfigurationForm {
             theme: config
                 .theme
                 .clone()
-                .unwrap_or_else(|| "One Light".to_owned()),
+                .unwrap_or_else(|| crate::ZETTA_DEFAULT_THEME.to_owned()),
             default_tab_icon: config.default_tab_icon,
             terminal_font_size: TextField::new(
                 config.terminal_font_size.unwrap_or(14.).to_string(),
@@ -407,7 +407,79 @@ impl ConfigurationForm {
                 ),
             );
         }
+        strip_default_configuration_values(&mut root, &self.profiles, &self.working_directory);
         serde_json::to_string_pretty(&Value::Object(root)).context("serializing configuration")
+    }
+}
+
+fn strip_matching_defaults(root: &mut Map<String, Value>, defaults: &[(&str, Value)]) {
+    for (key, default) in defaults {
+        if root.get(*key) == Some(default) {
+            root.remove(*key);
+        }
+    }
+}
+
+fn strip_default_configuration_values(
+    root: &mut Map<String, Value>,
+    profiles: &[ProfileForm],
+    working_directory: &TextField,
+) {
+    let mut defaults: Vec<(&str, Value)> = vec![
+        ("new_tab_profile", json!(NewTabProfile::default().as_str())),
+        (
+            "working_directory_scope",
+            json!(WorkingDirectoryScope::default().as_str()),
+        ),
+        ("theme", json!(crate::ZETTA_DEFAULT_THEME)),
+        ("default_tab_icon", json!("terminal")),
+        (
+            "terminal_font_family",
+            json!(crate::config::DEFAULT_TERMINAL_FONT_FAMILY),
+        ),
+        (
+            "max_scroll_history_lines",
+            json!(terminal::MAX_SCROLL_HISTORY_LINES as u64),
+        ),
+        (
+            "inactive_pane_opacity",
+            json!(
+                format!("{:.2}", crate::config::DEFAULT_INACTIVE_PANE_OPACITY)
+                    .parse::<f64>()
+                    .unwrap()
+            ),
+        ),
+        ("compact_mode", json!(false)),
+        ("hide_pane_size", json!(true)),
+        ("hide_title_bar_labels", json!(false)),
+        ("hide_title_bar_buttons", json!(false)),
+        (
+            "pane_controls_position",
+            json!(PaneControlsPosition::default().as_str()),
+        ),
+        ("pane_controls_hidden_by_default", json!(false)),
+    ];
+    #[cfg(target_os = "macos")]
+    defaults.push(("hide_title_bar_menus", json!(true)));
+    #[cfg(feature = "http-server")]
+    defaults.push(("http_server_port", json!(crate::config::DEFAULT_HTTP_PORT)));
+    #[cfg(feature = "tftp-server")]
+    defaults.push((
+        "tftp_server_port",
+        json!(crate::config::DEFAULT_TFTP_SERVER_PORT),
+    ));
+    strip_matching_defaults(root, &defaults);
+
+    if root
+        .get("default_profile")
+        .and_then(Value::as_str)
+        .zip(profiles.first())
+        .is_some_and(|(name, first)| name.eq_ignore_ascii_case(&first.name.text))
+    {
+        root.remove("default_profile");
+    }
+    if matches!(working_directory.text.trim(), "~" | "~/") {
+        root.remove("working_directory");
     }
 }
 
@@ -483,8 +555,7 @@ pub struct KeymapForm {
 
 impl KeymapForm {
     pub fn load(path: &Path) -> Result<Self> {
-        let template = serde_json::from_str(include_str!("../keymap.example.json"))
-            .context("parsing bundled keymap template")?;
+        let template = Value::Array(bundled_keymap_template()?);
         let value = read_json_or(path, template)?;
         let sections = value
             .as_array()
@@ -560,8 +631,80 @@ impl KeymapForm {
                 Value::Object(value)
             })
             .collect();
+        let sections = strip_default_keymap_bindings(sections);
         serde_json::to_string_pretty(&Value::Array(sections)).context("serializing keymap")
     }
+}
+
+fn bundled_keymap_template() -> Result<Vec<Value>> {
+    serde_json::from_str(include_str!("../keymap.example.json"))
+        .context("parsing bundled keymap template")
+}
+
+/// A keymap section's `bindings` map paired with everything else in the
+/// section (e.g. `use_key_equivalents`), with `context` and `bindings`
+/// removed from the latter.
+type KeymapSectionParts = (Map<String, Value>, Map<String, Value>);
+
+fn split_keymap_section(section: &Value) -> Option<KeymapSectionParts> {
+    let mut extra = section.as_object()?.clone();
+    extra.remove("context");
+    let bindings = extra
+        .remove("bindings")
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    Some((bindings, extra))
+}
+
+fn strip_default_keymap_bindings(sections: Vec<Value>) -> Vec<Value> {
+    let defaults = bundled_keymap_template().unwrap_or_default();
+    let defaults_by_context: HashMap<&str, KeymapSectionParts> = defaults
+        .iter()
+        .filter_map(|section| {
+            let context = section.get("context")?.as_str()?;
+            Some((context, split_keymap_section(section)?))
+        })
+        .collect();
+
+    sections
+        .into_iter()
+        .filter_map(|section| {
+            let mut object = section.as_object()?.clone();
+            let context = object.get("context").and_then(Value::as_str)?.to_owned();
+            let default = defaults_by_context.get(context.as_str());
+
+            if let Some((default_bindings, _)) = default
+                && let Some(Value::Object(bindings)) = object.get_mut("bindings")
+            {
+                bindings.retain(|keystroke, action| {
+                    let normalized = keymap_keystroke_storage(keystroke);
+                    !default_bindings
+                        .iter()
+                        .any(|(default_keystroke, default_action)| {
+                            keymap_keystroke_storage(default_keystroke) == normalized
+                                && default_action == action
+                        })
+                });
+            }
+
+            let bindings_empty = object
+                .get("bindings")
+                .and_then(Value::as_object)
+                .is_some_and(Map::is_empty);
+            let extra_matches_default = default.is_some_and(|(_, default_extra)| {
+                let mut extra = object.clone();
+                extra.remove("context");
+                extra.remove("bindings");
+                &extra == default_extra
+            });
+
+            if bindings_empty && extra_matches_default {
+                None
+            } else {
+                Some(Value::Object(object))
+            }
+        })
+        .collect()
 }
 
 pub fn save(path: &Path, text: &str) -> Result<()> {
