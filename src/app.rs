@@ -3318,6 +3318,71 @@ impl Zetta {
         .detach();
     }
 
+    pub(crate) fn edit_config_file(
+        &mut self,
+        _: &EditConfigFile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let path = self.launch_config.config_path.clone();
+        self.edit_settings_file_in_active_pane(path, window, cx);
+    }
+
+    pub(crate) fn edit_keymap_file(
+        &mut self,
+        _: &EditKeymapFile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let path = self.launch_config.keymap_path.clone();
+        self.edit_settings_file_in_active_pane(path, window, cx);
+    }
+
+    /// Runs Zetta's editor dispatcher against the active pane's shell, mirroring how a
+    /// clicked path or `EditScrollback` opens an editor: reused in place when the pane's
+    /// foreground process is the shell, otherwise split into a fresh pane.
+    fn edit_settings_file_in_active_pane(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            return;
+        };
+        let tab_id = tab.id;
+        let Some(pane) = tab.active_pane() else {
+            return;
+        };
+        let pane_id = pane.id;
+        let Some(terminal) = pane.terminal.clone() else {
+            return;
+        };
+        let (command, open_in_new_pane) = terminal.update(cx, |terminal, _| {
+            (
+                terminal.editor_command_for_path(&path, terminal.native_path_style()),
+                terminal.editor_should_open_in_new_pane(),
+            )
+        });
+        let Some(command) = command else {
+            return;
+        };
+        if open_in_new_pane {
+            self.open_editor_in_new_pane(
+                tab_id,
+                pane_id,
+                terminal_view::EditorRequest {
+                    command,
+                    temporary_path: None,
+                },
+                window,
+                cx,
+            );
+        } else {
+            terminal.update(cx, |terminal, _| terminal.submit_editor_command(command));
+        }
+    }
+
     pub(crate) fn reload_configuration(
         &mut self,
         _: &ReloadConfiguration,

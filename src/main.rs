@@ -118,6 +118,8 @@ actions!(
         ZoomWindow,
         OpenThemes,
         OpenKeymap,
+        EditConfigFile,
+        EditKeymapFile,
         DetachTab,
         ToggleAutoBackgroundTab,
         ReconnectSession,

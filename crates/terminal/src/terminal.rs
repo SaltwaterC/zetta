@@ -2600,6 +2600,12 @@ impl Terminal {
         self.open_path_in_editor_with_path_style(path, self.path_style);
     }
 
+    /// The path syntax native to this pane's shell, for callers building an
+    /// editor command from a path that did not come from the shell itself.
+    pub fn native_path_style(&self) -> PathStyle {
+        self.path_style
+    }
+
     /// Builds the shell command used to open a path in Zetta's editor.
     pub fn editor_command_for_path(&self, path: &Path, path_style: PathStyle) -> Option<String> {
         let shell_kind = interaction_shell_kind(&self.template.shell, self.path_style);

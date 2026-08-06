@@ -2530,6 +2530,8 @@ impl Render for Zetta {
             .on_action(cx.listener(Self::zoom_window))
             .on_action(cx.listener(Self::open_themes))
             .on_action(cx.listener(Self::open_keymap))
+            .on_action(cx.listener(Self::edit_config_file))
+            .on_action(cx.listener(Self::edit_keymap_file))
             .on_action(cx.listener(Self::detach_tab))
             .on_action(cx.listener(Self::toggle_auto_background_tab))
             .on_action(cx.listener(Self::reconnect_session))
