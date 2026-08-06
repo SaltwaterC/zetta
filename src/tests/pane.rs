@@ -898,6 +898,52 @@ fn moving_is_a_no_op_when_no_matching_axis_ancestor_exists() {
 }
 
 #[test]
+fn swap_panes_exchanges_leaves_anywhere_in_the_tree() {
+    let mut layout = PaneLayout::Split {
+        axis: SplitAxis::Vertical,
+        first_ratio: 700,
+        first: Box::new(PaneLayout::Pane(1)),
+        second: Box::new(PaneLayout::Split {
+            axis: SplitAxis::Horizontal,
+            first_ratio: DEFAULT_PANE_SPLIT_RATIO,
+            first: Box::new(PaneLayout::Pane(2)),
+            second: Box::new(PaneLayout::Pane(3)),
+        }),
+    };
+
+    assert!(layout.swap_panes(1, 3));
+    assert_eq!(
+        layout,
+        PaneLayout::Split {
+            axis: SplitAxis::Vertical,
+            first_ratio: 700,
+            first: Box::new(PaneLayout::Pane(3)),
+            second: Box::new(PaneLayout::Split {
+                axis: SplitAxis::Horizontal,
+                first_ratio: DEFAULT_PANE_SPLIT_RATIO,
+                first: Box::new(PaneLayout::Pane(2)),
+                second: Box::new(PaneLayout::Pane(1)),
+            }),
+        }
+    );
+}
+
+#[test]
+fn swap_panes_rejects_missing_or_identical_ids() {
+    let mut layout = PaneLayout::Split {
+        axis: SplitAxis::Vertical,
+        first_ratio: DEFAULT_PANE_SPLIT_RATIO,
+        first: Box::new(PaneLayout::Pane(1)),
+        second: Box::new(PaneLayout::Pane(2)),
+    };
+    let original = layout.clone();
+
+    assert!(!layout.swap_panes(1, 1));
+    assert!(!layout.swap_panes(1, 99));
+    assert_eq!(layout, original);
+}
+
+#[test]
 fn pane_resize_gutter_targets_its_exact_split() {
     let mut layout = PaneLayout::Split {
         axis: SplitAxis::Vertical,

@@ -248,6 +248,8 @@ pub struct TerminalView {
     pub(crate) window_corner_radii: Corners<Pixels>,
     pane_resize_mode_active: bool,
     pane_resize_toggle_action: Option<Box<dyn Action>>,
+    pane_move_mode_active: bool,
+    pane_move_toggle_action: Option<Box<dyn Action>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -393,6 +395,8 @@ impl TerminalView {
             window_corner_radii: Corners::default(),
             pane_resize_mode_active: false,
             pane_resize_toggle_action: None,
+            pane_move_mode_active: false,
+            pane_move_toggle_action: None,
             _subscriptions: vec![
                 focus_in,
                 focus_out,
@@ -507,6 +511,18 @@ impl TerminalView {
     ) {
         self.pane_resize_mode_active = active;
         self.pane_resize_toggle_action = toggle_action;
+    }
+
+    /// Surfaces a "Pane Move Mode" entry in the right-click context menu.
+    /// `toggle_action` is only `Some` when the containing tab has 2+ panes,
+    /// since move mode has nothing to do with a single pane.
+    pub fn set_pane_move_mode_entry(
+        &mut self,
+        active: bool,
+        toggle_action: Option<Box<dyn Action>>,
+    ) {
+        self.pane_move_mode_active = active;
+        self.pane_move_toggle_action = toggle_action;
     }
 
     pub fn set_theme(&mut self, theme: Option<Arc<Theme>>, cx: &mut Context<Self>) {
@@ -1074,6 +1090,11 @@ impl TerminalView {
             .pane_resize_toggle_action
             .as_ref()
             .map(|action| action.boxed_clone());
+        let pane_move_mode_active = self.pane_move_mode_active;
+        let pane_move_toggle_action = self
+            .pane_move_toggle_action
+            .as_ref()
+            .map(|action| action.boxed_clone());
         let menu = ContextMenu::build(window, cx, |menu, _, _| {
             menu.context(self.focus_handle.clone())
                 .action("Copy", Box::new(Copy))
@@ -1085,12 +1106,15 @@ impl TerminalView {
                 .separator()
                 .action("Clear Clipboard", Box::new(ClearClipboard))
                 .action("Clear", Box::new(Clear))
+                .when(
+                    pane_resize_toggle_action.is_some() || pane_move_toggle_action.is_some(),
+                    |menu| menu.separator(),
+                )
                 .when_some(pane_resize_toggle_action, |menu, action| {
-                    menu.separator().action_checked(
-                        "Pane Resize Mode",
-                        action,
-                        pane_resize_mode_active,
-                    )
+                    menu.action_checked("Pane Resize Mode", action, pane_resize_mode_active)
+                })
+                .when_some(pane_move_toggle_action, |menu, action| {
+                    menu.action_checked("Pane Move Mode", action, pane_move_mode_active)
                 })
         });
         window.focus(&menu.focus_handle(cx), cx);

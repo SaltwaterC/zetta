@@ -148,6 +148,10 @@ fn pane_resize_menu_entry_available(pane_count: usize) -> bool {
     pane_count >= 2
 }
 
+fn pane_move_menu_entry_available(pane_count: usize) -> bool {
+    pane_count >= 2
+}
+
 fn pane_resize_cell_delta(
     layout: &PaneLayout,
     pane_id: u64,
@@ -210,6 +214,15 @@ struct PaneResizeDrag {
     gutter: PaneResizeGutter,
     first_panes: Vec<u64>,
     second_panes: Vec<u64>,
+}
+
+/// Identifies a pane being dragged in pane-move mode. The same value serves
+/// as both the drag payload (this pane is being dragged) and, when rendered
+/// for a different pane, the drop target's identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PaneMoveDrag {
+    tab_id: u64,
+    pane_id: u64,
 }
 
 impl PaneResizeKeys {
@@ -2654,6 +2667,34 @@ impl Zetta {
         cx.notify();
     }
 
+    fn move_pane_via_drag(
+        &mut self,
+        dragged: PaneMoveDrag,
+        target: PaneMoveDrag,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.pane_move_mode
+            || dragged.tab_id != target.tab_id
+            || dragged.pane_id == target.pane_id
+        {
+            return;
+        }
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == target.tab_id) else {
+            return;
+        };
+        if tab.maximized_pane.is_some() {
+            return;
+        }
+        if !tab.layout.swap_panes(dragged.pane_id, target.pane_id) {
+            return;
+        }
+        tab.activate_pane(dragged.pane_id);
+        for terminal in tab.panes.iter().filter_map(|pane| pane.terminal.as_ref()) {
+            terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
+        }
+        cx.notify();
+    }
+
     pub(crate) fn resize_pane_left(
         &mut self,
         _: &ResizePaneLeft,
@@ -4167,6 +4208,8 @@ impl Zetta {
                 }) || (pane.view.is_none() && tab.active_pane == *pane_id);
                 let pane_resize_toggle_action = pane_resize_menu_entry_available(tab.panes.len())
                     .then(|| Box::new(TogglePaneResizeMode) as Box<dyn Action>);
+                let pane_move_toggle_action = pane_move_menu_entry_available(tab.panes.len())
+                    .then(|| Box::new(TogglePaneMoveMode) as Box<dyn Action>);
                 let content = match (&pane.view, &pane.error) {
                     (Some(view), _) => {
                         view.update(cx, |view, cx| {
@@ -4174,6 +4217,10 @@ impl Zetta {
                             view.set_pane_resize_mode_entry(
                                 self.pane_resize_mode,
                                 pane_resize_toggle_action,
+                            );
+                            view.set_pane_move_mode_entry(
+                                self.pane_move_mode,
+                                pane_move_toggle_action,
                             );
                         });
                         div().size_full().child(view.clone()).into_any_element()
@@ -4441,6 +4488,38 @@ impl Zetta {
                                                 }),
                                             )
                                     }),
+                            )
+                        },
+                    )
+                    .when(
+                        self.pane_move_mode
+                            && tab.panes.len() > 1
+                            && tab.maximized_pane.is_none(),
+                        |pane| {
+                            let pane_move_drag = PaneMoveDrag {
+                                tab_id: tab.id,
+                                pane_id: *pane_id,
+                            };
+                            // A dedicated top-most overlay, rather than handlers on the
+                            // pane itself, so `occlude` can block every mouse
+                            // interaction with the terminal underneath (selection,
+                            // clicks, scroll) while move mode is active: the pane must
+                            // act as a plain drag handle, not a terminal.
+                            pane.child(
+                                div()
+                                    .id(("pane-move-drag-surface", *pane_id as usize))
+                                    .absolute()
+                                    .inset_0()
+                                    .cursor(CursorStyle::OpenHand)
+                                    .occlude()
+                                    .on_drag(pane_move_drag, |_, _, _, cx| {
+                                        cx.new(|_| gpui::Empty)
+                                    })
+                                    .on_drop(cx.listener(
+                                        move |this, dragged: &PaneMoveDrag, _window, cx| {
+                                            this.move_pane_via_drag(*dragged, pane_move_drag, cx);
+                                        },
+                                    )),
                             )
                         },
                     )

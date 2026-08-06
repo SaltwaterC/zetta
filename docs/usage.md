@@ -67,15 +67,19 @@ display's usable bounds; a maximized or full-screen window is the hard growth
 limit. The native client window never shrinks below the size required for its
 window controls.
 
-Press `Alt-Shift-M`, or `Cmd-Shift-M` on macOS, to enter or leave pane-move
-mode. While it is active, the active pane shows a "Move mode" label and normal
-terminal input is paused. Arrow keys then move the active pane one step in
-that direction: it swaps with whichever pane, or group of panes, occupies the
-nearest matching side of the layout, so the tiling always stays valid — for
-example, moving one of the two stacked panes in the `three-right` template
-towards the large pane flips the whole layout to `three-left`. If there is no
-neighboring pane or group in that direction, the arrow key does nothing. Leave
-move mode with the same shortcut; there is no separate Escape binding.
+Press `Alt-Shift-M`, or `Cmd-Shift-M` on macOS, or right-click a pane and
+toggle "Pane Move Mode" from its context menu (shown once 2 or more panes are
+open), to enter or leave pane-move mode. While it is active, the active pane
+shows a "Move mode" label and normal terminal input is paused. Arrow keys then
+move the active pane one step in that direction: it swaps with whichever pane,
+or group of panes, occupies the nearest matching side of the layout, so the
+tiling always stays valid — for example, moving one of the two stacked panes in
+the `three-right` template towards the large pane flips the whole layout to
+`three-left`. If there is no neighboring pane or group in that direction, the
+arrow key does nothing. Hovering a pane shows a grab cursor; drag it onto
+another pane and release to swap the two panes directly, independent of the
+layout's split structure. Leave move mode with the same shortcut; there is no
+separate Escape binding.
 
 A maximized pane has a status strip below it. Restore it from that strip or
 with `Shift-Escape`.

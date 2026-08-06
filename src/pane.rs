@@ -923,6 +923,38 @@ impl PaneLayout {
         }
     }
 
+    /// Swaps the positions of two panes anywhere in the layout, regardless of
+    /// their split ancestry. Mouse-driven pane move drops a pane onto an
+    /// arbitrary target, unlike the directional keyboard move above, so it
+    /// cannot rely on a shared axis-matching ancestor.
+    pub(crate) fn swap_panes(&mut self, first: u64, second: u64) -> bool {
+        if first == second || !self.contains_pane(first) || !self.contains_pane(second) {
+            return false;
+        }
+        self.swap_panes_inner(first, second);
+        true
+    }
+
+    fn swap_panes_inner(&mut self, first: u64, second: u64) {
+        match self {
+            Self::Pane(id) => {
+                if *id == first {
+                    *id = second;
+                } else if *id == second {
+                    *id = first;
+                }
+            }
+            Self::Split {
+                first: first_child,
+                second: second_child,
+                ..
+            } => {
+                first_child.swap_panes_inner(first, second);
+                second_child.swap_panes_inner(first, second);
+            }
+        }
+    }
+
     pub(crate) fn adjacent_pane(&self, active: u64, direction: PaneDirection) -> Option<u64> {
         let regions = self.regions();
         let source = regions.iter().find(|region| region.id == active)?;
