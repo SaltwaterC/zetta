@@ -1481,6 +1481,10 @@ impl Render for Zetta {
                     .flex_shrink_1()
                     .overflow_hidden()
                     .gap_1()
+                    // When the reserve below makes this wider than its content, fill it from
+                    // the tab-bar side inward, so any blank space lands next to the traffic
+                    // lights instead of between the controls and the tabs.
+                    .justify_end()
                     // The traffic lights are native controls even with a client title bar.
                     .when(cfg!(target_os = "macos"), |controls| controls.ml(px(72.)))
                     // Reserve a minimal, constant gap next to the traffic lights sized for
