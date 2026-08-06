@@ -204,7 +204,7 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         ""
     };
     let clipboard_command = if cfg!(feature = "clipboard") {
-        "\n  copy                                Copy standard input to the clipboard\n  paste                                Print the clipboard's contents"
+        "\n  copy                                Copy standard input to the clipboard\n  paste                               Print the clipboard's contents"
     } else {
         ""
     };
