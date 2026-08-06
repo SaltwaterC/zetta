@@ -13,6 +13,15 @@ const TITLE_BAR_RECONNECT_LABEL_MIN_WIDTH: Pixels = px(800.);
 // when tabs grow to fill the rest of it, so the window stays movable from there.
 const COMPACT_DRAG_AREA_MIN_WIDTH: Pixels = px(60.);
 
+/// The tab bar's row height: `compact_height` (the platform title bar's own
+/// height) in compact mode, since the tab bar shares that row there, or the
+/// standard `h_8` otherwise. Shared by every element that lines up with the
+/// row — the tabs themselves, the overflow triggers, the new-tab button, and
+/// the bar's own container — so the compact/regular swap is only written once.
+fn tab_bar_row_height(compact_mode: bool, compact_height: Pixels) -> gpui::Div {
+    div().h_8().when(compact_mode, |el| el.h(compact_height))
+}
+
 // Keep the responsive sizing on a native flex item. Elements such as
 // `right_click_menu` are custom layout elements and cannot receive the flex
 // constraints that control how tabs shrink inside the scroll container.
@@ -29,9 +38,7 @@ fn responsive_tab_container(
     // making tabs balloon wider than usual. A renamed tab keeps its fixed,
     // non-growing width so the editable title doesn't reflow mid-edit.
     let grows_to_fill = compact_mode && !is_renaming;
-    div()
-        .h_8()
-        .when(compact_mode, |container| container.h(compact_height))
+    tab_bar_row_height(compact_mode, compact_height)
         .w(TAB_MAX_WIDTH)
         .min_w(if is_renaming { TAB_MAX_WIDTH } else { TAB_MIN_WIDTH })
         .max_w(TAB_MAX_WIDTH)
@@ -55,9 +62,13 @@ fn tab_bar_tabs_are_shrinking(available_width: Pixels, is_renaming: bool, tab_co
 ///   from instead of jumping to wherever the default placement would put it.
 /// - Otherwise (plain clicks, keyboard cycling) the range keeps the selected tab
 ///   visible with the least possible movement.
+///
+/// Capacity depends only on `is_renaming`, not on compact mode: per
+/// `responsive_tab_container`, a renaming tab reserves the same full
+/// `TAB_MAX_WIDTH` and every other tab can shrink to the same `TAB_MIN_WIDTH`
+/// in both the compact and regular tab bars.
 fn tab_bar_visible_tab_range(
     available_width: Pixels,
-    compact_mode: bool,
     tab_count: usize,
     selected_index: usize,
     is_renaming: bool,
@@ -68,9 +79,7 @@ fn tab_bar_visible_tab_range(
     }
 
     let effective_width = (available_width - TAB_OVERFLOW_TRIGGER_WIDTH).max(px(0.));
-    let capacity = if compact_mode {
-        (effective_width / TAB_MAX_WIDTH).floor() as usize
-    } else if is_renaming {
+    let capacity = if is_renaming {
         let remaining = (effective_width - (TAB_MAX_WIDTH - TAB_MIN_WIDTH)).max(px(0.));
         (remaining / TAB_MIN_WIDTH).floor() as usize
     } else {
@@ -209,9 +218,7 @@ fn render_tab_overflow_trigger(
     }
     .into();
 
-    div()
-        .h_8()
-        .when(compact_mode, |el| el.h(compact_height))
+    tab_bar_row_height(compact_mode, compact_height)
         .flex_none()
         .flex()
         .items_center()
@@ -272,11 +279,9 @@ fn render_tab_overflow_trigger(
 }
 
 fn render_new_tab_button(compact_mode: bool, compact_height: Pixels) -> AnyElement {
-    div()
+    tab_bar_row_height(compact_mode, compact_height)
         .ml_1()
         .mr_2()
-        .h_8()
-        .when(compact_mode, |button| button.h(compact_height))
         .flex_none()
         .flex()
         .items_center()
@@ -813,7 +818,6 @@ impl Render for Zetta {
                 tab_bar_tabs_are_shrinking(available_for_tabs, is_renaming_tab, tab_count);
             let visible_range = tab_bar_visible_tab_range(
                 available_for_tabs,
-                compact_mode,
                 tab_count,
                 selected_tab_index,
                 is_renaming_tab,
@@ -942,10 +946,8 @@ impl Render for Zetta {
                                         .child(title),
                                 )
                                 .into_any_element();
-                            let tab_element = div()
+                            let tab_element = tab_bar_row_height(compact_mode, title_bar_height)
                                 .id(("tab", tab.id as usize))
-                                .h_8()
-                                .when(compact_mode, |tab| tab.h(title_bar_height))
                                 .w_full()
                                 .min_w_0()
                                 .px_2()
@@ -1098,13 +1100,11 @@ impl Render for Zetta {
 
         let tabs_scroll = tabs_row.into_any_element();
 
-        let tab_bar = div()
+        let tab_bar = tab_bar_row_height(compact_mode, title_bar_height)
             .id("tab-bar")
-            .h_8()
             .flex_none()
             .when(compact_mode, |tab_bar| {
                 tab_bar
-                    .h(title_bar_height)
                     .flex_grow_1()
                     .flex_shrink_1()
                     .flex_basis(gpui::relative(0.))
