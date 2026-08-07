@@ -4582,6 +4582,18 @@ impl Zetta {
                     pane.overlay_font_size.unwrap_or(OverlayFontSize::DEFAULT);
                 let pane_overlay_base_opacity = pane.overlay_opacity.unwrap_or(0.85);
                 let pane_overlay_color = pane.overlay_color.unwrap_or(colors.text);
+                let pane_overlay_top = match pane_overlay_font_size {
+                    // The line box sits on the glyph's internal leading
+                    // (measured: 6px at `sm`, 14px at `3xl`), so each size
+                    // offsets by `overlay_pane_inset() - leading(size)` to keep
+                    // the visible gap to the pane edge constant.
+                    OverlayFontSize::Small => px(8.),
+                    OverlayFontSize::Base => px(7.),
+                    OverlayFontSize::Large => px(6.),
+                    OverlayFontSize::ExtraLarge => px(5.),
+                    OverlayFontSize::ExtraExtraLarge => px(3.),
+                    OverlayFontSize::ExtraExtraExtraLarge => px(0.),
+                };
                 let active = pane.view.as_ref().is_some_and(|view| {
                     view.focus_handle(cx).is_focused(window)
                         || view.read(cx).has_open_context_menu()
@@ -4696,8 +4708,8 @@ impl Zetta {
                             div()
                                 .id(("terminal-pane-overlay", *pane_id as usize))
                                 .absolute()
-                                .right(px(6.))
-                                .top(px(6.))
+                                .right(px(14.))
+                                .top(pane_overlay_top)
                                 .max_w(px(320.))
                                 .map(|element| match pane_overlay_font_size {
                                     OverlayFontSize::Small => element.text_sm(),
