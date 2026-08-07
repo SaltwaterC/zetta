@@ -662,7 +662,16 @@ impl Zetta {
                                     }),
                             ),
                         )
-                        .child(icon_grid),
+                        .child(icon_grid)
+                        .child(
+                            h_flex()
+                                .mt_2()
+                                .w_full()
+                                .justify_center()
+                                .text_color(colors.text_muted)
+                                .text_xs()
+                                .child("Tab / Shift-Tab: navigate icons  •  ↑/↓: navigate rows  •  ←/→: move cursor in search  •  Enter: select  •  Esc: close"),
+                        ),
                 )
                 .into_any_element(),
         )
