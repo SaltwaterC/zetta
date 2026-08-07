@@ -3,7 +3,10 @@
 Zetta can emit a shell-specific integration script with completion for its
 subcommands, flags, and flag values. The generated script includes the profile
 names from Zetta's current configuration, so `zetta --profile <Tab>` completes
-them as well. The script also provides `zvi`, an unconditional shortcut for
+them as well. Completing a value that contains spaces (such as a pane theme
+named `Gruvbox Light Hard`) inserts it as a single quoted argument, so the
+completed line runs without manual quoting. The script also provides `zvi`, an
+unconditional shortcut for
 the built-in vi editor, `ztftp`, a shortcut for the built-in TFTP client,
 `zntfy`, a shortcut for sending desktop notifications, and `zcopy`/`zpaste`,
 shortcuts for the clipboard; each has the same completion as its corresponding

@@ -1565,7 +1565,13 @@ $zettaCompletions = {
         if ($_ -like '-*') { $_ -notin $words } else { $true }
     })
     $candidates | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
-        [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+        $value = $_
+        $text = if ($value -match '\s' -or $value.Contains("'") -or $value.Contains('"')) {
+            "'" + $value.Replace("'", "''") + "'"
+        } else {
+            $value
+        }
+        [System.Management.Automation.CompletionResult]::new($text, $value, 'ParameterValue', $value)
     }
 }
 

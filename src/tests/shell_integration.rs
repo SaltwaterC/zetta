@@ -540,6 +540,22 @@ fn powershell_profiles_are_comma_separated() {
     );
 }
 
+// Regression test: values that contain spaces or quote characters are inserted
+// by PowerShell into the command line verbatim, splitting arguments. Completing
+// a theme name like "Gruvbox Light Hard" must emit a single quoted argument
+// (with embedded single quotes doubled), not the raw name, or `panetheme`
+// rejects it with "only one theme may be specified".
+#[test]
+fn powershell_quotes_spaced_completion_values() {
+    let powershell = ShellIntegration::PowerShell.script(&profiles());
+
+    assert!(powershell.contains(r#"$value -match '\s'"#));
+    assert!(powershell.contains(r#""'" + $value.Replace("'", "''")"#));
+    assert!(powershell.contains(
+        "[System.Management.Automation.CompletionResult]::new($text, $value, 'ParameterValue', $value)"
+    ));
+}
+
 #[cfg(windows)]
 #[test]
 fn powershell_accepts_the_generated_integration_syntax() {
