@@ -585,22 +585,10 @@ impl Zetta {
 
         let tab = &mut self.tabs[self.active_tab];
         for (index, pane_id) in added_pane_ids.iter().copied().enumerate() {
-            tab.push_pane(TerminalPane {
-                id: pane_id,
-                label_number: 0,
-                generated_label: Some(format!("Stress {:02}", index + 2)),
-                custom_label: None,
-                overlay_text: None,
-                overlay_font_size: None,
-                overlay_opacity: None,
-                overlay_color: None,
-                profile: profile.clone(),
-                terminal: None,
-                view: None,
-                error: None,
-                wsl_cwd_file: None,
-                pending_command: None,
-            });
+            tab.push_pane(
+                TerminalPane::new(pane_id, profile.clone())
+                    .with_generated_label(format!("Stress {:02}", index + 2)),
+            );
         }
         tab.layout = PaneLayout::tiled(&pane_ids).expect("a stress profile has panes");
         tab.minimized_panes.clear();
@@ -804,22 +792,11 @@ impl Zetta {
             ));
         self.tabs.push(Tab {
             id: tab_id,
-            panes: vec![TerminalPane {
-                id: pane_id,
-                label_number: 1,
-                generated_label: None,
-                custom_label: None,
-                overlay_text: None,
-                overlay_font_size: None,
-                overlay_opacity: None,
-                overlay_color: None,
-                profile: profile.clone(),
-                terminal: None,
-                view: None,
-                error: None,
-                wsl_cwd_file: wsl_cwd_file.clone(),
-                pending_command: None,
-            }],
+            panes: vec![
+                TerminalPane::new(pane_id, profile.clone())
+                    .with_label_number(1)
+                    .with_wsl_cwd_file(wsl_cwd_file.clone()),
+            ],
             pane_indices: HashMap::from([(pane_id, 0)]),
             next_pane_label: 2,
             layout: PaneLayout::Pane(pane_id),
@@ -1384,22 +1361,11 @@ impl Zetta {
             return false;
         }
         self.active_tab = tab_index;
-        tab.push_pane(TerminalPane {
-            id: pane_id,
-            label_number: 0,
-            generated_label: None,
-            custom_label: None,
-            overlay_text: None,
-            overlay_font_size: None,
-            overlay_opacity: None,
-            overlay_color: None,
-            profile: profile.clone(),
-            terminal: None,
-            view: None,
-            error: None,
-            wsl_cwd_file: wsl_cwd_file.clone(),
-            pending_command,
-        });
+        tab.push_pane(
+            TerminalPane::new(pane_id, profile.clone())
+                .with_wsl_cwd_file(wsl_cwd_file.clone())
+                .with_pending_command(pending_command),
+        );
         tab.activate_pane(pane_id);
         self.spawn_terminal(
             tab_id,
@@ -2533,22 +2499,10 @@ impl Zetta {
         }
         tab.panes.reserve(new_pane_count);
         for (pane_id, wsl_cwd_file) in &new_panes {
-            tab.push_pane(TerminalPane {
-                id: *pane_id,
-                label_number: 0,
-                generated_label: None,
-                custom_label: None,
-                overlay_text: None,
-                overlay_font_size: None,
-                overlay_opacity: None,
-                overlay_color: None,
-                profile: profile.clone(),
-                terminal: None,
-                view: None,
-                error: None,
-                wsl_cwd_file: wsl_cwd_file.clone(),
-                pending_command: None,
-            });
+            tab.push_pane(
+                TerminalPane::new(*pane_id, profile.clone())
+                    .with_wsl_cwd_file(wsl_cwd_file.clone()),
+            );
         }
         tab.activate_pane(active_pane_id);
 
@@ -5485,16 +5439,7 @@ fn server_input_stops_server(
     is_http_server: bool,
     is_tftp_server: bool,
 ) -> bool {
-    let _ = (input, is_http_server, is_tftp_server);
-    #[cfg(feature = "http-server")]
-    if is_http_server && crate::http_server_ui::http_input_stops_server(input) {
-        return true;
-    }
-    #[cfg(feature = "tftp-server")]
-    if is_tftp_server && crate::tftp_server_ui::tftp_input_stops_server(input) {
-        return true;
-    }
-    false
+    (is_http_server || is_tftp_server) && byte_stream_pane::ctrl_c_interrupts_byte_stream(input)
 }
 
 #[derive(Clone, Copy, Default)]

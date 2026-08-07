@@ -321,109 +321,26 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab) = self.tabs.get(self.active_tab) else {
-            return;
-        };
-        if !can_add_panes(tab.panes.len(), 1) {
-            return;
-        }
-        let tab_id = tab.id;
-        let active_pane_id = tab.active_pane;
-        let Some(profile) = tab.active_profile().cloned() else {
-            return;
-        };
-        let terminal_theme = match resolve_profile_theme(&profile, cx) {
-            Ok(theme) => theme,
-            Err(error) => {
-                self.configuration_error =
-                    Some(format!("Could not apply profile theme: {error:#}"));
-                cx.notify();
-                return;
-            }
-        };
-        let pane_id = self.next_pane_id;
-        self.next_pane_id += 1;
-        let label = format!("Serial: {}", serial.port_name);
-
-        let tab = &mut self.tabs[self.active_tab];
-        tab.maximized_pane = None;
-        if !tab.layout.split(
-            active_pane_id,
-            SplitAxis::Vertical,
-            pane_id,
-            SplitPosition::After,
-        ) {
-            return;
-        }
-        tab.push_pane(TerminalPane {
-            id: pane_id,
-            label_number: 0,
-            generated_label: Some(label.clone()),
-            custom_label: None,
-            overlay_text: None,
-            overlay_font_size: None,
-            overlay_opacity: None,
-            overlay_color: None,
-            profile,
-            terminal: None,
-            view: None,
-            error: None,
-            wsl_cwd_file: None,
-            pending_command: None,
+        let title = format!("{} @ {} baud ({})", serial.port_name, serial.baud_rate, {
+            let prompt = SerialConsolePrompt {
+                data_bits: serial.data_bits,
+                parity: serial.parity,
+                stop_bits: serial.stop_bits,
+                ..Default::default()
+            };
+            prompt.framing_label()
         });
-        tab.activate_pane(pane_id);
-
-        let settings = TerminalSpawnSettings::current(cx);
-        let builder = TerminalBuilder::new_byte_stream(
-            connection.reader,
-            connection.writer,
-            format!("{} @ {} baud ({})", serial.port_name, serial.baud_rate, {
-                let prompt = SerialConsolePrompt {
-                    data_bits: serial.data_bits,
-                    parity: serial.parity,
-                    stop_bits: serial.stop_bits,
-                    ..Default::default()
-                };
-                prompt.framing_label()
-            }),
-            settings.cursor_shape,
-            settings.alternate_scroll,
-            settings.max_scroll_history_lines,
-            cx.entity_id().as_u64(),
-            cx.background_executor(),
-            PathStyle::local(),
-        );
-        let terminal = cx.new(|cx| builder.subscribe(cx));
-        let view = cx.new(|cx| TerminalView::new_with_theme(terminal, terminal_theme, window, cx));
-        let emit_input_events = self.tabs[self.active_tab].broadcast_input;
-        view.update(cx, |view, _| view.set_emit_input_events(emit_input_events));
-        cx.subscribe_in(
-            &view,
-            window,
-            move |this, _, event, window, cx| match event {
-                TerminalViewEvent::Close => this.close_pane(tab_id, pane_id, window, cx),
-                TerminalViewEvent::TitleChanged => cx.notify(),
-                TerminalViewEvent::Input(input) => this.broadcast_input(tab_id, pane_id, input, cx),
-                TerminalViewEvent::OpenEditor(request) => {
-                    this.open_editor_in_new_pane(tab_id, pane_id, request.clone(), window, cx);
-                }
+        self.open_byte_stream_pane(
+            ByteStreamPaneRequest {
+                reader: connection.reader,
+                writer: connection.writer,
+                label: format!("Serial: {}", serial.port_name),
+                title,
+                input: ByteStreamInputPolicy::Broadcast,
             },
-        )
-        .detach();
-        let focus_handle = view.focus_handle(cx);
-        cx.on_focus(&focus_handle, window, move |this, _, cx| {
-            if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.id == tab_id) {
-                tab.activate_pane(pane_id);
-                cx.notify();
-            }
-        })
-        .detach();
-        if let Some(pane) = self.tabs[self.active_tab].pane_mut(pane_id) {
-            pane.terminal = Some(view.read(cx).terminal().clone());
-            pane.view = Some(view.clone());
-        }
-        view.focus_handle(cx).focus(window, cx);
-        cx.notify();
+            window,
+            cx,
+        );
     }
 
     pub(crate) fn serial_console_key_down(

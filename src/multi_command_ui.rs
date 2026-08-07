@@ -146,22 +146,12 @@ impl Zetta {
         let mut launches = Vec::with_capacity(additional);
         for (pane_id, expansion) in new_pane_ids.iter().copied().zip(expansions.iter().skip(1)) {
             let wsl_cwd_file = wsl_cwd_tracking_file(&profile, pane_id);
-            tab.push_pane(TerminalPane {
-                id: pane_id,
-                label_number: 0,
-                generated_label: Some(expansion.label.clone()),
-                custom_label: None,
-                overlay_text: None,
-                overlay_font_size: None,
-                overlay_opacity: None,
-                overlay_color: None,
-                profile: profile.clone(),
-                terminal: None,
-                view: None,
-                error: None,
-                wsl_cwd_file: wsl_cwd_file.clone(),
-                pending_command: Some(expansion.command.clone()),
-            });
+            tab.push_pane(
+                TerminalPane::new(pane_id, profile.clone())
+                    .with_generated_label(expansion.label.clone())
+                    .with_wsl_cwd_file(wsl_cwd_file.clone())
+                    .with_pending_command(Some(expansion.command.clone())),
+            );
             launches.push(QueuedTerminalLaunch {
                 tab_id,
                 pane_id,

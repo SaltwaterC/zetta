@@ -493,6 +493,45 @@ pub(crate) fn clone_or_take_for_final_spawn<T: Clone + Default>(
 }
 
 impl TerminalPane {
+    pub(crate) fn new(id: u64, profile: Profile) -> Self {
+        Self {
+            id,
+            label_number: 0,
+            generated_label: None,
+            custom_label: None,
+            overlay_text: None,
+            overlay_font_size: None,
+            overlay_opacity: None,
+            overlay_color: None,
+            profile,
+            terminal: None,
+            view: None,
+            error: None,
+            wsl_cwd_file: None,
+            pending_command: None,
+        }
+    }
+
+    pub(crate) fn with_label_number(mut self, label_number: usize) -> Self {
+        self.label_number = label_number;
+        self
+    }
+
+    pub(crate) fn with_generated_label(mut self, label: String) -> Self {
+        self.generated_label = Some(label);
+        self
+    }
+
+    pub(crate) fn with_pending_command(mut self, command: Option<String>) -> Self {
+        self.pending_command = command;
+        self
+    }
+
+    pub(crate) fn with_wsl_cwd_file(mut self, file: Option<PathBuf>) -> Self {
+        self.wsl_cwd_file = file;
+        self
+    }
+
     pub(crate) fn label(&self) -> String {
         self.custom_label
             .clone()
