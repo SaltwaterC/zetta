@@ -16,21 +16,44 @@ fn keymap_round_trip_preserves_parameterized_actions_and_section_metadata() {
     )
     .unwrap();
     let mut form = KeymapForm::load(&root).unwrap();
-    assert_eq!(form.sections[0].bindings[0].keystroke.text, "Ctrl+Shift+1");
-    let output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
-    assert_eq!(output[0]["use_key_equivalents"], true);
-    assert_eq!(output[0]["bindings"]["Ctrl+Shift+1"][1]["slot"], 1);
-
-    form.sections[0].bindings[0].keystroke.text = "Ctrl+Shift+3".to_owned();
-    let alias_output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
-    form.sections[0].bindings[0].keystroke.text = "Ctrl+Shift+0".to_owned();
-    let tenth_alias_output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
-    fs::remove_file(root).unwrap();
-    assert_eq!(alias_output[0]["bindings"]["Ctrl+Shift+3"][1]["slot"], 1);
+    let section_index = form
+        .sections
+        .iter()
+        .position(|section| section.context.text == "Zetta")
+        .unwrap();
     assert_eq!(
-        tenth_alias_output[0]["bindings"]["Ctrl+Shift+0"][1]["slot"],
-        1
+        form.sections[section_index].bindings[0].keystroke.text,
+        "Ctrl+Shift+1"
     );
+    let output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
+    let output_section = output
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["context"] == "Zetta")
+        .unwrap();
+    assert_eq!(output_section["use_key_equivalents"], true);
+    assert_eq!(output_section["bindings"]["Ctrl+Shift+1"][1]["slot"], 1);
+
+    form.sections[section_index].bindings[0].keystroke.text = "Ctrl+Shift+3".to_owned();
+    let alias_output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
+    let alias_section = alias_output
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["context"] == "Zetta")
+        .unwrap();
+    form.sections[section_index].bindings[0].keystroke.text = "Ctrl+Shift+0".to_owned();
+    let tenth_alias_output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
+    let tenth_section = tenth_alias_output
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["context"] == "Zetta")
+        .unwrap();
+    fs::remove_file(root).unwrap();
+    assert_eq!(alias_section["bindings"]["Ctrl+Shift+3"][1]["slot"], 1);
+    assert_eq!(tenth_section["bindings"]["Ctrl+Shift+0"][1]["slot"], 1);
 }
 
 #[test]
@@ -377,4 +400,142 @@ fn save_creates_parent_directories() {
     save(&path, "{}").unwrap();
     assert_eq!(fs::read_to_string(&path).unwrap(), "{}\n");
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn empty_keymap_file_loads_default_template() {
+    let root = std::env::temp_dir().join(format!(
+        "zetta-empty-keymap-form-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::write(&root, "[]").unwrap();
+    let form = KeymapForm::load(&root).unwrap();
+    // Should have sections from default template
+    assert!(!form.sections.is_empty());
+    let terminal_section = form
+        .sections
+        .iter()
+        .find(|s| s.context.text == "Zetta > Terminal")
+        .expect("should have Zetta > Terminal section");
+    // Should have default bindings
+    assert!(!terminal_section.bindings.is_empty());
+    fs::remove_file(root).unwrap();
+}
+
+#[test]
+fn keymap_user_customization_overrides_default() {
+    let root = std::env::temp_dir().join(format!(
+        "zetta-keymap-custom-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    // User overrides ctrl-shift-t to do something else
+    fs::write(
+        &root,
+        r#"[{"context":"Zetta > Terminal","bindings":{"ctrl-shift-t":"zetta::CloseTab"}}]"#,
+    )
+    .unwrap();
+    let form = KeymapForm::load(&root).unwrap();
+    let terminal_section = form
+        .sections
+        .iter()
+        .find(|s| s.context.text == "Zetta > Terminal")
+        .expect("should have Zetta > Terminal section");
+    // Find the customized binding (stored in lowercase format)
+    let binding = terminal_section
+        .bindings
+        .iter()
+        .find(|b| b.keystroke.text == "ctrl-shift-t")
+        .expect("should have ctrl-shift-t binding");
+    // Should have user's action, not default
+    assert_eq!(binding.action, json!("zetta::CloseTab"));
+    // Other default bindings should still exist
+    assert!(terminal_section.bindings.len() > 1);
+    fs::remove_file(root).unwrap();
+}
+
+#[test]
+fn keymap_new_user_section_is_preserved() {
+    let root = std::env::temp_dir().join(format!(
+        "zetta-keymap-new-section-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    // User adds a completely new section
+    fs::write(
+        &root,
+        r#"[{"context":"Custom Context","bindings":{"ctrl-x":"custom::Action"}}]"#,
+    )
+    .unwrap();
+    let form = KeymapForm::load(&root).unwrap();
+    // Should have default sections plus the new one
+    let custom_section = form
+        .sections
+        .iter()
+        .find(|s| s.context.text == "Custom Context")
+        .expect("should have Custom Context section");
+    assert!(!custom_section.bindings.is_empty());
+    let binding = &custom_section.bindings[0];
+    assert_eq!(binding.keystroke.text, "ctrl-x");
+    assert_eq!(binding.action, json!("custom::Action"));
+    // Default sections should still exist
+    assert!(
+        form.sections
+            .iter()
+            .any(|s| s.context.text == "Zetta > Terminal")
+    );
+    fs::remove_file(root).unwrap();
+}
+
+#[test]
+fn keymap_rebinding_action_removes_old_default_binding() {
+    let root = std::env::temp_dir().join(format!(
+        "zetta-keymap-rebind-action-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    // User rebinds NewTab from ctrl-shift-t to ctrl-?
+    fs::write(
+        &root,
+        r#"[{"context":"Zetta > Terminal","bindings":{"ctrl-?":"zetta::NewTab"}}]"#,
+    )
+    .unwrap();
+    let form = KeymapForm::load(&root).unwrap();
+    let terminal_section = form
+        .sections
+        .iter()
+        .find(|s| s.context.text == "Zetta > Terminal")
+        .expect("should have Zetta > Terminal section");
+    // Should have the new binding
+    let new_binding = terminal_section
+        .bindings
+        .iter()
+        .find(|b| b.keystroke.text == "ctrl-?")
+        .expect("should have ctrl-? binding");
+    assert_eq!(new_binding.action, json!("zetta::NewTab"));
+    // Should NOT have the old default binding for NewTab
+    let old_binding = terminal_section
+        .bindings
+        .iter()
+        .find(|b| b.keystroke.text == "ctrl-shift-t");
+    assert!(
+        old_binding.is_none(),
+        "old default binding for NewTab should be removed when rebound"
+    );
+    // Other default bindings should still exist
+    assert!(terminal_section.bindings.len() > 1);
+    fs::remove_file(root).unwrap();
 }

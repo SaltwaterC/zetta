@@ -555,9 +555,10 @@ pub struct KeymapForm {
 
 impl KeymapForm {
     pub fn load(path: &Path) -> Result<Self> {
-        let template = Value::Array(bundled_keymap_template()?);
-        let value = read_json_or(path, template)?;
-        let sections = value
+        let default_template = bundled_keymap_template()?;
+        let user_value = read_json_or(path, Value::Array(vec![]))?;
+        let merged = merge_keymap_with_defaults(user_value, &default_template)?;
+        let sections = merged
             .as_array()
             .context("keymap root must be an array")?
             .iter()
@@ -634,6 +635,78 @@ impl KeymapForm {
         let sections = strip_default_keymap_bindings(sections);
         serde_json::to_string_pretty(&Value::Array(sections)).context("serializing keymap")
     }
+}
+
+/// Merges user keymap with default template, with user bindings overriding defaults.
+fn merge_keymap_with_defaults(user_value: Value, default_template: &[Value]) -> Result<Value> {
+    let mut merged: Vec<Value> = default_template.to_vec();
+
+    let user_sections = user_value
+        .as_array()
+        .context("keymap root must be an array")?;
+
+    // Build lookup of default sections by context
+    let mut defaults_by_context: HashMap<&str, &Value> = HashMap::new();
+    for section in default_template {
+        if let Some(context) = section.get("context").and_then(|v| v.as_str()) {
+            defaults_by_context.insert(context, section);
+        }
+    }
+
+    // Apply user customizations to existing default sections
+    for user_section in user_sections {
+        let user_context = user_section
+            .get("context")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if let Some(default_section) = defaults_by_context.get(user_context) {
+            // Start with a cloned owned Value from the default
+            let mut merged_section = (*default_section).clone();
+
+            // Merge bindings: user bindings override defaults
+            if let Some(user_bindings) = user_section.get("bindings").and_then(|v| v.as_object()) {
+                let mut bindings = merged_section
+                    .get("bindings")
+                    .and_then(|v| v.as_object().cloned())
+                    .unwrap_or_default();
+
+                // First, remove any default bindings that have the same action as user bindings
+                // This ensures rebinding an action replaces the old keybinding
+                let user_actions: std::collections::HashSet<&Value> =
+                    user_bindings.values().collect();
+                bindings.retain(|_, action| !user_actions.contains(action));
+
+                // Then add user bindings
+                bindings.extend(user_bindings.clone());
+                merged_section["bindings"] = Value::Object(bindings);
+            }
+
+            // Preserve other user section properties (e.g., use_key_equivalents)
+            if let Some(user_obj) = user_section.as_object() {
+                let mut merged_obj = merged_section.as_object().cloned().unwrap_or_default();
+                for (key, value) in user_obj {
+                    if key != "context" && key != "bindings" {
+                        merged_obj.insert(key.clone(), value.clone());
+                    }
+                }
+                merged_section = Value::Object(merged_obj);
+            }
+
+            // Replace in merged list
+            if let Some(idx) = merged
+                .iter()
+                .position(|s| s.get("context").and_then(|v| v.as_str()) == Some(user_context))
+            {
+                merged[idx] = merged_section;
+            }
+        } else {
+            // New section not in defaults - add it
+            merged.push(user_section.clone());
+        }
+    }
+
+    Ok(Value::Array(merged))
 }
 
 fn bundled_keymap_template() -> Result<Vec<Value>> {

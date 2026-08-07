@@ -21,13 +21,15 @@ use crate::process_control::{
     request_existing_process_pane_theme_list, request_existing_process_tab_icon,
 };
 
+use gpui::{KeyBindingContextPredicate, Unbind};
 #[cfg(target_os = "macos")]
-use gpui::{Menu, MenuItem, Unbind};
+use gpui::{Menu, MenuItem};
 #[cfg(target_os = "macos")]
 use objc2::MainThreadMarker;
 #[cfg(target_os = "macos")]
 use objc2_app_kit::{NSApplication, NSEvent, NSEventMask, NSEventModifierFlags};
 use serde_json::Value;
+use std::rc::Rc;
 
 #[cfg(not(feature = "tftp-client"))]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2311,6 +2313,12 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
         Ok(bindings) => cx.bind_keys(bindings),
         Err(error) => eprintln!("Could not load the default terminal keymap: {error:#}"),
     }
+
+    // Build default bindings and collect a map of (action_name, context) -> keystroke
+    // for rebinding detection
+    let mut default_bindings_map: std::collections::HashMap<(String, Option<String>), String> =
+        std::collections::HashMap::new();
+
     let mut bindings = vec![
         KeyBinding::new("ctrl-shift-t", NewTab, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-shift-n", NewWindow, Some("Zetta > Terminal")),
@@ -2455,11 +2463,71 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
         (1..=profile_count.min(PROFILE_SHORTCUT_SYMBOLS.len()))
             .flat_map(|slot| profile_keybindings(slot, keyboard_mapper.as_ref())),
     );
+
+    // Collect default bindings map for rebinding detection
+    for binding in &bindings {
+        let action_name = binding.action().name().to_string();
+        let context = binding.predicate().map(|p| p.to_string());
+        // Get the first keystroke as a string
+        if let Some(keystroke) = binding.keystrokes().first() {
+            default_bindings_map.insert((action_name, context), keystroke.to_string());
+        }
+    }
+
     cx.bind_keys(bindings);
+
     let Ok(content) = fs::read_to_string(path) else {
         return;
     };
     let content = normalize_keymap_key_names(&content);
+
+    // Parse user keymap to detect rebindings and create unbind key bindings
+    let user_keymap = match KeymapFile::parse(&content) {
+        Ok(keymap) => keymap,
+        Err(error) => {
+            eprintln!("Could not parse {}: {error:#}", path.display());
+            return;
+        }
+    };
+
+    // Create unbind key bindings for rebindings
+    let mut unbind_keys = Vec::new();
+    for section in user_keymap.sections() {
+        let context_str = if section.context.is_empty() {
+            None
+        } else {
+            Some(section.context.clone())
+        };
+        let context_predicate = context_str
+            .as_ref()
+            .and_then(|s| KeyBindingContextPredicate::parse(s).ok().map(Rc::new));
+        for (_keystrokes, action) in section.bindings() {
+            if let Ok(Some((action_name, _))) = KeymapFile::parse_action(action)
+                && let Some(default_keystroke) =
+                    default_bindings_map.get(&(action_name.clone(), context_str.clone()))
+            {
+                // Create unbind key binding for the default keystroke
+                let unbind_action = Unbind(action_name.into());
+                if let Ok(key_binding) = KeyBinding::load(
+                    default_keystroke,
+                    Box::new(unbind_action),
+                    context_predicate.clone(),
+                    false,
+                    None,
+                    cx.keyboard_mapper().as_ref(),
+                ) {
+                    unbind_keys.push(key_binding);
+                }
+            }
+        }
+    }
+
+    // Bind unbind keys first to remove default bindings
+    if !unbind_keys.is_empty() {
+        cx.bind_keys(unbind_keys);
+    }
+
+    // Now load user keymap normally
     match KeymapFile::load(&content, cx) {
         KeymapFileLoadResult::Success { key_bindings } => cx.bind_keys(key_bindings),
         KeymapFileLoadResult::SomeFailedToLoad {
