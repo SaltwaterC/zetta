@@ -29,7 +29,7 @@ fn custom_window_border_matches_platform_conventions() {
 }
 
 #[test]
-#[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+#[cfg(any(target_os = "windows", linux_like))]
 fn window_controls_respect_window_capabilities() {
     let supported = WindowControls::default();
 
@@ -83,7 +83,7 @@ fn window_controls_respect_window_capabilities() {
     ));
 }
 
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(linux_like)]
 #[test]
 fn empty_client_window_button_sides_do_not_reserve_space() {
     let state = WindowControlState {

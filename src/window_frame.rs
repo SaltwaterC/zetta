@@ -19,7 +19,7 @@ pub(crate) fn system_window_button_layout(cx: &App) -> WindowButtonLayout {
         return layout;
     }
 
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[cfg(linux_like)]
     {
         cx.button_layout()
             .unwrap_or_else(WindowButtonLayout::linux_default)
@@ -34,7 +34,7 @@ pub(crate) fn system_window_button_layout(cx: &App) -> WindowButtonLayout {
         }
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")))]
+    #[cfg(not(any(linux_like, target_os = "macos")))]
     {
         let _ = cx;
         WindowButtonLayout {
@@ -81,19 +81,19 @@ pub(crate) fn platform_title_bar_height(window: &Window) -> Pixels {
 
 #[derive(Clone, Copy)]
 pub(crate) struct WindowControlState {
-    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+    #[cfg(any(target_os = "windows", linux_like))]
     pub(crate) supported_controls: WindowControls,
-    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+    #[cfg(any(target_os = "windows", linux_like))]
     pub(crate) is_maximized: bool,
-    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+    #[cfg(any(target_os = "windows", linux_like))]
     pub(crate) is_resizable: bool,
-    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+    #[cfg(any(target_os = "windows", linux_like))]
     pub(crate) is_minimizable: bool,
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[cfg(linux_like)]
     pub(crate) client_decorations: bool,
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+#[cfg(any(target_os = "windows", linux_like))]
 fn window_button_enabled(
     button: WindowButton,
     supported_controls: WindowControls,
@@ -107,7 +107,7 @@ fn window_button_enabled(
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(linux_like)]
 fn has_enabled_window_button(
     buttons: [Option<WindowButton>; MAX_BUTTONS_PER_SIDE],
     state: WindowControlState,
@@ -231,7 +231,7 @@ pub(crate) fn render_window_controls(
         .into_any_element()
 }
 
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(linux_like)]
 pub(crate) fn render_window_controls(
     buttons: [Option<WindowButton>; MAX_BUTTONS_PER_SIDE],
     state: WindowControlState,
@@ -321,7 +321,7 @@ pub(crate) fn render_window_controls(
         .into_any_element()
 }
 
-#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "freebsd")))]
+#[cfg(not(any(target_os = "windows", linux_like)))]
 pub(crate) fn render_window_controls(
     _buttons: [Option<WindowButton>; MAX_BUTTONS_PER_SIDE],
     _state: WindowControlState,

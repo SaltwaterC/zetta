@@ -1263,55 +1263,45 @@ impl Render for Zetta {
             .unwrap_or_default();
         let process_background_sessions = self.process_background_session_picker_entries(cx);
         let background_session_count = process_background_sessions.len();
-        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+        #[cfg(any(target_os = "windows", linux_like))]
         let supported_controls = window.window_controls();
-        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+        #[cfg(any(target_os = "windows", linux_like))]
         let is_maximized = window.is_maximized();
-        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+        #[cfg(any(target_os = "windows", linux_like))]
         let is_resizable = window.is_resizable();
-        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+        #[cfg(any(target_os = "windows", linux_like))]
         let is_minimizable = window.is_minimizable();
         let (client_decorations, tiling) = match window.window_decorations() {
             Decorations::Client { tiling } => (true, tiling),
             Decorations::Server => (false, Tiling::default()),
         };
         let window_control_state = WindowControlState {
-            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+            #[cfg(any(target_os = "windows", linux_like))]
             supported_controls,
-            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+            #[cfg(any(target_os = "windows", linux_like))]
             is_maximized,
-            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+            #[cfg(any(target_os = "windows", linux_like))]
             is_resizable,
-            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+            #[cfg(any(target_os = "windows", linux_like))]
             is_minimizable,
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            #[cfg(linux_like)]
             client_decorations,
         };
-        let rounded_top_left = cfg!(any(target_os = "linux", target_os = "freebsd"))
-            && client_decorations
-            && !tiling.top
-            && !tiling.left;
-        let rounded_top_right = cfg!(any(target_os = "linux", target_os = "freebsd"))
-            && client_decorations
-            && !tiling.top
-            && !tiling.right;
-        let rounded_bottom_left = cfg!(any(target_os = "linux", target_os = "freebsd"))
-            && client_decorations
-            && !tiling.bottom
-            && !tiling.left;
-        let rounded_bottom_right = cfg!(any(target_os = "linux", target_os = "freebsd"))
-            && client_decorations
-            && !tiling.bottom
-            && !tiling.right;
+        let rounded_top_left =
+            cfg!(linux_like) && client_decorations && !tiling.top && !tiling.left;
+        let rounded_top_right =
+            cfg!(linux_like) && client_decorations && !tiling.top && !tiling.right;
+        let rounded_bottom_left =
+            cfg!(linux_like) && client_decorations && !tiling.bottom && !tiling.left;
+        let rounded_bottom_right =
+            cfg!(linux_like) && client_decorations && !tiling.bottom && !tiling.right;
         let bottom_corner_radius = theme::CLIENT_SIDE_DECORATION_ROUNDING - px(1.);
         let tab_close_button_on_left = window_close_button_on_left(self.button_layout);
         let left_window_controls =
             render_window_controls(self.button_layout.left, window_control_state, false, cx);
         let right_window_controls =
             render_window_controls(self.button_layout.right, window_control_state, true, cx);
-        let title_bar_background = if cfg!(any(target_os = "linux", target_os = "freebsd"))
-            && !window.is_window_active()
-        {
+        let title_bar_background = if cfg!(linux_like) && !window.is_window_active() {
             colors.title_bar_inactive_background
         } else {
             colors.title_bar_background
@@ -3288,10 +3278,9 @@ impl Render for Zetta {
             .relative()
             .flex()
             .flex_col()
-            .when(
-                !cfg!(any(target_os = "linux", target_os = "freebsd")),
-                |content| content.bg(colors.editor_background),
-            )
+            .when(!cfg!(linux_like), |content| {
+                content.bg(colors.editor_background)
+            })
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::new_window))
             .on_action(cx.listener(Self::open_application_menu))

@@ -11,13 +11,13 @@ mod notification_sounds;
 mod process_control;
 #[cfg(feature = "serial-console")]
 mod serial_console;
-#[cfg(any(feature = "http-server", feature = "tftp-server"))]
+#[cfg(servers_enabled)]
 mod server_ui;
 mod session_auth_ui;
 mod session_cli;
 mod settings_editor;
 mod shell_integration;
-#[cfg(any(feature = "tftp-server", feature = "tftp-client"))]
+#[cfg(tftp_enabled)]
 mod tftp;
 mod theme_extensions;
 #[cfg(feature = "syntax-highlighting")]
@@ -53,7 +53,7 @@ use config::{
     WorkingDirectoryScope, profile_is_hidden, visible_profile_count, visible_profile_index,
 };
 use futures::StreamExt as _;
-#[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+#[cfg(any(target_os = "windows", linux_like))]
 use gpui::WindowControls;
 use gpui::{
     Action, Anchor, Animation, AnimationExt, AnyElement, App, AppContext as _, Bounds, Context,
@@ -249,7 +249,7 @@ use http_server::*;
 #[cfg(feature = "serial-console")]
 use serial_console::*;
 use settings_ui::*;
-#[cfg(any(feature = "tftp-server", feature = "tftp-client"))]
+#[cfg(tftp_enabled)]
 use tftp::*;
 mod app;
 #[cfg(feature = "http-server")]

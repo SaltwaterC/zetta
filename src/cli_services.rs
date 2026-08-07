@@ -1,4 +1,4 @@
-#[cfg(all(feature = "clipboard", any(target_os = "linux", target_os = "freebsd")))]
+#[cfg(all(feature = "clipboard", linux_like))]
 use std::env;
 #[cfg(any(
     feature = "serial-console",
@@ -27,10 +27,7 @@ use std::path::Path;
 use std::path::PathBuf;
 #[cfg(all(feature = "notifications", target_os = "macos"))]
 use std::process::Command;
-#[cfg(all(
-    feature = "notifications",
-    any(target_os = "linux", target_os = "freebsd")
-))]
+#[cfg(all(feature = "notifications", linux_like))]
 use std::process::{Command, Stdio};
 #[cfg(feature = "serial-console")]
 use std::sync::{
@@ -580,7 +577,7 @@ pub(crate) fn parse_tftp_server_args(
     }))
 }
 
-#[cfg(any(feature = "http-server", feature = "tftp-server"))]
+#[cfg(servers_enabled)]
 fn parse_server_options(
     args: &[OsString],
     service: &str,
@@ -619,7 +616,7 @@ fn parse_server_options(
     Ok((root, port, config_path))
 }
 
-#[cfg(any(feature = "http-server", feature = "tftp-server"))]
+#[cfg(servers_enabled)]
 fn parse_port(argument: &OsString) -> Result<u16> {
     let port = argument
         .to_string_lossy()
@@ -654,7 +651,7 @@ impl TftpServerCommand {
     }
 }
 
-#[cfg(any(feature = "http-server", feature = "tftp-server"))]
+#[cfg(servers_enabled)]
 fn stream_server_logs(
     mut reader: Box<dyn io::Read + Send>,
     _control: Box<dyn io::Write + Send>,
@@ -820,10 +817,7 @@ fn set_unix_notification_identity(
     Ok(())
 }
 
-#[cfg(all(
-    feature = "notifications",
-    any(target_os = "linux", target_os = "freebsd")
-))]
+#[cfg(all(feature = "notifications", linux_like))]
 fn try_show_portal_notification(command: &NotifyCommand) -> Result<bool> {
     // Unlike org.freedesktop.Notifications, the portal contract explicitly
     // requires notifications to outlive the process that submitted them.
@@ -864,16 +858,10 @@ fn try_show_portal_notification(command: &NotifyCommand) -> Result<bool> {
     Ok(sent.is_ok())
 }
 
-#[cfg(all(
-    feature = "notifications",
-    any(target_os = "linux", target_os = "freebsd")
-))]
+#[cfg(all(feature = "notifications", linux_like))]
 const NOTIFICATION_DAEMON_ENV: &str = "ZETTA_NOTIFICATION_DAEMON";
 
-#[cfg(all(
-    feature = "notifications",
-    any(target_os = "linux", target_os = "freebsd")
-))]
+#[cfg(all(feature = "notifications", linux_like))]
 fn spawn_notification_daemon() -> Result<()> {
     let executable = std::env::current_exe().context("locating the zetta executable")?;
     let mut command = Command::new(executable);
@@ -906,10 +894,7 @@ fn spawn_notification_daemon() -> Result<()> {
     Ok(())
 }
 
-#[cfg(all(
-    feature = "notifications",
-    any(target_os = "linux", target_os = "freebsd")
-))]
+#[cfg(all(feature = "notifications", linux_like))]
 fn keep_notification_worker_alive(timeout: Option<notify_rust::Timeout>) {
     let timeout = timeout.unwrap_or_default();
     match timeout {
@@ -1168,7 +1153,7 @@ impl NotifyCommand {
             .as_deref()
             .and_then(crate::notification_sounds::BuiltinSound::parse);
 
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        #[cfg(linux_like)]
         if (bundled_sound.is_some() || self.sound.is_none()) && try_show_portal_notification(self)?
         {
             if let Some(bundled_sound) = bundled_sound {
@@ -1177,7 +1162,7 @@ impl NotifyCommand {
             return Ok(());
         }
 
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        #[cfg(linux_like)]
         if std::env::var_os(NOTIFICATION_DAEMON_ENV).is_none() {
             return spawn_notification_daemon();
         }
@@ -1225,7 +1210,7 @@ impl NotifyCommand {
         if let Some(bundled_sound) = bundled_sound {
             bundled_sound.play()?;
         }
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        #[cfg(linux_like)]
         if std::env::var_os(NOTIFICATION_DAEMON_ENV).is_some() {
             keep_notification_worker_alive(self.timeout);
         }
@@ -1343,7 +1328,7 @@ pub(crate) fn parse_paste_args(
     Ok(CliServiceCommand::Paste(PasteCommand))
 }
 
-#[cfg(all(feature = "clipboard", any(target_os = "linux", target_os = "freebsd")))]
+#[cfg(all(feature = "clipboard", linux_like))]
 fn spawn_clipboard_copy_daemon(text: String) -> Result<()> {
     use std::os::unix::process::CommandExt as _;
     use std::process::Stdio;
@@ -1386,7 +1371,7 @@ fn run_clipboard_copy_daemon() -> Result<()> {
         .read_to_string(&mut input)
         .context("reading standard input")?;
     let mut clipboard = arboard::Clipboard::new().context("opening the system clipboard")?;
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[cfg(linux_like)]
     {
         use arboard::SetExtLinux as _;
         clipboard
@@ -1395,7 +1380,7 @@ fn run_clipboard_copy_daemon() -> Result<()> {
             .text(input)
             .context("serving the system clipboard")?;
     }
-    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    #[cfg(not(linux_like))]
     clipboard
         .set_text(input)
         .context("writing to the system clipboard")?;
@@ -1410,11 +1395,11 @@ impl CopyCommand {
             .lock()
             .read_to_string(&mut input)
             .context("reading standard input")?;
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        #[cfg(linux_like)]
         {
             spawn_clipboard_copy_daemon(input)
         }
-        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+        #[cfg(not(linux_like))]
         {
             let mut clipboard =
                 arboard::Clipboard::new().context("opening the system clipboard")?;

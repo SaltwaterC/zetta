@@ -762,7 +762,7 @@ fn negotiated_write_options(
     (block_size, transfer_size, acknowledged)
 }
 
-#[cfg(any(feature = "tftp-server", feature = "tftp-client"))]
+#[cfg(tftp_enabled)]
 fn transfer_socket(peer_ip: IpAddr) -> io::Result<UdpSocket> {
     match peer_ip {
         IpAddr::V4(_) => UdpSocket::bind(("0.0.0.0", 0)),

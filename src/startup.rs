@@ -142,9 +142,9 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         "Terminal emulator",
         #[cfg(feature = "syntax-highlighting")]
         "Vi syntax highlighting",
-        #[cfg(all(feature = "wayland", any(target_os = "linux", target_os = "freebsd")))]
+        #[cfg(all(feature = "wayland", linux_like))]
         "Wayland backend",
-        #[cfg(all(feature = "x11", any(target_os = "linux", target_os = "freebsd")))]
+        #[cfg(all(feature = "x11", linux_like))]
         "X11 backend",
         #[cfg(feature = "serial-console")]
         "Serial console",
@@ -170,7 +170,7 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
     } else {
         ""
     };
-    let tftp_usage = if cfg!(any(feature = "tftp-client", feature = "tftp-server")) {
+    let tftp_usage = if cfg!(tftp_enabled) {
         "\n       zetta tftp <COMMAND>"
     } else {
         ""
@@ -195,7 +195,7 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
     } else {
         ""
     };
-    let tftp_command = if cfg!(any(feature = "tftp-client", feature = "tftp-server")) {
+    let tftp_command = if cfg!(tftp_enabled) {
         "\n  tftp                                Transfer files or serve them with TFTP"
     } else {
         ""
@@ -2050,35 +2050,42 @@ pub(crate) fn validate_keymap_contents(content: &str, cx: &mut App) -> Result<()
 
 pub(crate) const RENAME_TAB_KEYBINDING: &str = "ctrl-shift-r";
 pub(crate) const CHANGE_TAB_ICON_KEYBINDING: &str = "ctrl-shift-y";
-#[cfg(target_os = "macos")]
-pub(crate) const RELOAD_CONFIGURATION_KEYBINDING: &str = "ctrl-cmd-r";
-#[cfg(not(target_os = "macos"))]
-pub(crate) const RELOAD_CONFIGURATION_KEYBINDING: &str = "ctrl-alt-r";
-#[cfg(target_os = "macos")]
-pub(crate) const RENAME_PANE_KEYBINDING: &str = "cmd-shift-r";
-#[cfg(not(target_os = "macos"))]
-pub(crate) const RENAME_PANE_KEYBINDING: &str = "alt-shift-r";
-#[cfg(target_os = "macos")]
-pub(crate) const TOGGLE_PANE_CONTROLS_KEYBINDING: &str = "cmd-shift-h";
-#[cfg(not(target_os = "macos"))]
-pub(crate) const TOGGLE_PANE_CONTROLS_KEYBINDING: &str = "alt-shift-h";
+pub(crate) const RELOAD_CONFIGURATION_KEYBINDING: &str = if cfg!(target_os = "macos") {
+    "ctrl-cmd-r"
+} else {
+    "ctrl-alt-r"
+};
+pub(crate) const RENAME_PANE_KEYBINDING: &str = if cfg!(target_os = "macos") {
+    "cmd-shift-r"
+} else {
+    "alt-shift-r"
+};
+pub(crate) const TOGGLE_PANE_CONTROLS_KEYBINDING: &str = if cfg!(target_os = "macos") {
+    "cmd-shift-h"
+} else {
+    "alt-shift-h"
+};
 pub(crate) const TOGGLE_TAB_PANE_CONTROLS_KEYBINDING: &str = "ctrl-shift-h";
-#[cfg(target_os = "macos")]
-pub(crate) const CLOSE_PANE_KEYBINDING: &str = "cmd-shift-x";
-#[cfg(not(target_os = "macos"))]
-pub(crate) const CLOSE_PANE_KEYBINDING: &str = "alt-shift-x";
-#[cfg(target_os = "macos")]
-pub(crate) const SAVE_PANE_OUTPUT_KEYBINDING: &str = "cmd-shift-s";
-#[cfg(not(target_os = "macos"))]
-pub(crate) const SAVE_PANE_OUTPUT_KEYBINDING: &str = "alt-shift-s";
-#[cfg(target_os = "macos")]
-pub(crate) const EDIT_SCROLLBACK_KEYBINDING: &str = "cmd-shift-v";
-#[cfg(not(target_os = "macos"))]
-pub(crate) const EDIT_SCROLLBACK_KEYBINDING: &str = "alt-shift-v";
-#[cfg(target_os = "macos")]
-pub(crate) const SELECT_ALL_KEYBINDING: &str = "cmd-shift-a";
-#[cfg(not(target_os = "macos"))]
-pub(crate) const SELECT_ALL_KEYBINDING: &str = "alt-shift-a";
+pub(crate) const CLOSE_PANE_KEYBINDING: &str = if cfg!(target_os = "macos") {
+    "cmd-shift-x"
+} else {
+    "alt-shift-x"
+};
+pub(crate) const SAVE_PANE_OUTPUT_KEYBINDING: &str = if cfg!(target_os = "macos") {
+    "cmd-shift-s"
+} else {
+    "alt-shift-s"
+};
+pub(crate) const EDIT_SCROLLBACK_KEYBINDING: &str = if cfg!(target_os = "macos") {
+    "cmd-shift-v"
+} else {
+    "alt-shift-v"
+};
+pub(crate) const SELECT_ALL_KEYBINDING: &str = if cfg!(target_os = "macos") {
+    "cmd-shift-a"
+} else {
+    "alt-shift-a"
+};
 pub(crate) const RECONNECT_SESSION_KEYBINDING: &str = "ctrl-shift-a";
 pub(crate) const DETACH_TAB_KEYBINDING: &str = "ctrl-shift-d";
 pub(crate) const CLOSE_WINDOW_KEYBINDING: &str = "ctrl-shift-q";
@@ -2086,36 +2093,35 @@ pub(crate) const CLOSE_ALL_WINDOWS_KEYBINDING: &str = "ctrl-shift-x";
 #[cfg(feature = "serial-console")]
 pub(crate) const SERIAL_CONSOLE_KEYBINDING: &str = "ctrl-shift-s";
 pub(crate) const AUTO_BACKGROUND_TAB_KEYBINDING: &str = "ctrl-shift-b";
-#[cfg(target_os = "macos")]
-pub(crate) const ROTATE_PANE_LAYOUT_KEYBINDING: &str = "cmd-shift-l";
-#[cfg(not(target_os = "macos"))]
-pub(crate) const ROTATE_PANE_LAYOUT_KEYBINDING: &str = "alt-shift-l";
-#[cfg(target_os = "macos")]
-pub(crate) const ROTATE_PANE_LAYOUT_COUNTER_CLOCKWISE_KEYBINDING: &str = "cmd-shift-k";
-#[cfg(not(target_os = "macos"))]
-pub(crate) const ROTATE_PANE_LAYOUT_COUNTER_CLOCKWISE_KEYBINDING: &str = "alt-shift-k";
+pub(crate) const ROTATE_PANE_LAYOUT_KEYBINDING: &str = if cfg!(target_os = "macos") {
+    "cmd-shift-l"
+} else {
+    "alt-shift-l"
+};
+pub(crate) const ROTATE_PANE_LAYOUT_COUNTER_CLOCKWISE_KEYBINDING: &str =
+    if cfg!(target_os = "macos") {
+        "cmd-shift-k"
+    } else {
+        "alt-shift-k"
+    };
 pub(crate) const TOGGLE_PANE_RESIZE_MODE_KEYBINDING: &str = "ctrl-shift-j";
 pub(crate) const TOGGLE_PANE_MOVE_MODE_KEYBINDING: &str = "alt-shift-m";
 pub(crate) const APPLICATION_MENU_KEYBINDING: &str = "alt-space";
 
 #[cfg(target_os = "macos")]
-pub(crate) const MACOS_NEW_TAB_KEYBINDING: &str = "cmd-t";
+mod macos_menu_keybindings {
+    pub(crate) const MACOS_NEW_TAB_KEYBINDING: &str = "cmd-t";
+    pub(crate) const MACOS_NEW_WINDOW_KEYBINDING: &str = "cmd-n";
+    pub(crate) const MACOS_SETTINGS_KEYBINDING: &str = "cmd-,";
+    pub(crate) const MACOS_CLOSE_TAB_KEYBINDING: &str = "cmd-w";
+    pub(crate) const MACOS_CLOSE_WINDOW_KEYBINDING: &str = "cmd-q";
+    pub(crate) const MACOS_CLOSE_ALL_WINDOWS_KEYBINDING: &str = "cmd-x";
+    pub(crate) const MACOS_COPY_KEYBINDING: &str = "cmd-c";
+    pub(crate) const MACOS_CLEAR_KEYBINDING: &str = "cmd-l";
+    pub(crate) const MACOS_PASTE_KEYBINDING: &str = "cmd-v";
+}
 #[cfg(target_os = "macos")]
-pub(crate) const MACOS_NEW_WINDOW_KEYBINDING: &str = "cmd-n";
-#[cfg(target_os = "macos")]
-pub(crate) const MACOS_SETTINGS_KEYBINDING: &str = "cmd-,";
-#[cfg(target_os = "macos")]
-pub(crate) const MACOS_CLOSE_TAB_KEYBINDING: &str = "cmd-w";
-#[cfg(target_os = "macos")]
-pub(crate) const MACOS_CLOSE_WINDOW_KEYBINDING: &str = "cmd-q";
-#[cfg(target_os = "macos")]
-pub(crate) const MACOS_CLOSE_ALL_WINDOWS_KEYBINDING: &str = "cmd-x";
-#[cfg(target_os = "macos")]
-pub(crate) const MACOS_COPY_KEYBINDING: &str = "cmd-c";
-#[cfg(target_os = "macos")]
-pub(crate) const MACOS_CLEAR_KEYBINDING: &str = "cmd-l";
-#[cfg(target_os = "macos")]
-pub(crate) const MACOS_PASTE_KEYBINDING: &str = "cmd-v";
+use macos_menu_keybindings::*;
 
 pub(crate) fn pane_output_keybinding() -> KeyBinding {
     KeyBinding::new(

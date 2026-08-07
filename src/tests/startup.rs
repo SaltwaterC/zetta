@@ -212,14 +212,14 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
         )
     );
 
-    #[cfg(all(feature = "wayland", any(target_os = "linux", target_os = "freebsd")))]
+    #[cfg(all(feature = "wayland", linux_like))]
     assert!(help.contains("Wayland backend"));
-    #[cfg(not(all(feature = "wayland", any(target_os = "linux", target_os = "freebsd"))))]
+    #[cfg(not(all(feature = "wayland", linux_like)))]
     assert!(!help.contains("Wayland backend"));
 
-    #[cfg(all(feature = "x11", any(target_os = "linux", target_os = "freebsd")))]
+    #[cfg(all(feature = "x11", linux_like))]
     assert!(help.contains("X11 backend"));
-    #[cfg(not(all(feature = "x11", any(target_os = "linux", target_os = "freebsd"))))]
+    #[cfg(not(all(feature = "x11", linux_like)))]
     assert!(!help.contains("X11 backend"));
 
     #[cfg(feature = "serial-console")]
@@ -250,13 +250,13 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     #[cfg(not(feature = "tftp-server"))]
     assert!(!help.contains("TFTP server"));
 
-    #[cfg(any(feature = "tftp-client", feature = "tftp-server"))]
+    #[cfg(tftp_enabled)]
     {
         #[cfg(feature = "tftp-client")]
         assert!(help.contains("TFTP client"));
         assert!(help.contains("zetta tftp <COMMAND>"));
     }
-    #[cfg(not(any(feature = "tftp-client", feature = "tftp-server")))]
+    #[cfg(not(tftp_enabled))]
     {
         assert!(!help.contains("TFTP client"));
         assert!(!help.contains("zetta tftp <COMMAND>"));

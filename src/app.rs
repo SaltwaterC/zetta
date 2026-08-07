@@ -5542,7 +5542,7 @@ impl PaneWindowEdges {
     }
 
     fn client_corner_radii(self, window: &Window) -> gpui::Corners<Pixels> {
-        if !cfg!(any(target_os = "linux", target_os = "freebsd")) {
+        if !cfg!(linux_like) {
             return gpui::Corners::default();
         }
         let Decorations::Client { tiling } = window.window_decorations() else {

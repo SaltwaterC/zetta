@@ -6,6 +6,8 @@ const CONPTY_PACKAGE_SHA256: &str =
     "2C57CB7DA7E19FA06C86487C8D9B5C307D65695429FA15A854BF5F3CDDCA9E1D";
 
 fn main() {
+    emit_cfg_aliases();
+
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
@@ -27,6 +29,32 @@ fn main() {
         .unwrap();
 
     stage_conpty_runtime();
+}
+
+/// Collapses platform and feature predicates that are otherwise respelled at
+/// every use site into single-word `cfg` aliases. Each alias must also be
+/// declared to `rustc-check-cfg` or `cargo check` reports it as unexpected.
+fn emit_cfg_aliases() {
+    println!("cargo::rustc-check-cfg=cfg(linux_like)");
+    println!("cargo::rustc-check-cfg=cfg(servers_enabled)");
+    println!("cargo::rustc-check-cfg=cfg(tftp_enabled)");
+
+    if matches!(
+        env::var("CARGO_CFG_TARGET_OS").as_deref(),
+        Ok("linux") | Ok("freebsd")
+    ) {
+        println!("cargo::rustc-cfg=linux_like");
+    }
+    if feature_enabled("HTTP_SERVER") || feature_enabled("TFTP_SERVER") {
+        println!("cargo::rustc-cfg=servers_enabled");
+    }
+    if feature_enabled("TFTP_SERVER") || feature_enabled("TFTP_CLIENT") {
+        println!("cargo::rustc-cfg=tftp_enabled");
+    }
+}
+
+fn feature_enabled(feature: &str) -> bool {
+    env::var_os(format!("CARGO_FEATURE_{feature}")).is_some()
 }
 
 fn stage_conpty_runtime() {
