@@ -116,7 +116,7 @@ LINUX_USER_DESKTOP_DIR := $(LINUX_USER_DATA_DIR)/applications
 LINUX_USER_CLI_PATH := $(LINUX_USER_BIN_DIR)/zetta
 
 .PHONY: build fmt test lint install install-binary install-capabilities install-assets install-user-path uninstall \
-	uninstall-binary uninstall-assets uninstall-user-path refresh-desktop-caches
+	uninstall-binary uninstall-assets uninstall-user-path refresh-desktop-caches clean
 
 test:
 	$(CARGO) test --locked --no-default-features --features "$(BUILD_FEATURES)"
@@ -327,4 +327,8 @@ refresh-desktop-caches:
 			gtk-update-icon-cache -f "$(PREFIX)/share/icons/hicolor"; \
 		fi; \
 	fi
+
+clean:
+	$(CARGO) clean
+
 endif
