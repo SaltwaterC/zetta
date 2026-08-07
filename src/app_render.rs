@@ -2740,6 +2740,7 @@ impl Render for Zetta {
             .on_action(cx.listener(Self::reset_pane_theme))
             .on_action(cx.listener(Self::rename_pane))
             .on_action(cx.listener(Self::set_pane_overlay))
+            .on_action(cx.listener(Self::reset_pane_overlay))
             .on_action(cx.listener(Self::toggle_pane_controls))
             .on_action(cx.listener(Self::toggle_tab_pane_controls))
             .on_action(cx.listener(Self::split_horizontal_down))

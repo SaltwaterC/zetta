@@ -4281,6 +4281,15 @@ impl Zetta {
         self.begin_pane_overlay_edit(pane_id, window, cx);
     }
 
+    pub(crate) fn reset_pane_overlay(
+        &mut self,
+        _: &ResetPaneOverlay,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_active_pane_overlay(None, None, None, None, cx);
+    }
+
     pub(crate) fn begin_pane_overlay_edit(
         &mut self,
         pane_id: u64,

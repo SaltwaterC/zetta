@@ -131,6 +131,7 @@ actions!(
         ResetPaneTheme,
         RenamePane,
         SetPaneOverlay,
+        ResetPaneOverlay,
         TogglePaneControls,
         ToggleTabPaneControls,
         ClosePane,
