@@ -225,6 +225,14 @@ use wayland_protocols::wp::linux_dmabuf::zv1::client::{
 /// Used to convert evdev scancode to xkb scancode
 const MIN_KEYCODE: u32 = 8;
 
+/// Converts the `key` field of a `wl_keyboard::Event::Key` to an xkb scancode.
+/// Returns `None` for out-of-range keycodes, such as `XKB_KEYCODE_INVALID`
+/// (0xffffffff), which some compositors (e.g. WSLg) send for special keys like
+/// the Fn key on laptops, instead of offsetting them.
+fn wayland_keycode_to_xkb(key: u32) -> Option<Keycode> {
+    key.checked_add(MIN_KEYCODE).map(Keycode::from)
+}
+
 const UNKNOWN_KEYBOARD_LAYOUT_NAME: SharedString = SharedString::new_static("unknown");
 const XDG_ACTIVATION_TOKEN_ENV_VAR: &str = "XDG_ACTIVATION_TOKEN";
 
@@ -1853,7 +1861,9 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                 };
 
                 let keymap_state = state.keymap_state.as_ref().unwrap();
-                let keycode = Keycode::from(key + MIN_KEYCODE);
+                let Some(keycode) = wayland_keycode_to_xkb(key) else {
+                    return;
+                };
                 let keysym = keymap_state.key_get_one_sym(keycode);
 
                 match key_state {
@@ -2893,6 +2903,27 @@ mod tests {
 
     fn ime_cursor_bounds(x: f32) -> Bounds<Pixels> {
         Bounds::new(point(px(x), px(20.25)), size(px(1.0), px(18.75)))
+    }
+
+    #[test]
+    fn converts_valid_wayland_keycodes() {
+        assert_eq!(wayland_keycode_to_xkb(30), Some(Keycode::from(38)));
+        assert_eq!(wayland_keycode_to_xkb(0), Some(Keycode::from(8)));
+        assert_eq!(wayland_keycode_to_xkb(247), Some(Keycode::from(255)));
+    }
+
+    #[test]
+    fn rejects_out_of_range_wayland_keycodes() {
+        assert_eq!(wayland_keycode_to_xkb(u32::MAX), None);
+        assert_eq!(wayland_keycode_to_xkb(u32::MAX - 7), None);
+        assert_eq!(
+            wayland_keycode_to_xkb(u32::MAX - 8),
+            Some(Keycode::from(u32::MAX))
+        );
+        assert_eq!(
+            wayland_keycode_to_xkb(u32::MAX - 9),
+            Some(Keycode::from(u32::MAX - 1))
+        );
     }
 
     #[test]
