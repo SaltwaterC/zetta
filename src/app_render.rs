@@ -1355,7 +1355,7 @@ impl Render for Zetta {
                 overflow_selection,
             );
 
-            let (tabs, left_overflow, right_overflow) = tab_bar_handle
+            let (tabs, left_overflow, right_overflow, first_visible_selected) = tab_bar_handle
                 .read_with(cx, |this, cx| {
                     let overflow_entries = |range: std::ops::Range<usize>| {
                         range
@@ -1368,13 +1368,29 @@ impl Render for Zetta {
                     let left_overflow = overflow_entries(0..visible_range.start);
                     let right_overflow = overflow_entries(visible_range.end..tab_count);
 
-                    let tabs = this
+                    let visible_tabs: Vec<_> = this
                         .tabs
                         .iter()
                         .enumerate()
                         .filter(|(index, _)| visible_range.contains(index))
                         .map(|(index, tab)| {
                             let selected = index == this.active_tab;
+                            (index, tab, selected)
+                        })
+                        .collect();
+                    let first_visible_selected = visible_tabs
+                        .first()
+                        .map(|(_, _, sel)| *sel)
+                        .unwrap_or(false);
+                    let visible_tabs_for_next = visible_tabs.clone();
+                    let tabs = visible_tabs
+                        .into_iter()
+                        .enumerate()
+                        .map(|(visible_index, (index, tab, selected))| {
+                            let next_selected = visible_tabs_for_next
+                                .get(visible_index + 1)
+                                .map(|(_, _, next_sel)| *next_sel)
+                                .unwrap_or(false);
                             let tab_theme = tab.theme(cx);
                             let tab_colors = tab_theme.colors();
                             let tab_background = if selected {
@@ -1486,8 +1502,13 @@ impl Render for Zetta {
                                 .when(tab_close_button_on_left, |tab| tab.flex_row_reverse())
                                 .items_center()
                                 .gap_1()
-                                .border_r_1()
-                                .border_color(tab_colors.border)
+                                .when(!(compact_mode && (selected || next_selected)), |tab| {
+                                    tab.border_r_1().border_color(if compact_mode {
+                                        tab_colors.border.opacity(0.5)
+                                    } else {
+                                        tab_colors.border
+                                    })
+                                })
                                 .bg(tab_background)
                                 .on_click(move |event, window, cx| {
                                     cx.stop_propagation();
@@ -1576,7 +1597,7 @@ impl Render for Zetta {
                         })
                         .collect::<Vec<_>>();
 
-                    (tabs, left_overflow, right_overflow)
+                    (tabs, left_overflow, right_overflow, first_visible_selected)
                 })
                 .unwrap_or_default();
 
@@ -1592,28 +1613,43 @@ impl Render for Zetta {
                 // Buttons form one contiguous area with no dividers between them, so
                 // this separator (matching the tab bar's own former left border) only
                 // belongs here when a tab, not the left overflow trigger, sits first.
-                .when(compact_mode && left_overflow.is_empty(), |tabs| {
-                    tabs.border_l_1().border_color(tab_overflow_border_color)
-                })
+                // Also omit when the first visible tab is the active tab in compact mode.
+                .when(
+                    compact_mode && left_overflow.is_empty() && !first_visible_selected,
+                    |tabs| {
+                        tabs.border_l_1()
+                            .border_color(tab_overflow_border_color.opacity(0.25))
+                    },
+                )
                 .when(!left_overflow.is_empty(), |bar| {
+                    let overflow_border = if compact_mode {
+                        tab_overflow_border_color.opacity(0.5)
+                    } else {
+                        tab_overflow_border_color
+                    };
                     bar.child(render_tab_overflow_trigger(
                         false,
                         left_overflow,
                         compact_mode,
                         title_bar_height,
-                        tab_overflow_border_color,
+                        overflow_border,
                         tab_overflow_left_menu_handle.clone(),
                         tab_bar_handle.clone(),
                     ))
                 })
                 .children(tabs)
                 .when(!right_overflow.is_empty(), |bar| {
+                    let overflow_border = if compact_mode {
+                        tab_overflow_border_color.opacity(0.5)
+                    } else {
+                        tab_overflow_border_color
+                    };
                     bar.child(render_tab_overflow_trigger(
                         true,
                         right_overflow,
                         compact_mode,
                         title_bar_height,
-                        tab_overflow_border_color,
+                        overflow_border,
                         tab_overflow_right_menu_handle.clone(),
                         tab_bar_handle.clone(),
                     ))
