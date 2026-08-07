@@ -3267,7 +3267,7 @@ pub(crate) fn run() -> Result<()> {
                         let Ok(zetta) = view.downcast::<Zetta>() else {
                             return;
                         };
-                        let _ = zetta.update(cx, |zetta, cx| {
+                        zetta.update(cx, |zetta, cx| {
                             if reverse {
                                 zetta.previous_tab(&PreviousTab, window, cx);
                             } else {

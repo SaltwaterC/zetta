@@ -458,7 +458,7 @@ fn tab_pane_index_resolves_panes_without_scanning() {
         overlay_buffer: None,
         overlay_cursor: 0,
         overlay_select_all: false,
-        overlay_opacity_picker: None,
+        overlay_style_picker: None,
     };
     for pane in &tab.panes {
         assert!(std::ptr::eq(tab.pane(pane.id).unwrap(), pane));
@@ -619,7 +619,7 @@ fn split_profile_comes_from_the_active_pane() {
         overlay_buffer: None,
         overlay_cursor: 0,
         overlay_select_all: false,
-        overlay_opacity_picker: None,
+        overlay_style_picker: None,
     };
 
     let profile = tab.active_profile().unwrap();
@@ -673,7 +673,7 @@ fn closing_active_pane_restores_previous_focus() {
         overlay_buffer: None,
         overlay_cursor: 0,
         overlay_select_all: false,
-        overlay_opacity_picker: None,
+        overlay_style_picker: None,
     };
 
     tab.remove_pane(3);
@@ -729,7 +729,7 @@ fn closing_inactive_pane_preserves_focus() {
         overlay_buffer: None,
         overlay_cursor: 0,
         overlay_select_all: false,
-        overlay_opacity_picker: None,
+        overlay_style_picker: None,
     };
 
     tab.remove_pane(1);
@@ -1079,7 +1079,7 @@ fn pane_management_tab() -> Tab {
         overlay_buffer: None,
         overlay_cursor: 0,
         overlay_select_all: false,
-        overlay_opacity_picker: None,
+        overlay_style_picker: None,
     }
 }
 
@@ -1253,37 +1253,216 @@ fn pane_overlay_is_hidden_by_default_and_renders_while_editing() {
 }
 
 #[test]
-fn overlay_opacity_picker_percent_snaps_to_five_percent_steps() {
-    let default = OverlayOpacityPicker::percent_for_opacity(None);
+fn overlay_style_picker_percent_snaps_to_five_percent_steps() {
+    let default = OverlayStylePicker::percent_for_opacity(None);
     assert_eq!(DEFAULT_OVERLAY_OPACITY, 0.85);
     assert_eq!(default, 85);
 
-    assert_eq!(OverlayOpacityPicker::percent_for_opacity(Some(0.)), 0);
-    assert_eq!(OverlayOpacityPicker::percent_for_opacity(Some(0.5)), 50);
-    assert_eq!(OverlayOpacityPicker::percent_for_opacity(Some(1.)), 100);
-    assert_eq!(OverlayOpacityPicker::percent_for_opacity(Some(0.37)), 35);
-    assert_eq!(OverlayOpacityPicker::percent_for_opacity(Some(1.4)), 100);
-    assert_eq!(OverlayOpacityPicker::percent_for_opacity(Some(-0.2)), 0);
+    assert_eq!(OverlayStylePicker::percent_for_opacity(Some(0.)), 0);
+    assert_eq!(OverlayStylePicker::percent_for_opacity(Some(0.5)), 50);
+    assert_eq!(OverlayStylePicker::percent_for_opacity(Some(1.)), 100);
+    assert_eq!(OverlayStylePicker::percent_for_opacity(Some(0.37)), 35);
+    assert_eq!(OverlayStylePicker::percent_for_opacity(Some(1.4)), 100);
+    assert_eq!(OverlayStylePicker::percent_for_opacity(Some(-0.2)), 0);
 }
 
 #[test]
-fn overlay_opacity_picker_preserves_committed_text_and_holds_percent() {
+fn overlay_style_picker_round_trips_hsl_to_hsv() {
+    for hsla in [
+        gpui::hsla(0., 1., 0.5, 1.),   // red
+        gpui::hsla(0.5, 1., 0.5, 1.),  // cyan
+        gpui::hsla(0.3, 0.4, 0.2, 1.), // dark olive
+        gpui::hsla(0., 0., 1., 1.),    // white
+        gpui::hsla(0., 0., 0., 1.),    // black
+    ] {
+        let (hue, saturation, value) = hsla_to_hsv(hsla);
+        let back = hsv_to_hsla(hue, saturation, value);
+        assert!((back.h - hsla.h).abs() < 1e-4);
+        assert!((back.s - hsla.s).abs() < 1e-4);
+        assert!((back.l - hsla.l).abs() < 1e-4);
+    }
+}
+
+#[test]
+fn overlay_style_picker_hex_field_colors_the_selection() {
+    let mut picker = OverlayStylePicker {
+        pane_id: 2,
+        section: OverlayPickerSection::Color,
+        font_size: OverlayFontSize::DEFAULT,
+        original_font_size: None,
+        hue: 0.,
+        saturation: 0.,
+        value: 1.,
+        original_color: None,
+        opacity_percent: 85,
+        original_opacity: None,
+        hex_buffer: String::new(),
+    };
+    picker.refresh_hex();
+    assert_eq!(picker.hex_buffer, "#ffffff");
+
+    // A complete buffer is replaced by a fresh entry instead of growing.
+    assert!(!picker.hex_input('#'));
+    assert!(!picker.hex_input('f'));
+    assert!(!picker.hex_input('0'));
+    assert_eq!(picker.hex_buffer, "#f0");
+
+    picker.refresh_hex();
+    for ch in ['f', 'f', '0', '0', '0', '0'] {
+        picker.hex_input(ch);
+    }
+    assert_eq!(picker.hex_buffer, "#ff0000");
+    let color = picker.color();
+    assert!(color.h.abs() < 1e-3 || (color.h - 1.).abs() < 1e-3);
+    assert!(color.s > 0.99);
+}
+
+#[test]
+fn overlay_style_picker_hex_accepts_three_digit_codes() {
+    let mut picker = OverlayStylePicker {
+        pane_id: 2,
+        section: OverlayPickerSection::Color,
+        font_size: OverlayFontSize::DEFAULT,
+        original_font_size: None,
+        hue: 0.,
+        saturation: 0.,
+        value: 1.,
+        original_color: None,
+        opacity_percent: 85,
+        original_opacity: None,
+        hex_buffer: String::new(),
+    };
+    picker.refresh_hex();
+
+    // `#f00` commits as soon as the third digit lands and keeps its literal
+    // buffer form so a longer code can keep being typed.
+    assert!(!picker.hex_input('f'));
+    assert!(!picker.hex_input('0'));
+    assert!(picker.hex_input('0'));
+    assert_eq!(picker.hex_buffer, "#f00");
+    let red = picker.color();
+    assert!(red.h.abs() < 1e-3 || (red.h - 1.).abs() < 1e-3);
+    assert!(red.s > 0.99);
+
+    // A six-digit code typed straight through is not interrupted by the
+    // short-form commit.
+    picker.refresh_hex();
+    for ch in ['f', 'f', '0', '0', '0', '0'] {
+        picker.hex_input(ch);
+    }
+    assert_eq!(picker.hex_buffer, "#ff0000");
+    let red = picker.color();
+    assert!(red.h.abs() < 1e-3 || (red.h - 1.).abs() < 1e-3);
+    assert!(red.s > 0.99);
+}
+
+#[test]
+fn overlay_style_picker_hex_backspace_keeps_the_hash() {
+    let mut picker = OverlayStylePicker {
+        pane_id: 2,
+        section: OverlayPickerSection::Color,
+        font_size: OverlayFontSize::DEFAULT,
+        original_font_size: None,
+        hue: 0.,
+        saturation: 0.,
+        value: 1.,
+        original_color: None,
+        opacity_percent: 85,
+        original_opacity: None,
+        hex_buffer: String::new(),
+    };
+    picker.refresh_hex();
+    picker.hex_input('a');
+    picker.hex_input('b');
+    picker.hex_input('c');
+
+    // Backspace keeps the leading `#`; repeated backspaces never clear it.
+    assert!(!picker.hex_backspace());
+    picker.hex_backspace();
+    picker.hex_backspace();
+    assert_eq!(picker.hex_buffer, "#");
+    assert!(!picker.hex_backspace());
+    assert_eq!(picker.hex_buffer, "#");
+}
+
+#[test]
+fn overlay_style_picker_seeds_a_pleasant_hue_for_achromatic_colors() {
+    let white = gpui::hsla(0., 0., 1., 1.);
+    let (hue, saturation, value) = overlay_picker_hsv_from_hsla(white);
+    assert_eq!(hue, DEFAULT_PICKER_HUE);
+    assert!(saturation < 0.05);
+    assert!(value > 0.95);
+
+    let blue = gpui::hsla(0.6, 1., 0.5, 1.);
+    let (hue, saturation, value) = overlay_picker_hsv_from_hsla(blue);
+    assert!((hue - 0.6).abs() < 1e-3);
+    assert!(saturation > 0.99);
+    assert!(value > 0.4);
+}
+
+#[test]
+fn overlay_font_size_steps_wrap_around_the_ends() {
+    assert_eq!(
+        OverlayFontSize::Small.step(-1),
+        OverlayFontSize::ExtraExtraExtraLarge
+    );
+    assert_eq!(
+        OverlayFontSize::ExtraExtraExtraLarge.step(1),
+        OverlayFontSize::Small
+    );
+    assert_eq!(
+        OverlayFontSize::ExtraLarge.step(1),
+        OverlayFontSize::ExtraExtraLarge
+    );
+    assert_eq!(OverlayFontSize::ExtraLarge.step(-2), OverlayFontSize::Base);
+}
+
+#[test]
+fn overlay_picker_section_steps_wrap_around_the_ends() {
+    assert_eq!(
+        OverlayPickerSection::FontSize.step(-1),
+        OverlayPickerSection::Opacity
+    );
+    assert_eq!(
+        OverlayPickerSection::Opacity.step(1),
+        OverlayPickerSection::FontSize
+    );
+    assert_eq!(
+        OverlayPickerSection::Color.step(1),
+        OverlayPickerSection::Opacity
+    );
+    assert_eq!(
+        OverlayPickerSection::Color.step(-1),
+        OverlayPickerSection::FontSize
+    );
+}
+
+#[test]
+fn overlay_style_picker_preserves_committed_text_and_holds_values() {
     let mut tab = pane_management_tab();
     let pane_id = 2;
     tab.pane_mut(pane_id).unwrap().overlay_text = Some("Prod".to_owned());
     tab.editing_overlay_pane = None;
     tab.overlay_buffer = None;
 
-    tab.overlay_opacity_picker = Some(OverlayOpacityPicker {
+    tab.overlay_style_picker = Some(OverlayStylePicker {
         pane_id,
-        percent: OverlayOpacityPicker::percent_for_opacity(Some(0.6)),
+        section: OverlayPickerSection::Color,
+        font_size: OverlayFontSize::Large,
+        original_font_size: None,
+        hue: 0.6,
+        saturation: 0.7,
+        value: 0.4,
+        original_color: None,
+        opacity_percent: 60,
         original_opacity: Some(0.6),
+        hex_buffer: String::new(),
     });
+    let picker = tab.overlay_style_picker.as_ref().unwrap();
 
-    assert_eq!(
-        tab.overlay_opacity_picker.map(|picker| picker.percent),
-        Some(60)
-    );
+    assert_eq!(picker.opacity_percent, 60);
+    assert_eq!(picker.section, OverlayPickerSection::Color);
+    assert_eq!(picker.font_size, OverlayFontSize::Large);
     assert_eq!(tab.displayed_pane_overlay(pane_id).as_deref(), Some("Prod"));
     assert_eq!(tab.editing_overlay_pane, None);
 }

@@ -1419,7 +1419,7 @@ fn unchanged_user_themes_are_not_reloaded() {
 
     assert_eq!(
         changed_theme_files(&themes_dir, &mut cache).unwrap(),
-        [theme_path.clone()]
+        std::slice::from_ref(&theme_path)
     );
     assert!(
         changed_theme_files(&themes_dir, &mut cache)

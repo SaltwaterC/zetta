@@ -186,7 +186,7 @@ impl ProcessControlServer {
                             secret,
                         }) => {
                             let (completion, completed) = channel();
-                            let result = commands
+                            let result = if commands
                                 .unbounded_send(ProcessControlCommand::ReconnectSession {
                                     runner_id,
                                     session_id,
@@ -194,10 +194,11 @@ impl ProcessControlServer {
                                     completion,
                                 })
                                 .is_ok()
-                                .then(|| {
-                                    wait_for_reconnect_completion(&completed, &stopping_for_thread)
-                                })
-                                .unwrap_or(ReconnectSessionResult::Rejected);
+                            {
+                                wait_for_reconnect_completion(&completed, &stopping_for_thread)
+                            } else {
+                                ReconnectSessionResult::Rejected
+                            };
                             reconnect_session_status(result)
                         }
                         Some(ControlRequestCommand::SetTabIcon { icon }) => {

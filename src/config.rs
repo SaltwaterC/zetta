@@ -230,7 +230,7 @@ impl Config {
     }
 
     fn parse_into(content: &str, mut config: Self) -> Result<Self> {
-        let root: Value = serde_json::from_str(&content)
+        let root: Value = serde_json::from_str(content)
             .with_context(|| format!("parsing {}", config.config_path.display()))?;
         validate_config_fields(&root)?;
 

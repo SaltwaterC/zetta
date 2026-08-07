@@ -358,7 +358,7 @@ fn background_session_is_reaped_after_its_final_pane_exits() {
         overlay_buffer: None,
         overlay_cursor: 0,
         overlay_select_all: false,
-        overlay_opacity_picker: None,
+        overlay_style_picker: None,
     };
     let mut sessions = BackgroundSessionRunner::default();
     sessions.detach(tab, None);

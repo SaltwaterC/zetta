@@ -13,8 +13,8 @@ impl Zetta {
         if self.tab_search.is_some() {
             self.dismiss_tab_search(window, cx);
         }
-        if self.is_picking_overlay_opacity() {
-            self.cancel_overlay_opacity_picker(window, cx);
+        if self.is_picking_overlay_style() {
+            self.cancel_overlay_style_picker(window, cx);
         }
         if self.command_palette.is_some() {
             self.dismiss_command_palette(window, cx);
@@ -196,8 +196,8 @@ impl Zetta {
         let Some(palette) = self.command_palette.as_mut() else {
             if self.is_editing_pane_overlay() {
                 self.overlay_key_down(event, window, cx);
-            } else if self.is_picking_overlay_opacity() {
-                self.overlay_opacity_key_down(event, window, cx);
+            } else if self.is_picking_overlay_style() {
+                self.overlay_style_key_down(event, window, cx);
             } else {
                 self.rename_key_down(event, window, cx);
             }
@@ -432,7 +432,7 @@ impl Zetta {
                 let text = buffer.trim().to_string();
                 let text = (!text.is_empty()).then_some(text);
                 if let Some(pane_id) = tab.editing_overlay_pane.take() {
-                    self.commit_overlay_text_then_pick_opacity(pane_id, text, window, cx);
+                    self.commit_overlay_text_then_pick_style(pane_id, text, window, cx);
                     return;
                 }
                 tab.overlay_buffer = None;
@@ -520,23 +520,69 @@ impl Zetta {
         cx.stop_propagation();
     }
 
-    /// Keyboard input for the overlay-opacity selector: arrows nudge the
-    /// slider by `5`%, Home/End jump to the ends, Enter commits the
-    /// highlighted opacity, and Escape restores the previous value.
-    pub(crate) fn overlay_opacity_key_down(
+    /// Keyboard input for the overlay-style selector. Tab (and shift-Tab)
+    /// cycle the section being adjusted; arrow keys adjust within the
+    /// section (font size, hue/saturation/brightness or hex digits, and
+    /// opacity); Enter commits the picker and Escape restores the previous
+    /// values.
+    pub(crate) fn overlay_style_key_down(
         &mut self,
         event: &KeyDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(section) = self
+            .tabs
+            .get(self.active_tab)
+            .and_then(|tab| tab.overlay_style_picker.as_ref())
+            .map(|picker| picker.section)
+        else {
+            return;
+        };
+        let shift = event.keystroke.modifiers.shift;
         match event.keystroke.key.as_str() {
-            "escape" => self.cancel_overlay_opacity_picker(window, cx),
-            "enter" => self.apply_overlay_opacity_picker(window, cx),
-            "left" | "down" => self.adjust_overlay_opacity_percent(-5, cx),
-            "right" | "up" => self.adjust_overlay_opacity_percent(5, cx),
-            "home" => self.set_overlay_opacity_percent(0, cx),
-            "end" => self.set_overlay_opacity_percent(100, cx),
-            _ => {}
+            "escape" => self.cancel_overlay_style_picker(window, cx),
+            "enter" => self.apply_overlay_style_picker(window, cx),
+            "tab" => self.adjust_overlay_picker_section(if shift { -1 } else { 1 }, cx),
+            _ => match section {
+                OverlayPickerSection::FontSize => match event.keystroke.key.as_str() {
+                    "left" => self.adjust_overlay_font_size(-1, cx),
+                    "right" => self.adjust_overlay_font_size(1, cx),
+                    "home" => self.set_overlay_font_size(OverlayFontSize::Small, cx),
+                    "end" => self.set_overlay_font_size(OverlayFontSize::ExtraExtraExtraLarge, cx),
+                    _ => {}
+                },
+                OverlayPickerSection::Color => match event.keystroke.key.as_str() {
+                    "left" if event.keystroke.modifiers.shift => {
+                        self.adjust_overlay_saturation(-0.05, cx)
+                    }
+                    "right" if event.keystroke.modifiers.shift => {
+                        self.adjust_overlay_saturation(0.05, cx)
+                    }
+                    "left" => self.adjust_overlay_hue(-1. / 36., cx),
+                    "right" => self.adjust_overlay_hue(1. / 36., cx),
+                    "up" => self.adjust_overlay_value(0.05, cx),
+                    "down" => self.adjust_overlay_value(-0.05, cx),
+                    "backspace" => self.overlay_hex_backspace(cx),
+                    _ if event.keystroke.modifiers.control
+                        || event.keystroke.modifiers.platform
+                        || event.keystroke.modifiers.alt => {}
+                    _ => {
+                        if let Some(ch) = event.keystroke.key_char.as_ref() {
+                            for ch in ch.chars().take(2) {
+                                self.overlay_hex_input(ch, cx);
+                            }
+                        }
+                    }
+                },
+                OverlayPickerSection::Opacity => match event.keystroke.key.as_str() {
+                    "left" | "down" => self.adjust_overlay_opacity_percent(-5, cx),
+                    "right" | "up" => self.adjust_overlay_opacity_percent(5, cx),
+                    "home" => self.set_overlay_opacity_percent(0, cx),
+                    "end" => self.set_overlay_opacity_percent(100, cx),
+                    _ => {}
+                },
+            },
         }
         cx.stop_propagation();
     }

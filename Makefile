@@ -115,11 +115,17 @@ LINUX_USER_BIN_DIR := $(DESTDIR)$(HOME)/.local/bin
 LINUX_USER_DESKTOP_DIR := $(LINUX_USER_DATA_DIR)/applications
 LINUX_USER_CLI_PATH := $(LINUX_USER_BIN_DIR)/zetta
 
-.PHONY: build test install install-binary install-capabilities install-assets install-user-path uninstall \
+.PHONY: build fmt test lint install install-binary install-capabilities install-assets install-user-path uninstall \
 	uninstall-binary uninstall-assets uninstall-user-path refresh-desktop-caches
 
 test:
 	$(CARGO) test --locked --no-default-features --features "$(BUILD_FEATURES)"
+
+fmt:
+	$(CARGO) fmt --all --check
+
+lint:
+	$(CARGO) clippy --locked --all-targets --no-default-features --features "$(BUILD_FEATURES)"
 
 ifeq ($(OS),Windows_NT)
 build:

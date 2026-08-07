@@ -9,13 +9,8 @@ const fn custom_window_border_enabled() -> bool {
 }
 
 pub(crate) fn window_close_button_on_left(layout: WindowButtonLayout) -> bool {
-    if layout.left.contains(&Some(WindowButton::Close)) {
-        true
-    } else if layout.right.contains(&Some(WindowButton::Close)) {
-        false
-    } else {
-        cfg!(target_os = "macos")
-    }
+    layout.left.contains(&Some(WindowButton::Close))
+        || (!layout.right.contains(&Some(WindowButton::Close)) && cfg!(target_os = "macos"))
 }
 
 pub(crate) fn system_window_button_layout(cx: &App) -> WindowButtonLayout {
