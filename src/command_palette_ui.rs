@@ -554,13 +554,13 @@ impl Zetta {
                 },
                 OverlayPickerSection::Color => match event.keystroke.key.as_str() {
                     "left" if event.keystroke.modifiers.shift => {
-                        self.adjust_overlay_saturation(-0.05, cx)
+                        self.adjust_overlay_hue(-1. / 36., cx)
                     }
                     "right" if event.keystroke.modifiers.shift => {
-                        self.adjust_overlay_saturation(0.05, cx)
+                        self.adjust_overlay_hue(1. / 36., cx)
                     }
-                    "left" => self.adjust_overlay_hue(-1. / 36., cx),
-                    "right" => self.adjust_overlay_hue(1. / 36., cx),
+                    "left" => self.adjust_overlay_saturation(-0.05, cx),
+                    "right" => self.adjust_overlay_saturation(0.05, cx),
                     "up" => self.adjust_overlay_value(0.05, cx),
                     "down" => self.adjust_overlay_value(-0.05, cx),
                     "backspace" => self.overlay_hex_backspace(cx),

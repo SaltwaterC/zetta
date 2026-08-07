@@ -117,6 +117,30 @@ changing it. Submitting empty text clears the overlay. The overlay is not
 saved: it is not written to `config.json`, so it disappears when the pane
 closes or the configuration reloads.
 
+While editing the overlay, press `Tab` to cycle through sections (Text, Font Size,
+Color, Opacity). Each section has its own controls:
+
+**Font Size:**
+- `←` / `→` — Decrease/increase font size
+- `Home` / `End` — Jump to smallest/largest size
+
+**Color:**
+- `←` / `→` — Adjust saturation
+- `↑` / `↓` — Adjust brightness
+- `Shift-←` / `Shift-→` — Adjust hue
+- `Backspace` — Delete hex digit
+- Type hex digits — Enter color as hex
+
+**Opacity:**
+- `←` / `↓` — Decrease opacity
+- `→` / `↑` — Increase opacity
+- `Home` / `End` — Jump to 0% / 100%
+
+In any section:
+- `Tab` / `Shift-Tab` — Next/previous section
+- `Enter` — Apply
+- `Escape` — Cancel
+
 The same change is available from any Zetta pane, or a script, with
 `zetta overlay TEXT`; `zetta overlay --reset` clears the overlay. Add
 `--size SIZE` (`sm`, `base`, `lg`, `xl` (default), `2xl`, or `3xl`),
@@ -379,6 +403,7 @@ become `Ctrl-Cmd`; for example, paste-trim is `Ctrl-Cmd-V` on macOS and
 | `Cmd-Shift-T` (macOS) / `Alt-Shift-T` (Windows/Linux) | Change the active pane's theme (non-persistent) |
 | `Cmd-Shift-R` (macOS) / `Alt-Shift-R` (Windows/Linux) | Label the active pane |
 | `Cmd-Shift-B` (macOS) / `Alt-Shift-B` (Windows/Linux) | Set the active pane's overlay text (non-persistent) |
+| `Tab`, `←`, `→`, `↑`, `↓`, `Shift-←`, `Shift-→`, `Home`, `End`, `Backspace` (in overlay picker) | Adjust overlay text, font size, color (hue/saturation/brightness/hex), and opacity |
 | `Ctrl-=` / `Ctrl-+` | Increase font size globally |
 | `Ctrl--` | Decrease font size globally |
 | `Ctrl-0` | Reset font size globally |

@@ -828,7 +828,7 @@ impl Zetta {
             OverlayPickerSection::FontSize => {
                 "← → size · Home/End ends · Tab switch · Enter apply · Esc cancel"
             }
-            OverlayPickerSection::Color => "← → hue · ↑↓ brightness · ⇧←→ saturation · Tab switch",
+            OverlayPickerSection::Color => "← → saturation · ↑↓ brightness · ⇧←→ hue · Tab switch",
             OverlayPickerSection::Opacity => {
                 "← → opacity · Home/End ends · Tab switch · Enter apply · Esc cancel"
             }
