@@ -108,6 +108,35 @@ impl OverlayFontSize {
     pub(crate) const CLI_NAMES: [&'static str; 6] = ["sm", "base", "lg", "xl", "2xl", "3xl"];
 }
 
+/// Default opacity for a pane overlay, from `0.0` to `1.0`. Mirrors the
+/// `overlay --opacity` CLI default of `85`, applied when a pane has no
+/// explicit `overlay_opacity`.
+pub(crate) const DEFAULT_OVERLAY_OPACITY: f32 = 0.85;
+
+/// The opacity selector shown after entering a pane overlay's text from the
+/// command palette. Tracks the pane being styled, the percentage highlighted
+/// in the slider (previewed live on the pane), and the opacity the pane had
+/// when the picker opened so cancel can restore it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct OverlayOpacityPicker {
+    pub(crate) pane_id: u64,
+    /// The highlighted percentage, from `0` to `100`, in `5`% steps.
+    pub(crate) percent: usize,
+    /// The pane's `overlay_opacity` when the picker opened, restored on
+    /// cancel.
+    pub(crate) original_opacity: Option<f32>,
+}
+
+impl OverlayOpacityPicker {
+    /// The highlighted percentage for a pane's opacity, snapped to the
+    /// slider's `5`% steps and falling back to the default opacity when the
+    /// pane has none.
+    pub(crate) fn percent_for_opacity(opacity: Option<f32>) -> usize {
+        let percent_fraction = opacity.unwrap_or(DEFAULT_OVERLAY_OPACITY).clamp(0., 1.) * 100.;
+        ((percent_fraction / 5.).round() as usize * 5).min(100)
+    }
+}
+
 /// Raw `zetta overlay` request values, before `color` is resolved from its
 /// hex string into a color and `opacity` from a 0-100 percentage into a
 /// 0.0-1.0 fraction. Shared by the CLI parser and the process-control client
@@ -1101,6 +1130,9 @@ pub(crate) struct Tab {
     pub(crate) overlay_buffer: Option<String>,
     pub(crate) overlay_cursor: usize,
     pub(crate) overlay_select_all: bool,
+    /// Live overlay-opacity selector, opened right after the overlay's text
+    /// is entered from the command palette.
+    pub(crate) overlay_opacity_picker: Option<OverlayOpacityPicker>,
 }
 
 impl Tab {
@@ -1144,6 +1176,7 @@ impl Tab {
         self.rename_buffer = None;
         self.editing_overlay_pane = None;
         self.overlay_buffer = None;
+        self.overlay_opacity_picker = None;
     }
 
     pub(crate) fn displayed_pane_label(&self, id: u64) -> Option<String> {

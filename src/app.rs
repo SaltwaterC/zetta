@@ -422,6 +422,9 @@ pub(crate) struct Zetta {
     pub(crate) next_tab_id: u64,
     pub(crate) next_pane_id: u64,
     pub(crate) rename_focus: gpui::FocusHandle,
+    /// Focused while the overlay-opacity selector is open, so arrow keys,
+    /// Enter, and Escape adjust the slider instead of reaching the terminal.
+    pub(crate) overlay_opacity_focus: gpui::FocusHandle,
     pub(crate) command_palette_focus: gpui::FocusHandle,
     pub(crate) command_palette: Option<CommandPalette>,
     pub(crate) multi_command_focus: gpui::FocusHandle,
@@ -642,6 +645,7 @@ impl Zetta {
             next_tab_id: 1,
             next_pane_id: 1,
             rename_focus: cx.focus_handle(),
+            overlay_opacity_focus: cx.focus_handle(),
             command_palette_focus: cx.focus_handle(),
             command_palette: None,
             multi_command_focus: cx.focus_handle(),
@@ -794,6 +798,7 @@ impl Zetta {
             overlay_buffer: None,
             overlay_cursor: 0,
             overlay_select_all: false,
+            overlay_opacity_picker: None,
         });
         self.active_tab = self.tabs.len() - 1;
 
@@ -4341,6 +4346,149 @@ impl Zetta {
         true
     }
 
+    /// Whether the overlay-opacity selector is open for the active tab.
+    pub(crate) fn is_picking_overlay_opacity(&self) -> bool {
+        self.tabs
+            .get(self.active_tab)
+            .is_some_and(|tab| tab.overlay_opacity_picker.is_some())
+    }
+
+    /// Opens the overlay-opacity selector for `pane_id`, seeded with the
+    /// pane's current opacity (or the default) and focused for keyboard
+    /// adjustment. The slider previews changes live on the pane; nothing is
+    /// committed until [`Self::apply_overlay_opacity_picker`] runs.
+    pub(crate) fn begin_overlay_opacity_picker(
+        &mut self,
+        pane_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            return;
+        };
+        let Some((percent, original_opacity)) = tab.pane(pane_id).map(|pane| {
+            (
+                OverlayOpacityPicker::percent_for_opacity(pane.overlay_opacity),
+                pane.overlay_opacity,
+            )
+        }) else {
+            return;
+        };
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.overlay_opacity_picker = Some(OverlayOpacityPicker {
+                pane_id,
+                percent,
+                original_opacity,
+            });
+        }
+        self.overlay_opacity_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Highlights the exact `percent` in the overlay-opacity slider and
+    /// previews it on the affected pane; does not commit the picker.
+    pub(crate) fn set_overlay_opacity_percent(&mut self, percent: usize, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            return;
+        };
+        let Some(picker) = tab.overlay_opacity_picker.as_mut() else {
+            return;
+        };
+        let percent = percent.clamp(0, 100);
+        if picker.percent == percent {
+            return;
+        }
+        picker.percent = percent;
+        let pane_id = picker.pane_id;
+        if let Some(pane) = tab.pane_mut(pane_id) {
+            pane.overlay_opacity = Some(percent as f32 / 100.);
+        }
+        cx.notify();
+    }
+
+    /// Nudges the highlighted overlay opacity by `delta` percentage points.
+    pub(crate) fn adjust_overlay_opacity_percent(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            return;
+        };
+        let Some(picker) = tab.overlay_opacity_picker.as_mut() else {
+            return;
+        };
+        let next = (picker.percent as isize + delta).clamp(0, 100) as usize;
+        if next == picker.percent {
+            return;
+        }
+        picker.percent = next;
+        let pane_id = picker.pane_id;
+        if let Some(pane) = tab.pane_mut(pane_id) {
+            pane.overlay_opacity = Some(next as f32 / 100.);
+        }
+        cx.notify();
+    }
+
+    /// Commits the highlighted overlay opacity to the pane and closes the
+    /// selector.
+    pub(crate) fn apply_overlay_opacity_picker(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            return;
+        };
+        let Some(picker) = tab.overlay_opacity_picker.take() else {
+            return;
+        };
+        if let Some(pane) = tab.pane_mut(picker.pane_id) {
+            pane.overlay_opacity = Some(picker.percent as f32 / 100.);
+        }
+        self.focus_active(window, cx);
+    }
+
+    /// Closes the overlay-opacity selector and restores the pane's opacity
+    /// from before it opened.
+    pub(crate) fn cancel_overlay_opacity_picker(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            return;
+        };
+        let Some(picker) = tab.overlay_opacity_picker.take() else {
+            return;
+        };
+        if let Some(pane) = tab.pane_mut(picker.pane_id) {
+            pane.overlay_opacity = picker.original_opacity;
+        }
+        self.focus_active(window, cx);
+    }
+
+    /// Applies the overlay's text and proceeds straight to the live opacity
+    /// selector in the same palette-driven flow. Skips the picker when the
+    /// entered text was empty (the overlay was cleared).
+    pub(crate) fn commit_overlay_text_then_pick_opacity(
+        &mut self,
+        pane_id: u64,
+        text: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let has_text = text.is_some();
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            if let Some(pane) = tab.pane_mut(pane_id) {
+                pane.overlay_text = text;
+            }
+            tab.overlay_buffer = None;
+            tab.overlay_select_all = false;
+        }
+        if has_text {
+            self.begin_overlay_opacity_picker(pane_id, window, cx);
+        } else {
+            self.focus_active(window, cx);
+        }
+    }
+
     pub(crate) fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.get(self.active_tab) {
             let active_is_visible = tab.pane_is_visible(tab.active_pane);
@@ -4580,7 +4728,8 @@ impl Zetta {
                 let pane_overlay_editing = tab.editing_overlay_pane == Some(*pane_id);
                 let pane_overlay_font_size =
                     pane.overlay_font_size.unwrap_or(OverlayFontSize::DEFAULT);
-                let pane_overlay_base_opacity = pane.overlay_opacity.unwrap_or(0.85);
+                let pane_overlay_base_opacity =
+                    pane.overlay_opacity.unwrap_or(DEFAULT_OVERLAY_OPACITY);
                 let pane_overlay_color = pane.overlay_color.unwrap_or(colors.text);
                 let pane_overlay_top = match pane_overlay_font_size {
                     // The line box sits on the glyph's internal leading

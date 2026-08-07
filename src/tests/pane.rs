@@ -458,6 +458,7 @@ fn tab_pane_index_resolves_panes_without_scanning() {
         overlay_buffer: None,
         overlay_cursor: 0,
         overlay_select_all: false,
+        overlay_opacity_picker: None,
     };
     for pane in &tab.panes {
         assert!(std::ptr::eq(tab.pane(pane.id).unwrap(), pane));
@@ -618,6 +619,7 @@ fn split_profile_comes_from_the_active_pane() {
         overlay_buffer: None,
         overlay_cursor: 0,
         overlay_select_all: false,
+        overlay_opacity_picker: None,
     };
 
     let profile = tab.active_profile().unwrap();
@@ -671,6 +673,7 @@ fn closing_active_pane_restores_previous_focus() {
         overlay_buffer: None,
         overlay_cursor: 0,
         overlay_select_all: false,
+        overlay_opacity_picker: None,
     };
 
     tab.remove_pane(3);
@@ -726,6 +729,7 @@ fn closing_inactive_pane_preserves_focus() {
         overlay_buffer: None,
         overlay_cursor: 0,
         overlay_select_all: false,
+        overlay_opacity_picker: None,
     };
 
     tab.remove_pane(1);
@@ -1075,6 +1079,7 @@ fn pane_management_tab() -> Tab {
         overlay_buffer: None,
         overlay_cursor: 0,
         overlay_select_all: false,
+        overlay_opacity_picker: None,
     }
 }
 
@@ -1241,6 +1246,42 @@ fn pane_overlay_is_hidden_by_default_and_renders_while_editing() {
 
     tab.pane_mut(2).unwrap().overlay_text = None;
     assert_eq!(tab.displayed_pane_overlay(2), None);
+}
+
+#[test]
+fn overlay_opacity_picker_percent_snaps_to_five_percent_steps() {
+    let default = OverlayOpacityPicker::percent_for_opacity(None);
+    assert_eq!(DEFAULT_OVERLAY_OPACITY, 0.85);
+    assert_eq!(default, 85);
+
+    assert_eq!(OverlayOpacityPicker::percent_for_opacity(Some(0.)), 0);
+    assert_eq!(OverlayOpacityPicker::percent_for_opacity(Some(0.5)), 50);
+    assert_eq!(OverlayOpacityPicker::percent_for_opacity(Some(1.)), 100);
+    assert_eq!(OverlayOpacityPicker::percent_for_opacity(Some(0.37)), 35);
+    assert_eq!(OverlayOpacityPicker::percent_for_opacity(Some(1.4)), 100);
+    assert_eq!(OverlayOpacityPicker::percent_for_opacity(Some(-0.2)), 0);
+}
+
+#[test]
+fn overlay_opacity_picker_preserves_committed_text_and_holds_percent() {
+    let mut tab = pane_management_tab();
+    let pane_id = 2;
+    tab.pane_mut(pane_id).unwrap().overlay_text = Some("Prod".to_owned());
+    tab.editing_overlay_pane = None;
+    tab.overlay_buffer = None;
+
+    tab.overlay_opacity_picker = Some(OverlayOpacityPicker {
+        pane_id,
+        percent: OverlayOpacityPicker::percent_for_opacity(Some(0.6)),
+        original_opacity: Some(0.6),
+    });
+
+    assert_eq!(
+        tab.overlay_opacity_picker.map(|picker| picker.percent),
+        Some(60)
+    );
+    assert_eq!(tab.displayed_pane_overlay(pane_id).as_deref(), Some("Prod"));
+    assert_eq!(tab.editing_overlay_pane, None);
 }
 
 #[test]

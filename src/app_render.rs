@@ -659,6 +659,190 @@ impl Zetta {
                 .into_any_element(),
         )
     }
+
+    /// Floating slider that chooses a pane overlay's opacity right after its
+    /// text is entered from the command palette. The pane under the slider
+    /// previews the highlighted percentage; Enter commits it and Escape
+    /// restores the pane's previous opacity.
+    pub(crate) fn render_overlay_opacity_picker_overlay(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let picker = self
+            .tabs
+            .get(self.active_tab)
+            .and_then(|tab| tab.overlay_opacity_picker.as_ref())?;
+        let colors = cx.theme().colors().clone();
+        let handle = cx.entity().downgrade();
+        let percent = picker.percent;
+        let fraction = percent as f32 / 100.;
+        let stops = (0usize..=20)
+            .map(|step| {
+                let step_value = step * 5;
+                let step_handle = handle.clone();
+                div()
+                    .id(("overlay-opacity-stop", step))
+                    .h_full()
+                    .flex_1()
+                    .cursor_pointer()
+                    .on_click(move |_, _, cx| {
+                        step_handle
+                            .update(cx, |this, cx| {
+                                this.set_overlay_opacity_percent(step_value, cx);
+                            })
+                            .ok();
+                    })
+            })
+            .collect::<Vec<_>>();
+        let cancel_handle = handle.clone();
+        let cancel_button_handle = handle.clone();
+        let apply_handle = handle.clone();
+
+        Some(
+            div()
+                .id("overlay-opacity-backdrop")
+                .absolute()
+                .inset_0()
+                .pt(px(72.))
+                .px_4()
+                .flex()
+                .items_start()
+                .justify_center()
+                .bg(transparent_black().opacity(0.24))
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    cancel_handle
+                        .update(cx, |this, cx| {
+                            this.cancel_overlay_opacity_picker(window, cx);
+                        })
+                        .ok();
+                })
+                .child(
+                    div()
+                        .id("overlay-opacity-picker")
+                        .track_focus(&self.overlay_opacity_focus)
+                        .w_full()
+                        .max_w(px(420.))
+                        .overflow_hidden()
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_color(colors.border)
+                        .bg(colors.elevated_surface_background)
+                        .shadow_lg()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(
+                            h_flex()
+                                .h_11()
+                                .px_3()
+                                .items_center()
+                                .justify_between()
+                                .border_b_1()
+                                .border_color(colors.border)
+                                .child(
+                                    div()
+                                        .text_color(colors.text)
+                                        .text_sm()
+                                        .child("Overlay opacity"),
+                                )
+                                .child(
+                                    div()
+                                        .text_color(colors.text_accent)
+                                        .text_sm()
+                                        .child(format!("{percent}%")),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .px_4()
+                                .py_4()
+                                .child(
+                                    h_flex().gap_3().child(
+                                        div().flex_1().py_2().flex().items_center().child(
+                                            div()
+                                                .relative()
+                                                .h_5()
+                                                .min_w_0()
+                                                .flex_1()
+                                                .flex()
+                                                .items_center()
+                                                .child(
+                                                    div()
+                                                        .absolute()
+                                                        .left_0()
+                                                        .right_0()
+                                                        .h_1()
+                                                        .rounded_full()
+                                                        .bg(colors.element_background),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .absolute()
+                                                        .left_0()
+                                                        .w(gpui::relative(fraction))
+                                                        .h_1()
+                                                        .rounded_full()
+                                                        .bg(colors.text_accent),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .absolute()
+                                                        .left(gpui::relative(fraction))
+                                                        .ml(px(-5.))
+                                                        .size(px(10.))
+                                                        .rounded_full()
+                                                        .border_1()
+                                                        .border_color(colors.border_focused)
+                                                        .bg(colors.text_accent),
+                                                )
+                                                .child(
+                                                    h_flex().absolute().inset_0().children(stops),
+                                                ),
+                                        ),
+                                    ),
+                                )
+                                .child(
+                                    div()
+                                        .mt_1()
+                                        .text_color(colors.text_muted)
+                                        .text_xs()
+                                        .child("← → adjust · Enter apply · Esc cancel"),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .px_3()
+                                .py_3()
+                                .gap_2()
+                                .justify_end()
+                                .border_t_1()
+                                .border_color(colors.border)
+                                .child(
+                                    Button::new("cancel-overlay-opacity", "Cancel")
+                                        .style(ButtonStyle::Outlined)
+                                        .on_click(move |_, window, cx| {
+                                            cancel_button_handle
+                                                .update(cx, |this, cx| {
+                                                    this.cancel_overlay_opacity_picker(window, cx);
+                                                })
+                                                .ok();
+                                        }),
+                                )
+                                .child(
+                                    Button::new("apply-overlay-opacity", "Apply")
+                                        .style(ButtonStyle::Filled)
+                                        .on_click(move |_, window, cx| {
+                                            apply_handle
+                                                .update(cx, |this, cx| {
+                                                    this.apply_overlay_opacity_picker(window, cx);
+                                                })
+                                                .ok();
+                                        }),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
 }
 
 impl Render for Zetta {
@@ -2695,6 +2879,7 @@ impl Render for Zetta {
 
         let settings_overlay = self.render_settings_overlay(window, cx);
         let tab_icon_picker_overlay = self.render_tab_icon_picker_overlay(window, cx);
+        let overlay_opacity_picker_overlay = self.render_overlay_opacity_picker_overlay(window, cx);
         #[cfg(feature = "serial-console")]
         let serial_console_overlay = self.render_serial_console_overlay(cx);
         #[cfg(not(feature = "serial-console"))]
@@ -2790,6 +2975,9 @@ impl Render for Zetta {
                 self.is_renaming() || self.is_editing_pane_overlay(),
                 |content| content.track_focus(&self.rename_focus),
             )
+            .when(self.is_picking_overlay_opacity(), |content| {
+                content.track_focus(&self.overlay_opacity_focus)
+            })
             .when(self.tab_icon_picker.is_some(), |content| {
                 content.track_focus(&self.tab_icon_picker_focus)
             })
@@ -2845,6 +3033,9 @@ impl Render for Zetta {
             content.child(overlay)
         });
         let content = content.when_some(theme_picker_overlay, |content, overlay| {
+            content.child(overlay)
+        });
+        let content = content.when_some(overlay_opacity_picker_overlay, |content, overlay| {
             content.child(overlay)
         });
         let content = content.when_some(serial_console_overlay, |content, overlay| {

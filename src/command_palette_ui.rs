@@ -13,6 +13,9 @@ impl Zetta {
         if self.tab_search.is_some() {
             self.dismiss_tab_search(window, cx);
         }
+        if self.is_picking_overlay_opacity() {
+            self.cancel_overlay_opacity_picker(window, cx);
+        }
         if self.command_palette.is_some() {
             self.dismiss_command_palette(window, cx);
             return;
@@ -193,6 +196,8 @@ impl Zetta {
         let Some(palette) = self.command_palette.as_mut() else {
             if self.is_editing_pane_overlay() {
                 self.overlay_key_down(event, window, cx);
+            } else if self.is_picking_overlay_opacity() {
+                self.overlay_opacity_key_down(event, window, cx);
             } else {
                 self.rename_key_down(event, window, cx);
             }
@@ -426,10 +431,9 @@ impl Zetta {
             "enter" => {
                 let text = buffer.trim().to_string();
                 let text = (!text.is_empty()).then_some(text);
-                if let Some(pane_id) = tab.editing_overlay_pane.take()
-                    && let Some(pane) = tab.pane_mut(pane_id)
-                {
-                    pane.overlay_text = text;
+                if let Some(pane_id) = tab.editing_overlay_pane.take() {
+                    self.commit_overlay_text_then_pick_opacity(pane_id, text, window, cx);
+                    return;
                 }
                 tab.overlay_buffer = None;
                 tab.overlay_select_all = false;
@@ -511,6 +515,27 @@ impl Zetta {
                     cx.notify();
                 }
             }
+            _ => {}
+        }
+        cx.stop_propagation();
+    }
+
+    /// Keyboard input for the overlay-opacity selector: arrows nudge the
+    /// slider by `5`%, Home/End jump to the ends, Enter commits the
+    /// highlighted opacity, and Escape restores the previous value.
+    pub(crate) fn overlay_opacity_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event.keystroke.key.as_str() {
+            "escape" => self.cancel_overlay_opacity_picker(window, cx),
+            "enter" => self.apply_overlay_opacity_picker(window, cx),
+            "left" | "down" => self.adjust_overlay_opacity_percent(-5, cx),
+            "right" | "up" => self.adjust_overlay_opacity_percent(5, cx),
+            "home" => self.set_overlay_opacity_percent(0, cx),
+            "end" => self.set_overlay_opacity_percent(100, cx),
             _ => {}
         }
         cx.stop_propagation();
