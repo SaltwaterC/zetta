@@ -1239,6 +1239,10 @@ fn pane_overlay_is_hidden_by_default_and_renders_while_editing() {
     tab.overlay_select_all = true;
     assert_eq!(tab.displayed_pane_overlay(2).as_deref(), Some("Staging"));
 
+    tab.overlay_buffer = Some(String::new());
+    tab.overlay_cursor = 0;
+    assert_eq!(tab.displayed_pane_overlay(2).as_deref(), Some("|"));
+
     tab.editing_overlay_pane = None;
     tab.overlay_buffer = None;
     tab.overlay_select_all = false;

@@ -1203,6 +1203,9 @@ impl Tab {
         }
         let buffer = self.overlay_buffer.as_ref()?;
         if self.overlay_select_all {
+            if buffer.is_empty() {
+                return Some("|".to_owned());
+            }
             return Some(buffer.clone());
         }
         let cursor = self.overlay_cursor.min(buffer.len());
