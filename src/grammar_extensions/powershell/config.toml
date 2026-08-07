@@ -1,0 +1,5 @@
+name = "PowerShell"
+grammar = "powershell"
+path_suffixes = ["ps1", "psm1", "psd1", "ps1xml", "psc1", "pssc"]
+modeline_aliases = ["powershell", "ps1", "posh"]
+line_comments = ["# "]

@@ -121,6 +121,8 @@ fn extension_grammars() -> Vec<(&'static str, tree_sitter::Language)> {
     vec![
         ("makefile", tree_sitter_make::LANGUAGE.into()),
         ("toml", tree_sitter_toml_ng::LANGUAGE.into()),
+        ("powershell", tree_sitter_powershell::LANGUAGE.into()),
+        ("batch", tree_sitter_batch::LANGUAGE.into()),
     ]
 }
 
@@ -377,10 +379,8 @@ impl ZedSyntaxHighlighter {
                             };
                             Some(configuration)
                         });
-                let spans = events
-                    .ok()
-                    .map(|events| highlight_spans(events, styles))
-                    .unwrap_or_default();
+                let events_vec: Vec<_> = events.expect("highlight failed").collect();
+                let spans = highlight_spans(events_vec.into_iter(), styles);
                 (spans, missing_languages.into_inner())
             };
 

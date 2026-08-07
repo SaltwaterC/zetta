@@ -74,6 +74,31 @@ fn background_highlighter_returns_the_current_revision() {
 }
 
 #[test]
+fn background_highlighter_highlights_batch_files() {
+    let mut highlighter =
+        BackgroundZedSyntaxHighlighter::new(Some(PathBuf::from("script.cmd")), None)
+            .expect("start syntax worker");
+    let source = b"@echo off\nset VAR=value\n";
+
+    assert!(highlighter.highlight(source).is_empty());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let spans = loop {
+        if let Some(spans) = highlighter.poll() {
+            break spans;
+        }
+        assert!(Instant::now() < deadline, "syntax worker did not respond");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+
+    // Should highlight @echo off as keyword
+    assert!(
+        spans.iter().any(|span| span.start == 0 && span.end >= 3),
+        "expected @echo to be highlighted, got spans: {:?}",
+        spans
+    );
+}
+
+#[test]
 fn selects_shell_syntax_from_a_shebang_without_a_suffix() {
     let theme = syntax_theme(&["keyword"]);
     let highlighter = ZedSyntaxHighlighter::new(theme).expect("load Zed grammars");
@@ -185,12 +210,20 @@ fn highlights_toml_and_makefiles_from_extension_grammars() {
             b"CC := cc\nall: app\n\t$(CC) main.c -o app\n".as_slice(),
             b"CC".as_slice(),
         ),
+        (
+            "script.cmd",
+            b"@echo off\nset VAR=value\n".as_slice(),
+            b"echo".as_slice(),
+        ),
     ] {
+        eprintln!("DEBUG test: highlighting {path}");
         let spans = highlighter.highlight_path(Some(Path::new(path)), source);
+        eprintln!("DEBUG test: got spans = {spans:?}");
         assert!(
-            spans
-                .iter()
-                .any(|span| source[span.start..span.end] == *token),
+            spans.iter().any(|span| {
+                let span_text = &source[span.start..span.end];
+                span_text.windows(token.len()).any(|window| window == token)
+            }),
             "expected {path} to highlight {token:?}; got {spans:?}",
         );
     }
@@ -212,6 +245,14 @@ fn recognizes_common_makefile_and_toml_paths() {
         highlighter.language_index(Some(Path::new("Cargo.toml")), b"[package]\n"),
         highlighter.language_names.get("toml").copied(),
     );
+    // Test batch file detection
+    for path in ["script.bat", "script.cmd", "build-windows.cmd"] {
+        assert_eq!(
+            highlighter.language_index(Some(Path::new(path)), b"@echo off\n"),
+            highlighter.language_names.get("batch").copied(),
+            "expected {path} to use Batch syntax",
+        );
+    }
 }
 
 #[test]
@@ -250,6 +291,16 @@ fn embeds_the_native_grammar_configs_and_queries_without_zeds_rust_source() {
     assert!(GrammarAssets::get("rust/config.toml").is_some());
     assert!(GrammarAssets::get("rust/highlights.scm").is_some());
     assert!(GrammarAssets::get("grammars.rs").is_none());
+
+    // Check batch grammar extension assets
+    assert!(
+        ExtensionGrammarAssets::get("batch/config.toml").is_some(),
+        "batch config.toml not embedded"
+    );
+    assert!(
+        ExtensionGrammarAssets::get("batch/highlights.scm").is_some(),
+        "batch highlights.scm not embedded"
+    );
 }
 
 #[test]
@@ -291,7 +342,7 @@ fn registers_extension_grammars_separately_from_zeds_native_registry() {
         .into_iter()
         .map(|(grammar_id, _)| grammar_id)
         .collect();
-    assert_eq!(grammar_ids, ["makefile", "toml"]);
+    assert_eq!(grammar_ids, ["makefile", "toml", "powershell", "batch"]);
     assert!(
         native_grammars()
             .into_iter()

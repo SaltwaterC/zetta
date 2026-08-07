@@ -1,0 +1,5 @@
+name = "Batch"
+grammar = "batch"
+path_suffixes = ["bat", "cmd"]
+modeline_aliases = ["batch", "bat", "cmd", "dos"]
+line_comments = ["rem ", ":: "]

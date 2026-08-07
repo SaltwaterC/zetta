@@ -609,10 +609,10 @@ fn executable_names(path: Option<&std::ffi::OsStr>) -> Vec<String> {
                 if !executable_extensions.contains(&extension) {
                     return None;
                 }
-                return Path::new(&name)
+                Path::new(&name)
                     .file_stem()
                     .and_then(|stem| stem.to_str())
-                    .map(str::to_owned);
+                    .map(str::to_owned)
             }
             #[cfg(not(windows))]
             Some(name)

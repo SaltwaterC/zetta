@@ -166,7 +166,7 @@ fn read_private_secret() -> Result<Zeroizing<String>> {
         writeln!(stdout)?;
         let secret = result?;
         anyhow::ensure!(!secret.is_empty(), "session secret must not be empty");
-        return Ok(secret);
+        Ok(secret)
     }
 
     #[cfg(not(any(unix, windows)))]
