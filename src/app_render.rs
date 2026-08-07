@@ -428,10 +428,18 @@ fn profile_shortcut_alias(_slot: usize, label: String) -> ProfileMenuShortcut {
 
 impl Zetta {
     pub(crate) fn render_tab_icon_picker_overlay(
-        &self,
+        &mut self,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
+        self.tab_icon_picker.as_ref()?;
+        let entries = self.tab_icon_entries();
+        let options = self
+            .tab_icon_picker
+            .as_mut()
+            .expect("checked above")
+            .options(&entries)
+            .to_vec();
         let picker = self.tab_icon_picker.as_ref()?;
         let colors = cx.theme().colors().clone();
         let handle = cx.entity().downgrade();
@@ -444,7 +452,6 @@ impl Zetta {
             let (before, after) = query.text.split_at(cursor);
             (before.to_owned(), after.to_owned())
         };
-        let options = matching_tab_icon_options(&query.text);
         let has_options = !options.is_empty();
         let selected_icon = match picker.target {
             TabIconPickerTarget::Tab(tab_index) => {

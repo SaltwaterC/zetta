@@ -23,6 +23,8 @@ git submodule update --init
 
 - Treat `zed/` as upstream code. Do not modify it unless the task explicitly
   requires an upstream dependency change.
+- Treat `busy-v/` as upstream code. Do not modify it unless the task
+  explicitly requires an upstream dependency change.
 - Code under `crates/` is maintained as part of Zetta and may be changed when
   the application needs corresponding terminal or platform behavior.
 - Keep platform-specific behavior behind the existing `cfg` boundaries. Linux

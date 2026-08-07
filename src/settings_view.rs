@@ -1,8 +1,635 @@
 use super::*;
+use crate::settings_ui::{
+    KeymapRow, invalidate_controls_cache, invalidate_keymap_cache, keymap_rows,
+};
 
 use crate::startup::keymap_keystroke_display;
 
+/// Owned snapshot of the state needed to render the currently open dropdown's option
+/// popover. The popover is always rendered once, as a sibling of the settings dialog
+/// content (see `dropdown_popup_widget`), rather than inline at each trigger, because a
+/// `deferred`+`anchored` popover positioned inline inside a virtualized `uniform_list`
+/// row (the keymap bindings list) does not paint correctly.
+#[derive(Clone)]
+struct DropdownRenderState {
+    dropdown_index: usize,
+    dropdown_query: String,
+    dropdown_filtered_options: HashMap<SettingsDropdown, Vec<usize>>,
+    dropdown_scroll: UniformListScrollHandle,
+    dropdown_anchor: Point<Pixels>,
+}
+
+/// Every row of the keymap list is forced to this height so `uniform_list`'s
+/// single-item height measurement (it only measures one representative row)
+/// stays valid across section headers, bindings, and the add-row footers.
+const KEYMAP_ROW_HEIGHT: f32 = 56.;
+
+/// Width of the settings dialog's custom scrollbar track. Lists that draw the track over
+/// their own rows reserve this much trailing padding so the two never overlap.
+const SETTINGS_SCROLLBAR_WIDTH: f32 = 10.;
+
+/// Owned per-row data for the virtualized keymap list, extracted from
+/// `SettingsEditor` once per render since the list's row closure must be
+/// `'static` and so cannot hold a borrow of it.
+enum KeymapRowData {
+    SectionHeader {
+        section_index: usize,
+        context: TextField,
+    },
+    Binding {
+        section_index: usize,
+        binding_index: usize,
+        keystroke: TextField,
+        action_name: String,
+        template_name: Option<String>,
+        profile_name: Option<String>,
+    },
+    AddBinding {
+        section_index: usize,
+    },
+    AddSection,
+}
+
+fn build_keymap_row_data(editor: &SettingsEditor, rows: &[KeymapRow]) -> Vec<KeymapRowData> {
+    rows.iter()
+        .filter_map(|row| match *row {
+            KeymapRow::SectionHeader(section_index) => {
+                let section = editor.keymap.sections.get(section_index)?;
+                Some(KeymapRowData::SectionHeader {
+                    section_index,
+                    context: section.context.clone(),
+                })
+            }
+            KeymapRow::Binding(section_index, binding_index) => {
+                let binding = editor
+                    .keymap
+                    .sections
+                    .get(section_index)?
+                    .bindings
+                    .get(binding_index)?;
+                let profile_name = binding.action_usize_parameter("slot").map(|slot| {
+                    editor
+                        .profile_names
+                        .get(slot.saturating_sub(1))
+                        .cloned()
+                        .unwrap_or_else(|| format!("Profile {slot}"))
+                });
+                Some(KeymapRowData::Binding {
+                    section_index,
+                    binding_index,
+                    keystroke: binding.keystroke.clone(),
+                    action_name: binding.action_name(),
+                    template_name: binding.action_parameter("name"),
+                    profile_name,
+                })
+            }
+            KeymapRow::AddBinding(section_index) => {
+                Some(KeymapRowData::AddBinding { section_index })
+            }
+            KeymapRow::AddSection => Some(KeymapRowData::AddSection),
+        })
+        .collect()
+}
+
+/// Owned snapshot of everything a keymap row needs to render, cloned once into
+/// the `uniform_list` row closure (see [`DropdownRenderState`] for why this
+/// can't just borrow `SettingsEditor`).
+#[derive(Clone)]
+struct KeymapRowRenderContext {
+    colors: ThemeColors,
+    handle: WeakEntity<Zetta>,
+    focused_control: Option<SettingsControl>,
+    focused_input: Option<SettingsInput>,
+}
+
 impl Zetta {
+    /// Just the trigger button; the option popover is rendered separately by
+    /// `dropdown_popup_widget`, once per render, as a sibling of the whole settings
+    /// dialog content (see [`DropdownRenderState`] for why).
+    fn dropdown_trigger_widget(
+        id: String,
+        label: String,
+        selection: SettingsDropdown,
+        focused: bool,
+        colors: ThemeColors,
+        handle: WeakEntity<Self>,
+    ) -> gpui::AnyElement {
+        let menu_handle = handle.clone();
+        ButtonLike::new(id)
+            .style(ButtonStyle::Outlined)
+            .toggle_state(focused)
+            .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
+            .full_width()
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .child(Label::new(label))
+                    .child(Icon::new(IconName::ChevronDown).size(IconSize::XSmall)),
+            )
+            .on_click(move |event, window, cx| {
+                let anchor = event.position();
+                menu_handle
+                    .update(cx, |this, cx| {
+                        this.focus_settings_control_without_scroll(
+                            SettingsControl::Dropdown(selection),
+                            window,
+                            cx,
+                        );
+                        this.open_settings_dropdown(selection, anchor, cx);
+                    })
+                    .ok();
+            })
+            .into_any_element()
+    }
+
+    /// Renders the currently open dropdown's option popover, anchored at the window-space
+    /// point captured when it was opened. Called once per render (see [`DropdownRenderState`]).
+    fn dropdown_popup_widget(
+        options: Arc<[String]>,
+        selection: SettingsDropdown,
+        colors: ThemeColors,
+        handle: WeakEntity<Self>,
+        state: DropdownRenderState,
+    ) -> gpui::AnyElement {
+        let id = format!("settings-dropdown-popup-{selection:?}");
+        let active_index = state.dropdown_index.min(options.len().saturating_sub(1));
+        let dropdown_query = state.dropdown_query.clone();
+        let matching_indices = state.dropdown_filtered_options.get(&selection).cloned();
+        let option_handle = handle.clone();
+        // Row indices into `options`, in display order; virtualized below so only the
+        // visible rows are ever built regardless of how many options exist.
+        let row_indices: Arc<[usize]> = match matching_indices {
+            Some(indices) => indices.into(),
+            None => (0..options.len()).collect::<Vec<_>>().into(),
+        };
+        let no_matches = row_indices.is_empty();
+        // `uniform_list` derives the whole list's width from a single measured row, so it has
+        // to measure the longest option; measuring the first one leaves every longer option
+        // wrapping inside a row whose height is pinned to the measured row's single line.
+        let widest_row = row_indices
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, index)| options[**index].chars().count())
+            .map(|(row, _)| row);
+        let option_rows = {
+            let row_indices = row_indices.clone();
+            let list_colors = colors.clone();
+            let list_id = id.clone();
+            uniform_list(
+                format!("{id}-options-list"),
+                row_indices.len(),
+                move |range, _, _| {
+                    range
+                        .map(|row| {
+                            let index = row_indices[row];
+                            let value = options[index].clone();
+                            let selected = index == active_index;
+                            let handle = option_handle.clone();
+                            div()
+                                .id(format!("{list_id}-option-{index}"))
+                                .px_2()
+                                .py_1()
+                                .rounded(px(3.))
+                                .cursor_pointer()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .when(selected, |row| row.bg(list_colors.element_selected))
+                                .hover(|style| style.bg(list_colors.element_hover))
+                                .child(value.clone())
+                                .on_click(move |_, _, cx| {
+                                    handle
+                                        .update(cx, |this, cx| {
+                                            this.set_settings_dropdown(
+                                                selection,
+                                                value.clone(),
+                                                cx,
+                                            );
+                                            if let Some(editor) = this.settings_editor.as_mut() {
+                                                editor.open_dropdown = None;
+                                            }
+                                            cx.notify();
+                                        })
+                                        .ok();
+                                })
+                        })
+                        .collect::<Vec<_>>()
+                },
+            )
+            // The popover is content-sized, so the list has to derive its own height
+            // from its items; the default `Auto` behaviour only works when a parent
+            // hands the list a definite height, and here it collapses the list to zero.
+            .with_sizing_behavior(ListSizingBehavior::Infer)
+            .with_width_from_item(widest_row)
+            .max_h(px(260.))
+            .track_scroll(&state.dropdown_scroll)
+        };
+        deferred(
+            anchored()
+                .position(state.dropdown_anchor)
+                .snap_to_window_with_margin(px(8.))
+                .child(
+                    div()
+                        .id(format!("{id}-options"))
+                        .min_w(px(180.))
+                        .max_w(px(560.))
+                        .rounded(px(4.))
+                        .border_1()
+                        .border_color(colors.border_focused)
+                        .bg(colors.elevated_surface_background)
+                        .shadow_lg()
+                        .overflow_hidden()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .when(!dropdown_query.is_empty(), |menu| {
+                            menu.child(
+                                div()
+                                    .px_2()
+                                    .py_1()
+                                    .text_xs()
+                                    .text_color(colors.text_muted)
+                                    .child(format!("Search: {dropdown_query}")),
+                            )
+                        })
+                        .child(if no_matches {
+                            div()
+                                .p_1()
+                                .child(
+                                    div()
+                                        .px_2()
+                                        .py_1()
+                                        .text_color(colors.text_muted)
+                                        .child("No matches"),
+                                )
+                                .into_any_element()
+                        } else {
+                            option_rows
+                                .p_1()
+                                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                                .into_any_element()
+                        }),
+                ),
+        )
+        .with_priority(1)
+        .into_any_element()
+    }
+
+    fn text_input_widget(
+        id: String,
+        field: TextField,
+        input: SettingsInput,
+        focused_input: Option<SettingsInput>,
+        colors: ThemeColors,
+        handle: WeakEntity<Self>,
+    ) -> gpui::AnyElement {
+        let focused = focused_input == Some(input);
+        let centered = match input {
+            SettingsInput::Configuration(
+                ConfigTextField::FontSize | ConfigTextField::ScrollHistory,
+            ) => true,
+            #[cfg(feature = "http-server")]
+            SettingsInput::Configuration(ConfigTextField::HttpServerPort) => true,
+            #[cfg(feature = "tftp-server")]
+            SettingsInput::Configuration(ConfigTextField::TftpServerPort) => true,
+            _ => false,
+        };
+        let cursor = field.cursor.min(field.text.len());
+        let (before, after) = field.text.split_at(cursor);
+        let input_handle = handle.clone();
+        div()
+            .id(id)
+            .h_9()
+            .w_full()
+            .min_w(px(180.))
+            .px_2()
+            .flex()
+            .items_center()
+            .when(centered, |input| input.justify_center().text_center())
+            .overflow_hidden()
+            .rounded(px(4.))
+            .border_1()
+            .border_color(if focused {
+                colors.border_focused
+            } else {
+                colors.border
+            })
+            .bg(colors.editor_background)
+            .cursor_text()
+            .when(field.select_all && focused, |input| {
+                input.bg(colors.element_selection_background)
+            })
+            .when(!focused, |input| {
+                input.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .flex_1()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(field.text.clone()),
+                )
+            })
+            .when(focused, |input| {
+                input
+                    .child(div().whitespace_nowrap().child(before.to_owned()))
+                    .when(!field.select_all, |input| {
+                        input.child(
+                            div()
+                                .flex_none()
+                                .w(px(1.))
+                                .h(px(16.))
+                                .bg(colors.text_accent),
+                        )
+                    })
+                    .child(div().whitespace_nowrap().child(after.to_owned()))
+            })
+            .on_click(move |_, window, cx| {
+                input_handle
+                    .update(cx, |this, cx| this.focus_settings_input(input, window, cx))
+                    .ok();
+            })
+            .into_any_element()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_keymap_row(row: &KeymapRowData, ctx: &KeymapRowRenderContext) -> gpui::AnyElement {
+        match row {
+            KeymapRowData::SectionHeader {
+                section_index,
+                context,
+            } => {
+                let section_index = *section_index;
+                let colors = ctx.colors.clone();
+                let focused = ctx.focused_control
+                    == Some(SettingsControl::Input(SettingsInput::Keymap(
+                        KeymapTextField::Context(section_index),
+                    )));
+                h_flex()
+                    .w_full()
+                    .h(px(KEYMAP_ROW_HEIGHT))
+                    .gap_2()
+                    .px_2()
+                    .border_t_1()
+                    .border_b_1()
+                    .border_color(colors.border)
+                    .bg(if focused {
+                        colors.element_selected
+                    } else {
+                        colors.editor_background
+                    })
+                    .child(div().flex_none().text_sm().child("Context"))
+                    .child(div().min_w_0().flex_1().child(Self::text_input_widget(
+                        format!("settings-keymap-section-{section_index}-context"),
+                        context.clone(),
+                        SettingsInput::Keymap(KeymapTextField::Context(section_index)),
+                        ctx.focused_input,
+                        colors.clone(),
+                        ctx.handle.clone(),
+                    )))
+                    .into_any_element()
+            }
+            KeymapRowData::Binding {
+                section_index,
+                binding_index,
+                keystroke,
+                action_name,
+                template_name,
+                profile_name,
+            } => {
+                let section_index = *section_index;
+                let binding_index = *binding_index;
+                let colors = ctx.colors.clone();
+                let binding_focused = ctx.focused_control
+                    == Some(SettingsControl::Input(SettingsInput::Keymap(
+                        KeymapTextField::Keystroke(section_index, binding_index),
+                    )))
+                    || ctx.focused_control
+                        == Some(SettingsControl::RemoveBinding(section_index, binding_index))
+                    || ctx.focused_control
+                        == Some(SettingsControl::CaptureKeymap(KeymapTextField::Keystroke(
+                            section_index,
+                            binding_index,
+                        )));
+                let action_focused = ctx.focused_control
+                    == Some(SettingsControl::Dropdown(SettingsDropdown::BindingAction(
+                        section_index,
+                        binding_index,
+                    )));
+                let action = Self::dropdown_trigger_widget(
+                    format!("settings-binding-{section_index}-{binding_index}-action"),
+                    action_name.clone(),
+                    SettingsDropdown::BindingAction(section_index, binding_index),
+                    action_focused,
+                    colors.clone(),
+                    ctx.handle.clone(),
+                );
+                let template = template_name.as_ref().map(|name| {
+                    let focused = ctx.focused_control
+                        == Some(SettingsControl::Dropdown(
+                            SettingsDropdown::BindingTemplate(section_index, binding_index),
+                        ));
+                    Self::dropdown_trigger_widget(
+                        format!("settings-binding-{section_index}-{binding_index}-template"),
+                        name.clone(),
+                        SettingsDropdown::BindingTemplate(section_index, binding_index),
+                        focused,
+                        colors.clone(),
+                        ctx.handle.clone(),
+                    )
+                });
+                let profile = profile_name.as_ref().map(|name| {
+                    let focused = ctx.focused_control
+                        == Some(SettingsControl::Dropdown(SettingsDropdown::BindingProfile(
+                            section_index,
+                            binding_index,
+                        )));
+                    Self::dropdown_trigger_widget(
+                        format!("settings-binding-{section_index}-{binding_index}-profile"),
+                        name.clone(),
+                        SettingsDropdown::BindingProfile(section_index, binding_index),
+                        focused,
+                        colors.clone(),
+                        ctx.handle.clone(),
+                    )
+                });
+                let remove_handle = ctx.handle.clone();
+                let capture_handle = ctx.handle.clone();
+                h_flex()
+                    .w_full()
+                    .h(px(KEYMAP_ROW_HEIGHT))
+                    .pl_6()
+                    .pr_2()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(colors.border_variant)
+                    .when(binding_focused, |row| row.bg(colors.element_selected))
+                    .child(
+                        h_flex()
+                            .w(px(330.))
+                            .gap_1()
+                            .flex_none()
+                            .child(Self::text_input_widget(
+                                format!("settings-binding-{section_index}-{binding_index}-key"),
+                                keystroke.clone(),
+                                SettingsInput::Keymap(KeymapTextField::Keystroke(
+                                    section_index,
+                                    binding_index,
+                                )),
+                                ctx.focused_input,
+                                colors.clone(),
+                                ctx.handle.clone(),
+                            ))
+                            .child(
+                                Button::new(
+                                    format!(
+                                        "record-settings-binding-{section_index}-{binding_index}"
+                                    ),
+                                    "Record",
+                                )
+                                .style(ButtonStyle::Outlined)
+                                .size(ButtonSize::Compact)
+                                .on_click(move |_, window, cx| {
+                                    capture_handle
+                                        .update(cx, |this, cx| {
+                                            this.start_keymap_capture(
+                                                KeymapTextField::Keystroke(
+                                                    section_index,
+                                                    binding_index,
+                                                ),
+                                                window,
+                                                cx,
+                                            )
+                                        })
+                                        .ok();
+                                }),
+                            ),
+                    )
+                    .child(div().min_w_0().flex_1().child(action))
+                    .when_some(template, |row, template| {
+                        row.child(div().w(px(180.)).flex_none().child(template))
+                    })
+                    .when_some(profile, |row, profile| {
+                        row.child(div().w(px(180.)).flex_none().child(profile))
+                    })
+                    .child(
+                        IconButton::new(
+                            format!("remove-settings-binding-{section_index}-{binding_index}"),
+                            IconName::Trash,
+                        )
+                        .icon_size(IconSize::Small)
+                        .toggle_state(
+                            ctx.focused_control
+                                == Some(SettingsControl::RemoveBinding(
+                                    section_index,
+                                    binding_index,
+                                )),
+                        )
+                        .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
+                        .tooltip(Tooltip::text("Remove binding"))
+                        .on_click(move |_, _, cx| {
+                            remove_handle
+                                .update(cx, |this, cx| {
+                                    if let Some(editor) = this.settings_editor.as_mut()
+                                        && let Some(section) =
+                                            editor.keymap.sections.get_mut(section_index)
+                                        && binding_index < section.bindings.len()
+                                    {
+                                        section.bindings.remove(binding_index);
+                                        editor.keymap_dirty = true;
+                                        invalidate_keymap_cache(editor);
+                                        invalidate_controls_cache(editor);
+                                        cx.notify();
+                                    }
+                                })
+                                .ok();
+                        }),
+                    )
+                    .into_any_element()
+            }
+            KeymapRowData::AddBinding { section_index } => {
+                let section_index = *section_index;
+                let colors = ctx.colors.clone();
+                let add_handle = ctx.handle.clone();
+                let focused =
+                    ctx.focused_control == Some(SettingsControl::AddBinding(section_index));
+                h_flex()
+                    .w_full()
+                    .h(px(KEYMAP_ROW_HEIGHT))
+                    .pl_6()
+                    .pr_2()
+                    .border_b_1()
+                    .border_color(colors.border_variant)
+                    .child(
+                        Button::new(
+                            format!("add-settings-binding-{section_index}"),
+                            "Add binding",
+                        )
+                        .style(ButtonStyle::Outlined)
+                        .toggle_state(focused)
+                        .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
+                        .on_click(move |_, _, cx| {
+                            add_handle
+                                .update(cx, |this, cx| {
+                                    if let Some(editor) = this.settings_editor.as_mut()
+                                        && let Some(section) =
+                                            editor.keymap.sections.get_mut(section_index)
+                                    {
+                                        section.bindings.push(BindingForm {
+                                            keystroke: TextField::new("ctrl-shift-x"),
+                                            action: serde_json::Value::String(
+                                                "zetta::NewTab".to_owned(),
+                                            ),
+                                        });
+                                        editor.keymap_dirty = true;
+                                        invalidate_keymap_cache(editor);
+                                        invalidate_controls_cache(editor);
+                                        cx.notify();
+                                    }
+                                })
+                                .ok();
+                        }),
+                    )
+                    .into_any_element()
+            }
+            KeymapRowData::AddSection => {
+                let colors = ctx.colors.clone();
+                let add_handle = ctx.handle.clone();
+                let focused = ctx.focused_control == Some(SettingsControl::AddKeymapSection);
+                h_flex()
+                    .w_full()
+                    .h(px(KEYMAP_ROW_HEIGHT))
+                    .pl_6()
+                    .pr_2()
+                    .border_b_1()
+                    .border_color(colors.border_variant)
+                    .child(
+                        Button::new("add-keymap-section", "Add keymap context")
+                            .style(ButtonStyle::Outlined)
+                            .toggle_state(focused)
+                            .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
+                            .on_click(move |_, _, cx| {
+                                add_handle
+                                    .update(cx, |this, cx| {
+                                        if let Some(editor) = this.settings_editor.as_mut() {
+                                            editor
+                                                .keymap
+                                                .sections
+                                                .push(KeymapSectionForm::new("Zetta > Terminal"));
+                                            editor.keymap_dirty = true;
+                                            invalidate_keymap_cache(editor);
+                                            invalidate_controls_cache(editor);
+                                            cx.notify();
+                                        }
+                                    })
+                                    .ok();
+                            }),
+                    )
+                    .into_any_element()
+            }
+        }
+    }
+
     pub(crate) fn render_settings_overlay(
         &self,
         window: &mut Window,
@@ -51,7 +678,7 @@ impl Zetta {
                 .top_0()
                 .right_0()
                 .bottom_0()
-                .w(px(10.))
+                .w(px(SETTINGS_SCROLLBAR_WIDTH))
                 .bg(colors.scrollbar_track_background)
                 .cursor_pointer()
                 .child(
@@ -89,218 +716,35 @@ impl Zetta {
         };
 
         let text_input = |id: String, field: TextField, input: SettingsInput| -> gpui::AnyElement {
-            let focused = editor.focused_input == Some(input);
-            let centered = match input {
-                SettingsInput::Configuration(
-                    ConfigTextField::FontSize | ConfigTextField::ScrollHistory,
-                ) => true,
-                #[cfg(feature = "http-server")]
-                SettingsInput::Configuration(ConfigTextField::HttpServerPort) => true,
-                #[cfg(feature = "tftp-server")]
-                SettingsInput::Configuration(ConfigTextField::TftpServerPort) => true,
-                _ => false,
-            };
-            let cursor = field.cursor.min(field.text.len());
-            let (before, after) = field.text.split_at(cursor);
-            let input_handle = handle.clone();
-            div()
-                .id(id)
-                .h_9()
-                .w_full()
-                .min_w(px(180.))
-                .px_2()
-                .flex()
-                .items_center()
-                .when(centered, |input| input.justify_center().text_center())
-                .overflow_hidden()
-                .rounded(px(4.))
-                .border_1()
-                .border_color(if focused {
-                    colors.border_focused
-                } else {
-                    colors.border
-                })
-                .bg(colors.editor_background)
-                .cursor_text()
-                .when(field.select_all && focused, |input| {
-                    input.bg(colors.element_selection_background)
-                })
-                .when(!focused, |input| {
-                    input.child(
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .flex_1()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .child(field.text.clone()),
-                    )
-                })
-                .when(focused, |input| {
-                    input
-                        .child(div().whitespace_nowrap().child(before.to_owned()))
-                        .when(!field.select_all, |input| {
-                            input.child(
-                                div()
-                                    .flex_none()
-                                    .w(px(1.))
-                                    .h(px(16.))
-                                    .bg(colors.text_accent),
-                            )
-                        })
-                        .child(div().whitespace_nowrap().child(after.to_owned()))
-                })
-                .on_click(move |_, window, cx| {
-                    input_handle
-                        .update(cx, |this, cx| this.focus_settings_input(input, window, cx))
-                        .ok();
-                })
-                .into_any_element()
+            Self::text_input_widget(
+                id,
+                field,
+                input,
+                editor.focused_input,
+                colors.clone(),
+                handle.clone(),
+            )
         };
 
-        let dropdown = |id: String,
-                        label: String,
-                        options: Arc<[String]>,
-                        selection: SettingsDropdown,
-                        _window: &mut Window,
-                        _cx: &mut Context<Self>|
-         -> gpui::AnyElement {
-            let menu_handle = handle.clone();
-            let focused = editor.focused_control == Some(SettingsControl::Dropdown(selection));
-            let open = editor.open_dropdown == Some(selection);
-            let active_index = editor.dropdown_index.min(options.len().saturating_sub(1));
-            let dropdown_query = editor.dropdown_query.clone();
-            let matching_indices = (!dropdown_query.is_empty())
-                .then(|| fuzzy_match_indices(&options, &dropdown_query));
-            let no_matches = matching_indices
-                .as_ref()
-                .is_some_and(|indices| indices.is_empty());
-            let trigger = ButtonLike::new(id.clone())
-                .style(ButtonStyle::Outlined)
-                .toggle_state(focused)
-                .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
-                .full_width()
-                .child(
-                    h_flex()
-                        .w_full()
-                        .justify_between()
-                        .child(Label::new(label))
-                        .child(Icon::new(IconName::ChevronDown).size(IconSize::XSmall)),
-                )
-                .on_click(move |_, window, cx| {
-                    menu_handle
-                        .update(cx, |this, cx| {
-                            this.focus_settings_control_without_scroll(
-                                SettingsControl::Dropdown(selection),
-                                window,
-                                cx,
-                            );
-                            this.open_settings_dropdown(selection, cx);
-                        })
-                        .ok();
-                });
-            let option_handle = handle.clone();
-            let option_row = |index: usize, option: &String| {
-                let value = option.clone();
-                let selected = index == active_index;
-                let handle = option_handle.clone();
-                div()
-                    .id(format!("{id}-option-{index}"))
-                    .px_2()
-                    .py_1()
-                    .rounded(px(3.))
-                    .cursor_pointer()
-                    .when(selected, |row| row.bg(colors.element_selected))
-                    .hover(|style| style.bg(colors.element_hover))
-                    .child(value.clone())
-                    .on_click(move |_, _, cx| {
-                        handle
-                            .update(cx, |this, cx| {
-                                this.set_settings_dropdown(selection, value.clone(), cx);
-                                if let Some(editor) = this.settings_editor.as_mut() {
-                                    editor.open_dropdown = None;
-                                }
-                                cx.notify();
-                            })
-                            .ok();
-                    })
-            };
-            let option_rows = matching_indices
-                .as_ref()
-                .map(|indices| {
-                    indices
-                        .iter()
-                        .map(|index| option_row(*index, &options[*index]))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_else(|| {
-                    options
-                        .iter()
-                        .enumerate()
-                        .map(|(index, option)| option_row(index, option))
-                        .collect::<Vec<_>>()
-                });
-            div()
-                .relative()
-                .flex()
-                .flex_col()
-                .child(trigger)
-                .when(open, |dropdown| {
-                    dropdown.child(
-                        deferred(
-                            anchored()
-                                .position_mode(AnchoredPositionMode::Local)
-                                .position(point(px(0.), px(40.)))
-                                .snap_to_window_with_margin(px(8.))
-                                .child(
-                                    div()
-                                        .id(format!("{id}-options"))
-                                        .min_w(px(180.))
-                                        .rounded(px(4.))
-                                        .border_1()
-                                        .border_color(colors.border_focused)
-                                        .bg(colors.elevated_surface_background)
-                                        .overflow_hidden()
-                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation()
-                                        })
-                                        .when(!dropdown_query.is_empty(), |menu| {
-                                            menu.child(
-                                                div()
-                                                    .px_2()
-                                                    .py_1()
-                                                    .text_xs()
-                                                    .text_color(colors.text_muted)
-                                                    .child(format!("Search: {dropdown_query}")),
-                                            )
-                                        })
-                                        .child(
-                                            div()
-                                                .id(format!("{id}-options-list"))
-                                                .max_h(px(260.))
-                                                .overflow_y_scroll()
-                                                .track_scroll(&editor.dropdown_scroll)
-                                                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                                                .p_1()
-                                                .when(no_matches, |list| {
-                                                    list.child(
-                                                        div()
-                                                            .px_2()
-                                                            .py_1()
-                                                            .text_color(colors.text_muted)
-                                                            .child("No matches"),
-                                                    )
-                                                })
-                                                .children(option_rows),
-                                        ),
-                                ),
-                        )
-                        .with_priority(1),
-                    )
-                })
-                .into_any_element()
+        let dropdown_state = DropdownRenderState {
+            dropdown_index: editor.dropdown_index,
+            dropdown_query: editor.dropdown_query.clone(),
+            dropdown_filtered_options: editor.dropdown_filtered_options.clone(),
+            dropdown_scroll: editor.dropdown_scroll.clone(),
+            dropdown_anchor: editor.dropdown_anchor,
         };
+        let dropdown =
+            |id: String, label: String, selection: SettingsDropdown| -> gpui::AnyElement {
+                let focused = editor.focused_control == Some(SettingsControl::Dropdown(selection));
+                Self::dropdown_trigger_widget(
+                    id,
+                    label,
+                    selection,
+                    focused,
+                    colors.clone(),
+                    handle.clone(),
+                )
+            };
 
         let setting_row = |label: &'static str,
                            description: &'static str,
@@ -527,39 +971,20 @@ impl Zetta {
         let content = match editor.page {
             SettingsPage::Configuration => {
                 let configuration = &editor.configuration;
-                let mut profile_names = editor.profile_names.to_vec();
-                profile_names.extend(
-                    configuration
-                        .profiles
-                        .iter()
-                        .map(|profile| profile.name.text.clone())
-                        .filter(|name| !name.trim().is_empty()),
-                );
-                profile_names.sort();
-                profile_names.dedup();
                 let default_profile = dropdown(
                     "settings-default-profile".to_owned(),
                     configuration.default_profile.clone(),
-                    profile_names.into(),
                     SettingsDropdown::DefaultProfile,
-                    window,
-                    cx,
                 );
                 let new_tab_profile = dropdown(
                     "settings-new-tab-profile".to_owned(),
                     configuration.new_tab_profile.label().to_owned(),
-                    vec!["Default".to_owned(), "Inherit".to_owned()].into(),
                     SettingsDropdown::NewTabProfile,
-                    window,
-                    cx,
                 );
                 let theme = dropdown(
                     "settings-theme".to_owned(),
                     configuration.theme.clone(),
-                    editor.themes.clone(),
                     SettingsDropdown::Theme,
-                    window,
-                    cx,
                 );
                 let current_default_tab_icon = configuration.default_tab_icon;
                 let default_tab_icon_handle = handle.clone();
@@ -611,18 +1036,12 @@ impl Zetta {
                 let working_directory_scope = dropdown(
                     "settings-working-directory-scope".to_owned(),
                     configuration.working_directory_scope.label().to_owned(),
-                    vec!["None".to_owned(), "Pane".to_owned(), "Tab".to_owned()].into(),
                     SettingsDropdown::WorkingDirectoryScope,
-                    window,
-                    cx,
                 );
                 let pane_controls_position = dropdown(
                     "settings-pane-controls-position".to_owned(),
                     configuration.pane_controls_position.label().to_owned(),
-                    vec!["Right".to_owned(), "Left".to_owned()].into(),
                     SettingsDropdown::PaneControlsPosition,
-                    window,
-                    cx,
                 );
                 let pane_controls_default_visibility = dropdown(
                     "settings-pane-controls-default-visibility".to_owned(),
@@ -631,10 +1050,7 @@ impl Zetta {
                     } else {
                         "Visible".to_owned()
                     },
-                    vec!["Visible".to_owned(), "Hidden".to_owned()].into(),
                     SettingsDropdown::PaneControlsDefaultVisibility,
-                    window,
-                    cx,
                 );
                 let current_font = configuration.terminal_font_family.clone();
                 let picker_handle = handle.clone();
@@ -902,8 +1318,6 @@ impl Zetta {
                                 index,
                             )))
                         || editor.focused_control == Some(SettingsControl::RemoveProfile(index));
-                    let mut theme_options = vec!["Use application theme".to_owned()];
-                    theme_options.extend(editor.themes.iter().cloned());
                     let profile_theme = profile
                         .theme
                         .clone()
@@ -911,10 +1325,7 @@ impl Zetta {
                     let profile_theme = dropdown(
                         format!("settings-profile-{index}-theme"),
                         profile_theme,
-                        theme_options.into(),
                         SettingsDropdown::ProfileTheme(index),
-                        window,
-                        cx,
                     );
                     let card = if profile.detected {
                         let visibility_handle = handle.clone();
@@ -1504,307 +1915,122 @@ impl Zetta {
                 div().children(rows).into_any_element()
             }
             SettingsPage::Keymap => {
-                let mut sections = Vec::new();
-                sections.push(
-                    div()
-                        .mb_3()
-                        .text_sm()
-                        .child("Type an accelerator in the field, or click Record to capture one from your keyboard.")
-                        .child(
-                            div()
-                                .mt_1()
-                                .text_xs()
-                                .text_color(colors.text_muted)
-                                .child("Recording opens a confirmation dialog: press Return to use the captured shortcut or Esc to cancel."),
-                        )
-                        .into_any_element(),
-                );
-                for (section_index, section) in editor.keymap.sections.iter().enumerate() {
-                    let section_focused = matches!(
-                        editor.focused_control.as_ref(),
-                        Some(SettingsControl::Input(SettingsInput::Keymap(
-                            KeymapTextField::Context(index)
-                        ))) if *index == section_index
-                    ) || editor.focused_control
-                        == Some(SettingsControl::AddBinding(section_index));
-                    let mut bindings = Vec::new();
-                    for (binding_index, binding) in section.bindings.iter().enumerate() {
-                        let binding_focused = editor.focused_control
-                            == Some(SettingsControl::Input(SettingsInput::Keymap(
-                                KeymapTextField::Keystroke(section_index, binding_index),
-                            )))
-                            || editor.focused_control
-                                == Some(SettingsControl::RemoveBinding(
-                                    section_index,
-                                    binding_index,
-                                ))
-                            || editor.focused_control
-                                == Some(SettingsControl::CaptureKeymap(
-                                    KeymapTextField::Keystroke(section_index, binding_index),
-                                ));
-                        let action = dropdown(
-                            format!("settings-binding-{section_index}-{binding_index}-action"),
-                            binding.action_name(),
-                            editor.actions.clone(),
-                            SettingsDropdown::BindingAction(section_index, binding_index),
-                            window,
-                            cx,
-                        );
-                        let template = binding.action_parameter("name").map(|name| {
-                            dropdown(
-                                format!(
-                                    "settings-binding-{section_index}-{binding_index}-template"
-                                ),
-                                name,
-                                editor.pane_template_names.clone(),
-                                SettingsDropdown::BindingTemplate(section_index, binding_index),
-                                window,
-                                cx,
-                            )
-                        });
-                        let profile = binding.action_usize_parameter("slot").map(|slot| {
-                            let name = editor
-                                .profile_names
-                                .get(slot.saturating_sub(1))
-                                .cloned()
-                                .unwrap_or_else(|| format!("Profile {slot}"));
-                            dropdown(
-                                format!("settings-binding-{section_index}-{binding_index}-profile"),
-                                name,
-                                editor.profile_names.clone(),
-                                SettingsDropdown::BindingProfile(section_index, binding_index),
-                                window,
-                                cx,
-                            )
-                        });
-                        let remove_handle = handle.clone();
-                        let capture_handle = handle.clone();
-                        bindings.push(
-                            h_flex()
-                                .mb_2()
-                                .p_1()
-                                .gap_2()
-                                .rounded(px(4.))
-                                .border_1()
-                                .border_color(if binding_focused {
-                                    colors.border_focused
-                                } else {
-                                    colors.border_variant
-                                })
-                                .when(binding_focused, |row| {
-                                    row.bg(colors.element_selected)
-                                })
-                                .child(
-                                    h_flex()
-                                        .w(px(330.))
-                                        .gap_1()
-                                        .flex_none()
-                                        .child(text_input(
-                                            format!(
-                                                "settings-binding-{section_index}-{binding_index}-key"
-                                            ),
-                                            binding.keystroke.clone(),
-                                            SettingsInput::Keymap(
-                                                KeymapTextField::Keystroke(
-                                                    section_index,
-                                                    binding_index,
-                                                ),
-                                            ),
-                                        ))
-                                        .child(
-                                            Button::new(
-                                                format!(
-                                                    "record-settings-binding-{section_index}-{binding_index}"
-                                                ),
-                                                "Record",
-                                            )
-                                            .style(ButtonStyle::Outlined)
-                                            .size(ButtonSize::Compact)
-                                            .on_click(move |_, window, cx| {
-                                                capture_handle
-                                                    .update(cx, |this, cx| {
-                                                        this.start_keymap_capture(
-                                                            KeymapTextField::Keystroke(
-                                                                section_index,
-                                                                binding_index,
-                                                            ),
-                                                            window,
-                                                            cx,
-                                                        )
-                                                    })
-                                                    .ok();
-                                            }),
-                                        ),
-                                )
-                                .child(div().min_w_0().flex_1().child(action))
-                                .when_some(template, |row, template| {
-                                    row.child(div().w(px(180.)).flex_none().child(template))
-                                })
-                                .when_some(profile, |row, profile| {
-                                    row.child(div().w(px(180.)).flex_none().child(profile))
-                                })
-                                .child(
-                                    IconButton::new(
-                                        format!("remove-settings-binding-{section_index}-{binding_index}"),
-                                        IconName::Trash,
-                                    )
-                                    .icon_size(IconSize::Small)
-                                    .toggle_state(
-                                        editor.focused_control
-                                            == Some(SettingsControl::RemoveBinding(
-                                                section_index,
-                                                binding_index,
-                                            )),
-                                    )
-                                    .selected_style(ButtonStyle::OutlinedCustom(
-                                        colors.border_focused,
-                                    ))
-                                    .tooltip(Tooltip::text("Remove binding"))
-                                    .on_click(move |_, _, cx| {
-                                        remove_handle
-                                            .update(cx, |this, cx| {
-                                                if let Some(editor) =
-                                                    this.settings_editor.as_mut()
-                                                {
-                                                    editor.keymap.sections[section_index]
-                                                        .bindings
-                                                        .remove(binding_index);
-                                                    editor.keymap_dirty = true;
-                                                    cx.notify();
-                                                }
-                                            })
-                                            .ok();
-                                    }),
-                                )
-                                .into_any_element(),
-                        );
-                    }
-                    let add_handle = handle.clone();
-                    sections.push(
+                let rows = keymap_rows(editor);
+                let row_data: Arc<[KeymapRowData]> = build_keymap_row_data(editor, &rows).into();
+                let row_count = row_data.len();
+                let no_results = row_count == 0 && !editor.keymap_search.text.trim().is_empty();
+
+                let row_ctx = KeymapRowRenderContext {
+                    colors: colors.clone(),
+                    handle: handle.clone(),
+                    focused_control: editor.focused_control.clone(),
+                    focused_input: editor.focused_input,
+                };
+                let rows_list =
+                    uniform_list("settings-keymap-list", row_count, move |range, _, _| {
+                        range
+                            .map(|row| Self::render_keymap_row(&row_data[row], &row_ctx))
+                            .collect::<Vec<_>>()
+                    })
+                    .size_full()
+                    .track_scroll(&editor.keymap_scroll);
+                let keymap_scroll = editor.keymap_scroll.0.borrow().base_handle.clone();
+
+                div()
+                    .flex()
+                    .flex_col()
+                    .size_full()
+                    .child(
                         div()
-                            .p_3()
+                            .flex_none()
                             .mb_3()
-                            .rounded(px(6.))
-                            .border_1()
-                            .border_color(if section_focused {
-                                colors.border_focused
-                            } else {
-                                colors.border
-                            })
-                            .bg(if section_focused {
-                                colors.element_selected
-                            } else {
-                                colors.editor_background
-                            })
-                            .child(
-                                h_flex()
-                                    .mb_3()
-                                    .gap_2()
-                                    .child(div().flex_none().text_sm().child("Context"))
-                                    .child(div().min_w_0().flex_1().child(text_input(
-                                        format!("settings-keymap-section-{section_index}-context"),
-                                        section.context.clone(),
-                                        SettingsInput::Keymap(KeymapTextField::Context(
-                                            section_index,
-                                        )),
-                                    ))),
-                            )
-                            .children(bindings)
+                            .text_sm()
+                            .child("Type an accelerator in the field, or click Record to capture one from your keyboard.")
                             .child(
                                 div()
-                                    .id(("add-settings-binding", section_index))
-                                    .h_8()
-                                    .px_3()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded(px(4.))
-                                    .border_1()
-                                    .border_color(
-                                        if editor.focused_control
-                                            == Some(SettingsControl::AddBinding(section_index))
-                                        {
-                                            colors.border_focused
-                                        } else {
-                                            colors.border
-                                        },
-                                    )
-                                    .when(
-                                        editor.focused_control
-                                            == Some(SettingsControl::AddBinding(section_index)),
-                                        |button| button.bg(colors.element_selected),
-                                    )
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(colors.element_hover))
-                                    .child("Add binding")
-                                    .on_click(move |_, _, cx| {
-                                        add_handle
-                                            .update(cx, |this, cx| {
-                                                if let Some(editor) = this.settings_editor.as_mut()
-                                                {
-                                                    editor.keymap.sections[section_index]
-                                                        .bindings
-                                                        .push(BindingForm {
-                                                            keystroke: TextField::new(
-                                                                "ctrl-shift-x",
-                                                            ),
-                                                            action: serde_json::Value::String(
-                                                                "zetta::NewTab".to_owned(),
-                                                            ),
-                                                        });
-                                                    editor.keymap_dirty = true;
-                                                    cx.notify();
-                                                }
-                                            })
-                                            .ok();
-                                    }),
-                            )
-                            .into_any_element(),
-                    );
-                }
-                let add_handle = handle.clone();
-                sections.push(
-                    div()
-                        .id("add-keymap-section")
-                        .h_9()
-                        .px_3()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(4.))
-                        .border_1()
-                        .border_color(
-                            if editor.focused_control == Some(SettingsControl::AddKeymapSection) {
-                                colors.border_focused
-                            } else {
-                                colors.border
-                            },
+                                    .mt_1()
+                                    .text_xs()
+                                    .text_color(colors.text_muted)
+                                    .child("Recording opens a confirmation dialog: press Return to use the captured shortcut or Esc to cancel."),
+                            ),
+                    )
+                    .child(
+                        div().flex_none().mb_3().child(text_input(
+                            "settings-keymap-search".to_owned(),
+                            editor.keymap_search.clone(),
+                            SettingsInput::KeymapSearch,
+                        )),
+                    )
+                    .when(no_results, |content| {
+                        content.child(
+                            div()
+                                .flex_none()
+                                .mb_3()
+                                .text_sm()
+                                .text_color(colors.text_muted)
+                                .child("No bindings match your search."),
                         )
-                        .when(
-                            editor.focused_control == Some(SettingsControl::AddKeymapSection),
-                            |button| button.bg(colors.element_selected),
-                        )
-                        .cursor_pointer()
-                        .hover(|style| style.bg(colors.element_hover))
-                        .child("Add keymap context")
-                        .on_click(move |_, _, cx| {
-                            add_handle
-                                .update(cx, |this, cx| {
-                                    if let Some(editor) = this.settings_editor.as_mut() {
-                                        editor
-                                            .keymap
-                                            .sections
-                                            .push(KeymapSectionForm::new("Zetta > Terminal"));
-                                        editor.keymap_dirty = true;
-                                        cx.notify();
-                                    }
-                                })
-                                .ok();
-                        })
-                        .into_any_element(),
-                );
-                div().children(sections).into_any_element()
+                    })
+                    .child(
+                        // The scroll indicator is absolutely positioned against this
+                        // container's padding edge, so the padding is what keeps it off the
+                        // rows rather than painted over their trailing controls.
+                        div()
+                            .relative()
+                            .flex_1()
+                            .min_h_0()
+                            .pr(px(SETTINGS_SCROLLBAR_WIDTH + 2.))
+                            .child(rows_list)
+                            .child(scroll_indicator(
+                                "settings-keymap-scrollbar".to_owned(),
+                                &keymap_scroll,
+                            )),
+                    )
+                    .into_any_element()
             }
+        };
+
+        // The keymap list virtualizes its rows with `uniform_list`, which only clips to a
+        // bounded viewport when its parent isn't itself `overflow: scroll` (an overflow-scroll
+        // parent gives its child unconstrained height so it can be scrolled over, which would
+        // make the list size itself to fit every row instead of virtualizing). So the keymap
+        // page owns its own scroll region instead of sharing the generic one below.
+        let scroll_region = if editor.page == SettingsPage::Keymap {
+            div()
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .child(
+                    div()
+                        .id("settings-keymap-form")
+                        .size_full()
+                        .px_5()
+                        .py_3()
+                        .text_color(colors.text)
+                        .child(content),
+                )
+                .into_any_element()
+        } else {
+            div()
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .child(
+                    div()
+                        .id("settings-form-scroll")
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(&editor.settings_scroll)
+                        .px_5()
+                        .py_3()
+                        .text_color(colors.text)
+                        .child(content),
+                )
+                .child(scroll_indicator(
+                    "settings-form-scrollbar".to_owned(),
+                    &editor.settings_scroll,
+                ))
+                .into_any_element()
         };
 
         let font_modal = editor.font_query.as_ref().map(|query| {
@@ -1828,7 +2054,15 @@ impl Zetta {
                             .ok();
                     })
             };
-            let filtered_fonts = matching_font_indices(&editor.normalized_fonts, &query.text);
+            // Use cached filtered font indices or compute inline if cache is missing
+            let filtered_fonts = if editor.font_search_query_cache == query.text {
+                editor
+                    .font_filtered_indices
+                    .clone()
+                    .unwrap_or_else(|| matching_font_indices(&editor.normalized_fonts, &query.text))
+            } else {
+                matching_font_indices(&editor.normalized_fonts, &query.text)
+            };
             let fonts = editor.fonts.clone();
             let font_handle = handle.clone();
             let font_colors = colors.clone();
@@ -1940,18 +2174,13 @@ impl Zetta {
         });
 
         let profile_modal = editor.profile_draft.as_ref().map(|draft| {
-            let mut theme_options = vec!["Use application theme".to_owned()];
-            theme_options.extend(editor.themes.iter().cloned());
             let profile_theme = dropdown(
                 "settings-new-profile-theme".to_owned(),
                 draft
                     .theme
                     .clone()
                     .unwrap_or_else(|| "Use application theme".to_owned()),
-                theme_options.into(),
                 SettingsDropdown::ProfileDraftTheme,
-                window,
-                cx,
             );
             let close_new_profile_button = || {
                 let cancel_handle = handle.clone();
@@ -2226,6 +2455,19 @@ impl Zetta {
                 .into_any_element()
         });
 
+        // Rendered once, as a sibling of the dialog content, regardless of which page or
+        // row opened it (see `DropdownRenderState` for why it can't render inline).
+        let dropdown_popup = editor.open_dropdown.map(|selection| {
+            let (_, options) = Self::settings_dropdown_options(editor, selection);
+            Self::dropdown_popup_widget(
+                options,
+                selection,
+                colors.clone(),
+                handle.clone(),
+                dropdown_state.clone(),
+            )
+        });
+
         let config_handle = handle.clone();
         let themes_handle = handle.clone();
         let keymap_handle = handle.clone();
@@ -2433,27 +2675,7 @@ impl Zetta {
                                 .text_color(colors.text_muted)
                                 .child(path),
                         )
-                        .child(
-                            div()
-                                .relative()
-                                .flex_1()
-                                .min_h_0()
-                                .child(
-                                    div()
-                                        .id("settings-form-scroll")
-                                        .size_full()
-                                        .overflow_y_scroll()
-                                        .track_scroll(&editor.settings_scroll)
-                                        .px_5()
-                                        .py_3()
-                                        .text_color(colors.text)
-                                        .child(content),
-                                )
-                                .child(scroll_indicator(
-                                    "settings-form-scrollbar".to_owned(),
-                                    &editor.settings_scroll,
-                                )),
-                        )
+                        .child(scroll_region)
                         .when_some(editor.message.clone(), |dialog, (error, message)| {
                             dialog.child(
                                 div()
@@ -2472,7 +2694,8 @@ impl Zetta {
                         })
                         .when_some(font_modal, |dialog, modal| dialog.child(modal))
                         .when_some(profile_modal, |dialog, modal| dialog.child(modal))
-                        .when_some(keymap_capture_modal, |dialog, modal| dialog.child(modal)),
+                        .when_some(keymap_capture_modal, |dialog, modal| dialog.child(modal))
+                        .when_some(dropdown_popup, |dialog, popup| dialog.child(popup)),
                 )
                 .into_any_element(),
         )

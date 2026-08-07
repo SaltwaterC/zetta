@@ -1,6 +1,8 @@
 use super::*;
 
 use crate::startup::keymap_keystroke_display;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SettingsInput {
@@ -8,6 +10,7 @@ pub(crate) enum SettingsInput {
     Keymap(KeymapTextField),
     ThemeSearch,
     FontSearch,
+    KeymapSearch,
     ProfileDraft(ProfileDraftField),
 }
 
@@ -18,7 +21,7 @@ pub(crate) enum ProfileDraftField {
     Arguments,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum SettingsDropdown {
     DefaultProfile,
     NewTabProfile,
@@ -103,9 +106,11 @@ pub(crate) struct SettingsEditor {
     pub(crate) normalized_fonts: Arc<[String]>,
     pub(crate) font_query: Option<TextField>,
     pub(crate) profile_draft: Option<settings_editor::ProfileForm>,
+    pub(crate) keymap_search: TextField,
     pub(crate) settings_scroll: ScrollHandle,
-    pub(crate) dropdown_scroll: ScrollHandle,
+    pub(crate) dropdown_scroll: UniformListScrollHandle,
     pub(crate) font_scroll: UniformListScrollHandle,
+    pub(crate) keymap_scroll: UniformListScrollHandle,
     pub(crate) numeric_repeat_generation: u64,
     pub(crate) scroll_geometry_initialized: bool,
     pub(crate) focused_input: Option<SettingsInput>,
@@ -114,9 +119,27 @@ pub(crate) struct SettingsEditor {
     pub(crate) open_dropdown: Option<SettingsDropdown>,
     pub(crate) dropdown_index: usize,
     pub(crate) dropdown_query: String,
+    /// Window-space point the open dropdown's option popover is anchored to, captured from
+    /// the click (or, for keyboard activation, the cursor position) that opened it. The popover
+    /// renders as a sibling of the settings dialog rather than nested in place, because a
+    /// `deferred`+`anchored` popover positioned inline inside a virtualized `uniform_list` row
+    /// (the keymap bindings list) does not paint correctly.
+    pub(crate) dropdown_anchor: Point<Pixels>,
     pub(crate) configuration_dirty: bool,
     pub(crate) keymap_dirty: bool,
     pub(crate) message: Option<(bool, String)>,
+
+    // Cached search/filter results for performance
+    pub(crate) keymap_filtered_sections: Option<Vec<usize>>,
+    pub(crate) keymap_search_query_cache: String,
+    pub(crate) keymap_filtered_bindings: HashMap<usize, Vec<usize>>,
+    pub(crate) dropdown_filtered_options: HashMap<SettingsDropdown, Vec<usize>>,
+    pub(crate) font_filtered_indices: Option<Arc<[usize]>>,
+    pub(crate) font_search_query_cache: String,
+
+    // Controls cache for keyboard navigation
+    pub(crate) controls_cache: Option<Vec<SettingsControl>>,
+    pub(crate) controls_generation: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -289,7 +312,121 @@ pub(crate) fn next_char_boundary(text: &str, cursor: usize) -> usize {
         .unwrap_or(text.len())
 }
 
+/// A binding matches a query if its own keystroke or action name contains it, or if its
+/// section's context does (so searching a context name surfaces all of that context's bindings).
+fn keymap_search_matches(
+    sections: &[KeymapSectionForm],
+    query: &str,
+) -> (Vec<usize>, HashMap<usize, Vec<usize>>) {
+    if query.is_empty() {
+        let section_indices = (0..sections.len()).collect();
+        let bindings = sections
+            .iter()
+            .enumerate()
+            .map(|(index, section)| (index, (0..section.bindings.len()).collect()))
+            .collect();
+        return (section_indices, bindings);
+    }
+    let mut filtered_sections = Vec::new();
+    let mut filtered_bindings = HashMap::new();
+    for (section_index, section) in sections.iter().enumerate() {
+        let context_matches = section.context.text.to_lowercase().contains(query);
+        let matching_bindings: Vec<usize> = section
+            .bindings
+            .iter()
+            .enumerate()
+            .filter(|(_, binding)| {
+                context_matches
+                    || binding.keystroke.text.to_lowercase().contains(query)
+                    || binding.action_name().to_lowercase().contains(query)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if !matching_bindings.is_empty() {
+            filtered_bindings.insert(section_index, matching_bindings);
+            filtered_sections.push(section_index);
+        }
+    }
+    (filtered_sections, filtered_bindings)
+}
+
+pub(crate) fn rebuild_keymap_search_cache(editor: &mut SettingsEditor) {
+    let query = editor.keymap_search.text.trim().to_lowercase();
+    let (sections, bindings) = keymap_search_matches(&editor.keymap.sections, &query);
+    editor.keymap_search_query_cache = query;
+    editor.keymap_filtered_sections = Some(sections);
+    editor.keymap_filtered_bindings = bindings;
+}
+
+pub(crate) fn invalidate_keymap_cache(editor: &mut SettingsEditor) {
+    editor.keymap_filtered_sections = None;
+    editor.keymap_search_query_cache.clear();
+    editor.keymap_filtered_bindings.clear();
+}
+
+/// Returns the current search-filtered (section, bindings) indices, using the cache
+/// when it's still valid for the current query and recomputing inline otherwise
+/// (render only has `&SettingsEditor`, so it can't refresh the cache in place).
+pub(crate) fn keymap_filtered_indices(
+    editor: &SettingsEditor,
+) -> (Vec<usize>, HashMap<usize, Vec<usize>>) {
+    let query = editor.keymap_search.text.trim().to_lowercase();
+    if editor.keymap_search_query_cache == query
+        && let Some(sections) = editor.keymap_filtered_sections.as_ref()
+    {
+        return (sections.clone(), editor.keymap_filtered_bindings.clone());
+    }
+    keymap_search_matches(&editor.keymap.sections, &query)
+}
+
+/// A single row of the virtualized keymap list, in display order. Kept in sync with
+/// [`build_settings_controls`]'s `SettingsPage::Keymap` arm, which walks the same
+/// filtered indices, so keyboard navigation and rendering never disagree about
+/// which bindings are visible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KeymapRow {
+    SectionHeader(usize),
+    Binding(usize, usize),
+    AddBinding(usize),
+    AddSection,
+}
+
+pub(crate) fn keymap_rows(editor: &SettingsEditor) -> Vec<KeymapRow> {
+    let (filtered_sections, filtered_bindings) = keymap_filtered_indices(editor);
+    let mut rows = Vec::new();
+    for section_index in filtered_sections {
+        rows.push(KeymapRow::SectionHeader(section_index));
+        if let Some(binding_indices) = filtered_bindings.get(&section_index) {
+            rows.extend(
+                binding_indices
+                    .iter()
+                    .map(|&binding_index| KeymapRow::Binding(section_index, binding_index)),
+            );
+        }
+        rows.push(KeymapRow::AddBinding(section_index));
+    }
+    rows.push(KeymapRow::AddSection);
+    rows
+}
+
+pub(crate) fn invalidate_controls_cache(editor: &mut SettingsEditor) {
+    editor.controls_cache = None;
+    editor.controls_generation = editor.controls_generation.wrapping_add(1);
+}
+
 impl Zetta {
+    fn rebuild_font_search_cache(editor: &mut SettingsEditor) {
+        if let Some(font_query) = editor.font_query.as_ref() {
+            let query = font_query.text.clone();
+            editor.font_search_query_cache = query.clone();
+            editor.font_filtered_indices =
+                Some(matching_font_indices(&editor.normalized_fonts, &query));
+        } else {
+            editor.font_filtered_indices = None;
+            editor.font_search_query_cache.clear();
+        }
+    }
+
     pub(crate) fn toggle_settings(
         &mut self,
         _: &ToggleSettings,
@@ -361,12 +498,22 @@ impl Zetta {
         themes.sort();
         themes.dedup();
         let installed_theme_extensions = Vec::new();
-        let mut fonts = cx.text_system().all_font_names();
+        // Use cached font enumeration from Zetta.font_cache if available, otherwise compute inline
+        let mut fonts = self
+            .font_cache
+            .get()
+            .map(|cache| cache.fonts.to_vec())
+            .unwrap_or_else(|| cx.text_system().all_font_names());
         if !fonts.contains(&configuration.terminal_font_family) {
             fonts.push(configuration.terminal_font_family.clone());
         }
         fonts.sort_by_key(|font| font.to_lowercase());
         fonts.dedup();
+        let normalized_fonts: Arc<[String]> = fonts
+            .iter()
+            .map(|font| font.to_lowercase())
+            .collect::<Vec<_>>()
+            .into();
         self.settings_editor = Some(SettingsEditor {
             page: SettingsPage::Configuration,
             configuration,
@@ -386,17 +533,15 @@ impl Zetta {
             theme_extension_downloading: None,
             actions: actions.into(),
             pane_template_names: pane_template_names.into(),
-            normalized_fonts: fonts
-                .iter()
-                .map(|font| font.to_lowercase())
-                .collect::<Vec<_>>()
-                .into(),
             fonts: fonts.into(),
+            normalized_fonts,
             font_query: None,
             profile_draft: None,
+            keymap_search: TextField::new(""),
             settings_scroll: ScrollHandle::new(),
-            dropdown_scroll: ScrollHandle::new(),
+            dropdown_scroll: UniformListScrollHandle::new(),
             font_scroll: UniformListScrollHandle::new(),
+            keymap_scroll: UniformListScrollHandle::new(),
             numeric_repeat_generation: 0,
             scroll_geometry_initialized: false,
             focused_input: None,
@@ -405,10 +550,26 @@ impl Zetta {
             open_dropdown: None,
             dropdown_index: 0,
             dropdown_query: String::new(),
+            dropdown_anchor: Point::default(),
             configuration_dirty: false,
             keymap_dirty: false,
             message: None,
+
+            // Cache fields
+            keymap_filtered_sections: None,
+            keymap_search_query_cache: String::new(),
+            keymap_filtered_bindings: HashMap::new(),
+            dropdown_filtered_options: HashMap::new(),
+            font_filtered_indices: None,
+            font_search_query_cache: String::new(),
+            controls_cache: None,
+            controls_generation: 0,
         });
+
+        // Initialize keymap search cache on first load
+        if let Some(editor) = self.settings_editor.as_mut() {
+            rebuild_keymap_search_cache(editor);
+        }
         let themes_dir = config::themes_dir();
         let executor = cx.background_executor().clone();
         let this = cx.entity().downgrade();
@@ -697,6 +858,7 @@ impl Zetta {
             editor.font_query = None;
             editor.profile_draft = None;
             editor.numeric_repeat_generation = editor.numeric_repeat_generation.wrapping_add(1);
+            invalidate_controls_cache(editor);
         }
         self.settings_focus.focus(window, cx);
         cx.notify();
@@ -750,6 +912,7 @@ impl Zetta {
             SettingsInput::Keymap(field) => editor.keymap.text_mut(field),
             SettingsInput::ThemeSearch => Some(&mut editor.theme_extension_query),
             SettingsInput::FontSearch => editor.font_query.as_mut(),
+            SettingsInput::KeymapSearch => Some(&mut editor.keymap_search),
             SettingsInput::ProfileDraft(field) => {
                 editor.profile_draft.as_mut().map(|draft| match field {
                     ProfileDraftField::Name => &mut draft.name,
@@ -843,7 +1006,18 @@ impl Zetta {
         self.focus_settings_input(SettingsInput::Keymap(target), window, cx);
     }
 
-    fn settings_controls(editor: &SettingsEditor) -> Vec<SettingsControl> {
+    fn settings_controls(editor: &mut SettingsEditor) -> Vec<SettingsControl> {
+        // Check cache first
+        if let Some(ref cache) = editor.controls_cache {
+            return cache.clone();
+        }
+
+        let controls = Self::build_settings_controls(editor);
+        editor.controls_cache = Some(controls.clone());
+        controls
+    }
+
+    fn build_settings_controls(editor: &SettingsEditor) -> Vec<SettingsControl> {
         if let Some(query) = editor.font_query.as_ref() {
             let mut controls = vec![
                 SettingsControl::CloseFontPicker,
@@ -959,35 +1133,46 @@ impl Zetta {
                 }
             }
             SettingsPage::Keymap => {
-                for (section_index, section) in editor.keymap.sections.iter().enumerate() {
+                controls.push(SettingsControl::Input(SettingsInput::KeymapSearch));
+                let (filtered_sections, filtered_bindings) = keymap_filtered_indices(editor);
+                for section_index in filtered_sections {
+                    let Some(section) = editor.keymap.sections.get(section_index) else {
+                        continue;
+                    };
                     controls.push(SettingsControl::Input(SettingsInput::Keymap(
                         KeymapTextField::Context(section_index),
                     )));
-                    for (binding_index, binding) in section.bindings.iter().enumerate() {
-                        controls.extend([
-                            SettingsControl::Input(SettingsInput::Keymap(
-                                KeymapTextField::Keystroke(section_index, binding_index),
-                            )),
-                            SettingsControl::CaptureKeymap(KeymapTextField::Keystroke(
-                                section_index,
-                                binding_index,
-                            )),
-                            SettingsControl::Dropdown(SettingsDropdown::BindingAction(
-                                section_index,
-                                binding_index,
-                            )),
-                        ]);
-                        if binding.action_parameter("name").is_some() {
-                            controls.push(SettingsControl::Dropdown(
-                                SettingsDropdown::BindingTemplate(section_index, binding_index),
-                            ));
+                    if let Some(binding_indices) = filtered_bindings.get(&section_index) {
+                        for &binding_index in binding_indices {
+                            let Some(binding) = section.bindings.get(binding_index) else {
+                                continue;
+                            };
+                            controls.extend([
+                                SettingsControl::Input(SettingsInput::Keymap(
+                                    KeymapTextField::Keystroke(section_index, binding_index),
+                                )),
+                                SettingsControl::CaptureKeymap(KeymapTextField::Keystroke(
+                                    section_index,
+                                    binding_index,
+                                )),
+                                SettingsControl::Dropdown(SettingsDropdown::BindingAction(
+                                    section_index,
+                                    binding_index,
+                                )),
+                            ]);
+                            if binding.action_parameter("name").is_some() {
+                                controls.push(SettingsControl::Dropdown(
+                                    SettingsDropdown::BindingTemplate(section_index, binding_index),
+                                ));
+                            }
+                            if binding.action_usize_parameter("slot").is_some() {
+                                controls.push(SettingsControl::Dropdown(
+                                    SettingsDropdown::BindingProfile(section_index, binding_index),
+                                ));
+                            }
+                            controls
+                                .push(SettingsControl::RemoveBinding(section_index, binding_index));
                         }
-                        if binding.action_usize_parameter("slot").is_some() {
-                            controls.push(SettingsControl::Dropdown(
-                                SettingsDropdown::BindingProfile(section_index, binding_index),
-                            ));
-                        }
-                        controls.push(SettingsControl::RemoveBinding(section_index, binding_index));
                     }
                     controls.push(SettingsControl::AddBinding(section_index));
                 }
@@ -998,7 +1183,7 @@ impl Zetta {
     }
 
     fn scroll_settings_control_into_view(&mut self, control: &SettingsControl) {
-        let Some(editor) = self.settings_editor.as_ref() else {
+        let Some(editor) = self.settings_editor.as_mut() else {
             return;
         };
         if let Some(query) = editor.font_query.as_ref() {
@@ -1013,6 +1198,36 @@ impl Zetta {
             return;
         }
         if editor.profile_draft.is_some() {
+            return;
+        }
+        if editor.page == SettingsPage::Keymap {
+            let row = match control {
+                SettingsControl::Input(SettingsInput::Keymap(KeymapTextField::Context(
+                    section,
+                ))) => Some(KeymapRow::SectionHeader(*section)),
+                SettingsControl::Input(SettingsInput::Keymap(KeymapTextField::Keystroke(
+                    section,
+                    binding,
+                )))
+                | SettingsControl::CaptureKeymap(KeymapTextField::Keystroke(section, binding))
+                | SettingsControl::Dropdown(SettingsDropdown::BindingAction(section, binding))
+                | SettingsControl::Dropdown(SettingsDropdown::BindingTemplate(section, binding))
+                | SettingsControl::Dropdown(SettingsDropdown::BindingProfile(section, binding))
+                | SettingsControl::RemoveBinding(section, binding) => {
+                    Some(KeymapRow::Binding(*section, *binding))
+                }
+                SettingsControl::AddBinding(section) => Some(KeymapRow::AddBinding(*section)),
+                SettingsControl::AddKeymapSection => Some(KeymapRow::AddSection),
+                _ => None,
+            };
+            if let Some(row) = row {
+                let rows = keymap_rows(editor);
+                if let Some(row_index) = rows.iter().position(|candidate| *candidate == row) {
+                    editor
+                        .keymap_scroll
+                        .scroll_to_item(row_index, ScrollStrategy::Nearest);
+                }
+            }
             return;
         }
         let controls = Self::settings_controls(editor);
@@ -1079,7 +1294,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(editor) = self.settings_editor.as_ref() else {
+        let Some(editor) = self.settings_editor.as_mut() else {
             return;
         };
         let controls = Self::settings_controls(editor);
@@ -1094,10 +1309,10 @@ impl Zetta {
         }
     }
 
-    fn settings_dropdown_options(
+    pub(crate) fn settings_dropdown_options(
         editor: &SettingsEditor,
         dropdown: SettingsDropdown,
-    ) -> (String, Vec<String>) {
+    ) -> (String, Arc<[String]>) {
         match dropdown {
             SettingsDropdown::DefaultProfile => {
                 let mut options = editor.profile_names.to_vec();
@@ -1110,20 +1325,24 @@ impl Zetta {
                 );
                 options.sort();
                 options.dedup();
-                (editor.configuration.default_profile.clone(), options)
+                (editor.configuration.default_profile.clone(), options.into())
             }
             SettingsDropdown::NewTabProfile => (
                 editor.configuration.new_tab_profile.label().to_owned(),
-                vec!["Default".to_owned(), "Inherit".to_owned()],
+                Arc::from([String::from("Default"), String::from("Inherit")]),
             ),
-            SettingsDropdown::Theme => (editor.configuration.theme.clone(), editor.themes.to_vec()),
+            SettingsDropdown::Theme => (editor.configuration.theme.clone(), editor.themes.clone()),
             SettingsDropdown::WorkingDirectoryScope => (
                 editor
                     .configuration
                     .working_directory_scope
                     .label()
                     .to_owned(),
-                vec!["None".to_owned(), "Pane".to_owned(), "Tab".to_owned()],
+                Arc::from([
+                    String::from("None"),
+                    String::from("Pane"),
+                    String::from("Tab"),
+                ]),
             ),
             SettingsDropdown::PaneControlsPosition => (
                 editor
@@ -1131,7 +1350,7 @@ impl Zetta {
                     .pane_controls_position
                     .label()
                     .to_owned(),
-                vec!["Right".to_owned(), "Left".to_owned()],
+                Arc::from([String::from("Right"), String::from("Left")]),
             ),
             SettingsDropdown::PaneControlsDefaultVisibility => (
                 if editor.configuration.pane_controls_hidden_by_default {
@@ -1139,7 +1358,7 @@ impl Zetta {
                 } else {
                     "Visible".to_owned()
                 },
-                vec!["Visible".to_owned(), "Hidden".to_owned()],
+                Arc::from([String::from("Visible"), String::from("Hidden")]),
             ),
             SettingsDropdown::ProfileTheme(index) => (
                 editor
@@ -1170,7 +1389,7 @@ impl Zetta {
                     .and_then(|section| section.bindings.get(binding))
                     .map(BindingForm::action_name)
                     .unwrap_or_default(),
-                editor.actions.to_vec(),
+                editor.actions.clone(),
             ),
             SettingsDropdown::BindingTemplate(section, binding) => (
                 editor
@@ -1180,7 +1399,7 @@ impl Zetta {
                     .and_then(|section| section.bindings.get(binding))
                     .and_then(|binding| binding.action_parameter("name"))
                     .unwrap_or_default(),
-                editor.pane_template_names.to_vec(),
+                editor.pane_template_names.clone(),
             ),
             SettingsDropdown::BindingProfile(section, binding) => {
                 let slot = editor
@@ -1196,7 +1415,7 @@ impl Zetta {
                         .get(slot.saturating_sub(1))
                         .cloned()
                         .unwrap_or_default(),
-                    editor.profile_names.to_vec(),
+                    editor.profile_names.clone(),
                 )
             }
         }
@@ -1205,6 +1424,7 @@ impl Zetta {
     pub(crate) fn open_settings_dropdown(
         &mut self,
         dropdown: SettingsDropdown,
+        anchor: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
         let Some(editor) = self.settings_editor.as_mut() else {
@@ -1219,7 +1439,13 @@ impl Zetta {
             .position(|option| option == &selected)
             .unwrap_or(0);
         editor.dropdown_query.clear();
-        editor.dropdown_scroll.scroll_to_item(editor.dropdown_index);
+        // Only one dropdown is ever open at a time, so the previous dropdown's
+        // filtered-options entry is dead weight the moment a different one opens.
+        editor.dropdown_filtered_options.clear();
+        editor
+            .dropdown_scroll
+            .scroll_to_item(editor.dropdown_index, ScrollStrategy::Nearest);
+        editor.dropdown_anchor = anchor;
         editor.open_dropdown = Some(dropdown);
         cx.notify();
     }
@@ -1246,7 +1472,9 @@ impl Zetta {
             (current + 1) % matching_indices.len()
         };
         editor.dropdown_index = matching_indices[next];
-        editor.dropdown_scroll.scroll_to_item(editor.dropdown_index);
+        editor
+            .dropdown_scroll
+            .scroll_to_item(editor.dropdown_index, ScrollStrategy::Nearest);
         cx.notify();
         true
     }
@@ -1281,9 +1509,19 @@ impl Zetta {
         }
 
         let (_, options) = Self::settings_dropdown_options(editor, dropdown);
-        if let Some(index) = fuzzy_match_index(&options, &editor.dropdown_query) {
+        let query = editor.dropdown_query.clone();
+        if let Some(index) = fuzzy_match_index(&options, &query) {
             editor.dropdown_index = index;
-            editor.dropdown_scroll.scroll_to_item(index);
+            editor
+                .dropdown_scroll
+                .scroll_to_item(index, ScrollStrategy::Nearest);
+        }
+        if query.is_empty() {
+            editor.dropdown_filtered_options.remove(&dropdown);
+        } else {
+            editor
+                .dropdown_filtered_options
+                .insert(dropdown, fuzzy_match_indices(&options, &query));
         }
         cx.notify();
         true
@@ -1322,7 +1560,9 @@ impl Zetta {
             SettingsControl::Close => self.dismiss_settings(window, cx),
             SettingsControl::Input(input) => self.focus_settings_input(input, window, cx),
             SettingsControl::CaptureKeymap(target) => self.start_keymap_capture(target, window, cx),
-            SettingsControl::Dropdown(dropdown) => self.open_settings_dropdown(dropdown, cx),
+            SettingsControl::Dropdown(dropdown) => {
+                self.open_settings_dropdown(dropdown, window.mouse_position(), cx)
+            }
             SettingsControl::Toggle(toggle) => {
                 let value = self.settings_editor.as_ref().map(|editor| match toggle {
                     SettingsToggle::CompactMode => editor.configuration.compact_mode,
@@ -1345,6 +1585,7 @@ impl Zetta {
                 if let Some(editor) = self.settings_editor.as_mut() {
                     editor.font_query = Some(TextField::default());
                     editor.scroll_geometry_initialized = false;
+                    Self::rebuild_font_search_cache(editor);
                 }
                 self.focus_settings_input(SettingsInput::FontSearch, window, cx);
             }
@@ -1489,6 +1730,7 @@ impl Zetta {
             SettingsInput::Keymap(field) => editor.keymap.text_mut(field),
             SettingsInput::ThemeSearch => Some(&mut editor.theme_extension_query),
             SettingsInput::FontSearch => editor.font_query.as_mut(),
+            SettingsInput::KeymapSearch => Some(&mut editor.keymap_search),
             SettingsInput::ProfileDraft(field) => {
                 editor.profile_draft.as_mut().map(|draft| match field {
                     ProfileDraftField::Name => &mut draft.name,
@@ -1527,11 +1769,24 @@ impl Zetta {
             _ => {}
         }
         match input {
-            SettingsInput::Configuration(_) => editor.configuration_dirty = true,
-            SettingsInput::Keymap(_) => editor.keymap_dirty = true,
-            SettingsInput::ThemeSearch
-            | SettingsInput::FontSearch
-            | SettingsInput::ProfileDraft(_) => {}
+            SettingsInput::Configuration(_) => {
+                editor.configuration_dirty = true;
+                invalidate_controls_cache(editor);
+            }
+            SettingsInput::Keymap(_) => {
+                editor.keymap_dirty = true;
+                invalidate_keymap_cache(editor);
+                invalidate_controls_cache(editor);
+            }
+            SettingsInput::ThemeSearch => {}
+            SettingsInput::FontSearch => {
+                Self::rebuild_font_search_cache(editor);
+            }
+            SettingsInput::KeymapSearch => {
+                rebuild_keymap_search_cache(editor);
+                invalidate_controls_cache(editor);
+            }
+            SettingsInput::ProfileDraft(_) => {}
         }
         editor.message = None;
         cx.notify();
@@ -1649,7 +1904,9 @@ impl Zetta {
         }
         match dropdown {
             SettingsDropdown::BindingAction(_, _) | SettingsDropdown::BindingTemplate(_, _) => {
-                editor.keymap_dirty = true
+                editor.keymap_dirty = true;
+                invalidate_keymap_cache(editor);
+                invalidate_controls_cache(editor);
             }
             SettingsDropdown::ProfileDraftTheme => {}
             _ => editor.configuration_dirty = true,
@@ -1989,7 +2246,7 @@ impl Zetta {
                     .and_then(|editor| editor.focused_control.clone());
                 match control {
                     Some(SettingsControl::Dropdown(dropdown)) => {
-                        self.open_settings_dropdown(dropdown, cx);
+                        self.open_settings_dropdown(dropdown, window.mouse_position(), cx);
                         self.move_open_settings_dropdown(direction, cx);
                     }
                     Some(SettingsControl::Numeric(setting)) => {
@@ -2036,7 +2293,7 @@ impl Zetta {
                         self.focus_settings_control(SettingsControl::Tab(pages[next]), window, cx);
                     }
                     Some(SettingsControl::Dropdown(dropdown)) => {
-                        self.open_settings_dropdown(dropdown, cx);
+                        self.open_settings_dropdown(dropdown, window.mouse_position(), cx);
                         self.move_open_settings_dropdown(direction, cx);
                     }
                     Some(SettingsControl::Input(_)) => self.edit_settings_input(event, command, cx),

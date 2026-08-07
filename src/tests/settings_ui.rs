@@ -116,6 +116,79 @@ fn captured_keymap_shortcuts_use_keymap_text_syntax() {
     assert_eq!(keystroke.unparse(), "shift-escape");
 }
 
+fn binding(keystroke: &str, action: &str) -> BindingForm {
+    BindingForm {
+        keystroke: TextField::new(keystroke),
+        action: serde_json::Value::String(action.to_owned()),
+    }
+}
+
+fn section(context: &str, bindings: Vec<BindingForm>) -> KeymapSectionForm {
+    let mut section = KeymapSectionForm::new(context);
+    section.bindings = bindings;
+    section
+}
+
+#[test]
+fn keymap_search_matches_empty_query_keeps_every_section_and_binding() {
+    let sections = vec![
+        section("Zetta > Terminal", vec![binding("ctrl-t", "zetta::NewTab")]),
+        section("Zetta > Pane", vec![]),
+    ];
+
+    let (matched_sections, matched_bindings) = keymap_search_matches(&sections, "");
+
+    assert_eq!(matched_sections, vec![0, 1]);
+    assert_eq!(matched_bindings.get(&0), Some(&vec![0]));
+    assert_eq!(matched_bindings.get(&1), Some(&Vec::new()));
+}
+
+#[test]
+fn keymap_search_matches_binding_by_keystroke_or_action_name() {
+    let sections = vec![section(
+        "Zetta > Terminal",
+        vec![
+            binding("ctrl-t", "zetta::NewTab"),
+            binding("ctrl-w", "zetta::CloseTab"),
+        ],
+    )];
+
+    let (matched_sections, matched_bindings) = keymap_search_matches(&sections, "closetab");
+    assert_eq!(matched_sections, vec![0]);
+    assert_eq!(matched_bindings.get(&0), Some(&vec![1]));
+
+    let (matched_sections, matched_bindings) = keymap_search_matches(&sections, "ctrl-t");
+    assert_eq!(matched_sections, vec![0]);
+    assert_eq!(matched_bindings.get(&0), Some(&vec![0]));
+}
+
+#[test]
+fn keymap_search_matching_context_surfaces_every_binding_in_it() {
+    let sections = vec![
+        section("Zetta > Terminal", vec![binding("ctrl-t", "zetta::NewTab")]),
+        section("Zetta > Pane", vec![binding("ctrl-w", "zetta::CloseTab")]),
+    ];
+
+    let (matched_sections, matched_bindings) = keymap_search_matches(&sections, "terminal");
+
+    assert_eq!(matched_sections, vec![0]);
+    assert_eq!(matched_bindings.get(&0), Some(&vec![0]));
+    assert_eq!(matched_bindings.get(&1), None);
+}
+
+#[test]
+fn keymap_search_drops_sections_with_no_matching_bindings() {
+    let sections = vec![section(
+        "Zetta > Terminal",
+        vec![binding("ctrl-t", "zetta::NewTab")],
+    )];
+
+    let (matched_sections, matched_bindings) = keymap_search_matches(&sections, "nonexistent");
+
+    assert!(matched_sections.is_empty());
+    assert!(matched_bindings.is_empty());
+}
+
 #[test]
 fn captured_shifted_number_row_uses_gpui_keymap_normalization() {
     let keystroke = gpui::Keystroke::parse("ctrl-!").unwrap();

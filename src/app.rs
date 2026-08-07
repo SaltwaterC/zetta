@@ -1,4 +1,5 @@
 use super::*;
+use strum::IntoEnumIterator as _;
 use zeroize::Zeroizing;
 
 const PANE_CONTROLS_IDLE_DELAY: Duration = Duration::from_millis(1200);
@@ -10,6 +11,17 @@ const PANE_RESIZE_REPEAT_DELAY: Duration = Duration::from_millis(400);
 const PANE_RESIZE_REPEAT_INTERVAL: Duration = Duration::from_millis(75);
 const PANE_RESIZE_GUTTER_SIZE: Pixels = px(20.);
 const PANE_SPLIT_SEPARATOR_SIZE: Pixels = px(1.);
+
+/// Cached font enumeration for settings font picker
+pub(crate) struct FontCache {
+    pub fonts: Arc<[String]>,
+}
+
+/// Cached icon entries (icon + precomputed lowercase label) shared by the
+/// tab icon picker, used both for per-tab icons and the config default icon.
+pub(crate) struct IconCache {
+    pub entries: Arc<[IconEntry]>,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ReconnectRequest {
@@ -436,6 +448,8 @@ pub(crate) struct Zetta {
     pub(crate) multi_command_launches: BoundedLaunchQueue<QueuedTerminalLaunch>,
     pub(crate) settings_focus: gpui::FocusHandle,
     pub(crate) settings_editor: Option<SettingsEditor>,
+    pub(crate) font_cache: Arc<OnceLock<FontCache>>,
+    pub(crate) icon_cache: Arc<OnceLock<IconCache>>,
     pub(crate) tab_icon_picker_focus: gpui::FocusHandle,
     pub(crate) tab_icon_picker: Option<TabIconPicker>,
     pub(crate) theme_picker_focus: gpui::FocusHandle,
@@ -657,6 +671,8 @@ impl Zetta {
             multi_command_launches: BoundedLaunchQueue::new(MAX_CONCURRENT_MULTI_COMMAND_SPAWNS),
             settings_focus: cx.focus_handle(),
             settings_editor: None,
+            font_cache: Arc::new(OnceLock::new()),
+            icon_cache: Arc::new(OnceLock::new()),
             tab_icon_picker_focus: cx.focus_handle(),
             tab_icon_picker: None,
             theme_picker_focus: cx.focus_handle(),
@@ -704,6 +720,29 @@ impl Zetta {
                 }),
             ],
         };
+        // Initialize font and icon caches in background
+        let text_system = cx.text_system().clone();
+        let font_cache = this.font_cache.clone();
+        let icon_cache = this.icon_cache.clone();
+        cx.background_executor()
+            .spawn(async move {
+                // Font cache
+                let mut fonts = text_system.all_font_names();
+                fonts.sort_by_key(|f| f.to_lowercase());
+                fonts.dedup();
+                font_cache
+                    .set(FontCache {
+                        fonts: fonts.into(),
+                    })
+                    .ok();
+
+                // Icon cache
+                let all_icons: Vec<ui::IconName> = ui::IconName::iter().collect();
+                let entries: Arc<[IconEntry]> = build_icon_entries(&all_icons).into();
+                icon_cache.set(IconCache { entries }).ok();
+            })
+            .detach();
+
         this.load_multi_command_catalog(cx);
         if let Some(profile) = initial_profile {
             this.open_tab_with_profile(profile, window, cx);
@@ -3795,6 +3834,17 @@ impl Zetta {
         self.begin_rename_with_title(tab_index, automatic_title, window, cx);
     }
 
+    /// Shared icon entries (icon + precomputed lowercase label) backing the
+    /// tab icon picker, whether opened for a specific tab or for the
+    /// config default icon. Reads the background-populated cache, falling
+    /// back to a lazily-computed set if it isn't ready yet.
+    pub(crate) fn tab_icon_entries(&self) -> Arc<[IconEntry]> {
+        self.icon_cache
+            .get()
+            .map(|cache| cache.entries.clone())
+            .unwrap_or_else(fallback_icon_entries)
+    }
+
     pub(crate) fn open_tab_icon_picker(
         &mut self,
         tab_index: usize,
@@ -3805,9 +3855,11 @@ impl Zetta {
             return;
         }
         let current_icon = self.tabs.get(tab_index).and_then(|tab| tab.icon);
+        let entries = self.tab_icon_entries();
         self.tab_icon_picker = Some(TabIconPicker::new(
             TabIconPickerTarget::Tab(tab_index),
             current_icon,
+            &entries,
         ));
         if let Some(picker) = self.tab_icon_picker.as_ref() {
             picker.scroll.scroll_to_item(picker.selected);
@@ -3832,9 +3884,11 @@ impl Zetta {
             .settings_editor
             .as_ref()
             .and_then(|editor| editor.configuration.default_tab_icon);
+        let entries = self.tab_icon_entries();
         self.tab_icon_picker = Some(TabIconPicker::new(
             TabIconPickerTarget::Default,
             current_icon,
+            &entries,
         ));
         if let Some(picker) = self.tab_icon_picker.as_ref() {
             picker.scroll.scroll_to_item(picker.selected);
@@ -3894,6 +3948,7 @@ impl Zetta {
             self.dismiss_tab_icon_picker(window, cx);
             return;
         }
+        let entries = self.tab_icon_entries();
         let activate = {
             let mut activate = None;
             let mut query_changed = false;
@@ -3901,7 +3956,7 @@ impl Zetta {
             let Some(picker) = self.tab_icon_picker.as_mut() else {
                 return;
             };
-            let options = matching_tab_icon_options(&picker.query.text);
+            let options = picker.options(&entries).to_vec();
             match event.keystroke.key.as_str() {
                 "left" if !command => picker.query.move_left(),
                 "right" if !command => picker.query.move_right(),
