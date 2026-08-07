@@ -1,10 +1,5 @@
 use super::*;
-#[cfg(any(
-    feature = "serial-console",
-    feature = "http-server",
-    feature = "tftp-server",
-    feature = "notifications"
-))]
+#[cfg(cli_services)]
 use crate::cli_services::CliServiceCommand;
 #[cfg(feature = "serial-console")]
 use crate::cli_services::SerialCommand;

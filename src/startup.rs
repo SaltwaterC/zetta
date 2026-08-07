@@ -1,10 +1,5 @@
 use super::*;
-#[cfg(any(
-    feature = "serial-console",
-    feature = "http-server",
-    feature = "tftp-server",
-    feature = "notifications"
-))]
+#[cfg(cli_services)]
 use crate::cli_services::CliServiceCommand;
 #[cfg(feature = "clipboard")]
 use crate::cli_services::{copy_help, parse_copy_args, parse_paste_args, paste_help};
@@ -64,13 +59,7 @@ const DEFAULT_PERFORMANCE_REPORT_DURATION: Duration = Duration::from_secs(10);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StartupMode {
     Application,
-    #[cfg(any(
-        feature = "serial-console",
-        feature = "http-server",
-        feature = "tftp-server",
-        feature = "notifications",
-        feature = "clipboard"
-    ))]
+    #[cfg(cli_services)]
     CliService(CliServiceCommand),
     PrintShellIntegration(ShellIntegration),
     ConfigureCurrentShellIntegration,
@@ -3195,13 +3184,7 @@ pub(crate) fn run() -> Result<()> {
         }
         _ => {}
     }
-    #[cfg(any(
-        feature = "serial-console",
-        feature = "http-server",
-        feature = "tftp-server",
-        feature = "notifications",
-        feature = "clipboard"
-    ))]
+    #[cfg(cli_services)]
     if let StartupMode::CliService(command) = &args.mode {
         return command.run();
     }
