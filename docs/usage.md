@@ -107,9 +107,8 @@ The same change is available from any Zetta pane, or a script, with
 process (built-in and user-installed). Shell integration completes pane
 theme names dynamically, the same way it does for `zetta tabicon`.
 
-Press `Alt-Shift-B`, or `Cmd-Shift-B` on macOS, or run **Set Pane Overlay**
-from the command palette to edit text shown over the active pane's terminal
-content. It renders as larger, translucent text in the pane's top-right
+Run **Set Pane Overlay** from the command palette to edit text shown over the
+active pane's terminal content. It renders as larger, translucent text in the pane's top-right
 corner, with no background box, so it reads as a watermark rather than
 obscuring the terminal underneath. The text is edited in place over the
 pane, at full opacity while editing; type to change it, use the arrow keys

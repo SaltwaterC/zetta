@@ -2408,7 +2408,6 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
         ),
         platform_keybinding("alt-shift-t", ChangePaneTheme, Some("Zetta > Terminal")),
         KeyBinding::new(RENAME_PANE_KEYBINDING, RenamePane, Some("Zetta > Terminal")),
-        platform_keybinding("alt-shift-b", SetPaneOverlay, Some("Zetta > Terminal")),
         KeyBinding::new(
             TOGGLE_PANE_CONTROLS_KEYBINDING,
             TogglePaneControls,
