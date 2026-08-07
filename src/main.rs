@@ -266,7 +266,18 @@ mod serial_console_ui;
 #[cfg(feature = "tftp-server")]
 mod tftp_server_ui;
 use app::*;
+mod pane_resize;
+use pane_resize::*;
 mod app_render;
+mod background_session_ui;
+mod cli_service_stubs;
+mod pane_overlay;
+mod pane_render;
+mod pane_theme_picker;
+mod pane_view_state;
+mod tab_body_render;
+mod title_bar_render;
+use title_bar_render::*;
 mod window_frame;
 use window_frame::*;
 mod startup;
