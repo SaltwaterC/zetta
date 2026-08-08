@@ -10,9 +10,9 @@ pub(crate) const TITLE_BAR_RECONNECT_LABEL_MIN_WIDTH: Pixels = px(800.);
 // Compact mode always keeps at least this much of the tab bar draggable, even
 // when tabs grow to fill the rest of it, so the window stays movable from there.
 pub(crate) const COMPACT_DRAG_AREA_MIN_WIDTH: Pixels = px(60.);
-// Two Large buttons (32px each) plus the gap_1 (4px) between them — see the
+// One Large button (32px) plus the gap_1 (4px) — see the
 // `title-bar-controls` reserve this backs on macOS.
-pub(crate) const COMPACT_LEADING_CONTROLS_RESERVE: Pixels = px(68.);
+pub(crate) const COMPACT_LEADING_CONTROLS_RESERVE: Pixels = px(36.);
 
 /// The tab bar's row height: `compact_height` (the platform title bar's own
 /// height) in compact mode, since the tab bar shares that row there, or the
