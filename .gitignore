@@ -2,3 +2,4 @@ target/
 *:Zone.Identifier
 artifacts/
 .DS_Store
+.opencode/

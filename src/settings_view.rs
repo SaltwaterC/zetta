@@ -1,7 +1,5 @@
 use super::*;
-use crate::settings_ui::{
-    KeymapRow, invalidate_controls_cache, invalidate_keymap_cache, keymap_rows,
-};
+use crate::settings_ui::{KeymapRow, invalidate_controls_cache, invalidate_keymap_cache};
 
 use crate::startup::keymap_keystroke_display;
 
@@ -9,7 +7,7 @@ mod modals;
 mod pages;
 mod widgets;
 
-pub(crate) use widgets::{DropdownRenderState, SETTINGS_SCROLLBAR_WIDTH};
+pub(crate) use widgets::{DropdownRenderState, KEYMAP_ROW_HEIGHT, SETTINGS_SCROLLBAR_WIDTH};
 
 impl Zetta {
     pub(crate) fn render_settings_overlay(
@@ -354,6 +352,7 @@ impl Zetta {
             editor,
             &colors,
             &handle,
+            &cx.entity(),
             &scroll_indicator,
             &text_input,
             &dropdown,

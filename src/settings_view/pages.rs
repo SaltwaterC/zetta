@@ -2,12 +2,15 @@ use super::widgets::{
     KeymapRowData, KeymapRowRenderContext, SETTINGS_SCROLLBAR_WIDTH, build_keymap_row_data,
 };
 use super::*;
+use crate::settings_ui::keymap::{compute_keymap_sticky_candidates, keymap_rows};
+use ui::sticky_items;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_settings_pages(
     editor: &SettingsEditor,
     colors: &ThemeColors,
     handle: &WeakEntity<Zetta>,
+    zetta_entity: &gpui::Entity<Zetta>,
     scroll_indicator: &impl Fn(String, &ScrollHandle) -> AnyElement,
     text_input: &impl Fn(String, TextField, SettingsInput) -> AnyElement,
     dropdown: &impl Fn(String, String, SettingsDropdown) -> AnyElement,
@@ -961,13 +964,23 @@ pub(crate) fn render_settings_pages(
                 focused_control: editor.focused_control.clone(),
                 focused_input: editor.focused_input,
             };
+            let zetta_entity_for_sticky = zetta_entity.clone();
             let rows_list = uniform_list("settings-keymap-list", row_count, move |range, _, _| {
                 range
                     .map(|row| Zetta::render_keymap_row(&row_data[row], &row_ctx))
                     .collect::<Vec<_>>()
             })
             .size_full()
-            .track_scroll(&editor.keymap_scroll);
+            .track_scroll(&editor.keymap_scroll)
+            .with_decoration(sticky_items(
+                zetta_entity_for_sticky,
+                move |zetta, range, window, cx| {
+                    compute_keymap_sticky_candidates(zetta, range, window, cx)
+                },
+                move |zetta, candidate, window, cx| {
+                    render_keymap_sticky_candidate(zetta, candidate, window, cx)
+                },
+            ));
             let keymap_scroll = editor.keymap_scroll.0.borrow().base_handle.clone();
 
             div()

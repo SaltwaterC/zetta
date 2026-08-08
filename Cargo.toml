@@ -70,6 +70,7 @@ schemars = "1"
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+smallvec = "1"
 sysinfo = "0.37"
 regex = "1.11"
 strum = "0.27.2"

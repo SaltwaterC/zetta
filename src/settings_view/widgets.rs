@@ -17,7 +17,7 @@ pub(crate) struct DropdownRenderState {
 /// Every row of the keymap list is forced to this height so `uniform_list`'s
 /// single-item height measurement (it only measures one representative row)
 /// stays valid across section headers, bindings, and the add-row footers.
-const KEYMAP_ROW_HEIGHT: f32 = 56.;
+pub(crate) const KEYMAP_ROW_HEIGHT: f32 = 56.;
 
 /// Width of the settings dialog's custom scrollbar track. Lists that draw the track over
 /// their own rows reserve this much trailing padding so the two never overlap.

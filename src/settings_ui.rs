@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 mod controls;
-mod keymap;
+pub(crate) mod keymap;
 mod theme_extensions_ui;
 
 pub(crate) use controls::invalidate_controls_cache;
@@ -13,7 +13,7 @@ use keymap::{
     KeymapCapture, is_modifier_key, is_unmodified_capture_control, keybinding_for_capture,
     rebuild_keymap_search_cache,
 };
-pub(crate) use keymap::{KeymapRow, invalidate_keymap_cache, keymap_rows};
+pub(crate) use keymap::{KeymapRow, invalidate_keymap_cache, render_keymap_sticky_candidate};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SettingsInput {

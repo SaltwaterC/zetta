@@ -1,4 +1,8 @@
 use super::*;
+use crate::settings_view::KEYMAP_ROW_HEIGHT;
+use smallvec::SmallVec;
+use ui::StickyCandidate;
+use ui::{Button, ButtonStyle, div, h_flex, px};
 
 #[derive(Clone, Debug)]
 pub(crate) struct KeymapCapture {
@@ -130,6 +134,138 @@ pub(crate) fn keymap_rows(editor: &SettingsEditor) -> Vec<KeymapRow> {
     }
     rows.push(KeymapRow::AddSection);
     rows
+}
+
+/// A candidate for sticky section headers in the keymap list.
+/// Section headers have depth 0, all other rows have depth 1.
+#[derive(Clone, Debug)]
+pub(crate) struct KeymapStickyCandidate {
+    pub(crate) row: KeymapRow,
+    pub(crate) depth: usize,
+}
+
+impl StickyCandidate for KeymapStickyCandidate {
+    fn depth(&self) -> usize {
+        self.depth
+    }
+}
+
+/// Compute sticky candidates for a range of keymap rows.
+/// This is called with &mut Zetta, so we access the settings_editor from there.
+pub(crate) fn compute_keymap_sticky_candidates(
+    zetta: &mut Zetta,
+    range: std::ops::Range<usize>,
+    _window: &mut gpui::Window,
+    _cx: &mut gpui::Context<Zetta>,
+) -> SmallVec<[KeymapStickyCandidate; 8]> {
+    let Some(editor) = zetta.settings_editor.as_mut() else {
+        return SmallVec::new();
+    };
+    let rows = keymap_rows(editor);
+    let range_end = range.end.min(rows.len());
+    let mut candidates = SmallVec::new();
+    for row in rows.iter().take(range_end).skip(range.start) {
+        let depth = match row {
+            KeymapRow::SectionHeader(_) => 0,
+            KeymapRow::AddSection => 0,
+            _ => 1,
+        };
+        candidates.push(KeymapStickyCandidate { row: *row, depth });
+    }
+    candidates
+}
+
+/// Render a sticky candidate as a section header.
+/// This is called with &mut Zetta, so we access the settings_editor and theme from there.
+pub(crate) fn render_keymap_sticky_candidate(
+    zetta: &mut Zetta,
+    candidate: KeymapStickyCandidate,
+    _window: &mut gpui::Window,
+    cx: &mut gpui::Context<Zetta>,
+) -> SmallVec<[gpui::AnyElement; 8]> {
+    let Some(editor) = zetta.settings_editor.as_mut() else {
+        return SmallVec::new();
+    };
+    let colors = cx.theme().colors().clone();
+    let handle = cx.entity().downgrade();
+    let mut elements = SmallVec::new();
+    match candidate.row {
+        KeymapRow::SectionHeader(section_index) => {
+            if let Some(section) = editor.keymap.sections.get(section_index) {
+                let context = section.context.clone();
+                let focused = editor.focused_control
+                    == Some(SettingsControl::Input(SettingsInput::Keymap(
+                        KeymapTextField::Context(section_index),
+                    )));
+                let element = h_flex()
+                    .w_full()
+                    .h(px(KEYMAP_ROW_HEIGHT))
+                    .gap_2()
+                    .px_2()
+                    .border_t_1()
+                    .border_b_1()
+                    .border_color(colors.border)
+                    .bg(if focused {
+                        colors.element_selected
+                    } else {
+                        colors.editor_background
+                    })
+                    .child(div().flex_none().text_sm().child("Context"))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .child(crate::Zetta::text_input_widget(
+                                format!("settings-keymap-section-{section_index}-context"),
+                                context,
+                                SettingsInput::Keymap(KeymapTextField::Context(section_index)),
+                                editor.focused_input,
+                                colors.clone(),
+                                handle.clone(),
+                            )),
+                    )
+                    .into_any_element();
+                elements.push(element);
+            }
+        }
+        KeymapRow::AddSection => {
+            let focused = editor.focused_control == Some(SettingsControl::AddKeymapSection);
+            let handle_for_click = handle.clone();
+            let element = h_flex()
+                .w_full()
+                .h(px(KEYMAP_ROW_HEIGHT))
+                .pl_6()
+                .pr_2()
+                .border_b_1()
+                .border_color(colors.border_variant)
+                .child(
+                    Button::new("add-keymap-section", "Add keymap context")
+                        .style(ButtonStyle::Outlined)
+                        .toggle_state(focused)
+                        .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
+                        .on_click(move |_, _, cx| {
+                            handle_for_click
+                                .update(cx, |zetta, cx| {
+                                    if let Some(editor) = zetta.settings_editor.as_mut() {
+                                        editor
+                                            .keymap
+                                            .sections
+                                            .push(KeymapSectionForm::new("Zetta > Terminal"));
+                                        editor.keymap_dirty = true;
+                                        invalidate_keymap_cache(editor);
+                                        invalidate_controls_cache(editor);
+                                        cx.notify();
+                                    }
+                                })
+                                .ok();
+                        }),
+                )
+                .into_any_element();
+            elements.push(element);
+        }
+        _ => {}
+    }
+    elements
 }
 
 impl Zetta {
