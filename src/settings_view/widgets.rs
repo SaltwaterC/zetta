@@ -41,6 +41,7 @@ pub(crate) enum KeymapRowData {
     },
     AddBinding {
         section_index: usize,
+        context: String,
     },
     AddSection,
 }
@@ -82,7 +83,16 @@ pub(crate) fn build_keymap_row_data(
                 })
             }
             KeymapRow::AddBinding(section_index) => {
-                Some(KeymapRowData::AddBinding { section_index })
+                let context = editor
+                    .keymap
+                    .sections
+                    .get(section_index)
+                    .map(|section| section.context.text.clone())
+                    .unwrap_or_default();
+                Some(KeymapRowData::AddBinding {
+                    section_index,
+                    context,
+                })
             }
             KeymapRow::AddSection => Some(KeymapRowData::AddSection),
         })
@@ -548,7 +558,10 @@ impl Zetta {
                     )
                     .into_any_element()
             }
-            KeymapRowData::AddBinding { section_index } => {
+            KeymapRowData::AddBinding {
+                section_index,
+                context,
+            } => {
                 let section_index = *section_index;
                 let colors = ctx.colors.clone();
                 let add_handle = ctx.handle.clone();
@@ -564,7 +577,7 @@ impl Zetta {
                     .child(
                         Button::new(
                             format!("add-settings-binding-{section_index}"),
-                            "Add binding",
+                            format!("Add binding for {context}"),
                         )
                         .style(ButtonStyle::Outlined)
                         .toggle_state(focused)
