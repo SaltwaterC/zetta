@@ -1,5 +1,21 @@
 use super::*;
 
+#[cfg(target_os = "macos")]
+pub(crate) mod macos_menu_keybindings {
+    pub(crate) const MACOS_NEW_TAB_KEYBINDING: &str = "cmd-t";
+    pub(crate) const MACOS_NEW_WINDOW_KEYBINDING: &str = "cmd-n";
+    pub(crate) const MACOS_SETTINGS_KEYBINDING: &str = "cmd-,";
+    pub(crate) const MACOS_CLOSE_TAB_KEYBINDING: &str = "cmd-w";
+    pub(crate) const MACOS_CLOSE_WINDOW_KEYBINDING: &str = "cmd-q";
+    pub(crate) const MACOS_CLOSE_ALL_WINDOWS_KEYBINDING: &str = "cmd-x";
+    pub(crate) const MACOS_COPY_KEYBINDING: &str = "cmd-c";
+    pub(crate) const MACOS_CLEAR_KEYBINDING: &str = "cmd-l";
+    pub(crate) const MACOS_PASTE_KEYBINDING: &str = "cmd-v";
+}
+
+#[cfg(target_os = "macos")]
+use macos_menu_keybindings::*;
+
 pub(crate) fn profile_keybindings(
     slot: usize,
     keyboard_mapper: &dyn PlatformKeyboardMapper,
@@ -256,19 +272,6 @@ pub(crate) const TOGGLE_PANE_RESIZE_MODE_KEYBINDING: &str = "ctrl-shift-j";
 pub(crate) const TOGGLE_PANE_MOVE_MODE_KEYBINDING: &str = "alt-shift-m";
 
 pub(crate) const APPLICATION_MENU_KEYBINDING: &str = "alt-space";
-
-#[cfg(target_os = "macos")]
-mod macos_menu_keybindings {
-    pub(crate) const MACOS_NEW_TAB_KEYBINDING: &str = "cmd-t";
-    pub(crate) const MACOS_NEW_WINDOW_KEYBINDING: &str = "cmd-n";
-    pub(crate) const MACOS_SETTINGS_KEYBINDING: &str = "cmd-,";
-    pub(crate) const MACOS_CLOSE_TAB_KEYBINDING: &str = "cmd-w";
-    pub(crate) const MACOS_CLOSE_WINDOW_KEYBINDING: &str = "cmd-q";
-    pub(crate) const MACOS_CLOSE_ALL_WINDOWS_KEYBINDING: &str = "cmd-x";
-    pub(crate) const MACOS_COPY_KEYBINDING: &str = "cmd-c";
-    pub(crate) const MACOS_CLEAR_KEYBINDING: &str = "cmd-l";
-    pub(crate) const MACOS_PASTE_KEYBINDING: &str = "cmd-v";
-}
 
 pub(crate) fn pane_output_keybinding() -> KeyBinding {
     KeyBinding::new(
@@ -762,7 +765,7 @@ pub(crate) fn update_native_macos_menus(
 }
 
 #[cfg(target_os = "macos")]
-fn install_native_macos_menus(
+pub(crate) fn install_native_macos_menus(
     cx: &mut App,
     profiles: &[Profile],
     hidden_profiles: &HashSet<String>,

@@ -37,14 +37,14 @@ pub(crate) use arg_parsing::{
 use arg_parsing::{select_launch_profile, should_handoff_to_existing_process};
 #[cfg(not(feature = "tftp-client"))]
 pub(crate) use cli_help::{TftpCommand, parse_tftp_args, tftp_help};
-#[cfg(target_os = "macos")]
-pub(crate) use keybindings::update_native_macos_menus;
 pub(crate) use keybindings::{
     PROFILE_SHORTCUT_KEYS, keymap_keystroke_display, keymap_keystroke_storage, load_keybindings,
     profile_keybindings, profile_shortcut_label,
 };
 #[cfg(test)]
 pub(crate) use keybindings::{RENAME_TAB_KEYBINDING, keymap_keystroke_alias};
+#[cfg(target_os = "macos")]
+pub(crate) use keybindings::{install_native_macos_menus, update_native_macos_menus};
 use wsl::paths_for_external_editor;
 pub(crate) use wsl::{
     is_wsl_shell, launch_working_directory, msys2_cwd_tracking_environment, msys2_path_to_windows,
@@ -199,9 +199,6 @@ pub(crate) fn validate_keymap_contents(content: &str, cx: &mut App) -> Result<()
         }
     }
 }
-
-#[cfg(target_os = "macos")]
-use macos_menu_keybindings::*;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn open_zetta_window(
