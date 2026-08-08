@@ -37,19 +37,54 @@ git submodule update --init
 Keep `src/main.rs` limited to crate wiring, actions, shared imports/constants,
 and the process entry point. Put behavior in the module that owns it:
 
-- `app.rs`: application state and core tab/pane orchestration
-- `app_render.rs`: top-level application rendering
+- `app.rs`: `Zetta` struct, tab/pane lifecycle, and state that doesn't belong
+  to a narrower module below
+- `app_render.rs`: top-level `Render for Zetta` composition (setup, the
+  overlay stack, and the tab-icon-picker/overlay-style-picker overlays);
+  delegates to `title_bar_render.rs` and `tab_body_render.rs`
+- `title_bar_render.rs`: tab bar, title bar, and profile/application menu
+  rendering
+- `tab_body_render.rs`: tab body composition (maximized-pane bar, minimized
+  pane shelf, pane content wiring)
 - `pane.rs`: pane layout, tab models, terminal creation, and pane focus
+- `pane_resize.rs`: pane resize/move mode, keyboard and drag-based resizing
+- `pane_render.rs`: pane layout and resize-gutter rendering
+- `pane_view_state.rs`: pane maximize/minimize/restore and font size
+- `pane_overlay.rs`: per-pane overlay text and style picker
+- `pane_theme_picker.rs`: per-pane theme picker
+- `background_session_ui.rs`: background-session detach/store/reconnect and
+  the reconnect picker
+- `byte_stream_pane.rs`: shared pane opener for byte-stream-backed panes
+  (HTTP/TFTP server log panes, the serial console)
+- `cli_service_stubs.rs`: disabled-build fallbacks for CLI-service actions
 - `performance.rs`: frame collection and performance metrics
 - `tab_search.rs`: cross-pane scrollback search
+- `tab_icon_picker.rs`: tab icon picker model, rendering, and the
+  `Zetta` methods that drive it
 - `settings_editor.rs`: typed configuration/keymap forms and persistence
-- `settings_ui.rs`: settings state and event handling
-- `settings_view.rs`: settings rendering
+- `settings_ui.rs`: settings state and event handling; a module directory —
+  `settings_ui/keymap.rs` (capture, search cache), `settings_ui/controls.rs`
+  (control list, focus/scroll navigation, dropdowns), and
+  `settings_ui/theme_extensions_ui.rs` (fetch/download/remove)
+- `settings_view.rs`: settings rendering; a module directory —
+  `settings_view/pages.rs` (per-`SettingsPage` content),
+  `settings_view/modals.rs` (font/profile/keymap-capture modals), and
+  `settings_view/widgets.rs` (shared widget building blocks)
 - `command_palette.rs`: palette model and matching
 - `command_palette_ui.rs`: palette interaction and rendering
 - `window_frame.rs`: title bars, window controls, and resize edges
-- `startup.rs`: argument parsing, startup configuration, themes, keybindings,
-  profile launch directories, and WSL integration
+- `startup.rs`: `run()`, window/process lifecycle, and theme resolution
+  (`resolve_profile_theme`); a module directory — `startup/cli_help.rs`
+  (usage/help text), `startup/arg_parsing.rs` (`StartupMode`/`StartupArgs`
+  parsing), `startup/keybindings.rs` (keybinding constants/constructors and
+  macOS native menu construction), and `startup/wsl.rs` (WSL/MSYS2 profile
+  and working-directory integration)
+- `cli_services.rs`: CLI service dispatch; a module directory —
+  `cli_services/serial.rs`, `cli_services/servers.rs` (HTTP + TFTP server),
+  `cli_services/notify.rs`, `cli_services/clipboard.rs`, and
+  `cli_services/raw_terminal.rs`
+- `tftp.rs`: shared TFTP packet/opcode types; a module directory —
+  `tftp/server.rs` and `tftp/client.rs`
 - `theme_extensions.rs`: theme-extension discovery and installation
 - `zetta_assets.rs`: embedded assets
 
@@ -57,6 +92,13 @@ Prefer extending these modules over growing `main.rs`. If a module becomes
 difficult to navigate, split it by responsibility rather than creating a
 generic helpers module. Keep rendering code separate from state transitions
 where practical.
+
+Prefer splitting a module by responsibility once it approaches roughly 1500
+lines rather than letting it keep growing. Never let a single `render`
+function or method own an entire screen or top-level function own an entire
+CLI/state surface — extract per-section methods or functions (passing in
+already-computed values instead of recomputing them) once that function is
+hard to scan in one pass.
 
 ## Tests
 
@@ -73,6 +115,19 @@ Place new tests in the matching sidecar. Create a new sidecar when adding a
 new module with testable behavior. Use `use super::*;` so unit tests can cover
 private implementation details. Reserve Cargo's root `tests/` directory for
 true public-API integration tests.
+
+When a production module is a directory (for example `src/cli_services/` or
+`src/startup/`), its sidecar becomes a matching directory under `src/tests/`
+(for example `src/tests/startup/keybindings.rs`, referenced from
+`src/startup/keybindings.rs` as `#[path = "../tests/startup/keybindings.rs"]`).
+Only split a sidecar into a directory once its production module is actually
+split; keep a single flat sidecar file otherwise.
+
+Files under `crates/` that track an upstream Zed or Alacritty counterpart keep
+their inline `mod tests` to minimize merge friction against that upstream.
+Zetta-authored files in `crates/` with no upstream counterpart (for example
+`crates/terminal_view/src/standalone.rs`) use the same sidecar pattern as
+`src/`, under that crate's own `src/tests/`.
 
 Remember that `include_str!` and `include_bytes!` paths are relative to the
 file containing the macro; update such paths when moving tests or source.
@@ -108,6 +163,14 @@ feature combination, for example:
 
 ```sh
 cargo check --no-default-features --features x11
+```
+
+For changes touching a CLI service (`cli_services.rs`/`tftp.rs` and their
+gating), also check every CLI service disabled, since that combination
+exercises every `cli_services`/`servers_enabled`/`tftp_enabled` gate:
+
+```sh
+cargo check --no-default-features --features wayland
 ```
 
 Do not run `make install`, uninstall targets, or system-cache refresh targets
@@ -173,6 +236,22 @@ as separate artifacts associated with the JSON report.
 - Avoid broad dependency or `Cargo.lock` updates unless required by the task.
 - Update `README.md` and example configuration/keymap files when user-visible
   behavior, installation steps, or defaults change.
+- Gate platforms and features at the `mod` declaration rather than on every
+  item inside a module, so a module compiled only under one feature/platform
+  doesn't need to respell that predicate throughout its body.
+- Prefer the `cfg` aliases `build.rs` emits over respelling a repeated
+  platform/feature predicate: `linux_like` for
+  `any(target_os = "linux", target_os = "freebsd")`, `servers_enabled` for
+  `any(feature = "http-server", feature = "tftp-server")`, `tftp_enabled` for
+  `any(feature = "tftp-server", feature = "tftp-client")`, and `cli_services`
+  for "any CLI service feature is enabled". Add a new alias in `build.rs`
+  (with a matching `cargo::rustc-check-cfg` line) rather than adding another
+  ad hoc multi-clause predicate.
+- Embedded non-Rust payloads (shell integration scripts, grammar queries) live
+  in a data directory beside their module under `src/` (see
+  `src/shell_integration/`, `src/grammar_extensions/`), loaded with
+  `include_str!`/`include_bytes!` — not inline in Rust string literals, and
+  not under `assets/`, which `ZettaEmbeddedAssets` embeds wholesale.
 
 ## Command line integration design
 
