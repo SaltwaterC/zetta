@@ -23,7 +23,7 @@ fn keymap_round_trip_preserves_parameterized_actions_and_section_metadata() {
         .unwrap();
     assert_eq!(
         form.sections[section_index].bindings[0].keystroke.text,
-        "Ctrl+Shift+1"
+        "ctrl-shift-1"
     );
     let output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
     let output_section = output
@@ -33,9 +33,9 @@ fn keymap_round_trip_preserves_parameterized_actions_and_section_metadata() {
         .find(|s| s["context"] == "Zetta")
         .unwrap();
     assert_eq!(output_section["use_key_equivalents"], true);
-    assert_eq!(output_section["bindings"]["Ctrl+Shift+1"][1]["slot"], 1);
+    assert_eq!(output_section["bindings"]["ctrl-shift-1"][1]["slot"], 1);
 
-    form.sections[section_index].bindings[0].keystroke.text = "Ctrl+Shift+3".to_owned();
+    form.sections[section_index].bindings[0].keystroke.text = "ctrl-shift-3".to_owned();
     let alias_output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
     let alias_section = alias_output
         .as_array()
@@ -43,7 +43,7 @@ fn keymap_round_trip_preserves_parameterized_actions_and_section_metadata() {
         .iter()
         .find(|s| s["context"] == "Zetta")
         .unwrap();
-    form.sections[section_index].bindings[0].keystroke.text = "Ctrl+Shift+0".to_owned();
+    form.sections[section_index].bindings[0].keystroke.text = "ctrl-shift-0".to_owned();
     let tenth_alias_output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
     let tenth_section = tenth_alias_output
         .as_array()
@@ -52,8 +52,8 @@ fn keymap_round_trip_preserves_parameterized_actions_and_section_metadata() {
         .find(|s| s["context"] == "Zetta")
         .unwrap();
     fs::remove_file(root).unwrap();
-    assert_eq!(alias_section["bindings"]["Ctrl+Shift+3"][1]["slot"], 1);
-    assert_eq!(tenth_section["bindings"]["Ctrl+Shift+0"][1]["slot"], 1);
+    assert_eq!(alias_section["bindings"]["ctrl-shift-3"][1]["slot"], 1);
+    assert_eq!(tenth_section["bindings"]["ctrl-shift-0"][1]["slot"], 1);
 }
 
 #[test]

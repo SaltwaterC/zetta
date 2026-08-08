@@ -159,6 +159,16 @@ fn normalizes_keymap_aliases_for_runtime_loading() {
         r#"[{"bindings":{"Ctrl+Shift+1":"zetta::NextTab","Ctrl+Shift+0":"zetta::PreviousTab"}}]"#;
     assert_eq!(
         normalize_keymap_key_names(keymap),
-        r#"[{"bindings":{"ctrl-!":"zetta::NextTab","ctrl-)":"zetta::PreviousTab"}}]"#
+        r#"[{"bindings":{"ctrl-shift-1":"zetta::NextTab","ctrl-shift-0":"zetta::PreviousTab"}}]"#
+    );
+}
+
+#[test]
+fn normalizes_regular_keystrokes_to_lowercase() {
+    let keymap =
+        r#"[{"bindings":{"Ctrl+Alt+V":"zetta::PasteTrimmed","CTRL-SHIFT-T":"zetta::NewTab"}}]"#;
+    assert_eq!(
+        normalize_keymap_key_names(keymap),
+        r#"[{"bindings":{"ctrl-alt-v":"zetta::PasteTrimmed","ctrl-shift-t":"zetta::NewTab"}}]"#
     );
 }
