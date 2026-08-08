@@ -155,7 +155,7 @@ pub(crate) fn pane_font_size_keybindings() -> [KeyBinding; 4] {
 }
 
 #[cfg(target_os = "macos")]
-fn macos_keybindings() -> [KeyBinding; 9] {
+fn macos_keybindings() -> [KeyBinding; 12] {
     [
         // Keep application bindings unscoped so the native application menu
         // can resolve their key equivalents, including while a Zetta overlay
@@ -166,6 +166,9 @@ fn macos_keybindings() -> [KeyBinding; 9] {
         KeyBinding::new(MACOS_CLOSE_TAB_KEYBINDING, CloseTab, None),
         KeyBinding::new(MACOS_CLOSE_WINDOW_KEYBINDING, CloseWindow, None),
         KeyBinding::new(MACOS_CLOSE_ALL_WINDOWS_KEYBINDING, CloseAllWindows, None),
+        KeyBinding::new("cmd-h", HideWindow, None),
+        KeyBinding::new(HIDE_WINDOW_KEYBINDING, HideWindow, None),
+        KeyBinding::new("ctrl-shift-h", MinimizeWindow, None),
         // Terminal actions stay scoped so they do not override unrelated
         // macOS editor bindings outside a terminal pane.
         KeyBinding::new(
@@ -216,13 +219,11 @@ pub(crate) const RENAME_PANE_KEYBINDING: &str = if cfg!(target_os = "macos") {
     "alt-shift-r"
 };
 
-pub(crate) const TOGGLE_PANE_CONTROLS_KEYBINDING: &str = if cfg!(target_os = "macos") {
+pub(crate) const HIDE_WINDOW_KEYBINDING: &str = if cfg!(target_os = "macos") {
     "cmd-shift-h"
 } else {
-    "alt-shift-h"
+    "ctrl-shift-h"
 };
-
-pub(crate) const TOGGLE_TAB_PANE_CONTROLS_KEYBINDING: &str = "ctrl-shift-h";
 
 pub(crate) const CLOSE_PANE_KEYBINDING: &str = if cfg!(target_os = "macos") {
     "cmd-shift-x"
@@ -470,18 +471,10 @@ pub(crate) fn minimized_pane_keybindings() -> [KeyBinding; 4] {
     ]
 }
 
-pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut App) {
-    cx.clear_key_bindings();
-    match KeymapFile::load_asset_allow_partial_failure(settings::DEFAULT_KEYMAP_PATH, cx) {
-        Ok(bindings) => cx.bind_keys(bindings),
-        Err(error) => eprintln!("Could not load the default terminal keymap: {error:#}"),
-    }
-
-    // Build default bindings and collect a map of (action_name, context) -> keystroke
-    // for rebinding detection
-    let mut default_bindings_map: std::collections::HashMap<(String, Option<String>), String> =
-        std::collections::HashMap::new();
-
+fn default_keybindings(
+    profile_count: usize,
+    keyboard_mapper: &dyn PlatformKeyboardMapper,
+) -> Vec<KeyBinding> {
     let mut bindings = vec![
         KeyBinding::new("ctrl-shift-t", NewTab, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-shift-n", NewWindow, Some("Zetta > Terminal")),
@@ -579,16 +572,6 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
         ),
         platform_keybinding("alt-shift-t", ChangePaneTheme, Some("Zetta > Terminal")),
         KeyBinding::new(RENAME_PANE_KEYBINDING, RenamePane, Some("Zetta > Terminal")),
-        KeyBinding::new(
-            TOGGLE_PANE_CONTROLS_KEYBINDING,
-            TogglePaneControls,
-            Some("Zetta > Terminal"),
-        ),
-        KeyBinding::new(
-            TOGGLE_TAB_PANE_CONTROLS_KEYBINDING,
-            ToggleTabPaneControls,
-            Some("Zetta > Terminal"),
-        ),
         KeyBinding::new("ctrl-=", IncreaseTerminalFontSize, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-+", IncreaseTerminalFontSize, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl--", DecreaseTerminalFontSize, Some("Zetta > Terminal")),
@@ -606,6 +589,12 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
         // Override Zed's inherited `pane::CloseActiveItem` binding in terminal focus.
         KeyBinding::new("ctrl-shift-w", CloseTab, Some("Terminal")),
     ];
+    #[cfg(not(target_os = "macos"))]
+    bindings.push(KeyBinding::new(
+        HIDE_WINDOW_KEYBINDING,
+        HideWindow,
+        Some("Zetta"),
+    ));
     #[cfg(feature = "serial-console")]
     bindings.push(serial_console_keybinding());
     bindings.extend(application_menu_keybinding());
@@ -621,11 +610,27 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
     bindings.push(macos_terminal_clear_unbinding());
     #[cfg(target_os = "macos")]
     bindings.extend(macos_keybindings());
-    let keyboard_mapper = cx.keyboard_mapper().clone();
     bindings.extend(
         (1..=profile_count.min(PROFILE_SHORTCUT_SYMBOLS.len()))
-            .flat_map(|slot| profile_keybindings(slot, keyboard_mapper.as_ref())),
+            .flat_map(|slot| profile_keybindings(slot, keyboard_mapper)),
     );
+
+    bindings
+}
+
+pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut App) {
+    cx.clear_key_bindings();
+    match KeymapFile::load_asset_allow_partial_failure(settings::DEFAULT_KEYMAP_PATH, cx) {
+        Ok(bindings) => cx.bind_keys(bindings),
+        Err(error) => eprintln!("Could not load the default terminal keymap: {error:#}"),
+    }
+
+    // Build default bindings and collect a map of (action_name, context) -> keystroke
+    // for rebinding detection
+    let mut default_bindings_map: std::collections::HashMap<(String, Option<String>), String> =
+        std::collections::HashMap::new();
+    let keyboard_mapper = cx.keyboard_mapper().clone();
+    let bindings = default_keybindings(profile_count, keyboard_mapper.as_ref());
 
     // Collect default bindings map for rebinding detection
     for binding in &bindings {

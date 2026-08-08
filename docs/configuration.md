@@ -219,9 +219,8 @@ window-button layout so they do not move over a left-aligned prompt unless you
 choose that placement explicitly. Tab close buttons do follow the system
 window-button side.
 `pane_controls_hidden_by_default` defaults to `false`. Set it to `true` to
-start new panes with the controls hidden; `Cmd-Shift-H` on macOS or
-`Alt-Shift-H` on Windows/Linux still toggles the active pane, and
-`Ctrl-Shift-H` still toggles every pane in the active tab.
+start new panes with the controls hidden. Use the pane controls or command
+palette to toggle controls for the active pane or every pane in the active tab.
 When this setting changes and configuration reloads, Zetta resets every open
 pane to the selected default visibility.
 

@@ -364,6 +364,8 @@ become `Ctrl-Cmd`; for example, paste-trim is `Ctrl-Cmd-V` on macOS and
 | --- | --- |
 | `Ctrl-Shift-T` | New tab |
 | `Ctrl-Shift-N` | New window |
+| `Cmd-H` / `Cmd-Shift-H` (macOS) | Hide the application |
+| `Ctrl-Shift-H` | Minimize the current window; a Linux compositor may ignore the request |
 | `Ctrl-Shift-1` … `Ctrl-Shift-9` | New tab with profile 1 … 9 |
 | `Ctrl-Shift-W` | Close tab |
 | `Ctrl-Shift-D` | Detach the active tab into the background |

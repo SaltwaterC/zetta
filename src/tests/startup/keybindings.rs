@@ -82,15 +82,35 @@ fn pane_label_uses_the_documented_shortcut() {
 }
 
 #[test]
-fn pane_controls_use_the_requested_shortcuts() {
-    assert_eq!(
-        TOGGLE_PANE_CONTROLS_KEYBINDING,
-        platform_keystroke("alt-shift-h")
-    );
-    assert_eq!(TOGGLE_TAB_PANE_CONTROLS_KEYBINDING, "ctrl-shift-h");
-    assert_ne!(
-        TOGGLE_PANE_CONTROLS_KEYBINDING,
-        TOGGLE_TAB_PANE_CONTROLS_KEYBINDING
+fn hide_window_uses_the_platform_shortcuts() {
+    let bindings = default_keybindings(0, &gpui::DummyKeyboardMapper);
+    let hide_bindings = bindings
+        .iter()
+        .filter(|binding| binding.action().name() == HideWindow.name())
+        .collect::<Vec<_>>();
+
+    let expected_shortcuts = if cfg!(target_os = "macos") {
+        vec!["cmd-h", "cmd-shift-h"]
+    } else {
+        vec![HIDE_WINDOW_KEYBINDING]
+    };
+    assert_eq!(hide_bindings.len(), expected_shortcuts.len());
+    for shortcut in expected_shortcuts {
+        let shortcut = gpui::Keystroke::parse(shortcut).unwrap();
+        assert!(hide_bindings.iter().any(|binding| {
+            binding.match_keystrokes(std::slice::from_ref(&shortcut)) == Some(false)
+        }));
+    }
+}
+
+#[test]
+fn pane_control_actions_have_no_built_in_keyboard_bindings() {
+    let bindings = default_keybindings(0, &gpui::DummyKeyboardMapper);
+    let pane_control_actions = [TogglePaneControls.name(), ToggleTabPaneControls.name()];
+    assert!(
+        bindings
+            .iter()
+            .all(|binding| !pane_control_actions.contains(&binding.action().name()))
     );
 }
 
@@ -176,7 +196,6 @@ fn alt_shortcuts_use_the_platform_equivalent() {
         ("alt-shift-s", "cmd-shift-s"),
         ("alt-shift-v", "cmd-shift-v"),
         ("alt-shift-r", "cmd-shift-r"),
-        ("alt-shift-h", "cmd-shift-h"),
         ("alt-shift-x", "cmd-shift-x"),
         ("alt-shift-=", "cmd-shift-="),
         ("alt-shift-+", "cmd-shift-+"),
@@ -244,6 +263,9 @@ fn macos_shortcuts_are_additional_application_bindings() {
         ("cmd-w", CloseTab.name()),
         ("cmd-q", CloseWindow.name()),
         ("cmd-x", CloseAllWindows.name()),
+        ("cmd-h", HideWindow.name()),
+        ("cmd-shift-h", HideWindow.name()),
+        ("ctrl-shift-h", MinimizeWindow.name()),
         ("cmd-c", CopyAndClearSelection.name()),
         ("cmd-l", Clear.name()),
         ("cmd-v", Paste.name()),

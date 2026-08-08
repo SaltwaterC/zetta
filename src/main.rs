@@ -114,6 +114,7 @@ actions!(
         CloseWindow,
         CloseAllWindows,
         MinimizeWindow,
+        HideWindow,
         ZoomWindow,
         OpenThemes,
         OpenKeymap,

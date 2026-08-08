@@ -872,6 +872,7 @@ impl Zetta {
             .on_action(cx.listener(Self::close_window))
             .on_action(cx.listener(Self::close_all_windows))
             .on_action(cx.listener(Self::minimize_window))
+            .on_action(cx.listener(Self::hide_window))
             .on_action(cx.listener(Self::zoom_window))
             .on_action(cx.listener(Self::open_themes))
             .on_action(cx.listener(Self::open_keymap))

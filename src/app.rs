@@ -861,6 +861,19 @@ impl Zetta {
         }
     }
 
+    pub(crate) fn hide_window(
+        &mut self,
+        _: &HideWindow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if cfg!(target_os = "macos") {
+            cx.hide();
+        } else if window.is_minimizable() {
+            window.minimize_window();
+        }
+    }
+
     pub(crate) fn zoom_window(
         &mut self,
         _: &ZoomWindow,
