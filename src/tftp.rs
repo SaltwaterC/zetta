@@ -2,6 +2,7 @@ use std::io::{self, Read};
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::time::Duration;
 
+#[cfg(feature = "tftp-client")]
 use anyhow::Result;
 
 #[cfg(feature = "tftp-server")]
@@ -14,8 +15,10 @@ mod client;
 #[cfg(feature = "tftp-client")]
 pub(crate) use client::{TftpCommand, parse_tftp_args, tftp_help};
 
+#[cfg(feature = "tftp-client")]
 pub(crate) const DEFAULT_TFTP_PORT: u16 = 69;
 const DEFAULT_BLOCK_SIZE: usize = 512;
+#[cfg(feature = "tftp-client")]
 const REQUESTED_BLOCK_SIZE: usize = 1428;
 const MIN_BLOCK_SIZE: usize = 8;
 const MAX_BLOCK_SIZE: usize = 65_464;
@@ -64,6 +67,7 @@ fn read_block(reader: &mut impl Read, buffer: &mut [u8]) -> io::Result<usize> {
     Ok(total)
 }
 
+#[cfg(feature = "tftp-client")]
 fn request_packet(opcode: u16, filename: &str, size: Option<u64>) -> Vec<u8> {
     let mut packet = Vec::with_capacity(filename.len() + 48);
     packet.extend_from_slice(&opcode.to_be_bytes());
@@ -76,6 +80,7 @@ fn request_packet(opcode: u16, filename: &str, size: Option<u64>) -> Vec<u8> {
     packet
 }
 
+#[cfg(feature = "tftp-server")]
 fn option_ack_packet(options: &[(String, String)]) -> Vec<u8> {
     let mut packet = OP_OACK.to_be_bytes().to_vec();
     for (name, value) in options {
@@ -102,6 +107,7 @@ fn ack_packet(block: u16) -> [u8; 4] {
     [0, OP_ACK as u8, high, low]
 }
 
+#[cfg(feature = "tftp-server")]
 fn send_error(socket: &UdpSocket, peer: SocketAddr, code: u16, message: &str) {
     let mut packet = Vec::with_capacity(message.len() + 5);
     packet.extend_from_slice(&OP_ERROR.to_be_bytes());
@@ -147,6 +153,7 @@ fn error_message(packet: &[u8]) -> String {
     String::from_utf8_lossy(&message[..end]).into_owned()
 }
 
+#[cfg(feature = "tftp-client")]
 fn check_error_packet(packet: &[u8]) -> Result<()> {
     if packet_opcode(packet) == Some(OP_ERROR) {
         anyhow::bail!("TFTP server error: {}", error_message(packet));
@@ -154,6 +161,7 @@ fn check_error_packet(packet: &[u8]) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "tftp-client")]
 fn parsed_block_size(packet: &[u8]) -> Option<usize> {
     if packet_opcode(packet) != Some(OP_OACK) {
         return None;
