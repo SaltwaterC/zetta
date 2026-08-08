@@ -388,7 +388,427 @@ pub(crate) fn profile_shortcut_alias(_slot: usize, label: String) -> ProfileMenu
     ProfileMenuShortcut::Alias(label)
 }
 
+/// Returns focus to the active pane when `menu` is dismissed while focused.
+///
+/// Registered before `PopoverMenu`'s own dismissal listener so a menu reached
+/// through left/right navigation cannot restore focus to the menu it replaced.
+fn restore_focus_on_dismiss(
+    menu: &Entity<ui::ContextMenu>,
+    handle: WeakEntity<Zetta>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    window
+        .subscribe(menu, cx, move |menu, _: &DismissEvent, window, cx| {
+            if menu.focus_handle(cx).is_focused(window) {
+                handle
+                    .update(cx, |this, cx| this.focus_active(window, cx))
+                    .ok();
+            }
+        })
+        .detach();
+}
+
+/// The title bar plus, outside compact mode, the tab bar that renders as its
+/// own row underneath. In compact mode the tab bar is folded into the title bar
+/// and `tab_bar` is `None`.
+pub(crate) struct TitleBarChrome {
+    pub(crate) title_bar: AnyElement,
+    pub(crate) tab_bar: Option<AnyElement>,
+}
+
 impl Zetta {
+    /// Assembles the whole top-of-window chrome: window controls, tab bar,
+    /// title-bar menus, and the reconnect/broadcast controls.
+    pub(crate) fn render_title_bar_chrome(
+        &self,
+        frame: &WindowFrameGeometry,
+        colors: &ThemeColors,
+        handle: &WeakEntity<Self>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> TitleBarChrome {
+        let compact_mode = self.launch_config.compact_mode;
+        let title_bar_height = frame.title_bar_height;
+        let active_tab = self.tabs.get(self.active_tab);
+        let broadcast_input = active_tab.is_some_and(|tab| tab.broadcast_input);
+        let (auto_background_tab, auto_background_protected) = active_tab
+            .map(|tab| match &tab.close_policy {
+                TabClosePolicy::Background { authentication } => (true, authentication.is_some()),
+                TabClosePolicy::Close => (false, false),
+            })
+            .unwrap_or_default();
+        let background_sessions = self.process_background_session_picker_entries(cx);
+        let background_session_count = background_sessions.len();
+        let active_pane_size =
+            title_bar_pane_size_visible(compact_mode, self.launch_config.hide_pane_size)
+                .then(|| {
+                    active_tab
+                        .and_then(|tab| tab.active_pane())
+                        .and_then(|pane| pane.terminal.as_ref())
+                        .map(|terminal| {
+                            let bounds = terminal.read(cx).last_content().terminal_bounds;
+                            terminal_size_label(bounds.num_columns(), bounds.num_lines())
+                        })
+                })
+                .flatten();
+        let active_terminal_focus = active_tab
+            .and_then(Tab::active_pane)
+            .and_then(|pane| pane.view.as_ref())
+            .map(|view| view.focus_handle(cx));
+
+        let left_window_controls = render_window_controls(
+            self.button_layout.left,
+            frame.window_control_state,
+            false,
+            cx,
+        );
+        let right_window_controls = render_window_controls(
+            self.button_layout.right,
+            frame.window_control_state,
+            true,
+            cx,
+        );
+        let title_bar_background = if cfg!(linux_like) && !window.is_window_active() {
+            colors.title_bar_inactive_background
+        } else {
+            colors.title_bar_background
+        };
+
+        let tab_bar = self
+            .render_tab_bar(
+                TabBarChrome {
+                    handle: handle.clone(),
+                    compact_mode,
+                    title_bar_height,
+                    tab_close_button_on_left: window_close_button_on_left(self.button_layout),
+                    is_renaming_tab: self.is_renaming(),
+                    tab_count: self.tabs.len(),
+                    selected_tab_index: self.active_tab,
+                    overflow_selection: self.tab_overflow_selection_side,
+                    border_color: colors.border,
+                    left_menu_handle: self.tab_overflow_left_menu_handle.clone(),
+                    right_menu_handle: self.tab_overflow_right_menu_handle.clone(),
+                },
+                colors,
+                frame.rounded_top_right,
+                frame.bottom_corner_radius,
+            )
+            .into_any_element();
+        let (compact_tab_bar, regular_tab_bar) = if compact_mode {
+            (Some(tab_bar), None)
+        } else {
+            (None, Some(tab_bar))
+        };
+
+        let show_title_bar_control_labels = title_bar_shows_control_labels(
+            window.viewport_size().width,
+            background_session_count > 0,
+            self.launch_config.hide_title_bar_labels,
+            compact_mode,
+        );
+        let show_title_bar_buttons =
+            title_bar_buttons_visible(compact_mode, self.launch_config.hide_title_bar_buttons);
+        let reconnect_control =
+            (show_title_bar_buttons && background_session_count > 0).then(|| {
+                self.render_reconnect_control(
+                    show_title_bar_control_labels,
+                    &background_sessions,
+                    handle,
+                )
+            });
+        let right_reconnect_control = title_bar_background_indicator_on_right(
+            compact_mode,
+            self.launch_config.hide_title_bar_buttons,
+            background_session_count,
+        )
+        .then(|| {
+            // This control is outside the regular controls row, so it must
+            // block the draggable title-bar hitbox on platforms that use
+            // native hit testing for client-side decorations.
+            div()
+                .occlude()
+                .child(self.render_reconnect_control(false, &background_sessions, handle))
+                .into_any_element()
+        });
+
+        // Keep a reconnect control immediately next to the native/client window controls. The
+        // group owns the trailing auto-margin so the two controls cannot be separated by free
+        // space when the title-bar controls are hidden or compact mode is enabled.
+        let right_title_bar_controls = h_flex()
+            .id("title-bar-right-controls")
+            .h_full()
+            .flex_none()
+            .ml_auto()
+            .when_some(right_reconnect_control, |controls, reconnect_control| {
+                controls.child(reconnect_control)
+            })
+            .child(right_window_controls)
+            .into_any_element();
+
+        let title_bar = self.render_title_bar(
+            title_bar_height,
+            title_bar_background,
+            frame.rounded_top_left,
+            frame.rounded_top_right,
+            left_window_controls,
+            compact_mode,
+            title_bar_menus_visible(self.launch_config.hide_title_bar_menus),
+            self.render_application_menu(
+                show_title_bar_control_labels,
+                handle,
+                active_terminal_focus.clone(),
+            ),
+            self.render_profile_menu(
+                show_title_bar_control_labels,
+                handle,
+                active_terminal_focus,
+                cx,
+            ),
+            show_title_bar_buttons,
+            show_title_bar_control_labels,
+            auto_background_tab,
+            auto_background_protected,
+            reconnect_control,
+            title_bar_broadcast_visible(self.launch_config.hide_title_bar_buttons),
+            broadcast_input,
+            compact_tab_bar,
+            active_pane_size,
+            right_title_bar_controls,
+            cx,
+        );
+
+        TitleBarChrome {
+            title_bar,
+            tab_bar: regular_tab_bar,
+        }
+    }
+
+    /// The "Profile" menu: one entry per visible profile, each opening a new tab.
+    fn render_profile_menu(
+        &self,
+        show_label: bool,
+        handle: &WeakEntity<Self>,
+        active_terminal_focus: Option<gpui::FocusHandle>,
+        cx: &App,
+    ) -> AnyElement {
+        let profiles = self.profiles.clone();
+        let hidden_profiles = self.launch_config.hidden_profiles.clone();
+        let default_profile = self.launch_config.default_profile;
+        let menu_handle = handle.clone();
+        let dismiss_handle = handle.clone();
+        let keyboard_mapper = cx.keyboard_mapper().clone();
+        PopoverMenu::new("new-tab-profile-menu")
+            .with_handle(self.profile_menu_handle.clone())
+            .trigger_with_tooltip(
+                Button::new(
+                    "new-tab-profile-menu-trigger",
+                    if show_label { "Profile" } else { "" },
+                )
+                .start_icon(Icon::new(IconName::ChevronDown).size(IconSize::Small))
+                .style(ButtonStyle::Subtle)
+                .size(ButtonSize::Large)
+                .aria_label("New tab profile"),
+                Tooltip::text("New tab profile"),
+            )
+            .anchor(Anchor::TopRight)
+            .menu(move |window, cx| {
+                let profiles = profiles.clone();
+                let hidden_profiles = hidden_profiles.clone();
+                let handle = menu_handle.clone();
+                let dismiss_handle = dismiss_handle.clone();
+                let terminal_focus = active_terminal_focus.clone();
+                let keyboard_mapper = keyboard_mapper.clone();
+                let menu = ui::ContextMenu::build(window, cx, move |mut menu, window, _| {
+                    for (visible_index, (index, profile)) in profiles
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, profile)| !profile_is_hidden(profile, &hidden_profiles))
+                        .enumerate()
+                    {
+                        let is_default = index == default_profile;
+                        let label_for_row = profile.name.clone();
+                        let shortcut = profile_menu_shortcut(
+                            visible_index + 1,
+                            terminal_focus.as_ref(),
+                            window,
+                            keyboard_mapper.as_ref(),
+                        );
+                        let handle = handle.clone();
+                        menu = menu.custom_entry(
+                            move |_, _| {
+                                h_flex()
+                                    .w_full()
+                                    .justify_between()
+                                    .gap_4()
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .when(is_default, |row| {
+                                                row.child(
+                                                    Icon::new(IconName::Check)
+                                                        .size(IconSize::Small)
+                                                        .color(Color::Accent),
+                                                )
+                                            })
+                                            .when(!is_default, |row| row.child(div().w_4()))
+                                            .child(Label::new(label_for_row.clone()).color(
+                                                if is_default {
+                                                    Color::Accent
+                                                } else {
+                                                    Color::Default
+                                                },
+                                            )),
+                                    )
+                                    .when_some(shortcut.clone(), |row, shortcut| {
+                                        row.child(shortcut.render())
+                                    })
+                                    .into_any_element()
+                            },
+                            move |window, cx| {
+                                handle
+                                    .update(cx, |this, cx| {
+                                        let profile = this.profiles[index].clone();
+                                        this.open_tab_with_profile(profile, window, cx);
+                                    })
+                                    .ok();
+                            },
+                        );
+                    }
+                    menu
+                });
+                restore_focus_on_dismiss(&menu, dismiss_handle, window, cx);
+                Some(menu)
+            })
+            .into_any_element()
+    }
+
+    /// The "Menu" button's application menu.
+    fn render_application_menu(
+        &self,
+        show_label: bool,
+        handle: &WeakEntity<Self>,
+        // The popover receives focus while it is open. Retain the active
+        // terminal's context so actions continue to resolve their shortcuts
+        // when the user cycles here from the Profile menu.
+        action_context: Option<gpui::FocusHandle>,
+    ) -> AnyElement {
+        let dismiss_handle = handle.clone();
+        PopoverMenu::new("application-menu")
+            .with_handle(self.application_menu_handle.clone())
+            .trigger_with_tooltip(
+                Button::new(
+                    "application-menu-trigger",
+                    if show_label { "Menu" } else { "" },
+                )
+                .start_icon(Icon::new(IconName::Menu).size(IconSize::Small))
+                .style(ButtonStyle::Subtle)
+                .size(ButtonSize::Large)
+                .aria_label("Application menu"),
+                Tooltip::for_action_title("Open application menu", &OpenApplicationMenu),
+            )
+            .anchor(Anchor::TopLeft)
+            .menu(move |window, cx| {
+                let dismiss_handle = dismiss_handle.clone();
+                let action_context = action_context.clone();
+                let menu = ui::ContextMenu::build(window, cx, move |menu, _, _| {
+                    let menu =
+                        menu.when_some(action_context.clone(), |menu, focus| menu.context(focus));
+                    menu.action("New Tab", Box::new(NewTab))
+                        .action("New Window", Box::new(NewWindow))
+                        .separator()
+                        .action("Open Settings", Box::new(ToggleSettings))
+                        .action("Open Themes", Box::new(OpenThemes))
+                        .action("Open Keymap", Box::new(OpenKeymap))
+                        .separator()
+                        .action("Close Tab", Box::new(CloseTab))
+                        .action("Close Window", Box::new(CloseWindow))
+                        .action("Close All Windows", Box::new(CloseAllWindows))
+                });
+                restore_focus_on_dismiss(&menu, dismiss_handle, window, cx);
+                Some(menu)
+            })
+            .into_any_element()
+    }
+
+    /// The background-session reconnect control: a plain button for a single
+    /// session, a menu of sessions when more than one can be reconnected.
+    fn render_reconnect_control(
+        &self,
+        show_label: bool,
+        sessions: &Arc<[ProcessBackgroundSessionEntry]>,
+        handle: &WeakEntity<Self>,
+    ) -> AnyElement {
+        let session_count = sessions.len();
+        if session_count == 1 {
+            return Button::new("reconnect-session", reconnect_control_label(show_label))
+                .start_icon(Icon::new(IconName::RotateCw).size(IconSize::Small))
+                .style(ButtonStyle::Subtle)
+                .size(ButtonSize::Large)
+                .aria_label("Reconnect background session")
+                .tooltip(Tooltip::for_action_title(
+                    "Reconnect background session",
+                    &ReconnectSession,
+                ))
+                .on_click(|_, window, cx| window.dispatch_action(Box::new(ReconnectSession), cx))
+                .into_any_element();
+        }
+
+        let entries = sessions.to_vec();
+        let menu_handle = handle.clone();
+        PopoverMenu::new("reconnect-session-menu")
+            .with_handle(self.reconnect_menu_handle.clone())
+            .trigger_with_tooltip(
+                Button::new("reconnect-session", reconnect_control_label(show_label))
+                    .start_icon(Icon::new(IconName::RotateCw).size(IconSize::Small))
+                    .style(ButtonStyle::Subtle)
+                    .size(ButtonSize::Large)
+                    .aria_label("Choose background session to reconnect"),
+                Tooltip::for_action_title(
+                    format!("Choose background session to reconnect ({session_count})"),
+                    &ReconnectSession,
+                ),
+            )
+            .anchor(Anchor::TopRight)
+            .menu(move |window, cx| {
+                let entries = entries.clone();
+                let menu_handle = menu_handle.clone();
+                Some(ui::ContextMenu::build(window, cx, move |mut menu, _, _| {
+                    for (runner_id, session_id, title, details) in &entries {
+                        let runner_id = *runner_id;
+                        let session_id = *session_id;
+                        let title = title.clone();
+                        let details = details.clone();
+                        let handle = menu_handle.clone();
+                        menu = menu.custom_entry(
+                            move |_, _| {
+                                v_flex()
+                                    .gap_0p5()
+                                    .child(Label::new(title.clone()))
+                                    .child(
+                                        Label::new(details.clone())
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted),
+                                    )
+                                    .into_any_element()
+                            },
+                            move |window, cx| {
+                                handle
+                                    .update(cx, |this, cx| {
+                                        this.reconnect_background_session(
+                                            runner_id, session_id, window, cx,
+                                        )
+                                    })
+                                    .ok();
+                            },
+                        );
+                    }
+                    menu
+                }))
+            })
+            .into_any_element()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_title_bar(
         &self,

@@ -231,11 +231,7 @@ impl Global for ZettaProcessState {}
 mod pane;
 use pane::*;
 mod byte_stream_pane;
-#[cfg(any(
-    feature = "serial-console",
-    feature = "http-server",
-    feature = "tftp-server"
-))]
+#[cfg(byte_stream_panes)]
 use byte_stream_pane::*;
 mod multi_command;
 use multi_command::*;
@@ -266,6 +262,11 @@ mod serial_console_ui;
 #[cfg(feature = "tftp-server")]
 mod tftp_server_ui;
 use app::*;
+mod configuration_reload;
+mod pane_controls;
+mod rename;
+mod terminal_spawn;
+use pane_controls::*;
 mod pane_resize;
 use pane_resize::*;
 mod app_render;
@@ -275,6 +276,8 @@ mod pane_overlay;
 mod pane_render;
 mod pane_theme_picker;
 mod pane_view_state;
+mod tab_bar_render;
+use tab_bar_render::*;
 mod tab_body_render;
 mod title_bar_render;
 use title_bar_render::*;

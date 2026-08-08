@@ -38,6 +38,7 @@ fn emit_cfg_aliases() {
     println!("cargo::rustc-check-cfg=cfg(linux_like)");
     println!("cargo::rustc-check-cfg=cfg(servers_enabled)");
     println!("cargo::rustc-check-cfg=cfg(tftp_enabled)");
+    println!("cargo::rustc-check-cfg=cfg(byte_stream_panes)");
     println!("cargo::rustc-check-cfg=cfg(cli_services)");
 
     if matches!(
@@ -51,6 +52,12 @@ fn emit_cfg_aliases() {
     }
     if feature_enabled("TFTP_SERVER") || feature_enabled("TFTP_CLIENT") {
         println!("cargo::rustc-cfg=tftp_enabled");
+    }
+    if feature_enabled("SERIAL_CONSOLE")
+        || feature_enabled("HTTP_SERVER")
+        || feature_enabled("TFTP_SERVER")
+    {
+        println!("cargo::rustc-cfg=byte_stream_panes");
     }
     if [
         "SERIAL_CONSOLE",

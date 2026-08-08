@@ -380,6 +380,99 @@ impl Zetta {
         }
         cx.stop_propagation();
     }
+
+    /// The scrollback search field anchored below the title bar.
+    pub(crate) fn render_tab_search_overlay(&self, colors: &ThemeColors) -> Option<AnyElement> {
+        let search = self.tab_search.as_ref()?;
+        let cursor = search.cursor.min(search.query.len());
+        let (before, after) = search.query.split_at(cursor);
+        let before = before.to_owned();
+        let after = after.to_owned();
+        let selected = search.select_all;
+        let retained_match_count = search.matches.len();
+        let status = if search.limit_reached {
+            let position = search
+                .active_match
+                .map(|index| (index + 1).to_string())
+                .unwrap_or_else(|| "0".to_owned());
+            format!(
+                "{position} / {retained_match_count} shown · {} matches",
+                search.total_count
+            )
+        } else {
+            search
+                .active_match
+                .map(|index| format!("{} / {}", index + 1, search.total_count))
+                .unwrap_or_else(|| format!("0 / {}", search.total_count))
+        };
+
+        Some(
+            div()
+                .absolute()
+                .top(px(74.0))
+                .left_2()
+                .right_2()
+                .flex()
+                .justify_end()
+                .child(
+                    div()
+                        .id("tab-scrollback-search")
+                        .track_focus(&self.tab_search_focus)
+                        .w_full()
+                        .max_w(px(460.0))
+                        .px_3()
+                        .py_2()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .rounded(px(5.0))
+                        .border_1()
+                        .border_color(colors.border)
+                        .bg(colors.elevated_surface_background.alpha(1.0))
+                        .shadow_sm()
+                        .text_sm()
+                        .text_color(colors.text)
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .justify_between()
+                                .gap_3()
+                                .child(
+                                    h_flex()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .when(selected, |input| {
+                                            input.bg(colors.element_selection_background)
+                                        })
+                                        .child(div().whitespace_nowrap().child(before))
+                                        .when(!selected, |input| {
+                                            input.child(
+                                                div()
+                                                    .flex_none()
+                                                    .w(px(1.0))
+                                                    .h(px(16.0))
+                                                    .bg(colors.text_accent),
+                                            )
+                                        })
+                                        .child(div().whitespace_nowrap().child(after)),
+                                )
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_color(colors.text_muted)
+                                        .child(status),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(colors.text_muted)
+                                .child("All panes  Enter next  Shift+Enter previous  Esc close"),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
 }
 
 #[cfg(test)]

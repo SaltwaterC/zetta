@@ -1,3 +1,4 @@
+#[cfg(feature = "tftp-client")]
 use super::super::arg_parsing::parse_args_from;
 use super::*;
 

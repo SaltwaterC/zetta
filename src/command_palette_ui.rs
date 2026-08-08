@@ -586,4 +586,189 @@ impl Zetta {
         }
         cx.stop_propagation();
     }
+
+    /// The centred command palette, backdrop included.
+    pub(crate) fn render_command_palette_overlay(
+        &self,
+        colors: &ThemeColors,
+        handle: &WeakEntity<Self>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let palette = self.command_palette.as_ref()?;
+        let cursor = palette.cursor.min(palette.query.len());
+        let (query_before, query_after) = palette.query.split_at(cursor);
+        let query_before = query_before.to_owned();
+        let query_after = query_after.to_owned();
+        let query_empty = palette.query.is_empty();
+        let query_selected = palette.select_all;
+        let result_count = palette.matches().len();
+        let row_handle = handle.clone();
+        let row_colors = colors.clone();
+        let rows = uniform_list(
+            "command-palette-list",
+            result_count,
+            cx.processor(move |this, range: std::ops::Range<usize>, _, _| {
+                let Some(palette) = this.command_palette.as_ref() else {
+                    return Vec::new();
+                };
+                range
+                    .map(|position| {
+                        let command_index = palette.matches()[position];
+                        let command = &palette.commands[command_index];
+                        let command_name = command.name.clone();
+                        let shortcut = command.shortcut.clone();
+                        let row_handle = row_handle.clone();
+                        div()
+                            .id(("command-palette-row", command_index))
+                            .h_9()
+                            .w_full()
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .cursor_pointer()
+                            .text_sm()
+                            .text_color(row_colors.text)
+                            .when(position == palette.selected, |row| {
+                                row.bg(row_colors.element_selected)
+                            })
+                            .hover(|style| style.bg(row_colors.element_hover))
+                            .on_click(move |_, window, cx| {
+                                row_handle
+                                    .update(cx, |this, cx| {
+                                        this.run_palette_command(command_index, window, cx)
+                                    })
+                                    .ok();
+                            })
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .child(command_name),
+                            )
+                            .when_some(shortcut, |row, shortcut| {
+                                row.child(
+                                    div()
+                                        .flex_none()
+                                        .text_xs()
+                                        .text_color(row_colors.text_muted)
+                                        .child(shortcut),
+                                )
+                            })
+                    })
+                    .collect()
+            }),
+        )
+        .with_sizing_behavior(ListSizingBehavior::Infer)
+        .max_h(px(360.))
+        .track_scroll(&palette.scroll)
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation());
+        let dismiss_handle = handle.clone();
+
+        Some(
+            div()
+                .id("command-palette-backdrop")
+                .absolute()
+                .inset_0()
+                .pt(px(72.))
+                .px_4()
+                .flex()
+                .items_start()
+                .justify_center()
+                .bg(transparent_black().opacity(0.24))
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    dismiss_handle
+                        .update(cx, |this, cx| this.dismiss_command_palette(window, cx))
+                        .ok();
+                })
+                .child(
+                    div()
+                        .id("command-palette")
+                        .track_focus(&self.command_palette_focus)
+                        .w_full()
+                        .max_w(px(680.))
+                        .overflow_hidden()
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_color(colors.border)
+                        .bg(colors.elevated_surface_background)
+                        .shadow_lg()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(
+                            div()
+                                .h_12()
+                                .px_3()
+                                .flex()
+                                .items_center()
+                                .border_b_1()
+                                .border_color(colors.border)
+                                .text_color(colors.text)
+                                .child(div().text_color(colors.text_accent).mr_2().child(">"))
+                                .child(
+                                    h_flex()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .when(query_selected, |input| {
+                                            input.bg(colors.element_selection_background)
+                                        })
+                                        .child(div().whitespace_nowrap().child(query_before))
+                                        .when(!query_selected, |input| {
+                                            input.child(
+                                                div()
+                                                    .flex_none()
+                                                    .w(px(1.0))
+                                                    .h(px(16.0))
+                                                    .bg(colors.text_accent),
+                                            )
+                                        })
+                                        .child(div().whitespace_nowrap().child(query_after))
+                                        .when(query_empty, |input| {
+                                            input.child(
+                                                div()
+                                                    .text_color(colors.text_placeholder)
+                                                    .child("Type a command"),
+                                            )
+                                        }),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .py_1()
+                                .when(result_count == 0, |list| {
+                                    list.child(
+                                        div()
+                                            .h_12()
+                                            .px_3()
+                                            .flex()
+                                            .items_center()
+                                            .text_sm()
+                                            .text_color(colors.text_muted)
+                                            .child("No matching commands"),
+                                    )
+                                })
+                                .when(result_count > 0, |list| list.child(rows)),
+                        )
+                        .child(
+                            div()
+                                .h_7()
+                                .px_3()
+                                .flex()
+                                .items_center()
+                                .border_t_1()
+                                .border_color(colors.border)
+                                .text_xs()
+                                .text_color(colors.text_muted)
+                                .child(format!(
+                                    "{result_count} command{}",
+                                    if result_count == 1 { "" } else { "s" }
+                                )),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
 }

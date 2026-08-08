@@ -93,6 +93,59 @@ pub(crate) struct WindowControlState {
     pub(crate) client_decorations: bool,
 }
 
+/// The decoration-derived measurements every top-level render pass needs.
+/// Gathered once per frame so the title bar, tab body, and window frame all
+/// agree on rounding and on which window controls the platform offers.
+#[derive(Clone, Copy)]
+pub(crate) struct WindowFrameGeometry {
+    pub(crate) window_control_state: WindowControlState,
+    pub(crate) title_bar_height: Pixels,
+    pub(crate) rounded_top_left: bool,
+    pub(crate) rounded_top_right: bool,
+    pub(crate) rounded_bottom_left: bool,
+    pub(crate) rounded_bottom_right: bool,
+    pub(crate) bottom_corner_radius: Pixels,
+}
+
+impl WindowFrameGeometry {
+    pub(crate) fn new(window: &Window) -> Self {
+        #[cfg(any(target_os = "windows", linux_like))]
+        let supported_controls = window.window_controls();
+        #[cfg(any(target_os = "windows", linux_like))]
+        let is_maximized = window.is_maximized();
+        #[cfg(any(target_os = "windows", linux_like))]
+        let is_resizable = window.is_resizable();
+        #[cfg(any(target_os = "windows", linux_like))]
+        let is_minimizable = window.is_minimizable();
+        let (client_decorations, tiling) = match window.window_decorations() {
+            Decorations::Client { tiling } => (true, tiling),
+            Decorations::Server => (false, Tiling::default()),
+        };
+        let rounded =
+            |first: bool, second: bool| cfg!(linux_like) && client_decorations && !first && !second;
+        Self {
+            window_control_state: WindowControlState {
+                #[cfg(any(target_os = "windows", linux_like))]
+                supported_controls,
+                #[cfg(any(target_os = "windows", linux_like))]
+                is_maximized,
+                #[cfg(any(target_os = "windows", linux_like))]
+                is_resizable,
+                #[cfg(any(target_os = "windows", linux_like))]
+                is_minimizable,
+                #[cfg(linux_like)]
+                client_decorations,
+            },
+            title_bar_height: platform_title_bar_height(window),
+            rounded_top_left: rounded(tiling.top, tiling.left),
+            rounded_top_right: rounded(tiling.top, tiling.right),
+            rounded_bottom_left: rounded(tiling.bottom, tiling.left),
+            rounded_bottom_right: rounded(tiling.bottom, tiling.right),
+            bottom_corner_radius: theme::CLIENT_SIDE_DECORATION_ROUNDING - px(1.),
+        }
+    }
+}
+
 #[cfg(any(target_os = "windows", linux_like))]
 fn window_button_enabled(
     button: WindowButton,

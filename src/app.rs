@@ -1,9 +1,6 @@
 use super::*;
 use strum::IntoEnumIterator as _;
 
-const PANE_CONTROLS_IDLE_DELAY: Duration = Duration::from_millis(1200);
-const PERFORMANCE_PANE_STRESS_COUNT: usize = 4;
-
 /// Cached font enumeration for settings font picker
 pub(crate) struct FontCache {
     pub fonts: Arc<[String]>,
@@ -40,51 +37,6 @@ fn background_authentication_for_close(
         policy.background_authentication()
     } else {
         None
-    }
-}
-
-fn pane_controls_hide_delay(last_motion: Instant, now: Instant) -> Option<Duration> {
-    let elapsed = now.saturating_duration_since(last_motion);
-    let remaining = PANE_CONTROLS_IDLE_DELAY.checked_sub(elapsed)?;
-    (!remaining.is_zero()).then_some(remaining)
-}
-
-fn toggle_hidden_pane_controls(hidden_panes: &mut HashSet<u64>, pane_ids: &[u64]) -> bool {
-    let hide = pane_ids
-        .iter()
-        .any(|pane_id| !hidden_panes.contains(pane_id));
-    if hide {
-        hidden_panes.extend(pane_ids.iter().copied());
-    } else {
-        for pane_id in pane_ids {
-            hidden_panes.remove(pane_id);
-        }
-    }
-    hide
-}
-
-fn default_hidden_pane_controls(
-    pane_controls_hidden_by_default: bool,
-    pane_ids: impl IntoIterator<Item = u64>,
-) -> HashSet<u64> {
-    if pane_controls_hidden_by_default {
-        pane_ids.into_iter().collect()
-    } else {
-        HashSet::default()
-    }
-}
-
-fn reset_pane_controls_visibility(
-    hidden_panes: &mut HashSet<u64>,
-    pane_controls_hidden_by_default: bool,
-    pane_ids: impl IntoIterator<Item = u64>,
-) {
-    for pane_id in pane_ids {
-        if pane_controls_hidden_by_default {
-            hidden_panes.insert(pane_id);
-        } else {
-            hidden_panes.remove(&pane_id);
-        }
     }
 }
 
@@ -291,62 +243,6 @@ impl Zetta {
     pub(crate) fn resume_hidden_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.tabs.is_empty() {
             self.open_tab(window, cx);
-        }
-        cx.notify();
-    }
-
-    pub(crate) fn configure_pane_profile_stress(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(tab) = self.tabs.get(self.active_tab) else {
-            return;
-        };
-        let active_pane_id = tab.active_pane;
-        let tab_id = tab.id;
-        let Some(profile) = tab.active_profile().cloned() else {
-            return;
-        };
-        let mut pane_ids = vec![active_pane_id];
-        let mut added_pane_ids = Vec::with_capacity(PERFORMANCE_PANE_STRESS_COUNT - 1);
-        while pane_ids.len() < PERFORMANCE_PANE_STRESS_COUNT {
-            let pane_id = self.next_pane_id;
-            self.next_pane_id += 1;
-            pane_ids.push(pane_id);
-            added_pane_ids.push(pane_id);
-        }
-        self.pane_controls_hidden_for
-            .extend(default_hidden_pane_controls(
-                self.launch_config.pane_controls_hidden_by_default,
-                added_pane_ids.iter().copied(),
-            ));
-
-        let tab = &mut self.tabs[self.active_tab];
-        for (index, pane_id) in added_pane_ids.iter().copied().enumerate() {
-            tab.push_pane(
-                TerminalPane::new(pane_id, profile.clone())
-                    .with_generated_label(format!("Stress {:02}", index + 2)),
-            );
-        }
-        tab.layout = PaneLayout::tiled(&pane_ids).expect("a stress profile has panes");
-        tab.minimized_panes.clear();
-        tab.selected_minimized_pane = None;
-        tab.maximized_pane = None;
-        tab.activate_pane(active_pane_id);
-
-        let working_directory = self.working_directory.clone();
-        for pane_id in added_pane_ids {
-            self.spawn_terminal(
-                tab_id,
-                pane_id,
-                profile.clone(),
-                working_directory.clone(),
-                None,
-                None,
-                window,
-                cx,
-            );
         }
         cx.notify();
     }
@@ -580,280 +476,6 @@ impl Zetta {
         );
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn spawn_terminal(
-        &mut self,
-        tab_id: u64,
-        pane_id: u64,
-        profile: Profile,
-        working_directory: Option<PathBuf>,
-        wsl_directory: Option<String>,
-        wsl_cwd_file: Option<PathBuf>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let terminal_theme = match resolve_profile_theme(&profile, cx) {
-            Ok(theme) => theme,
-            Err(error) => {
-                if let Some(pane) = self
-                    .tabs
-                    .iter_mut()
-                    .find(|tab| tab.id == tab_id)
-                    .and_then(|tab| tab.pane_mut(pane_id))
-                {
-                    pane.error = Some(format!("Could not apply profile theme: {error:#}"));
-                }
-                cx.notify();
-                return;
-            }
-        };
-        let mut terminal_settings = TerminalSpawnSettings::current(cx);
-        let path_hyperlink_regexes = terminal_settings.path_hyperlink_regexes(true);
-        self.spawn_terminal_with_theme(
-            tab_id,
-            pane_id,
-            profile,
-            working_directory,
-            wsl_directory,
-            wsl_cwd_file,
-            terminal_theme,
-            &terminal_settings,
-            path_hyperlink_regexes,
-            false,
-            window,
-            cx,
-        );
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn spawn_terminal_with_theme(
-        &mut self,
-        tab_id: u64,
-        pane_id: u64,
-        profile: Profile,
-        working_directory: Option<PathBuf>,
-        wsl_directory: Option<String>,
-        wsl_cwd_file: Option<PathBuf>,
-        terminal_theme: Option<Arc<Theme>>,
-        settings: &TerminalSpawnSettings,
-        path_hyperlink_regexes: Vec<String>,
-        tracked_multi_command_launch: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let is_wsl = is_wsl_shell(&profile.command);
-        let command = if is_wsl {
-            wsl_shell_with_tracking(
-                profile.command,
-                wsl_directory.as_deref(),
-                wsl_cwd_file.as_deref(),
-            )
-        } else {
-            profile.command
-        };
-        let environment = if is_wsl {
-            HashMap::default()
-        } else {
-            let msys2_environment =
-                match msys2_cwd_tracking_environment(&command, pane_id, &env::temp_dir()) {
-                    Ok(environment) => environment,
-                    Err(error) => {
-                        if let Some(pane) = self
-                            .tabs
-                            .iter_mut()
-                            .find(|tab| tab.id == tab_id)
-                            .and_then(|tab| tab.pane_mut(pane_id))
-                        {
-                            pane.error =
-                                Some(format!("Could not configure MSYS2 CWD tracking: {error:#}"));
-                        }
-                        cx.notify();
-                        return;
-                    }
-                };
-            native_terminal_environment()
-                .into_iter()
-                .chain(msys2_environment)
-                .collect()
-        };
-        let builder = TerminalBuilder::new(
-            working_directory,
-            None,
-            command,
-            environment,
-            settings.cursor_shape,
-            settings.alternate_scroll,
-            settings.max_scroll_history_lines,
-            path_hyperlink_regexes,
-            settings.path_hyperlink_timeout_ms,
-            false,
-            cx.entity_id().as_u64(),
-            None,
-            cx,
-            Vec::new(),
-            PathStyle::local(),
-        );
-
-        let this = cx.entity().downgrade();
-        window
-            .spawn(cx, async move |cx| match builder.await {
-                Ok(builder) => {
-                    this.update_in(cx, |this, window, cx| {
-                        let terminal = cx.new(|cx| builder.subscribe(cx));
-                        let view = cx.new(|cx| {
-                            TerminalView::new_with_theme(
-                                terminal.clone(),
-                                terminal_theme,
-                                window,
-                                cx,
-                            )
-                        });
-                        cx.subscribe_in(
-                            &terminal,
-                            window,
-                            move |this, _, event: &TerminalEvent, window, cx| {
-                                if let TerminalEvent::ResizeRequested { rows, columns } = event {
-                                    this.resize_pane_to(
-                                        tab_id,
-                                        pane_id,
-                                        Some(*columns),
-                                        Some(*rows),
-                                        window,
-                                        cx,
-                                    );
-                                }
-                            },
-                        )
-                        .detach();
-                        cx.subscribe_in(
-                            &view,
-                            window,
-                            move |this, _, event, window, cx| match event {
-                                TerminalViewEvent::Close => {
-                                    this.terminal_closed(tab_id, pane_id, window, cx);
-                                }
-                                TerminalViewEvent::TitleChanged => {
-                                    cx.notify();
-                                }
-                                TerminalViewEvent::Input(input) => {
-                                    this.broadcast_input(tab_id, pane_id, input, cx);
-                                }
-                                TerminalViewEvent::OpenEditor(request) => {
-                                    this.open_editor_in_new_pane(
-                                        tab_id,
-                                        pane_id,
-                                        request.clone(),
-                                        window,
-                                        cx,
-                                    );
-                                }
-                            },
-                        )
-                        .detach();
-                        let focus_handle = view.focus_handle(cx);
-                        let emit_input_events = this
-                            .tabs
-                            .iter()
-                            .find(|tab| tab.id == tab_id)
-                            .is_some_and(|tab| tab.broadcast_input);
-                        let input_enabled =
-                            pane_input_enabled(this.pane_resize_mode || this.pane_move_mode);
-                        view.update(cx, |view, cx| {
-                            view.set_emit_input_events(emit_input_events);
-                            view.set_input_enabled(input_enabled, cx);
-                        });
-                        cx.on_focus_in(&focus_handle, window, move |this, _, cx| {
-                            if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.id == tab_id) {
-                                tab.activate_pane(pane_id);
-                                cx.notify();
-                            }
-                        })
-                        .detach();
-                        let tab_index = this.tabs.iter().position(|tab| tab.id == tab_id);
-                        let should_focus = tab_index.is_some_and(|index| {
-                            index == this.active_tab && this.tabs[index].active_pane == pane_id
-                        });
-                        if let Some(pane) = tab_index
-                            .and_then(|index| this.tabs.get_mut(index))
-                            .and_then(|tab| tab.pane_mut(pane_id))
-                        {
-                            pane.terminal = Some(terminal.clone());
-                            pane.view = Some(view.clone());
-                            if let Some(command) = pane.pending_command.take() {
-                                view.update(cx, |view, cx| {
-                                    view.apply_input(
-                                        &TerminalInput::Text(format!("{command}\r")),
-                                        cx,
-                                    )
-                                });
-                            }
-                        } else {
-                            let stored_in_background = {
-                                let pane = this
-                                    .background_sessions
-                                    .iter_mut()
-                                    .find(|tab| tab.id == tab_id)
-                                    .and_then(|tab| tab.pane_mut(pane_id));
-                                if let Some(pane) = pane {
-                                    pane.terminal = Some(terminal.clone());
-                                    true
-                                } else {
-                                    false
-                                }
-                            };
-                            if stored_in_background {
-                                this.observe_background_terminal(pane_id, terminal, cx);
-                                this.publish_background_session_catalog(cx);
-                            }
-                        }
-                        if should_focus {
-                            view.focus_handle(cx).focus(window, cx);
-                        }
-                        this.schedule_terminal_spawn_notify(cx);
-                        if tracked_multi_command_launch {
-                            this.finish_multi_command_launch(window, cx);
-                        }
-                    })
-                    .ok();
-                }
-                Err(error) => {
-                    this.update_in(cx, |this, window, cx| {
-                        if let Some(pane) = this
-                            .tabs
-                            .iter_mut()
-                            .find(|tab| tab.id == tab_id)
-                            .and_then(|tab| tab.pane_mut(pane_id))
-                        {
-                            pane.error = Some(format!("{error:#}"));
-                        }
-                        this.schedule_terminal_spawn_notify(cx);
-                        if tracked_multi_command_launch {
-                            this.finish_multi_command_launch(window, cx);
-                        }
-                    })
-                    .ok();
-                }
-            })
-            .detach();
-    }
-
-    pub(crate) fn schedule_terminal_spawn_notify(&mut self, cx: &mut Context<Self>) {
-        if !begin_coalesced_notification(&mut self.terminal_spawn_notify_pending) {
-            return;
-        }
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(TERMINAL_SPAWN_NOTIFY_INTERVAL)
-                .await;
-            this.update(cx, |this, cx| {
-                this.terminal_spawn_notify_pending = false;
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
     pub(crate) fn close_tab_at(
         &mut self,
         index: usize,
@@ -1007,6 +629,44 @@ impl Zetta {
             .collect::<HashSet<_>>();
         self.visible_terminals
             .retain(|terminal| open_terminals.contains(&terminal.entity_id()));
+    }
+
+    /// Reconciles the render cache of visible terminals with the active tab's layout.
+    ///
+    /// Hidden terminals keep parsing PTY output and retaining scrollback, but they must not
+    /// continually enqueue work on the foreground executor. A newly visible terminal emits
+    /// one consolidated wakeup to render everything produced while it was hidden.
+    pub(crate) fn sync_visible_terminals(&mut self, cx: &mut Context<Self>) {
+        let visible_terminals = self
+            .tabs
+            .get(self.active_tab)
+            .into_iter()
+            .flat_map(|tab| {
+                tab.panes.iter().filter_map(|pane| {
+                    tab.pane_is_visible(pane.id)
+                        .then(|| pane.terminal.clone())
+                        .flatten()
+                })
+            })
+            .collect::<Vec<_>>();
+        for terminal in &self.visible_terminals {
+            if !visible_terminals
+                .iter()
+                .any(|visible| visible.entity_id() == terminal.entity_id())
+            {
+                terminal.update(cx, |terminal, cx| terminal.set_ui_visible(false, cx));
+            }
+        }
+        for terminal in &visible_terminals {
+            if !self
+                .visible_terminals
+                .iter()
+                .any(|visible| visible.entity_id() == terminal.entity_id())
+            {
+                terminal.update(cx, |terminal, cx| terminal.set_ui_visible(true, cx));
+            }
+        }
+        self.visible_terminals = visible_terminals;
     }
 
     pub(crate) fn split_active_pane(
@@ -1639,259 +1299,6 @@ impl Zetta {
         self.focus_active(window, cx);
     }
 
-    pub(crate) fn toggle_performance_overlay(
-        &mut self,
-        _: &TogglePerformanceOverlay,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.performance_overlay_generation = self.performance_overlay_generation.wrapping_add(1);
-        if self.performance_overlay.take().is_some() {
-            disable_frame_tracing();
-            cx.notify();
-            return;
-        }
-
-        enable_frame_tracing();
-        let generation = self.performance_overlay_generation;
-        let (pane_count, minimized_pane_count) = self
-            .tabs
-            .get(self.active_tab)
-            .map(|tab| (tab.panes.len(), tab.minimized_panes.len()))
-            .unwrap_or_default();
-        self.performance_overlay = Some(PerformanceOverlay::new(
-            window.window_handle().window_id(),
-            generation,
-            pane_count,
-            minimized_pane_count,
-        ));
-        let executor = cx.background_executor().clone();
-        cx.spawn(async move |this, cx| {
-            loop {
-                executor.timer(PERFORMANCE_SAMPLE_INTERVAL).await;
-                let keep_sampling = this
-                    .update(cx, |this, cx| {
-                        let Some(overlay) = this.performance_overlay.as_mut() else {
-                            return false;
-                        };
-                        if overlay.generation != generation {
-                            return false;
-                        }
-                        overlay.sample();
-                        cx.notify();
-                        true
-                    })
-                    .unwrap_or(false);
-                if !keep_sampling {
-                    break;
-                }
-            }
-        })
-        .detach();
-        cx.notify();
-    }
-
-    pub(crate) fn start_performance_report(
-        &mut self,
-        options: PerformanceReportOptions,
-        status: PerformanceReportStatus,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(overlay) = self.performance_overlay.as_mut() else {
-            *status
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Err(
-                "performance overlay was not enabled before report capture".to_owned(),
-            ));
-            quit_zetta_process(cx);
-            return;
-        };
-        overlay.workload = options.workload;
-        overlay.begin_report();
-
-        let executor = cx.background_executor().clone();
-        cx.spawn(async move |this, cx| {
-            executor.timer(options.duration).await;
-            let result = this
-                .update(cx, |this, _| {
-                    this.performance_overlay
-                        .as_mut()
-                        .context("performance overlay closed before report completed")?
-                        .write_report(&options.path, options.duration)
-                })
-                .unwrap_or_else(Err)
-                .map_err(|error| format!("{error:#}"));
-            *status
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(result);
-            cx.update(quit_zetta_process);
-        })
-        .detach();
-    }
-
-    pub(crate) fn edit_config_file(
-        &mut self,
-        _: &EditConfigFile,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let path = self.launch_config.config_path.clone();
-        self.edit_settings_file_in_active_pane(path, window, cx);
-    }
-
-    pub(crate) fn edit_keymap_file(
-        &mut self,
-        _: &EditKeymapFile,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let path = self.launch_config.keymap_path.clone();
-        self.edit_settings_file_in_active_pane(path, window, cx);
-    }
-
-    /// Runs Zetta's editor dispatcher against the active pane's shell, mirroring how a
-    /// clicked path or `EditScrollback` opens an editor: reused in place when the pane's
-    /// foreground process is the shell, otherwise split into a fresh pane.
-    fn edit_settings_file_in_active_pane(
-        &mut self,
-        path: PathBuf,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(tab) = self.tabs.get(self.active_tab) else {
-            return;
-        };
-        let tab_id = tab.id;
-        let Some(pane) = tab.active_pane() else {
-            return;
-        };
-        let pane_id = pane.id;
-        let Some(terminal) = pane.terminal.clone() else {
-            return;
-        };
-        let (command, open_in_new_pane) = terminal.update(cx, |terminal, _| {
-            (
-                terminal.editor_command_for_path(&path, terminal.native_path_style()),
-                terminal.editor_should_open_in_new_pane(),
-            )
-        });
-        let Some(command) = command else {
-            return;
-        };
-        if open_in_new_pane {
-            self.open_editor_in_new_pane(
-                tab_id,
-                pane_id,
-                terminal_view::EditorRequest {
-                    command,
-                    temporary_path: None,
-                },
-                window,
-                cx,
-            );
-        } else {
-            terminal.update(cx, |terminal, _| terminal.submit_editor_command(command));
-        }
-    }
-
-    pub(crate) fn reload_configuration(
-        &mut self,
-        _: &ReloadConfiguration,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let config_path = self.launch_config.config_path.clone();
-        let keymap_override = self.launch_config.keymap_override.clone();
-        let config = match Config::load(Some(&config_path), keymap_override) {
-            Ok(config) => config,
-            Err(error) => {
-                self.configuration_error = Some(format!(
-                    "Could not load {}: {error:#}",
-                    config_path.display()
-                ));
-                cx.notify();
-                return;
-            }
-        };
-
-        load_user_themes(cx).log_err();
-        if let Err(error) = apply_config_settings(&config, cx) {
-            self.configuration_error = Some(format!(
-                "Could not apply {}: {error:#}",
-                config_path.display()
-            ));
-            cx.notify();
-            return;
-        }
-        let profile_themes = match config
-            .profiles
-            .iter()
-            .map(|profile| {
-                resolve_profile_theme(profile, cx).map(|theme| (profile.name.to_lowercase(), theme))
-            })
-            .collect::<Result<HashMap<_, _>>>()
-        {
-            Ok(themes) => themes,
-            Err(error) => {
-                self.configuration_error = Some(format!(
-                    "Could not apply {}: {error:#}",
-                    config_path.display()
-                ));
-                cx.notify();
-                return;
-            }
-        };
-        for pane in self.tabs.iter_mut().flat_map(|tab| &mut tab.panes) {
-            if let Some(profile) = config
-                .profiles
-                .iter()
-                .find(|profile| profile.name.eq_ignore_ascii_case(&pane.profile.name))
-            {
-                pane.profile = profile.clone();
-            } else {
-                pane.profile.theme = None;
-            }
-            if let Some(view) = pane.view.as_ref() {
-                let theme = profile_themes
-                    .get(&pane.profile.name.to_lowercase())
-                    .cloned()
-                    .flatten();
-                view.update(cx, |view, cx| view.set_theme(theme, cx));
-            }
-        }
-        let profile_count = visible_profile_count(&config.profiles, &config.hidden_profiles);
-        load_keybindings(&config.keymap_path, profile_count, cx);
-
-        #[cfg(windows)]
-        windows_integration::update_profile_jump_list(config.profiles.clone());
-
-        if config.pane_controls_hidden_by_default
-            != self.launch_config.pane_controls_hidden_by_default
-        {
-            reset_pane_controls_visibility(
-                &mut self.pane_controls_hidden_for,
-                config.pane_controls_hidden_by_default,
-                self.tabs
-                    .iter()
-                    .flat_map(|tab| tab.panes.iter().map(|pane| pane.id)),
-            );
-            self.pane_controls_visible_for = None;
-        }
-        self.profiles = config.profiles.clone();
-        self.working_directory = config.working_directory.clone();
-        self.launch_config = config;
-        #[cfg(target_os = "macos")]
-        update_native_macos_menus(
-            cx,
-            &self.profiles,
-            &self.launch_config.hidden_profiles,
-            self.launch_config.default_profile,
-        );
-        self.configuration_error = None;
-        self.focus_active(window, cx);
-        cx.notify();
-    }
-
     pub(crate) fn next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
         if self.tab_search.is_some() {
             self.dismiss_tab_search(window, cx);
@@ -1952,99 +1359,6 @@ impl Zetta {
         self.focus_active(window, cx);
     }
 
-    pub(crate) fn rename_tab(
-        &mut self,
-        _: &RenameTab,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.begin_tab_rename(self.active_tab, window, cx);
-    }
-
-    pub(crate) fn begin_tab_rename(
-        &mut self,
-        tab_index: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let automatic_title = self
-            .tabs
-            .get(tab_index)
-            .and_then(Tab::active_pane)
-            .and_then(|pane| pane.view.as_ref())
-            .map(|view| view.read(cx).tab_content_text(0, cx).to_string())
-            .or_else(|| {
-                self.tabs
-                    .get(tab_index)
-                    .and_then(Tab::active_pane)
-                    .map(|pane| pane.profile.name.clone())
-            })
-            .unwrap_or_else(|| "Terminal".to_owned());
-        self.active_tab = tab_index;
-        self.begin_rename_with_title(tab_index, automatic_title, window, cx);
-    }
-
-    pub(crate) fn begin_rename(
-        &mut self,
-        view: Entity<TerminalView>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let automatic_title = view.read(cx).tab_content_text(0, cx).to_string();
-        self.begin_rename_with_title(self.active_tab, automatic_title, window, cx);
-    }
-
-    fn begin_rename_with_title(
-        &mut self,
-        tab_index: usize,
-        automatic_title: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(tab) = self.tabs.get_mut(tab_index) {
-            let title = tab.custom_title.clone().unwrap_or(automatic_title);
-            tab.renaming_pane = None;
-            tab.rename_cursor = title.len();
-            tab.rename_buffer = Some(title);
-            tab.rename_select_all = false;
-        }
-        self.rename_focus.focus(window, cx);
-        cx.notify();
-    }
-
-    pub(crate) fn rename_pane(
-        &mut self,
-        _: &RenamePane,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(pane_id) = self.tabs.get(self.active_tab).map(|tab| tab.active_pane) else {
-            return;
-        };
-        self.begin_pane_rename(pane_id, window, cx);
-    }
-
-    pub(crate) fn begin_pane_rename(
-        &mut self,
-        pane_id: u64,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
-            return;
-        };
-        let Some(label) = tab.pane(pane_id).map(TerminalPane::label) else {
-            return;
-        };
-        tab.activate_pane(pane_id);
-        tab.renaming_pane = Some(pane_id);
-        tab.rename_cursor = label.len();
-        tab.rename_buffer = Some(label);
-        tab.rename_select_all = true;
-        self.rename_focus.focus(window, cx);
-        cx.notify();
-    }
-
     pub(crate) fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.get(self.active_tab) {
             let active_is_visible = tab.pane_is_visible(tab.active_pane);
@@ -2058,114 +1372,6 @@ impl Zetta {
         }
         cx.notify();
     }
-
-    pub(crate) fn show_pane_controls(
-        &mut self,
-        pane_id: u64,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.pane_controls_hidden_for.contains(&pane_id) {
-            return;
-        }
-        let visibility_changed = self.pane_controls_visible_for != Some(pane_id);
-        self.pane_controls_visible_for = Some(pane_id);
-        self.pane_controls_last_motion = Instant::now();
-
-        if self.pane_controls_hide_task.is_none() {
-            let executor = cx.background_executor().clone();
-            self.pane_controls_hide_task = Some(cx.spawn_in(window, async move |this, cx| {
-                let mut remaining = PANE_CONTROLS_IDLE_DELAY;
-                loop {
-                    executor.timer(remaining).await;
-                    let next_delay = this
-                        .update(cx, |this, cx| {
-                            let next_delay = pane_controls_hide_delay(
-                                this.pane_controls_last_motion,
-                                Instant::now(),
-                            );
-                            if next_delay.is_none() {
-                                this.pane_controls_visible_for = None;
-                                this.pane_controls_hide_task.take();
-                                cx.notify();
-                            }
-                            next_delay
-                        })
-                        .ok()
-                        .flatten();
-                    let Some(next_delay) = next_delay else {
-                        break;
-                    };
-                    remaining = next_delay;
-                }
-            }));
-        }
-
-        if visibility_changed {
-            cx.notify();
-        }
-    }
-
-    fn forget_pane_controls(&mut self, pane_ids: impl IntoIterator<Item = u64>) {
-        for pane_id in pane_ids {
-            self.pane_controls_hidden_for.remove(&pane_id);
-            if self.pane_controls_visible_for == Some(pane_id) {
-                self.pane_controls_visible_for = None;
-            }
-        }
-    }
-
-    fn toggle_pane_controls_for(&mut self, pane_ids: &[u64], cx: &mut Context<Self>) {
-        if pane_ids.is_empty() {
-            return;
-        }
-        if toggle_hidden_pane_controls(&mut self.pane_controls_hidden_for, pane_ids)
-            && self
-                .pane_controls_visible_for
-                .is_some_and(|pane_id| pane_ids.contains(&pane_id))
-        {
-            self.pane_controls_visible_for = None;
-        }
-        cx.notify();
-    }
-
-    pub(crate) fn toggle_pane_controls(
-        &mut self,
-        _: &TogglePaneControls,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let pane_id = self.tabs.get(self.active_tab).map(|tab| tab.active_pane);
-        if let Some(pane_id) = pane_id {
-            self.toggle_pane_controls_for(&[pane_id], cx);
-        }
-    }
-
-    pub(crate) fn toggle_tab_pane_controls(
-        &mut self,
-        _: &ToggleTabPaneControls,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let pane_ids = self
-            .tabs
-            .get(self.active_tab)
-            .map(|tab| tab.panes.iter().map(|pane| pane.id).collect::<Vec<_>>())
-            .unwrap_or_default();
-        self.toggle_pane_controls_for(&pane_ids, cx);
-    }
-
-    pub(crate) fn is_renaming(&self) -> bool {
-        self.tabs
-            .get(self.active_tab)
-            .is_some_and(|tab| tab.rename_buffer.is_some())
-    }
-
-    pub(crate) fn is_editing_pane_overlay(&self) -> bool {
-        self.tabs
-            .get(self.active_tab)
-            .is_some_and(|tab| tab.overlay_buffer.is_some())
-    }
 }
 
 impl Drop for Zetta {
@@ -2173,21 +1379,6 @@ impl Drop for Zetta {
         if self.performance_overlay.is_some() {
             disable_frame_tracing();
         }
-    }
-}
-
-fn enable_frame_tracing() {
-    if PERFORMANCE_OVERLAY_COUNT.fetch_add(1, Ordering::AcqRel) == 0 {
-        PERFORMANCE_OWNS_FRAME_TRACING
-            .store(profiler::set_frame_trace_enabled(true), Ordering::Release);
-    }
-}
-
-fn disable_frame_tracing() {
-    let previous = PERFORMANCE_OVERLAY_COUNT.fetch_sub(1, Ordering::AcqRel);
-    debug_assert!(previous > 0);
-    if previous == 1 && PERFORMANCE_OWNS_FRAME_TRACING.swap(false, Ordering::AcqRel) {
-        profiler::set_frame_trace_enabled(false);
     }
 }
 

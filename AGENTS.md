@@ -39,11 +39,17 @@ and the process entry point. Put behavior in the module that owns it:
 
 - `app.rs`: `Zetta` struct, tab/pane lifecycle, and state that doesn't belong
   to a narrower module below
-- `app_render.rs`: top-level `Render for Zetta` composition (setup, the
-  overlay stack, and the tab-icon-picker/overlay-style-picker overlays);
-  delegates to `title_bar_render.rs` and `tab_body_render.rs`
-- `title_bar_render.rs`: tab bar, title bar, and profile/application menu
-  rendering
+- `terminal_spawn.rs`: terminal process spawning and its event wiring
+- `configuration_reload.rs`: settings/keymap file editing and configuration
+  reload
+- `rename.rs`: tab and pane rename state
+- `app_render.rs`: top-level `Render for Zetta` composition (action
+  registration, overlay collection, and the tab-icon-picker/overlay-style-picker
+  overlays); delegates to `title_bar_render.rs` and `tab_body_render.rs`
+- `title_bar_render.rs`: title bar composition, its menus (application,
+  profile, reconnect), and the layout predicates the bar shares with the tab bar
+- `tab_bar_render.rs`: the measured tab row, individual tabs, and the bar
+  that hosts them
 - `tab_body_render.rs`: tab body composition (maximized-pane bar, minimized
   pane shelf, pane content wiring)
 - `pane.rs`: pane layout, tab models, terminal creation, and pane focus
@@ -51,14 +57,16 @@ and the process entry point. Put behavior in the module that owns it:
 - `pane_render.rs`: pane layout and resize-gutter rendering
 - `pane_view_state.rs`: pane maximize/minimize/restore and font size
 - `pane_overlay.rs`: per-pane overlay text and style picker
-- `pane_theme_picker.rs`: per-pane theme picker
+- `pane_controls.rs`: per-pane control visibility and its idle timer
+- `pane_theme_picker.rs`: per-pane theme picker model and overlay
 - `background_session_ui.rs`: background-session detach/store/reconnect and
   the reconnect picker
 - `byte_stream_pane.rs`: shared pane opener for byte-stream-backed panes
   (HTTP/TFTP server log panes, the serial console)
 - `cli_service_stubs.rs`: disabled-build fallbacks for CLI-service actions
-- `performance.rs`: frame collection and performance metrics
-- `tab_search.rs`: cross-pane scrollback search
+- `performance.rs`: frame collection, performance metrics, and the
+  performance overlay
+- `tab_search.rs`: cross-pane scrollback search and its overlay
 - `tab_icon_picker.rs`: tab icon picker model, rendering, and the
   `Zetta` methods that drive it
 - `settings_editor.rs`: typed configuration/keymap forms and persistence
@@ -71,8 +79,9 @@ and the process entry point. Put behavior in the module that owns it:
   `settings_view/modals.rs` (font/profile/keymap-capture modals), and
   `settings_view/widgets.rs` (shared widget building blocks)
 - `command_palette.rs`: palette model and matching
-- `command_palette_ui.rs`: palette interaction and rendering
-- `window_frame.rs`: title bars, window controls, and resize edges
+- `command_palette_ui.rs`: palette interaction, rendering, and its overlay
+- `window_frame.rs`: window decorations (`WindowFrameGeometry`), window
+  controls, and resize edges
 - `startup.rs`: `run()`, window/process lifecycle, and theme resolution
   (`resolve_profile_theme`); a module directory — `startup/cli_help.rs`
   (usage/help text), `startup/arg_parsing.rs` (`StartupMode`/`StartupArgs`
@@ -243,8 +252,10 @@ as separate artifacts associated with the JSON report.
   platform/feature predicate: `linux_like` for
   `any(target_os = "linux", target_os = "freebsd")`, `servers_enabled` for
   `any(feature = "http-server", feature = "tftp-server")`, `tftp_enabled` for
-  `any(feature = "tftp-server", feature = "tftp-client")`, and `cli_services`
-  for "any CLI service feature is enabled". Add a new alias in `build.rs`
+  `any(feature = "tftp-server", feature = "tftp-client")`, `byte_stream_panes`
+  for `any(feature = "serial-console", feature = "http-server", feature =
+  "tftp-server")`, and `cli_services` for "any CLI service feature is
+  enabled". Add a new alias in `build.rs`
   (with a matching `cargo::rustc-check-cfg` line) rather than adding another
   ad hoc multi-clause predicate.
 - Embedded non-Rust payloads (shell integration scripts, grammar queries) live

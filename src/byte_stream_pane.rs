@@ -19,11 +19,7 @@ pub(crate) fn ctrl_c_interrupts_byte_stream(input: &TerminalInput) -> bool {
     }
 }
 
-#[cfg(any(
-    feature = "serial-console",
-    feature = "http-server",
-    feature = "tftp-server"
-))]
+#[cfg(byte_stream_panes)]
 #[derive(Clone, Copy)]
 #[allow(
     dead_code,
@@ -36,11 +32,7 @@ pub(crate) enum ByteStreamInputPolicy {
     Broadcast,
 }
 
-#[cfg(any(
-    feature = "serial-console",
-    feature = "http-server",
-    feature = "tftp-server"
-))]
+#[cfg(byte_stream_panes)]
 pub(crate) struct ByteStreamPaneRequest {
     pub(crate) reader: Box<dyn std::io::Read + Send>,
     pub(crate) writer: Box<dyn std::io::Write + Send>,
@@ -49,11 +41,7 @@ pub(crate) struct ByteStreamPaneRequest {
     pub(crate) input: ByteStreamInputPolicy,
 }
 
-#[cfg(any(
-    feature = "serial-console",
-    feature = "http-server",
-    feature = "tftp-server"
-))]
+#[cfg(byte_stream_panes)]
 impl Zetta {
     /// Opens a pane backed by a raw byte stream rather than a spawned process
     /// (an HTTP/TFTP server's log output, or a serial console connection).

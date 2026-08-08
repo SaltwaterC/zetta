@@ -358,6 +358,242 @@ impl PerformanceOverlay {
     }
 }
 
+const PERFORMANCE_PANE_STRESS_COUNT: usize = 4;
+
+impl Zetta {
+    pub(crate) fn configure_pane_profile_stress(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            return;
+        };
+        let active_pane_id = tab.active_pane;
+        let tab_id = tab.id;
+        let Some(profile) = tab.active_profile().cloned() else {
+            return;
+        };
+        let mut pane_ids = vec![active_pane_id];
+        let mut added_pane_ids = Vec::with_capacity(PERFORMANCE_PANE_STRESS_COUNT - 1);
+        while pane_ids.len() < PERFORMANCE_PANE_STRESS_COUNT {
+            let pane_id = self.next_pane_id;
+            self.next_pane_id += 1;
+            pane_ids.push(pane_id);
+            added_pane_ids.push(pane_id);
+        }
+        self.pane_controls_hidden_for
+            .extend(default_hidden_pane_controls(
+                self.launch_config.pane_controls_hidden_by_default,
+                added_pane_ids.iter().copied(),
+            ));
+
+        let tab = &mut self.tabs[self.active_tab];
+        for (index, pane_id) in added_pane_ids.iter().copied().enumerate() {
+            tab.push_pane(
+                TerminalPane::new(pane_id, profile.clone())
+                    .with_generated_label(format!("Stress {:02}", index + 2)),
+            );
+        }
+        tab.layout = PaneLayout::tiled(&pane_ids).expect("a stress profile has panes");
+        tab.minimized_panes.clear();
+        tab.selected_minimized_pane = None;
+        tab.maximized_pane = None;
+        tab.activate_pane(active_pane_id);
+
+        let working_directory = self.working_directory.clone();
+        for pane_id in added_pane_ids {
+            self.spawn_terminal(
+                tab_id,
+                pane_id,
+                profile.clone(),
+                working_directory.clone(),
+                None,
+                None,
+                window,
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_performance_overlay(
+        &mut self,
+        _: &TogglePerformanceOverlay,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.performance_overlay_generation = self.performance_overlay_generation.wrapping_add(1);
+        if self.performance_overlay.take().is_some() {
+            disable_frame_tracing();
+            cx.notify();
+            return;
+        }
+
+        enable_frame_tracing();
+        let generation = self.performance_overlay_generation;
+        let (pane_count, minimized_pane_count) = self
+            .tabs
+            .get(self.active_tab)
+            .map(|tab| (tab.panes.len(), tab.minimized_panes.len()))
+            .unwrap_or_default();
+        self.performance_overlay = Some(PerformanceOverlay::new(
+            window.window_handle().window_id(),
+            generation,
+            pane_count,
+            minimized_pane_count,
+        ));
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            loop {
+                executor.timer(PERFORMANCE_SAMPLE_INTERVAL).await;
+                let keep_sampling = this
+                    .update(cx, |this, cx| {
+                        let Some(overlay) = this.performance_overlay.as_mut() else {
+                            return false;
+                        };
+                        if overlay.generation != generation {
+                            return false;
+                        }
+                        overlay.sample();
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep_sampling {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub(crate) fn start_performance_report(
+        &mut self,
+        options: PerformanceReportOptions,
+        status: PerformanceReportStatus,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(overlay) = self.performance_overlay.as_mut() else {
+            *status
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Err(
+                "performance overlay was not enabled before report capture".to_owned(),
+            ));
+            quit_zetta_process(cx);
+            return;
+        };
+        overlay.workload = options.workload;
+        overlay.begin_report();
+
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            executor.timer(options.duration).await;
+            let result = this
+                .update(cx, |this, _| {
+                    this.performance_overlay
+                        .as_mut()
+                        .context("performance overlay closed before report completed")?
+                        .write_report(&options.path, options.duration)
+                })
+                .unwrap_or_else(Err)
+                .map_err(|error| format!("{error:#}"));
+            *status
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(result);
+            cx.update(quit_zetta_process);
+        })
+        .detach();
+    }
+}
+
+pub(crate) fn enable_frame_tracing() {
+    if PERFORMANCE_OVERLAY_COUNT.fetch_add(1, Ordering::AcqRel) == 0 {
+        PERFORMANCE_OWNS_FRAME_TRACING
+            .store(profiler::set_frame_trace_enabled(true), Ordering::Release);
+    }
+}
+
+pub(crate) fn disable_frame_tracing() {
+    let previous = PERFORMANCE_OVERLAY_COUNT.fetch_sub(1, Ordering::AcqRel);
+    debug_assert!(previous > 0);
+    if previous == 1 && PERFORMANCE_OWNS_FRAME_TRACING.swap(false, Ordering::AcqRel) {
+        profiler::set_frame_trace_enabled(false);
+    }
+}
+
+impl Zetta {
+    /// The floating frame-timing readout toggled by `TogglePerformanceOverlay`.
+    pub(crate) fn render_performance_overlay(
+        &self,
+        colors: &ThemeColors,
+        window: &Window,
+    ) -> Option<AnyElement> {
+        let overlay = self.performance_overlay.as_ref()?;
+        let metrics = overlay.metrics;
+        let rows = [
+            ("Draw FPS", format!("{:.1}", metrics.draw_fps)),
+            (
+                "Frame avg / p95",
+                format!(
+                    "{:.2} / {:.2} ms",
+                    metrics.average_draw_ms, metrics.p95_draw_ms
+                ),
+            ),
+            (
+                "Invalidation avg",
+                format!("{:.2} ms", metrics.average_latency_ms),
+            ),
+            ("Frames > 8.3 ms", metrics.slow_120_hz.to_string()),
+            ("Frames > 16.7 ms", metrics.slow_60_hz.to_string()),
+            (
+                "Window",
+                if window.is_window_active() {
+                    "Active".to_owned()
+                } else {
+                    "Inactive".to_owned()
+                },
+            ),
+        ];
+        Some(
+            div()
+                .id("performance-overlay")
+                .absolute()
+                .top(px(74.))
+                .right(px(10.))
+                .w(px(232.))
+                .p_2()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .rounded(px(4.))
+                .border_1()
+                .border_color(colors.border)
+                .bg(colors.elevated_surface_background.opacity(0.96))
+                .shadow_sm()
+                .text_sm()
+                .text_color(colors.text)
+                .child(
+                    div()
+                        .pb_1()
+                        .border_b_1()
+                        .border_color(colors.border)
+                        .child("Performance"),
+                )
+                .children(rows.into_iter().map(|(label, value)| {
+                    h_flex()
+                        .w_full()
+                        .justify_between()
+                        .gap_3()
+                        .child(div().text_color(colors.text_muted).child(label))
+                        .child(div().child(value))
+                }))
+                .into_any_element(),
+        )
+    }
+}
+
 fn duration_millis(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
 }

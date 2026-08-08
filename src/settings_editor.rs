@@ -425,6 +425,10 @@ fn strip_default_configuration_values(
     profiles: &[ProfileForm],
     working_directory: &TextField,
 ) {
+    #[allow(
+        unused_mut,
+        reason = "the platform- and feature-gated pushes below are the only mutations"
+    )]
     let mut defaults: Vec<(&str, Value)> = vec![
         ("new_tab_profile", json!(NewTabProfile::default().as_str())),
         (

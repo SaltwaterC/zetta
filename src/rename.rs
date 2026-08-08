@@ -1,0 +1,108 @@
+use super::*;
+
+impl Zetta {
+    pub(crate) fn rename_tab(
+        &mut self,
+        _: &RenameTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.begin_tab_rename(self.active_tab, window, cx);
+    }
+
+    pub(crate) fn begin_tab_rename(
+        &mut self,
+        tab_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let automatic_title = self
+            .tabs
+            .get(tab_index)
+            .and_then(Tab::active_pane)
+            .and_then(|pane| pane.view.as_ref())
+            .map(|view| view.read(cx).tab_content_text(0, cx).to_string())
+            .or_else(|| {
+                self.tabs
+                    .get(tab_index)
+                    .and_then(Tab::active_pane)
+                    .map(|pane| pane.profile.name.clone())
+            })
+            .unwrap_or_else(|| "Terminal".to_owned());
+        self.active_tab = tab_index;
+        self.begin_rename_with_title(tab_index, automatic_title, window, cx);
+    }
+
+    pub(crate) fn begin_rename(
+        &mut self,
+        view: Entity<TerminalView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let automatic_title = view.read(cx).tab_content_text(0, cx).to_string();
+        self.begin_rename_with_title(self.active_tab, automatic_title, window, cx);
+    }
+
+    fn begin_rename_with_title(
+        &mut self,
+        tab_index: usize,
+        automatic_title: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tab) = self.tabs.get_mut(tab_index) {
+            let title = tab.custom_title.clone().unwrap_or(automatic_title);
+            tab.renaming_pane = None;
+            tab.rename_cursor = title.len();
+            tab.rename_buffer = Some(title);
+            tab.rename_select_all = false;
+        }
+        self.rename_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn rename_pane(
+        &mut self,
+        _: &RenamePane,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pane_id) = self.tabs.get(self.active_tab).map(|tab| tab.active_pane) else {
+            return;
+        };
+        self.begin_pane_rename(pane_id, window, cx);
+    }
+
+    pub(crate) fn begin_pane_rename(
+        &mut self,
+        pane_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            return;
+        };
+        let Some(label) = tab.pane(pane_id).map(TerminalPane::label) else {
+            return;
+        };
+        tab.activate_pane(pane_id);
+        tab.renaming_pane = Some(pane_id);
+        tab.rename_cursor = label.len();
+        tab.rename_buffer = Some(label);
+        tab.rename_select_all = true;
+        self.rename_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn is_renaming(&self) -> bool {
+        self.tabs
+            .get(self.active_tab)
+            .is_some_and(|tab| tab.rename_buffer.is_some())
+    }
+
+    pub(crate) fn is_editing_pane_overlay(&self) -> bool {
+        self.tabs
+            .get(self.active_tab)
+            .is_some_and(|tab| tab.overlay_buffer.is_some())
+    }
+}
