@@ -104,6 +104,34 @@ fn hide_window_uses_the_platform_shortcuts() {
 }
 
 #[test]
+fn default_binding_index_keeps_all_shortcuts_for_an_action() {
+    let bindings = default_keybindings(0, &gpui::DummyKeyboardMapper);
+    let indexed = index_default_bindings(&bindings);
+    let terminal_context = Some("Zetta > Terminal".to_owned());
+
+    assert_eq!(
+        indexed.get(&(
+            IncreaseTerminalFontSize.name().to_owned(),
+            terminal_context.clone()
+        )),
+        Some(&vec!["^=".to_owned(), "^+".to_owned()])
+    );
+
+    let window_context = None;
+    if cfg!(target_os = "macos") {
+        assert_eq!(
+            indexed.get(&(HideWindow.name().to_owned(), window_context)),
+            Some(&vec!["⌘H".to_owned(), "⌘⇧H".to_owned()])
+        );
+    } else {
+        assert_eq!(
+            indexed.get(&(HideWindow.name().to_owned(), Some("Zetta".to_owned()))),
+            Some(&vec!["ctrl-shift-h".to_owned()])
+        );
+    }
+}
+
+#[test]
 fn pane_control_actions_have_no_built_in_keyboard_bindings() {
     let bindings = default_keybindings(0, &gpui::DummyKeyboardMapper);
     let pane_control_actions = [TogglePaneControls.name(), ToggleTabPaneControls.name()];

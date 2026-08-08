@@ -1,4 +1,5 @@
 use super::*;
+use crate::settings_ui::keymap::{GLOBAL_CONTEXT_LABEL, keymap_context_label};
 
 /// Owned snapshot of the state needed to render the currently open dropdown's option
 /// popover. The popover is always rendered once, as a sibling of the settings dialog
@@ -96,7 +97,7 @@ pub(crate) fn build_keymap_row_data(
                     .keymap
                     .sections
                     .get(section_index)
-                    .map(|section| section.context.text.clone())
+                    .map(|section| keymap_context_label(&section.context.text).to_owned())
                     .unwrap_or_default();
                 Some(KeymapRowData::AddBinding {
                     section_index,
@@ -324,6 +325,9 @@ impl Zetta {
             SettingsInput::Configuration(ConfigTextField::TftpServerPort) => true,
             _ => false,
         };
+        let keymap_global_placeholder = (field.text.is_empty()
+            && matches!(input, SettingsInput::Keymap(KeymapTextField::Context(_))))
+        .then_some(GLOBAL_CONTEXT_LABEL);
         let cursor = field.cursor.min(field.text.len());
         let (before, after) = field.text.split_at(cursor);
         let input_handle = handle.clone();
@@ -358,7 +362,14 @@ impl Zetta {
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .text_ellipsis()
-                        .child(field.text.clone()),
+                        .when(keymap_global_placeholder.is_some(), |text| {
+                            text.text_color(colors.text_placeholder)
+                        })
+                        .child(
+                            keymap_global_placeholder
+                                .unwrap_or(field.text.as_str())
+                                .to_owned(),
+                        ),
                 )
             })
             .when(focused, |input| {

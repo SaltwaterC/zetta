@@ -39,6 +39,16 @@ pub(crate) fn keybinding_for_capture(
     KeybindingKeystroke::new_with_mapper(keystroke.clone(), false, keyboard_mapper)
 }
 
+pub(crate) const GLOBAL_CONTEXT_LABEL: &str = "Global";
+
+pub(crate) fn keymap_context_label(context: &str) -> &str {
+    if context.is_empty() {
+        GLOBAL_CONTEXT_LABEL
+    } else {
+        context
+    }
+}
+
 /// A binding matches a query if its own keystroke or action name contains it, or if its
 /// section's context does (so searching a context name surfaces all of that context's bindings).
 pub(crate) fn keymap_search_matches(
@@ -57,7 +67,9 @@ pub(crate) fn keymap_search_matches(
     let mut filtered_sections = Vec::new();
     let mut filtered_bindings = HashMap::new();
     for (section_index, section) in sections.iter().enumerate() {
-        let context_matches = section.context.text.to_lowercase().contains(query);
+        let context_matches = keymap_context_label(&section.context.text)
+            .to_lowercase()
+            .contains(query);
         let matching_bindings: Vec<usize> = section
             .bindings
             .iter()

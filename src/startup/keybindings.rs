@@ -618,6 +618,23 @@ fn default_keybindings(
     bindings
 }
 
+type DefaultBindingKey = (String, Option<String>);
+
+fn index_default_bindings(bindings: &[KeyBinding]) -> HashMap<DefaultBindingKey, Vec<String>> {
+    let mut indexed: HashMap<DefaultBindingKey, Vec<String>> = HashMap::new();
+    for binding in bindings {
+        let action_name = binding.action().name().to_string();
+        let context = binding.predicate().map(|predicate| predicate.to_string());
+        if let Some(keystroke) = binding.keystrokes().first() {
+            indexed
+                .entry((action_name, context))
+                .or_default()
+                .push(keystroke.to_string());
+        }
+    }
+    indexed
+}
+
 pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut App) {
     cx.clear_key_bindings();
     match KeymapFile::load_asset_allow_partial_failure(settings::DEFAULT_KEYMAP_PATH, cx) {
@@ -625,22 +642,11 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
         Err(error) => eprintln!("Could not load the default terminal keymap: {error:#}"),
     }
 
-    // Build default bindings and collect a map of (action_name, context) -> keystroke
+    // Build default bindings and collect a map of (action_name, context) -> keystrokes
     // for rebinding detection
-    let mut default_bindings_map: std::collections::HashMap<(String, Option<String>), String> =
-        std::collections::HashMap::new();
     let keyboard_mapper = cx.keyboard_mapper().clone();
     let bindings = default_keybindings(profile_count, keyboard_mapper.as_ref());
-
-    // Collect default bindings map for rebinding detection
-    for binding in &bindings {
-        let action_name = binding.action().name().to_string();
-        let context = binding.predicate().map(|p| p.to_string());
-        // Get the first keystroke as a string
-        if let Some(keystroke) = binding.keystrokes().first() {
-            default_bindings_map.insert((action_name, context), keystroke.to_string());
-        }
-    }
+    let default_bindings_map = index_default_bindings(&bindings);
 
     cx.bind_keys(bindings);
 
@@ -671,20 +677,23 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
             .and_then(|s| KeyBindingContextPredicate::parse(s).ok().map(Rc::new));
         for (_keystrokes, action) in section.bindings() {
             if let Ok(Some((action_name, _))) = KeymapFile::parse_action(action)
-                && let Some(default_keystroke) =
+                && let Some(default_keystrokes) =
                     default_bindings_map.get(&(action_name.clone(), context_str.clone()))
             {
-                // Create unbind key binding for the default keystroke
-                let unbind_action = Unbind(action_name.into());
-                if let Ok(key_binding) = KeyBinding::load(
-                    default_keystroke,
-                    Box::new(unbind_action),
-                    context_predicate.clone(),
-                    false,
-                    None,
-                    cx.keyboard_mapper().as_ref(),
-                ) {
-                    unbind_keys.push(key_binding);
+                for default_keystroke in default_keystrokes {
+                    // Create unbind key bindings for every default keystroke
+                    // belonging to this action and context.
+                    let unbind_action = Unbind(action_name.clone().into());
+                    if let Ok(key_binding) = KeyBinding::load(
+                        default_keystroke,
+                        Box::new(unbind_action),
+                        context_predicate.clone(),
+                        false,
+                        None,
+                        cx.keyboard_mapper().as_ref(),
+                    ) {
+                        unbind_keys.push(key_binding);
+                    }
                 }
             }
         }

@@ -6,31 +6,64 @@
       "ctrl-shift-t": "zetta::NewTab",
       "ctrl-shift-n": "zetta::NewWindow",
       "ctrl-shift-w": "zetta::CloseTab",
+      "ctrl-shift-q": "zetta::CloseWindow",
+      "ctrl-shift-x": "zetta::CloseAllWindows",
       "ctrl-shift-d": "zetta::DetachTab",
       "ctrl-shift-a": "zetta::ReconnectSession",
       "ctrl-shift-b": "zetta::ToggleAutoBackgroundTab",
+      "alt-shift-x": "zetta::ClosePane",
       "ctrl-shift-o": "zetta::SplitHorizontalDown",
       "ctrl-shift-e": "zetta::SplitVerticalRight",
+      "alt-shift-l": "zetta::RotatePaneLayout",
+      "alt-shift-k": "zetta::RotatePaneLayoutCounterClockwise",
       "ctrl-shift-j": "zetta::TogglePaneResizeMode",
       "alt-shift-m": "zetta::TogglePaneMoveMode",
+      "alt-shift-a": "terminal_view::SelectAll",
       "ctrl-shift-backspace": "terminal_view::ClearClipboard",
       "shift-escape": "zetta::ToggleMaximizePane",
       "ctrl-shift-i": "zetta::ToggleBroadcastInput",
+      "ctrl-shift-m": "zetta::ToggleMultiCommand",
       "ctrl-tab": "zetta::NextTab",
       "ctrl-shift-tab": "zetta::PreviousTab",
       "ctrl-pageup": "zetta::NextTab",
       "ctrl-pagedown": "zetta::PreviousTab",
+      "ctrl-shift-l": "terminal::Clear",
       "ctrl-v": "terminal::Paste",
+      "cmd-l": "terminal::Clear",
+      "cmd-v": "terminal::Paste",
+      "alt-shift-f": "terminal_view::SearchScrollback",
       "alt-shift-v": "terminal_view::EditScrollback",
       "ctrl-shift-f": "zetta::SearchTabScrollback",
+      "ctrl-alt-v": "terminal::PasteTrimmed",
+      "ctrl-cmd-v": "terminal::PasteTrimmed",
+      "alt-shift-s": "zetta::SavePaneOutput",
       "ctrl-shift-p": "zetta::ToggleCommandPalette",
       "ctrl-,": "zetta::ToggleSettings",
       "ctrl-shift-s": "zetta::ToggleSerialConsole",
       "ctrl-shift-r": "zetta::RenameTab",
+      "ctrl-shift-y": "zetta::ChangeTabIcon",
+      "alt-shift-t": "zetta::ChangePaneTheme",
+      "alt-shift-r": "zetta::RenamePane",
       "ctrl-=": "zetta::IncreaseTerminalFontSize",
+      "ctrl-+": "zetta::IncreaseTerminalFontSize",
       "ctrl--": "zetta::DecreaseTerminalFontSize",
       "ctrl-0": "zetta::ResetTerminalFontSize",
+      "ctrl-alt-r": "zetta::ReloadConfiguration",
       "ctrl-shift-f12": "zetta::TogglePerformanceOverlay",
+      "alt-left": "zetta::FocusPaneLeft",
+      "alt-right": "zetta::FocusPaneRight",
+      "alt-up": "zetta::FocusPaneUp",
+      "alt-down": "zetta::FocusPaneDown",
+      "alt-shift-down": "zetta::MinimizePane",
+      "alt-shift-up": "zetta::RestoreMinimizedPane",
+      "alt-shift-left": "zetta::SelectPreviousMinimizedPane",
+      "alt-shift-right": "zetta::SelectNextMinimizedPane",
+      "alt-shift-o": ["zetta::ApplyPaneSplitTemplate", { "name": "three-right" }],
+      "alt-shift-e": ["zetta::ApplyPaneSplitTemplate", { "name": "quarters" }],
+      "alt-shift-=": "zetta::IncreasePaneFontSize",
+      "alt-shift-+": "zetta::IncreasePaneFontSize",
+      "alt-shift--": "zetta::DecreasePaneFontSize",
+      "alt-shift-0": "zetta::ResetPaneFontSize",
       "Ctrl+Shift+1": ["zetta::OpenProfile", { "slot": 1 }],
       "Ctrl+Shift+2": ["zetta::OpenProfile", { "slot": 2 }],
       "Ctrl+Shift+3": ["zetta::OpenProfile", { "slot": 3 }],
@@ -41,6 +74,27 @@
       "Ctrl+Shift+8": ["zetta::OpenProfile", { "slot": 8 }],
       "Ctrl+Shift+9": ["zetta::OpenProfile", { "slot": 9 }],
       "Ctrl+Shift+0": ["zetta::OpenProfile", { "slot": 10 }]
+    }
+  },
+  {
+    "context": "Zetta",
+    "bindings": {
+      "alt-space": "zetta::OpenApplicationMenu",
+      "ctrl-shift-h": "zetta::HideWindow"
+    }
+  },
+  {
+    "context": "",
+    "bindings": {
+      "cmd-t": "zetta::NewTab",
+      "cmd-n": "zetta::NewWindow",
+      "cmd-,": "zetta::ToggleSettings",
+      "cmd-w": "zetta::CloseTab",
+      "cmd-q": "zetta::CloseWindow",
+      "cmd-x": "zetta::CloseAllWindows",
+      "cmd-h": "zetta::HideWindow",
+      "cmd-shift-h": "zetta::HideWindow",
+      "ctrl-shift-h": "zetta::MinimizeWindow"
     }
   },
   {
@@ -64,7 +118,8 @@
   {
     "context": "Zetta > Terminal && selection",
     "bindings": {
-      "ctrl-c": "terminal_view::CopyAndClearSelection"
+      "ctrl-c": "terminal_view::CopyAndClearSelection",
+      "cmd-c": "terminal_view::CopyAndClearSelection"
     }
   },
   {
@@ -76,6 +131,23 @@
       "shift-f3": "terminal_view::SearchPreviousMatch",
       "escape": "terminal_view::DismissSearch",
       "ctrl-a": "terminal_view::SelectAllSearchText"
+    }
+  },
+  {
+    "context": "Zetta > menu",
+    "bindings": {
+      "left": "zetta::ActivateApplicationMenuLeft",
+      "right": "zetta::ActivateApplicationMenuRight",
+      "ctrl-tab": "zetta::NextTab",
+      "ctrl-shift-tab": "zetta::PreviousTab",
+      "ctrl-pageup": "zetta::NextTab",
+      "ctrl-pagedown": "zetta::PreviousTab"
+    }
+  },
+  {
+    "context": "Terminal",
+    "bindings": {
+      "ctrl-shift-w": "zetta::CloseTab"
     }
   }
 ]

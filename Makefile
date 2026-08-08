@@ -119,13 +119,13 @@ LINUX_USER_CLI_PATH := $(LINUX_USER_BIN_DIR)/zetta
 	uninstall-binary uninstall-assets uninstall-user-path refresh-desktop-caches clean
 
 test:
-	$(CARGO) test --locked --no-default-features --features "$(BUILD_FEATURES)"
+	$(CARGO) test --locked --quiet --no-default-features --features "$(BUILD_FEATURES)" -- --format=terse
 
 fmt:
 	$(CARGO) fmt --all --check
 
 lint:
-	$(CARGO) clippy --locked --all-targets --no-default-features --features "$(BUILD_FEATURES)"
+	$(CARGO) clippy --locked --all-targets --no-default-features --features "$(BUILD_FEATURES)" -- -D warnings
 
 ifeq ($(OS),Windows_NT)
 build:

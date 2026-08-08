@@ -21,8 +21,15 @@ fn keymap_round_trip_preserves_parameterized_actions_and_section_metadata() {
         .iter()
         .position(|section| section.context.text == "Zetta")
         .unwrap();
+    let profile_binding_index = form.sections[section_index]
+        .bindings
+        .iter()
+        .position(|binding| binding.keystroke.text == "ctrl-shift-1")
+        .unwrap();
     assert_eq!(
-        form.sections[section_index].bindings[0].keystroke.text,
+        form.sections[section_index].bindings[profile_binding_index]
+            .keystroke
+            .text,
         "ctrl-shift-1"
     );
     let output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
@@ -35,7 +42,9 @@ fn keymap_round_trip_preserves_parameterized_actions_and_section_metadata() {
     assert_eq!(output_section["use_key_equivalents"], true);
     assert_eq!(output_section["bindings"]["ctrl-shift-1"][1]["slot"], 1);
 
-    form.sections[section_index].bindings[0].keystroke.text = "ctrl-shift-3".to_owned();
+    form.sections[section_index].bindings[profile_binding_index]
+        .keystroke
+        .text = "ctrl-shift-3".to_owned();
     let alias_output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
     let alias_section = alias_output
         .as_array()
@@ -43,7 +52,9 @@ fn keymap_round_trip_preserves_parameterized_actions_and_section_metadata() {
         .iter()
         .find(|s| s["context"] == "Zetta")
         .unwrap();
-    form.sections[section_index].bindings[0].keystroke.text = "ctrl-shift-0".to_owned();
+    form.sections[section_index].bindings[profile_binding_index]
+        .keystroke
+        .text = "ctrl-shift-0".to_owned();
     let tenth_alias_output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
     let tenth_section = tenth_alias_output
         .as_array()
@@ -369,14 +380,14 @@ fn keymap_single_rebind_is_preserved_others_dropped() {
         .iter_mut()
         .find(|binding| binding.keystroke.text == "ctrl-shift-t")
         .unwrap();
-    binding.keystroke.text = "ctrl-shift-x".to_owned();
+    binding.keystroke.text = "ctrl-shift-z".to_owned();
 
     let output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
     let sections = output.as_array().unwrap();
     assert_eq!(sections.len(), 1);
     let bindings = sections[0]["bindings"].as_object().unwrap();
     assert_eq!(bindings.len(), 1);
-    assert_eq!(bindings["ctrl-shift-x"], "zetta::NewTab");
+    assert_eq!(bindings["ctrl-shift-z"], "zetta::NewTab");
 }
 
 #[test]
@@ -390,6 +401,117 @@ fn keymap_template_matches_hardcoded_default_constant() {
     assert_eq!(
         terminal["bindings"][crate::startup::RENAME_TAB_KEYBINDING],
         "zetta::RenameTab"
+    );
+}
+
+#[test]
+fn keymap_template_exposes_all_builtin_shortcuts() {
+    let template = bundled_keymap_template().unwrap();
+    let assert_binding = |context: &str, keystroke: &str, action: &str| {
+        let section = template
+            .iter()
+            .find(|section| section["context"] == context)
+            .unwrap_or_else(|| panic!("missing keymap context {context:?}"));
+        let binding = section["bindings"]
+            .as_object()
+            .and_then(|bindings| bindings.get(keystroke))
+            .unwrap_or_else(|| panic!("missing keymap binding {keystroke:?} in {context:?}"));
+        assert_eq!(
+            binding, action,
+            "wrong action for {context:?} {keystroke:?}"
+        );
+    };
+
+    for (keystroke, action) in [
+        ("ctrl-shift-q", "zetta::CloseWindow"),
+        ("ctrl-shift-x", "zetta::CloseAllWindows"),
+        ("alt-shift-x", "zetta::ClosePane"),
+        ("alt-shift-l", "zetta::RotatePaneLayout"),
+        ("alt-shift-k", "zetta::RotatePaneLayoutCounterClockwise"),
+        ("alt-shift-a", "terminal_view::SelectAll"),
+        ("ctrl-shift-m", "zetta::ToggleMultiCommand"),
+        ("ctrl-shift-l", "terminal::Clear"),
+        ("alt-shift-f", "terminal_view::SearchScrollback"),
+        ("ctrl-alt-v", "terminal::PasteTrimmed"),
+        ("ctrl-cmd-v", "terminal::PasteTrimmed"),
+        ("alt-shift-s", "zetta::SavePaneOutput"),
+        ("ctrl-shift-y", "zetta::ChangeTabIcon"),
+        ("alt-shift-t", "zetta::ChangePaneTheme"),
+        ("alt-shift-r", "zetta::RenamePane"),
+        ("ctrl-+", "zetta::IncreaseTerminalFontSize"),
+        ("ctrl-alt-r", "zetta::ReloadConfiguration"),
+        ("alt-left", "zetta::FocusPaneLeft"),
+        ("alt-right", "zetta::FocusPaneRight"),
+        ("alt-up", "zetta::FocusPaneUp"),
+        ("alt-down", "zetta::FocusPaneDown"),
+        ("alt-shift-down", "zetta::MinimizePane"),
+        ("alt-shift-up", "zetta::RestoreMinimizedPane"),
+        ("alt-shift-left", "zetta::SelectPreviousMinimizedPane"),
+        ("alt-shift-right", "zetta::SelectNextMinimizedPane"),
+        ("alt-shift-=", "zetta::IncreasePaneFontSize"),
+        ("alt-shift-+", "zetta::IncreasePaneFontSize"),
+        ("alt-shift--", "zetta::DecreasePaneFontSize"),
+        ("alt-shift-0", "zetta::ResetPaneFontSize"),
+    ] {
+        assert_binding("Zetta > Terminal", keystroke, action);
+    }
+
+    assert_binding("Zetta", "alt-space", "zetta::OpenApplicationMenu");
+    assert_binding("Zetta", "ctrl-shift-h", "zetta::HideWindow");
+
+    for (keystroke, action) in [
+        ("cmd-h", "zetta::HideWindow"),
+        ("cmd-shift-h", "zetta::HideWindow"),
+        ("ctrl-shift-h", "zetta::MinimizeWindow"),
+    ] {
+        assert_binding("", keystroke, action);
+    }
+
+    for (keystroke, action) in [
+        ("left", "zetta::ResizePaneLeft"),
+        ("right", "zetta::ResizePaneRight"),
+        ("up", "zetta::ResizePaneUp"),
+        ("down", "zetta::ResizePaneDown"),
+    ] {
+        assert_binding("Zetta > PaneResize > Terminal", keystroke, action);
+    }
+    for (keystroke, action) in [
+        ("left", "zetta::MovePaneLeft"),
+        ("right", "zetta::MovePaneRight"),
+        ("up", "zetta::MovePaneUp"),
+        ("down", "zetta::MovePaneDown"),
+    ] {
+        assert_binding("Zetta > PaneMove > Terminal", keystroke, action);
+    }
+
+    assert_binding(
+        "Zetta > Terminal && selection",
+        "cmd-c",
+        "terminal_view::CopyAndClearSelection",
+    );
+    for (keystroke, action) in [
+        ("left", "zetta::ActivateApplicationMenuLeft"),
+        ("right", "zetta::ActivateApplicationMenuRight"),
+        ("ctrl-tab", "zetta::NextTab"),
+        ("ctrl-shift-tab", "zetta::PreviousTab"),
+        ("ctrl-pageup", "zetta::NextTab"),
+        ("ctrl-pagedown", "zetta::PreviousTab"),
+    ] {
+        assert_binding("Zetta > menu", keystroke, action);
+    }
+    assert_binding("Terminal", "ctrl-shift-w", "zetta::CloseTab");
+
+    let terminal = template
+        .iter()
+        .find(|section| section["context"] == "Zetta > Terminal")
+        .expect("bundled template must define the terminal context");
+    assert_eq!(
+        terminal["bindings"]["alt-shift-o"],
+        json!(["zetta::ApplyPaneSplitTemplate", { "name": "three-right" }])
+    );
+    assert_eq!(
+        terminal["bindings"]["alt-shift-e"],
+        json!(["zetta::ApplyPaneSplitTemplate", { "name": "quarters" }])
     );
 }
 

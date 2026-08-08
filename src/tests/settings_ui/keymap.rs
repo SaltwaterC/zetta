@@ -29,6 +29,12 @@ fn keymap_capture_ignores_modifier_only_events() {
 }
 
 #[test]
+fn empty_keymap_context_uses_global_display_label() {
+    assert_eq!(keymap_context_label(""), "Global");
+    assert_eq!(keymap_context_label("Zetta > Terminal"), "Zetta > Terminal");
+}
+
+#[test]
 fn captured_keymap_shortcuts_use_keymap_text_syntax() {
     let keystroke = gpui::Keystroke::parse("shift-escape").unwrap();
     assert_eq!(keystroke.unparse(), "shift-escape");
