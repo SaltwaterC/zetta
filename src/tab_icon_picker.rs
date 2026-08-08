@@ -3,14 +3,24 @@ use std::sync::{Arc, OnceLock};
 use strum::IntoEnumIterator as _;
 
 use crate::TextField;
-use gpui::ScrollHandle;
+use gpui::{ScrollStrategy, SharedString, UniformListScrollHandle};
 use ui::IconName;
 
 use super::*;
 
-/// An icon paired with its precomputed, lowercased search label, so
-/// filtering never has to re-run `format!("{icon:?}")` per keystroke.
-pub(crate) type IconEntry = (IconName, String);
+/// An icon paired with cached display and search labels, so filtering and
+/// rendering never have to re-run `format!("{icon:?}")` on the UI thread.
+pub(crate) struct IconEntry {
+    pub(crate) icon: IconName,
+    pub(crate) label: SharedString,
+    pub(crate) search_label: String,
+}
+
+pub(crate) const TAB_ICON_COLUMNS: usize = 7;
+
+pub(crate) const fn tab_icon_row(index: usize) -> usize {
+    index / TAB_ICON_COLUMNS
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TabIconPickerTarget {
@@ -22,8 +32,9 @@ pub(crate) struct TabIconPicker {
     pub(crate) target: TabIconPickerTarget,
     pub(crate) query: TextField,
     pub(crate) selected: usize,
-    pub(crate) scroll: ScrollHandle,
-    options_cache: Vec<Option<IconName>>,
+    pub(crate) scroll: UniformListScrollHandle,
+    entries: Arc<[IconEntry]>,
+    options_cache: Arc<[Option<usize>]>,
     options_query_cache: String,
 }
 
@@ -31,19 +42,20 @@ impl TabIconPicker {
     pub(crate) fn new(
         target: TabIconPickerTarget,
         current_icon: Option<IconName>,
-        entries: &[IconEntry],
+        entries: Arc<[IconEntry]>,
     ) -> Self {
-        let options = filter_icon_entries(entries, "");
+        let options = filter_icon_entries(&entries, "");
         let selected = options
             .iter()
-            .position(|icon| *icon == current_icon)
+            .position(|option| icon_for_option(&entries, *option) == current_icon)
             .unwrap_or_default();
         Self {
             target,
             query: TextField::default(),
             selected,
-            scroll: ScrollHandle::new(),
-            options_cache: options,
+            scroll: UniformListScrollHandle::new(),
+            entries,
+            options_cache: options.into(),
             options_query_cache: String::new(),
         }
     }
@@ -52,12 +64,20 @@ impl TabIconPicker {
     /// by keyboard handling and rendering so both see identical results and
     /// neither redoes the filter when the query hasn't changed since the
     /// last call.
-    pub(crate) fn options(&mut self, entries: &[IconEntry]) -> &[Option<IconName>] {
+    pub(crate) fn options(&mut self) -> Arc<[Option<usize>]> {
         if self.options_query_cache != self.query.text {
-            self.options_cache = filter_icon_entries(entries, &self.query.text);
+            self.options_cache = filter_icon_entries(&self.entries, &self.query.text).into();
             self.options_query_cache = self.query.text.clone();
         }
-        &self.options_cache
+        self.options_cache.clone()
+    }
+
+    pub(crate) fn icon_for_option(&self, option: Option<usize>) -> Option<IconName> {
+        icon_for_option(&self.entries, option)
+    }
+
+    pub(crate) fn entries(&self) -> Arc<[IconEntry]> {
+        self.entries.clone()
     }
 }
 
@@ -68,7 +88,14 @@ pub(crate) fn tab_icon_label(icon: IconName) -> String {
 pub(crate) fn build_icon_entries(icons: &[IconName]) -> Vec<IconEntry> {
     icons
         .iter()
-        .map(|icon| (*icon, tab_icon_label(*icon).to_lowercase()))
+        .map(|icon| {
+            let label = tab_icon_label(*icon);
+            IconEntry {
+                icon: *icon,
+                label: label.clone().into(),
+                search_label: label.to_lowercase(),
+            }
+        })
         .collect()
 }
 
@@ -81,7 +108,11 @@ pub(crate) fn fallback_icon_entries() -> Arc<[IconEntry]> {
         .clone()
 }
 
-fn filter_icon_entries(entries: &[IconEntry], query: &str) -> Vec<Option<IconName>> {
+fn icon_for_option(entries: &[IconEntry], option: Option<usize>) -> Option<IconName> {
+    option.and_then(|index| entries.get(index).map(|entry| entry.icon))
+}
+
+fn filter_icon_entries(entries: &[IconEntry], query: &str) -> Vec<Option<usize>> {
     let query = query.to_lowercase();
     let mut options = Vec::new();
     if query.is_empty() || "none".contains(&query) || "no icon".contains(&query) {
@@ -90,8 +121,9 @@ fn filter_icon_entries(entries: &[IconEntry], query: &str) -> Vec<Option<IconNam
     options.extend(
         entries
             .iter()
-            .filter(|(_, label)| label.contains(&query))
-            .map(|(icon, _)| Some(*icon)),
+            .enumerate()
+            .filter(|(_, entry)| entry.search_label.contains(&query))
+            .map(|(index, _)| Some(index)),
     );
     options
 }
@@ -101,9 +133,10 @@ fn filter_icon_entries(entries: &[IconEntry], query: &str) -> Vec<Option<IconNam
 /// `TabIconPicker`/`Zetta` instance.
 #[cfg(test)]
 pub(crate) fn matching_tab_icons(query: &str) -> Vec<IconName> {
-    filter_icon_entries(&fallback_icon_entries(), query)
+    let entries = fallback_icon_entries();
+    filter_icon_entries(&entries, query)
         .into_iter()
-        .flatten()
+        .filter_map(|option| icon_for_option(&entries, option))
         .collect()
 }
 
@@ -112,7 +145,11 @@ pub(crate) fn matching_tab_icons(query: &str) -> Vec<IconName> {
 /// `TabIconPicker`/`Zetta` instance.
 #[cfg(test)]
 pub(crate) fn matching_tab_icon_options(query: &str) -> Vec<Option<IconName>> {
-    filter_icon_entries(&fallback_icon_entries(), query)
+    let entries = fallback_icon_entries();
+    filter_icon_entries(&entries, query)
+        .into_iter()
+        .map(|option| icon_for_option(&entries, option))
+        .collect()
 }
 
 pub(crate) fn tab_icon_completion_names() -> impl Iterator<Item = &'static str> {
@@ -177,10 +214,12 @@ impl Zetta {
         self.tab_icon_picker = Some(TabIconPicker::new(
             TabIconPickerTarget::Tab(tab_index),
             current_icon,
-            &entries,
+            entries,
         ));
         if let Some(picker) = self.tab_icon_picker.as_ref() {
-            picker.scroll.scroll_to_item(picker.selected);
+            picker
+                .scroll
+                .scroll_to_item(tab_icon_row(picker.selected), ScrollStrategy::Nearest);
         }
         self.tab_icon_picker_focus.focus(window, cx);
         cx.notify();
@@ -206,10 +245,12 @@ impl Zetta {
         self.tab_icon_picker = Some(TabIconPicker::new(
             TabIconPickerTarget::Default,
             current_icon,
-            &entries,
+            entries,
         ));
         if let Some(picker) = self.tab_icon_picker.as_ref() {
-            picker.scroll.scroll_to_item(picker.selected);
+            picker
+                .scroll
+                .scroll_to_item(tab_icon_row(picker.selected), ScrollStrategy::Nearest);
         }
         self.tab_icon_picker_focus.focus(window, cx);
         cx.notify();
@@ -266,7 +307,6 @@ impl Zetta {
             self.dismiss_tab_icon_picker(window, cx);
             return;
         }
-        let entries = self.tab_icon_entries();
         let activate = {
             let mut activate = None;
             let mut query_changed = false;
@@ -274,16 +314,17 @@ impl Zetta {
             let Some(picker) = self.tab_icon_picker.as_mut() else {
                 return;
             };
-            let options = picker.options(&entries).to_vec();
+            let options = picker.options();
             match event.keystroke.key.as_str() {
                 "left" if !command => picker.query.move_left(),
                 "right" if !command => picker.query.move_right(),
                 "up" if !command => {
-                    picker.selected = picker.selected.saturating_sub(7);
+                    picker.selected = picker.selected.saturating_sub(TAB_ICON_COLUMNS);
                     selection_changed = true;
                 }
                 "down" if !command => {
-                    picker.selected = (picker.selected + 7).min(options.len().saturating_sub(1));
+                    picker.selected =
+                        (picker.selected + TAB_ICON_COLUMNS).min(options.len().saturating_sub(1));
                     selection_changed = true;
                 }
                 "tab" if !command => {
@@ -296,7 +337,10 @@ impl Zetta {
                     selection_changed = true;
                 }
                 "enter" if !command => {
-                    activate = options.get(picker.selected).copied();
+                    activate = options
+                        .get(picker.selected)
+                        .copied()
+                        .map(|option| picker.icon_for_option(option));
                 }
                 "backspace" => {
                     picker.query.backspace();
@@ -331,7 +375,9 @@ impl Zetta {
                 selection_changed = true;
             }
             if selection_changed {
-                picker.scroll.scroll_to_item(picker.selected);
+                picker
+                    .scroll
+                    .scroll_to_item(tab_icon_row(picker.selected), ScrollStrategy::Nearest);
             }
             activate
         };

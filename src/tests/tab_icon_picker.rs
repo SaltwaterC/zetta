@@ -23,6 +23,34 @@ fn icon_options_include_none_and_filter_it_by_name() {
 }
 
 #[test]
+fn virtualized_grid_uses_row_indices_at_column_boundaries() {
+    assert_eq!(tab_icon_row(0), 0);
+    assert_eq!(tab_icon_row(TAB_ICON_COLUMNS - 1), 0);
+    assert_eq!(tab_icon_row(TAB_ICON_COLUMNS), 1);
+    assert_eq!(tab_icon_row(TAB_ICON_COLUMNS * 3 + 2), 3);
+}
+
+#[test]
+fn picker_filters_cached_entries_without_rebuilding_labels() {
+    let entries = build_icon_entries(&[IconName::Terminal, IconName::Folder]).into();
+    let mut picker =
+        TabIconPicker::new(TabIconPickerTarget::Tab(0), Some(IconName::Folder), entries);
+
+    assert_eq!(picker.selected, 2);
+    assert_eq!(picker.entries[0].label.as_ref(), "Terminal");
+    assert_eq!(picker.entries[0].search_label, "terminal");
+
+    let options = picker.options();
+    assert_eq!(options.as_ref(), &[None, Some(0), Some(1)]);
+    assert_eq!(picker.icon_for_option(options[0]), None);
+    assert_eq!(picker.icon_for_option(options[2]), Some(IconName::Folder));
+
+    picker.query.text = "folder".to_owned();
+    let filtered = picker.options();
+    assert_eq!(filtered.as_ref(), &[Some(1)]);
+}
+
+#[test]
 fn cli_icon_names_are_snake_case_and_include_none() {
     let names = tab_icon_completion_names().collect::<Vec<_>>();
     assert_eq!(names.first(), Some(&"none"));
