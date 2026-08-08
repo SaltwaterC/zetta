@@ -90,6 +90,7 @@ pub(crate) enum SettingsControl {
     InstallTheme(Arc<str>),
     RemoveTheme(String),
     RemoveBinding(usize, usize),
+    UnbindBinding(usize, usize),
     AddBinding(usize),
     AddKeymapSection,
     CloseFontPicker,
@@ -151,6 +152,33 @@ pub(crate) struct SettingsEditor {
     // Controls cache for keyboard navigation
     pub(crate) controls_cache: Option<Vec<SettingsControl>>,
     pub(crate) controls_generation: u64,
+}
+
+impl SettingsEditor {
+    /// Check if a binding in the given section matches a default binding.
+    /// Returns true if the binding (keystroke + action) exists in the default template.
+    pub(crate) fn is_default_binding(&self, section_index: usize, binding_index: usize) -> bool {
+        let Some(section) = self.keymap.sections.get(section_index) else {
+            return false;
+        };
+        let Some(binding) = section.bindings.get(binding_index) else {
+            return false;
+        };
+
+        let context = &section.context.text;
+        let keystroke = keymap_keystroke_storage(&binding.keystroke.text);
+        let action = &binding.action;
+
+        // Load default bindings for this context
+        if let Ok(defaults_by_context) = settings_editor::default_bindings_by_context()
+            && let Some(default_bindings) = defaults_by_context.get(context)
+        {
+            return default_bindings
+                .get(&keystroke)
+                .is_some_and(|default_action| default_action == action);
+        }
+        false
+    }
 }
 
 pub(crate) fn previous_char_boundary(text: &str, cursor: usize) -> usize {

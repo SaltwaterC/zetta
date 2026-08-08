@@ -114,6 +114,7 @@ pub(crate) fn keymap_filtered_indices(
 pub(crate) enum KeymapRow {
     SectionHeader(usize),
     Binding(usize, usize),
+    UnboundDefault(usize, usize),
     AddBinding(usize),
     AddSection,
 }
@@ -129,6 +130,12 @@ pub(crate) fn keymap_rows(editor: &SettingsEditor) -> Vec<KeymapRow> {
                     .iter()
                     .map(|&binding_index| KeymapRow::Binding(section_index, binding_index)),
             );
+        }
+        // Add unbound default bindings for this section
+        if let Some(section) = editor.keymap.sections.get(section_index) {
+            for (unbound_index, _) in section.unbound_defaults.iter().enumerate() {
+                rows.push(KeymapRow::UnboundDefault(section_index, unbound_index));
+            }
         }
         rows.push(KeymapRow::AddBinding(section_index));
     }

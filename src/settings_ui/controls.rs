@@ -233,7 +233,8 @@ impl Zetta {
                 | SettingsControl::Dropdown(SettingsDropdown::BindingAction(section, binding))
                 | SettingsControl::Dropdown(SettingsDropdown::BindingTemplate(section, binding))
                 | SettingsControl::Dropdown(SettingsDropdown::BindingProfile(section, binding))
-                | SettingsControl::RemoveBinding(section, binding) => {
+                | SettingsControl::RemoveBinding(section, binding)
+                | SettingsControl::UnbindBinding(section, binding) => {
                     Some(KeymapRow::Binding(*section, *binding))
                 }
                 SettingsControl::AddBinding(section) => Some(KeymapRow::AddBinding(*section)),
@@ -654,6 +655,22 @@ impl Zetta {
                     && binding < section.bindings.len()
                 {
                     section.bindings.remove(binding);
+                    editor.keymap_dirty = true;
+                    editor.focused_control = None;
+                    cx.notify();
+                }
+            }
+            SettingsControl::UnbindBinding(section, binding) => {
+                if let Some(editor) = self.settings_editor.as_mut()
+                    && let Some(section) = editor.keymap.sections.get_mut(section)
+                    && binding < section.bindings.len()
+                {
+                    let binding = section.bindings.remove(binding);
+                    // Add to unbind map
+                    section.unbind.insert(
+                        keymap_keystroke_storage(&binding.keystroke.text),
+                        binding.action_name(),
+                    );
                     editor.keymap_dirty = true;
                     editor.focused_control = None;
                     cx.notify();

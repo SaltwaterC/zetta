@@ -1,6 +1,7 @@
 use std::{collections::HashMap, fs, io, path::Path};
 
 use anyhow::{Context as _, Result};
+use indexmap::IndexMap;
 use serde_json::{Map, Value, json};
 use ui::IconName;
 
@@ -540,6 +541,8 @@ pub struct KeymapSectionForm {
     extra: Map<String, Value>,
     pub context: TextField,
     pub bindings: Vec<BindingForm>,
+    pub unbind: IndexMap<String, String>,
+    pub unbound_defaults: Vec<BindingForm>,
 }
 
 impl KeymapSectionForm {
@@ -548,6 +551,8 @@ impl KeymapSectionForm {
             extra: Map::new(),
             context: TextField::new(context),
             bindings: Vec::new(),
+            unbind: IndexMap::new(),
+            unbound_defaults: Vec::new(),
         }
     }
 }
@@ -587,10 +592,48 @@ impl KeymapForm {
                         action,
                     })
                     .collect();
+                let unbind: IndexMap<String, String> = extra
+                    .remove("unbind")
+                    .and_then(|value| value.as_object().cloned())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|(keystroke, action)| {
+                        action
+                            .as_str()
+                            .map(|a| (keymap_keystroke_storage(&keystroke), a.to_owned()))
+                    })
+                    .collect();
+                // Build unbound_defaults from default template for this context
+                let context_str = context.text.clone();
+                let defaults_by_context = default_bindings_by_context().ok();
+                let unbound_defaults = if let Some(defaults_by_context) =
+                    defaults_by_context.as_ref()
+                    && let Some(default_bindings) = defaults_by_context.get(&context_str)
+                {
+                    default_bindings
+                        .iter()
+                        .filter_map(|(storage_keystroke, action)| {
+                            if unbind.contains_key(storage_keystroke) {
+                                // Find the display form of the keystroke
+                                let display_keystroke = keymap_keystroke_display(storage_keystroke);
+                                Some(BindingForm {
+                                    keystroke: TextField::new(display_keystroke),
+                                    action: action.clone(),
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 Ok(KeymapSectionForm {
                     extra,
                     context,
                     bindings,
+                    unbind,
+                    unbound_defaults,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -633,6 +676,20 @@ impl KeymapForm {
                             .collect(),
                     ),
                 );
+                if !section.unbind.is_empty() {
+                    value.insert(
+                        "unbind".into(),
+                        Value::Object(
+                            section
+                                .unbind
+                                .iter()
+                                .map(|(keystroke, action)| {
+                                    (keymap_keystroke_storage(keystroke), json!(action))
+                                })
+                                .collect(),
+                        ),
+                    );
+                }
                 Value::Object(value)
             })
             .collect();
@@ -686,11 +743,31 @@ fn merge_keymap_with_defaults(user_value: Value, default_template: &[Value]) -> 
                 merged_section["bindings"] = Value::Object(bindings);
             }
 
+            // Merge unbind: user unbind entries are added to defaults
+            if let Some(user_unbind) = user_section.get("unbind").and_then(|v| v.as_object()) {
+                let mut unbind = merged_section
+                    .get("unbind")
+                    .and_then(|v| v.as_object().cloned())
+                    .unwrap_or_default();
+                unbind.extend(user_unbind.clone());
+                merged_section["unbind"] = Value::Object(unbind);
+
+                // Remove default bindings that are explicitly unbound
+                if let Some(Value::Object(bindings)) = merged_section.get_mut("bindings") {
+                    for (unbind_keystroke, _) in user_unbind {
+                        let normalized = keymap_keystroke_storage(unbind_keystroke);
+                        bindings.retain(|keystroke, _| {
+                            keymap_keystroke_storage(keystroke) != normalized
+                        });
+                    }
+                }
+            }
+
             // Preserve other user section properties (e.g., use_key_equivalents)
             if let Some(user_obj) = user_section.as_object() {
                 let mut merged_obj = merged_section.as_object().cloned().unwrap_or_default();
                 for (key, value) in user_obj {
-                    if key != "context" && key != "bindings" {
+                    if key != "context" && key != "bindings" && key != "unbind" {
                         merged_obj.insert(key.clone(), value.clone());
                     }
                 }
@@ -713,9 +790,28 @@ fn merge_keymap_with_defaults(user_value: Value, default_template: &[Value]) -> 
     Ok(Value::Array(merged))
 }
 
-fn bundled_keymap_template() -> Result<Vec<Value>> {
+pub fn bundled_keymap_template() -> Result<Vec<Value>> {
     serde_json::from_str(include_str!("../keymap.example.json"))
         .context("parsing bundled keymap template")
+}
+
+/// Build a lookup map of default bindings by context for efficient checking.
+/// Returns a map of context -> (keystroke -> action) for default bindings.
+pub fn default_bindings_by_context() -> Result<HashMap<String, IndexMap<String, Value>>> {
+    let template = bundled_keymap_template()?;
+    let mut map = HashMap::new();
+    for section in template {
+        if let Some(context) = section.get("context").and_then(|v| v.as_str())
+            && let Some(bindings) = section.get("bindings").and_then(|v| v.as_object())
+        {
+            let mut section_bindings = IndexMap::new();
+            for (keystroke, action) in bindings {
+                section_bindings.insert(keymap_keystroke_storage(keystroke), action.clone());
+            }
+            map.insert(context.to_owned(), section_bindings);
+        }
+    }
+    Ok(map)
 }
 
 /// A keymap section's `bindings` map paired with everything else in the

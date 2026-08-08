@@ -38,6 +38,13 @@ pub(crate) enum KeymapRowData {
         action_name: String,
         template_name: Option<String>,
         profile_name: Option<String>,
+        is_default: bool,
+    },
+    UnboundDefault {
+        section_index: usize,
+        binding_index: usize,
+        keystroke: TextField,
+        action_name: String,
     },
     AddBinding {
         section_index: usize,
@@ -73,6 +80,7 @@ pub(crate) fn build_keymap_row_data(
                         .cloned()
                         .unwrap_or_else(|| format!("Profile {slot}"))
                 });
+                let is_default = editor.is_default_binding(section_index, binding_index);
                 Some(KeymapRowData::Binding {
                     section_index,
                     binding_index,
@@ -80,6 +88,7 @@ pub(crate) fn build_keymap_row_data(
                     action_name: binding.action_name(),
                     template_name: binding.action_parameter("name"),
                     profile_name,
+                    is_default,
                 })
             }
             KeymapRow::AddBinding(section_index) => {
@@ -92,6 +101,20 @@ pub(crate) fn build_keymap_row_data(
                 Some(KeymapRowData::AddBinding {
                     section_index,
                     context,
+                })
+            }
+            KeymapRow::UnboundDefault(section_index, binding_index) => {
+                let binding = editor
+                    .keymap
+                    .sections
+                    .get(section_index)?
+                    .unbound_defaults
+                    .get(binding_index)?;
+                Some(KeymapRowData::UnboundDefault {
+                    section_index,
+                    binding_index,
+                    keystroke: binding.keystroke.clone(),
+                    action_name: binding.action_name(),
                 })
             }
             KeymapRow::AddSection => Some(KeymapRowData::AddSection),
@@ -407,6 +430,7 @@ impl Zetta {
                 action_name,
                 template_name,
                 profile_name,
+                is_default,
             } => {
                 let section_index = *section_index;
                 let binding_index = *binding_index;
@@ -464,7 +488,6 @@ impl Zetta {
                         ctx.handle.clone(),
                     )
                 });
-                let remove_handle = ctx.handle.clone();
                 let capture_handle = ctx.handle.clone();
                 h_flex()
                     .w_full()
@@ -523,21 +546,30 @@ impl Zetta {
                     .when_some(profile, |row, profile| {
                         row.child(div().w(px(180.)).flex_none().child(profile))
                     })
-                    .child(
+                    .child({
+                        let is_default = *is_default;
+                        let (icon, tooltip_text, control_variant) = if is_default {
+                            (
+                                IconName::Slash,
+                                "Unbind (disable built-in binding)",
+                                SettingsControl::UnbindBinding(section_index, binding_index),
+                            )
+                        } else {
+                            (
+                                IconName::Trash,
+                                "Remove binding",
+                                SettingsControl::RemoveBinding(section_index, binding_index),
+                            )
+                        };
+                        let remove_handle = ctx.handle.clone();
                         IconButton::new(
-                            format!("remove-settings-binding-{section_index}-{binding_index}"),
-                            IconName::Trash,
+                            format!("unbind-settings-binding-{section_index}-{binding_index}"),
+                            icon,
                         )
                         .icon_size(IconSize::Small)
-                        .toggle_state(
-                            ctx.focused_control
-                                == Some(SettingsControl::RemoveBinding(
-                                    section_index,
-                                    binding_index,
-                                )),
-                        )
+                        .toggle_state(ctx.focused_control == Some(control_variant))
                         .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
-                        .tooltip(Tooltip::text("Remove binding"))
+                        .tooltip(Tooltip::text(tooltip_text))
                         .on_click(move |_, _, cx| {
                             remove_handle
                                 .update(cx, |this, cx| {
@@ -546,7 +578,109 @@ impl Zetta {
                                             editor.keymap.sections.get_mut(section_index)
                                         && binding_index < section.bindings.len()
                                     {
-                                        section.bindings.remove(binding_index);
+                                        let binding = section.bindings.remove(binding_index);
+                                        if is_default {
+                                            // Add to unbind map
+                                            let storage_key =
+                                                keymap_keystroke_storage(&binding.keystroke.text);
+                                            section
+                                                .unbind
+                                                .insert(storage_key.clone(), binding.action_name());
+                                            // Add to unbound_defaults for immediate UI feedback
+                                            section.unbound_defaults.push(BindingForm {
+                                                keystroke: binding.keystroke,
+                                                action: binding.action,
+                                            });
+                                        }
+                                        editor.keymap_dirty = true;
+                                        invalidate_keymap_cache(editor);
+                                        invalidate_controls_cache(editor);
+                                        cx.notify();
+                                    }
+                                })
+                                .ok();
+                        })
+                    })
+                    .into_any_element()
+            }
+            KeymapRowData::UnboundDefault {
+                section_index,
+                binding_index,
+                keystroke,
+                action_name,
+            } => {
+                let section_index = *section_index;
+                let binding_index = *binding_index;
+                let colors = ctx.colors.clone();
+                let restore_handle = ctx.handle.clone();
+                h_flex()
+                    .w_full()
+                    .h(px(KEYMAP_ROW_HEIGHT))
+                    .pl_6()
+                    .pr_2()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(colors.border_variant)
+                    .child(
+                        h_flex()
+                            .w(px(330.))
+                            .gap_1()
+                            .flex_none()
+                            .child(Self::text_input_widget(
+                                format!("settings-unbound-{section_index}-{binding_index}-key"),
+                                keystroke.clone(),
+                                SettingsInput::Keymap(KeymapTextField::Keystroke(
+                                    section_index,
+                                    binding_index,
+                                )),
+                                ctx.focused_input,
+                                colors.clone(),
+                                ctx.handle.clone(),
+                            ))
+                            .child(
+                                Button::new(
+                                    format!("record-unbound-{section_index}-{binding_index}"),
+                                    "Record",
+                                )
+                                .style(ButtonStyle::Outlined)
+                                .size(ButtonSize::Compact)
+                                .disabled(true)
+                                .on_click(move |_, _, _| {}),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .opacity(0.5)
+                            .child(action_name.clone()),
+                    )
+                    .child(
+                        IconButton::new(
+                            format!("restore-unbound-{section_index}-{binding_index}"),
+                            IconName::RotateCw,
+                        )
+                        .icon_size(IconSize::Small)
+                        .tooltip(Tooltip::text("Restore binding"))
+                        .on_click(move |_, _, cx| {
+                            restore_handle
+                                .update(cx, |this, cx| {
+                                    if let Some(editor) = this.settings_editor.as_mut()
+                                        && let Some(section) =
+                                            editor.keymap.sections.get_mut(section_index)
+                                        && binding_index < section.unbound_defaults.len()
+                                    {
+                                        let binding =
+                                            section.unbound_defaults.remove(binding_index);
+                                        // Remove from unbind map
+                                        section.unbind.shift_remove(&keymap_keystroke_storage(
+                                            &binding.keystroke.text,
+                                        ));
+                                        // Add back to bindings
+                                        section.bindings.push(BindingForm {
+                                            keystroke: binding.keystroke,
+                                            action: binding.action,
+                                        });
                                         editor.keymap_dirty = true;
                                         invalidate_keymap_cache(editor);
                                         invalidate_controls_cache(editor);

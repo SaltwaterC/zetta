@@ -539,3 +539,124 @@ fn keymap_rebinding_action_removes_old_default_binding() {
     assert!(terminal_section.bindings.len() > 1);
     fs::remove_file(root).unwrap();
 }
+
+#[test]
+fn keymap_explicit_unbind_is_loaded_and_serialized() {
+    let root = std::env::temp_dir().join(format!(
+        "zetta-keymap-explicit-unbind-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    // User explicitly unbinds a default binding (e.g., unbind ctrl-shift-w which is CloseTab by default)
+    fs::write(
+        &root,
+        r#"[{"context":"Zetta > Terminal","unbind":{"ctrl-shift-w":"zetta::CloseTab"}}]"#,
+    )
+    .unwrap();
+    let form = KeymapForm::load(&root).unwrap();
+    let terminal_section = form
+        .sections
+        .iter()
+        .find(|s| s.context.text == "Zetta > Terminal")
+        .expect("should have Zetta > Terminal section");
+    // Should have the unbind entry
+    assert!(terminal_section.unbind.contains_key("ctrl-shift-w"));
+    assert_eq!(
+        terminal_section.unbind.get("ctrl-shift-w"),
+        Some(&"zetta::CloseTab".to_owned())
+    );
+    // Should NOT have the default binding for CloseTab in bindings list
+    let close_tab_binding = terminal_section
+        .bindings
+        .iter()
+        .find(|b| b.action_name() == "zetta::CloseTab");
+    assert!(
+        close_tab_binding.is_none(),
+        "explicit unbind should remove default binding from bindings list"
+    );
+    // Serialize back and verify unbind is preserved
+    let output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
+    let output_section = output
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["context"] == "Zetta > Terminal")
+        .unwrap();
+    assert!(output_section["unbind"].get("ctrl-shift-w").is_some());
+    assert_eq!(output_section["unbind"]["ctrl-shift-w"], "zetta::CloseTab");
+    fs::remove_file(root).unwrap();
+}
+
+#[test]
+fn keymap_unbind_and_binding_both_preserved() {
+    let root = std::env::temp_dir().join(format!(
+        "zetta-keymap-unbind-and-binding-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    // User unbinds one default and adds a custom binding
+    fs::write(
+        &root,
+        r#"[{"context":"Zetta > Terminal","unbind":{"ctrl-shift-w":"zetta::CloseTab"},"bindings":{"ctrl-shift-x":"zetta::NewTab"}}]"#,
+    )
+    .unwrap();
+    let form = KeymapForm::load(&root).unwrap();
+    let terminal_section = form
+        .sections
+        .iter()
+        .find(|s| s.context.text == "Zetta > Terminal")
+        .expect("should have Zetta > Terminal section");
+    // Should have the unbind entry
+    assert!(terminal_section.unbind.contains_key("ctrl-shift-w"));
+    // Should have the custom binding
+    assert!(
+        terminal_section
+            .bindings
+            .iter()
+            .any(|b| b.keystroke.text == "ctrl-shift-x")
+    );
+    // Serialize back and verify both are preserved
+    let output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
+    let output_section = output
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["context"] == "Zetta > Terminal")
+        .unwrap();
+    assert!(output_section["unbind"].get("ctrl-shift-w").is_some());
+    assert!(output_section["bindings"].get("ctrl-shift-x").is_some());
+    fs::remove_file(root).unwrap();
+}
+
+#[test]
+fn merge_keymap_with_defaults_merges_unbind() {
+    let user_value = json!([{
+        "context": "Zetta > Terminal",
+        "unbind": {"ctrl-shift-w": "zetta::CloseTab"}
+    }]);
+    let default_template = bundled_keymap_template().unwrap();
+    let merged = merge_keymap_with_defaults(user_value, &default_template).unwrap();
+    let sections = merged.as_array().unwrap();
+    let terminal_section = sections
+        .iter()
+        .find(|s| s["context"] == "Zetta > Terminal")
+        .unwrap();
+    // Should have unbind entry from user
+    assert!(terminal_section["unbind"].get("ctrl-shift-w").is_some());
+    assert_eq!(
+        terminal_section["unbind"]["ctrl-shift-w"],
+        "zetta::CloseTab"
+    );
+    // Should still have default bindings (except the unbound one)
+    let close_tab_binding = terminal_section["bindings"].get("ctrl-shift-w");
+    assert!(
+        close_tab_binding.is_none(),
+        "unbind should remove default binding"
+    );
+}
