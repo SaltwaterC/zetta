@@ -14,6 +14,14 @@ the built-in vi editor, `ztftp`, a shortcut for the built-in TFTP client,
 shortcuts for the clipboard; each has the same completion as its corresponding
 `zetta` command.
 
+It also provides `zwt`, a wrapper for the Git worktree workflow. `zwt new NAME`
+captures `zetta wt new --path-only NAME` and changes into the created worktree;
+`zwt done` similarly changes into the integrated source worktree. Other `zwt`
+operations pass through to `zetta wt`. Arguments are forwarded as literal shell
+arguments, so nested names and paths containing spaces are supported. The
+completion scripts offer `wt`, `new`, `done`, `status`, `rerere`, and the long
+`--path-only` flag (the short `-P` remains accepted by the CLI).
+
 The root `--split`/`-s` launch option runs `zetta splits` at completion time,
 so it completes every currently configured layout name without embedding a
 hardcoded list in the integration script. Run `zetta splits` directly to

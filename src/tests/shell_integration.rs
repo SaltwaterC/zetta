@@ -37,6 +37,12 @@ fn supported_shells_generate_completion_and_tftp_shortcut() {
         assert!(script.contains("zetta panetheme --list"));
         assert!(script.contains("zetta splits"));
         assert!(script.contains("replace-pane"));
+        assert!(script.contains("zwt"));
+        assert!(script.contains("wt"));
+        for operation in ["new", "done", "status", "rerere"] {
+            assert!(script.contains(operation));
+        }
+        assert!(script.contains("--path-only"));
     }
 }
 
@@ -166,6 +172,130 @@ fn bash_color_completion_offers_named_presets_for_long_and_short_flags() {
             );
         }
     }
+}
+
+#[test]
+fn bash_worktree_completion_offers_operations_and_long_path_only() {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+
+    if !Command::new("bash")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return;
+    }
+
+    let script = ShellIntegration::Bash.script(&profiles());
+    let driver = format!(
+        "{script}\nCOMP_WORDS=(zetta wt '')\nCOMP_CWORD=2\n_zetta_complete\nprintf 'operation:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta wt new --)\nCOMP_CWORD=3\n_zetta_complete\nprintf 'option:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zwt '')\nCOMP_CWORD=1\n_zetta_complete_zwt\nprintf 'wrapper:%s\\n' \"${{COMPREPLY[@]}}\"\n"
+    );
+    let mut child = Command::new("bash")
+        .args(["--noprofile", "--norc"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(driver.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "Bash completion script failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let completions = String::from_utf8_lossy(&output.stdout);
+    for prefix in ["operation:", "wrapper:"] {
+        for operation in ["new", "done", "status", "rerere"] {
+            assert!(
+                completions
+                    .lines()
+                    .any(|line| line == format!("{prefix}{operation}")),
+                "expected {operation} after {prefix}: {completions}"
+            );
+        }
+    }
+    assert!(completions.lines().any(|line| line == "option:--path-only"));
+    assert!(!completions.lines().any(|line| line == "option:-P"));
+}
+
+#[cfg(unix)]
+#[test]
+fn bash_zwt_changes_directory_for_nested_paths_with_spaces() {
+    use std::{
+        io::Write as _,
+        os::unix::fs::PermissionsExt as _,
+        process::{Command, Stdio},
+    };
+
+    let temporary = tempfile::tempdir().unwrap();
+    let start = temporary.path().join("start directory");
+    let new_path = temporary.path().join("new worktree/feature api");
+    let done_path = temporary.path().join("source worktree");
+    std::fs::create_dir_all(&start).unwrap();
+    std::fs::create_dir_all(&new_path).unwrap();
+    std::fs::create_dir_all(&done_path).unwrap();
+
+    let fake_zetta = temporary.path().join("zetta");
+    std::fs::write(
+        &fake_zetta,
+        "#!/bin/sh\ncase \"$2\" in\n  new) printf '%s\\n' \"$ZETTA_TEST_NEW\" ;;\n  done) printf '%s\\n' \"$ZETTA_TEST_DONE\" ;;\n  *) exit 0 ;;\nesac\n",
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&fake_zetta).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fake_zetta, permissions).unwrap();
+
+    let mut path = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = std::env::split_paths(&path).collect::<Vec<_>>();
+    paths.insert(0, temporary.path().to_owned());
+    path = std::env::join_paths(paths).unwrap();
+
+    let script = ShellIntegration::Bash.script(&profiles());
+    let driver = format!(
+        "{script}\ncd '{}'\nzwt new --path-only 'feature/api'\nprintf 'new:%s\\n' \"$PWD\"\nzwt done --path-only\nprintf 'done:%s\\n' \"$PWD\"\n",
+        start.display()
+    );
+    let mut child = Command::new("bash")
+        .args(["--noprofile", "--norc"])
+        .current_dir(&start)
+        .env("PATH", path)
+        .env("ZETTA_TEST_NEW", &new_path)
+        .env("ZETTA_TEST_DONE", &done_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(driver.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "Bash zwt wrapper failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output
+            .lines()
+            .any(|line| line == format!("new:{}", new_path.display()))
+    );
+    assert!(
+        output
+            .lines()
+            .any(|line| line == format!("done:{}", done_path.display()))
+    );
 }
 
 #[test]
@@ -1056,7 +1186,7 @@ fn generated_scripts_only_offer_long_form_flags() {
         let script = shell.script(&profiles);
         match shell {
             ShellIntegration::Bash => assert!(script.contains(
-                "terminal-size sessions profile edit vi init serial http tftp notify copy paste splits tabicon panetheme overlay --help --version --config --keymap --profile --split --replace-pane --theme'"
+                "terminal-size sessions profile edit vi init serial http tftp notify copy paste splits tabicon panetheme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme'"
             )),
             ShellIntegration::Fish => {
                 assert!(script.contains("-l profile -r"));
@@ -1066,9 +1196,12 @@ fn generated_scripts_only_offer_long_form_flags() {
                     "-s c -r -n '__zetta_has_profile_subcommand; and __zetta_short_option -c'"
                 ));
             }
-            ShellIntegration::PowerShell => assert!(script.contains(
-                "'--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme'"
-            )),
+            ShellIntegration::PowerShell => {
+                assert!(script.contains(
+                    "'--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme'"
+                ));
+                assert!(script.contains("'overlay', 'wt', '--help'"));
+            }
             ShellIntegration::Zsh => assert!(script
                 .contains("_zetta_options --help --version --config --keymap --profile")),
         }

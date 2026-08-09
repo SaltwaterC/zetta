@@ -116,6 +116,10 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
     );
     help
     .replace(
+        "       zetta sessions [--json]",
+        "       zetta sessions [--json]\n       zetta wt <COMMAND>",
+    )
+    .replace(
         "  -s, --split NAME                    Apply a configured pane split template; run `zetta splits` to list available names\n  -t, --theme NAME                    Non-persistently override --profile's theme for this launch",
         "  -s, --split NAME                    Apply a configured pane split template; run `zetta splits` to list available names\n  -r, --replace-pane                  Replace the active pane in a running process; requires --split or --profile\n  -t, --theme NAME                    Non-persistently override --profile's theme for this launch",
     )
@@ -125,7 +129,7 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
     )
     .replace(
         "sessions                            List detached background sessions",
-        "sessions                            List or reconnect detached background sessions\n  splits                              List configured pane split templates\n  tabicon                             Set the active tab icon\n  panetheme                           Non-persistently change the active pane's theme\n  overlay                             Non-persistently show text over the active pane\n  edit                                Edit files with $EDITOR, falling back to Zetta vi\n  vi                                  Edit files with Zetta's built-in vi",
+        "sessions                            List or reconnect detached background sessions\n  wt                                  Create and integrate Git worktrees\n  splits                              List configured pane split templates\n  tabicon                             Set the active tab icon\n  panetheme                           Non-persistently change the active pane's theme\n  overlay                             Non-persistently show text over the active pane\n  edit                                Edit files with $EDITOR, falling back to Zetta vi\n  vi                                  Edit files with Zetta's built-in vi",
     )
 }
 

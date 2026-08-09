@@ -17,6 +17,37 @@ function zvi --wraps 'zetta vi' --description 'Zetta vi editor'
 end
 complete -c zvi -F
 
+function zwt --description 'Zetta Git worktree workflow'
+    switch $argv[1]
+        case new
+            set -l operation_args $argv[2..-1]
+            set -l path
+            if contains -- --path-only $operation_args; or contains -- -P $operation_args
+                set path (command zetta wt new $operation_args)
+            else
+                set path (command zetta wt new --path-only $operation_args)
+            end
+            or return
+            test (count $path) -eq 1
+            or return 1
+            builtin cd -- $path[1]
+        case done
+            set -l operation_args $argv[2..-1]
+            set -l path
+            if contains -- --path-only $operation_args; or contains -- -P $operation_args
+                set path (command zetta wt done $operation_args)
+            else
+                set path (command zetta wt done --path-only $operation_args)
+            end
+            or return
+            test (count $path) -eq 1
+            or return 1
+            builtin cd -- $path[1]
+        case '*'
+            command zetta wt $argv
+    end
+end
+
 function ztftp --wraps 'zetta tftp' --description 'Zetta TFTP client'
     zetta tftp $argv
 end
@@ -345,6 +376,13 @@ function __zetta_long_options
                 --color 'Set the text color (name or hex)' \
                 --reset 'Clear the overlay' \
                 --help 'Print help'
+        case wt
+            printf '%s\t%s\n' \
+                new 'Create a worktree' \
+                done 'Integrate and remove the current worktree' \
+                status 'Show worktree state' \
+                rerere 'Enable Git rerere' \
+                --help 'Print help'
         case terminal-size
             printf '%s\t%s\n' \
                 --json 'Print machine-readable JSON' \
@@ -429,6 +467,7 @@ complete -c zetta -n '__zetta_at_root' -a tabicon -d 'Set the active tab icon'
 complete -c zetta -n '__zetta_at_root' -a panetheme -d "Non-persistently change the active pane's theme"
 complete -c zetta -n '__zetta_at_root' -a splits -d 'List configured pane split templates'
 complete -c zetta -n '__zetta_at_root' -a overlay -d 'Non-persistently show text over the active pane'
+complete -c zetta -n '__zetta_at_root' -a wt -d 'Create and integrate Git worktrees'
 complete -c zetta -n '__zetta_use_subcommand' -l help -d 'Print help'
 complete -c zetta -n '__zetta_use_subcommand' -l version -d 'Print version'
 complete -c zetta -n '__zetta_use_subcommand' -l config -r -d 'Use a configuration file'
@@ -590,6 +629,14 @@ complete -c zetta -s c -r -a 'ZETTA_OVERLAY_COLORS' -n '__fish_seen_subcommand_f
 complete -c zetta -n '__fish_seen_subcommand_from overlay' -l reset -d 'Clear the overlay'
 complete -c zetta -n '__fish_seen_subcommand_from overlay' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from overlay' -a '(__zetta_long_options overlay)'
+complete -c zetta -n '__zetta_at_subcommand wt' -a 'new done status rerere'
+complete -c zetta -n '__fish_seen_subcommand_from wt' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from wt' -a '(__zetta_long_options wt)'
+complete -c zetta -n '__fish_seen_subcommand_from wt; and __fish_seen_subcommand_from new done' -l path-only -d 'Print only the resulting path'
+complete -c zwt -f
+complete -c zwt -n '__fish_use_subcommand' -a 'new done status rerere'
+complete -c zwt -n '__fish_seen_subcommand_from new done' -l path-only -d 'Print only the resulting path'
+complete -c zwt -n '__fish_seen_subcommand_from new done status rerere' -l help -d 'Print help'
 complete -c ztftp -f -a 'get put'
 complete -c ztftp -l port -r -d 'Server port'
 complete -c ztftp -l help -d 'Print help'

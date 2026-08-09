@@ -16,6 +16,7 @@ use crate::process_control::{
     request_existing_process_pane_theme_list, request_existing_process_replace_pane,
     request_existing_process_tab_icon,
 };
+use crate::worktree_cli;
 
 use gpui::{KeyBindingContextPredicate, Unbind};
 #[cfg(target_os = "macos")]
@@ -679,6 +680,9 @@ pub(crate) fn run() -> Result<()> {
     } = &args.mode
     {
         return run_output_benchmark(*size_mib, *output_type);
+    }
+    if let StartupMode::Worktree(command) = args.mode {
+        return worktree_cli::run(&command);
     }
     if let StartupMode::Profile(command) = args.mode {
         let result = crate::profile_cli::run(command, args.config_path.as_deref())?;

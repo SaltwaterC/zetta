@@ -4,12 +4,14 @@ use super::cli_help::{
 };
 use super::*;
 use crate::profile_cli::{ProfileCommand, parse_profile_args};
+use crate::worktree_cli::{WorktreeCommand, parse_worktree_args};
 
 const DEFAULT_PERFORMANCE_REPORT_DURATION: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StartupMode {
     Application,
+    Worktree(WorktreeCommand),
     #[cfg(cli_services)]
     CliService(CliServiceCommand),
     Profile(ProfileCommand),
@@ -79,6 +81,24 @@ pub(crate) struct StartupArgs {
 
 pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Result<StartupArgs> {
     let arguments = args.into_iter().collect::<Vec<_>>();
+    if arguments.first().is_some_and(|argument| argument == "wt") {
+        return Ok(StartupArgs {
+            config_path: None,
+            keymap_path: None,
+            profile: None,
+            split: None,
+            replace_pane: false,
+            theme_override: None,
+            mode: StartupMode::Worktree(parse_worktree_args(&arguments[1..])?),
+            profile_report: None,
+            profile_duration: None,
+            profile_pane_stress: false,
+            profile_background_stress: false,
+            profile_sparse_updates: false,
+            profile_external_terminal: false,
+            tftp_command: None,
+        });
+    }
     if let Some(profile_index) = profile_subcommand_index(&arguments) {
         let config_path = parse_profile_root_config(&arguments[..profile_index])?;
         let parsed = parse_profile_args(&arguments[profile_index + 1..], config_path)?;

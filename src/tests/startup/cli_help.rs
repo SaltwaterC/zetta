@@ -1,6 +1,10 @@
 #[cfg(feature = "tftp-client")]
 use super::super::arg_parsing::parse_args_from;
 use super::*;
+use crate::worktree_cli::{
+    worktree_done_help, worktree_help, worktree_new_help, worktree_rerere_help,
+    worktree_status_help,
+};
 
 #[test]
 fn version_flags_and_output_are_defined() {
@@ -46,6 +50,10 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     );
     assert!(help.contains("run `zetta splits` to list available names"));
     assert!(help.contains("zetta terminal-size [--json | --resize"));
+    assert!(help.contains("zetta wt <COMMAND>"));
+    assert!(
+        help.contains("wt                                  Create and integrate Git worktrees")
+    );
     assert!(help.contains("zetta tabicon [OPTIONS] ICON"));
     assert!(help.contains("tabicon                             Set the active tab icon"));
     assert!(help.contains("zetta overlay [OPTIONS] TEXT"));
@@ -134,6 +142,26 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
         assert!(!help.contains("Desktop notifications"));
         assert!(!help.contains("zetta notify"));
     }
+}
+
+#[test]
+fn worktree_help_lists_every_operation_and_path_only() {
+    for help in [
+        worktree_help(),
+        worktree_new_help(),
+        worktree_done_help(),
+        worktree_status_help(),
+        worktree_rerere_help(),
+    ] {
+        assert!(help.contains("wt.root"));
+        assert!(help.contains("zetta wt rerere"));
+    }
+    assert!(worktree_help().contains("zetta wt new [OPTIONS] NAME"));
+    assert!(worktree_help().contains("zetta wt done [OPTIONS]"));
+    assert!(worktree_help().contains("zetta wt status"));
+    assert!(worktree_help().contains("zetta wt rerere"));
+    assert!(worktree_new_help().contains("-P, --path-only"));
+    assert!(worktree_done_help().contains("-P, --path-only"));
 }
 
 #[test]

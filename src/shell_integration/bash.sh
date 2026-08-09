@@ -10,6 +10,50 @@ fi
 
 zvi() { command zetta vi "$@"; }
 
+zwt() {
+    case $1 in
+        new)
+            local path path_only_arg
+            local -a operation_args=("${@:2}")
+            for path_only_arg in "${operation_args[@]}"; do
+                if [[ $path_only_arg == --path-only || $path_only_arg == -P ]]; then
+                    path_only_arg=1
+                    break
+                fi
+                path_only_arg=''
+            done
+            if [[ $path_only_arg == 1 ]]; then
+                path=$(command zetta wt new "${operation_args[@]}") || return
+            else
+                path=$(command zetta wt new --path-only "${operation_args[@]}") || return
+            fi
+            [[ -n $path ]] || return 1
+            builtin cd -- "$path"
+            ;;
+        done)
+            local path path_only_arg
+            local -a operation_args=("${@:2}")
+            for path_only_arg in "${operation_args[@]}"; do
+                if [[ $path_only_arg == --path-only || $path_only_arg == -P ]]; then
+                    path_only_arg=1
+                    break
+                fi
+                path_only_arg=''
+            done
+            if [[ $path_only_arg == 1 ]]; then
+                path=$(command zetta wt done "${operation_args[@]}") || return
+            else
+                path=$(command zetta wt done --path-only "${operation_args[@]}") || return
+            fi
+            [[ -n $path ]] || return 1
+            builtin cd -- "$path"
+            ;;
+        *)
+            command zetta wt "$@"
+            ;;
+    esac
+}
+
 _zetta_option_used() {
     local option=$1 index
     for (( index = 1; index < COMP_CWORD; index++ )); do
@@ -320,7 +364,7 @@ _zetta_complete() {
     esac
 
     if (( COMP_CWORD == 1 )); then
-        _zetta_compgen 'benchmark benchmark-output terminal-size sessions profile edit vi init serial http tftp notify copy paste splits tabicon panetheme overlay --help --version --config --keymap --profile --split --replace-pane --theme'
+        _zetta_compgen 'benchmark benchmark-output terminal-size sessions profile edit vi init serial http tftp notify copy paste splits tabicon panetheme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme'
         return
     fi
 
@@ -476,7 +520,26 @@ _zetta_complete() {
         overlay)
             _zetta_compgen '--text --size --opacity --color --reset --help'
             ;;
+        wt)
+            if (( COMP_CWORD == 2 )); then
+                _zetta_compgen 'new done status rerere --help'
+            elif [[ ${COMP_WORDS[2]} == new || ${COMP_WORDS[2]} == done ]]; then
+                _zetta_compgen '--path-only --help'
+            else
+                _zetta_compgen '--help'
+            fi
+            ;;
     esac
+}
+
+_zetta_complete_zwt() {
+    local saved_words=("${COMP_WORDS[@]}")
+    local saved_cword=$COMP_CWORD
+    COMP_WORDS=(zetta wt "${COMP_WORDS[@]:1}")
+    (( COMP_CWORD++ ))
+    _zetta_complete
+    COMP_WORDS=("${saved_words[@]}")
+    COMP_CWORD=$saved_cword
 }
 
 _zetta_tftp_complete() {
@@ -610,6 +673,7 @@ zntfy() { zetta notify "$@"; }
 zcopy() { zetta copy "$@"; }
 zpaste() { zetta paste "$@"; }
 complete -F _zetta_complete zetta
+complete -F _zetta_complete_zwt zwt
 complete -F _zetta_complete zvi
 complete -F _ztftp_complete ztftp
 complete -F _zntfy_complete zntfy

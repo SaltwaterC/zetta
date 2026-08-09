@@ -26,6 +26,8 @@ for active development.
   themes
 - Serial consoles plus built-in HTTP and TFTP tools, usable from panes or the
   CLI
+- Git worktree workflow with `zetta wt new`, `zetta wt done`, status, and
+  conflict-resolution helpers; shell integration adds the `zwt` directory wrapper
 - Cross-platform desktop notifications from the CLI
 - A small syntax-highlighted built-in [vi editor](https://github.com/SaltwaterC/busy-v),
   available as `zetta vi`, unconditionally as `zvi`, and conditionally as `vi`
@@ -80,6 +82,13 @@ commands documented in the [configuration guide](docs/configuration.md).
 Changes are validated before being saved and request a best-effort live reload
 for a Zetta process using the same configuration file.
 
+Use `zetta wt new NAME`, `zetta wt done`, `zetta wt status`, and
+`zetta wt rerere` for the Git worktree workflow. The direct commands never
+change the caller's directory; generated shell integration provides `zwt new`
+and `zwt done` wrappers that enter the resulting worktree, including paths with
+spaces and nested names. See [Using Zetta](docs/usage.md#git-worktrees) for
+configuration and safety details.
+
 ## Multi-command prompt
 
 Press `Ctrl-Shift-M` and enter a command such as:
@@ -119,14 +128,14 @@ built, how it should behave, and when the result was good enough.
 
 - [Installation](docs/installation.md): build requirements and platform
   integration
-- [Using Zetta](docs/usage.md): tabs, panes, search, shortcuts, and pane
-  templates
+- [Using Zetta](docs/usage.md): tabs, panes, search, shortcuts, pane templates,
+  and Git worktrees
 - [Configuration](docs/configuration.md): settings, profiles, keymaps, fonts,
   and themes
 - [Background sessions](docs/background-sessions.md): detach, protect, inspect,
   and reconnect sessions
 - [Shell integration](docs/shell-integration.md): command completion and the
-  `zvi`/`ztftp`/`zntfy`/`vi` shortcuts
+  `zvi`/`zwt`/`ztftp`/`zntfy`/`vi` shortcuts
 - [Serial and network tools](docs/tools.md): serial consoles, HTTP and TFTP
   servers, the TFTP client, and desktop notifications
 - [Performance profiling](docs/performance.md): overlays, automated reports,

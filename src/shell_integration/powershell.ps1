@@ -10,6 +10,34 @@ if ($zettaViMissing) {
 
 function zvi { & zetta vi @args }
 
+function zwt {
+    switch ($args[0]) {
+        'new' {
+            $operationArgs = @($args | Select-Object -Skip 1)
+            if ($operationArgs -contains '--path-only' -or $operationArgs -contains '-P') {
+                $path = @(& zetta wt new @operationArgs)
+            } else {
+                $path = @(& zetta wt new --path-only @operationArgs)
+            }
+            if ($LASTEXITCODE -ne 0 -or $path.Count -ne 1) { return }
+            Set-Location -LiteralPath $path[0]
+        }
+        'done' {
+            $operationArgs = @($args | Select-Object -Skip 1)
+            if ($operationArgs -contains '--path-only' -or $operationArgs -contains '-P') {
+                $path = @(& zetta wt done @operationArgs)
+            } else {
+                $path = @(& zetta wt done --path-only @operationArgs)
+            }
+            if ($LASTEXITCODE -ne 0 -or $path.Count -ne 1) { return }
+            Set-Location -LiteralPath $path[0]
+        }
+        default {
+            & zetta wt @args
+        }
+    }
+}
+
 function ztftp { & zetta tftp @args }
 function zntfy { & zetta notify @args }
 function zcopy { & zetta copy @args }
@@ -87,8 +115,17 @@ $zettaCompletions = {
         }
     }
     $subcommand = $words | Where-Object {
-        $_ -in 'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'splits', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay'
+        $_ -in 'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'splits', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', 'wt'
     } | Select-Object -First 1
+    $worktreeCommand = $false
+    $worktreeOperation = ''
+    if ($commandName -eq 'zwt') {
+        $worktreeCommand = $true
+        if ($words.Count -gt 1) { $worktreeOperation = $words[1] }
+    } elseif ($subcommand -eq 'wt') {
+        $worktreeCommand = $true
+        if ($words.Count -gt 2) { $worktreeOperation = $words[2] }
+    }
     if ($profileIndex -ge 0) {
         $subcommand = 'profile'
     }
@@ -189,8 +226,16 @@ $zettaCompletions = {
         else { & $zettaProfiles $configArguments }
     } elseif ($subcommand -eq 'sessions' -and $words.Count -ge 3 -and $words[2] -eq 'reconnect') {
         if ($previous -in '--session', '-s') { @() } else { & $zettaSessionIds }
+    } elseif ($worktreeCommand) {
+        if ([string]::IsNullOrEmpty($worktreeOperation)) {
+            'new', 'done', 'status', 'rerere', '--help'
+        } elseif ($worktreeOperation -in 'new', 'done') {
+            '--path-only', '--help'
+        } else {
+            '--help'
+        }
     } elseif ($null -eq $subcommand) {
-        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'profile', 'splits', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', '--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme'
+        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'profile', 'splits', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', 'wt', '--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme'
     } else {
         switch ($subcommand) {
             'benchmark' { '--terminal-render-workload', '--terminal-checkerboard-workload', '--terminal-sparse-update-workload', '--profile-report', '--profile-duration', '--profile-pane-stress', '--profile-background-stress', '--profile-sparse-updates', '--profile-external-terminal', '--help' }
@@ -239,6 +284,15 @@ $zettaCompletions = {
             'tabicon' { '--icon', '--list', '--help' }
             'panetheme' { '--theme', '--reset', '--list', '--help' }
             'overlay' { '--text', '--size', '--opacity', '--color', '--reset', '--help' }
+            'wt' {
+                if ([string]::IsNullOrEmpty($worktreeOperation)) {
+                    'new', 'done', 'status', 'rerere', '--help'
+                } elseif ($worktreeOperation -in 'new', 'done') {
+                    '--path-only', '--help'
+                } else {
+                    '--help'
+                }
+            }
         }
     }
 
@@ -262,6 +316,7 @@ Register-ArgumentCompleter -CommandName zntfy -ScriptBlock $zettaCompletions
 Register-ArgumentCompleter -CommandName zcopy -ScriptBlock $zettaCompletions
 Register-ArgumentCompleter -CommandName zpaste -ScriptBlock $zettaCompletions
 Register-ArgumentCompleter -CommandName zvi -ScriptBlock $zettaCompletions
+Register-ArgumentCompleter -CommandName zwt -ScriptBlock $zettaCompletions
 if ($zettaViMissing) {
     Register-ArgumentCompleter -CommandName vi -ScriptBlock $zettaCompletions
 }

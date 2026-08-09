@@ -56,6 +56,24 @@ The HTTP and TFTP server ports are typed settings backed by
 `http_server_port` and `tftp_server_port` in `config.json`. They default to
 8000 and 69 respectively and accept integers from 1 through 65535.
 
+## Git worktree root
+
+The `zetta wt` commands use Git's effective `wt.root` configuration; it is not
+a Zetta JSON setting. The recommended repository-local configuration is:
+
+```sh
+git config --local wt.root ../project-worktrees
+```
+
+Relative values resolve from the repository's main worktree root. Absolute
+values are used as written. If the setting is absent, Zetta defaults to the
+sibling directory `<repository>-worktrees`. `zetta wt new` creates missing
+parent directories and rejects existing destinations and symlink collisions;
+`zetta wt status` reports the configured or default path without creating it.
+
+Run `zetta wt rerere` to enable the two global Git settings recommended for
+this workflow: `rerere.enabled=true` and `rerere.autoupdate=true`.
+
 ## Profiles and working directories
 
 Zetta detects common shells. On macOS and Linux, shells installed by Homebrew

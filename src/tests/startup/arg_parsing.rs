@@ -1,6 +1,7 @@
 use super::*;
 #[cfg(feature = "serial-console")]
 use crate::cli_services::SerialCommand;
+use crate::worktree_cli::WorktreeCommand;
 
 #[cfg(windows)]
 #[test]
@@ -34,6 +35,32 @@ fn executable_directory_is_prepended_to_native_terminal_path() {
     assert_eq!(entries[1], Path::new("/usr/bin"));
     assert_eq!(entries[2], Path::new("/bin"));
     assert!(path_with_entry_first(Some(path.as_os_str()), executable_directory).is_none());
+}
+
+#[test]
+fn worktree_subcommand_is_available_without_cli_services() {
+    let arguments = parse_args_from([
+        OsString::from("wt"),
+        OsString::from("new"),
+        OsString::from("-P"),
+        OsString::from("feature/api"),
+    ])
+    .unwrap();
+    assert_eq!(
+        arguments.mode,
+        StartupMode::Worktree(WorktreeCommand::New {
+            name: "feature/api".to_owned(),
+            path_only: true,
+        })
+    );
+    assert!(
+        parse_args_from([
+            OsString::from("wt"),
+            OsString::from("done"),
+            OsString::from("--path-only"),
+        ])
+        .is_ok()
+    );
 }
 
 #[test]

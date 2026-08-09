@@ -263,6 +263,45 @@ The prompt provides native completion. Use `Tab` and `Shift-Tab` to cycle
 through executables from `PATH`, paths relative to the active pane's working
 directory, and SSH aliases declared by `Host` entries in `~/.ssh/config`.
 
+## Git worktrees
+
+Zetta includes a small, safety-focused Git worktree workflow for temporary
+branches:
+
+```sh
+zetta wt new feature/api
+zetta wt status
+zetta wt done
+```
+
+`new NAME` creates `wt/NAME` from the current attached branch, records the
+source branch in `wtbranch.<branch>.base`, and creates the worktree below
+`wt.root`. Nested names such as `feature/api` are supported. Configure a
+repository-specific root with Git:
+
+```sh
+git config --local wt.root ../project-worktrees
+```
+
+Relative roots resolve from the repository's main worktree. Without `wt.root`,
+Zetta uses the sibling directory `<repository>-worktrees`. The root is created
+on demand by `new`; `status` only reports its resolved path and never creates
+directories.
+
+`done` must run from a clean, linked `wt/*` worktree created by `new`. It
+rebases onto the recorded source branch, checks that the source worktree is
+still attached and clean, fast-forwards the source branch, then removes the
+temporary worktree, branch, and metadata. A conflict leaves the rebase in
+place: resolve the files, stage them with `git add`, and rerun `zetta wt done`.
+Run `zetta wt rerere` once to enable Git's `rerere.enabled` and
+`rerere.autoupdate` helpers for repeated conflicts.
+
+The direct CLI never changes the caller's directory. After enabling shell
+integration, `zwt new NAME` changes into the new worktree and `zwt done`
+changes into the integrated source worktree. Use `--path-only` (or `-P`) with
+`new` or `done` when scripting; it reserves standard output for exactly one
+path, while errors remain on standard error.
+
 ## Pane split templates
 
 The parameterized `zetta::ApplyPaneSplitTemplate` action replaces the active

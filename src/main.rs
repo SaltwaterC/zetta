@@ -23,6 +23,7 @@ mod tftp;
 mod theme_extensions;
 #[cfg(feature = "syntax-highlighting")]
 mod vi_syntax;
+mod worktree_cli;
 mod zetta_assets;
 
 const ZETTA_APP_ID: &str = "Zetta";

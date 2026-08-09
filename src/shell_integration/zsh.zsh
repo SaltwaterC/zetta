@@ -12,6 +12,50 @@ fi
 
 function zvi { command zetta vi "$@"; }
 
+function zwt {
+    case $1 in
+        new)
+            local path path_only_arg
+            local -a operation_args=("${@[2,-1]}")
+            for path_only_arg in "${operation_args[@]}"; do
+                if [[ $path_only_arg == --path-only || $path_only_arg == -P ]]; then
+                    path_only_arg=1
+                    break
+                fi
+                path_only_arg=''
+            done
+            if [[ $path_only_arg == 1 ]]; then
+                path=$(command zetta wt new "${operation_args[@]}") || return
+            else
+                path=$(command zetta wt new --path-only "${operation_args[@]}") || return
+            fi
+            [[ -n $path ]] || return 1
+            builtin cd -- "$path"
+            ;;
+        done)
+            local path path_only_arg
+            local -a operation_args=("${@[2,-1]}")
+            for path_only_arg in "${operation_args[@]}"; do
+                if [[ $path_only_arg == --path-only || $path_only_arg == -P ]]; then
+                    path_only_arg=1
+                    break
+                fi
+                path_only_arg=''
+            done
+            if [[ $path_only_arg == 1 ]]; then
+                path=$(command zetta wt done "${operation_args[@]}") || return
+            else
+                path=$(command zetta wt done --path-only "${operation_args[@]}") || return
+            fi
+            [[ -n $path ]] || return 1
+            builtin cd -- "$path"
+            ;;
+        *)
+            command zetta wt "$@"
+            ;;
+    esac
+}
+
 if ! (( $+functions[compdef] )); then
     autoload -Uz compinit
     compinit
@@ -172,7 +216,7 @@ _zetta() {
     fi
 
     if (( CURRENT == 2 )); then
-        compadd -S ' ' -- benchmark benchmark-output terminal-size sessions profile edit vi init serial http tftp notify copy paste splits tabicon panetheme overlay
+        compadd -S ' ' -- benchmark benchmark-output terminal-size sessions profile edit vi init serial http tftp notify copy paste splits tabicon panetheme overlay wt
         _zetta_options --help --version --config --keymap --profile --split --replace-pane --theme
         return
     fi
@@ -480,6 +524,16 @@ _zetta() {
         overlay)
             _zetta_options --text --size --opacity --color --reset --help
             ;;
+        wt)
+            if (( CURRENT == 3 )); then
+                compadd -S ' ' -- new done status rerere
+                _zetta_options --help
+            elif [[ $words[3] == new || $words[3] == done ]]; then
+                _zetta_options --path-only --help
+            else
+                _zetta_options --help
+            fi
+            ;;
     esac
 }
 
@@ -587,6 +641,16 @@ _zpaste() {
 }
 
 compdef _zetta zetta
+_zwt() {
+    local -a saved_words=("${words[@]}")
+    local saved_current=$CURRENT
+    words=(zetta wt "${words[@]:1}")
+    (( CURRENT++ ))
+    _zetta
+    words=("${saved_words[@]}")
+    CURRENT=$saved_current
+}
+compdef _zwt zwt
 compdef _ztftp ztftp
 compdef _zntfy zntfy
 compdef _zcopy zcopy
