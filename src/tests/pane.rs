@@ -1376,6 +1376,59 @@ fn overlay_style_picker_percent_snaps_to_five_percent_steps() {
 }
 
 #[test]
+fn overlay_style_picker_preset_cursor_clamps_to_the_six_column_grid() {
+    let mut picker = OverlayStylePicker {
+        pane_id: 2,
+        section: OverlayPickerSection::ColorPresets,
+        font_size: OverlayFontSize::DEFAULT,
+        original_font_size: None,
+        hue: 0.,
+        saturation: 0.,
+        value: 1.,
+        original_color: None,
+        preset_index: 0,
+        opacity_percent: 85,
+        original_opacity: None,
+        hex_buffer: String::new(),
+    };
+
+    assert_eq!(OVERLAY_COLOR_PRESET_COLUMNS, 6);
+    picker.move_preset_cursor(0, -1);
+    assert_eq!(picker.preset_index, 0);
+    picker.move_preset_cursor(-1, 0);
+    assert_eq!(picker.preset_index, 0);
+
+    picker.move_preset_cursor(0, 1);
+    assert_eq!(picker.preset_index, 1);
+    picker.set_preset_index(5);
+    picker.move_preset_cursor(0, 1);
+    assert_eq!(picker.preset_index, 5);
+    picker.move_preset_cursor(1, 0);
+    assert_eq!(picker.preset_index, 11);
+    picker.move_preset_cursor(1, 0);
+    assert_eq!(picker.preset_index, 11);
+
+    picker.move_preset_cursor(0, -1);
+    assert_eq!(picker.preset_index, 10);
+    picker.move_preset_cursor(-1, 0);
+    assert_eq!(picker.preset_index, 4);
+    picker.set_preset_index(6);
+    picker.move_preset_cursor(0, -1);
+    assert_eq!(picker.preset_index, 6);
+    picker.set_preset_index(usize::MAX);
+    assert_eq!(picker.preset_index, 11);
+}
+
+#[test]
+fn overlay_style_picker_preset_cursor_starts_at_a_matching_preset_or_first() {
+    let red = overlay_color_from_hex("#ff0000").unwrap();
+    assert_eq!(OverlayStylePicker::preset_index_for_color(red), 3);
+
+    let custom = overlay_color_from_hex("#123456").unwrap();
+    assert_eq!(OverlayStylePicker::preset_index_for_color(custom), 0);
+}
+
+#[test]
 fn overlay_color_presets_parse_to_their_canonical_opaque_values() {
     let expected = [
         ("black", "#000000"),
@@ -1459,6 +1512,7 @@ fn overlay_style_picker_hex_field_colors_the_selection() {
         saturation: 0.,
         value: 1.,
         original_color: None,
+        preset_index: 0,
         opacity_percent: 85,
         original_opacity: None,
         hex_buffer: String::new(),
@@ -1493,6 +1547,7 @@ fn overlay_style_picker_preset_selection_keeps_hsv_and_hex_editing_live() {
         saturation: 0.,
         value: 1.,
         original_color: None,
+        preset_index: 0,
         opacity_percent: 85,
         original_opacity: None,
         hex_buffer: String::new(),
@@ -1504,12 +1559,14 @@ fn overlay_style_picker_preset_selection_keeps_hsv_and_hex_editing_live() {
         .copied()
         .unwrap();
     picker.set_color_preset(orange);
+    assert_eq!(picker.preset_index, 4);
     assert_eq!(picker.hex_buffer, orange.hex);
     assert_eq!(overlay_color_to_hex(picker.color()), orange.hex);
 
     picker.adjust_value(-0.2);
     assert!(picker.value < 1.);
     assert_ne!(picker.hex_buffer, orange.hex);
+    assert_eq!(picker.preset_index, 4);
 
     picker.hex_buffer = "#".to_owned();
     for digit in ['0', '0', '8', '0', '0', '0'] {
@@ -1517,6 +1574,7 @@ fn overlay_style_picker_preset_selection_keeps_hsv_and_hex_editing_live() {
     }
     assert_eq!(picker.hex_buffer, "#008000");
     assert_eq!(overlay_color_to_hex(picker.color()), "#008000");
+    assert_eq!(picker.preset_index, 4);
 }
 
 #[test]
@@ -1530,6 +1588,7 @@ fn overlay_style_picker_hex_accepts_three_digit_codes() {
         saturation: 0.,
         value: 1.,
         original_color: None,
+        preset_index: 0,
         opacity_percent: 85,
         original_opacity: None,
         hex_buffer: String::new(),
@@ -1569,6 +1628,7 @@ fn overlay_style_picker_hex_backspace_keeps_the_hash() {
         saturation: 0.,
         value: 1.,
         original_color: None,
+        preset_index: 0,
         opacity_percent: 85,
         original_opacity: None,
         hex_buffer: String::new(),
@@ -1623,19 +1683,35 @@ fn overlay_font_size_steps_wrap_around_the_ends() {
 fn overlay_picker_section_steps_wrap_around_the_ends() {
     assert_eq!(
         OverlayPickerSection::FontSize.step(-1),
+        OverlayPickerSection::ColorPresets
+    );
+    assert_eq!(
+        OverlayPickerSection::FontSize.step(1),
         OverlayPickerSection::Opacity
     );
     assert_eq!(
         OverlayPickerSection::Opacity.step(1),
-        OverlayPickerSection::FontSize
+        OverlayPickerSection::Color
     );
     assert_eq!(
         OverlayPickerSection::Color.step(1),
-        OverlayPickerSection::Opacity
+        OverlayPickerSection::ColorPresets
+    );
+    assert_eq!(
+        OverlayPickerSection::ColorPresets.step(1),
+        OverlayPickerSection::FontSize
+    );
+    assert_eq!(
+        OverlayPickerSection::Opacity.step(-1),
+        OverlayPickerSection::FontSize
     );
     assert_eq!(
         OverlayPickerSection::Color.step(-1),
-        OverlayPickerSection::FontSize
+        OverlayPickerSection::Opacity
+    );
+    assert_eq!(
+        OverlayPickerSection::ColorPresets.step(-1),
+        OverlayPickerSection::Color
     );
 }
 
@@ -1656,6 +1732,7 @@ fn overlay_style_picker_preserves_committed_text_and_holds_values() {
         saturation: 0.7,
         value: 0.4,
         original_color: None,
+        preset_index: 0,
         opacity_percent: 60,
         original_opacity: Some(0.6),
         hex_buffer: String::new(),

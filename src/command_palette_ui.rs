@@ -522,9 +522,9 @@ impl Zetta {
 
     /// Keyboard input for the overlay-style selector. Tab (and shift-Tab)
     /// cycle the section being adjusted; arrow keys adjust within the
-    /// section (font size, hue/saturation/brightness or hex digits, and
-    /// opacity); Enter commits the picker and Escape restores the previous
-    /// values.
+    /// section (font size, hue/saturation/brightness, hex digits, colour
+    /// presets, and opacity); Enter commits the picker and Escape restores
+    /// the previous values.
     pub(crate) fn overlay_style_key_down(
         &mut self,
         event: &KeyDownEvent,
@@ -574,6 +574,18 @@ impl Zetta {
                             }
                         }
                     }
+                },
+                OverlayPickerSection::ColorPresets => match event.keystroke.key.as_str() {
+                    "left" => self.adjust_overlay_color_preset(0, -1, cx),
+                    "right" => self.adjust_overlay_color_preset(0, 1, cx),
+                    "up" => self.adjust_overlay_color_preset(-1, 0, cx),
+                    "down" => self.adjust_overlay_color_preset(1, 0, cx),
+                    "home" => self.set_overlay_color_preset_index(0, cx),
+                    "end" => self.set_overlay_color_preset_index(
+                        OVERLAY_COLOR_PRESETS.len().saturating_sub(1),
+                        cx,
+                    ),
+                    _ => {}
                 },
                 OverlayPickerSection::Opacity => match event.keystroke.key.as_str() {
                     "left" | "down" => self.adjust_overlay_opacity_percent(-5, cx),

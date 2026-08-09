@@ -300,6 +300,9 @@ impl Zetta {
         let selected_preset_index = OVERLAY_COLOR_PRESETS
             .iter()
             .position(|preset| preset.hex.eq_ignore_ascii_case(&hex));
+        let focused_preset_index = picker
+            .preset_index
+            .min(OVERLAY_COLOR_PRESETS.len().saturating_sub(1));
         let section_boxed = |element: gpui::Div, active: bool, section: OverlayPickerSection| {
             let section_handle = handle.clone();
             element
@@ -391,7 +394,7 @@ impl Zetta {
             .collect::<Vec<_>>();
 
         let preset_rows = OVERLAY_COLOR_PRESETS
-            .chunks(6)
+            .chunks(OVERLAY_COLOR_PRESET_COLUMNS)
             .enumerate()
             .map(|(row_index, presets)| {
                 let row_handle = handle.clone();
@@ -404,8 +407,12 @@ impl Zetta {
                             .enumerate()
                             .map(move |(column_index, preset)| {
                                 let preset = *preset;
-                                let preset_index = row_index * 6 + column_index;
+                                let preset_index =
+                                    row_index * OVERLAY_COLOR_PRESET_COLUMNS + column_index;
                                 let selected = selected_preset_index == Some(preset_index);
+                                let keyboard_focused = section
+                                    == OverlayPickerSection::ColorPresets
+                                    && focused_preset_index == preset_index;
                                 let preset_handle = row_handle.clone();
                                 div()
                                     .id(("overlay-color-preset", preset_index))
@@ -417,6 +424,12 @@ impl Zetta {
                                     .items_center()
                                     .gap_1()
                                     .rounded(px(4.))
+                                    .border_1()
+                                    .border_color(if keyboard_focused {
+                                        colors.border_focused
+                                    } else {
+                                        colors.border.opacity(0.)
+                                    })
                                     .cursor_pointer()
                                     .when(selected, |swatch| swatch.bg(colors.element_selected))
                                     .hover(|swatch| swatch.bg(colors.element_hover))
@@ -492,11 +505,64 @@ impl Zetta {
             OverlayPickerSection::FontSize => {
                 "← → size · Home/End ends · Tab switch · Enter apply · Esc cancel"
             }
-            OverlayPickerSection::Color => "← → saturation · ↑↓ brightness · ⇧←→ hue · Tab switch",
+            OverlayPickerSection::Color => {
+                "← → saturation · ↑↓ brightness · ⇧←→ hue · type hex · Tab switch · Enter apply · Esc cancel"
+            }
+            OverlayPickerSection::ColorPresets => {
+                "← →/↑↓ move · Home/End ends · Tab switch · Enter apply · Esc cancel"
+            }
             OverlayPickerSection::Opacity => {
                 "← → opacity · Home/End ends · Tab switch · Enter apply · Esc cancel"
             }
         };
+        let opacity_section = section_boxed(
+            div(),
+            section == OverlayPickerSection::Opacity,
+            OverlayPickerSection::Opacity,
+        )
+        .flex_1()
+        .min_w_0()
+        .flex_col()
+        .gap_2()
+        .child(div().text_color(colors.text).text_sm().child("Opacity"))
+        .child(
+            div()
+                .relative()
+                .h_5()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .h_1()
+                        .rounded_full()
+                        .bg(colors.element_background),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .w(gpui::relative(opacity_fraction))
+                        .h_1()
+                        .rounded_full()
+                        .bg(colors.text_accent),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left(gpui::relative(opacity_fraction))
+                        .ml(px(-5.))
+                        .size(px(10.))
+                        .rounded_full()
+                        .border_1()
+                        .border_color(colors.border_focused)
+                        .bg(colors.text_accent),
+                )
+                .child(h_flex().absolute().inset_0().children(opacity_stops)),
+        );
 
         Some(
             div()
@@ -576,238 +642,219 @@ impl Zetta {
                                 .flex_col()
                                 .gap_3()
                                 .child(
-                                    section_boxed(
-                                        div(),
-                                        section == OverlayPickerSection::FontSize,
-                                        OverlayPickerSection::FontSize,
-                                    )
-                                    .flex_col()
-                                    .gap_2()
-                                    .child(
-                                        div().text_color(colors.text).text_sm().child("Font size"),
-                                    )
-                                    .child(h_flex().gap_1().children(size_options)),
-                                )
-                                .child(
-                                    section_boxed(
-                                        div(),
-                                        section == OverlayPickerSection::Color,
-                                        OverlayPickerSection::Color,
-                                    )
-                                    .flex_col()
-                                    .gap_2()
-                                    .child(
-                                        h_flex()
-                                            .gap_2()
-                                            .items_center()
-                                            .child(
-                                                div()
-                                                    .w(px(30.))
-                                                    .h(px(18.))
-                                                    .rounded_sm()
-                                                    .border_1()
-                                                    .border_color(colors.border)
-                                                    .bg(picker.color()),
+                                    h_flex()
+                                        .w_full()
+                                        .gap_3()
+                                        .child(
+                                            section_boxed(
+                                                div(),
+                                                section == OverlayPickerSection::FontSize,
+                                                OverlayPickerSection::FontSize,
                                             )
+                                            .flex_1()
+                                            .min_w_0()
+                                            .flex_col()
+                                            .gap_2()
                                             .child(
                                                 div()
                                                     .text_color(colors.text)
                                                     .text_sm()
-                                                    .child("Colour"),
+                                                    .child("Font size"),
                                             )
-                                            .child(
-                                                div()
-                                                    .id("overlay-hex-field")
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .px_2()
-                                                    .py_1()
-                                                    .rounded_sm()
-                                                    .border_1()
-                                                    .border_color(if section
-                                                        == OverlayPickerSection::Color
-                                                    {
-                                                        colors.border_focused
-                                                    } else {
-                                                        colors.border
-                                                    })
-                                                    .bg(colors.element_background)
-                                                    .cursor_text()
-                                                    .on_click({
-                                                        let hex_field_handle = handle.clone();
-                                                        move |_, _, cx| {
-                                                            hex_field_handle
-                                                                .update(cx, |this, cx| {
-                                                                    this.set_overlay_picker_section(
-                                                                        OverlayPickerSection::Color,
-                                                                        cx,
-                                                                    );
-                                                                })
-                                                                .ok();
-                                                        }
-                                                    })
-                                                    .child(
-                                                        h_flex()
-                                                            .gap_0p5()
-                                                            .child(
-                                                                div()
-                                                                    .text_color(colors.text)
-                                                                    .text_sm()
-                                                                    .child(hex),
-                                                            )
-                                                            .when(
-                                                                section
-                                                                    == OverlayPickerSection::Color,
-                                                                |field| {
-                                                                    field.child(
-                                                                        div()
-                                                                            .w(px(1.5))
-                                                                            .h(px(13.))
-                                                                            .bg(colors.text)
-                                                                            .with_animation(
-                                                                                "overlay-hex-caret",
-                                                                                Animation::new(
-                                                                                    Duration::from_millis(
-                                                                                        500,
-                                                                                    ),
-                                                                                )
-                                                                                .repeat(),
-                                                                                |caret, progress| {
-                                                                                    let visible =
-                                                                                        (progress * 2.)
-                                                                                            .fract()
-                                                                                            < 0.5;
-                                                                                    caret.opacity(
-                                                                                        if visible
-                                                                                        {
-                                                                                            1.
-                                                                                        } else {
-                                                                                            0.
-                                                                                        },
-                                                                                    )
-                                                                                },
-                                                                            )
-                                                                    )
-                                                                },
-                                                            ),
-                                                    ),
-                                            ),
-                                    )
-                                    .child(v_flex().gap_1().children(preset_rows))
-                                    .child(
-                                        div()
-                                            .relative()
-                                            .h(px(152.))
-                                            .w_full()
-                                            .flex()
-                                            .flex_col()
-                                            .min_h_0()
-                                            .rounded_sm()
-                                            .border_1()
-                                            .border_color(colors.border)
-                                            .overflow_hidden()
-                                            .child(
-                                                v_flex()
-                                                    .flex_1()
-                                                    .min_h_0()
-                                                    .children(sv_rows),
-                                            )
-                                            .child(
-                                                div()
-                                                    .absolute()
-                                                    .left(gpui::relative(saturation))
-                                                    .top(gpui::relative(1. - value))
-                                                    .ml(px(-6.))
-                                                    .mt(px(-6.))
-                                                    .size(px(12.))
-                                                    .rounded_full()
-                                                    .border_1()
-                                                    .border_color(
-                                                        colors.element_selection_background,
-                                                    )
-                                                    .bg(colors.text_accent),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .relative()
-                                            .h(px(18.))
-                                            .w_full()
-                                            .flex()
-                                            .rounded_sm()
-                                            .border_1()
-                                            .border_color(colors.border)
-                                            .overflow_hidden()
-                                            .child(h_flex().flex_1().children(hue_segments))
-                                            .child(
-                                                div()
-                                                    .absolute()
-                                                    .top(px(2.))
-                                                    .left(gpui::relative(hue))
-                                                    .ml(px(-6.))
-                                                    .size(px(12.))
-                                                    .rounded_full()
-                                                    .border_1()
-                                                    .border_color(
-                                                        colors.element_selection_background,
-                                                    )
-                                                    .bg(colors.text_accent),
-                                            ),
-                                    ),
+                                            .child(h_flex().gap_1().children(size_options)),
+                                        )
+                                        .child(opacity_section),
                                 )
                                 .child(
-                                    section_boxed(
-                                        div(),
-                                        section == OverlayPickerSection::Opacity,
-                                        OverlayPickerSection::Opacity,
-                                    )
-                                    .flex_col()
-                                    .gap_2()
-                                    .child(div().text_color(colors.text).text_sm().child("Opacity"))
-                                    .child(
-                                        div()
-                                            .relative()
-                                            .h_5()
+                                    h_flex()
+                                        .w_full()
+                                        .gap_3()
+                                        .child(
+                                            section_boxed(
+                                                div(),
+                                                section == OverlayPickerSection::Color,
+                                                OverlayPickerSection::Color,
+                                            )
+                                            .flex_1()
                                             .min_w_0()
-                                            .flex()
-                                            .items_center()
-                                            .child(
-                                                div()
-                                                    .absolute()
-                                                    .left_0()
-                                                    .right_0()
-                                                    .h_1()
-                                                    .rounded_full()
-                                                    .bg(colors.element_background),
-                                            )
-                                            .child(
-                                                div()
-                                                    .absolute()
-                                                    .left_0()
-                                                    .w(gpui::relative(opacity_fraction))
-                                                    .h_1()
-                                                    .rounded_full()
-                                                    .bg(colors.text_accent),
-                                            )
-                                            .child(
-                                                div()
-                                                    .absolute()
-                                                    .left(gpui::relative(opacity_fraction))
-                                                    .ml(px(-5.))
-                                                    .size(px(10.))
-                                                    .rounded_full()
-                                                    .border_1()
-                                                    .border_color(colors.border_focused)
-                                                    .bg(colors.text_accent),
-                                            )
+                                            .flex_col()
+                                            .gap_2()
                                             .child(
                                                 h_flex()
-                                                    .absolute()
-                                                    .inset_0()
-                                                    .children(opacity_stops),
+                                                    .gap_2()
+                                                    .items_center()
+                                                    .child(
+                                                        div()
+                                                            .w(px(30.))
+                                                            .h(px(18.))
+                                                            .rounded_sm()
+                                                            .border_1()
+                                                            .border_color(colors.border)
+                                                            .bg(picker.color()),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_color(colors.text)
+                                                            .text_sm()
+                                                            .child("Colour"),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .id("overlay-hex-field")
+                                                            .flex_1()
+                                                            .min_w_0()
+                                                            .px_2()
+                                                            .py_1()
+                                                            .rounded_sm()
+                                                            .border_1()
+                                                            .border_color(if section
+                                                                == OverlayPickerSection::Color
+                                                            {
+                                                                colors.border_focused
+                                                            } else {
+                                                                colors.border
+                                                            })
+                                                            .bg(colors.element_background)
+                                                            .cursor_text()
+                                                            .on_click({
+                                                                let hex_field_handle = handle.clone();
+                                                                move |_, _, cx| {
+                                                                    hex_field_handle
+                                                                        .update(cx, |this, cx| {
+                                                                            this.set_overlay_picker_section(
+                                                                                OverlayPickerSection::Color,
+                                                                                cx,
+                                                                            );
+                                                                        })
+                                                                        .ok();
+                                                                }
+                                                            })
+                                                            .child(
+                                                                h_flex()
+                                                                    .gap_0p5()
+                                                                    .child(
+                                                                        div()
+                                                                            .text_color(colors.text)
+                                                                            .text_sm()
+                                                                            .child(hex),
+                                                                    )
+                                                                    .when(
+                                                                        section
+                                                                            == OverlayPickerSection::Color,
+                                                                        |field| {
+                                                                            field.child(
+                                                                                div()
+                                                                                    .w(px(1.5))
+                                                                                    .h(px(13.))
+                                                                                    .bg(colors.text)
+                                                                                    .with_animation(
+                                                                                        "overlay-hex-caret",
+                                                                                        Animation::new(
+                                                                                            Duration::from_millis(
+                                                                                                500,
+                                                                                            ),
+                                                                                        )
+                                                                                        .repeat(),
+                                                                                        |caret, progress| {
+                                                                                            let visible =
+                                                                                                (progress * 2.)
+                                                                                                    .fract()
+                                                                                                    < 0.5;
+                                                                                            caret.opacity(
+                                                                                                if visible {
+                                                                                                    1.
+                                                                                                } else {
+                                                                                                    0.
+                                                                                                },
+                                                                                            )
+                                                                                        },
+                                                                                    )
+                                                                            )
+                                                                        },
+                                                                    ),
+                                                            ),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .relative()
+                                                    .h(px(152.))
+                                                    .w_full()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .min_h_0()
+                                                    .rounded_sm()
+                                                    .border_1()
+                                                    .border_color(colors.border)
+                                                    .overflow_hidden()
+                                                    .child(
+                                                        v_flex()
+                                                            .flex_1()
+                                                            .min_h_0()
+                                                            .children(sv_rows),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .absolute()
+                                                            .left(gpui::relative(saturation))
+                                                            .top(gpui::relative(1. - value))
+                                                            .ml(px(-6.))
+                                                            .mt(px(-6.))
+                                                            .size(px(12.))
+                                                            .rounded_full()
+                                                            .border_1()
+                                                            .border_color(
+                                                                colors.element_selection_background,
+                                                            )
+                                                            .bg(colors.text_accent),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .relative()
+                                                    .h(px(18.))
+                                                    .w_full()
+                                                    .flex()
+                                                    .rounded_sm()
+                                                    .border_1()
+                                                    .border_color(colors.border)
+                                                    .overflow_hidden()
+                                                    .child(h_flex().flex_1().children(hue_segments))
+                                                    .child(
+                                                        div()
+                                                            .absolute()
+                                                            .top(px(2.))
+                                                            .left(gpui::relative(hue))
+                                                            .ml(px(-6.))
+                                                            .size(px(12.))
+                                                            .rounded_full()
+                                                            .border_1()
+                                                            .border_color(
+                                                                colors.element_selection_background,
+                                                            )
+                                                            .bg(colors.text_accent),
+                                                    ),
                                             ),
-                                    ),
-                                ),
+                                        )
+                                        .child(
+                                            section_boxed(
+                                                div(),
+                                                section == OverlayPickerSection::ColorPresets,
+                                                OverlayPickerSection::ColorPresets,
+                                            )
+                                            .flex_1()
+                                            .min_w_0()
+                                            .flex_col()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .text_color(colors.text)
+                                                    .text_sm()
+                                                    .child("Colour presets"),
+                                            )
+                                            .child(v_flex().gap_1().children(preset_rows)),
+                                        ),
+                                )
                         )
                         .child(
                             div()

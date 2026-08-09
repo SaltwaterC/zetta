@@ -142,6 +142,9 @@ impl OverlayFontSize {
 /// explicit `overlay_opacity`.
 pub(crate) const DEFAULT_OVERLAY_OPACITY: f32 = 0.85;
 
+/// The number of columns in the overlay colour-preset grid.
+pub(crate) const OVERLAY_COLOR_PRESET_COLUMNS: usize = 6;
+
 /// Which control inside the overlay-style selector the keyboard is adjusting.
 /// Tab (and shift-Tab) cycle through them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -150,12 +153,21 @@ pub(crate) enum OverlayPickerSection {
     FontSize,
     /// The overlay's text colour: hue/saturation/brightness plus a hex field.
     Color,
+    /// The overlay's fixed named colour presets.
+    ColorPresets,
     /// The overlay's opacity.
     Opacity,
 }
 
 impl OverlayPickerSection {
-    pub(crate) const ALL: [Self; 3] = [Self::FontSize, Self::Color, Self::Opacity];
+    /// Sections in the order used by Tab navigation, matching the picker's
+    /// visual grid from left to right and top to bottom.
+    pub(crate) const ALL: [Self; 4] = [
+        Self::FontSize,
+        Self::Opacity,
+        Self::Color,
+        Self::ColorPresets,
+    ];
 
     /// The section `delta` positions away in [`Self::ALL`], wrapping around
     /// the ends.
@@ -167,8 +179,9 @@ impl OverlayPickerSection {
     fn index(self) -> usize {
         match self {
             Self::FontSize => 0,
-            Self::Color => 1,
-            Self::Opacity => 2,
+            Self::Opacity => 1,
+            Self::Color => 2,
+            Self::ColorPresets => 3,
         }
     }
 }
@@ -195,6 +208,8 @@ pub(crate) struct OverlayStylePicker {
     pub(crate) value: f32,
     /// The pane's `overlay_color` when the picker opened, restored on cancel.
     pub(crate) original_color: Option<gpui::Hsla>,
+    /// The keyboard-focused colour preset.
+    pub(crate) preset_index: usize,
     /// The highlighted opacity, from `0` to `100`, in `5`% steps.
     pub(crate) opacity_percent: usize,
     /// The pane's `overlay_opacity` when the picker opened, restored on
@@ -205,6 +220,38 @@ pub(crate) struct OverlayStylePicker {
 }
 
 impl OverlayStylePicker {
+    /// Returns the preset matching `color`, or the first preset when the
+    /// colour is custom.
+    pub(crate) fn preset_index_for_color(color: gpui::Hsla) -> usize {
+        let hex = overlay_color_to_hex(color);
+        OVERLAY_COLOR_PRESETS
+            .iter()
+            .position(|preset| preset.hex.eq_ignore_ascii_case(&hex))
+            .unwrap_or_default()
+    }
+
+    /// Sets the focused preset, clamping it to the available grid.
+    pub(crate) fn set_preset_index(&mut self, index: usize) {
+        self.preset_index = index.min(OVERLAY_COLOR_PRESETS.len().saturating_sub(1));
+    }
+
+    /// Moves the focused preset by rows and columns, clamping at every grid
+    /// edge rather than wrapping into the adjacent row.
+    pub(crate) fn move_preset_cursor(&mut self, row_delta: isize, column_delta: isize) -> bool {
+        let last_index = OVERLAY_COLOR_PRESETS.len().saturating_sub(1);
+        let index = self.preset_index.min(last_index);
+        let row = index / OVERLAY_COLOR_PRESET_COLUMNS;
+        let column = index % OVERLAY_COLOR_PRESET_COLUMNS;
+        let last_row = last_index / OVERLAY_COLOR_PRESET_COLUMNS;
+        let row = (row as isize + row_delta).clamp(0, last_row as isize) as usize;
+        let column = (column as isize + column_delta)
+            .clamp(0, (OVERLAY_COLOR_PRESET_COLUMNS - 1) as isize) as usize;
+        let next_index = (row * OVERLAY_COLOR_PRESET_COLUMNS + column).min(last_index);
+        let changed = self.preset_index != next_index;
+        self.preset_index = next_index;
+        changed
+    }
+
     /// The highlighted percentage for a pane's opacity, snapped to the
     /// slider's `5`% steps and falling back to the default opacity when the
     /// pane has none.
@@ -232,6 +279,12 @@ impl OverlayStylePicker {
     pub(crate) fn set_color_preset(&mut self, preset: OverlayColorPreset) {
         let (hue, saturation, value) = overlay_picker_hsv_from_hsla(preset.color());
         self.set_color(hue, saturation, value);
+        if let Some(index) = OVERLAY_COLOR_PRESETS
+            .iter()
+            .position(|candidate| *candidate == preset)
+        {
+            self.preset_index = index;
+        }
     }
 
     /// Rotates the selected colour's hue by `delta` turns.

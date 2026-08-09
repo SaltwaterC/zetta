@@ -359,7 +359,7 @@ impl Zetta {
                     && this.session_authentication.is_none()
                     && this.tab_search.is_none()
                 {
-                    this.focus_active(window, cx);
+                    this.focus_after_window_activation(window, cx);
                 }
             }));
         if self.tabs.is_empty() {
@@ -467,7 +467,7 @@ impl Zetta {
                         && this.session_authentication.is_none()
                         && this.tab_search.is_none()
                     {
-                        this.focus_active(window, cx);
+                        this.focus_after_window_activation(window, cx);
                     }
                 }),
             ],
@@ -1761,6 +1761,14 @@ impl Zetta {
         self.tab_overflow_selection_side = Some(side_is_right);
         self.dismiss_tab_overflow_menus(cx);
         self.focus_active(window, cx);
+    }
+
+    fn focus_after_window_activation(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_picking_overlay_style() {
+            self.overlay_style_focus.focus(window, cx);
+        } else {
+            self.focus_active(window, cx);
+        }
     }
 
     pub(crate) fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {

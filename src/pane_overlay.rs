@@ -107,6 +107,7 @@ impl Zetta {
             saturation: 0.,
             value: 1.,
             original_color: pane.overlay_color,
+            preset_index: OverlayStylePicker::preset_index_for_color(current_color),
             opacity_percent: OverlayStylePicker::percent_for_opacity(pane.overlay_opacity),
             original_opacity: pane.overlay_opacity,
             hex_buffer: String::new(),
@@ -258,6 +259,51 @@ impl Zetta {
         };
         picker.set_color_preset(preset);
         self.preview_overlay_style(cx);
+    }
+
+    /// Selects the colour preset at `index` and previews it on the affected
+    /// pane; does not commit the picker.
+    pub(crate) fn set_overlay_color_preset_index(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(index) = self
+            .tabs
+            .get_mut(self.active_tab)
+            .and_then(|tab| tab.overlay_style_picker.as_mut())
+            .map(|picker| {
+                picker.set_preset_index(index);
+                picker.preset_index
+            })
+        else {
+            return;
+        };
+        let Some(preset) = OVERLAY_COLOR_PRESETS.get(index).copied() else {
+            return;
+        };
+        self.set_overlay_color_preset(preset, cx);
+    }
+
+    /// Moves the keyboard-focused colour preset within the six-column grid
+    /// and previews the newly focused preset.
+    pub(crate) fn adjust_overlay_color_preset(
+        &mut self,
+        row_delta: isize,
+        column_delta: isize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((index, changed)) = self
+            .tabs
+            .get_mut(self.active_tab)
+            .and_then(|tab| tab.overlay_style_picker.as_mut())
+            .map(|picker| {
+                let changed = picker.move_preset_cursor(row_delta, column_delta);
+                (picker.preset_index, changed)
+            })
+        else {
+            return;
+        };
+        if !changed {
+            return;
+        }
+        self.set_overlay_color_preset_index(index, cx);
     }
 
     /// Rotates the overlay colour's hue by `delta` turns.
