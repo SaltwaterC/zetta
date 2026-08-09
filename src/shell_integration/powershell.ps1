@@ -14,7 +14,10 @@ function zwt {
     switch ($args[0]) {
         'new' {
             $operationArgs = @($args | Select-Object -Skip 1)
-            if ($operationArgs -contains '--path-only' -or $operationArgs -contains '-P') {
+            if ($operationArgs -contains '--help' -or $operationArgs -contains '-h') {
+                & zetta wt new @operationArgs
+                return
+            } elseif ($operationArgs -contains '--path-only' -or $operationArgs -contains '-P') {
                 $path = @(& zetta wt new @operationArgs)
             } else {
                 $path = @(& zetta wt new --path-only @operationArgs)
@@ -24,7 +27,10 @@ function zwt {
         }
         'done' {
             $operationArgs = @($args | Select-Object -Skip 1)
-            if ($operationArgs -contains '--path-only' -or $operationArgs -contains '-P') {
+            if ($operationArgs -contains '--help' -or $operationArgs -contains '-h') {
+                & zetta wt done @operationArgs
+                return
+            } elseif ($operationArgs -contains '--path-only' -or $operationArgs -contains '-P') {
                 $path = @(& zetta wt done @operationArgs)
             } else {
                 $path = @(& zetta wt done --path-only @operationArgs)

@@ -16,6 +16,10 @@ zwt() {
             local path path_only_arg
             local -a operation_args=("${@:2}")
             for path_only_arg in "${operation_args[@]}"; do
+                if [[ $path_only_arg == --help || $path_only_arg == -h ]]; then
+                    command zetta wt new "${operation_args[@]}"
+                    return
+                fi
                 if [[ $path_only_arg == --path-only || $path_only_arg == -P ]]; then
                     path_only_arg=1
                     break
@@ -34,6 +38,10 @@ zwt() {
             local path path_only_arg
             local -a operation_args=("${@:2}")
             for path_only_arg in "${operation_args[@]}"; do
+                if [[ $path_only_arg == --help || $path_only_arg == -h ]]; then
+                    command zetta wt done "${operation_args[@]}"
+                    return
+                fi
                 if [[ $path_only_arg == --path-only || $path_only_arg == -P ]]; then
                     path_only_arg=1
                     break

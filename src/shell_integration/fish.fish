@@ -22,7 +22,10 @@ function zwt --description 'Zetta Git worktree workflow'
         case new
             set -l operation_args $argv[2..-1]
             set -l path
-            if contains -- --path-only $operation_args; or contains -- -P $operation_args
+            if contains -- --help $operation_args; or contains -- -h $operation_args
+                command zetta wt new $operation_args
+                return $status
+            else if contains -- --path-only $operation_args; or contains -- -P $operation_args
                 set path (command zetta wt new $operation_args)
             else
                 set path (command zetta wt new --path-only $operation_args)
@@ -34,7 +37,10 @@ function zwt --description 'Zetta Git worktree workflow'
         case done
             set -l operation_args $argv[2..-1]
             set -l path
-            if contains -- --path-only $operation_args; or contains -- -P $operation_args
+            if contains -- --help $operation_args; or contains -- -h $operation_args
+                command zetta wt done $operation_args
+                return $status
+            else if contains -- --path-only $operation_args; or contains -- -P $operation_args
                 set path (command zetta wt done $operation_args)
             else
                 set path (command zetta wt done --path-only $operation_args)

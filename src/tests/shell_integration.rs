@@ -314,6 +314,110 @@ fn bash_zwt_changes_directory_for_nested_paths_with_spaces() {
 }
 
 #[test]
+fn worktree_wrappers_pass_help_through_without_capturing_it_as_a_path() {
+    let bash = ShellIntegration::Bash.script(&profiles());
+    assert!(bash.contains("$path_only_arg == --help || $path_only_arg == -h"));
+
+    let zsh = ShellIntegration::Zsh.script(&profiles());
+    assert!(zsh.contains("$path_only_arg == --help || $path_only_arg == -h"));
+
+    let fish = ShellIntegration::Fish.script(&profiles());
+    assert!(fish.contains("contains -- --help $operation_args; or contains -- -h $operation_args"));
+
+    let powershell = ShellIntegration::PowerShell.script(&profiles());
+    assert!(
+        powershell.contains("$operationArgs -contains '--help' -or $operationArgs -contains '-h'")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn posix_zwt_help_does_not_change_directory_or_inject_path_only() {
+    use std::{
+        io::Write as _,
+        os::unix::fs::PermissionsExt as _,
+        process::{Command, Stdio},
+    };
+
+    let temporary = tempfile::tempdir().unwrap();
+    let start = temporary.path().join("start directory");
+    let args_file = temporary.path().join("zetta arguments");
+    std::fs::create_dir_all(&start).unwrap();
+
+    let fake_zetta = temporary.path().join("zetta");
+    std::fs::write(
+        &fake_zetta,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ZETTA_TEST_ARGS\"\nprintf '%s\\n' 'Create a Git worktree for a temporary wt/NAME branch' 'Usage: zetta wt new [OPTIONS] NAME'\n",
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&fake_zetta).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fake_zetta, permissions).unwrap();
+
+    let mut path = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = std::env::split_paths(&path).collect::<Vec<_>>();
+    paths.insert(0, temporary.path().to_owned());
+    path = std::env::join_paths(paths).unwrap();
+
+    for shell in ["bash", "zsh"] {
+        if Command::new(shell).arg("--version").output().is_err() {
+            continue;
+        }
+
+        let script = ShellIntegration::parse(shell).unwrap().script(&profiles());
+        let prefix = if shell == "zsh" {
+            "compdef() { :; }\n"
+        } else {
+            ""
+        };
+        let driver = format!(
+            "{prefix}{script}\ncd '{}'\nzwt new --help\nprintf 'cwd:%s\\n' \"$PWD\"\n",
+            start.display()
+        );
+
+        let mut command = Command::new(shell);
+        if shell == "bash" {
+            command.args(["--noprofile", "--norc"]);
+        } else {
+            command.arg("-f");
+        }
+        let mut child = command
+            .current_dir(&start)
+            .env("PATH", &path)
+            .env("ZETTA_TEST_ARGS", &args_file)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(driver.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{shell} zwt help wrapper failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout
+                .lines()
+                .any(|line| line == format!("cwd:{}", start.display())),
+            "{shell} zwt help wrapper changed directory: {stdout}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&args_file).unwrap(),
+            "wt\nnew\n--help\n",
+            "{shell} zwt help wrapper changed the CLI arguments"
+        );
+    }
+}
+
+#[test]
 fn supported_shells_generate_notify_completion_and_zntfy_shortcut() {
     let profiles = profiles();
     for shell in [
