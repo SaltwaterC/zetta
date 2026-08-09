@@ -13,6 +13,9 @@ fi
 function zvi { command zetta vi "$@"; }
 
 function zwt {
+    # zsh caches failed command lookups. Refresh it so a Zetta binary installed
+    # or moved after this shell started is visible to the wrapper.
+    rehash
     case $1 in
         new)
             local path path_only_arg

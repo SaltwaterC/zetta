@@ -76,6 +76,7 @@ fn vi_integration_is_conditional_and_has_cli_completion() {
     assert!(zsh.contains("$+commands[vi]"));
     assert!(zsh.contains("compdef _zetta vi"));
     assert!(zsh.contains("function zvi { command zetta vi \"$@\"; }"));
+    assert!(zsh.contains("function zwt {\n    # zsh caches failed command lookups."));
     assert!(zsh.contains("compdef _zetta zvi"));
     assert!(zsh.contains("_zetta_option_unused"));
     assert!(zsh.contains("_zetta_options()"));
