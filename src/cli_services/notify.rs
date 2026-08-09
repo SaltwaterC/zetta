@@ -3,18 +3,48 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
-#[cfg(target_os = "macos")]
-use std::process::Command;
-#[cfg(linux_like)]
 use std::process::{Command, Stdio};
 
 use anyhow::{Context as _, Result};
 
 use super::{
-    CliServiceCommand, NotificationRequest, NotificationTimeout, parse_notification_timeout,
+    CliServiceCommand, NotificationRequest, NotificationTarget, NotificationTimeout,
+    parse_notification_timeout,
 };
 
 pub(crate) type NotifyCommand = NotificationRequest;
+
+const NOTIFICATION_WORKER_ENV: &str = "ZETTA_NOTIFICATION_WORKER";
+const NOTIFICATION_TARGET_PROCESS_ID_ENV: &str = "ZETTA_NOTIFICATION_TARGET_PROCESS_ID";
+const NOTIFICATION_TARGET_ATTENTION_ID_ENV: &str = "ZETTA_NOTIFICATION_TARGET_ATTENTION_ID";
+
+pub(crate) fn parse_notification_target(
+    process_id: &str,
+    attention_id: &str,
+) -> Option<NotificationTarget> {
+    let process_id = process_id.parse::<u32>().ok().filter(|id| *id != 0)?;
+    let attention_id = attention_id.parse::<u64>().ok().filter(|id| *id != 0)?;
+    Some(NotificationTarget {
+        process_id,
+        attention_id,
+    })
+}
+
+pub(crate) fn notification_target_from_environment() -> Option<NotificationTarget> {
+    parse_notification_target(
+        &std::env::var("ZETTA_PROCESS_ID").ok()?,
+        &std::env::var("ZETTA_ATTENTION_ID").ok()?,
+    )
+}
+
+fn notification_target_from_worker_environment() -> Result<NotificationTarget> {
+    let process_id = std::env::var(NOTIFICATION_TARGET_PROCESS_ID_ENV)
+        .context("notification worker is missing its target process ID")?;
+    let attention_id = std::env::var(NOTIFICATION_TARGET_ATTENTION_ID_ENV)
+        .context("notification worker is missing its target attention ID")?;
+    parse_notification_target(&process_id, &attention_id)
+        .context("notification worker has an invalid target")
+}
 
 pub(crate) fn notify_help() -> &'static str {
     "Show a desktop notification\n\nUsage: zetta notify [OPTIONS] SUMMARY [BODY]\n\nSUMMARY is the notification's title; BODY is optional additional text.\n\nOptions:\n  -a, --app-name NAME                Set the notification's application name\n  -i, --icon PATH                    Show an image from PATH with the notification (default: Zetta's icon)\n  -s, --sound NAME                   zetta-default, zetta-ok, zetta-alarm, or a platform-specific system sound name\n  -t, --timeout WHEN                 default, never, or a number of milliseconds (default: default)\n  -h, --help                         Print help\n\nShows the notification through the desktop's native notification system: D-Bus\non Linux and BSD, Notification Center on macOS, and toast notifications on\nWindows. Without --icon, Zetta's own icon is shown; it is bundled in the\nbinary, so it is always available. --app-name has no effect on macOS and\n--timeout is ignored by some macOS notification centers; every other option\nbehaves the same on all platforms.\n\n--sound zetta-default, zetta-ok, and zetta-alarm are bundled tones that Zetta\nsynthesizes and plays itself, so they always play the same way regardless of\nthe host's sound theme or configuration. Any other value is passed through as\na platform-specific system sound name (for example a freedesktop sound-theme\nname on Linux, a system sound name on macOS, or a toast sound identifier on\nWindows) and is only played if the platform recognizes it."
@@ -173,6 +203,73 @@ fn try_show_portal_notification(command: &NotifyCommand) -> Result<bool> {
 #[cfg(linux_like)]
 const NOTIFICATION_DAEMON_ENV: &str = "ZETTA_NOTIFICATION_DAEMON";
 
+fn notification_worker_executable() -> Result<Option<PathBuf>> {
+    let current_executable = std::env::current_exe().context("locating the Zetta executable")?;
+    #[cfg(target_os = "macos")]
+    {
+        // The modern macOS notification backend requires an application bundle.
+        // Returning the canonical bundle executable also makes a CLI symlink
+        // re-enter the signed app instead of the unbundled development binary.
+        Ok(macos_bundle_executable(&current_executable))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(Some(current_executable))
+    }
+}
+
+fn spawn_notification_worker(
+    notification: &NotificationRequest,
+    target: NotificationTarget,
+    executable: PathBuf,
+) -> Result<()> {
+    let mut command = Command::new(executable);
+    command
+        .args(notification_reexec_args(notification))
+        .env(NOTIFICATION_WORKER_ENV, "1")
+        .env(
+            NOTIFICATION_TARGET_PROCESS_ID_ENV,
+            target.process_id.to_string(),
+        )
+        .env(
+            NOTIFICATION_TARGET_ATTENTION_ID_ENV,
+            target.attention_id.to_string(),
+        )
+        // The worker has its own authenticated target. Do not let it derive a
+        // second target from the shell environment it inherited from the pane.
+        .env_remove("ZETTA_PROCESS_ID")
+        .env_remove("ZETTA_ATTENTION_ID")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        // SAFETY: setsid(2) is async-signal-safe and is the only call made in
+        // the forked child before it execs.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        const DETACHED_PROCESS: u32 = 0x00000008;
+        command.creation_flags(DETACHED_PROCESS);
+    }
+
+    command
+        .spawn()
+        .context("spawning the targeted desktop notification worker")?;
+    Ok(())
+}
+
 #[cfg(linux_like)]
 fn spawn_notification_daemon(notification: &NotificationRequest) -> Result<()> {
     let executable = std::env::current_exe().context("locating the zetta executable")?;
@@ -237,7 +334,6 @@ fn keep_notification_worker_alive(timeout: Option<NotificationTimeout>) {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
 fn notify_rust_timeout(timeout: NotificationTimeout) -> notify_rust::Timeout {
     match timeout {
         NotificationTimeout::Default => notify_rust::Timeout::Default,
@@ -449,6 +545,54 @@ fn show_bundled_macos_notification(command: &NotifyCommand, sound: Option<&str>)
 }
 
 #[cfg(target_os = "macos")]
+fn show_targeted_bundled_macos_notification(
+    command: &NotifyCommand,
+    bundled_sound: Option<crate::notification_sounds::BuiltinSound>,
+    sound: Option<&str>,
+) -> Result<notify_rust::NotificationResponse> {
+    let authorized = mac_usernotifications::blocking::request_auth()
+        .map_err(|error| anyhow::anyhow!("{error}"))
+        .context("requesting macOS desktop notification authorization")?;
+    anyhow::ensure!(
+        authorized,
+        "macOS desktop notification authorization was denied; enable notifications for Zetta in System Settings"
+    );
+
+    let mut notification = notify_rust::Notification::new();
+    notification.summary(&command.summary);
+    if let Some(body) = &command.body {
+        notification.body(body);
+    }
+    // The signed app bundle supplies Zetta's identity. Only an explicit icon is
+    // an attachment, matching the existing bundled macOS notification path.
+    if let Some(icon) = macos_notification_attachment(command) {
+        notification.image_path(icon);
+    }
+    if let Some(sound) = sound {
+        notification.sound_name(sound);
+    }
+    if let Some(timeout) = command.timeout {
+        notification.timeout(notify_rust_timeout(timeout));
+    }
+    let handle = notification
+        .show()
+        .map_err(|error| anyhow::anyhow!("{error}"))
+        .context("showing the desktop notification")?;
+    if let Some(sound) = bundled_sound {
+        sound.play()?;
+    }
+
+    let mut response = None;
+    handle
+        .wait_for_response(|received: &notify_rust::NotificationResponse| {
+            response = Some(received.clone())
+        })
+        .map_err(|error| anyhow::anyhow!("{error}"))
+        .context("waiting for the desktop notification response")?;
+    response.context("desktop notification returned no response")
+}
+
+#[cfg(target_os = "macos")]
 fn macos_notification_attachment(command: &NotifyCommand) -> Option<&str> {
     command.icon.as_deref()
 }
@@ -461,28 +605,94 @@ fn macos_notification_sound(command: &NotifyCommand) -> Option<&str> {
         .filter(|sound| crate::notification_sounds::BuiltinSound::parse(sound).is_none())
 }
 
-pub(crate) fn run_notification(command: &NotificationRequest) -> Result<()> {
-    command.run()
+fn notification_response_activates_tab(response: &notify_rust::NotificationResponse) -> bool {
+    response.is_default_action()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn build_notification(
+    command: &NotifyCommand,
+    target: Option<NotificationTarget>,
+) -> Result<notify_rust::Notification> {
+    let mut notification = notify_rust::Notification::new();
+    notification.summary(&command.summary);
+    if let Some(body) = &command.body {
+        notification.body(body);
+    }
+    notification.appname(notification_app_name(command));
+    #[cfg(target_os = "windows")]
+    {
+        // notify-rust's Windows backend has no small "app logo" placement -
+        // any icon passed to `image_path` renders as a large image below
+        // the notification text. That's right for a user's deliberately
+        // attached `--icon`, but Zetta's default icon shouldn't also be
+        // shown that way: `register_windows_notification_identity` already
+        // makes it appear correctly-sized next to the app name via the
+        // AUMID registration, so only attach an inline image when the user
+        // explicitly asked for one.
+        register_windows_notification_identity(
+            &mut notification,
+            &default_notification_icon_path()?,
+        );
+        if let Some(icon) = &command.icon {
+            notification.image_path(icon);
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    set_unix_notification_identity(&mut notification, command)?;
+
+    let bundled_sound = command
+        .sound
+        .as_deref()
+        .and_then(crate::notification_sounds::BuiltinSound::parse);
+    if let Some(sound) = command.sound.as_deref().filter(|_| bundled_sound.is_none()) {
+        notification.sound_name(sound);
+    }
+    if let Some(timeout) = command.timeout {
+        notification.timeout(notify_rust_timeout(timeout));
+    }
+    #[cfg(linux_like)]
+    if target.is_some() {
+        // An explicit default action makes body clicks observable on XDG
+        // notification daemons while keeping the action button itself blank.
+        notification.action("default", "");
+    }
+    Ok(notification)
+}
+
+pub(crate) fn run_notification(
+    command: &NotificationRequest,
+    target: Option<NotificationTarget>,
+) -> Result<()> {
+    if std::env::var_os(NOTIFICATION_WORKER_ENV).is_some() {
+        return command.run(Some(notification_target_from_worker_environment()?));
+    }
+    if let Some(target) = target
+        && let Some(executable) = notification_worker_executable()?
+    {
+        return spawn_notification_worker(command, target, executable);
+    }
+    // Unbundled macOS development binaries deliberately remain fire-and-forget.
+    command.run(None)
 }
 
 impl NotificationRequest {
-    pub(super) fn run(&self) -> Result<()> {
+    pub(super) fn run(&self, target: Option<NotificationTarget>) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
-            self.run_macos()
+            self.run_macos(target)
         }
 
         #[cfg(not(target_os = "macos"))]
         {
-            self.run_non_macos()
+            self.run_non_macos(target)
         }
     }
 
     #[cfg(target_os = "macos")]
-    fn run_macos(&self) -> Result<()> {
-        if mac_usernotifications::check_bundle().is_err()
-            && rerun_notification_from_macos_bundle(self)?
-        {
+    fn run_macos(&self, target: Option<NotificationTarget>) -> Result<()> {
+        let bundled = mac_usernotifications::check_bundle().is_ok();
+        if !bundled && target.is_none() && rerun_notification_from_macos_bundle(self)? {
             return Ok(());
         }
 
@@ -492,26 +702,39 @@ impl NotificationRequest {
             .and_then(crate::notification_sounds::BuiltinSound::parse);
         let notification_sound = macos_notification_sound(self);
 
-        if mac_usernotifications::check_bundle().is_ok() {
+        if let Some(target) = target
+            && bundled
+        {
+            let response =
+                show_targeted_bundled_macos_notification(self, bundled_sound, notification_sound)?;
+            if notification_response_activates_tab(&response) {
+                let _ = crate::process_control::request_process_focus_tab(
+                    target.process_id,
+                    target.attention_id,
+                );
+            }
+        } else if bundled {
             show_bundled_macos_notification(self, notification_sound)?;
+            if let Some(sound) = bundled_sound {
+                sound.play()?;
+            }
         } else {
             show_unbundled_macos_notification(self, notification_sound)?;
-        }
-        if let Some(sound) = bundled_sound {
-            sound.play()?;
         }
         Ok(())
     }
 
     #[cfg(not(target_os = "macos"))]
-    fn run_non_macos(&self) -> Result<()> {
+    fn run_non_macos(&self, target: Option<NotificationTarget>) -> Result<()> {
         let bundled_sound = self
             .sound
             .as_deref()
             .and_then(crate::notification_sounds::BuiltinSound::parse);
 
         #[cfg(linux_like)]
-        if (bundled_sound.is_some() || self.sound.is_none()) && try_show_portal_notification(self)?
+        if target.is_none()
+            && (bundled_sound.is_some() || self.sound.is_none())
+            && try_show_portal_notification(self)?
         {
             if let Some(bundled_sound) = bundled_sound {
                 bundled_sound.play()?;
@@ -520,56 +743,40 @@ impl NotificationRequest {
         }
 
         #[cfg(linux_like)]
-        if std::env::var_os(NOTIFICATION_DAEMON_ENV).is_none() {
+        if target.is_none() && std::env::var_os(NOTIFICATION_DAEMON_ENV).is_none() {
             return spawn_notification_daemon(self);
         }
 
-        let mut notification = notify_rust::Notification::new();
-        notification.summary(&self.summary);
-        if let Some(body) = &self.body {
-            notification.body(body);
-        }
-        notification.appname(notification_app_name(self));
-        #[cfg(target_os = "windows")]
-        {
-            // notify-rust's Windows backend has no small "app logo" placement -
-            // any icon passed to `image_path` renders as a large image below
-            // the notification text. That's right for a user's deliberately
-            // attached `--icon`, but Zetta's default icon shouldn't also be
-            // shown that way: `register_windows_notification_identity` already
-            // makes it appear correctly-sized next to the app name via the
-            // AUMID registration, so only attach an inline image when the user
-            // explicitly asked for one.
-            register_windows_notification_identity(
-                &mut notification,
-                &default_notification_icon_path()?,
-            );
-            if let Some(icon) = &self.icon {
-                notification.image_path(icon);
-            }
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            #[cfg(not(target_os = "macos"))]
-            set_unix_notification_identity(&mut notification, self)?;
-        }
-        let notification_sound = self.sound.as_deref().filter(|_| bundled_sound.is_none());
-        if let Some(sound) = notification_sound {
-            notification.sound_name(sound);
-        }
-        if let Some(timeout) = self.timeout {
-            notification.timeout(notify_rust_timeout(timeout));
-        }
-        let _notification_handle = notification
+        let notification = build_notification(self, target)?;
+        let notification_handle = notification
             .show()
             .map_err(|error| anyhow::anyhow!("{error}"))
             .context("showing the desktop notification")?;
         if let Some(bundled_sound) = bundled_sound {
             bundled_sound.play()?;
         }
-        #[cfg(linux_like)]
-        if std::env::var_os(NOTIFICATION_DAEMON_ENV).is_some() {
-            keep_notification_worker_alive(self.timeout);
+        if let Some(target) = target {
+            let mut response = None;
+            notification_handle
+                .wait_for_response(|received: &notify_rust::NotificationResponse| {
+                    response = Some(received.clone())
+                })
+                .map_err(|error| anyhow::anyhow!("{error}"))
+                .context("waiting for the desktop notification response")?;
+            if response
+                .as_ref()
+                .is_some_and(notification_response_activates_tab)
+            {
+                let _ = crate::process_control::request_process_focus_tab(
+                    target.process_id,
+                    target.attention_id,
+                );
+            }
+        } else {
+            #[cfg(linux_like)]
+            if std::env::var_os(NOTIFICATION_DAEMON_ENV).is_some() {
+                keep_notification_worker_alive(self.timeout);
+            }
         }
         Ok(())
     }

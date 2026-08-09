@@ -29,7 +29,8 @@ for active development.
 - Git worktree workflow with `zetta wt new`, `zetta wt done`, status, and
   conflict-resolution helpers; shell integration adds the `zwt` directory wrapper
 - In-memory tab attention badges from `zetta attention`, with optional
-  cross-platform desktop notifications
+  cross-platform desktop notifications that click back to the issuing visible
+  tab
 - A small syntax-highlighted built-in [vi editor](https://github.com/SaltwaterC/busy-v),
   available as `zetta vi`, unconditionally as `zvi`, and conditionally as `vi`
   through shell integration;
@@ -63,6 +64,11 @@ PATH`, `zetta http server`, `zetta tftp server`, and `zetta notify`. From a
 Zetta terminal, `zetta attention [OPTIONS] [SUMMARY] [BODY]` marks the
 originating tab with a badge; it works in badge-only builds, defaults to
 `Attention required`, and adds a desktop notification when `--notify` is used.
+Notifications issued from a Zetta terminal can be clicked to activate their
+issuing window and visible tab; closed, dormant, or background-only tabs are
+left alone. Plain `zetta notify` outside Zetta remains fire-and-forget.
+Packaged macOS app builds support click routing; unbundled development builds
+still display notifications but do not route clicks.
 From a Zetta pane, `zetta tabicon ICON` changes the active tab icon, and
 `zetta panetheme THEME` non-persistently changes the active pane's theme
 (`zetta panetheme --reset` restores the profile's configured theme).

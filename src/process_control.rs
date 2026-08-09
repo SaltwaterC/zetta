@@ -26,7 +26,7 @@ use ui::IconName;
 
 use crate::pane::{OverlayFontSize, PaneOverlayRequest, overlay_color_from_value};
 
-const CONTROL_VERSION: u32 = 6;
+const CONTROL_VERSION: u32 = 7;
 const MAX_CONTROL_MESSAGE_BYTES: usize = 4096;
 const CONTROL_COMPLETION_TIMEOUT: Duration = Duration::from_secs(2);
 const CONTROL_COMPLETION_POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -95,6 +95,10 @@ pub(crate) enum ProcessControlCommand {
         request: TabAttentionRequest,
         completion: Sender<bool>,
     },
+    FocusTab {
+        attention_id: u64,
+        completion: Sender<bool>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -131,6 +135,9 @@ enum ControlRequestCommand {
         summary: String,
         body: Option<String>,
     },
+    FocusTab {
+        attention_id: u64,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -142,6 +149,7 @@ struct ControlEndpoint {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ControlRequest {
     token: String,
     command: String,
@@ -358,6 +366,17 @@ impl ProcessControlServer {
                                 && wait_for_control_completion(&completed, &stopping_for_thread);
                             if accepted { "ok" } else { "rejected" }
                         }
+                        Some(ControlRequestCommand::FocusTab { attention_id }) => {
+                            let (completion, completed) = channel();
+                            let accepted = commands
+                                .unbounded_send(ProcessControlCommand::FocusTab {
+                                    attention_id,
+                                    completion,
+                                })
+                                .is_ok()
+                                && wait_for_control_completion(&completed, &stopping_for_thread);
+                            if accepted { "ok" } else { "rejected" }
+                        }
                         None => "rejected",
                     };
                     let status = if status == "ok" && stopping_for_thread.load(Ordering::Acquire) {
@@ -491,7 +510,7 @@ fn decode_control_request(
         }
         return None;
     }
-    if request.command != "set_tab_attention"
+    if !matches!(request.command.as_str(), "set_tab_attention" | "focus_tab")
         && (request.attention_id.is_some()
             || request.attention_summary.is_some()
             || request.attention_body.is_some())
@@ -638,6 +657,26 @@ fn decode_control_request(
                 summary,
                 body: request.attention_body.take(),
             })
+        }
+        "focus_tab"
+            if request.runner_id.is_none()
+                && request.session_id.is_none()
+                && request.secret.is_none()
+                && request.icon.is_none()
+                && request.pane_theme.is_none()
+                && request.pane_overlay.is_none()
+                && request.pane_overlay_font_size.is_none()
+                && request.pane_overlay_opacity.is_none()
+                && request.pane_overlay_color.is_none()
+                && request.attention_summary.is_none()
+                && request.attention_body.is_none()
+                && request.config_path.is_none()
+                && request.split.is_none()
+                && request.profile.is_none()
+                && request.theme.is_none() =>
+        {
+            let attention_id = request.attention_id.take().filter(|id| *id != 0)?;
+            Some(ControlRequestCommand::FocusTab { attention_id })
         }
         _ => None,
     };
@@ -948,6 +987,26 @@ pub(crate) fn request_process_tab_attention(
     send_set_tab_attention_request(&endpoint, &request)
 }
 
+#[cfg(feature = "notifications")]
+pub(crate) fn request_process_focus_tab(process_id: u32, attention_id: u64) -> Result<bool> {
+    anyhow::ensure!(process_id != 0, "process ID must be positive");
+    anyhow::ensure!(attention_id != 0, "attention ID must be positive");
+    let endpoint_path = control_endpoint_path(process_id);
+    let contents = fs::read(&endpoint_path).with_context(|| {
+        format!(
+            "reading Zetta process control endpoint {}",
+            endpoint_path.display()
+        )
+    })?;
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&contents).context("parsing Zetta process control endpoint")?;
+    anyhow::ensure!(
+        endpoint.version == CONTROL_VERSION && endpoint.process_id == process_id,
+        "Zetta process control endpoint is outdated"
+    );
+    send_focus_tab_request(&endpoint, attention_id)
+}
+
 fn send_open_window_request(endpoint: &ControlEndpoint) -> Result<bool> {
     let mut stream = UnixStream::connect(&endpoint.socket_path)?;
     stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
@@ -1003,6 +1062,38 @@ fn send_set_tab_attention_request(
             attention_id: Some(request.attention_id),
             attention_summary: Some(request.summary.clone()),
             attention_body: request.body.clone(),
+            config_path: None,
+            split: None,
+            profile: None,
+            theme: None,
+        },
+    )?;
+    let response = read_message::<ControlResponse>(&mut stream)?;
+    Ok(response.status == "ok")
+}
+
+#[cfg(feature = "notifications")]
+fn send_focus_tab_request(endpoint: &ControlEndpoint, attention_id: u64) -> Result<bool> {
+    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
+    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    write_message(
+        &mut stream,
+        &ControlRequest {
+            token: endpoint.token.clone(),
+            command: "focus_tab".to_owned(),
+            runner_id: None,
+            session_id: None,
+            secret: None,
+            icon: None,
+            pane_theme: None,
+            pane_overlay: None,
+            pane_overlay_font_size: None,
+            pane_overlay_opacity: None,
+            pane_overlay_color: None,
+            attention_id: Some(attention_id),
+            attention_summary: None,
+            attention_body: None,
             config_path: None,
             split: None,
             profile: None,

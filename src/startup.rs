@@ -1,6 +1,7 @@
 use super::*;
 #[cfg(cli_services)]
 use crate::cli_services::CliServiceCommand;
+use crate::cli_services::NotificationTarget;
 #[cfg(feature = "clipboard")]
 use crate::cli_services::{copy_help, parse_copy_args, parse_paste_args, paste_help};
 #[cfg(feature = "http-server")]
@@ -691,10 +692,14 @@ pub(crate) fn run() -> Result<()> {
             .context("zetta attention must run inside a Zetta terminal")?;
         let (process_id, attention_id) =
             parse_attention_target(&inherited_process_id, &inherited_attention_id)?;
-        let accepted = request_process_tab_attention(
+        let target = NotificationTarget {
             process_id,
+            attention_id,
+        };
+        let accepted = request_process_tab_attention(
+            target.process_id,
             TabAttentionRequest {
-                attention_id,
+                attention_id: target.attention_id,
                 summary: command.notification.summary.clone(),
                 body: command.notification.body.clone(),
             },
@@ -702,7 +707,7 @@ pub(crate) fn run() -> Result<()> {
         anyhow::ensure!(accepted, "the originating Zetta tab is no longer available");
         #[cfg(feature = "notifications")]
         if command.notify {
-            run_notification(&command.notification)?;
+            run_notification(&command.notification, Some(target))?;
         }
         #[cfg(not(feature = "notifications"))]
         if command.notify {
@@ -1217,6 +1222,43 @@ pub(crate) fn run() -> Result<()> {
                                 accepted
                             });
                             let _ = completion.send(accepted);
+                        }
+                        ProcessControlCommand::FocusTab {
+                            attention_id,
+                            completion,
+                        } => {
+                            let focused = cx.update(|cx| {
+                                if !cx
+                                    .global::<ZettaProcessState>()
+                                    .control_server
+                                    .is_accepting()
+                                {
+                                    return false;
+                                }
+                                let windows = cx
+                                    .global::<ZettaProcessState>()
+                                    .windows
+                                    .keys()
+                                    .copied()
+                                    .collect::<Vec<_>>();
+                                windows.into_iter().any(|window_id| {
+                                    gpui::WindowHandle::<Zetta>::new(window_id)
+                                        .update(cx, |zetta, window, cx| {
+                                            if zetta.has_visible_tab_by_attention_id(attention_id) {
+                                                window.activate_window();
+                                                zetta.focus_tab_by_attention_id(
+                                                    attention_id,
+                                                    window,
+                                                    cx,
+                                                )
+                                            } else {
+                                                false
+                                            }
+                                        })
+                                        .unwrap_or(false)
+                                })
+                            });
+                            let _ = completion.send(focused);
                         }
                         ProcessControlCommand::ReconnectSession {
                             runner_id,

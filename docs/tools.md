@@ -165,6 +165,17 @@ platform recognizes it. On macOS, Notification Center owns playback of system
 sound names, while Zetta's built-in tones continue asynchronously after
 `zetta notify` exits.
 
+When `zetta notify` runs inside a Zetta terminal with both inherited
+`ZETTA_PROCESS_ID` and `ZETTA_ATTENTION_ID` values valid, clicking the
+notification body activates the matching Zetta window and visible tab.
+Dismissing, timing out, replying to, or choosing another notification action
+does not focus anything. If the tab has closed or is only dormant/background,
+the click is a no-op; Zetta does not reconnect sessions for notifications.
+Outside Zetta, or when either inherited value is missing or invalid, plain
+`zetta notify` remains fire-and-forget. Packaged macOS app builds support this
+click routing; unbundled development builds use `osascript` and display the
+notification without routing its click.
+
 With [shell integration](shell-integration.md) enabled, `zntfy` is an
 equivalent shortcut and retains notification command completion.
 
@@ -186,7 +197,9 @@ zetta attention --notify --sound zetta-ok "Deploy finished"
 SUMMARY defaults to `Attention required`; BODY is optional. `--notify` adds a
 desktop notification using the same `--app-name`, `--icon`, `--sound`, and
 `--timeout` options as `zetta notify`. Those notification options are rejected
-unless `--notify` is present. Run `zetta attention --help` for complete syntax.
+unless `--notify` is present. Clicking the notification body focuses the
+originating visible tab when it still exists; it does not reconnect a dormant
+background session. Run `zetta attention --help` for complete syntax.
 
 ## Clipboard
 

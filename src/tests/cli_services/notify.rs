@@ -82,6 +82,65 @@ fn notify_requires_a_summary_and_rejects_invalid_options() {
 }
 
 #[test]
+fn notification_targets_require_two_positive_numeric_ids() {
+    assert_eq!(
+        parse_notification_target("42", "7"),
+        Some(NotificationTarget {
+            process_id: 42,
+            attention_id: 7,
+        })
+    );
+    for (process_id, attention_id) in [
+        ("", "7"),
+        ("not-a-process", "7"),
+        ("0", "7"),
+        ("42", ""),
+        ("42", "not-an-attention"),
+        ("42", "0"),
+    ] {
+        assert_eq!(parse_notification_target(process_id, attention_id), None);
+    }
+}
+
+#[test]
+fn notification_responses_only_focus_on_default_activation() {
+    assert!(notification_response_activates_tab(
+        &notify_rust::NotificationResponse::Default
+    ));
+    for response in [
+        notify_rust::NotificationResponse::Action("default".to_owned()),
+        notify_rust::NotificationResponse::Action("open".to_owned()),
+        notify_rust::NotificationResponse::Reply("reply".to_owned()),
+        notify_rust::NotificationResponse::Closed(notify_rust::CloseReason::Dismissed),
+        notify_rust::NotificationResponse::Closed(notify_rust::CloseReason::Expired),
+    ] {
+        assert!(!notification_response_activates_tab(&response));
+    }
+}
+
+#[cfg(linux_like)]
+#[test]
+fn targeted_linux_notifications_add_only_the_xdg_default_action() {
+    let command = NotifyCommand {
+        summary: "Build finished".to_owned(),
+        body: Some("All tests passed".to_owned()),
+        app_name: None,
+        icon: Some("icon.png".to_owned()),
+        sound: None,
+        timeout: None,
+    };
+    let target = NotificationTarget {
+        process_id: 42,
+        attention_id: 7,
+    };
+    let targeted = build_notification(&command, Some(target)).unwrap();
+    assert_eq!(targeted.actions, ["default", ""]);
+
+    let untargeted = build_notification(&command, None).unwrap();
+    assert!(untargeted.actions.is_empty());
+}
+
+#[test]
 fn notification_worker_reexec_replays_explicit_notify_arguments() {
     let command = NotifyCommand {
         summary: "Build finished".to_owned(),

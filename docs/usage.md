@@ -112,7 +112,11 @@ Pass `--notify` to also show a desktop notification. The notification reuses
 the `notify` command's `--app-name`, `--icon`, `--sound`, and `--timeout`
 options; those options require `--notify`. Attention commands outside a Zetta
 terminal, or after their originating tab closes, fail rather than targeting
-the current active tab.
+the current active tab. When a notification is issued from a Zetta terminal,
+clicking its body activates the issuing window and visible tab. Dismissal,
+expiry, replies, and other actions do not focus; closed, dormant, and
+background-only tabs are no-ops. Packaged macOS app builds route clicks, while
+unbundled development builds only display the notification.
 
 Press `Ctrl-Shift-G`, or right-click a tab and choose the checked `Tab Move
 Mode` entry, to make that tab the active moving tab. A `Move tab ← →` indicator

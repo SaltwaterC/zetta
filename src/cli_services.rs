@@ -47,6 +47,12 @@ pub(crate) struct NotificationRequest {
     pub(crate) timeout: Option<NotificationTimeout>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NotificationTarget {
+    pub(crate) process_id: u32,
+    pub(crate) attention_id: u64,
+}
+
 pub(crate) fn parse_notification_timeout(value: &str) -> Result<NotificationTimeout> {
     match value {
         "default" => Ok(NotificationTimeout::Default),
@@ -92,7 +98,9 @@ impl CliServiceCommand {
             #[cfg(feature = "tftp-server")]
             Self::Tftp(command) => command.run(),
             #[cfg(feature = "notifications")]
-            Self::Notify(command) => command.run(),
+            Self::Notify(command) => {
+                notify::run_notification(command, notify::notification_target_from_environment())
+            }
             #[cfg(feature = "clipboard")]
             Self::Copy(command) => command.run(),
             #[cfg(feature = "clipboard")]

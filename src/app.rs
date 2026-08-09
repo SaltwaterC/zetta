@@ -1785,6 +1785,33 @@ impl Zetta {
         }
     }
 
+    pub(crate) fn has_visible_tab_by_attention_id(&self, attention_id: u64) -> bool {
+        self.tabs.iter().any(|tab| tab.attention_id == attention_id)
+    }
+
+    pub(crate) fn focus_tab_by_attention_id(
+        &mut self,
+        attention_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(tab_index) = self
+            .tabs
+            .iter()
+            .position(|tab| tab.attention_id == attention_id)
+        else {
+            return false;
+        };
+        if self.tab_search.is_some() {
+            self.dismiss_tab_search(window, cx);
+        }
+        self.active_tab = tab_index;
+        self.tab_overflow_selection_side = None;
+        self.dismiss_tab_overflow_menus(cx);
+        self.focus_active(window, cx);
+        true
+    }
+
     pub(crate) fn attention_id_for_tab(&self, tab_id: u64) -> Option<u64> {
         self.tabs
             .iter()

@@ -148,6 +148,59 @@ fn tab_attention_control_requests_validate_target_and_payload() {
     );
 }
 
+#[cfg(feature = "notifications")]
+#[test]
+fn focus_tab_control_requests_validate_target_and_reject_extra_fields() {
+    let mut focus = request("token", "focus_tab");
+    focus.attention_id = Some(42);
+    assert_eq!(
+        decode_control_request(&mut focus, "token"),
+        Some(ControlRequestCommand::FocusTab { attention_id: 42 })
+    );
+
+    for invalid in [
+        request("token", "focus_tab"),
+        ControlRequest {
+            attention_id: Some(0),
+            ..request("token", "focus_tab")
+        },
+        ControlRequest {
+            attention_id: Some(42),
+            attention_summary: Some("unexpected".to_owned()),
+            ..request("token", "focus_tab")
+        },
+        ControlRequest {
+            attention_id: Some(42),
+            pane_theme: Some("Dracula".to_owned()),
+            ..request("token", "focus_tab")
+        },
+    ] {
+        let mut invalid = invalid;
+        assert_eq!(decode_control_request(&mut invalid, "token"), None);
+    }
+
+    let mut wrong_token = request("wrong", "focus_tab");
+    wrong_token.attention_id = Some(42);
+    assert_eq!(decode_control_request(&mut wrong_token, "token"), None);
+    assert!(request_process_focus_tab(0, 42).is_err());
+    assert!(request_process_focus_tab(u32::MAX, 0).is_err());
+}
+
+#[test]
+fn control_request_deserialization_rejects_unknown_fields() {
+    assert!(
+        serde_json::from_str::<ControlRequest>(
+            r#"{
+            "token": "token",
+            "command": "focus_tab",
+            "attention_id": 42,
+            "unrelated": true
+        }"#
+        )
+        .is_err()
+    );
+}
+
 #[test]
 fn configuration_reload_requests_decode_the_normalized_path() {
     let mut reload = request("token", "reload_configuration");
@@ -524,6 +577,54 @@ fn control_server_delivers_a_tab_attention_request() {
     assert_eq!(request, expected);
     completion.send(true).unwrap();
     assert!(client.join().unwrap().unwrap());
+}
+
+#[cfg(feature = "notifications")]
+#[test]
+fn control_server_delivers_a_focus_tab_request_and_completion_status() {
+    let directory = tempfile::tempdir().unwrap();
+    let endpoint_path = directory.path().join("control.json");
+    let (commands, mut received) = futures::channel::mpsc::unbounded();
+    let _server = ProcessControlServer::start_at(commands, endpoint_path.clone()).unwrap();
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&fs::read(endpoint_path).unwrap()).unwrap();
+
+    let client = thread::spawn(move || send_focus_tab_request(&endpoint, 42));
+    let command = futures::executor::block_on(received.next()).unwrap();
+    let ProcessControlCommand::FocusTab {
+        attention_id,
+        completion,
+    } = command
+    else {
+        panic!("unexpected process control command");
+    };
+    assert_eq!(attention_id, 42);
+    completion.send(true).unwrap();
+    assert!(client.join().unwrap().unwrap());
+}
+
+#[cfg(feature = "notifications")]
+#[test]
+fn control_server_reports_a_rejected_focus_tab_target() {
+    let directory = tempfile::tempdir().unwrap();
+    let endpoint_path = directory.path().join("control.json");
+    let (commands, mut received) = futures::channel::mpsc::unbounded();
+    let _server = ProcessControlServer::start_at(commands, endpoint_path.clone()).unwrap();
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&fs::read(endpoint_path).unwrap()).unwrap();
+
+    let client = thread::spawn(move || send_focus_tab_request(&endpoint, 42));
+    let command = futures::executor::block_on(received.next()).unwrap();
+    let ProcessControlCommand::FocusTab {
+        attention_id,
+        completion,
+    } = command
+    else {
+        panic!("unexpected process control command");
+    };
+    assert_eq!(attention_id, 42);
+    completion.send(false).unwrap();
+    assert!(!client.join().unwrap().unwrap());
 }
 
 #[test]
