@@ -18,7 +18,6 @@ impl Zetta {
         let editor = self.settings_editor.as_ref()?;
         let colors = cx.theme().colors().clone();
         let handle = cx.entity().downgrade();
-        let close_button_on_left = window_close_button_on_left(self.button_layout);
         if !editor.scroll_geometry_initialized {
             let geometry_handle = handle.clone();
             window.on_next_frame(move |_, cx| {
@@ -405,23 +404,11 @@ impl Zetta {
                 .into_any_element()
         };
 
-        let font_modal = modals::render_font_modal(
-            editor,
-            &colors,
-            &handle,
-            close_button_on_left,
-            &scroll_indicator,
-            &text_input,
-        );
+        let font_modal =
+            modals::render_font_modal(editor, &colors, &handle, &scroll_indicator, &text_input);
 
-        let profile_modal = modals::render_profile_modal(
-            editor,
-            &colors,
-            &handle,
-            close_button_on_left,
-            &text_input,
-            &dropdown,
-        );
+        let profile_modal =
+            modals::render_profile_modal(editor, &colors, &handle, &text_input, &dropdown);
 
         let keymap_capture_modal = modals::render_keymap_capture_modal(editor, &colors, &handle);
 
@@ -442,19 +429,6 @@ impl Zetta {
         let themes_handle = handle.clone();
         let keymap_handle = handle.clone();
         let save_handle = handle.clone();
-        let close_settings_button = || {
-            let close_handle = handle.clone();
-            IconButton::new("close-settings", IconName::Close)
-                .icon_size(IconSize::Small)
-                .toggle_state(editor.focused_control == Some(SettingsControl::Close))
-                .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
-                .tooltip(Tooltip::text("Close settings"))
-                .on_click(move |_, window, cx| {
-                    close_handle
-                        .update(cx, |this, cx| this.dismiss_settings(window, cx))
-                        .ok();
-                })
-        };
         let path = match editor.page {
             SettingsPage::Configuration => self.launch_config.config_path.display().to_string(),
             SettingsPage::Themes => format!(
@@ -478,6 +452,7 @@ impl Zetta {
                     div()
                         .id("settings-editor")
                         .track_focus(&self.settings_focus)
+                        .key_context("Settings")
                         .relative()
                         .size_full()
                         .max_w(px(980.))
@@ -501,10 +476,6 @@ impl Zetta {
                                 .child(
                                     h_flex()
                                         .gap_1()
-                                        .when(close_button_on_left, |controls| {
-                                            controls
-                                                .child(div().mr_1().child(close_settings_button()))
-                                        })
                                         .child(
                                             div()
                                                 .id("settings-configuration-tab")
@@ -595,6 +566,12 @@ impl Zetta {
                                         .gap_2()
                                         .child(
                                             div()
+                                                .text_xs()
+                                                .text_color(colors.text_muted)
+                                                .child("Esc: close"),
+                                        )
+                                        .child(
+                                            div()
                                                 .id("save-settings")
                                                 .px_3()
                                                 .py_1()
@@ -612,6 +589,11 @@ impl Zetta {
                                                 .cursor_pointer()
                                                 .bg(colors.element_selected)
                                                 .hover(|style| style.bg(colors.element_hover))
+                                                .tooltip(Tooltip::for_action_title_in(
+                                                    "Save settings",
+                                                    &SaveSettings,
+                                                    &self.settings_focus,
+                                                ))
                                                 .on_click(move |_, window, cx| {
                                                     save_handle
                                                         .update(cx, |this, cx| {
@@ -628,10 +610,7 @@ impl Zetta {
                                                         "Save"
                                                     },
                                                 ),
-                                        )
-                                        .when(!close_button_on_left, |controls| {
-                                            controls.child(close_settings_button())
-                                        }),
+                                        ),
                                 ),
                         )
                         .child(

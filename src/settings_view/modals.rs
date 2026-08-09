@@ -4,31 +4,11 @@ pub(crate) fn render_font_modal(
     editor: &SettingsEditor,
     colors: &ThemeColors,
     handle: &WeakEntity<Zetta>,
-    close_button_on_left: bool,
     scroll_indicator: &impl Fn(String, &ScrollHandle) -> AnyElement,
     text_input: &impl Fn(String, TextField, SettingsInput) -> AnyElement,
 ) -> Option<AnyElement> {
     editor.font_query.as_ref().map(|query| {
         let current_font = editor.configuration.terminal_font_family.clone();
-        let close_font_picker_button = || {
-            let close_handle = handle.clone();
-            IconButton::new("close-font-picker", IconName::Close)
-                .icon_size(IconSize::Small)
-                .toggle_state(editor.focused_control == Some(SettingsControl::CloseFontPicker))
-                .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
-                .tooltip(Tooltip::text("Close font picker"))
-                .on_click(move |_, _, cx| {
-                    close_handle
-                        .update(cx, |this, cx| {
-                            if let Some(editor) = this.settings_editor.as_mut() {
-                                editor.font_query = None;
-                                editor.focused_input = None;
-                                cx.notify();
-                            }
-                        })
-                        .ok();
-                })
-        };
         // Use cached filtered font indices or compute inline if cache is missing
         let filtered_fonts = if editor.font_search_query_cache == query.text {
             editor
@@ -129,17 +109,18 @@ pub(crate) fn render_font_modal(
                         h_flex()
                             .mb_3()
                             .gap_2()
-                            .when(close_button_on_left, |header| {
-                                header.child(close_font_picker_button())
-                            })
                             .child(div().min_w_0().flex_1().child(text_input(
                                 "settings-font-search".to_owned(),
                                 query.clone(),
                                 SettingsInput::FontSearch,
                             )))
-                            .when(!close_button_on_left, |header| {
-                                header.child(close_font_picker_button())
-                            }),
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_xs()
+                                    .text_color(colors.text_muted)
+                                    .child("Esc: close"),
+                            ),
                     )
                     .child(div().relative().min_h_0().flex_1().child(font_rows).child(
                         scroll_indicator("settings-font-scrollbar".to_owned(), &font_scroll),
@@ -153,7 +134,6 @@ pub(crate) fn render_profile_modal(
     editor: &SettingsEditor,
     colors: &ThemeColors,
     handle: &WeakEntity<Zetta>,
-    close_button_on_left: bool,
     text_input: &impl Fn(String, TextField, SettingsInput) -> AnyElement,
     dropdown: &impl Fn(String, String, SettingsDropdown) -> AnyElement,
 ) -> Option<AnyElement> {
@@ -166,25 +146,6 @@ pub(crate) fn render_profile_modal(
                 .unwrap_or_else(|| "Use application theme".to_owned()),
             SettingsDropdown::ProfileDraftTheme,
         );
-        let close_new_profile_button = || {
-            let cancel_handle = handle.clone();
-            IconButton::new("close-new-profile", IconName::Close)
-                .icon_size(IconSize::Small)
-                .toggle_state(editor.focused_control == Some(SettingsControl::CloseProfileDialog))
-                .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
-                .on_click(move |_, _, cx| {
-                    cancel_handle
-                        .update(cx, |this, cx| {
-                            if let Some(editor) = this.settings_editor.as_mut() {
-                                editor.profile_draft = None;
-                                editor.focused_input = None;
-                                editor.message = None;
-                                cx.notify();
-                            }
-                        })
-                        .ok();
-                })
-        };
         let create_handle = handle.clone();
         div()
             .id("new-profile-modal")
@@ -211,13 +172,14 @@ pub(crate) fn render_profile_modal(
                         h_flex()
                             .mb_4()
                             .gap_2()
-                            .when(close_button_on_left, |header| {
-                                header.child(close_new_profile_button())
-                            })
                             .child(div().min_w_0().flex_1().text_lg().child("Add profile"))
-                            .when(!close_button_on_left, |header| {
-                                header.child(close_new_profile_button())
-                            }),
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_xs()
+                                    .text_color(colors.text_muted)
+                                    .child("Esc: close"),
+                            ),
                     )
                     .child(
                         div()

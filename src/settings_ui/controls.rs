@@ -39,10 +39,7 @@ impl Zetta {
 
     fn build_settings_controls(editor: &SettingsEditor) -> Vec<SettingsControl> {
         if let Some(query) = editor.font_query.as_ref() {
-            let mut controls = vec![
-                SettingsControl::CloseFontPicker,
-                SettingsControl::Input(SettingsInput::FontSearch),
-            ];
+            let mut controls = vec![SettingsControl::Input(SettingsInput::FontSearch)];
             controls.extend(
                 matching_font_indices(&editor.normalized_fonts, &query.text)
                     .iter()
@@ -53,7 +50,6 @@ impl Zetta {
         }
         if editor.profile_draft.is_some() {
             return vec![
-                SettingsControl::CloseProfileDialog,
                 SettingsControl::Input(SettingsInput::ProfileDraft(ProfileDraftField::Name)),
                 SettingsControl::Input(SettingsInput::ProfileDraft(ProfileDraftField::Program)),
                 SettingsControl::Input(SettingsInput::ProfileDraft(ProfileDraftField::Arguments)),
@@ -71,7 +67,6 @@ impl Zetta {
             SettingsControl::Tab(SettingsPage::Themes),
             SettingsControl::Tab(SettingsPage::Keymap),
             SettingsControl::Save,
-            SettingsControl::Close,
         ];
         match editor.page {
             SettingsPage::Configuration => {
@@ -582,7 +577,6 @@ impl Zetta {
         match control {
             SettingsControl::Tab(page) => self.select_settings_page(page, window, cx),
             SettingsControl::Save => self.save_settings(window, cx),
-            SettingsControl::Close => self.dismiss_settings(window, cx),
             SettingsControl::Input(input) => self.focus_settings_input(input, window, cx),
             SettingsControl::CaptureKeymap(target) => self.start_keymap_capture(target, window, cx),
             SettingsControl::Dropdown(dropdown) => {
@@ -698,14 +692,6 @@ impl Zetta {
                     cx.notify();
                 }
             }
-            SettingsControl::CloseFontPicker => {
-                if let Some(editor) = self.settings_editor.as_mut() {
-                    editor.font_query = None;
-                    editor.focused_input = None;
-                    editor.focused_control = None;
-                    cx.notify();
-                }
-            }
             SettingsControl::Font(index) => {
                 if let Some(editor) = self.settings_editor.as_mut()
                     && let Some(font) = editor.fonts.get(index)
@@ -713,15 +699,6 @@ impl Zetta {
                     editor.configuration.terminal_font_family = font.clone();
                     editor.configuration_dirty = true;
                     editor.font_query = None;
-                    editor.focused_input = None;
-                    editor.focused_control = None;
-                    editor.message = None;
-                    cx.notify();
-                }
-            }
-            SettingsControl::CloseProfileDialog => {
-                if let Some(editor) = self.settings_editor.as_mut() {
-                    editor.profile_draft = None;
                     editor.focused_input = None;
                     editor.focused_control = None;
                     editor.message = None;

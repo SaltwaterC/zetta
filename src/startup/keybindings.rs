@@ -237,6 +237,12 @@ pub(crate) const SAVE_PANE_OUTPUT_KEYBINDING: &str = if cfg!(target_os = "macos"
     "alt-shift-s"
 };
 
+pub(crate) const SAVE_SETTINGS_KEYBINDING: &str = if cfg!(target_os = "macos") {
+    "cmd-s"
+} else {
+    "ctrl-s"
+};
+
 pub(crate) const EDIT_SCROLLBACK_KEYBINDING: &str = if cfg!(target_os = "macos") {
     "cmd-shift-v"
 } else {
@@ -286,6 +292,14 @@ pub(crate) fn pane_output_keybinding() -> KeyBinding {
         SAVE_PANE_OUTPUT_KEYBINDING,
         SavePaneOutput,
         Some("Zetta > Terminal"),
+    )
+}
+
+pub(crate) fn save_settings_keybinding() -> KeyBinding {
+    KeyBinding::new(
+        SAVE_SETTINGS_KEYBINDING,
+        SaveSettings,
+        Some("Zetta > Settings"),
     )
 }
 
@@ -558,6 +572,7 @@ fn default_keybindings(
         ),
         platform_keybinding("ctrl-alt-v", PasteTrimmed, Some("Zetta > Terminal")),
         pane_output_keybinding(),
+        save_settings_keybinding(),
         KeyBinding::new(
             "ctrl-shift-p",
             ToggleCommandPalette,

@@ -172,6 +172,7 @@ actions!(
         ReloadConfiguration,
         ToggleCommandPalette,
         ToggleSettings,
+        SaveSettings,
         ToggleSerialConsole,
         StartHttpServer,
         StartTftpServer,

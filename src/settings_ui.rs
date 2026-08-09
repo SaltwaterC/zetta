@@ -75,7 +75,6 @@ pub(crate) enum NumericSetting {
 pub(crate) enum SettingsControl {
     Tab(SettingsPage),
     Save,
-    Close,
     Input(SettingsInput),
     CaptureKeymap(KeymapTextField),
     Dropdown(SettingsDropdown),
@@ -93,9 +92,7 @@ pub(crate) enum SettingsControl {
     UnbindBinding(usize, usize),
     AddBinding(usize),
     AddKeymapSection,
-    CloseFontPicker,
     Font(usize),
-    CloseProfileDialog,
     CreateProfile,
 }
 
@@ -624,6 +621,15 @@ impl Zetta {
         }
     }
 
+    pub(crate) fn save_settings_action(
+        &mut self,
+        _: &SaveSettings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.save_settings(window, cx);
+    }
+
     pub(crate) fn settings_key_down(
         &mut self,
         event: &KeyDownEvent,
@@ -735,7 +741,6 @@ impl Zetta {
                     self.dismiss_settings(window, cx);
                 }
             }
-            "s" if command => self.save_settings(window, cx),
             "1" if command => self.select_settings_page(SettingsPage::Configuration, window, cx),
             "2" if command => self.select_settings_page(SettingsPage::Themes, window, cx),
             "3" if command => self.select_settings_page(SettingsPage::Keymap, window, cx),

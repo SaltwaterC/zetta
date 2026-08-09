@@ -212,7 +212,6 @@ impl Zetta {
         .track_scroll(&scroll_handle)
         .on_scroll_wheel(|_, _, cx| cx.stop_propagation());
 
-        let close_handle = handle.clone();
         let has_options = !options.is_empty();
 
         Some(
@@ -240,26 +239,7 @@ impl Zetta {
                         .border_color(colors.border)
                         .bg(colors.elevated_surface_background)
                         .shadow_lg()
-                        .child({
-                            let close_button_on_left = window_close_button_on_left(self.button_layout);
-                            h_flex()
-                                .mb_3()
-                                .gap_2()
-                                .when(close_button_on_left, |flex| flex.flex_row_reverse())
-                                .child(search)
-                                .child(
-                                    IconButton::new("close-tab-icon-picker", IconName::Close)
-                                        .icon_size(IconSize::Small)
-                                        .tooltip(Tooltip::text("Close icon picker"))
-                                        .on_click(move |_, window, cx| {
-                                            close_handle
-                                                .update(cx, |this, cx| {
-                                                    this.dismiss_tab_icon_picker(window, cx);
-                                                })
-                                                .ok();
-                                        }),
-                                )
-                        })
+                        .child(h_flex().mb_3().gap_2().child(search))
                         .child(
                             div()
                                 .relative()
@@ -934,6 +914,7 @@ impl Zetta {
             .on_action(cx.listener(Self::reload_configuration))
             .on_action(cx.listener(Self::toggle_command_palette))
             .on_action(cx.listener(Self::toggle_settings))
+            .on_action(cx.listener(Self::save_settings_action))
             .on_action(cx.listener(Self::toggle_serial_console))
             .on_action(cx.listener(Self::start_http_server))
             .on_action(cx.listener(Self::start_tftp_server))
