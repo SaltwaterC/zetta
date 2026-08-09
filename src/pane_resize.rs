@@ -107,7 +107,7 @@ impl PaneResizeKeys {
         self.pressed &= !direction.bit();
     }
 
-    fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.pressed = 0;
     }
 
@@ -239,16 +239,9 @@ impl Zetta {
         self.pane_resize_drag = None;
         if self.pane_resize_mode {
             self.pane_move_mode = false;
+            self.tab_move_mode = false;
         }
-        let input_enabled = pane_input_enabled(self.pane_resize_mode || self.pane_move_mode);
-        for view in self
-            .tabs
-            .iter()
-            .flat_map(|tab| tab.panes.iter())
-            .filter_map(|pane| pane.view.as_ref())
-        {
-            view.update(cx, |view, cx| view.set_input_enabled(input_enabled, cx));
-        }
+        self.update_terminal_input_enabled(cx);
         cx.notify();
     }
 
@@ -268,19 +261,12 @@ impl Zetta {
         self.pane_move_mode = !self.pane_move_mode;
         if self.pane_move_mode {
             self.pane_resize_mode = false;
+            self.tab_move_mode = false;
             self.pane_resize_keys.clear();
             self.cancel_pane_resize_repeat();
             self.pane_resize_drag = None;
         }
-        let input_enabled = pane_input_enabled(self.pane_resize_mode || self.pane_move_mode);
-        for view in self
-            .tabs
-            .iter()
-            .flat_map(|tab| tab.panes.iter())
-            .filter_map(|pane| pane.view.as_ref())
-        {
-            view.update(cx, |view, cx| view.set_input_enabled(input_enabled, cx));
-        }
+        self.update_terminal_input_enabled(cx);
         cx.notify();
     }
 

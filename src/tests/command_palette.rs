@@ -1,9 +1,14 @@
 use super::*;
+use crate::ToggleTabMoveMode;
 gpui::actions!(command_palette_test, [First, Second]);
 
 #[test]
 fn humanizes_action_names() {
     assert_eq!(humanize_action_name("zetta::NewTab"), "zetta: new tab");
+    assert_eq!(
+        humanize_action_name(ToggleTabMoveMode.name()),
+        "zetta: toggle tab move mode"
+    );
     assert_eq!(
         humanize_action_name("editor::OpenURLParser"),
         "editor: open URL parser"

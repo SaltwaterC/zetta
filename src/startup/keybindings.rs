@@ -293,6 +293,8 @@ pub(crate) const TOGGLE_PANE_RESIZE_MODE_KEYBINDING: &str = "ctrl-shift-j";
 
 pub(crate) const TOGGLE_PANE_MOVE_MODE_KEYBINDING: &str = "alt-shift-m";
 
+pub(crate) const TOGGLE_TAB_MOVE_MODE_KEYBINDING: &str = "ctrl-shift-g";
+
 pub(crate) const APPLICATION_MENU_KEYBINDING: &str = "alt-space";
 
 pub(crate) fn pane_output_keybinding() -> KeyBinding {
@@ -452,12 +454,27 @@ pub(crate) fn pane_move_mode_keybinding() -> KeyBinding {
     )
 }
 
+pub(crate) fn tab_move_mode_keybinding() -> KeyBinding {
+    KeyBinding::new(
+        TOGGLE_TAB_MOVE_MODE_KEYBINDING,
+        ToggleTabMoveMode,
+        Some("Zetta > Terminal"),
+    )
+}
+
 pub(crate) fn pane_move_keybindings() -> [KeyBinding; 4] {
     [
         KeyBinding::new("left", MovePaneLeft, Some("Zetta > PaneMove > Terminal")),
         KeyBinding::new("right", MovePaneRight, Some("Zetta > PaneMove > Terminal")),
         KeyBinding::new("up", MovePaneUp, Some("Zetta > PaneMove > Terminal")),
         KeyBinding::new("down", MovePaneDown, Some("Zetta > PaneMove > Terminal")),
+    ]
+}
+
+pub(crate) fn tab_move_keybindings() -> [KeyBinding; 2] {
+    [
+        KeyBinding::new("left", MoveTabLeft, Some("Zetta > TabMove > Terminal")),
+        KeyBinding::new("right", MoveTabRight, Some("Zetta > TabMove > Terminal")),
     ]
 }
 
@@ -517,6 +534,7 @@ fn default_keybindings(
         rotate_pane_layout_counter_clockwise_keybinding(),
         pane_resize_mode_keybinding(),
         pane_move_mode_keybinding(),
+        tab_move_mode_keybinding(),
         select_all_keybinding(),
         edit_scrollback_keybinding(),
         KeyBinding::new(
@@ -627,6 +645,7 @@ fn default_keybindings(
     bindings.extend(minimized_pane_keybindings());
     bindings.extend(pane_resize_keybindings());
     bindings.extend(pane_move_keybindings());
+    bindings.extend(tab_move_keybindings());
     bindings.extend(pane_template_keybindings());
     bindings.extend(pane_font_size_keybindings());
     #[cfg(target_os = "macos")]

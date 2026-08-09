@@ -428,6 +428,7 @@ fn keymap_template_exposes_all_builtin_shortcuts() {
         ("alt-shift-x", "zetta::ClosePane"),
         ("alt-shift-l", "zetta::RotatePaneLayout"),
         ("alt-shift-k", "zetta::RotatePaneLayoutCounterClockwise"),
+        ("ctrl-shift-g", "zetta::ToggleTabMoveMode"),
         ("alt-shift-a", "terminal_view::SelectAll"),
         ("ctrl-shift-m", "zetta::ToggleMultiCommand"),
         ("ctrl-shift-l", "terminal::Clear"),
@@ -482,6 +483,12 @@ fn keymap_template_exposes_all_builtin_shortcuts() {
         ("down", "zetta::MovePaneDown"),
     ] {
         assert_binding("Zetta > PaneMove > Terminal", keystroke, action);
+    }
+    for (keystroke, action) in [
+        ("left", "zetta::MoveTabLeft"),
+        ("right", "zetta::MoveTabRight"),
+    ] {
+        assert_binding("Zetta > TabMove > Terminal", keystroke, action);
     }
 
     assert_binding(

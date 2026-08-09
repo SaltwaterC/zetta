@@ -197,6 +197,74 @@ fn pane_resize_mode_uses_a_dedicated_ctrl_shift_shortcut() {
 }
 
 #[test]
+fn tab_move_mode_uses_a_dedicated_ctrl_shift_shortcut_without_collisions() {
+    assert_eq!(TOGGLE_TAB_MOVE_MODE_KEYBINDING, "ctrl-shift-g");
+    let binding = tab_move_mode_keybinding();
+    let shortcut = gpui::Keystroke::parse(TOGGLE_TAB_MOVE_MODE_KEYBINDING).unwrap();
+    assert_eq!(
+        binding.match_keystrokes(std::slice::from_ref(&shortcut)),
+        Some(false)
+    );
+    assert_eq!(binding.action().name(), ToggleTabMoveMode.name());
+    assert!(
+        binding
+            .predicate()
+            .expect("tab move toggle should be scoped to a terminal")
+            .depth_of(&[
+                gpui::KeyContext::parse("Zetta").unwrap(),
+                gpui::KeyContext::parse("Terminal").unwrap(),
+            ])
+            .is_some()
+    );
+
+    let defaults = default_keybindings(0, &gpui::DummyKeyboardMapper);
+    let matching_bindings = defaults
+        .iter()
+        .filter(|candidate| {
+            candidate.match_keystrokes(std::slice::from_ref(&shortcut)) == Some(false)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        matching_bindings.len(),
+        1,
+        "Ctrl-Shift-G must have exactly one Zetta default binding"
+    );
+    assert_eq!(
+        matching_bindings[0].action().name(),
+        ToggleTabMoveMode.name()
+    );
+}
+
+#[test]
+fn tab_move_shortcuts_use_the_tab_move_terminal_context() {
+    for (binding, shortcut) in tab_move_keybindings().into_iter().zip(["left", "right"]) {
+        assert_eq!(
+            binding.match_keystrokes(&[gpui::Keystroke::parse(shortcut).unwrap()]),
+            Some(false)
+        );
+        assert_eq!(
+            binding.action().name(),
+            if shortcut == "left" {
+                MoveTabLeft.name()
+            } else {
+                MoveTabRight.name()
+            }
+        );
+        assert!(
+            binding
+                .predicate()
+                .expect("tab move shortcut should be scoped to a terminal")
+                .depth_of(&[
+                    gpui::KeyContext::parse("Zetta").unwrap(),
+                    gpui::KeyContext::parse("TabMove").unwrap(),
+                    gpui::KeyContext::parse("Terminal").unwrap(),
+                ])
+                .is_some()
+        );
+    }
+}
+
+#[test]
 fn pane_focus_shortcuts_use_the_platform_modifier() {
     let shortcuts = ["alt-left", "alt-right", "alt-up", "alt-down"];
 

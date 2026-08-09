@@ -103,7 +103,11 @@ impl Zetta {
             ByteStreamInputPolicy::CloseOnInterrupt => true,
             ByteStreamInputPolicy::Broadcast => self.tabs[self.active_tab].broadcast_input,
         };
-        view.update(cx, |view, _| view.set_emit_input_events(emit_input_events));
+        let input_enabled = self.terminal_input_enabled();
+        view.update(cx, |view, cx| {
+            view.set_emit_input_events(emit_input_events);
+            view.set_input_enabled(input_enabled, cx);
+        });
         cx.subscribe_in(
             &view,
             window,

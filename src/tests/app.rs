@@ -55,6 +55,48 @@ fn pane_resize_mode_pauses_terminal_input() {
 }
 
 #[test]
+fn tab_move_mode_moves_adjacent_tabs_without_wrapping() {
+    let mut ids = vec![1, 2, 3, 4];
+    assert_eq!(
+        move_item_by_id(&mut ids, 3, TabMoveDirection::Left, 3, true, |id| *id),
+        Some(1)
+    );
+    assert_eq!(ids, vec![1, 3, 2, 4]);
+
+    assert_eq!(
+        move_item_by_id(&mut ids, 3, TabMoveDirection::Right, 3, true, |id| *id),
+        Some(2)
+    );
+    assert_eq!(ids, vec![1, 2, 3, 4]);
+}
+
+#[test]
+fn tab_move_mode_stops_at_boundaries_and_when_disabled() {
+    let mut ids = vec![1, 2, 3];
+    assert_eq!(
+        move_item_by_id(&mut ids, 1, TabMoveDirection::Left, 1, true, |id| *id),
+        None
+    );
+    assert_eq!(
+        move_item_by_id(&mut ids, 3, TabMoveDirection::Right, 3, true, |id| *id),
+        None
+    );
+    assert_eq!(
+        move_item_by_id(&mut ids, 2, TabMoveDirection::Right, 2, false, |id| *id),
+        None
+    );
+    assert_eq!(ids, vec![1, 2, 3]);
+}
+
+#[test]
+fn tab_move_mode_preserves_the_logical_active_tab() {
+    let mut ids = vec![1, 2, 3, 4];
+    let active_index = move_item_by_id(&mut ids, 2, TabMoveDirection::Right, 2, true, |id| *id);
+    assert_eq!(ids, vec![1, 3, 2, 4]);
+    assert_eq!(active_index, Some(2));
+}
+
+#[test]
 fn application_menu_navigation_wraps_in_both_directions() {
     assert_eq!(
         adjacent_application_menu_index(2, 0, ApplicationMenuDirection::Left),
@@ -247,4 +289,11 @@ fn tab_reorder_ignores_same_tab_invalid_target_empty_and_outside_drops() {
         None
     );
     assert_eq!(ids, vec![1, 2, 3]);
+}
+
+#[test]
+fn overflow_selection_side_distinguishes_left_and_right_entries() {
+    assert_eq!(tab_overflow_selection_side(1, 4), Some(false));
+    assert_eq!(tab_overflow_selection_side(7, 4), Some(true));
+    assert_eq!(tab_overflow_selection_side(4, 4), None);
 }

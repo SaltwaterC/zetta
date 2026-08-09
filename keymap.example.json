@@ -18,6 +18,7 @@
       "alt-shift-k": "zetta::RotatePaneLayoutCounterClockwise",
       "ctrl-shift-j": "zetta::TogglePaneResizeMode",
       "alt-shift-m": "zetta::TogglePaneMoveMode",
+      "ctrl-shift-g": "zetta::ToggleTabMoveMode",
       "alt-shift-a": "terminal_view::SelectAll",
       "ctrl-shift-backspace": "terminal_view::ClearClipboard",
       "shift-escape": "zetta::ToggleMaximizePane",
@@ -113,6 +114,13 @@
       "right": "zetta::MovePaneRight",
       "up": "zetta::MovePaneUp",
       "down": "zetta::MovePaneDown"
+    }
+  },
+  {
+    "context": "Zetta > TabMove > Terminal",
+    "bindings": {
+      "left": "zetta::MoveTabLeft",
+      "right": "zetta::MoveTabRight"
     }
   },
   {

@@ -11,6 +11,12 @@ pub(crate) enum TabDropPosition {
     Outside,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TabMoveDirection {
+    Left,
+    Right,
+}
+
 fn reorder_items_by_id<T>(
     items: &mut Vec<T>,
     source_id: u64,
@@ -48,6 +54,40 @@ fn reorder_items_by_id<T>(
     // The active item is identified before the move and found again afterward,
     // so moving either the active or an inactive tab preserves logical focus.
     items.iter().position(|item| item_id(item) == active_id)
+}
+
+fn move_item_by_id<T>(
+    items: &mut Vec<T>,
+    source_id: u64,
+    direction: TabMoveDirection,
+    active_id: u64,
+    enabled: bool,
+    item_id: impl Fn(&T) -> u64,
+) -> Option<usize> {
+    if !enabled {
+        return None;
+    }
+
+    let source_index = items.iter().position(|item| item_id(item) == source_id)?;
+    let target_id = match direction {
+        TabMoveDirection::Left => source_index
+            .checked_sub(1)
+            .and_then(|target_index| items.get(target_index))
+            .map(&item_id),
+        TabMoveDirection::Right => source_index
+            .checked_add(1)
+            .and_then(|target_index| items.get(target_index))
+            .map(&item_id),
+    }?;
+    let position = match direction {
+        TabMoveDirection::Left => TabDropPosition::Before(target_id),
+        TabMoveDirection::Right => TabDropPosition::After(target_id),
+    };
+    reorder_items_by_id(items, source_id, position, active_id, item_id)
+}
+
+fn tab_overflow_selection_side(selected_index: usize, active_index: usize) -> Option<bool> {
+    (selected_index != active_index).then_some(selected_index > active_index)
 }
 
 /// Cached font enumeration for settings font picker
@@ -215,6 +255,7 @@ pub(crate) struct Zetta {
     pub(crate) pane_resize_repeat_generation: u64,
     pub(crate) pane_resize_drag: Option<PaneResizeDrag>,
     pub(crate) pane_move_mode: bool,
+    pub(crate) tab_move_mode: bool,
     pub(crate) titlebar_dragging: bool,
     pub(crate) button_layout: WindowButtonLayout,
     pub(crate) performance_overlay: Option<PerformanceOverlay>,
@@ -248,6 +289,7 @@ impl Zetta {
             self.finish_background_session_change(cx);
         }
         self.active_tab = 0;
+        self.tab_move_mode = false;
         self.command_palette = None;
         self.multi_command = None;
         self.settings_editor = None;
@@ -368,6 +410,7 @@ impl Zetta {
             pane_resize_repeat_generation: 0,
             pane_resize_drag: None,
             pane_move_mode: false,
+            tab_move_mode: false,
             titlebar_dragging: false,
             button_layout,
             performance_overlay: None,
@@ -567,6 +610,7 @@ impl Zetta {
         self.forget_pane_controls(closed_pane_ids);
         self.tabs.remove(index);
         self.retain_open_visible_terminals();
+        self.disable_tab_move_mode_if_unavailable(cx);
         if self.tabs.is_empty() {
             window.remove_window();
             return;
@@ -1401,6 +1445,100 @@ impl Zetta {
         }
     }
 
+    pub(crate) fn terminal_input_enabled(&self) -> bool {
+        pane_input_enabled(self.pane_resize_mode || self.pane_move_mode || self.tab_move_mode)
+    }
+
+    pub(crate) fn update_terminal_input_enabled(&self, cx: &mut App) {
+        let enabled = self.terminal_input_enabled();
+        for view in self
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.panes.iter())
+            .filter_map(|pane| pane.view.as_ref())
+        {
+            view.update(cx, |view, cx| view.set_input_enabled(enabled, cx));
+        }
+    }
+
+    pub(crate) fn disable_tab_move_mode_if_unavailable(&mut self, cx: &mut App) {
+        if self.tabs.len() < 2 && self.tab_move_mode {
+            self.tab_move_mode = false;
+            self.update_terminal_input_enabled(cx);
+        }
+    }
+
+    pub(crate) fn toggle_tab_move_mode(
+        &mut self,
+        _: &ToggleTabMoveMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.tabs.len() < 2 && !self.tab_move_mode {
+            return;
+        }
+
+        self.tab_move_mode = !self.tab_move_mode;
+        self.tab_overflow_selection_side = None;
+        self.dismiss_tab_overflow_menus(cx);
+        if self.tab_move_mode {
+            self.pane_resize_mode = false;
+            self.pane_move_mode = false;
+            self.pane_resize_keys.clear();
+            self.pane_resize_repeat_generation = self.pane_resize_repeat_generation.wrapping_add(1);
+            self.pane_resize_drag = None;
+        }
+        self.update_terminal_input_enabled(cx);
+        self.focus_active(window, cx);
+    }
+
+    pub(crate) fn move_tab_left(
+        &mut self,
+        _: &MoveTabLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_active_tab(TabMoveDirection::Left, window, cx);
+    }
+
+    pub(crate) fn move_tab_right(
+        &mut self,
+        _: &MoveTabRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_active_tab(TabMoveDirection::Right, window, cx);
+    }
+
+    fn move_active_tab(
+        &mut self,
+        direction: TabMoveDirection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.tab_move_mode {
+            return;
+        }
+        let Some(source_id) = self.tabs.get(self.active_tab).map(|tab| tab.id) else {
+            return;
+        };
+        let Some(active_tab_index) = move_item_by_id(
+            &mut self.tabs,
+            source_id,
+            direction,
+            source_id,
+            true,
+            |tab| tab.id,
+        ) else {
+            return;
+        };
+
+        self.active_tab = active_tab_index;
+        self.tab_overflow_selection_side = None;
+        self.dismiss_tab_overflow_menus(cx);
+        self.focus_active(window, cx);
+    }
+
     pub(crate) fn reorder_tab(
         &mut self,
         tab_id: u64,
@@ -1436,7 +1574,9 @@ impl Zetta {
         // Any overflowed tab is either entirely left of the visible range (index <
         // active_tab) or entirely right of it (index > active_tab); keep the tab
         // bar anchored on the side the user picked it from.
-        let side_is_right = index > self.active_tab;
+        let Some(side_is_right) = tab_overflow_selection_side(index, self.active_tab) else {
+            return;
+        };
         self.active_tab = index;
         self.tab_overflow_selection_side = Some(side_is_right);
         self.dismiss_tab_overflow_menus(cx);

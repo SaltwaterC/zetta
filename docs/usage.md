@@ -43,6 +43,16 @@ From a Zetta pane, `zetta tabicon ICON` changes the active tab icon;
 built-in icon names.
 Tabs retain a fixed width as their names change.
 
+Press `Ctrl-Shift-G`, or right-click a tab and choose the checked `Tab Move
+Mode` entry, to make that tab the active moving tab. A `Move tab ← →` indicator
+appears in the tab bar while the mode is active. `Left` and `Right` then move
+the tab one position at a time without wrapping; normal terminal input is
+paused. The mode stays active until you toggle the shortcut or menu entry
+again, or use `Tab Move Mode` in the command palette. The moving tab remains
+visible as tabs displaced from either end enter the corresponding overflow
+menu. Selecting a tab from either overflow menu brings it into the visible
+range, anchored on the side from which it was selected, before it can be moved.
+
 ## Panes
 
 Splits inherit the active pane's working directory and selected profile. Use
@@ -368,6 +378,7 @@ become `Ctrl-Cmd`; for example, paste-trim is `Ctrl-Cmd-V` on macOS and
 | `Ctrl-Shift-H` | Minimize the current window; a Linux compositor may ignore the request |
 | `Ctrl-Shift-1` … `Ctrl-Shift-9` | New tab with profile 1 … 9 |
 | `Ctrl-Shift-W` | Close tab |
+| `Ctrl-Shift-G`, then `Left` / `Right` | Toggle tab-move mode and move the active tab without wrapping |
 | `Ctrl-Shift-D` | Detach the active tab into the background |
 | `Ctrl-Shift-B` | Toggle automatic backgrounding for the active tab |
 | `Ctrl-Shift-A` | Reconnect the most recently detached tab |

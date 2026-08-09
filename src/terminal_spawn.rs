@@ -177,8 +177,7 @@ impl Zetta {
                             .iter()
                             .find(|tab| tab.id == tab_id)
                             .is_some_and(|tab| tab.broadcast_input);
-                        let input_enabled =
-                            pane_input_enabled(this.pane_resize_mode || this.pane_move_mode);
+                        let input_enabled = this.terminal_input_enabled();
                         view.update(cx, |view, cx| {
                             view.set_emit_input_events(emit_input_events);
                             view.set_input_enabled(input_enabled, cx);

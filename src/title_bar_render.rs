@@ -485,6 +485,7 @@ impl Zetta {
                     is_renaming_tab: self.is_renaming(),
                     tab_count: self.tabs.len(),
                     selected_tab_index: self.active_tab,
+                    tab_move_mode_active: self.tab_move_mode,
                     overflow_selection: self.tab_overflow_selection_side,
                     border_color: colors.border,
                     left_menu_handle: self.tab_overflow_left_menu_handle.clone(),

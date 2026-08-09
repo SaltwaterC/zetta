@@ -113,6 +113,7 @@ impl Zetta {
         } else if self.active_tab >= self.tabs.len() && !self.tabs.is_empty() {
             self.active_tab = self.tabs.len() - 1;
         }
+        self.disable_tab_move_mode_if_unavailable(cx);
         self.store_background_tab(tab, authentication, cx);
         self.finish_background_session_change(cx);
     }

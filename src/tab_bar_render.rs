@@ -10,12 +10,17 @@ pub(crate) struct TabBarChrome {
     pub(crate) is_renaming_tab: bool,
     pub(crate) tab_count: usize,
     pub(crate) selected_tab_index: usize,
+    pub(crate) tab_move_mode_active: bool,
     /// `Some(true)` when the user is stepping through the right overflow menu,
     /// `Some(false)` for the left one.
     pub(crate) overflow_selection: Option<bool>,
     pub(crate) border_color: Hsla,
     pub(crate) left_menu_handle: PopoverMenuHandle<ui::ContextMenu>,
     pub(crate) right_menu_handle: PopoverMenuHandle<ui::ContextMenu>,
+}
+
+fn tab_move_menu_entry_available(tab_count: usize) -> bool {
+    tab_count >= 2
 }
 
 #[derive(Clone, Copy)]
@@ -36,6 +41,7 @@ impl Zetta {
     ) -> gpui::Stateful<gpui::Div> {
         let compact_mode = chrome.compact_mode;
         let title_bar_height = chrome.title_bar_height;
+        let tab_move_mode_active = chrome.tab_move_mode_active;
         let tabs_scroll = render_tabs_row(chrome).into_any_element();
 
         tab_bar_row_height(compact_mode, title_bar_height)
@@ -67,8 +73,42 @@ impl Zetta {
                     window.dispatch_action(Box::new(NewTab), cx)
                 }
             })
+            .when(tab_move_mode_active, |tab_bar| {
+                tab_bar.child(render_tab_move_mode_indicator(
+                    compact_mode,
+                    title_bar_height,
+                    colors,
+                ))
+            })
             .child(tabs_scroll)
     }
+}
+
+fn render_tab_move_mode_indicator(
+    compact_mode: bool,
+    title_bar_height: Pixels,
+    colors: &ThemeColors,
+) -> gpui::Stateful<gpui::Div> {
+    tab_bar_row_height(compact_mode, title_bar_height)
+        .id("tab-move-mode-indicator")
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap_1()
+        .px_2()
+        .border_r_1()
+        .border_color(colors.border)
+        .bg(colors.status_bar_background)
+        .aria_label("Tab move mode")
+        .tooltip(Tooltip::text(
+            "Tab move mode: Left and Right move the active tab",
+        ))
+        .child(Label::new("Move tab").size(LabelSize::Small))
+        .child(
+            Label::new("← →")
+                .size(LabelSize::Small)
+                .color(Color::Custom(colors.text_muted)),
+        )
 }
 
 /// The measured row of tabs. The visible range and shrink behaviour depend on
@@ -83,6 +123,7 @@ fn render_tabs_row(chrome: TabBarChrome) -> impl IntoElement {
         is_renaming_tab,
         tab_count,
         selected_tab_index,
+        tab_move_mode_active,
         overflow_selection,
         border_color,
         left_menu_handle,
@@ -155,6 +196,8 @@ fn render_tabs_row(chrome: TabBarChrome) -> impl IntoElement {
                                 index,
                                 selected,
                                 next_selected,
+                                tab_count,
+                                tab_move_mode_active,
                                 is_shrinking,
                                 is_renaming_tab,
                                 compact_mode,
@@ -236,6 +279,8 @@ struct TabChrome<'a> {
     index: usize,
     selected: bool,
     next_selected: bool,
+    tab_count: usize,
+    tab_move_mode_active: bool,
     is_shrinking: bool,
     is_renaming_tab: bool,
     compact_mode: bool,
@@ -249,6 +294,8 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
         index,
         selected,
         next_selected,
+        tab_count,
+        tab_move_mode_active,
         is_shrinking,
         is_renaming_tab,
         compact_mode,
@@ -370,8 +417,15 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
                 tab_colors.border
             })
         })
+        .when(tab_move_mode_active && selected, |tab| {
+            tab.border_b_2().border_color(tab_colors.text_accent)
+        })
         .bg(tab_background)
-        .cursor(CursorStyle::OpenHand)
+        .cursor(if tab_move_mode_active {
+            CursorStyle::ResizeLeftRight
+        } else {
+            CursorStyle::OpenHand
+        })
         .on_drag(TabDrag { tab_id: tab.id }, |_, _, _, cx| {
             cx.new(|_| gpui::Empty)
         })
@@ -440,6 +494,13 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
                     let menu = menu.when_some(action_context, |menu, focus| menu.context(focus));
                     menu.action("Rename Tab", Box::new(RenameTab))
                         .action("Change Tab Icon", Box::new(ChangeTabIcon))
+                        .when(tab_move_menu_entry_available(tab_count), |menu| {
+                            menu.separator().action_checked(
+                                "Tab Move Mode",
+                                Box::new(ToggleTabMoveMode),
+                                tab_move_mode_active,
+                            )
+                        })
                 })
             })
             .trigger(move |_, _, _| tab_element)
@@ -520,3 +581,7 @@ fn render_tab_drop_surface(
                 .ok();
         })
 }
+
+#[cfg(test)]
+#[path = "tests/tab_bar_render.rs"]
+mod tests;
