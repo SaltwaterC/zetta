@@ -90,8 +90,12 @@ Use `zetta wt new NAME`, `zetta wt done`, `zetta wt status`, and
 `zetta wt rerere` for the Git worktree workflow. The direct commands never
 change the caller's directory; generated shell integration provides `zwt new`
 and `zwt done` wrappers that enter the resulting worktree, including paths with
-spaces and nested names. See [Using Zetta](docs/usage.md#git-worktrees) for
-configuration and safety details.
+spaces and nested names. `zetta wt new` also recursively initializes source
+submodules at their pinned commits, reusing initialized source checkouts as
+local object references and falling back to configured submodule remotes when a
+source checkout is unavailable. Failed initialization cleans up the partial
+worktree, branch, and metadata. See [Using Zetta](docs/usage.md#git-worktrees)
+for configuration and safety details.
 
 ## Multi-command prompt
 

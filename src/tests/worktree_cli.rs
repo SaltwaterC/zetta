@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 use std::{
     ffi::OsString,
     fs,
@@ -118,6 +120,125 @@ impl GitFixture {
         });
         self.worktree_path(name)
     }
+
+    fn create_repository(&self, name: &str) -> PathBuf {
+        let repository = self._tempdir.path().join(name);
+        fs::create_dir(&repository).unwrap();
+        self.git(&repository, &["init", "-q", "-b", "main"]);
+        self.git(
+            &repository,
+            &["config", "user.email", "test@example.invalid"],
+        );
+        self.git(&repository, &["config", "user.name", "Zetta Test"]);
+        self.commit(&repository, "file", &format!("{name}\n"), "initial");
+        repository
+    }
+
+    fn add_submodule(&self, parent: &Path, repository: &Path, path: &str) -> String {
+        let url = repository.to_str().unwrap();
+        let output = self.git_output(
+            parent,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                url,
+                path,
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "git submodule add failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        self.git(parent, &["add", "-A"]);
+        self.git(
+            parent,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-qm",
+                "add submodule",
+            ],
+        );
+        self.git(repository, &["rev-parse", "HEAD"])
+            .trim()
+            .to_owned()
+    }
+
+    fn initialize_submodule(&self, parent: &Path, path: &str) {
+        let output = self.git_output(
+            parent,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "update",
+                "--init",
+                "--",
+                path,
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "git submodule update failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn allow_file_protocol(&self) {
+        self.git(
+            &self.root,
+            &["config", "--global", "protocol.file.allow", "always"],
+        );
+    }
+
+    fn remove_source_submodule(&self, path: &str) {
+        let submodule = self.root.join(path);
+        if submodule.exists() {
+            fs::remove_dir_all(&submodule).unwrap();
+        }
+        let module_path = PathBuf::from(
+            self.git(
+                &self.root,
+                &["rev-parse", "--git-path", &format!("modules/{path}")],
+            )
+            .trim(),
+        );
+        let module_path = if module_path.is_absolute() {
+            module_path
+        } else {
+            self.root.join(module_path)
+        };
+        if module_path.exists() {
+            fs::remove_dir_all(module_path).unwrap();
+        }
+    }
+
+    fn git_dir(&self, repository: &Path) -> PathBuf {
+        let git_dir = PathBuf::from(self.git(repository, &["rev-parse", "--git-dir"]).trim());
+        if git_dir.is_absolute() {
+            git_dir
+        } else {
+            repository.join(git_dir)
+        }
+    }
+
+    fn uses_reference(&self, repository: &Path, reference: &Path) -> bool {
+        let alternates = self.git_dir(repository).join("objects/info/alternates");
+        let Ok(contents) = fs::read_to_string(alternates) else {
+            return false;
+        };
+        let reference_objects = fs::canonicalize(self.git_dir(reference).join("objects")).unwrap();
+        contents.lines().any(|line| {
+            fs::canonicalize(line)
+                .map(|path| path == reference_objects)
+                .unwrap_or(false)
+        })
+    }
 }
 
 fn test_lock() -> MutexGuard<'static, ()> {
@@ -196,6 +317,14 @@ fn worktree_help_covers_the_workflow() {
     assert!(worktree_rerere_help().contains("rerere.autoupdate"));
 }
 
+#[cfg(unix)]
+#[test]
+fn parses_gitlink_paths_without_lossy_path_conversion() {
+    let paths = parse_gitlink_paths(b"160000 commit abc\tdeps/\xff-module\0").unwrap();
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0].as_os_str().as_bytes(), b"deps/\xff-module");
+}
+
 #[test]
 fn resolves_default_relative_and_absolute_roots_without_creating_them() {
     let fixture = GitFixture::new();
@@ -245,6 +374,115 @@ fn creates_nested_worktrees_and_records_the_source_branch() {
         fixture.git(&worktree, &["branch", "--show-current"]),
         "wt/feature/api\n"
     );
+}
+
+#[test]
+fn initializes_top_level_and_nested_submodules_at_recorded_commits() {
+    let fixture = GitFixture::new();
+    fixture.allow_file_protocol();
+    let leaf = fixture.create_repository("leaf");
+    let top = fixture.create_repository("top");
+    let leaf_commit = fixture.add_submodule(&top, &leaf, "nested");
+    let top_commit = fixture.git(&top, &["rev-parse", "HEAD"]).trim().to_owned();
+    fixture.add_submodule(&fixture.root, &top, "vendor/top");
+    fixture.initialize_submodule(&fixture.root.join("vendor/top"), "nested");
+
+    let worktree = fixture.create_worktree("submodules");
+    assert_eq!(
+        fixture
+            .git(&worktree.join("vendor/top"), &["rev-parse", "HEAD"])
+            .trim(),
+        top_commit
+    );
+    assert_eq!(
+        fixture
+            .git(&worktree.join("vendor/top/nested"), &["rev-parse", "HEAD"],)
+            .trim(),
+        leaf_commit
+    );
+    assert!(fixture.uses_reference(
+        &worktree.join("vendor/top"),
+        &fixture.root.join("vendor/top")
+    ));
+    assert!(fixture.uses_reference(
+        &worktree.join("vendor/top/nested"),
+        &fixture.root.join("vendor/top/nested")
+    ));
+}
+
+#[test]
+fn falls_back_to_a_submodule_remote_when_the_source_checkout_is_missing() {
+    let fixture = GitFixture::new();
+    fixture.allow_file_protocol();
+    let remote = fixture.create_repository("remote");
+    let remote_commit = fixture.add_submodule(&fixture.root, &remote, "vendor/remote");
+    fixture.remove_source_submodule("vendor/remote");
+
+    let worktree = fixture.create_worktree("remote-fallback");
+    assert_eq!(
+        fixture
+            .git(&worktree.join("vendor/remote"), &["rev-parse", "HEAD"])
+            .trim(),
+        remote_commit
+    );
+    assert!(!fixture.uses_reference(
+        &worktree.join("vendor/remote"),
+        &fixture.root.join("vendor/remote")
+    ));
+}
+
+#[test]
+fn failed_submodule_initialization_rolls_back_worktree_branch_metadata_and_modules() {
+    let fixture = GitFixture::new();
+    let remote = fixture.create_repository("remote");
+    fixture.add_submodule(&fixture.root, &remote, "vendor/broken");
+    fixture.remove_source_submodule("vendor/broken");
+    fixture.git(
+        &fixture.root,
+        &[
+            "config",
+            "-f",
+            ".gitmodules",
+            "submodule.vendor/broken.url",
+            "/path/that/does/not/exist",
+        ],
+    );
+    fixture.git(&fixture.root, &["add", ".gitmodules"]);
+    fixture.git(
+        &fixture.root,
+        &[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "break submodule",
+        ],
+    );
+
+    let root = fixture.root.clone();
+    let destination = fixture.worktree_path("broken");
+    let error = in_directory(&fixture, &root, || {
+        run(&WorktreeCommand::New {
+            name: "broken".to_owned(),
+            path_only: false,
+        })
+        .unwrap_err()
+    });
+    assert!(
+        error
+            .to_string()
+            .contains("initializing worktree submodules")
+    );
+    assert!(!destination.exists());
+    assert_eq!(fixture.git(&root, &["branch", "--list", "wt/broken"]), "");
+    assert_eq!(
+        fixture
+            .git_output(&root, &["config", "--get", "wtbranch.wt/broken.base"])
+            .status
+            .code(),
+        Some(1)
+    );
+    assert!(!destination.join("vendor/broken").exists());
 }
 
 #[test]
@@ -307,6 +545,51 @@ fn integrates_clean_worktrees_and_removes_branch_and_metadata() {
             == Some(1)
     );
     assert!(root.join("work").is_file());
+}
+
+#[test]
+fn integrates_and_forcibly_removes_a_worktree_containing_submodules() {
+    let fixture = GitFixture::new();
+    fixture.allow_file_protocol();
+    let remote = fixture.create_repository("remote");
+    fixture.add_submodule(&fixture.root, &remote, "vendor/remote");
+    let worktree = fixture.create_worktree("submodule-done");
+    let root = fixture.root.clone();
+
+    in_directory(&fixture, &worktree, || {
+        run(&WorktreeCommand::Done { path_only: true }).unwrap();
+    });
+
+    assert!(!worktree.exists());
+    assert_eq!(
+        fixture.git(&root, &["branch", "--list", "wt/submodule-done"]),
+        ""
+    );
+    assert_eq!(
+        fixture
+            .git_output(
+                &root,
+                &["config", "--get", "wtbranch.wt/submodule-done.base"],
+            )
+            .status
+            .code(),
+        Some(1)
+    );
+}
+
+#[test]
+fn submodule_changes_are_included_in_done_cleanliness_checks() {
+    let fixture = GitFixture::new();
+    fixture.allow_file_protocol();
+    let remote = fixture.create_repository("remote");
+    fixture.add_submodule(&fixture.root, &remote, "vendor/remote");
+    let worktree = fixture.create_worktree("dirty-submodule");
+    fs::write(worktree.join("vendor/remote/untracked"), "dirty\n").unwrap();
+
+    let error = in_directory(&fixture, &worktree, || {
+        run(&WorktreeCommand::Done { path_only: false }).unwrap_err()
+    });
+    assert!(error.to_string().contains("current worktree is dirty"));
 }
 
 #[test]

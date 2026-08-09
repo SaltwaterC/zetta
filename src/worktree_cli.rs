@@ -8,6 +8,8 @@ use std::{
 
 #[cfg(test)]
 use std::cell::RefCell;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
 
 use anyhow::{Context as _, Result};
 
@@ -149,11 +151,11 @@ pub(crate) fn worktree_help() -> &'static str {
 }
 
 pub(crate) fn worktree_new_help() -> &'static str {
-    "Create a Git worktree for a temporary wt/NAME branch\n\nUsage: zetta wt new [OPTIONS] NAME\n\nThe current worktree must be on an attached branch. Zetta creates branch wt/NAME,\nrecords that branch source in wtbranch.wt/NAME.base, and places the worktree at\n<wt.root>/NAME. Nested NAME values are supported. The default root is sibling\n<repository>-worktrees; configure a repository root with git config --local wt.root PATH.\nFor example, use git config --local wt.root ../project-worktrees. Relative PATH values\nresolve from the repository root. Existing paths, symlinks, and branches are rejected.\n\nOptions:\n  -P, --path-only                   Print exactly the created worktree path\n  -h, --help                        Print help\n\nUse zwt new NAME from generated shell integration to create the worktree and cd into\nit. The zetta wt rerere shortcut is recommended before the first conflict."
+    "Create a Git worktree for a temporary wt/NAME branch\n\nUsage: zetta wt new [OPTIONS] NAME\n\nThe current worktree must be on an attached branch. Zetta creates branch wt/NAME,\nrecords that branch source in wtbranch.wt/NAME.base, and places the worktree at\n<wt.root>/NAME. Nested NAME values are supported. The default root is sibling\n<repository>-worktrees; configure a repository root with git config --local wt.root PATH.\nFor example, use git config --local wt.root ../project-worktrees. Relative PATH values\nresolve from the repository root. Existing paths, symlinks, and branches are rejected.\n\nIf the source commit contains submodules, new recursively initializes them at their\nrecorded commits. An initialized matching submodule checkout in the source worktree\nis reused as a local Git object reference when possible; otherwise Git uses the\nsubmodule's configured remote. If initialization fails, Zetta force-removes the\npartial worktree, deletes its branch, and clears its metadata.\n\nOptions:\n  -P, --path-only                   Print exactly the created worktree path\n  -h, --help                        Print help\n\nUse zwt new NAME from generated shell integration to create the worktree and cd into\nit. The zetta wt rerere shortcut is recommended before the first conflict."
 }
 
 pub(crate) fn worktree_done_help() -> &'static str {
-    "Integrate and remove the current temporary worktree\n\nUsage: zetta wt done [OPTIONS]\n\nThe current worktree must be a clean, attached wt/* branch created by zetta wt new.\nZetta rebases it onto the recorded source branch, verifies that the source branch is\nstill attached to a clean worktree, fast-forwards that source worktree, removes the\ntemporary worktree and branch, and clears the source metadata. If a rebase conflicts,\nresolve the files, stage the resolutions with git add, and rerun zetta wt done.\n\nOptions:\n  -P, --path-only                   Print exactly the integrated source worktree path\n  -h, --help                        Print help\n\nThe direct CLI does not change directory. zwt done changes into the source worktree\nafter success. The worktree destination uses the configured wt.root, or the sibling\n<repository>-worktrees default when wt.root is unset. For example, use git config --local\nwt.root ../project-worktrees. Run zetta wt rerere to enable Git recorded conflict-resolution\nhelpers."
+    "Integrate and remove the current temporary worktree\n\nUsage: zetta wt done [OPTIONS]\n\nThe current worktree must be a clean, attached wt/* branch created by zetta wt new.\nZetta rebases it onto the recorded source branch, verifies that the source worktree is\nstill attached to a clean worktree, fast-forwards that source worktree, removes the\ntemporary worktree and branch, and clears the source metadata. Submodule changes are\nincluded in the cleanliness checks. Worktrees whose current commit contains submodules\nare removed with Git's forced worktree cleanup after successful integration. If a rebase\nconflicts, resolve the files, stage the resolutions with git add, and rerun zetta wt done.\n\nOptions:\n  -P, --path-only                   Print exactly the integrated source worktree path\n  -h, --help                        Print help\n\nThe direct CLI does not change directory. zwt done changes into the source worktree\nafter success. The worktree destination uses the configured wt.root, or the sibling\n<repository>-worktrees default when wt.root is unset. For example, use git config --local\nwt.root ../project-worktrees. Run zetta wt rerere to enable Git recorded conflict-resolution\nhelpers."
 }
 
 pub(crate) fn worktree_status_help() -> &'static str {
@@ -217,6 +219,7 @@ fn run_new(name: &str, path_only: bool, current_directory: Option<&Path>) -> Res
     let branch = format!("{WORKTREE_BRANCH_PREFIX}{name}");
     validate_branch_name(&repository.current_worktree, &branch)?;
     ensure_branch_is_available(&repository.current_worktree, &branch)?;
+    let source_submodules = gitlink_paths(&repository.current_worktree, source_branch)?;
 
     let resolved_root = resolved_worktree_root(&repository.current_worktree, &repository.root)?;
     let destination = destination_path(&resolved_root.path, name);
@@ -238,6 +241,28 @@ fn run_new(name: &str, path_only: bool, current_directory: Option<&Path>) -> Res
     }
 
     let metadata_key = metadata_key(&branch);
+    if !source_submodules.is_empty()
+        && let Err(error) = initialize_submodules(
+            &destination,
+            &repository.current_worktree,
+            &source_submodules,
+        )
+    {
+        let rollback_errors = rollback_new_worktree(
+            &repository.current_worktree,
+            &destination,
+            &branch,
+            &metadata_key,
+            &created_directories,
+        );
+        let mut message = format!("initializing worktree submodules failed: {error}");
+        if !rollback_errors.is_empty() {
+            message.push_str("; rollback also failed: ");
+            message.push_str(&rollback_errors.join("; "));
+        }
+        return Err(anyhow::anyhow!(message));
+    }
+
     let metadata_arguments = vec![
         os("config"),
         os("--local"),
@@ -330,6 +355,8 @@ fn run_done(path_only: bool, current_directory: Option<&Path>) -> Result<()> {
         &repository.current_worktree,
         "current worktree after rebase",
     )?;
+    let current_commit_has_submodules =
+        !gitlink_paths(&repository.current_worktree, "HEAD")?.is_empty();
 
     // Re-read the source worktree after rebasing. This catches a source branch
     // switch or newly-created changes before the integration mutates it.
@@ -341,12 +368,14 @@ fn run_done(path_only: bool, current_directory: Option<&Path>) -> Result<()> {
         return Err(git_error("git merge --ff-only", &merge_output));
     }
 
-    let remove_arguments = vec![
-        os("worktree"),
-        os("remove"),
+    let mut remove_arguments = vec![os("worktree"), os("remove")];
+    if current_commit_has_submodules {
+        remove_arguments.push(os("--force"));
+    }
+    remove_arguments.extend([
         os("--"),
         repository.current_worktree.as_os_str().to_os_string(),
-    ];
+    ]);
     let remove_output = run_git(Some(&source_path), &remove_arguments)?;
     if !remove_output.status.success() {
         return Err(git_error("git worktree remove", &remove_output));
@@ -657,6 +686,114 @@ fn remove_empty_directories(directories: &[PathBuf]) {
     }
 }
 
+fn gitlink_paths(repository: &Path, treeish: &str) -> Result<Vec<PathBuf>> {
+    let arguments = vec![
+        os("ls-tree"),
+        os("-r"),
+        os("-z"),
+        os("--full-tree"),
+        os(treeish),
+        os("--"),
+    ];
+    let output = run_git(Some(repository), &arguments)?;
+    anyhow::ensure!(
+        output.status.success(),
+        "could not inspect Git tree for submodules: {}",
+        git_diagnostic(&output)
+    );
+    parse_gitlink_paths(&output.stdout)
+}
+
+fn parse_gitlink_paths(output: &[u8]) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    for record in output.split(|byte| *byte == 0) {
+        if record.is_empty() {
+            continue;
+        }
+        let tab = record
+            .iter()
+            .position(|byte| *byte == b'\t')
+            .context("Git returned a malformed tree entry while finding submodules")?;
+        if !record.starts_with(b"160000 ") {
+            continue;
+        }
+        let path = &record[tab + 1..];
+        anyhow::ensure!(
+            !path.is_empty(),
+            "Git returned an empty submodule path while finding submodules"
+        );
+        paths.push(git_path_from_bytes(path));
+    }
+    Ok(paths)
+}
+
+fn git_path_from_bytes(path: &[u8]) -> PathBuf {
+    #[cfg(unix)]
+    {
+        PathBuf::from(OsString::from_vec(path.to_vec()))
+    }
+    #[cfg(not(unix))]
+    {
+        PathBuf::from(String::from_utf8_lossy(path).into_owned())
+    }
+}
+
+fn initialize_submodules(
+    destination: &Path,
+    source_worktree: &Path,
+    paths: &[PathBuf],
+) -> Result<()> {
+    for path in paths {
+        initialize_submodule(destination, source_worktree, path)?;
+    }
+    Ok(())
+}
+
+fn initialize_submodule(
+    destination_parent: &Path,
+    source_parent: &Path,
+    path: &Path,
+) -> Result<()> {
+    let source_path = source_parent.join(path);
+    let mut arguments = vec![
+        os("submodule"),
+        os("update"),
+        os("--init"),
+        os("--checkout"),
+    ];
+    if is_valid_reference_repository(&source_path) {
+        arguments.push(os("--reference"));
+        arguments.push(source_path.as_os_str().to_os_string());
+    }
+    arguments.push(os("--"));
+    arguments.push(path.as_os_str().to_os_string());
+
+    let output = run_git(Some(destination_parent), &arguments)?;
+    anyhow::ensure!(
+        output.status.success(),
+        "{} failed: {}",
+        display_arguments(&arguments),
+        git_diagnostic(&output)
+    );
+
+    let destination_path = destination_parent.join(path);
+    let nested_paths = gitlink_paths(&destination_path, "HEAD")?;
+    for nested_path in nested_paths {
+        initialize_submodule(&destination_path, &source_path, &nested_path)?;
+    }
+    Ok(())
+}
+
+fn is_valid_reference_repository(path: &Path) -> bool {
+    if !path.is_dir() {
+        return false;
+    }
+    let arguments = [os("rev-parse"), os("--git-dir")];
+    run_git(Some(path), &arguments)
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
 fn rollback_new_worktree(
     repository: &Path,
     destination: &Path,
@@ -668,6 +805,7 @@ fn rollback_new_worktree(
     let remove_arguments = vec![
         os("worktree"),
         os("remove"),
+        os("--force"),
         os("--"),
         destination.as_os_str().to_os_string(),
     ];
@@ -746,6 +884,7 @@ fn ensure_clean(path: &Path, description: &str) -> Result<()> {
         os("status"),
         os("--porcelain=v1"),
         os("--untracked-files=all"),
+        os("--ignore-submodules=none"),
     ];
     let output = run_git(Some(path), &arguments)?;
     anyhow::ensure!(

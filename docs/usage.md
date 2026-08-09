@@ -307,11 +307,23 @@ Zetta uses the sibling directory `<repository>-worktrees`. The root is created
 on demand by `new`; `status` only reports its resolved path and never creates
 directories.
 
+When the source commit contains submodules, `new` initializes them recursively
+at the gitlink commits recorded by that source tree. For each submodule, an
+initialized matching checkout in the source worktree is supplied to Git as a
+local `--reference`, so its objects can be reused without copying them. Missing
+source checkouts omit the reference and use the submodule's configured remote
+instead. Nested modules are initialized from their immediate parent, preserving
+the corresponding reference at every level; remote branch tips are never used.
+If initialization fails, Zetta force-removes the partial worktree, deletes its
+temporary branch, and clears the recorded metadata.
+
 `done` must run from a clean, linked `wt/*` worktree created by `new`. It
 rebases onto the recorded source branch, checks that the source worktree is
-still attached and clean, fast-forwards the source branch, then removes the
-temporary worktree, branch, and metadata. A conflict leaves the rebase in
-place: resolve the files, stage them with `git add`, and rerun `zetta wt done`.
+still attached and clean (including submodule changes), fast-forwards the source
+branch, then removes the temporary worktree, branch, and metadata. A worktree
+whose current commit contains submodules is removed with Git's forced cleanup
+after integration. A conflict leaves the rebase in place: resolve the files,
+stage them with `git add`, and rerun `zetta wt done`.
 Run `zetta wt rerere` once to enable Git's `rerere.enabled` and
 `rerere.autoupdate` helpers for repeated conflicts.
 
