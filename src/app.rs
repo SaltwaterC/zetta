@@ -171,6 +171,12 @@ fn resolve_cli_replacement_profile(
             let mut profile = profiles
                 .iter()
                 .find(|profile| profile.name.eq_ignore_ascii_case(requested_name))
+                .or_else(|| {
+                    let homebrew_name = format!("{requested_name} (Homebrew)");
+                    profiles
+                        .iter()
+                        .find(|profile| profile.name.eq_ignore_ascii_case(&homebrew_name))
+                })
                 .cloned()?;
             apply_launch_theme_override(&mut profile, launch_theme_override);
             if let Some(theme) = requested_theme {

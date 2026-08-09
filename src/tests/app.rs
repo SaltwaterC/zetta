@@ -69,6 +69,43 @@ fn cli_replacement_profile_resolution_is_case_insensitive_and_preserves_split_de
 }
 
 #[test]
+fn cli_replacement_profile_resolution_falls_back_to_homebrew_and_prefers_exact_names() {
+    let homebrew_profile = Profile {
+        name: "Fish (Homebrew)".to_owned(),
+        command: Shell::Program("/opt/homebrew/bin/fish".to_owned()),
+        theme: Some("Homebrew Theme".to_owned()),
+    };
+    let launch_theme_override = ("fish (homebrew)".to_owned(), "Launch Theme".to_owned());
+
+    let selected = resolve_cli_replacement_profile(
+        std::slice::from_ref(&homebrew_profile),
+        Some("fIsH"),
+        None,
+        Some(&launch_theme_override),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(selected.name, "Fish (Homebrew)");
+    assert_eq!(selected.theme.as_deref(), Some("Launch Theme"));
+
+    let exact_profile = Profile {
+        name: "Fish".to_owned(),
+        command: Shell::Program("fish".to_owned()),
+        theme: None,
+    };
+    let profiles = [homebrew_profile, exact_profile];
+    let selected = resolve_cli_replacement_profile(&profiles, Some("fIsH"), None, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(selected.name, "Fish");
+
+    let selected = resolve_cli_replacement_profile(&profiles, Some("fIsH (hOmEbReW)"), None, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(selected.name, "Fish (Homebrew)");
+}
+
+#[test]
 fn mouse_window_resize_clamps_each_dimension_to_the_minimum() {
     assert_eq!(
         clamp_window_size_to_minimum(size(px(400.), px(500.))),
