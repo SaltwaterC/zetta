@@ -990,7 +990,7 @@ impl PaneLayout {
         pane_ids: &mut impl Iterator<Item = u64>,
     ) -> Self {
         match template {
-            PaneSplitTemplate::Pane => Self::Pane(
+            PaneSplitTemplate::Pane(_) => Self::Pane(
                 pane_ids
                     .next()
                     .expect("pane template and allocated IDs must have equal lengths"),
@@ -1594,6 +1594,17 @@ impl Tab {
         self.next_pane_label = self.next_pane_label.max(pane.label_number + 1);
         self.pane_indices.insert(pane.id, self.panes.len());
         self.panes.push(pane);
+    }
+
+    pub(crate) fn apply_generated_labels(
+        &mut self,
+        pane_labels: impl IntoIterator<Item = (u64, Option<String>)>,
+    ) {
+        for (pane_id, generated_label) in pane_labels {
+            if let Some(pane) = self.pane_mut(pane_id) {
+                pane.generated_label = generated_label;
+            }
+        }
     }
 
     pub(crate) fn remove_pane(&mut self, id: u64) -> Option<TerminalPane> {

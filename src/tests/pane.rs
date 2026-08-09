@@ -201,8 +201,8 @@ fn pane_rotation_recurses_only_into_the_active_group() {
 fn pane_template_replaces_only_the_target_leaf() {
     let template = PaneSplitTemplate::Split {
         axis: PaneSplitAxis::Horizontal,
-        first: Box::new(PaneSplitTemplate::Pane),
-        second: Box::new(PaneSplitTemplate::Pane),
+        first: Box::new(PaneSplitTemplate::Pane(None)),
+        second: Box::new(PaneSplitTemplate::Pane(None)),
     };
     let mut layout = PaneLayout::Split {
         axis: SplitAxis::Vertical,
@@ -226,6 +226,39 @@ fn pane_template_replaces_only_the_target_leaf() {
                 second: Box::new(PaneLayout::Pane(3)),
             }),
         }
+    );
+}
+
+#[test]
+fn pane_template_labels_follow_the_materialized_leaf_order() {
+    let template = PaneSplitTemplate::Split {
+        axis: PaneSplitAxis::Vertical,
+        first: Box::new(PaneSplitTemplate::Pane(Some("left".to_owned()))),
+        second: Box::new(PaneSplitTemplate::Split {
+            axis: PaneSplitAxis::Horizontal,
+            first: Box::new(PaneSplitTemplate::Pane(Some("top-right".to_owned()))),
+            second: Box::new(PaneSplitTemplate::Pane(Some("bottom-right".to_owned()))),
+        }),
+    };
+
+    let layout = PaneLayout::from_template(&template, &mut [10, 11, 12].into_iter());
+
+    assert_eq!(
+        template.pane_labels(),
+        vec![
+            Some("left".to_owned()),
+            Some("top-right".to_owned()),
+            Some("bottom-right".to_owned()),
+        ]
+    );
+    assert_eq!(layout.first_pane(), 10);
+    assert_eq!(
+        layout
+            .regions()
+            .iter()
+            .map(|region| region.id)
+            .collect::<Vec<_>>(),
+        [10, 11, 12]
     );
 }
 
@@ -391,8 +424,8 @@ fn configured_template_layout_is_built_through_a_borrow() {
         "two".to_owned(),
         PaneSplitTemplate::Split {
             axis: PaneSplitAxis::Vertical,
-            first: Box::new(PaneSplitTemplate::Pane),
-            second: Box::new(PaneSplitTemplate::Pane),
+            first: Box::new(PaneSplitTemplate::Pane(None)),
+            second: Box::new(PaneSplitTemplate::Pane(None)),
         },
     )]);
     let layout = pane_layout_from_configured_template(&templates, "two", &mut [10, 11].into_iter());
@@ -415,13 +448,13 @@ fn four_vertical_template_materializes_left_to_right_equal_columns() {
         axis: PaneSplitAxis::Vertical,
         first: Box::new(PaneSplitTemplate::Split {
             axis: PaneSplitAxis::Vertical,
-            first: Box::new(PaneSplitTemplate::Pane),
-            second: Box::new(PaneSplitTemplate::Pane),
+            first: Box::new(PaneSplitTemplate::Pane(None)),
+            second: Box::new(PaneSplitTemplate::Pane(None)),
         }),
         second: Box::new(PaneSplitTemplate::Split {
             axis: PaneSplitAxis::Vertical,
-            first: Box::new(PaneSplitTemplate::Pane),
-            second: Box::new(PaneSplitTemplate::Pane),
+            first: Box::new(PaneSplitTemplate::Pane(None)),
+            second: Box::new(PaneSplitTemplate::Pane(None)),
         }),
     };
     let layout = PaneLayout::from_template(&template, &mut [1, 2, 3, 4].into_iter());
@@ -1272,6 +1305,30 @@ fn custom_pane_labels_replace_the_fallback_and_render_while_editing() {
     tab.renaming_pane = None;
     tab.rename_buffer = None;
     assert_eq!(tab.pane(2).unwrap().label(), "dev · eu-west");
+}
+
+#[test]
+fn template_labels_replace_generated_labels_but_preserve_manual_labels() {
+    let mut tab = pane_management_tab();
+    tab.pane_mut(1).unwrap().generated_label = Some("old-left".to_owned());
+    tab.pane_mut(2).unwrap().generated_label = Some("old-middle".to_owned());
+    tab.pane_mut(2).unwrap().custom_label = Some("Manual".to_owned());
+    tab.pane_mut(3).unwrap().generated_label = Some("old-right".to_owned());
+
+    tab.apply_generated_labels([
+        (1, Some("top-left".to_owned())),
+        (2, Some("top-right".to_owned())),
+        (3, None),
+    ]);
+
+    assert_eq!(tab.pane(1).unwrap().label(), "top-left");
+    assert_eq!(tab.pane(2).unwrap().label(), "Manual");
+    assert_eq!(
+        tab.pane(2).unwrap().generated_label.as_deref(),
+        Some("top-right")
+    );
+    assert_eq!(tab.pane(3).unwrap().label(), "Pane 3");
+    assert_eq!(tab.pane(3).unwrap().generated_label, None);
 }
 
 #[test]

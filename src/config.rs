@@ -102,7 +102,7 @@ impl WorkingDirectoryScope {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PaneSplitTemplate {
-    Pane,
+    Pane(Option<String>),
     Split {
         axis: PaneSplitAxis,
         first: Box<PaneSplitTemplate>,
@@ -119,8 +119,24 @@ pub enum PaneSplitAxis {
 impl PaneSplitTemplate {
     pub fn pane_count(&self) -> usize {
         match self {
-            Self::Pane => 1,
+            Self::Pane(_) => 1,
             Self::Split { first, second, .. } => first.pane_count() + second.pane_count(),
+        }
+    }
+
+    pub fn pane_labels(&self) -> Vec<Option<String>> {
+        let mut labels = Vec::with_capacity(self.pane_count());
+        self.collect_pane_labels(&mut labels);
+        labels
+    }
+
+    fn collect_pane_labels(&self, labels: &mut Vec<Option<String>>) {
+        match self {
+            Self::Pane(label) => labels.push(label.clone()),
+            Self::Split { first, second, .. } => {
+                first.collect_pane_labels(labels);
+                second.collect_pane_labels(labels);
+            }
         }
     }
 }
@@ -441,17 +457,17 @@ fn parse_server_port(value: &Value, field: &str) -> Result<u16> {
 }
 
 fn default_pane_split_templates() -> HashMap<String, PaneSplitTemplate> {
-    let pane = || Box::new(PaneSplitTemplate::Pane);
+    let labeled_pane = |label: &str| Box::new(PaneSplitTemplate::Pane(Some(label.to_owned())));
     HashMap::from([
         (
             "three-right".to_owned(),
             PaneSplitTemplate::Split {
                 axis: PaneSplitAxis::Vertical,
-                first: pane(),
+                first: labeled_pane("left"),
                 second: Box::new(PaneSplitTemplate::Split {
                     axis: PaneSplitAxis::Horizontal,
-                    first: pane(),
-                    second: pane(),
+                    first: labeled_pane("top-right"),
+                    second: labeled_pane("bottom-right"),
                 }),
             },
         ),
@@ -461,10 +477,10 @@ fn default_pane_split_templates() -> HashMap<String, PaneSplitTemplate> {
                 axis: PaneSplitAxis::Vertical,
                 first: Box::new(PaneSplitTemplate::Split {
                     axis: PaneSplitAxis::Horizontal,
-                    first: pane(),
-                    second: pane(),
+                    first: labeled_pane("top-left"),
+                    second: labeled_pane("bottom-left"),
                 }),
-                second: pane(),
+                second: labeled_pane("right"),
             },
         ),
         (
@@ -473,13 +489,13 @@ fn default_pane_split_templates() -> HashMap<String, PaneSplitTemplate> {
                 axis: PaneSplitAxis::Vertical,
                 first: Box::new(PaneSplitTemplate::Split {
                     axis: PaneSplitAxis::Horizontal,
-                    first: pane(),
-                    second: pane(),
+                    first: labeled_pane("top-left"),
+                    second: labeled_pane("bottom-left"),
                 }),
                 second: Box::new(PaneSplitTemplate::Split {
                     axis: PaneSplitAxis::Horizontal,
-                    first: pane(),
-                    second: pane(),
+                    first: labeled_pane("top-right"),
+                    second: labeled_pane("bottom-right"),
                 }),
             },
         ),
@@ -489,13 +505,13 @@ fn default_pane_split_templates() -> HashMap<String, PaneSplitTemplate> {
                 axis: PaneSplitAxis::Vertical,
                 first: Box::new(PaneSplitTemplate::Split {
                     axis: PaneSplitAxis::Vertical,
-                    first: pane(),
-                    second: pane(),
+                    first: labeled_pane("left"),
+                    second: labeled_pane("left-center"),
                 }),
                 second: Box::new(PaneSplitTemplate::Split {
                     axis: PaneSplitAxis::Vertical,
-                    first: pane(),
-                    second: pane(),
+                    first: labeled_pane("right-center"),
+                    second: labeled_pane("right"),
                 }),
             },
         ),
@@ -504,7 +520,7 @@ fn default_pane_split_templates() -> HashMap<String, PaneSplitTemplate> {
 
 fn parse_pane_split_template(value: &Value) -> Result<PaneSplitTemplate> {
     if value.as_str() == Some("pane") {
-        return Ok(PaneSplitTemplate::Pane);
+        return Ok(PaneSplitTemplate::Pane(None));
     }
 
     let object = value
@@ -514,21 +530,55 @@ fn parse_pane_split_template(value: &Value) -> Result<PaneSplitTemplate> {
         object.len() == 1,
         "split objects must have exactly one axis"
     );
-    let (axis, children) = object.iter().next().unwrap();
-    let axis = match axis.as_str() {
-        "horizontal" => PaneSplitAxis::Horizontal,
-        "vertical" => PaneSplitAxis::Vertical,
-        _ => anyhow::bail!("split axis must be \"horizontal\" or \"vertical\""),
-    };
-    let children = children
-        .as_array()
-        .context("split children must be a two-element array")?;
-    anyhow::ensure!(children.len() == 2, "splits must have exactly two children");
-    Ok(PaneSplitTemplate::Split {
-        axis,
-        first: Box::new(parse_pane_split_template(&children[0])?),
-        second: Box::new(parse_pane_split_template(&children[1])?),
-    })
+    let (kind, value) = object.iter().next().unwrap();
+    match kind.as_str() {
+        "pane" => {
+            let label = value
+                .as_str()
+                .context("labeled pane leaves must contain a string label")?;
+            anyhow::ensure!(
+                is_valid_pane_split_label(label),
+                "pane labels must be lowercase kebab-case"
+            );
+            Ok(PaneSplitTemplate::Pane(Some(label.to_owned())))
+        }
+        "horizontal" | "vertical" => {
+            let axis = match kind.as_str() {
+                "horizontal" => PaneSplitAxis::Horizontal,
+                "vertical" => PaneSplitAxis::Vertical,
+                _ => unreachable!(),
+            };
+            let children = value
+                .as_array()
+                .context("split children must be a two-element array")?;
+            anyhow::ensure!(children.len() == 2, "splits must have exactly two children");
+            Ok(PaneSplitTemplate::Split {
+                axis,
+                first: Box::new(parse_pane_split_template(&children[0])?),
+                second: Box::new(parse_pane_split_template(&children[1])?),
+            })
+        }
+        _ => {
+            anyhow::bail!("template objects must contain \"pane\", \"horizontal\", or \"vertical\"")
+        }
+    }
+}
+
+fn is_valid_pane_split_label(label: &str) -> bool {
+    let mut segment_has_character = false;
+    for byte in label.bytes() {
+        if byte == b'-' {
+            if !segment_has_character {
+                return false;
+            }
+            segment_has_character = false;
+        } else if byte.is_ascii_lowercase() || byte.is_ascii_digit() {
+            segment_has_character = true;
+        } else {
+            return false;
+        }
+    }
+    segment_has_character
 }
 
 fn resolve_default_profile(profiles: &[Profile], name: &str) -> Result<usize> {

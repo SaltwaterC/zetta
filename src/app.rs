@@ -1300,17 +1300,16 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(new_pane_count) = self
-            .launch_config
-            .pane_split_templates
-            .get(name)
-            .and_then(|template| template.pane_count().checked_sub(1))
-        else {
+        let Some(template) = self.launch_config.pane_split_templates.get(name) else {
             self.configuration_error =
                 Some(format!("Pane split template {:?} is not configured", name));
             cx.notify();
             return false;
         };
+        let Some(new_pane_count) = template.pane_count().checked_sub(1) else {
+            return false;
+        };
+        let pane_labels = template.pane_labels();
         let Some(tab) = self.tabs.get(self.active_tab) else {
             return false;
         };
@@ -1385,6 +1384,11 @@ impl Zetta {
             &mut all_pane_ids,
         )
         .expect("the configured pane template was resolved before allocating panes");
+        let generated_labels = std::iter::once(active_pane_id)
+            .chain(new_panes.iter().map(|(pane_id, _)| *pane_id))
+            .zip(pane_labels)
+            .collect::<Vec<_>>();
+        debug_assert_eq!(generated_labels.len(), new_pane_count + 1);
 
         let tab = &mut self.tabs[self.active_tab];
         tab.maximized_pane = None;
@@ -1409,6 +1413,7 @@ impl Zetta {
                     .with_wsl_cwd_file(wsl_cwd_file.clone()),
             );
         }
+        tab.apply_generated_labels(generated_labels);
         tab.activate_pane(active_pane_id);
         self.retain_open_visible_terminals();
 

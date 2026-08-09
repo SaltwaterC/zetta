@@ -353,17 +353,24 @@ unbound by default. Add custom bindings when needed:
 On macOS, use `ctrl-cmd-shift` instead of `ctrl-alt-shift` for these custom
 bindings.
 
-Templates are recursive. `"pane"` is a leaf, `vertical` places two children
-side by side, and `horizontal` stacks two children. Define named templates in
-`config.json`:
+Templates are recursive. `"pane"` is an unlabeled leaf, while
+`{ "pane": "label" }` assigns a label to that leaf. Labels must use lowercase
+kebab-case (`[a-z0-9]+(?:-[a-z0-9]+)*`); duplicate labels are allowed.
+`vertical` places two children side by side, and `horizontal` stacks two
+children. Define named templates in `config.json`:
 
 ```json
 {
   "pane_split_templates": {
     "three-bottom": {
       "horizontal": [
-        "pane",
-        { "vertical": ["pane", "pane"] }
+        { "pane": "top" },
+        {
+          "vertical": [
+            { "pane": "bottom-left" },
+            { "pane": "bottom-right" }
+          ]
+        }
       ]
     }
   }
@@ -378,6 +385,9 @@ them by using the same name.
 The active terminal becomes the first, top-left leaf and retains focus. New
 panes inherit its profile and working directory. Applying a template again
 therefore recurses into the active pane without changing the rest of the tab.
+Labeled leaves replace automatic pane labels when a template is applied;
+manually assigned labels still take precedence, and an unlabeled leaf restores
+the `Pane N` fallback.
 
 ## Clipboard
 

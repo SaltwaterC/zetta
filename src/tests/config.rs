@@ -340,7 +340,23 @@ fn pane_split_templates_include_built_ins_and_custom_layouts() {
     .unwrap();
 
     assert_eq!(config.pane_split_templates["three-right"].pane_count(), 3);
+    assert_eq!(
+        config.pane_split_templates["three-right"].pane_labels(),
+        vec![
+            Some("left".to_owned()),
+            Some("top-right".to_owned()),
+            Some("bottom-right".to_owned()),
+        ]
+    );
     assert_eq!(config.pane_split_templates["three-left"].pane_count(), 3);
+    assert_eq!(
+        config.pane_split_templates["three-left"].pane_labels(),
+        vec![
+            Some("top-left".to_owned()),
+            Some("bottom-left".to_owned()),
+            Some("right".to_owned()),
+        ]
+    );
     assert!(matches!(
         config.pane_split_templates["three-left"],
         PaneSplitTemplate::Split {
@@ -350,15 +366,33 @@ fn pane_split_templates_include_built_ins_and_custom_layouts() {
         } if matches!(first.as_ref(), PaneSplitTemplate::Split {
             axis: PaneSplitAxis::Horizontal,
             ..
-        }) && matches!(second.as_ref(), PaneSplitTemplate::Pane)
+        }) && matches!(second.as_ref(), PaneSplitTemplate::Pane(_))
     ));
     assert_eq!(config.pane_split_templates["quarters"].pane_count(), 4);
+    assert_eq!(
+        config.pane_split_templates["quarters"].pane_labels(),
+        vec![
+            Some("top-left".to_owned()),
+            Some("bottom-left".to_owned()),
+            Some("top-right".to_owned()),
+            Some("bottom-right".to_owned()),
+        ]
+    );
     let four_vertical = &config.pane_split_templates["four-vertical"];
     assert_eq!(four_vertical.pane_count(), 4);
+    assert_eq!(
+        four_vertical.pane_labels(),
+        vec![
+            Some("left".to_owned()),
+            Some("left-center".to_owned()),
+            Some("right-center".to_owned()),
+            Some("right".to_owned()),
+        ]
+    );
 
     fn assert_all_splits_are_vertical(template: &PaneSplitTemplate) {
         match template {
-            PaneSplitTemplate::Pane => {}
+            PaneSplitTemplate::Pane(_) => {}
             PaneSplitTemplate::Split {
                 axis,
                 first,
@@ -383,6 +417,44 @@ fn pane_split_templates_include_built_ins_and_custom_layouts() {
 }
 
 #[test]
+fn pane_split_templates_parse_labeled_and_legacy_leaves_in_traversal_order() {
+    let config = Config::parse(
+        r#"{
+            "pane_split_templates": {
+                "labeled": {
+                    "horizontal": [
+                        { "pane": "top" },
+                        { "vertical": [
+                            { "pane": "bottom-left" },
+                            { "pane": "bottom-right" }
+                        ] }
+                    ]
+                },
+                "legacy": {
+                    "vertical": ["pane", "pane"]
+                }
+            }
+        }"#,
+        None,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(
+        config.pane_split_templates["labeled"].pane_labels(),
+        vec![
+            Some("top".to_owned()),
+            Some("bottom-left".to_owned()),
+            Some("bottom-right".to_owned()),
+        ]
+    );
+    assert_eq!(
+        config.pane_split_templates["legacy"].pane_labels(),
+        vec![None, None]
+    );
+}
+
+#[test]
 fn pane_split_templates_reject_malformed_and_single_pane_layouts() {
     let malformed = Config::parse(
         r#"{"pane_split_templates":{"bad":{"diagonal":["pane","pane"]}}}"#,
@@ -399,6 +471,48 @@ fn pane_split_templates_reject_malformed_and_single_pane_layouts() {
     let single =
         Config::parse(r#"{"pane_split_templates":{"bad":"pane"}}"#, None, None).unwrap_err();
     assert!(single.to_string().contains("between 2 and 64 panes"));
+}
+
+#[test]
+fn pane_split_templates_reject_invalid_labels_and_label_types() {
+    for label in ["", "Top-left", "top_left", "top--left", "-top", "top-"] {
+        let document = serde_json::json!({
+            "pane_split_templates": {
+                "bad": {
+                    "vertical": [
+                        { "pane": label },
+                        "pane"
+                    ]
+                }
+            }
+        });
+        let error = Config::parse(&document.to_string(), None, None).unwrap_err();
+        let error = format!("{error:#}");
+        assert!(
+            error.contains("lowercase kebab-case"),
+            "unexpected error for {label:?}: {error:#}"
+        );
+    }
+
+    for value in ["null", "true", "1", "[]", "{}"] {
+        let pane_value: serde_json::Value = serde_json::from_str(value).unwrap();
+        let document = serde_json::json!({
+            "pane_split_templates": {
+                "bad": {
+                    "vertical": [
+                        { "pane": pane_value },
+                        "pane"
+                    ]
+                }
+            }
+        });
+        let error = Config::parse(&document.to_string(), None, None).unwrap_err();
+        let error = format!("{error:#}");
+        assert!(
+            error.contains("string label"),
+            "unexpected error for {value}: {error:#}"
+        );
+    }
 }
 
 #[test]
