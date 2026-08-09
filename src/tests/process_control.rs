@@ -15,6 +15,9 @@ fn request(token: &str, command: &str) -> ControlRequest {
         pane_overlay_font_size: None,
         pane_overlay_opacity: None,
         pane_overlay_color: None,
+        attention_id: None,
+        attention_summary: None,
+        attention_body: None,
         config_path: None,
         split: None,
         profile: None,
@@ -89,6 +92,59 @@ fn unknown_control_commands_are_rejected() {
     assert_eq!(
         decode_control_request(&mut request("token", "delete_sessions"), "token"),
         None
+    );
+}
+
+#[test]
+fn tab_attention_control_requests_validate_target_and_payload() {
+    let mut attention = request("token", "set_tab_attention");
+    attention.attention_id = Some(42);
+    attention.attention_summary = Some("Build finished".to_owned());
+    attention.attention_body = Some("All tests passed".to_owned());
+    assert_eq!(
+        decode_control_request(&mut attention, "token"),
+        Some(ControlRequestCommand::SetTabAttention {
+            attention_id: 42,
+            summary: "Build finished".to_owned(),
+            body: Some("All tests passed".to_owned()),
+        })
+    );
+
+    for invalid in [
+        request("token", "set_tab_attention"),
+        ControlRequest {
+            attention_id: Some(0),
+            attention_summary: Some("Build finished".to_owned()),
+            ..request("token", "set_tab_attention")
+        },
+        ControlRequest {
+            attention_id: Some(42),
+            attention_summary: Some(String::new()),
+            ..request("token", "set_tab_attention")
+        },
+        ControlRequest {
+            attention_id: Some(42),
+            attention_summary: Some("Build finished".to_owned()),
+            pane_theme: Some("Dracula".to_owned()),
+            ..request("token", "set_tab_attention")
+        },
+    ] {
+        let mut invalid = invalid;
+        assert_eq!(decode_control_request(&mut invalid, "token"), None);
+    }
+
+    let mut wrong_token = attention;
+    assert_eq!(decode_control_request(&mut wrong_token, "wrong"), None);
+    assert!(
+        request_process_tab_attention(
+            u32::MAX,
+            TabAttentionRequest {
+                attention_id: 42,
+                summary: "Build finished".to_owned(),
+                body: None,
+            }
+        )
+        .is_err()
     );
 }
 
@@ -270,6 +326,9 @@ fn reconnect_requests_carry_a_session_target_and_optional_secret() {
         pane_overlay_font_size: None,
         pane_overlay_opacity: None,
         pane_overlay_color: None,
+        attention_id: None,
+        attention_summary: None,
+        attention_body: None,
         config_path: None,
         split: None,
         profile: None,
@@ -294,6 +353,7 @@ fn control_server_delivers_a_token_authenticated_open_request() {
     let _server = ProcessControlServer::start_at(commands, endpoint_path.clone()).unwrap();
     let endpoint: ControlEndpoint =
         serde_json::from_slice(&fs::read(endpoint_path).unwrap()).unwrap();
+    assert_eq!(endpoint.version, CONTROL_VERSION);
 
     let client = thread::spawn(move || send_open_window_request(&endpoint).unwrap());
     let command = futures::executor::block_on(received.next()).unwrap();
@@ -435,6 +495,35 @@ fn control_server_delivers_a_pane_overlay_request() {
     assert_eq!(overlay_color_to_hex(color.unwrap()), "#ff0000");
     completion.send(true).unwrap();
     assert!(client.join().unwrap());
+}
+
+#[test]
+fn control_server_delivers_a_tab_attention_request() {
+    let directory = tempfile::tempdir().unwrap();
+    let endpoint_path = directory.path().join("control.json");
+    let (commands, mut received) = futures::channel::mpsc::unbounded();
+    let _server = ProcessControlServer::start_at(commands, endpoint_path.clone()).unwrap();
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&fs::read(endpoint_path).unwrap()).unwrap();
+    let expected = TabAttentionRequest {
+        attention_id: 42,
+        summary: "Build finished".to_owned(),
+        body: Some("All tests passed".to_owned()),
+    };
+    let client_request = expected.clone();
+
+    let client = thread::spawn(move || send_set_tab_attention_request(&endpoint, &client_request));
+    let command = futures::executor::block_on(received.next()).unwrap();
+    let ProcessControlCommand::SetTabAttention {
+        request,
+        completion,
+    } = command
+    else {
+        panic!("unexpected process control command");
+    };
+    assert_eq!(request, expected);
+    completion.send(true).unwrap();
+    assert!(client.join().unwrap().unwrap());
 }
 
 #[test]

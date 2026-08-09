@@ -522,6 +522,8 @@ fn tab_pane_index_resolves_panes_without_scanning() {
         .collect::<Vec<_>>();
     let mut tab = Tab {
         id: 1,
+        attention_id: 1,
+        attention: None,
         panes,
         pane_indices: HashMap::from([(1, 0), (2, 1), (3, 2)]),
         next_pane_label: 4,
@@ -645,6 +647,8 @@ fn split_profile_comes_from_the_active_pane() {
     };
     let tab = Tab {
         id: 1,
+        attention_id: 1,
+        attention: None,
         panes: vec![
             TerminalPane {
                 id: 1,
@@ -737,6 +741,8 @@ fn closing_active_pane_restores_previous_focus() {
     };
     let mut tab = Tab {
         id: 1,
+        attention_id: 1,
+        attention: None,
         panes: vec![pane(1), pane(2), pane(3)],
         pane_indices: HashMap::from([(1, 0), (2, 1), (3, 2)]),
         next_pane_label: 4,
@@ -793,6 +799,8 @@ fn closing_inactive_pane_preserves_focus() {
     };
     let mut tab = Tab {
         id: 1,
+        attention_id: 1,
+        attention: None,
         panes: vec![pane(1), pane(2), pane(3)],
         pane_indices: HashMap::from([(1, 0), (2, 1), (3, 2)]),
         next_pane_label: 4,
@@ -1143,6 +1151,8 @@ fn pane_management_tab() -> Tab {
     };
     Tab {
         id: 1,
+        attention_id: 1,
+        attention: None,
         panes: vec![pane(1), pane(2), pane(3)],
         pane_indices: HashMap::from([(1, 0), (2, 1), (3, 2)]),
         next_pane_label: 4,
@@ -1171,6 +1181,11 @@ fn pane_management_tab() -> Tab {
 #[test]
 fn transferred_tabs_receive_target_window_ids_consistently() {
     let mut tab = pane_management_tab();
+    tab.attention_id = 99;
+    tab.attention = Some(TabAttention {
+        summary: "Build finished".to_owned(),
+        body: Some("All tests passed".to_owned()),
+    });
     tab.maximized_pane = Some(2);
     tab.minimized_panes = vec![1, 3];
     tab.selected_minimized_pane = Some(3);
@@ -1179,6 +1194,11 @@ fn transferred_tabs_receive_target_window_ids_consistently() {
     tab.reassign_ids(10, &mut next_pane_id);
 
     assert_eq!(tab.id, 10);
+    assert_eq!(tab.attention_id, 99);
+    assert_eq!(
+        tab.attention.as_ref().unwrap().tooltip_text(),
+        "Build finished\nAll tests passed"
+    );
     assert_eq!(next_pane_id, 23);
     assert_eq!(
         tab.panes.iter().map(|pane| pane.id).collect::<Vec<_>>(),

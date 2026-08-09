@@ -168,6 +168,26 @@ sound names, while Zetta's built-in tones continue asynchronously after
 With [shell integration](shell-integration.md) enabled, `zntfy` is an
 equivalent shortcut and retains notification command completion.
 
+## Tab attention
+
+`zetta attention` marks the tab that launched the command with a small,
+theme-colored badge. The badge is held in memory and clears when that tab is
+selected and its terminal (or minimized-pane shelf) genuinely receives focus.
+It never falls back to whichever tab happens to be active: the command must
+inherit the `ZETTA_PROCESS_ID` and `ZETTA_ATTENTION_ID` variables from a Zetta
+terminal, and it reports an error if the originating tab has closed.
+
+```sh
+zetta attention
+zetta attention "Build finished" "All tests passed"
+zetta attention --notify --sound zetta-ok "Deploy finished"
+```
+
+SUMMARY defaults to `Attention required`; BODY is optional. `--notify` adds a
+desktop notification using the same `--app-name`, `--icon`, `--sound`, and
+`--timeout` options as `zetta notify`. Those notification options are rejected
+unless `--notify` is present. Run `zetta attention --help` for complete syntax.
+
 ## Clipboard
 
 `zetta copy` and `zetta paste` read standard input to the system clipboard and

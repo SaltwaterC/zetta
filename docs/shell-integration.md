@@ -12,7 +12,8 @@ unconditional shortcut for
 the built-in vi editor, `ztftp`, a shortcut for the built-in TFTP client,
 `zntfy`, a shortcut for sending desktop notifications, and `zcopy`/`zpaste`,
 shortcuts for the clipboard; each has the same completion as its corresponding
-`zetta` command.
+`zetta` command. The top-level `attention` command also completes its long
+notification options while retaining all short aliases.
 
 It also provides `zwt`, a wrapper for the Git worktree workflow. `zwt new NAME`
 captures `zetta wt new --path-only NAME` and changes into the created worktree;

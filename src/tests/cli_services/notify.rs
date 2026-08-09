@@ -37,7 +37,7 @@ fn notify_parser_accepts_summary_body_and_options() {
             app_name: Some("zetta".to_owned()),
             icon: Some("/usr/share/icons/zetta.png".to_owned()),
             sound: Some("message-new-instant".to_owned()),
-            timeout: Some(notify_rust::Timeout::Never),
+            timeout: Some(NotificationTimeout::Never),
         })
     );
 
@@ -61,7 +61,7 @@ fn notify_parser_accepts_summary_body_and_options() {
             app_name: Some("zetta".to_owned()),
             icon: Some("icon.png".to_owned()),
             sound: Some("bell".to_owned()),
-            timeout: Some(notify_rust::Timeout::Milliseconds(5000)),
+            timeout: Some(NotificationTimeout::Milliseconds(5000)),
         })
     );
 }
@@ -79,6 +79,38 @@ fn notify_requires_a_summary_and_rejects_invalid_options() {
     );
     assert!(parse_notify_args([OsString::from("--timeout"), OsString::from("soon")]).is_err());
     assert!(parse_notify_args([OsString::from("--unknown")]).is_err());
+}
+
+#[test]
+fn notification_worker_reexec_replays_explicit_notify_arguments() {
+    let command = NotifyCommand {
+        summary: "Build finished".to_owned(),
+        body: Some("All tests passed".to_owned()),
+        app_name: Some("zetta-ci".to_owned()),
+        icon: Some("icon.png".to_owned()),
+        sound: Some("zetta-ok".to_owned()),
+        timeout: Some(NotificationTimeout::Milliseconds(5000)),
+    };
+    let arguments = notification_reexec_args(&command)
+        .into_iter()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        arguments,
+        vec![
+            "notify",
+            "--app-name",
+            "zetta-ci",
+            "--icon",
+            "icon.png",
+            "--sound",
+            "zetta-ok",
+            "--timeout",
+            "5000",
+            "Build finished",
+            "All tests passed",
+        ]
+    );
 }
 
 #[test]

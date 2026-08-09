@@ -354,6 +354,7 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
     } else {
         tab_overflow_entry_label(tab, cx)
     };
+    let attention_tooltip = tab.attention.as_ref().map(TabAttention::tooltip_text);
     let content = h_flex()
         .min_w_0()
         .gap_1()
@@ -381,6 +382,18 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
                         .text_color(tab_icon),
                 )
             })
+        })
+        .when_some(attention_tooltip, |content, tooltip| {
+            content.child(
+                div()
+                    .id(("tab-attention", tab.id as usize))
+                    .size(px(7.))
+                    .flex_none()
+                    .rounded_full()
+                    .bg(tab_colors.text_accent)
+                    .aria_label("Attention required")
+                    .tooltip(Tooltip::text(tooltip)),
+            )
         })
         .child(
             div()

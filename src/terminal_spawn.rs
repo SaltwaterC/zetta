@@ -63,6 +63,18 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         let is_wsl = is_wsl_shell(&profile.command);
+        let Some(attention_id) = self.attention_id_for_tab(tab_id) else {
+            if let Some(pane) = self
+                .tabs
+                .iter_mut()
+                .find(|tab| tab.id == tab_id)
+                .and_then(|tab| tab.pane_mut(pane_id))
+            {
+                pane.error = Some("Could not identify the terminal's Zetta tab".to_owned());
+            }
+            cx.notify();
+            return;
+        };
         let command = if is_wsl {
             wsl_shell_with_tracking(
                 profile.command,
@@ -72,7 +84,7 @@ impl Zetta {
         } else {
             profile.command
         };
-        let environment = if is_wsl {
+        let mut environment = if is_wsl {
             HashMap::default()
         } else {
             let msys2_environment =
@@ -97,6 +109,14 @@ impl Zetta {
                 .chain(msys2_environment)
                 .collect()
         };
+        environment.insert(
+            "ZETTA_PROCESS_ID".to_owned(),
+            std::process::id().to_string(),
+        );
+        environment.insert("ZETTA_ATTENTION_ID".to_owned(), attention_id.to_string());
+        if is_wsl {
+            add_wsl_environment_variables(&mut environment);
+        }
         let builder = TerminalBuilder::new(
             working_directory,
             None,
@@ -182,11 +202,12 @@ impl Zetta {
                             view.set_emit_input_events(emit_input_events);
                             view.set_input_enabled(input_enabled, cx);
                         });
-                        cx.on_focus_in(&focus_handle, window, move |this, _, cx| {
+                        cx.on_focus_in(&focus_handle, window, move |this, window, cx| {
                             if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.id == tab_id) {
                                 tab.activate_pane(pane_id);
                                 cx.notify();
                             }
+                            this.clear_active_tab_attention_if_focused(window, cx);
                         })
                         .detach();
                         let tab_index = this.tabs.iter().position(|tab| tab.id == tab_id);

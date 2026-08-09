@@ -1,8 +1,9 @@
 use super::cli_help::{
-    help_text, is_version_argument, pane_splits_help, parse_overlay_args, parse_pane_theme_args,
-    parse_tab_icon_args, parse_terminal_resize_dimension, version_text,
+    attention_help, help_text, is_version_argument, pane_splits_help, parse_overlay_args,
+    parse_pane_theme_args, parse_tab_icon_args, parse_terminal_resize_dimension, version_text,
 };
 use super::*;
+use crate::cli_services::{NotificationRequest, parse_notification_timeout};
 use crate::profile_cli::{ProfileCommand, parse_profile_args};
 use crate::worktree_cli::{WorktreeCommand, parse_worktree_args};
 
@@ -11,6 +12,7 @@ const DEFAULT_PERFORMANCE_REPORT_DURATION: Duration = Duration::from_secs(10);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StartupMode {
     Application,
+    Attention(AttentionCommand),
     Worktree(WorktreeCommand),
     #[cfg(cli_services)]
     CliService(CliServiceCommand),
@@ -54,6 +56,12 @@ pub(crate) enum StartupMode {
     TerminalSparseUpdateWorkload,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AttentionCommand {
+    pub(crate) notify: bool,
+    pub(crate) notification: NotificationRequest,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TerminalResize {
     pub(crate) columns: Option<usize>,
@@ -77,6 +85,134 @@ pub(crate) struct StartupArgs {
     pub(crate) profile_sparse_updates: bool,
     pub(crate) profile_external_terminal: bool,
     pub(crate) tftp_command: Option<TftpCommand>,
+}
+
+pub(crate) fn parse_attention_args(args: &[OsString]) -> Result<StartupArgs> {
+    let mut notify = false;
+    let mut app_name = None;
+    let mut icon = None;
+    let mut sound = None;
+    let mut timeout = None;
+    let mut positional = Vec::new();
+    let mut arguments = args.iter();
+    while let Some(argument) = arguments.next() {
+        match argument.to_string_lossy().as_ref() {
+            "--notify" | "-n" => {
+                anyhow::ensure!(!notify, "--notify may only be specified once");
+                notify = true;
+            }
+            "--app-name" | "-a" => {
+                anyhow::ensure!(app_name.is_none(), "--app-name may only be specified once");
+                app_name = Some(
+                    arguments
+                        .next()
+                        .context("--app-name requires a name")?
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+            "--icon" | "-i" => {
+                anyhow::ensure!(icon.is_none(), "--icon may only be specified once");
+                icon = Some(
+                    arguments
+                        .next()
+                        .context("--icon requires a path")?
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+            "--sound" | "-s" => {
+                anyhow::ensure!(sound.is_none(), "--sound may only be specified once");
+                sound = Some(
+                    arguments
+                        .next()
+                        .context("--sound requires a name")?
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+            "--timeout" | "-t" => {
+                anyhow::ensure!(timeout.is_none(), "--timeout may only be specified once");
+                let value = arguments
+                    .next()
+                    .context("--timeout requires default, never, or a number of milliseconds")?
+                    .to_string_lossy()
+                    .into_owned();
+                timeout = Some(parse_notification_timeout(&value)?);
+            }
+            "--help" | "-h" => anyhow::bail!("{}", attention_help()),
+            option if option.starts_with('-') => {
+                anyhow::bail!("unknown attention option {option:?}")
+            }
+            _ => positional.push(argument),
+        }
+    }
+
+    anyhow::ensure!(
+        (0..=2).contains(&positional.len()),
+        "usage: zetta attention [OPTIONS] [SUMMARY] [BODY]; run `zetta attention --help` for details"
+    );
+    anyhow::ensure!(
+        notify || (app_name.is_none() && icon.is_none() && sound.is_none() && timeout.is_none()),
+        "--app-name, --icon, --sound, and --timeout require --notify"
+    );
+    if notify && !cfg!(feature = "notifications") {
+        anyhow::bail!("desktop notifications are disabled in this build")
+    }
+
+    let summary = positional
+        .first()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Attention required".to_owned());
+    anyhow::ensure!(!summary.is_empty(), "SUMMARY must not be empty");
+    let body = positional
+        .get(1)
+        .map(|value| value.to_string_lossy().into_owned());
+
+    Ok(StartupArgs {
+        config_path: None,
+        keymap_path: None,
+        profile: None,
+        split: None,
+        replace_pane: false,
+        theme_override: None,
+        mode: StartupMode::Attention(AttentionCommand {
+            notify,
+            notification: NotificationRequest {
+                summary,
+                body,
+                app_name,
+                icon,
+                sound,
+                timeout,
+            },
+        }),
+        profile_report: None,
+        profile_duration: None,
+        profile_pane_stress: false,
+        profile_background_stress: false,
+        profile_sparse_updates: false,
+        profile_external_terminal: false,
+        tftp_command: None,
+    })
+}
+
+pub(crate) fn parse_attention_target(process_id: &str, attention_id: &str) -> Result<(u32, u64)> {
+    let process_id = process_id
+        .parse::<u32>()
+        .context("ZETTA_PROCESS_ID must be a positive process ID")?;
+    anyhow::ensure!(
+        process_id != 0,
+        "ZETTA_PROCESS_ID must be a positive process ID"
+    );
+    let attention_id = attention_id
+        .parse::<u64>()
+        .context("ZETTA_ATTENTION_ID must be a positive attention ID")?;
+    anyhow::ensure!(
+        attention_id != 0,
+        "ZETTA_ATTENTION_ID must be a positive attention ID"
+    );
+    Ok((process_id, attention_id))
 }
 
 pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Result<StartupArgs> {
@@ -212,6 +348,19 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             profile_external_terminal: false,
             tftp_command: None,
         });
+    }
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "attention")
+    {
+        if arguments[1..]
+            .iter()
+            .any(|argument| matches!(argument.to_string_lossy().as_ref(), "--help" | "-h"))
+        {
+            println!("{}", attention_help());
+            std::process::exit(0);
+        }
+        return parse_attention_args(&arguments[1..]);
     }
     if arguments
         .first()

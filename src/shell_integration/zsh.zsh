@@ -216,7 +216,7 @@ _zetta() {
     fi
 
     if (( CURRENT == 2 )); then
-        compadd -S ' ' -- benchmark benchmark-output terminal-size sessions profile edit vi init serial http tftp notify copy paste splits tabicon panetheme overlay wt
+        compadd -S ' ' -- benchmark benchmark-output terminal-size sessions profile edit vi init serial http tftp notify attention copy paste splits tabicon panetheme overlay wt
         _zetta_options --help --version --config --keymap --profile --split --replace-pane --theme
         return
     fi
@@ -237,7 +237,7 @@ _zetta() {
                 return
             elif [[ $words[2] == serial ]]; then
                 compadd -- none odd even
-            elif [[ $words[2] != http && $words[2] != tftp && $words[2] != notify ]]; then
+            elif [[ $words[2] != http && $words[2] != tftp && $words[2] != notify && $words[2] != attention ]]; then
                 _zetta_profiles
             fi
             return
@@ -286,7 +286,7 @@ _zetta() {
         --stop-bits|--size)
             if [[ $words[2] == serial ]]; then
                 compadd -- 1 2
-            elif [[ $words[2] == notify ]]; then
+            elif [[ $words[2] == notify || $words[2] == attention ]]; then
                 _zetta_sound_names
             elif [[ $words[2] == overlay ]]; then
                 compadd -- sm base lg xl 2xl 3xl
@@ -298,7 +298,7 @@ _zetta() {
                 _zetta_split_names
             elif [[ $words[2] == serial ]]; then
                 compadd -- 1 2
-            elif [[ $words[2] == notify ]]; then
+            elif [[ $words[2] == notify || $words[2] == attention ]]; then
                 _zetta_sound_names
             elif [[ $words[2] == overlay ]]; then
                 compadd -- sm base lg xl 2xl 3xl
@@ -497,6 +497,9 @@ _zetta() {
             ;;
         notify)
             _zetta_options --app-name --icon --sound --timeout --help
+            ;;
+        attention)
+            _zetta_options --notify --app-name --icon --sound --timeout --help
             ;;
         copy)
             _zetta_options --pboard --help

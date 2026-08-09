@@ -11,6 +11,32 @@ pub(crate) fn is_wsl_shell(shell: &Shell) -> bool {
         .is_some_and(|name| name.eq_ignore_ascii_case("wsl.exe"))
 }
 
+pub(crate) fn add_wsl_environment_variables<S>(environment: &mut HashMap<String, String, S>)
+where
+    S: std::hash::BuildHasher,
+{
+    let mut wslenv = environment
+        .remove("WSLENV")
+        .or_else(|| env::var("WSLENV").ok())
+        .unwrap_or_default();
+
+    for variable in ["ZETTA_PROCESS_ID/u", "ZETTA_ATTENTION_ID/u"] {
+        let name = variable.split('/').next().unwrap();
+        if wslenv
+            .split(':')
+            .any(|entry| entry.split('/').next() == Some(name))
+        {
+            continue;
+        }
+        if !wslenv.is_empty() {
+            wslenv.push(':');
+        }
+        wslenv.push_str(variable);
+    }
+
+    environment.insert("WSLENV".to_owned(), wslenv);
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Msys2Shell {
     Bash,

@@ -16,6 +16,8 @@ fn background_session_is_reaped_after_its_final_pane_exits() {
     };
     let tab = Tab {
         id: 1,
+        attention_id: 1,
+        attention: None,
         panes: vec![TerminalPane {
             id: 3,
             label_number: 1,

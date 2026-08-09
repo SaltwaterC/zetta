@@ -115,7 +115,7 @@ $zettaCompletions = {
         }
     }
     $subcommand = $words | Where-Object {
-        $_ -in 'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'splits', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', 'wt'
+        $_ -in 'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'splits', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', 'wt'
     } | Select-Object -First 1
     $worktreeCommand = $false
     $worktreeOperation = ''
@@ -172,12 +172,12 @@ $zettaCompletions = {
         (($previous -eq '-p' -or $last -eq '-p') -and $null -eq $subcommand)
     ) {
         & $zettaProfiles $configArguments
-    } elseif ($previous -eq '--timeout') {
+    } elseif ($previous -in '--timeout', '-t') {
         'default', 'never'
     } elseif ($previous -in '--output-type', '-t', '--theme', '--text') {
         if ($subcommand -eq 'profile' -or $null -eq $subcommand) { & $zettaProfileThemes $configArguments }
         elseif ($subcommand -eq 'panetheme') { & $zettaPaneThemes }
-        elseif ($subcommand -eq 'notify') { 'default', 'never' }
+        elseif ($subcommand -in 'notify', 'attention') { 'default', 'never' }
         elseif ($subcommand -eq 'overlay') { @() }
         else { 'repeated', 'unique' }
     } elseif ($previous -in '--device', '-d') {
@@ -188,7 +188,7 @@ $zettaCompletions = {
         'none', 'odd', 'even'
     } elseif ($previous -in '--stop-bits', '-s', '--size') {
         if ($subcommand -eq 'serial') { '1', '2' }
-        elseif ($subcommand -eq 'notify') { $zettaSoundNames }
+        elseif ($subcommand -in 'notify', 'attention') { $zettaSoundNames }
         elseif ($subcommand -eq 'overlay') { 'sm', 'base', 'lg', 'xl', '2xl', '3xl' }
         else { @() }
     } elseif ($previous -eq '--sound') {
@@ -235,7 +235,7 @@ $zettaCompletions = {
             '--help'
         }
     } elseif ($null -eq $subcommand) {
-        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'profile', 'splits', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', 'wt', '--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme'
+        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'profile', 'splits', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', 'wt', '--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme'
     } else {
         switch ($subcommand) {
             'benchmark' { '--terminal-render-workload', '--terminal-checkerboard-workload', '--terminal-sparse-update-workload', '--profile-report', '--profile-duration', '--profile-pane-stress', '--profile-background-stress', '--profile-sparse-updates', '--profile-external-terminal', '--help' }
@@ -279,6 +279,7 @@ $zettaCompletions = {
                 else { '--port', '--help' }
             }
             'notify' { '--app-name', '--icon', '--sound', '--timeout', '--help' }
+            'attention' { '--notify', '--app-name', '--icon', '--sound', '--timeout', '--help' }
             'copy' { '--pboard', '--help' }
             'paste' { '--pboard', '--prefer', '--help' }
             'tabicon' { '--icon', '--list', '--help' }

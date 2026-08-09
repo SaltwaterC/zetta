@@ -194,7 +194,7 @@ _zetta_complete() {
                 COMPREPLY=()
             elif [[ $command == serial ]]; then
                 _zetta_compgen 'none odd even'
-            elif [[ $command != tftp && $command != http && $command != notify ]]; then
+            elif [[ $command != tftp && $command != http && $command != notify && $command != attention ]]; then
                 _zetta_complete_profiles
             else
                 COMPREPLY=()
@@ -244,7 +244,7 @@ _zetta_complete() {
         --stop-bits|--size)
             if [[ $command == serial ]]; then
                 _zetta_compgen '1 2'
-            elif [[ $command == notify ]]; then
+            elif [[ $command == notify || $command == attention ]]; then
                 _zetta_complete_sound_names
             elif [[ $command == overlay ]]; then
                 _zetta_compgen 'sm base lg xl 2xl 3xl'
@@ -258,7 +258,7 @@ _zetta_complete() {
                 _zetta_complete_pane_splits
             elif [[ $command == serial ]]; then
                 _zetta_compgen '1 2'
-            elif [[ $command == notify ]]; then
+            elif [[ $command == notify || $command == attention ]]; then
                 _zetta_complete_sound_names
             elif [[ $command == overlay ]]; then
                 _zetta_compgen 'sm base lg xl 2xl 3xl'
@@ -348,7 +348,7 @@ _zetta_complete() {
                 _zetta_complete_profile_themes
             elif [[ $command == panetheme ]]; then
                 _zetta_complete_pane_themes
-            elif [[ $command == notify ]]; then
+            elif [[ $command == notify || $command == attention ]]; then
                 _zetta_compgen 'default never'
             elif [[ $command == overlay ]]; then
                 COMPREPLY=()
@@ -364,7 +364,7 @@ _zetta_complete() {
     esac
 
     if (( COMP_CWORD == 1 )); then
-        _zetta_compgen 'benchmark benchmark-output terminal-size sessions profile edit vi init serial http tftp notify copy paste splits tabicon panetheme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme'
+        _zetta_compgen 'benchmark benchmark-output terminal-size sessions profile edit vi init serial http tftp notify attention copy paste splits tabicon panetheme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme'
         return
     fi
 
@@ -493,6 +493,9 @@ _zetta_complete() {
             ;;
         notify)
             _zetta_compgen '--app-name --icon --sound --timeout --help'
+            ;;
+        attention)
+            _zetta_compgen '--notify --app-name --icon --sound --timeout --help'
             ;;
         copy)
             _zetta_compgen '--pboard --help'

@@ -437,6 +437,14 @@ function __zetta_long_options
                 --sound 'Sound name' \
                 --timeout 'Timeout' \
                 --help 'Print help'
+        case attention
+            printf '%s\t%s\n' \
+                --notify 'Also show a desktop notification' \
+                --app-name 'Application name' \
+                --icon 'Image to show with the notification' \
+                --sound 'Sound name' \
+                --timeout 'Timeout' \
+                --help 'Print help'
         case copy zcopy pbcopy
             printf '%s\t%s\n' --pboard 'Pasteboard to use' --help 'Print help'
         case paste zpaste pbpaste
@@ -461,6 +469,7 @@ complete -c zetta -n '__zetta_at_root' -a serial -d 'List or connect to serial d
 complete -c zetta -n '__zetta_at_root' -a http -d 'Serve static files over HTTP'
 complete -c zetta -n '__zetta_at_root' -a tftp -d 'Transfer a file with TFTP'
 complete -c zetta -n '__zetta_at_root' -a notify -d 'Show a desktop notification'
+complete -c zetta -n '__zetta_at_root' -a attention -d 'Mark the originating tab as needing attention'
 complete -c zetta -n '__zetta_at_root' -a copy -d 'Copy standard input to the clipboard'
 complete -c zetta -n '__zetta_at_root' -a paste -d "Print the clipboard's contents"
 complete -c zetta -n '__zetta_at_root' -a tabicon -d 'Set the active tab icon'
@@ -597,6 +606,18 @@ complete -c zetta -s a -r -n '__fish_seen_subcommand_from notify; and __zetta_sh
 complete -c zetta -s i -r -n '__fish_seen_subcommand_from notify; and __zetta_short_option -i'
 complete -c zetta -s s -r -a '(__zetta_sound_names)' -n '__fish_seen_subcommand_from notify; and __zetta_short_option -s'
 complete -c zetta -s t -r -a 'default never' -n '__fish_seen_subcommand_from notify; and __zetta_short_option -t'
+complete -c zetta -n '__fish_seen_subcommand_from attention' -l notify -d 'Also show a desktop notification'
+complete -c zetta -n '__fish_seen_subcommand_from attention' -l app-name -r -d 'Application name'
+complete -c zetta -n '__fish_seen_subcommand_from attention' -l icon -r -d 'Image to show with the notification'
+complete -c zetta -n '__fish_seen_subcommand_from attention' -l sound -r -a '(__zetta_sound_names)' -d 'Sound name'
+complete -c zetta -n '__fish_seen_subcommand_from attention' -l timeout -r -a 'default never' -d 'Timeout'
+complete -c zetta -n '__fish_seen_subcommand_from attention' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from attention' -a '(__zetta_long_options attention)'
+complete -c zetta -s n -n '__fish_seen_subcommand_from attention; and __zetta_short_option -n'
+complete -c zetta -s a -r -n '__fish_seen_subcommand_from attention; and __zetta_short_option -a'
+complete -c zetta -s i -r -n '__fish_seen_subcommand_from attention; and __zetta_short_option -i'
+complete -c zetta -s s -r -a '(__zetta_sound_names)' -n '__fish_seen_subcommand_from attention; and __zetta_short_option -s'
+complete -c zetta -s t -r -a 'default never' -n '__fish_seen_subcommand_from attention; and __zetta_short_option -t'
 complete -c zetta -n '__fish_seen_subcommand_from copy' -l pboard -r -a 'general ruler find font'
 complete -c zetta -n '__fish_seen_subcommand_from copy' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from copy' -a '(__zetta_long_options copy)'

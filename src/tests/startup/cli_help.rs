@@ -56,6 +56,10 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     );
     assert!(help.contains("zetta tabicon [OPTIONS] ICON"));
     assert!(help.contains("tabicon                             Set the active tab icon"));
+    assert!(help.contains("zetta attention [OPTIONS] [SUMMARY] [BODY]"));
+    assert!(help.contains(
+        "attention                           Mark the originating tab as needing attention"
+    ));
     assert!(help.contains("zetta overlay [OPTIONS] TEXT"));
     assert!(help.contains(
         "overlay                             Non-persistently show text over the active pane"
@@ -172,6 +176,15 @@ fn overlay_help_lists_named_colours() {
     }
     assert!(help.contains("named preset"));
     assert!(help.contains("rrggbbaa"));
+}
+
+#[test]
+fn attention_help_documents_badge_and_notification_modes() {
+    let help = attention_help();
+    assert!(help.contains("Usage: zetta attention [OPTIONS] [SUMMARY] [BODY]"));
+    assert!(help.contains("Attention required"));
+    assert!(help.contains("-n, --notify"));
+    assert!(help.contains("require --notify"));
 }
 
 #[cfg(feature = "tftp-client")]

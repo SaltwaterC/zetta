@@ -28,7 +28,8 @@ for active development.
   CLI
 - Git worktree workflow with `zetta wt new`, `zetta wt done`, status, and
   conflict-resolution helpers; shell integration adds the `zwt` directory wrapper
-- Cross-platform desktop notifications from the CLI
+- In-memory tab attention badges from `zetta attention`, with optional
+  cross-platform desktop notifications
 - A small syntax-highlighted built-in [vi editor](https://github.com/SaltwaterC/busy-v),
   available as `zetta vi`, unconditionally as `zvi`, and conditionally as `vi`
   through shell integration;
@@ -50,7 +51,7 @@ installation instructions are in the [installation guide](docs/installation.md).
 optimized release build.
 
 Corporate or otherwise restricted deployments can omit the serial console,
-network tools, and desktop notifications at build time. For example, `make
+network tools, and desktop notification support at build time. For example, `make
 build SERIAL=0 HTTP=0 TFTP=0 NOTIFY=0` produces a terminal-only build.
 `TFTP_SERVER=0` and `TFTP_CLIENT=0` control the two TFTP components
 independently. Set `SYNTAX_HIGHLIGHTING=0` to omit the optional bundled
@@ -58,7 +59,10 @@ Tree-sitter grammar set from the vi editor. The flags also accept `false`,
 `no`, or `off`.
 
 The tools are available directly when enabled: `zetta serial console --device
-PATH`, `zetta http server`, `zetta tftp server`, and `zetta notify`.
+PATH`, `zetta http server`, `zetta tftp server`, and `zetta notify`. From a
+Zetta terminal, `zetta attention [OPTIONS] [SUMMARY] [BODY]` marks the
+originating tab with a badge; it works in badge-only builds, defaults to
+`Attention required`, and adds a desktop notification when `--notify` is used.
 From a Zetta pane, `zetta tabicon ICON` changes the active tab icon, and
 `zetta panetheme THEME` non-persistently changes the active pane's theme
 (`zetta panetheme --reset` restores the profile's configured theme).

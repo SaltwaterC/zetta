@@ -43,7 +43,9 @@ sudo apt install libasound2-dev
 ```
 
 Building with `NOTIFY=0` (or `--no-default-features` without re-enabling
-`notifications`) omits this requirement along with the rest of `zetta notify`.
+`notifications`) omits this requirement and desktop notifications. The
+badge-only `zetta attention` command remains available in that build; its
+`--notify` option is rejected.
 
 The `clipboard` feature (enabled by default; see
 [Serial and network tools](tools.md#clipboard)) needs no extra system

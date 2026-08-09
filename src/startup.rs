@@ -6,15 +6,16 @@ use crate::cli_services::{copy_help, parse_copy_args, parse_paste_args, paste_he
 #[cfg(feature = "http-server")]
 use crate::cli_services::{http_server_help, parse_http_args};
 #[cfg(feature = "notifications")]
-use crate::cli_services::{notify_help, parse_notify_args};
+use crate::cli_services::{notify_help, parse_notify_args, run_notification};
 #[cfg(feature = "serial-console")]
 use crate::cli_services::{parse_serial_args, serial_help};
 #[cfg(feature = "tftp-server")]
 use crate::cli_services::{parse_tftp_server_args, tftp_server_help};
 use crate::process_control::{
-    ReplacePaneRequest, request_existing_process_pane_overlay, request_existing_process_pane_theme,
-    request_existing_process_pane_theme_list, request_existing_process_replace_pane,
-    request_existing_process_tab_icon,
+    ReplacePaneRequest, TabAttentionRequest, request_existing_process_pane_overlay,
+    request_existing_process_pane_theme, request_existing_process_pane_theme_list,
+    request_existing_process_replace_pane, request_existing_process_tab_icon,
+    request_process_tab_attention,
 };
 use crate::worktree_cli;
 
@@ -37,8 +38,9 @@ pub(crate) use arg_parsing::{
     StartupArgs, StartupMode, load_startup_config, native_terminal_environment, parse_args,
 };
 use arg_parsing::{
-    configured_split_names, select_launch_profile, should_handoff_to_existing_process,
-    should_replace_pane_in_existing_process, validate_launch_split,
+    configured_split_names, parse_attention_target, select_launch_profile,
+    should_handoff_to_existing_process, should_replace_pane_in_existing_process,
+    validate_launch_split,
 };
 #[cfg(not(feature = "tftp-client"))]
 pub(crate) use cli_help::{TftpCommand, parse_tftp_args, tftp_help};
@@ -52,8 +54,9 @@ pub(crate) use keybindings::{RENAME_TAB_KEYBINDING, keymap_keystroke_alias};
 pub(crate) use keybindings::{install_native_macos_menus, update_native_macos_menus};
 use wsl::paths_for_external_editor;
 pub(crate) use wsl::{
-    is_wsl_shell, launch_working_directory, msys2_cwd_tracking_environment, msys2_path_to_windows,
-    msys2_profile, wsl_cwd_tracking_file, wsl_shell_with_tracking,
+    add_wsl_environment_variables, is_wsl_shell, launch_working_directory,
+    msys2_cwd_tracking_environment, msys2_path_to_windows, msys2_profile, wsl_cwd_tracking_file,
+    wsl_shell_with_tracking,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -681,6 +684,32 @@ pub(crate) fn run() -> Result<()> {
     {
         return run_output_benchmark(*size_mib, *output_type);
     }
+    if let StartupMode::Attention(command) = &args.mode {
+        let inherited_process_id = env::var("ZETTA_PROCESS_ID")
+            .context("zetta attention must run inside a Zetta terminal")?;
+        let inherited_attention_id = env::var("ZETTA_ATTENTION_ID")
+            .context("zetta attention must run inside a Zetta terminal")?;
+        let (process_id, attention_id) =
+            parse_attention_target(&inherited_process_id, &inherited_attention_id)?;
+        let accepted = request_process_tab_attention(
+            process_id,
+            TabAttentionRequest {
+                attention_id,
+                summary: command.notification.summary.clone(),
+                body: command.notification.body.clone(),
+            },
+        )?;
+        anyhow::ensure!(accepted, "the originating Zetta tab is no longer available");
+        #[cfg(feature = "notifications")]
+        if command.notify {
+            run_notification(&command.notification)?;
+        }
+        #[cfg(not(feature = "notifications"))]
+        if command.notify {
+            anyhow::bail!("desktop notifications are disabled in this build");
+        }
+        return Ok(());
+    }
     if let StartupMode::Worktree(command) = args.mode {
         return worktree_cli::run(&command);
     }
@@ -877,6 +906,7 @@ pub(crate) fn run() -> Result<()> {
                 windows: HashMap::new(),
                 dormant: Vec::new(),
                 runners: HashMap::new(),
+                next_attention_id: 1,
                 background_session_entries: Arc::from([]),
                 config: config.clone(),
                 configuration_error: configuration_error.clone(),
@@ -1144,6 +1174,47 @@ pub(crate) fn run() -> Result<()> {
                                         )
                                     })
                                     .unwrap_or(false)
+                            });
+                            let _ = completion.send(accepted);
+                        }
+                        ProcessControlCommand::SetTabAttention {
+                            request,
+                            completion,
+                        } => {
+                            let accepted = cx.update(|cx| {
+                                if !cx
+                                    .global::<ZettaProcessState>()
+                                    .control_server
+                                    .is_accepting()
+                                {
+                                    return false;
+                                }
+                                let process = cx.global::<ZettaProcessState>();
+                                let windows = process.windows.keys().copied().collect::<Vec<_>>();
+                                let dormant = process.dormant.clone();
+                                let mut accepted = false;
+                                for window_id in windows {
+                                    let found = gpui::WindowHandle::<Zetta>::new(window_id)
+                                        .update(cx, |zetta, window, cx| {
+                                            let found = zetta.set_tab_attention(
+                                                request.clone(),
+                                                Some(window),
+                                                cx,
+                                            );
+                                            if found && !window.is_window_active() {
+                                                window.request_attention();
+                                            }
+                                            found
+                                        })
+                                        .unwrap_or(false);
+                                    accepted |= found;
+                                }
+                                for zetta in dormant {
+                                    accepted |= zetta.update(cx, |zetta, cx| {
+                                        zetta.set_tab_attention(request.clone(), None, cx)
+                                    });
+                                }
+                                accepted
                             });
                             let _ = completion.send(accepted);
                         }

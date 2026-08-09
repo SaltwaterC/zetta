@@ -116,6 +116,14 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
     );
     help
     .replace(
+        "       zetta profile <COMMAND>",
+        "       zetta profile <COMMAND>\n       zetta attention [OPTIONS] [SUMMARY] [BODY]",
+    )
+    .replace(
+        "  profile                             List and manage profiles",
+        "  profile                             List and manage profiles\n  attention                           Mark the originating tab as needing attention",
+    )
+    .replace(
         "       zetta sessions [--json]",
         "       zetta sessions [--json]\n       zetta wt <COMMAND>",
     )
@@ -135,6 +143,10 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
 
 pub(crate) fn is_version_argument(argument: &str) -> bool {
     matches!(argument, "--version" | "-v")
+}
+
+pub(crate) fn attention_help() -> &'static str {
+    "Mark the originating Zetta tab as needing attention\n\nUsage: zetta attention [OPTIONS] [SUMMARY] [BODY]\n\nSUMMARY defaults to `Attention required`; BODY is optional additional text. The command must run inside a terminal launched by Zetta. The badge is cleared when that tab becomes active and genuinely focused.\n\nOptions:\n  -n, --notify                      Also show a desktop notification\n  -a, --app-name NAME               Set the notification's application name\n  -i, --icon PATH                   Show an image with the notification (default: Zetta's icon)\n  -s, --sound NAME                  zetta-default, zetta-ok, zetta-alarm, or a platform-specific system sound name\n  -t, --timeout WHEN                default, never, or a number of milliseconds (default: default)\n  -h, --help                        Print help\n\nNotification options require --notify. Without --notify, attention is an in-memory tab badge only."
 }
 
 pub(crate) fn parse_terminal_resize_dimension(argument: &OsString, option: &str) -> Result<usize> {

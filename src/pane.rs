@@ -1522,8 +1522,27 @@ impl TabClosePolicy {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TabAttention {
+    pub(crate) summary: String,
+    pub(crate) body: Option<String>,
+}
+
+impl TabAttention {
+    pub(crate) fn tooltip_text(&self) -> String {
+        match &self.body {
+            Some(body) if !body.is_empty() => format!("{}\n{}", self.summary, body),
+            _ => self.summary.clone(),
+        }
+    }
+}
+
 pub(crate) struct Tab {
     pub(crate) id: u64,
+    /// Stable within this Zetta process. Unlike `id`, this survives moving a
+    /// tab between visible and background storage and any pane/tab ID remap.
+    pub(crate) attention_id: u64,
+    pub(crate) attention: Option<TabAttention>,
     pub(crate) panes: Vec<TerminalPane>,
     pub(crate) pane_indices: HashMap<u64, usize>,
     pub(crate) next_pane_label: usize,

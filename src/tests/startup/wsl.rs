@@ -132,6 +132,37 @@ fn native_shells_are_not_treated_as_wsl() {
 }
 
 #[test]
+fn shares_attention_target_environment_with_wsl() {
+    let mut environment = HashMap::from([
+        ("ZETTA_PROCESS_ID".to_owned(), "123".to_owned()),
+        ("ZETTA_ATTENTION_ID".to_owned(), "456".to_owned()),
+        ("WSLENV".to_owned(), String::new()),
+    ]);
+
+    add_wsl_environment_variables(&mut environment);
+
+    assert_eq!(
+        environment.get("WSLENV").map(String::as_str),
+        Some("ZETTA_PROCESS_ID/u:ZETTA_ATTENTION_ID/u")
+    );
+}
+
+#[test]
+fn preserves_existing_wslenv_entries_without_duplicates() {
+    let mut environment = HashMap::from([(
+        "WSLENV".to_owned(),
+        "PATH/l:ZETTA_PROCESS_ID/l:USER/u".to_owned(),
+    )]);
+
+    add_wsl_environment_variables(&mut environment);
+
+    assert_eq!(
+        environment.get("WSLENV").map(String::as_str),
+        Some("PATH/l:ZETTA_PROCESS_ID/l:USER/u:ZETTA_ATTENTION_ID/u")
+    );
+}
+
+#[test]
 fn explicit_wsl_directory_is_not_overridden() {
     let shell = Shell::WithArguments {
         program: "wsl.exe".to_owned(),

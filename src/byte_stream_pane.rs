@@ -132,11 +132,12 @@ impl Zetta {
         )
         .detach();
         let focus_handle = view.focus_handle(cx);
-        cx.on_focus(&focus_handle, window, move |this, _, cx| {
+        cx.on_focus(&focus_handle, window, move |this, window, cx| {
             if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.id == tab_id) {
                 tab.activate_pane(pane_id);
                 cx.notify();
             }
+            this.clear_active_tab_attention_if_focused(window, cx);
         })
         .detach();
         if let Some(pane) = self.tabs[self.active_tab].pane_mut(pane_id) {

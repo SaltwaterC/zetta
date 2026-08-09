@@ -69,7 +69,7 @@ use gpui::{
     deferred, div, point, profiler, px, size, svg, transparent_black, uniform_list,
 };
 use process_control::{
-    ProcessControlCommand, ProcessControlServer, ReconnectSessionResult,
+    ProcessControlCommand, ProcessControlServer, ReconnectSessionResult, TabAttentionRequest,
     request_existing_process_window,
 };
 use schemars::JsonSchema;
@@ -226,6 +226,7 @@ struct ZettaProcessState {
     windows: HashMap<WindowId, Entity<Zetta>>,
     dormant: Vec<Entity<Zetta>>,
     runners: HashMap<u64, Entity<Zetta>>,
+    next_attention_id: u64,
     background_session_entries: Arc<[ProcessBackgroundSessionEntry]>,
     config: Config,
     configuration_error: Option<String>,

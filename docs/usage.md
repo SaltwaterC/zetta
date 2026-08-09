@@ -99,6 +99,21 @@ From a Zetta pane, `zetta tabicon ICON` changes the active tab icon;
 built-in icon names.
 Tabs retain a fixed width as their names change.
 
+### Tab attention
+
+Commands running in a Zetta terminal can mark their originating tab with
+`zetta attention [OPTIONS] [SUMMARY] [BODY]`. The summary defaults to
+`Attention required`, and the optional body appears in the badge tooltip.
+The badge is non-animated, uses the active theme's accent color, and clears
+when the tab becomes active and its terminal or minimized-pane shelf is
+focused. It is kept in memory only and is not part of session persistence.
+
+Pass `--notify` to also show a desktop notification. The notification reuses
+the `notify` command's `--app-name`, `--icon`, `--sound`, and `--timeout`
+options; those options require `--notify`. Attention commands outside a Zetta
+terminal, or after their originating tab closes, fail rather than targeting
+the current active tab.
+
 Press `Ctrl-Shift-G`, or right-click a tab and choose the checked `Tab Move
 Mode` entry, to make that tab the active moving tab. A `Move tab ← →` indicator
 appears in the tab bar while the mode is active. `Left` and `Right` then move

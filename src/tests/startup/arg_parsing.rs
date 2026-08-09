@@ -401,6 +401,129 @@ fn notify_subcommand_bypasses_application_startup() {
     assert!(parse_args_from([OsString::from("notify")]).is_err());
 }
 
+#[test]
+fn attention_subcommand_defaults_to_a_badge_without_notification() {
+    let args = parse_args_from([OsString::from("attention")]).unwrap();
+    let StartupMode::Attention(command) = args.mode else {
+        panic!("unexpected startup mode");
+    };
+    assert!(!command.notify);
+    assert_eq!(command.notification.summary, "Attention required");
+    assert_eq!(command.notification.body, None);
+    assert_eq!(command.notification.timeout, None);
+    assert!(!should_handoff_to_existing_process(&StartupArgs {
+        config_path: None,
+        keymap_path: None,
+        profile: None,
+        split: None,
+        replace_pane: false,
+        theme_override: None,
+        mode: StartupMode::Attention(command),
+        profile_report: None,
+        profile_duration: None,
+        profile_pane_stress: false,
+        profile_background_stress: false,
+        profile_sparse_updates: false,
+        profile_external_terminal: false,
+        tftp_command: None,
+    }));
+}
+
+#[cfg(feature = "notifications")]
+#[test]
+fn attention_subcommand_parses_summary_body_and_notification_options() {
+    let args = parse_args_from([
+        OsString::from("attention"),
+        OsString::from("--notify"),
+        OsString::from("-a"),
+        OsString::from("zetta-ci"),
+        OsString::from("--icon"),
+        OsString::from("icon.png"),
+        OsString::from("-s"),
+        OsString::from("zetta-ok"),
+        OsString::from("--timeout"),
+        OsString::from("5000"),
+        OsString::from("Build finished"),
+        OsString::from("All tests passed"),
+    ])
+    .unwrap();
+    let StartupMode::Attention(command) = args.mode else {
+        panic!("unexpected startup mode");
+    };
+    assert!(command.notify);
+    assert_eq!(command.notification.summary, "Build finished");
+    assert_eq!(
+        command.notification.body.as_deref(),
+        Some("All tests passed")
+    );
+    assert_eq!(command.notification.app_name.as_deref(), Some("zetta-ci"));
+    assert_eq!(command.notification.icon.as_deref(), Some("icon.png"));
+    assert_eq!(command.notification.sound.as_deref(), Some("zetta-ok"));
+    assert_eq!(
+        command.notification.timeout,
+        Some(crate::cli_services::NotificationTimeout::Milliseconds(5000))
+    );
+}
+
+#[test]
+fn attention_subcommand_rejects_duplicate_invalid_and_unpaired_options() {
+    assert!(
+        parse_args_from([
+            OsString::from("attention"),
+            OsString::from("--notify"),
+            OsString::from("-n"),
+        ])
+        .is_err()
+    );
+    assert!(
+        parse_args_from([
+            OsString::from("attention"),
+            OsString::from("--timeout"),
+            OsString::from("soon"),
+        ])
+        .is_err()
+    );
+    assert!(
+        parse_args_from([
+            OsString::from("attention"),
+            OsString::from("--icon"),
+            OsString::from("icon.png"),
+        ])
+        .is_err()
+    );
+    assert!(
+        parse_args_from([
+            OsString::from("attention"),
+            OsString::from("summary"),
+            OsString::from("body"),
+            OsString::from("extra"),
+        ])
+        .is_err()
+    );
+    assert!(parse_args_from([OsString::from("attention"), OsString::from("--unknown"),]).is_err());
+}
+
+#[test]
+fn attention_target_requires_positive_inherited_process_and_tab_ids() {
+    assert_eq!(parse_attention_target("42", "7").unwrap(), (42, 7));
+    for (process_id, attention_id) in [
+        ("", "7"),
+        ("not-a-process", "7"),
+        ("0", "7"),
+        ("42", ""),
+        ("42", "not-an-attention"),
+        ("42", "0"),
+    ] {
+        assert!(parse_attention_target(process_id, attention_id).is_err());
+    }
+}
+
+#[cfg(not(feature = "notifications"))]
+#[test]
+fn attention_notification_is_rejected_when_notifications_are_disabled() {
+    assert!(parse_args_from([OsString::from("attention"), OsString::from("--notify"),]).is_err());
+}
+
 #[cfg(feature = "clipboard")]
 #[test]
 fn copy_and_paste_subcommands_bypass_application_startup() {

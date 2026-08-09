@@ -26,7 +26,7 @@ use ui::IconName;
 
 use crate::pane::{OverlayFontSize, PaneOverlayRequest, overlay_color_from_value};
 
-const CONTROL_VERSION: u32 = 5;
+const CONTROL_VERSION: u32 = 6;
 const MAX_CONTROL_MESSAGE_BYTES: usize = 4096;
 const CONTROL_COMPLETION_TIMEOUT: Duration = Duration::from_secs(2);
 const CONTROL_COMPLETION_POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -46,6 +46,13 @@ pub(crate) struct ReplacePaneRequest {
     pub(crate) split: Option<String>,
     pub(crate) profile: Option<String>,
     pub(crate) theme: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TabAttentionRequest {
+    pub(crate) attention_id: u64,
+    pub(crate) summary: String,
+    pub(crate) body: Option<String>,
 }
 
 pub(crate) enum ProcessControlCommand {
@@ -84,6 +91,10 @@ pub(crate) enum ProcessControlCommand {
         color: Option<Hsla>,
         completion: Sender<bool>,
     },
+    SetTabAttention {
+        request: TabAttentionRequest,
+        completion: Sender<bool>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -115,6 +126,11 @@ enum ControlRequestCommand {
         opacity: Option<f32>,
         color: Option<String>,
     },
+    SetTabAttention {
+        attention_id: u64,
+        summary: String,
+        body: Option<String>,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -138,6 +154,9 @@ struct ControlRequest {
     pane_overlay_font_size: Option<String>,
     pane_overlay_opacity: Option<u8>,
     pane_overlay_color: Option<String>,
+    attention_id: Option<u64>,
+    attention_summary: Option<String>,
+    attention_body: Option<String>,
     config_path: Option<String>,
     split: Option<String>,
     profile: Option<String>,
@@ -320,6 +339,25 @@ impl ProcessControlServer {
                                 && wait_for_control_completion(&completed, &stopping_for_thread);
                             if accepted { "ok" } else { "rejected" }
                         }
+                        Some(ControlRequestCommand::SetTabAttention {
+                            attention_id,
+                            summary,
+                            body,
+                        }) => {
+                            let (completion, completed) = channel();
+                            let accepted = commands
+                                .unbounded_send(ProcessControlCommand::SetTabAttention {
+                                    request: TabAttentionRequest {
+                                        attention_id,
+                                        summary,
+                                        body,
+                                    },
+                                    completion,
+                                })
+                                .is_ok()
+                                && wait_for_control_completion(&completed, &stopping_for_thread);
+                            if accepted { "ok" } else { "rejected" }
+                        }
                         None => "rejected",
                     };
                     let status = if status == "ok" && stopping_for_thread.load(Ordering::Acquire) {
@@ -453,6 +491,16 @@ fn decode_control_request(
         }
         return None;
     }
+    if request.command != "set_tab_attention"
+        && (request.attention_id.is_some()
+            || request.attention_summary.is_some()
+            || request.attention_body.is_some())
+    {
+        if let Some(secret) = request.secret.as_mut() {
+            secret.zeroize();
+        }
+        return None;
+    }
     let command = match request.command.as_str() {
         "reload_configuration"
             if request.runner_id.is_none()
@@ -563,6 +611,32 @@ fn decode_control_request(
                     .take()
                     .map(|percent| f32::from(percent) / 100.0),
                 color: request.pane_overlay_color.take(),
+            })
+        }
+        "set_tab_attention"
+            if request.runner_id.is_none()
+                && request.session_id.is_none()
+                && request.secret.is_none()
+                && request.icon.is_none()
+                && request.pane_theme.is_none()
+                && request.pane_overlay.is_none()
+                && request.pane_overlay_font_size.is_none()
+                && request.pane_overlay_opacity.is_none()
+                && request.pane_overlay_color.is_none()
+                && request.config_path.is_none()
+                && request.split.is_none()
+                && request.profile.is_none()
+                && request.theme.is_none() =>
+        {
+            let attention_id = request.attention_id.take().filter(|id| *id != 0)?;
+            let summary = request
+                .attention_summary
+                .take()
+                .filter(|summary| !summary.is_empty())?;
+            Some(ControlRequestCommand::SetTabAttention {
+                attention_id,
+                summary,
+                body: request.attention_body.take(),
             })
         }
         _ => None,
@@ -854,6 +928,26 @@ pub(crate) fn request_reconnect_session(
     send_reconnect_session_request(&endpoint, runner_id, session_id, secret)
 }
 
+pub(crate) fn request_process_tab_attention(
+    process_id: u32,
+    request: TabAttentionRequest,
+) -> Result<bool> {
+    let endpoint_path = control_endpoint_path(process_id);
+    let contents = fs::read(&endpoint_path).with_context(|| {
+        format!(
+            "reading Zetta process control endpoint {}",
+            endpoint_path.display()
+        )
+    })?;
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&contents).context("parsing Zetta process control endpoint")?;
+    anyhow::ensure!(
+        endpoint.version == CONTROL_VERSION && endpoint.process_id == process_id,
+        "Zetta process control endpoint is outdated"
+    );
+    send_set_tab_attention_request(&endpoint, &request)
+}
+
 fn send_open_window_request(endpoint: &ControlEndpoint) -> Result<bool> {
     let mut stream = UnixStream::connect(&endpoint.socket_path)?;
     stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
@@ -872,6 +966,43 @@ fn send_open_window_request(endpoint: &ControlEndpoint) -> Result<bool> {
             pane_overlay_font_size: None,
             pane_overlay_opacity: None,
             pane_overlay_color: None,
+            attention_id: None,
+            attention_summary: None,
+            attention_body: None,
+            config_path: None,
+            split: None,
+            profile: None,
+            theme: None,
+        },
+    )?;
+    let response = read_message::<ControlResponse>(&mut stream)?;
+    Ok(response.status == "ok")
+}
+
+fn send_set_tab_attention_request(
+    endpoint: &ControlEndpoint,
+    request: &TabAttentionRequest,
+) -> Result<bool> {
+    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
+    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    write_message(
+        &mut stream,
+        &ControlRequest {
+            token: endpoint.token.clone(),
+            command: "set_tab_attention".to_owned(),
+            runner_id: None,
+            session_id: None,
+            secret: None,
+            icon: None,
+            pane_theme: None,
+            pane_overlay: None,
+            pane_overlay_font_size: None,
+            pane_overlay_opacity: None,
+            pane_overlay_color: None,
+            attention_id: Some(request.attention_id),
+            attention_summary: Some(request.summary.clone()),
+            attention_body: request.body.clone(),
             config_path: None,
             split: None,
             profile: None,
@@ -903,6 +1034,9 @@ fn send_replace_pane_request(
             pane_overlay_font_size: None,
             pane_overlay_opacity: None,
             pane_overlay_color: None,
+            attention_id: None,
+            attention_summary: None,
+            attention_body: None,
             config_path: None,
             split: request.split.clone(),
             profile: request.profile.clone(),
@@ -934,6 +1068,9 @@ fn send_reload_configuration_request(
             pane_overlay_font_size: None,
             pane_overlay_opacity: None,
             pane_overlay_color: None,
+            attention_id: None,
+            attention_summary: None,
+            attention_body: None,
             config_path: Some(config_path.to_owned()),
             split: None,
             profile: None,
@@ -965,6 +1102,9 @@ fn send_set_tab_icon_request(endpoint: &ControlEndpoint, icon: Option<IconName>)
             pane_overlay_font_size: None,
             pane_overlay_opacity: None,
             pane_overlay_color: None,
+            attention_id: None,
+            attention_summary: None,
+            attention_body: None,
             config_path: None,
             split: None,
             profile: None,
@@ -993,6 +1133,9 @@ fn send_set_pane_theme_request(endpoint: &ControlEndpoint, theme: Option<String>
             pane_overlay_font_size: None,
             pane_overlay_opacity: None,
             pane_overlay_color: None,
+            attention_id: None,
+            attention_summary: None,
+            attention_body: None,
             config_path: None,
             split: None,
             profile: None,
@@ -1021,6 +1164,9 @@ fn send_list_pane_themes_request(endpoint: &ControlEndpoint) -> Result<Option<Ve
             pane_overlay_font_size: None,
             pane_overlay_opacity: None,
             pane_overlay_color: None,
+            attention_id: None,
+            attention_summary: None,
+            attention_body: None,
             config_path: None,
             split: None,
             profile: None,
@@ -1055,6 +1201,9 @@ fn send_set_overlay_request(
                 .map(str::to_owned),
             pane_overlay_opacity: request.opacity,
             pane_overlay_color: request.color.clone(),
+            attention_id: None,
+            attention_summary: None,
+            attention_body: None,
             config_path: None,
             split: None,
             profile: None,
@@ -1086,6 +1235,9 @@ fn send_reconnect_session_request(
         pane_overlay_font_size: None,
         pane_overlay_opacity: None,
         pane_overlay_color: None,
+        attention_id: None,
+        attention_summary: None,
+        attention_body: None,
         config_path: None,
         split: None,
         profile: None,

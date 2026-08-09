@@ -327,6 +327,27 @@ fn supported_shells_generate_notify_completion_and_zntfy_shortcut() {
 }
 
 #[test]
+fn supported_shells_generate_attention_completion() {
+    let profiles = profiles();
+    for shell in [
+        ShellIntegration::Bash,
+        ShellIntegration::Fish,
+        ShellIntegration::PowerShell,
+        ShellIntegration::Zsh,
+    ] {
+        let script = shell.script(&profiles);
+        assert!(script.contains("attention"));
+        if shell == ShellIntegration::Fish {
+            assert!(script.contains("-l notify"));
+        } else {
+            assert!(script.contains("--notify"));
+        }
+        assert!(script.contains("--app-name"));
+        assert!(script.contains("--timeout"));
+    }
+}
+
+#[test]
 fn supported_shells_generate_copy_paste_completion_and_shortcuts() {
     let profiles = profiles();
     for shell in [
@@ -429,14 +450,16 @@ fn sound_completion_calls_a_shared_helper_from_every_call_site() {
     assert!(bash.contains("--sound)\n            _zetta_complete_sound_names"));
     assert!(bash.contains("--sound|-s)\n            _zetta_complete_sound_names"));
     assert!(bash.contains(
-        "elif [[ $command == notify ]]; then\n                _zetta_complete_sound_names"
+        "elif [[ $command == notify || $command == attention ]]; then\n                _zetta_complete_sound_names"
     ));
 
     let zsh = ShellIntegration::Zsh.script(&profiles);
     assert!(zsh.contains("--sound)\n            _zetta_sound_names"));
     assert!(zsh.contains("--sound|-s)\n            _zetta_sound_names"));
     assert!(
-        zsh.contains("elif [[ $words[2] == notify ]]; then\n                _zetta_sound_names")
+        zsh.contains(
+            "elif [[ $words[2] == notify || $words[2] == attention ]]; then\n                _zetta_sound_names"
+        )
     );
 
     let fish = ShellIntegration::Fish.script(&profiles);
@@ -445,7 +468,9 @@ fn sound_completion_calls_a_shared_helper_from_every_call_site() {
     let powershell = ShellIntegration::PowerShell.script(&profiles);
     assert!(powershell.contains("elseif ($previous -in '--sound', '-s') { $zettaSoundNames }"));
     assert!(powershell.contains("elseif ($previous -eq '--sound') {\n        $zettaSoundNames"));
-    assert!(powershell.contains("elseif ($subcommand -eq 'notify') { $zettaSoundNames }"));
+    assert!(
+        powershell.contains("elseif ($subcommand -in 'notify', 'attention') { $zettaSoundNames }")
+    );
 }
 
 // Regression guard: a flat, unconditional merge of every platform's sound
@@ -1188,7 +1213,7 @@ fn generated_scripts_only_offer_long_form_flags() {
         let script = shell.script(&profiles);
         match shell {
             ShellIntegration::Bash => assert!(script.contains(
-                "terminal-size sessions profile edit vi init serial http tftp notify copy paste splits tabicon panetheme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme'"
+                "terminal-size sessions profile edit vi init serial http tftp notify attention copy paste splits tabicon panetheme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme'"
             )),
             ShellIntegration::Fish => {
                 assert!(script.contains("-l profile -r"));
@@ -1229,6 +1254,7 @@ fn fish_script_emits_long_option_candidates_for_every_command_context() {
         "tftp-client",
         "tftp-server",
         "notify",
+        "attention",
         "copy",
         "paste",
         "tabicon",
@@ -1399,6 +1425,18 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
             &["--app-name", "--icon", "--sound", "--timeout", "--help"][..],
         ),
         ("zetta notify -s ", &["zetta-default"][..]),
+        (
+            "zetta attention ",
+            &[
+                "--notify",
+                "--app-name",
+                "--icon",
+                "--sound",
+                "--timeout",
+                "--help",
+            ][..],
+        ),
+        ("zetta attention -s ", &["zetta-default"][..]),
         ("zetta copy ", &["--pboard", "--help"][..]),
         ("zetta paste ", &["--pboard", "--prefer", "--help"][..]),
         (

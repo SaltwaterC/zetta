@@ -404,6 +404,15 @@ impl Zetta {
             self.next_tab_id += 1;
             tab.reassign_ids(tab_id, &mut self.next_pane_id);
         }
+        self.next_attention_id = self
+            .next_attention_id
+            .max(tab.attention_id.saturating_add(1));
+        if cx.has_global::<ZettaProcessState>() {
+            let process = cx.global_mut::<ZettaProcessState>();
+            process.next_attention_id = process
+                .next_attention_id
+                .max(tab.attention_id.saturating_add(1));
+        }
         let tab_id = tab.id;
         let panes = tab
             .panes
@@ -714,11 +723,12 @@ impl Zetta {
         )
         .detach();
         let focus_handle = view.focus_handle(cx);
-        cx.on_focus_in(&focus_handle, window, move |this, _, cx| {
+        cx.on_focus_in(&focus_handle, window, move |this, window, cx| {
             if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.id == tab_id) {
                 tab.activate_pane(pane_id);
                 cx.notify();
             }
+            this.clear_active_tab_attention_if_focused(window, cx);
         })
         .detach();
         let emit_input_events = is_http_server

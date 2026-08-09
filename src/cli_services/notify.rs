@@ -10,17 +10,11 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context as _, Result};
 
-use super::CliServiceCommand;
+use super::{
+    CliServiceCommand, NotificationRequest, NotificationTimeout, parse_notification_timeout,
+};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct NotifyCommand {
-    summary: String,
-    body: Option<String>,
-    app_name: Option<String>,
-    icon: Option<String>,
-    sound: Option<String>,
-    timeout: Option<notify_rust::Timeout>,
-}
+pub(crate) type NotifyCommand = NotificationRequest;
 
 pub(crate) fn notify_help() -> &'static str {
     "Show a desktop notification\n\nUsage: zetta notify [OPTIONS] SUMMARY [BODY]\n\nSUMMARY is the notification's title; BODY is optional additional text.\n\nOptions:\n  -a, --app-name NAME                Set the notification's application name\n  -i, --icon PATH                    Show an image from PATH with the notification (default: Zetta's icon)\n  -s, --sound NAME                   zetta-default, zetta-ok, zetta-alarm, or a platform-specific system sound name\n  -t, --timeout WHEN                 default, never, or a number of milliseconds (default: default)\n  -h, --help                         Print help\n\nShows the notification through the desktop's native notification system: D-Bus\non Linux and BSD, Notification Center on macOS, and toast notifications on\nWindows. Without --icon, Zetta's own icon is shown; it is bundled in the\nbinary, so it is always available. --app-name has no effect on macOS and\n--timeout is ignored by some macOS notification centers; every other option\nbehaves the same on all platforms.\n\n--sound zetta-default, zetta-ok, and zetta-alarm are bundled tones that Zetta\nsynthesizes and plays itself, so they always play the same way regardless of\nthe host's sound theme or configuration. Any other value is passed through as\na platform-specific system sound name (for example a freedesktop sound-theme\nname on Linux, a system sound name on macOS, or a toast sound identifier on\nWindows) and is only played if the platform recognizes it."
@@ -74,7 +68,7 @@ pub(crate) fn parse_notify_args(
                     .context("--timeout requires default, never, or a number of milliseconds")?
                     .to_string_lossy()
                     .into_owned();
-                timeout = Some(parse_notify_timeout(&value)?);
+                timeout = Some(parse_notification_timeout(&value)?);
             }
             "--help" | "-h" => anyhow::bail!("{}", notify_help()),
             option if option.starts_with('-') => anyhow::bail!("unknown notify option {option:?}"),
@@ -98,14 +92,6 @@ pub(crate) fn parse_notify_args(
         sound,
         timeout,
     }))
-}
-
-fn parse_notify_timeout(value: &str) -> Result<notify_rust::Timeout> {
-    value.parse().map_err(|_: std::num::ParseIntError| {
-        anyhow::anyhow!(
-            "--timeout must be default, never, or a whole number of milliseconds, got {value:?}"
-        )
-    })
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -154,7 +140,7 @@ fn try_show_portal_notification(command: &NotifyCommand) -> Result<bool> {
         || command.icon.is_some()
         || matches!(
             command.timeout,
-            Some(notify_rust::Timeout::Milliseconds(_)) | Some(notify_rust::Timeout::Never)
+            Some(NotificationTimeout::Milliseconds(_)) | Some(NotificationTimeout::Never)
         )
         || command
             .sound
@@ -188,11 +174,11 @@ fn try_show_portal_notification(command: &NotifyCommand) -> Result<bool> {
 const NOTIFICATION_DAEMON_ENV: &str = "ZETTA_NOTIFICATION_DAEMON";
 
 #[cfg(linux_like)]
-fn spawn_notification_daemon() -> Result<()> {
+fn spawn_notification_daemon(notification: &NotificationRequest) -> Result<()> {
     let executable = std::env::current_exe().context("locating the zetta executable")?;
     let mut command = Command::new(executable);
     command
-        .args(std::env::args_os().skip(1))
+        .args(notification_reexec_args(notification))
         .env(NOTIFICATION_DAEMON_ENV, "1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -221,14 +207,14 @@ fn spawn_notification_daemon() -> Result<()> {
 }
 
 #[cfg(linux_like)]
-fn keep_notification_worker_alive(timeout: Option<notify_rust::Timeout>) {
+fn keep_notification_worker_alive(timeout: Option<NotificationTimeout>) {
     let timeout = timeout.unwrap_or_default();
     match timeout {
         // GNOME's default is commonly five seconds. Keep the sender alive a
         // little longer so the server can expire and archive the notification
         // instead of treating the worker's exit as a dismissal.
-        notify_rust::Timeout::Default => std::thread::sleep(std::time::Duration::from_secs(10)),
-        notify_rust::Timeout::Milliseconds(milliseconds) => {
+        NotificationTimeout::Default => std::thread::sleep(std::time::Duration::from_secs(10)),
+        NotificationTimeout::Milliseconds(milliseconds) => {
             if milliseconds == 0 {
                 // A never-expiring notification needs a live sender. This is
                 // intentionally indefinite, matching the notification's
@@ -245,10 +231,51 @@ fn keep_notification_worker_alive(timeout: Option<notify_rust::Timeout>) {
         }
         // A never-expiring notification needs a live sender. This is
         // intentionally indefinite, matching the notification's lifetime.
-        notify_rust::Timeout::Never => loop {
+        NotificationTimeout::Never => loop {
             std::thread::sleep(std::time::Duration::from_secs(60));
         },
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn notify_rust_timeout(timeout: NotificationTimeout) -> notify_rust::Timeout {
+    match timeout {
+        NotificationTimeout::Default => notify_rust::Timeout::Default,
+        NotificationTimeout::Never => notify_rust::Timeout::Never,
+        NotificationTimeout::Milliseconds(milliseconds) => {
+            notify_rust::Timeout::Milliseconds(milliseconds)
+        }
+    }
+}
+
+/// Re-enter the notification-only startup mode when a platform requires a
+/// child process. In particular, an `attention --notify` request must not be
+/// replayed as `attention`, or the child would route the badge a second time.
+pub(crate) fn notification_reexec_args(command: &NotificationRequest) -> Vec<OsString> {
+    let mut args = vec![OsString::from("notify")];
+    for (option, value) in [
+        ("--app-name", command.app_name.as_deref()),
+        ("--icon", command.icon.as_deref()),
+        ("--sound", command.sound.as_deref()),
+    ] {
+        if let Some(value) = value {
+            args.push(OsString::from(option));
+            args.push(OsString::from(value));
+        }
+    }
+    if let Some(timeout) = command.timeout {
+        args.push(OsString::from("--timeout"));
+        args.push(OsString::from(match timeout {
+            NotificationTimeout::Default => "default".to_owned(),
+            NotificationTimeout::Never => "never".to_owned(),
+            NotificationTimeout::Milliseconds(milliseconds) => milliseconds.to_string(),
+        }));
+    }
+    args.push(OsString::from(&command.summary));
+    if let Some(body) = &command.body {
+        args.push(OsString::from(body));
+    }
+    args
 }
 
 // Without an explicit `App User Model ID`, notify-rust's Windows backend
@@ -326,7 +353,7 @@ fn macos_bundle_executable(path: &Path) -> Option<PathBuf> {
 /// sees Zetta's bundle identifier. Standalone development builds return false
 /// and use the script-host fallback below instead.
 #[cfg(target_os = "macos")]
-fn rerun_notification_from_macos_bundle() -> Result<bool> {
+fn rerun_notification_from_macos_bundle(notification: &NotificationRequest) -> Result<bool> {
     if std::env::var_os(MACOS_NOTIFICATION_REEXEC_ENV).is_some() {
         return Ok(false);
     }
@@ -335,7 +362,7 @@ fn rerun_notification_from_macos_bundle() -> Result<bool> {
         return Ok(false);
     };
     let output = Command::new(&bundle_executable)
-        .args(std::env::args_os().skip(1))
+        .args(notification_reexec_args(notification))
         .env(MACOS_NOTIFICATION_REEXEC_ENV, "1")
         .output()
         .with_context(|| {
@@ -434,7 +461,11 @@ fn macos_notification_sound(command: &NotifyCommand) -> Option<&str> {
         .filter(|sound| crate::notification_sounds::BuiltinSound::parse(sound).is_none())
 }
 
-impl NotifyCommand {
+pub(crate) fn run_notification(command: &NotificationRequest) -> Result<()> {
+    command.run()
+}
+
+impl NotificationRequest {
     pub(super) fn run(&self) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
@@ -449,7 +480,8 @@ impl NotifyCommand {
 
     #[cfg(target_os = "macos")]
     fn run_macos(&self) -> Result<()> {
-        if mac_usernotifications::check_bundle().is_err() && rerun_notification_from_macos_bundle()?
+        if mac_usernotifications::check_bundle().is_err()
+            && rerun_notification_from_macos_bundle(self)?
         {
             return Ok(());
         }
@@ -489,7 +521,7 @@ impl NotifyCommand {
 
         #[cfg(linux_like)]
         if std::env::var_os(NOTIFICATION_DAEMON_ENV).is_none() {
-            return spawn_notification_daemon();
+            return spawn_notification_daemon(self);
         }
 
         let mut notification = notify_rust::Notification::new();
@@ -526,7 +558,7 @@ impl NotifyCommand {
             notification.sound_name(sound);
         }
         if let Some(timeout) = self.timeout {
-            notification.timeout(timeout);
+            notification.timeout(notify_rust_timeout(timeout));
         }
         let _notification_handle = notification
             .show()

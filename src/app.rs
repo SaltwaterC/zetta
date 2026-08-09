@@ -250,6 +250,7 @@ pub(crate) struct Zetta {
     pub(crate) profiles: Vec<Profile>,
     pub(crate) working_directory: Option<PathBuf>,
     pub(crate) next_tab_id: u64,
+    pub(crate) next_attention_id: u64,
     pub(crate) next_pane_id: u64,
     pub(crate) rename_focus: gpui::FocusHandle,
     /// Focused while the overlay-style selector is open, so the section
@@ -411,6 +412,7 @@ impl Zetta {
             profiles: config.profiles,
             working_directory: config.working_directory,
             next_tab_id: 1,
+            next_attention_id: 1,
             next_pane_id: 1,
             rename_focus: cx.focus_handle(),
             overlay_style_focus: cx.focus_handle(),
@@ -546,6 +548,16 @@ impl Zetta {
         );
         let tab_id = self.next_tab_id;
         self.next_tab_id += 1;
+        let attention_id = if cx.has_global::<ZettaProcessState>() {
+            let process = cx.global_mut::<ZettaProcessState>();
+            let attention_id = process.next_attention_id;
+            process.next_attention_id += 1;
+            attention_id
+        } else {
+            let attention_id = self.next_attention_id;
+            self.next_attention_id += 1;
+            attention_id
+        };
         let pane_id = self.next_pane_id;
         self.next_pane_id += 1;
         let wsl_cwd_file = wsl_cwd_tracking_file(&profile, pane_id);
@@ -556,6 +568,8 @@ impl Zetta {
             ));
         self.tabs.push(Tab {
             id: tab_id,
+            attention_id,
+            attention: None,
             panes: vec![
                 TerminalPane::new(pane_id, profile.clone())
                     .with_label_number(1)
@@ -1763,7 +1777,7 @@ impl Zetta {
         self.focus_active(window, cx);
     }
 
-    fn focus_after_window_activation(&self, window: &mut Window, cx: &mut Context<Self>) {
+    fn focus_after_window_activation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.is_picking_overlay_style() {
             self.overlay_style_focus.focus(window, cx);
         } else {
@@ -1771,7 +1785,95 @@ impl Zetta {
         }
     }
 
-    pub(crate) fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn attention_id_for_tab(&self, tab_id: u64) -> Option<u64> {
+        self.tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .map(|tab| tab.attention_id)
+            .or_else(|| {
+                self.background_sessions
+                    .iter()
+                    .find(|tab| tab.id == tab_id)
+                    .map(|tab| tab.attention_id)
+            })
+    }
+
+    fn tab_content_is_focused(
+        &self,
+        tab_index: usize,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(tab) = self.tabs.get(tab_index) else {
+            return false;
+        };
+        if tab.pane_is_visible(tab.active_pane) {
+            tab.active_pane()
+                .and_then(|pane| pane.view.as_ref())
+                .is_some_and(|view| view.focus_handle(cx).is_focused(window))
+        } else {
+            !tab.minimized_panes.is_empty() && self.minimized_panes_focus.is_focused(window)
+        }
+    }
+
+    pub(crate) fn clear_active_tab_attention_if_focused(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !window.is_window_active() {
+            return false;
+        }
+        let active_tab = self.active_tab;
+        if !self.tab_content_is_focused(active_tab, window, cx) {
+            return false;
+        }
+        let cleared = self
+            .tabs
+            .get_mut(active_tab)
+            .and_then(|tab| tab.attention.take())
+            .is_some();
+        if cleared {
+            cx.notify();
+        }
+        cleared
+    }
+
+    pub(crate) fn set_tab_attention(
+        &mut self,
+        request: TabAttentionRequest,
+        window: Option<&Window>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let attention = TabAttention {
+            summary: request.summary,
+            body: request.body,
+        };
+        if let Some(tab_index) = self
+            .tabs
+            .iter()
+            .position(|tab| tab.attention_id == request.attention_id)
+        {
+            let should_clear = window.is_some_and(|window| {
+                self.active_tab == tab_index && self.tab_content_is_focused(tab_index, window, cx)
+            });
+            self.tabs[tab_index].attention = (!should_clear).then_some(attention);
+            cx.notify();
+            return true;
+        }
+        if let Some(tab) = self
+            .background_sessions
+            .iter_mut()
+            .find(|tab| tab.attention_id == request.attention_id)
+        {
+            tab.attention = Some(attention);
+            cx.notify();
+            return true;
+        }
+        false
+    }
+
+    pub(crate) fn focus_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.get(self.active_tab) {
             let active_is_visible = tab.pane_is_visible(tab.active_pane);
             if active_is_visible {
@@ -1782,6 +1884,7 @@ impl Zetta {
                 self.minimized_panes_focus.focus(window, cx);
             }
         }
+        self.clear_active_tab_attention_if_focused(window, cx);
         cx.notify();
     }
 }
