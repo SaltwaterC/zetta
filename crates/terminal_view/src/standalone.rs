@@ -96,6 +96,27 @@ fn search_request_is_current(
     expected_generation == current_generation && current_query == Some(expected_query)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RightClickAction {
+    ContextMenu,
+    Paste,
+    Forward,
+}
+
+fn right_click_action(
+    terminal_mouse_mode: bool,
+    shift: bool,
+    clipboard_has_text: bool,
+) -> RightClickAction {
+    if terminal_mouse_mode && !shift {
+        RightClickAction::Forward
+    } else if shift || !clipboard_has_text {
+        RightClickAction::ContextMenu
+    } else {
+        RightClickAction::Paste
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum TerminalInput {
     Keystroke(Keystroke),
@@ -1379,15 +1400,31 @@ impl Render for TerminalView {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    if !this.terminal.read(cx).mouse_mode(event.modifiers.shift) {
-                        if event.modifiers.shift || !Self::clipboard_has_content(cx) {
+                    let terminal_mouse_mode = this
+                        .terminal
+                        .read(cx)
+                        .last_content
+                        .mode
+                        .contains(Modes::MOUSE_MODE);
+                    let clipboard_has_text = !terminal_mouse_mode
+                        && !event.modifiers.shift
+                        && Self::clipboard_has_content(cx);
+                    let action = right_click_action(
+                        terminal_mouse_mode,
+                        event.modifiers.shift,
+                        clipboard_has_text,
+                    );
+                    match action {
+                        RightClickAction::ContextMenu => {
                             this.deploy_context_menu(event.position, window, cx);
-                        } else {
+                        }
+                        RightClickAction::Paste => {
                             this.paste(&Paste, window, cx);
                         }
-                        cx.stop_propagation();
-                        cx.notify();
+                        RightClickAction::Forward => return,
                     }
+                    cx.stop_propagation();
+                    cx.notify();
                 }),
             )
             .child(

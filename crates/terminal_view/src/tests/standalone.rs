@@ -45,6 +45,42 @@ fn disabled_input_events_are_not_allocated() {
 }
 
 #[test]
+fn shifted_right_click_opens_the_context_menu() {
+    assert_eq!(
+        right_click_action(true, true, true),
+        RightClickAction::ContextMenu
+    );
+    assert_eq!(
+        right_click_action(true, true, false),
+        RightClickAction::ContextMenu
+    );
+}
+
+#[test]
+fn plain_right_click_pastes_when_clipboard_has_text() {
+    assert_eq!(
+        right_click_action(false, false, true),
+        RightClickAction::Paste
+    );
+}
+
+#[test]
+fn plain_right_click_opens_the_context_menu_without_clipboard_text() {
+    assert_eq!(
+        right_click_action(false, false, false),
+        RightClickAction::ContextMenu
+    );
+}
+
+#[test]
+fn plain_right_click_is_forwarded_in_terminal_mouse_mode() {
+    assert_eq!(
+        right_click_action(true, false, true),
+        RightClickAction::Forward
+    );
+}
+
+#[test]
 fn relative_file_links_are_resolved_from_the_terminal_directory() {
     let terminal_dir = std::env::temp_dir().join("zetta-link-test");
     let target = PathLikeTarget {

@@ -15,7 +15,7 @@ use cocoa::{
 };
 use core_foundation::data::{CFDataGetBytePtr, CFDataRef};
 use core_graphics::event::CGKeyCode;
-use objc::{msg_send, sel, sel_impl};
+use objc::{class, msg_send, sel, sel_impl};
 use std::{borrow::Cow, ffi::c_void};
 
 const BACKSPACE_KEY: u16 = 0x7f;
@@ -82,23 +82,47 @@ pub fn key_to_native(key: &str) -> Cow<'_, str> {
     Cow::Owned(String::from_utf16(&[code]).unwrap())
 }
 
-unsafe fn read_modifiers(native_event: id) -> Modifiers {
-    unsafe {
-        let modifiers = native_event.modifierFlags();
-        let control = modifiers.contains(NSEventModifierFlags::NSControlKeyMask);
-        let alt = modifiers.contains(NSEventModifierFlags::NSAlternateKeyMask);
-        let shift = modifiers.contains(NSEventModifierFlags::NSShiftKeyMask);
-        let command = modifiers.contains(NSEventModifierFlags::NSCommandKeyMask);
-        let function = modifiers.contains(NSEventModifierFlags::NSFunctionKeyMask);
+fn modifiers_from_flags(modifiers: NSEventModifierFlags) -> Modifiers {
+    let control = modifiers.contains(NSEventModifierFlags::NSControlKeyMask);
+    let alt = modifiers.contains(NSEventModifierFlags::NSAlternateKeyMask);
+    let shift = modifiers.contains(NSEventModifierFlags::NSShiftKeyMask);
+    let command = modifiers.contains(NSEventModifierFlags::NSCommandKeyMask);
+    let function = modifiers.contains(NSEventModifierFlags::NSFunctionKeyMask);
 
-        Modifiers {
-            control,
-            alt,
-            shift,
-            platform: command,
-            function,
-        }
+    Modifiers {
+        control,
+        alt,
+        shift,
+        platform: command,
+        function,
     }
+}
+
+unsafe fn read_modifiers(native_event: id) -> Modifiers {
+    unsafe { modifiers_from_flags(native_event.modifierFlags()) }
+}
+
+unsafe fn current_modifiers() -> Modifiers {
+    unsafe {
+        let modifiers: NSEventModifierFlags = msg_send![class!(NSEvent), modifierFlags];
+        modifiers_from_flags(modifiers)
+    }
+}
+
+fn normalize_mouse_down_modifiers(
+    event_modifiers: Modifiers,
+    current_modifiers: Modifiers,
+) -> Modifiers {
+    Modifiers {
+        // AppKit can omit Shift from secondary mouse-down events even while it
+        // is physically held. The current modifier state still has it.
+        shift: event_modifiers.shift || current_modifiers.shift,
+        ..event_modifiers
+    }
+}
+
+unsafe fn read_mouse_down_modifiers(native_event: id) -> Modifiers {
+    unsafe { normalize_mouse_down_modifiers(read_modifiers(native_event), current_modifiers()) }
 }
 
 pub(crate) unsafe fn platform_input_from_native(
@@ -156,7 +180,7 @@ pub(crate) unsafe fn platform_input_from_native(
                             // MacOS screen coordinates are relative to bottom left
                             window_height - px(native_event.locationInWindow().y as f32),
                         ),
-                        modifiers: read_modifiers(native_event),
+                        modifiers: read_mouse_down_modifiers(native_event),
                         click_count: native_event.clickCount() as usize,
                         first_mouse: false,
                     })
@@ -578,3 +602,7 @@ fn chars_for_modified_key(code: CGKeyCode, modifiers: u32) -> String {
     }
     String::from_utf16(&buffer[..buffer_size]).unwrap_or_default()
 }
+
+#[cfg(test)]
+#[path = "tests/events.rs"]
+mod tests;
