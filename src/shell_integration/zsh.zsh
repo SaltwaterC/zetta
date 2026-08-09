@@ -13,12 +13,9 @@ fi
 function zvi { command zetta vi "$@"; }
 
 function zwt {
-    # zsh caches failed command lookups. Refresh it so a Zetta binary installed
-    # or moved after this shell started is visible to the wrapper.
-    rehash
     case $1 in
         new)
-            local path path_only_arg
+            local worktree_path path_only_arg
             local -a operation_args=("${@[2,-1]}")
             for path_only_arg in "${operation_args[@]}"; do
                 if [[ $path_only_arg == --path-only || $path_only_arg == -P ]]; then
@@ -28,15 +25,15 @@ function zwt {
                 path_only_arg=''
             done
             if [[ $path_only_arg == 1 ]]; then
-                path=$(command zetta wt new "${operation_args[@]}") || return
+                worktree_path=$(command zetta wt new "${operation_args[@]}") || return
             else
-                path=$(command zetta wt new --path-only "${operation_args[@]}") || return
+                worktree_path=$(command zetta wt new --path-only "${operation_args[@]}") || return
             fi
-            [[ -n $path ]] || return 1
-            builtin cd -- "$path"
+            [[ -n $worktree_path ]] || return 1
+            builtin cd -- "$worktree_path"
             ;;
         done)
-            local path path_only_arg
+            local worktree_path path_only_arg
             local -a operation_args=("${@[2,-1]}")
             for path_only_arg in "${operation_args[@]}"; do
                 if [[ $path_only_arg == --path-only || $path_only_arg == -P ]]; then
@@ -46,12 +43,12 @@ function zwt {
                 path_only_arg=''
             done
             if [[ $path_only_arg == 1 ]]; then
-                path=$(command zetta wt done "${operation_args[@]}") || return
+                worktree_path=$(command zetta wt done "${operation_args[@]}") || return
             else
-                path=$(command zetta wt done --path-only "${operation_args[@]}") || return
+                worktree_path=$(command zetta wt done --path-only "${operation_args[@]}") || return
             fi
-            [[ -n $path ]] || return 1
-            builtin cd -- "$path"
+            [[ -n $worktree_path ]] || return 1
+            builtin cd -- "$worktree_path"
             ;;
         *)
             command zetta wt "$@"
