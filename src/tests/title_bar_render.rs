@@ -43,6 +43,55 @@ fn compact_mode_hides_labels_and_regular_title_bar_buttons() {
 }
 
 #[test]
+fn compact_chrome_keeps_windowed_reservations() {
+    assert_eq!(
+        macos_title_bar_reservations_enabled(false),
+        cfg!(target_os = "macos")
+    );
+    assert!(!compact_leading_controls_reservation_enabled(false, false));
+    assert_eq!(
+        compact_leading_controls_reservation_enabled(true, false),
+        cfg!(target_os = "macos")
+    );
+    assert!(compact_drag_area_visible(true, false));
+    assert_eq!(
+        compact_drag_area_reserve_width(compact_drag_area_visible(true, false)),
+        COMPACT_DRAG_AREA_MIN_WIDTH
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_fullscreen_compact_chrome_removes_reservations() {
+    assert!(!macos_title_bar_reservations_enabled(true));
+    assert!(!compact_leading_controls_reservation_enabled(true, true));
+    assert!(!compact_drag_area_visible(true, true));
+    assert_eq!(
+        compact_drag_area_reserve_width(compact_drag_area_visible(true, true)),
+        px(0.)
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn non_macos_fullscreen_compact_chrome_keeps_reservations() {
+    // The chrome assembly's platform-qualified fullscreen flag is always false
+    // off macOS, even when the window itself is fullscreen.
+    let is_macos_fullscreen = false;
+
+    assert!(!macos_title_bar_reservations_enabled(is_macos_fullscreen));
+    assert!(!compact_leading_controls_reservation_enabled(
+        true,
+        is_macos_fullscreen
+    ));
+    assert!(compact_drag_area_visible(true, is_macos_fullscreen));
+    assert_eq!(
+        compact_drag_area_reserve_width(compact_drag_area_visible(true, is_macos_fullscreen,)),
+        COMPACT_DRAG_AREA_MIN_WIDTH
+    );
+}
+
+#[test]
 fn hiding_title_bar_buttons_hides_broadcast_in_compact_mode() {
     assert!(title_bar_broadcast_visible(false));
     assert!(!title_bar_broadcast_visible(true));

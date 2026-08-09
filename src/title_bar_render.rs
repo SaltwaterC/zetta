@@ -14,6 +14,32 @@ pub(crate) const COMPACT_DRAG_AREA_MIN_WIDTH: Pixels = px(60.);
 // `title-bar-controls` reserve this backs on macOS.
 pub(crate) const COMPACT_LEADING_CONTROLS_RESERVE: Pixels = px(36.);
 
+/// Whether macOS-specific title-bar space should still be reserved. The
+/// fullscreen flag passed here is already qualified to macOS by the caller,
+/// so non-macOS platforms keep their existing layout.
+pub(crate) fn macos_title_bar_reservations_enabled(is_macos_fullscreen: bool) -> bool {
+    cfg!(target_os = "macos") && !is_macos_fullscreen
+}
+
+pub(crate) fn compact_leading_controls_reservation_enabled(
+    compact_mode: bool,
+    is_macos_fullscreen: bool,
+) -> bool {
+    compact_mode && macos_title_bar_reservations_enabled(is_macos_fullscreen)
+}
+
+pub(crate) fn compact_drag_area_visible(compact_mode: bool, is_macos_fullscreen: bool) -> bool {
+    compact_mode && !is_macos_fullscreen
+}
+
+pub(crate) fn compact_drag_area_reserve_width(show_compact_drag_area: bool) -> Pixels {
+    if show_compact_drag_area {
+        COMPACT_DRAG_AREA_MIN_WIDTH
+    } else {
+        px(0.)
+    }
+}
+
 /// The tab bar's row height: `compact_height` (the platform title bar's own
 /// height) in compact mode, since the tab bar shares that row there, or the
 /// standard `h_8` otherwise. Shared by every element that lines up with the
@@ -429,6 +455,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) -> TitleBarChrome {
         let compact_mode = self.launch_config.compact_mode;
+        let is_macos_fullscreen = cfg!(target_os = "macos") && window.is_fullscreen();
         let title_bar_height = frame.title_bar_height;
         let active_tab = self.tabs.get(self.active_tab);
         let broadcast_input = active_tab.is_some_and(|tab| tab.broadcast_input);
@@ -481,6 +508,7 @@ impl Zetta {
                     handle: handle.clone(),
                     compact_mode,
                     title_bar_height,
+                    is_macos_fullscreen,
                     tab_close_button_on_left: window_close_button_on_left(self.button_layout),
                     is_renaming_tab: self.is_renaming(),
                     tab_count: self.tabs.len(),
@@ -554,6 +582,7 @@ impl Zetta {
             frame.rounded_top_right,
             left_window_controls,
             compact_mode,
+            is_macos_fullscreen,
             title_bar_menus_visible(self.launch_config.hide_title_bar_menus),
             self.render_application_menu(
                 show_title_bar_control_labels,
@@ -819,6 +848,7 @@ impl Zetta {
         rounded_top_right: bool,
         left_window_controls: AnyElement,
         compact_mode: bool,
+        is_macos_fullscreen: bool,
         show_title_bar_menus: bool,
         application_menu: AnyElement,
         profile_menu: AnyElement,
@@ -834,6 +864,10 @@ impl Zetta {
         right_title_bar_controls: AnyElement,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let reserve_macos_title_bar_space =
+            macos_title_bar_reservations_enabled(is_macos_fullscreen);
+        let reserve_compact_leading_controls =
+            compact_leading_controls_reservation_enabled(compact_mode, is_macos_fullscreen);
         div()
             .id("zetta-title-bar")
             .window_control_area(WindowControlArea::Drag)
@@ -896,14 +930,16 @@ impl Zetta {
                     // lights instead of between the controls and the tabs.
                     .justify_end()
                     // The traffic lights are native controls even with a client title bar.
-                    .when(cfg!(target_os = "macos"), |controls| controls.ml(px(72.)))
+                    .when(reserve_macos_title_bar_space, |controls| {
+                        controls.ml(px(72.))
+                    })
                     // Reserve a minimal, constant gap next to the traffic lights sized for
                     // two Large buttons (e.g. the application and profile menu triggers) —
                     // enough that tabs don't crowd the traffic lights when nothing else is
                     // there, but a `min_w` rather than extra margin so that any menus or the
                     // broadcast button which do render here expand into that reserve instead
                     // of pushing further out.
-                    .when(cfg!(target_os = "macos") && compact_mode, |controls| {
+                    .when(reserve_compact_leading_controls, |controls| {
                         controls.min_w(COMPACT_LEADING_CONTROLS_RESERVE)
                     })
                     .when(show_title_bar_menus, |controls| {

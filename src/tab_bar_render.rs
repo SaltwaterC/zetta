@@ -6,6 +6,7 @@ pub(crate) struct TabBarChrome {
     pub(crate) handle: WeakEntity<Zetta>,
     pub(crate) compact_mode: bool,
     pub(crate) title_bar_height: Pixels,
+    pub(crate) is_macos_fullscreen: bool,
     pub(crate) tab_close_button_on_left: bool,
     pub(crate) is_renaming_tab: bool,
     pub(crate) tab_count: usize,
@@ -119,6 +120,7 @@ fn render_tabs_row(chrome: TabBarChrome) -> impl IntoElement {
         handle,
         compact_mode,
         title_bar_height,
+        is_macos_fullscreen,
         tab_close_button_on_left,
         is_renaming_tab,
         tab_count,
@@ -136,14 +138,11 @@ fn render_tabs_row(chrome: TabBarChrome) -> impl IntoElement {
         // instead of sitting at the edge of the bar. Reserve its footprint here,
         // on top of whatever an overflow trigger itself needs, so it can never
         // get pushed out of the measured width and clipped. In compact mode also
-        // reserve the drag strip's guaranteed minimum, so tabs growing to fill
-        // the bar can't force it to eat into their own width instead.
-        let reserved_chrome_width = TAB_OVERFLOW_TRIGGER_WIDTH
-            + if compact_mode {
-                COMPACT_DRAG_AREA_MIN_WIDTH
-            } else {
-                px(0.)
-            };
+        // reserve the drag strip's guaranteed minimum, except in macOS
+        // fullscreen where the artificial strip is omitted.
+        let show_compact_drag_area = compact_drag_area_visible(compact_mode, is_macos_fullscreen);
+        let reserved_chrome_width =
+            TAB_OVERFLOW_TRIGGER_WIDTH + compact_drag_area_reserve_width(show_compact_drag_area);
         let available_for_tabs = (size.width - reserved_chrome_width).max(px(0.));
         let is_shrinking =
             tab_bar_tabs_are_shrinking(available_for_tabs, is_renaming_tab, tab_count);
@@ -266,7 +265,7 @@ fn render_tabs_row(chrome: TabBarChrome) -> impl IntoElement {
                 ))
             })
             .child(render_new_tab_button(compact_mode, title_bar_height))
-            .when(compact_mode, |bar| {
+            .when(show_compact_drag_area, |bar| {
                 bar.child(render_compact_drag_area(title_bar_height, handle.clone()))
             })
     })
