@@ -3,6 +3,7 @@ use super::cli_help::{
     parse_tab_icon_args, parse_terminal_resize_dimension, version_text,
 };
 use super::*;
+use crate::profile_cli::{ProfileCommand, parse_profile_args};
 
 const DEFAULT_PERFORMANCE_REPORT_DURATION: Duration = Duration::from_secs(10);
 
@@ -11,6 +12,7 @@ pub(crate) enum StartupMode {
     Application,
     #[cfg(cli_services)]
     CliService(CliServiceCommand),
+    Profile(ProfileCommand),
     PrintShellIntegration(ShellIntegration),
     ConfigureCurrentShellIntegration,
     OutputBenchmark {
@@ -76,6 +78,25 @@ pub(crate) struct StartupArgs {
 
 pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Result<StartupArgs> {
     let arguments = args.into_iter().collect::<Vec<_>>();
+    if let Some(profile_index) = profile_subcommand_index(&arguments) {
+        let config_path = parse_profile_root_config(&arguments[..profile_index])?;
+        let parsed = parse_profile_args(&arguments[profile_index + 1..], config_path)?;
+        return Ok(StartupArgs {
+            config_path: parsed.config_path,
+            keymap_path: None,
+            profile: None,
+            split: None,
+            theme_override: None,
+            mode: StartupMode::Profile(parsed.command),
+            profile_report: None,
+            profile_duration: None,
+            profile_pane_stress: false,
+            profile_background_stress: false,
+            profile_sparse_updates: false,
+            profile_external_terminal: false,
+            tftp_command: None,
+        });
+    }
     if arguments
         .first()
         .is_some_and(|argument| argument == "tabicon")
@@ -976,6 +997,43 @@ pub(crate) fn validate_launch_split(config: &Config, requested: Option<&str>) ->
 
 pub(crate) fn parse_args() -> Result<StartupArgs> {
     parse_args_from(env::args_os().skip(1))
+}
+
+fn profile_subcommand_index(arguments: &[OsString]) -> Option<usize> {
+    let mut index = 0;
+    while index < arguments.len() {
+        match arguments[index].to_string_lossy().as_ref() {
+            "--config" | "-c" | "--keymap" | "-k" | "--profile" | "-p" | "--split" | "-s"
+            | "--theme" | "-t" => {
+                index = index.checked_add(2)?;
+            }
+            "--help" | "-h" | "--version" | "-v" => index += 1,
+            "profile" => return Some(index),
+            _ => return None,
+        }
+    }
+    None
+}
+
+fn parse_profile_root_config(arguments: &[OsString]) -> Result<Option<PathBuf>> {
+    let mut config_path = None;
+    let mut arguments = arguments.iter();
+    while let Some(argument) = arguments.next() {
+        match argument.to_string_lossy().as_ref() {
+            "--config" | "-c" => {
+                anyhow::ensure!(
+                    config_path.is_none(),
+                    "--config may only be specified once for zetta profile"
+                );
+                config_path = Some(arguments.next().context("--config requires a path")?.into());
+            }
+            "--help" | "-h" => {}
+            unknown => anyhow::bail!(
+                "unknown root argument {unknown:?} before zetta profile; use --config/-c"
+            ),
+        }
+    }
+    Ok(config_path)
 }
 
 pub(crate) fn should_handoff_to_existing_process(args: &StartupArgs) -> bool {

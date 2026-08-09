@@ -9,6 +9,7 @@ mod http_server;
 #[cfg(feature = "notifications")]
 mod notification_sounds;
 mod process_control;
+mod profile_cli;
 #[cfg(feature = "serial-console")]
 mod serial_console;
 #[cfg(servers_enabled)]

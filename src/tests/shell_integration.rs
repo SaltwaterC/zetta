@@ -387,19 +387,19 @@ fn notify_timeout_completion_does_not_leak_into_other_short_t_flags() {
 
     let bash = ShellIntegration::Bash.script(&profiles);
     assert!(bash.contains(
-        "--output-type|-t|--theme|--text)\n            if [[ $command == panetheme || $command == -* ]]; then\n                _zetta_complete_pane_themes\n            elif [[ $command == notify ]]; then\n                _zetta_compgen 'default never'\n            elif [[ $command == overlay ]]; then\n                COMPREPLY=()"
+        "--output-type|-t|--theme|--text)\n            if [[ $command == profile ]]; then\n                _zetta_complete_profile_themes\n            elif [[ $command == -* ]]; then\n                _zetta_complete_profile_themes\n            elif [[ $command == panetheme ]]; then"
     ));
     assert!(bash.contains("_zetta_compgen 'repeated unique'"));
 
     let zsh = ShellIntegration::Zsh.script(&profiles);
     assert!(zsh.contains(
-        "--output-type|-t|--theme|--text)\n            if [[ $words[2] == panetheme || $words[2] == -* ]]; then\n                _zetta_pane_themes\n            elif [[ $words[2] == notify ]]; then\n                compadd -- default never\n            elif [[ $words[2] == overlay ]]; then\n                return"
+        "--output-type|-t|--theme|--text)\n            if [[ $words[2] == profile || $words[2] == -* ]]; then\n                _zetta_profile_themes \"${config_args[@]}\"\n            elif [[ $words[2] == panetheme ]]; then"
     ));
     assert!(zsh.contains("compadd -- repeated unique"));
 
     let powershell = ShellIntegration::PowerShell.script(&profiles);
     assert!(powershell.contains(
-        "elseif ($previous -in '--output-type', '-t', '--theme', '--text') {\n        if ($subcommand -eq 'panetheme' -or $null -eq $subcommand) { & $zettaPaneThemes }\n        elseif ($subcommand -eq 'notify') { 'default', 'never' }\n        elseif ($subcommand -eq 'overlay') { @() }\n        else { 'repeated', 'unique' }"
+        "elseif ($previous -in '--output-type', '-t', '--theme', '--text') {\n        if ($subcommand -eq 'profile' -or $null -eq $subcommand) { & $zettaProfileThemes $configArguments }\n        elseif ($subcommand -eq 'panetheme') { & $zettaPaneThemes }"
     ));
 }
 
@@ -492,7 +492,7 @@ fn bash_root_split_completion_handles_long_short_and_combined_launch_options() {
 
     let script = ShellIntegration::Bash.script(&profiles());
     let driver = format!(
-        "zetta() {{\n    if [[ $1 == splits ]]; then\n        printf '%s\\n' custom-layout quarters four-vertical three-left three-right\n    fi\n}}\n{script}\nCOMP_WORDS=(zetta --split '')\nCOMP_CWORD=2\n_zetta_complete\nprintf 'long:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta -s '')\nCOMP_CWORD=2\n_zetta_complete\nprintf 'short:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta --profile System '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'profile:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta --split quarters --profile '')\nCOMP_CWORD=4\n_zetta_complete\nprintf 'combined:%s\\n' \"${{COMPREPLY[@]}}\"\n"
+        "zetta() {{\n    if [[ $1 == splits ]]; then\n        printf '%s\\n' custom-layout quarters four-vertical three-left three-right\n    elif [[ $1 == profile && $2 == list ]]; then\n        if [[ $3 == --config && $4 == profiles.json ]]; then\n            printf '%s\\n' 'Configured Shell'\n        else\n            printf '%s\\n' 'System' 'WSL: Ubuntu'\n        fi\n    fi\n}}\n{script}\nCOMP_WORDS=(zetta --split '')\nCOMP_CWORD=2\n_zetta_complete\nprintf 'long:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta -s '')\nCOMP_CWORD=2\n_zetta_complete\nprintf 'short:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta --profile System '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'profile:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta --split quarters --profile '')\nCOMP_CWORD=4\n_zetta_complete\nprintf 'combined:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta -c profiles.json profile disable '')\nCOMP_CWORD=5\n_zetta_complete\nprintf 'profile-config:%s\\n' \"${{COMPREPLY[@]}}\"\n"
     );
     let mut child = Command::new("bash")
         .args(["--noprofile", "--norc"])
@@ -532,6 +532,11 @@ fn bash_root_split_completion_handles_long_short_and_combined_launch_options() {
     }
     assert!(completions.lines().any(|line| line == "profile:--split"));
     assert!(completions.lines().any(|line| line == "combined:System"));
+    assert!(
+        completions
+            .lines()
+            .any(|line| line == "profile-config:Configured Shell")
+    );
 }
 
 #[test]
@@ -641,11 +646,18 @@ fn service_subcommand_completions_only_offer_long_form_flags() {
 }
 
 #[test]
-fn powershell_profiles_are_comma_separated() {
-    assert_eq!(
-        render_profiles(ShellIntegration::PowerShell, &profiles()),
-        "'System', 'WSL: Ubuntu'"
-    );
+fn profile_completion_uses_line_oriented_dynamic_endpoints() {
+    let scripts = [
+        ShellIntegration::Bash.script(&profiles()),
+        ShellIntegration::Fish.script(&profiles()),
+        ShellIntegration::PowerShell.script(&profiles()),
+        ShellIntegration::Zsh.script(&profiles()),
+    ];
+    for script in scripts {
+        assert!(!script.contains("ZETTA_PROFILES"));
+        assert!(script.contains("profile list"));
+        assert!(script.contains("profile themes"));
+    }
 }
 
 // Regression test: values that contain spaces or quote characters are inserted
@@ -999,7 +1011,9 @@ fn generated_scripts_include_root_flags_and_configured_profiles() {
         let script = shell.script(&profiles);
         assert!(script.contains("profile"));
         assert!(script.contains("config"));
-        assert!(script.contains("WSL: Ubuntu"));
+        assert!(!script.contains("WSL: Ubuntu"));
+        assert!(script.contains("zetta profile list"));
+        assert!(script.contains("zetta profile themes"));
         assert!(script.contains("profile-report"));
         assert!(script.contains("split"));
         assert!(script.contains("zetta splits"));
@@ -1040,11 +1054,14 @@ fn generated_scripts_only_offer_long_form_flags() {
         let script = shell.script(&profiles);
         match shell {
             ShellIntegration::Bash => assert!(script.contains(
-                "terminal-size sessions edit vi init serial http tftp notify copy paste splits tabicon panetheme overlay --help --version --config --keymap --profile --split --theme'"
+                "terminal-size sessions profile edit vi init serial http tftp notify copy paste splits tabicon panetheme overlay --help --version --config --keymap --profile --split --theme'"
             )),
             ShellIntegration::Fish => {
                 assert!(script.contains("-l profile -r"));
                 assert!(!script.contains("-s p -l profile"));
+                assert!(script.contains(
+                    "-s c -r -n '__zetta_has_profile_subcommand; and __zetta_short_option -c'"
+                ));
             }
             ShellIntegration::PowerShell => assert!(script.contains(
                 "'--help', '--version', '--config', '--keymap', '--profile', '--split', '--theme'"
@@ -1144,6 +1161,19 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
         ),
         ("zetta --profile System ", &["--split"][..]),
         ("zetta --split quarters --profile ", &["System"][..]),
+        (
+            "zetta profile ",
+            &[
+                "list", "themes", "disable", "enable", "theme", "default", "add", "remove",
+            ][..],
+        ),
+        ("zetta profile disable ", &["System", "WSL: Ubuntu"][..]),
+        ("zetta profile theme ", &["System", "WSL: Ubuntu"][..]),
+        ("zetta profile theme System ", &["Gruvbox Light Hard"][..]),
+        (
+            "zetta -c profiles.json profile disable ",
+            &["Configured Shell"][..],
+        ),
         (
             "zetta benchmark ",
             &[
@@ -1249,7 +1279,7 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
             .args([
                 "--no-config",
                 "-c",
-                "function zetta; if test \"$argv[1]\" = splits; printf '%s\\n' custom-layout quarters four-vertical three-left three-right; end; end; source $argv[1]; complete -C \"$argv[2]\"",
+                "function zetta; if test \"$argv[1]\" = splits; printf '%s\\n' custom-layout quarters four-vertical three-left three-right; else if test \"$argv[1]\" = profile; and test \"$argv[2]\" = list; if test \"$argv[3]\" = --config; and test \"$argv[4]\" = profiles.json; printf '%s\\n' 'Configured Shell'; else; printf '%s\\n' System 'WSL: Ubuntu'; end; else if test \"$argv[1]\" = profile; and test \"$argv[2]\" = themes; printf '%s\\n' 'Gruvbox Light Hard'; end; end; source $argv[1]; complete -C \"$argv[2]\"",
                 "--",
                 script_file.path().to_str().unwrap(),
                 line,

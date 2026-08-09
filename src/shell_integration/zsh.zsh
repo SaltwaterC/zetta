@@ -60,7 +60,13 @@ case "$OSTYPE" in
 esac
 
 _zetta_profiles() {
-    compadd -- ZETTA_PROFILES
+    local -a config_args=("$@")
+    compadd -- "${(@f)$(zetta profile list "${config_args[@]}" 2>/dev/null)}"
+}
+
+_zetta_profile_themes() {
+    local -a config_args=("$@")
+    compadd -- "${(@f)$(zetta profile themes "${config_args[@]}" 2>/dev/null)}"
 }
 
 _zetta_split_names() {
@@ -105,7 +111,47 @@ _zetta_sound_names() {
 }
 
 _zetta() {
-    local previous=${words[CURRENT-1]}
+    local previous=${words[CURRENT-1]} profile_operation='' profile_command_index=-1
+    local index
+    local -a config_args=()
+
+    for (( index = 2; index < CURRENT; index++ )); do
+        case ${words[index]} in
+            --config|-c)
+                if (( index + 1 < CURRENT )); then
+                    config_args+=(--config "${words[index+1]}")
+                    (( index++ ))
+                fi
+                ;;
+            --keymap|-k|--profile|-p|--split|-s|--theme|-t)
+                (( index++ ))
+                ;;
+            profile)
+                profile_command_index=$index
+                break
+                ;;
+        esac
+    done
+    if (( profile_command_index >= 0 )); then
+        index=$((profile_command_index + 1))
+        while (( index < CURRENT )); do
+            case ${words[index]} in
+                --config|-c)
+                    (( index += 2 ))
+                    ;;
+                --help|-h)
+                    (( index++ ))
+                    ;;
+                -*)
+                    break
+                    ;;
+                *)
+                    profile_operation=${words[index]}
+                    break
+                    ;;
+            esac
+        done
+    fi
 
     if [[ $words[1] == edit ]]; then
         if [[ $words[CURRENT] == -* ]]; then
@@ -126,8 +172,14 @@ _zetta() {
     fi
 
     if (( CURRENT == 2 )); then
-        compadd -S ' ' -- benchmark benchmark-output terminal-size sessions edit vi init serial http tftp notify copy paste splits tabicon panetheme overlay
+        compadd -S ' ' -- benchmark benchmark-output terminal-size sessions profile edit vi init serial http tftp notify copy paste splits tabicon panetheme overlay
         _zetta_options --help --version --config --keymap --profile --split --theme
+        return
+    fi
+
+    if (( profile_command_index >= 0 && CURRENT == profile_command_index + 1 )); then
+        compadd -S ' ' -- list themes disable enable theme default add remove
+        _zetta_options --config --help
         return
     fi
 
@@ -137,7 +189,9 @@ _zetta() {
             return
             ;;
         -p)
-            if [[ $words[2] == serial ]]; then
+            if [[ $words[2] == profile && $profile_operation == add ]]; then
+                return
+            elif [[ $words[2] == serial ]]; then
                 compadd -- none odd even
             elif [[ $words[2] != http && $words[2] != tftp && $words[2] != notify ]]; then
                 _zetta_profiles
@@ -146,6 +200,9 @@ _zetta() {
             ;;
         --config|--keymap|-k|--profile-report)
             _files
+            return
+            ;;
+        --program|--arg)
             return
             ;;
         --root)
@@ -260,7 +317,9 @@ _zetta() {
             return
             ;;
         --output-type|-t|--theme|--text)
-            if [[ $words[2] == panetheme || $words[2] == -* ]]; then
+            if [[ $words[2] == profile || $words[2] == -* ]]; then
+                _zetta_profile_themes "${config_args[@]}"
+            elif [[ $words[2] == panetheme ]]; then
                 _zetta_pane_themes
             elif [[ $words[2] == notify ]]; then
                 compadd -- default never
@@ -275,6 +334,39 @@ _zetta() {
             return
             ;;
     esac
+
+    if [[ -n $profile_operation ]]; then
+        case $profile_operation in
+            list|themes)
+                _zetta_options --config --help
+                ;;
+            disable|enable|default|remove)
+                if [[ $previous == "$profile_operation" ]]; then
+                    _zetta_profiles "${config_args[@]}"
+                else
+                    _zetta_options --config --help
+                fi
+                ;;
+            theme)
+                if [[ $words[CURRENT] == -* ]]; then
+                    _zetta_options --reset --config --help
+                elif [[ $previous == theme ]]; then
+                    _zetta_profiles "${config_args[@]}"
+                elif [[ $previous == --reset || $previous == -r ]]; then
+                    _zetta_options --config --help
+                else
+                    _zetta_profile_themes "${config_args[@]}"
+                fi
+                ;;
+            add)
+                _zetta_options --program --arg --theme --config --help
+                ;;
+            *)
+                _zetta_options list themes disable enable theme default add remove --config --help
+                ;;
+        esac
+        return
+    fi
 
     # A leading flag rules out a subcommand for the rest of the command line
     # (subcommands are only recognized as the first argument), so keep

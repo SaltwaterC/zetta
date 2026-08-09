@@ -961,6 +961,49 @@ fn shorthand_options_match_long_options() {
 }
 
 #[test]
+fn profile_commands_are_typed_and_accept_config_paths_in_each_position() {
+    let root_form = parse_args_from([
+        OsString::from("-c"),
+        OsString::from("profiles.json"),
+        OsString::from("profile"),
+        OsString::from("list"),
+    ])
+    .unwrap();
+    let after_profile = parse_args_from([
+        OsString::from("profile"),
+        OsString::from("list"),
+        OsString::from("--config"),
+        OsString::from("profiles.json"),
+    ])
+    .unwrap();
+    assert_eq!(root_form, after_profile);
+    assert_eq!(root_form.config_path, Some(PathBuf::from("profiles.json")));
+    assert_eq!(root_form.mode, StartupMode::Profile(ProfileCommand::List));
+
+    let add = parse_args_from([
+        OsString::from("profile"),
+        OsString::from("add"),
+        OsString::from("Dev Shell"),
+        OsString::from("--program"),
+        OsString::from("bash"),
+        OsString::from("--arg"),
+        OsString::from("-l"),
+        OsString::from("-a"),
+        OsString::from("one two"),
+    ])
+    .unwrap();
+    assert_eq!(
+        add.mode,
+        StartupMode::Profile(ProfileCommand::Add {
+            name: "Dev Shell".to_owned(),
+            program: "bash".to_owned(),
+            args: vec!["-l".to_owned(), "one two".to_owned()],
+            theme: None,
+        })
+    );
+}
+
+#[test]
 fn launch_profile_selects_an_available_profile_without_changing_the_configured_default() {
     let mut config = Config::defaults(None, None);
     config.profiles = vec![

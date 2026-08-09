@@ -15,6 +15,7 @@ fn request(token: &str, command: &str) -> ControlRequest {
         pane_overlay_font_size: None,
         pane_overlay_opacity: None,
         pane_overlay_color: None,
+        config_path: None,
     }
 }
 
@@ -36,6 +37,28 @@ fn unknown_control_commands_are_rejected() {
         decode_control_request(&mut request("token", "delete_sessions"), "token"),
         None
     );
+}
+
+#[test]
+fn configuration_reload_requests_decode_the_normalized_path() {
+    let mut reload = request("token", "reload_configuration");
+    reload.config_path = Some("/tmp/zetta/config.json".to_owned());
+    assert_eq!(
+        decode_control_request(&mut reload, "token"),
+        Some(ControlRequestCommand::ReloadConfiguration {
+            config_path: "/tmp/zetta/config.json".to_owned(),
+        })
+    );
+
+    let mut missing_path = request("token", "reload_configuration");
+    assert_eq!(decode_control_request(&mut missing_path, "token"), None);
+}
+
+#[test]
+fn config_path_identity_is_absolute_and_lexically_normalized() {
+    let relative = config_path_identity(Path::new("./config/../config.json"));
+    let absolute = config_path_identity(&std::env::current_dir().unwrap().join("config.json"));
+    assert_eq!(relative, absolute);
 }
 
 #[test]
@@ -194,6 +217,7 @@ fn reconnect_requests_carry_a_session_target_and_optional_secret() {
         pane_overlay_font_size: None,
         pane_overlay_opacity: None,
         pane_overlay_color: None,
+        config_path: None,
     };
     assert_eq!(
         decode_control_request(&mut request, "token"),
@@ -220,6 +244,33 @@ fn control_server_delivers_a_token_authenticated_open_request() {
     let ProcessControlCommand::OpenWindow { completion } = command else {
         panic!("unexpected process control command");
     };
+    completion.send(true).unwrap();
+    assert!(client.join().unwrap());
+}
+
+#[test]
+fn control_server_delivers_a_configuration_reload_request() {
+    let directory = tempfile::tempdir().unwrap();
+    let endpoint_path = directory.path().join("control.json");
+    let (commands, mut received) = futures::channel::mpsc::unbounded();
+    let _server = ProcessControlServer::start_at(commands, endpoint_path.clone()).unwrap();
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&fs::read(endpoint_path).unwrap()).unwrap();
+    let config_path = config_path_identity(Path::new("config.json"));
+
+    let client = thread::spawn({
+        let config_path = config_path.clone();
+        move || send_reload_configuration_request(&endpoint, &config_path).unwrap()
+    });
+    let command = futures::executor::block_on(received.next()).unwrap();
+    let ProcessControlCommand::ReloadConfiguration {
+        config_path: received_path,
+        completion,
+    } = command
+    else {
+        panic!("unexpected process control command");
+    };
+    assert_eq!(received_path, config_path);
     completion.send(true).unwrap();
     assert!(client.join().unwrap());
 }

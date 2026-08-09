@@ -49,8 +49,31 @@ switch (uname)
         end
 end
 
+function __zetta_config_args
+    set -l words (commandline -opc)
+    set -l args
+    set -l index 2
+    while test $index -le (count $words)
+        switch $words[$index]
+            case --config -c
+                if test $index -lt (count $words)
+                    set index (math $index + 1)
+                    set args $args --config $words[$index]
+                end
+        end
+        set index (math $index + 1)
+    end
+    printf '%s\n' $args
+end
+
 function __zetta_profiles
-    printf '%s\n' ZETTA_PROFILES
+    set -l config_args (__zetta_config_args)
+    zetta profile list $config_args 2>/dev/null
+end
+
+function __zetta_profile_themes
+    set -l config_args (__zetta_config_args)
+    zetta profile themes $config_args 2>/dev/null
 end
 
 function __zetta_serial_devices
@@ -98,6 +121,108 @@ function __zetta_at_subcommand
     set -l words (commandline -opc)
     test (count $words) -eq 2
     and test "$words[2]" = "$argv[1]"
+end
+
+function __zetta_profile_operation
+    set -l words (commandline -opc)
+    set -l seen 0
+    set -l skip 0
+    for word in $words[2..-1]
+        if test $skip -eq 1
+            set skip 0
+            continue
+        end
+        if test $seen -eq 0
+            switch $word
+                case --config -c --keymap -k --profile -p --split -s --theme -t
+                    set skip 1
+                case profile
+                    set seen 1
+            end
+            continue
+        end
+        if test $seen -eq 1
+            switch $word
+                case --config -c
+                    set skip 1
+                case '-*'
+                case '*'
+                    printf '%s\n' $word
+                    return 0
+            end
+        end
+    end
+    return 1
+end
+
+function __zetta_has_profile_subcommand
+    set -l words (commandline -opc)
+    set -l skip 0
+    for word in $words[2..-1]
+        if test $skip -eq 1
+            set skip 0
+            continue
+        end
+        switch $word
+            case --config -c --keymap -k --profile -p --split -s --theme -t
+                set skip 1
+            case profile
+                return 0
+        end
+    end
+    return 1
+end
+
+function __zetta_at_profile_command
+    __zetta_has_profile_subcommand; or return 1
+    set -l operation (__zetta_profile_operation)
+    test (count $operation) -eq 0
+end
+
+function __zetta_profile_argument_count
+    set -l words (commandline -opc)
+    set -l operation (__zetta_profile_operation)
+    set -l seen 0
+    set -l skip 0
+    set -l count 0
+    for word in $words[2..-1]
+        if test $skip -eq 1
+            set skip 0
+            continue
+        end
+        if test $seen -eq 0
+            switch $word
+                case --config -c --keymap -k --profile -p --split -s --theme -t
+                    set skip 1
+                case profile
+                    set seen 1
+            end
+            continue
+        end
+        if test "$word" = "$operation"
+        else
+            switch $word
+                case --config -c
+                    set skip 1
+                case '-*'
+                case '*'
+                    set count (math $count + 1)
+            end
+        end
+    end
+    printf '%s\n' $count
+end
+
+function __zetta_profile_is
+    test (__zetta_profile_operation) = "$argv[1]"
+end
+
+function __zetta_profile_needs_profile
+    test (__zetta_profile_argument_count) -eq 0
+end
+
+function __zetta_profile_needs_theme
+    test (__zetta_profile_argument_count) -eq 1
 end
 
 # A subcommand is only recognized as the very first argument, unlike root
@@ -186,6 +311,18 @@ function __zetta_long_options
                 --profile 'Select a profile' \
                 --split 'Apply a configured pane split template' \
                 --theme 'Non-persistently override the profile theme'
+        case profile
+            printf '%s\t%s\n' \
+                list 'List all resolved profiles' \
+                themes 'List available profile themes' \
+                disable 'Hide a profile' \
+                enable 'Show a profile' \
+                theme 'Set or reset a profile theme' \
+                default 'Set the default profile' \
+                add 'Add a custom profile' \
+                remove 'Remove a custom profile' \
+                --config 'Use a configuration file' \
+                --help 'Print help'
         case init serial http tftp splits
             printf '%s\t%s\n' --help 'Print help'
         case panetheme
@@ -277,6 +414,7 @@ complete -c zetta -n '__zetta_at_root' -a benchmark -d 'Profile terminal renderi
 complete -c zetta -n '__zetta_at_root' -a benchmark-output -d 'Write and time a text payload'
 complete -c zetta -n '__zetta_at_root' -a terminal-size -d 'Print the current terminal size'
 complete -c zetta -n '__zetta_at_root' -a sessions -d 'List detached background sessions'
+complete -c zetta -n '__zetta_at_root' -a profile -d 'List and manage profiles'
 complete -c zetta -n '__zetta_at_root' -a edit -d 'Edit files with EDITOR or Zetta vi'
 complete -c zetta -n '__zetta_at_root' -a vi -d "Edit files with Zetta's built-in vi"
 complete -c zetta -n '__zetta_at_root' -a init -d 'Generate shell integration'
@@ -296,13 +434,31 @@ complete -c zetta -n '__zetta_use_subcommand' -l config -r -d 'Use a configurati
 complete -c zetta -n '__zetta_use_subcommand' -l keymap -r -d 'Use a keymap file'
 complete -c zetta -n '__zetta_use_subcommand' -l profile -r -a '(__zetta_profiles)' -d 'Select a profile'
 complete -c zetta -n '__zetta_use_subcommand' -l split -r -a '(__zetta_pane_splits)' -d 'Apply a configured pane split template'
-complete -c zetta -n '__zetta_use_subcommand' -l theme -r -a '(__zetta_pane_themes)' -d 'Non-persistently override the profile theme'
+complete -c zetta -n '__zetta_use_subcommand' -l theme -r -a '(__zetta_profile_themes)' -d 'Non-persistently override the profile theme'
 complete -c zetta -n '__zetta_use_subcommand' -a '(__zetta_long_options root)'
 complete -c zetta -s c -r -n '__zetta_use_subcommand; and __zetta_short_option -c'
 complete -c zetta -s k -r -n '__zetta_use_subcommand; and __zetta_short_option -k'
 complete -c zetta -s p -r -a '(__zetta_profiles)' -n '__zetta_use_subcommand; and __zetta_short_option -p'
 complete -c zetta -s s -r -a '(__zetta_pane_splits)' -n '__zetta_use_subcommand; and __zetta_short_option -s'
-complete -c zetta -s t -r -a '(__zetta_pane_themes)' -n '__zetta_use_subcommand; and __zetta_short_option -t'
+complete -c zetta -s t -r -a '(__zetta_profile_themes)' -n '__zetta_use_subcommand; and __zetta_short_option -t'
+complete -c zetta -n '__zetta_at_profile_command' -a '(__zetta_long_options profile)'
+complete -c zetta -n '__zetta_has_profile_subcommand' -l config -r -d 'Use a configuration file'
+complete -c zetta -s c -r -n '__zetta_has_profile_subcommand; and __zetta_short_option -c'
+complete -c zetta -n '__zetta_has_profile_subcommand' -l help -d 'Print help'
+complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is disable; and __zetta_profile_needs_profile' -a '(__zetta_profiles)' -d 'Profile to hide'
+complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is enable; and __zetta_profile_needs_profile' -a '(__zetta_profiles)' -d 'Profile to show'
+complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is default; and __zetta_profile_needs_profile' -a '(__zetta_profiles)' -d 'Default profile'
+complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is remove; and __zetta_profile_needs_profile' -a '(__zetta_profiles)' -d 'Profile to remove'
+complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is theme; and __zetta_profile_needs_profile' -a '(__zetta_profiles)' -d 'Profile to theme'
+complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is theme; and __zetta_profile_needs_theme' -a '(__zetta_profile_themes)' -d 'Profile theme'
+complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is theme' -l reset -d 'Remove the profile theme override'
+complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is add' -l program -r -d 'Program to launch'
+complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is add' -l arg -r -d 'Program argument'
+complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is add' -l theme -r -a '(__zetta_profile_themes)' -d 'Profile theme'
+complete -c zetta -s p -r -n '__zetta_has_profile_subcommand; and __zetta_profile_is add; and __zetta_short_option -p'
+complete -c zetta -s a -r -n '__zetta_has_profile_subcommand; and __zetta_profile_is add; and __zetta_short_option -a'
+complete -c zetta -s t -r -a '(__zetta_profile_themes)' -n '__zetta_has_profile_subcommand; and __zetta_profile_is add; and __zetta_short_option -t'
+complete -c zetta -s r -n '__zetta_has_profile_subcommand; and __zetta_profile_is theme; and __zetta_short_option -r'
 complete -c zetta -n '__zetta_at_subcommand init' -a 'bash fish powershell pwsh zsh'
 complete -c zetta -n '__fish_seen_subcommand_from init' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from init' -a '(__zetta_long_options init)'

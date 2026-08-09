@@ -30,11 +30,55 @@ _zetta_compgen() {
 }
 
 _zetta_complete() {
-    local current previous command
-    local -a profiles=(ZETTA_PROFILES)
+    local current previous command profile_operation profile_command_index=-1
+    local -a config_args=()
     current=${COMP_WORDS[COMP_CWORD]}
     previous=${COMP_WORDS[COMP_CWORD-1]}
     command=${COMP_WORDS[1]}
+
+    local index
+    for (( index = 1; index < COMP_CWORD; index++ )); do
+        if [[ ${COMP_WORDS[index]} == --config || ${COMP_WORDS[index]} == -c ]]; then
+            if (( index + 1 < COMP_CWORD )); then
+                config_args+=(--config "${COMP_WORDS[index+1]}")
+                (( index++ ))
+            fi
+        fi
+    done
+
+    profile_operation=''
+    for (( index = 1; index < COMP_CWORD; index++ )); do
+        case ${COMP_WORDS[index]} in
+            --config|-c|--keymap|-k|--profile|-p|--split|-s|--theme|-t)
+                (( index++ ))
+                ;;
+            profile)
+                profile_command_index=$index
+                command=profile
+                break
+                ;;
+        esac
+    done
+    if (( profile_command_index >= 0 )); then
+        index=$((profile_command_index + 1))
+        while (( index < COMP_CWORD )); do
+            case ${COMP_WORDS[index]} in
+                --config|-c)
+                    (( index += 2 ))
+                    ;;
+                --help|-h)
+                    (( index++ ))
+                    ;;
+                -*)
+                    break
+                    ;;
+                *)
+                    profile_operation=${COMP_WORDS[index]}
+                    break
+                    ;;
+            esac
+        done
+    fi
 
     if [[ ${COMP_WORDS[0]} == vi || ${COMP_WORDS[0]} == zvi ]]; then
         if [[ $current == -* ]]; then
@@ -48,9 +92,17 @@ _zetta_complete() {
     _zetta_complete_profiles() {
         COMPREPLY=()
         local profile
-        for profile in "${profiles[@]}"; do
+        while IFS= read -r profile; do
             [[ $profile == "$current"* ]] && COMPREPLY+=("$profile")
-        done
+        done < <(zetta profile list "${config_args[@]}" 2>/dev/null)
+    }
+
+    _zetta_complete_profile_themes() {
+        COMPREPLY=()
+        local theme
+        while IFS= read -r theme; do
+            [[ $theme == "$current"* ]] && COMPREPLY+=("$theme")
+        done < <(zetta profile themes "${config_args[@]}" 2>/dev/null)
     }
 
     _zetta_complete_session_ids() {
@@ -94,7 +146,9 @@ _zetta_complete() {
             return
             ;;
         -p)
-            if [[ $command == serial ]]; then
+            if [[ $command == profile && $profile_operation == add ]]; then
+                COMPREPLY=()
+            elif [[ $command == serial ]]; then
                 _zetta_compgen 'none odd even'
             elif [[ $command != tftp && $command != http && $command != notify ]]; then
                 _zetta_complete_profiles
@@ -197,7 +251,7 @@ _zetta_complete() {
             COMPREPLY=()
             return
             ;;
-        --config|--keymap|-k|--profile-report)
+        --config|--keymap|-k|--profile-report|--program|--arg|-a)
             COMPREPLY=( $(compgen -f -- "$current") )
             return
             ;;
@@ -230,7 +284,11 @@ _zetta_complete() {
             return
             ;;
         --output-type|-t|--theme|--text)
-            if [[ $command == panetheme || $command == -* ]]; then
+            if [[ $command == profile ]]; then
+                _zetta_complete_profile_themes
+            elif [[ $command == -* ]]; then
+                _zetta_complete_profile_themes
+            elif [[ $command == panetheme ]]; then
                 _zetta_complete_pane_themes
             elif [[ $command == notify ]]; then
                 _zetta_compgen 'default never'
@@ -248,7 +306,7 @@ _zetta_complete() {
     esac
 
     if (( COMP_CWORD == 1 )); then
-        _zetta_compgen 'benchmark benchmark-output terminal-size sessions edit vi init serial http tftp notify copy paste splits tabicon panetheme overlay --help --version --config --keymap --profile --split --theme'
+        _zetta_compgen 'benchmark benchmark-output terminal-size sessions profile edit vi init serial http tftp notify copy paste splits tabicon panetheme overlay --help --version --config --keymap --profile --split --theme'
         return
     fi
 
@@ -262,6 +320,61 @@ _zetta_complete() {
     fi
 
     case "$command" in
+        profile)
+            if (( profile_command_index >= 0 && COMP_CWORD == profile_command_index + 1 )); then
+                _zetta_compgen 'list themes disable enable theme default add remove --help'
+            elif [[ $current == -* ]]; then
+                case "$profile_operation" in
+                    theme) _zetta_compgen '--reset --config --help' ;;
+                    add) _zetta_compgen '--program --arg --theme --config --help' ;;
+                    *) _zetta_compgen '--config --help' ;;
+                esac
+            else
+                case "$profile_operation" in
+                    disable|enable|default|remove)
+                        if [[ $previous == "$profile_operation" ]]; then
+                            _zetta_complete_profiles
+                        else
+                            _zetta_compgen '--config --help'
+                        fi
+                        ;;
+                    theme)
+                        if [[ $current == -* ]]; then
+                            _zetta_compgen '--reset --config --help'
+                        else
+                            local positional=0 skip=0 argument
+                            for (( index = profile_command_index + 2; index < COMP_CWORD; index++ )); do
+                                argument=${COMP_WORDS[index]}
+                                if (( skip )); then
+                                    skip=0
+                                elif [[ $argument == --config || $argument == -c ]]; then
+                                    skip=1
+                                elif [[ $argument == --reset || $argument == -r ]]; then
+                                    :
+                                elif [[ $argument != -* ]]; then
+                                    (( positional++ ))
+                                fi
+                            done
+                            if (( positional == 0 )); then
+                                _zetta_complete_profiles
+                            else
+                                _zetta_complete_profile_themes
+                            fi
+                        fi
+                        ;;
+                    add)
+                        if [[ $previous == --theme || $previous == -t ]]; then
+                            _zetta_complete_profile_themes
+                        else
+                            _zetta_compgen '--program --arg --theme --config --help'
+                        fi
+                        ;;
+                    *)
+                        _zetta_compgen '--config --help'
+                        ;;
+                esac
+            fi
+            ;;
         benchmark)
             _zetta_compgen '--terminal-render-workload --terminal-checkerboard-workload --terminal-sparse-update-workload --profile-report --profile-duration --profile-pane-stress --profile-background-stress --profile-sparse-updates --profile-external-terminal --help'
             ;;

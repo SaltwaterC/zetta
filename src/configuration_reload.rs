@@ -86,8 +86,7 @@ impl Zetta {
             }
         };
 
-        load_user_themes(cx).log_err();
-        if let Err(error) = apply_config_settings(&config, cx) {
+        if let Err(error) = self.apply_loaded_configuration(config, cx) {
             self.configuration_error = Some(format!(
                 "Could not apply {}: {error:#}",
                 config_path.display()
@@ -95,24 +94,31 @@ impl Zetta {
             cx.notify();
             return;
         }
-        let profile_themes = match config
+        self.configuration_error = None;
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn reload_configuration_from_process(
+        &mut self,
+        config: Config,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        self.apply_loaded_configuration(config, cx)?;
+        self.configuration_error = None;
+        Ok(())
+    }
+
+    fn apply_loaded_configuration(&mut self, config: Config, cx: &mut Context<Self>) -> Result<()> {
+        load_user_themes(cx).log_err();
+        apply_config_settings(&config, cx)?;
+        let profile_themes = config
             .profiles
             .iter()
             .map(|profile| {
                 resolve_profile_theme(profile, cx).map(|theme| (profile.name.to_lowercase(), theme))
             })
-            .collect::<Result<HashMap<_, _>>>()
-        {
-            Ok(themes) => themes,
-            Err(error) => {
-                self.configuration_error = Some(format!(
-                    "Could not apply {}: {error:#}",
-                    config_path.display()
-                ));
-                cx.notify();
-                return;
-            }
-        };
+            .collect::<Result<HashMap<_, _>>>()?;
         for pane in self.tabs.iter_mut().flat_map(|tab| &mut tab.panes) {
             if let Some(profile) = config
                 .profiles
@@ -159,8 +165,7 @@ impl Zetta {
             &self.launch_config.hidden_profiles,
             self.launch_config.default_profile,
         );
-        self.configuration_error = None;
-        self.focus_active(window, cx);
         cx.notify();
+        Ok(())
     }
 }

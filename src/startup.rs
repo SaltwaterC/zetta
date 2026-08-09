@@ -679,6 +679,13 @@ pub(crate) fn run() -> Result<()> {
     {
         return run_output_benchmark(*size_mib, *output_type);
     }
+    if let StartupMode::Profile(command) = args.mode {
+        let result = crate::profile_cli::run(command, args.config_path.as_deref())?;
+        if result.changed {
+            crate::profile_cli::reload_after_mutation(&result);
+        }
+        return Ok(());
+    }
     if let StartupMode::PrintTerminalSize { json, resize } = args.mode {
         if let Some(resize) = resize {
             return request_terminal_resize(resize.columns, resize.rows);
@@ -906,6 +913,57 @@ pub(crate) fn run() -> Result<()> {
             cx.spawn(async move |cx| {
                 while let Some(command) = control_rx.next().await {
                     match command {
+                        ProcessControlCommand::ReloadConfiguration {
+                            config_path,
+                            completion,
+                        } => {
+                            let accepted = cx.update(|cx| {
+                                if !cx
+                                    .global::<ZettaProcessState>()
+                                    .control_server
+                                    .is_accepting()
+                                {
+                                    return false;
+                                }
+                                let process = cx.global::<ZettaProcessState>();
+                                if crate::process_control::config_path_identity(
+                                    &process.config.config_path,
+                                ) != config_path
+                                {
+                                    return false;
+                                }
+                                let config_path = process.config.config_path.clone();
+                                let keymap_override = process.config.keymap_override.clone();
+                                let config = match Config::load(Some(&config_path), keymap_override)
+                                {
+                                    Ok(config) => config,
+                                    Err(error) => {
+                                        eprintln!(
+                                            "Could not reload {}: {error:#}",
+                                            config_path.display()
+                                        );
+                                        return false;
+                                    }
+                                };
+                                let entities = process_zetta_entities(cx);
+                                for entity in entities {
+                                    if let Err(error) = entity.update(cx, |zetta, cx| {
+                                        zetta.reload_configuration_from_process(config.clone(), cx)
+                                    }) {
+                                        eprintln!(
+                                            "Could not apply reloaded configuration {}: {error:#}",
+                                            config_path.display()
+                                        );
+                                        return false;
+                                    }
+                                }
+                                let process = cx.global_mut::<ZettaProcessState>();
+                                process.config = config;
+                                process.configuration_error = None;
+                                true
+                            });
+                            let _ = completion.send(accepted);
+                        }
                         ProcessControlCommand::OpenWindow { completion } => {
                             let opened = cx.update(|cx| {
                                 if !cx

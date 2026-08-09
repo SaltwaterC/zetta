@@ -35,6 +35,27 @@ override is never written to `config.json` or the profile itself, so the
 Settings UI keeps showing the profile's real configured theme and the next
 launch uses it again.
 
+Manage persistent profile state with the typed `profile` command family:
+
+```sh
+zetta profile list
+zetta profile themes
+zetta profile disable "PROFILE"
+zetta profile enable "PROFILE"
+zetta profile theme "PROFILE" "THEME"
+zetta profile theme "PROFILE" --reset
+zetta profile default "PROFILE"
+zetta profile add "NAME" --program PROGRAM [--arg ARG ...] [--theme THEME]
+zetta profile remove "PROFILE"
+```
+
+Use `--config PATH` or `-c PATH` anywhere after `profile`, or use the root
+form `zetta -c PATH profile ...`. Profile names are case-insensitive, and
+`profile list` includes hidden and detected profiles. `profile themes` is the
+source for valid profile themes. Mutations validate and write the selected
+configuration while preserving its other settings, then request a best-effort
+live reload from a matching Zetta process.
+
 Launch the first tab with a configured pane layout using either form:
 
 ```sh

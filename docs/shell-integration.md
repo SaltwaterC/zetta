@@ -1,11 +1,13 @@
 # Shell integration
 
 Zetta can emit a shell-specific integration script with completion for its
-subcommands, flags, and flag values. The generated script includes the profile
-names from Zetta's current configuration, so `zetta --profile <Tab>` completes
-them as well. Completing a value that contains spaces (such as a pane theme
-named `Gruvbox Light Hard`) inserts it as a single quoted argument, so the
-completed line runs without manual quoting. The script also provides `zvi`, an
+subcommands, flags, and flag values. Profile and theme names are fetched at
+completion time from `zetta profile list` and `zetta profile themes`, so
+`zetta --profile <Tab>` and profile-management commands use the selected
+configuration's current state. Completing a value that contains spaces or
+quotes (such as a profile named `Project Shell` or a theme named `Gruvbox Light
+Hard`) inserts it as a single argument, so the completed line runs without
+manual quoting. The script also provides `zvi`, an
 unconditional shortcut for
 the built-in vi editor, `ztftp`, a shortcut for the built-in TFTP client,
 `zntfy`, a shortcut for sending desktop notifications, and `zcopy`/`zpaste`,
@@ -44,8 +46,16 @@ offers whatever that process has registered, including user-installed
 themes. Use `zetta panetheme THEME` (or `zetta panetheme --theme THEME`) from
 a Zetta pane to non-persistently change the active pane's theme;
 `zetta panetheme --reset` restores the profile's configured theme. `--theme`
-(or `-t`) also completes pane themes when typed after `--profile` at launch,
+(or `-t`) also completes profile themes when typed after `--profile` at launch,
 since it non-persistently overrides that profile's theme for the new window.
+
+Profile administration uses the non-GUI endpoint too. `zetta profile list`
+supplies root `--profile`/`-p` and the `disable`, `enable`, `theme`, `default`,
+and `remove` profile arguments. `zetta profile themes` supplies profile theme
+values for `profile theme`, `profile add --theme`, and root `--theme`/`-t`.
+If a `-c`/`--config` value is present in the command line, completion passes it
+through to both endpoints. Endpoint output is processed one line at a time,
+so names containing spaces or quotes remain single completion candidates.
 
 Pane-split completion works dynamically too: completing the root
 `zetta --split`/`-s` option runs `zetta splits` against the current
@@ -122,8 +132,10 @@ For example, `zetta init` from Zsh adds `eval "$(zetta init zsh)"` to
 `zetta init powershell | Out-String | Invoke-Expression` to `$PROFILE`. Start a new shell
 or source the file after editing it.
 
-Profile names are captured when the integration script is generated. After
-changing your Zetta profiles, start a new shell or run the applicable command
-again to refresh its completions.
+Profile and theme changes are visible on the next completion request; there is
+no shell-integration regeneration step. A profile mutation also asks a running
+Zetta process using the same configuration path to reload all open and dormant
+entities. The persisted file remains authoritative if no matching process is
+running, and the CLI reports that live state was not refreshed.
 
 Run `zetta init --help` to see the accepted shell names.

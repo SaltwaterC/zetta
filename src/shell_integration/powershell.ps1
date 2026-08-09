@@ -26,7 +26,8 @@ if (-not $IsMacOS) {
     function pbpaste { & zetta paste @args }
 }
 
-$zettaProfiles = @(ZETTA_PROFILES)
+$zettaProfiles = { param($configArguments) @(& zetta profile list @configArguments 2>$null) }
+$zettaProfileThemes = { param($configArguments) @(& zetta profile themes @configArguments 2>$null) }
 $zettaOverlayColors = @(ZETTA_OVERLAY_COLORS)
 $zettaTabIcons = { @(& zetta tabicon --list 2>$null) }
 $zettaPaneThemes = { @(& zetta panetheme --list 2>$null) }
@@ -65,9 +66,45 @@ $zettaCompletions = {
     $words = @($commandAst.CommandElements | ForEach-Object { $_.Value })
     $previous = if ($words.Count -gt 1) { $words[$words.Count - 2] } else { '' }
     $last = if ($words.Count -gt 1) { $words[$words.Count - 1] } else { '' }
+
+    $configArguments = @()
+    for ($index = 1; $index -lt $words.Count; $index++) {
+        if ($words[$index] -in '--config', '-c' -and $index + 1 -lt $words.Count) {
+            $configArguments += '--config'
+            $configArguments += $words[$index + 1]
+            $index++
+        }
+    }
+    $profileOperation = ''
+    $profileOperationIndex = -1
+    $profileIndex = -1
+    for ($index = 1; $index -lt $words.Count; $index++) {
+        if ($words[$index] -in '--config', '-c', '--keymap', '-k', '--profile', '-p', '--split', '-s', '--theme', '-t') {
+            $index++
+        } elseif ($words[$index] -eq 'profile') {
+            $profileIndex = $index
+            break
+        }
+    }
     $subcommand = $words | Where-Object {
         $_ -in 'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'splits', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay'
     } | Select-Object -First 1
+    if ($profileIndex -ge 0) {
+        $subcommand = 'profile'
+    }
+    if ($profileIndex -ge 0) {
+        for ($index = $profileIndex + 1; $index -lt $words.Count; $index++) {
+            if ($words[$index] -in '--config', '-c') {
+                $index++
+            } elseif ([string]::IsNullOrEmpty($words[$index])) {
+                continue
+            } elseif ($words[$index] -notlike '-*') {
+                $profileOperation = $words[$index]
+                $profileOperationIndex = $index
+                break
+            }
+        }
+    }
 
     $candidates = if ($commandName -eq 'ztftp') {
         if ($words.Count -le 1) { 'get', 'put', '--help' } else { '--port', '--help' }
@@ -91,11 +128,12 @@ $zettaCompletions = {
         $previous -eq '--profile' -or $last -eq '--profile' -or
         (($previous -eq '-p' -or $last -eq '-p') -and $null -eq $subcommand)
     ) {
-        $zettaProfiles
+        & $zettaProfiles $configArguments
     } elseif ($previous -eq '--timeout') {
         'default', 'never'
     } elseif ($previous -in '--output-type', '-t', '--theme', '--text') {
-        if ($subcommand -eq 'panetheme' -or $null -eq $subcommand) { & $zettaPaneThemes }
+        if ($subcommand -eq 'profile' -or $null -eq $subcommand) { & $zettaProfileThemes $configArguments }
+        elseif ($subcommand -eq 'panetheme') { & $zettaPaneThemes }
         elseif ($subcommand -eq 'notify') { 'default', 'never' }
         elseif ($subcommand -eq 'overlay') { @() }
         else { 'repeated', 'unique' }
@@ -139,10 +177,14 @@ $zettaCompletions = {
         & $zettaTabIcons
     } elseif ($subcommand -eq 'panetheme' -and $wordToComplete -notlike '-*') {
         & $zettaPaneThemes
+    } elseif ($subcommand -eq 'profile' -and $profileOperation -eq 'theme' -and $wordToComplete -notlike '-*' -and $words -notcontains '--reset' -and $words -notcontains '-r' -and -not ($profileOperationIndex -eq ($words.Count - 1) -and -not [string]::IsNullOrEmpty($wordToComplete))) {
+        $profileArguments = @($words | Select-Object -Skip ($profileIndex + 2) | Where-Object { $_ -notlike '-*' -and -not [string]::IsNullOrEmpty($_) })
+        if ($profileArguments.Count -ge 2 -or ($profileArguments.Count -eq 1 -and [string]::IsNullOrEmpty($wordToComplete))) { & $zettaProfileThemes $configArguments }
+        else { & $zettaProfiles $configArguments }
     } elseif ($subcommand -eq 'sessions' -and $words.Count -ge 3 -and $words[2] -eq 'reconnect') {
         if ($previous -in '--session', '-s') { @() } else { & $zettaSessionIds }
     } elseif ($null -eq $subcommand) {
-        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'splits', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', '--help', '--version', '--config', '--keymap', '--profile', '--split', '--theme'
+        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'profile', 'splits', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', '--help', '--version', '--config', '--keymap', '--profile', '--split', '--theme'
     } else {
         switch ($subcommand) {
             'benchmark' { '--terminal-render-workload', '--terminal-checkerboard-workload', '--terminal-sparse-update-workload', '--profile-report', '--profile-duration', '--profile-pane-stress', '--profile-background-stress', '--profile-sparse-updates', '--profile-external-terminal', '--help' }
@@ -158,6 +200,20 @@ $zettaCompletions = {
                 } else { '--json', '--help' }
             }
             'splits' { '--help' }
+            'profile' {
+                if ([string]::IsNullOrEmpty($profileOperation) -or ($profileOperationIndex -eq ($words.Count - 1) -and -not [string]::IsNullOrEmpty($wordToComplete)) -or $profileOperation -notin 'list', 'themes', 'disable', 'enable', 'theme', 'default', 'add', 'remove') {
+                    'list', 'themes', 'disable', 'enable', 'theme', 'default', 'add', 'remove', '--config', '--help'
+                } elseif ($profileOperation -in 'disable', 'enable', 'default', 'remove') {
+                    if ($previous -eq $profileOperation -or $last -eq $profileOperation) { & $zettaProfiles $configArguments } else { '--config', '--help' }
+                } elseif ($profileOperation -eq 'theme') {
+                    if ($wordToComplete -like '-*') { '--reset', '--config', '--help' }
+                    elseif ($previous -eq 'theme' -or $last -eq 'theme') { & $zettaProfiles $configArguments }
+                    elseif ($previous -in '--reset', '-r' -or $last -in '--reset', '-r') { '--config', '--help' }
+                    else { & $zettaProfileThemes $configArguments }
+                } elseif ($profileOperation -eq 'add') {
+                    '--program', '--arg', '--theme', '--config', '--help'
+                } else { '--config', '--help' }
+            }
             'init' { 'bash', 'fish', 'powershell', 'pwsh', 'zsh', '--help' }
             'serial' {
                 if ($words.Count -le 2) { 'console', 'list', '--help' }

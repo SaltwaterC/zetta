@@ -109,6 +109,34 @@ move into the released shortcut slot:
 }
 ```
 
+The same profile state can be managed without opening the UI:
+
+```sh
+zetta profile list
+zetta profile themes
+zetta profile disable "Bash"
+zetta profile enable "Bash"
+zetta profile theme "Bash" "One Dark"
+zetta profile theme "Bash" --reset
+zetta profile default "Bash"
+zetta profile add "Project Shell" --program bash --arg -l --theme "One Dark"
+zetta profile remove "Project Shell"
+```
+
+Use `-c PATH` or `--config PATH` with any profile operation, either after the
+`profile` command or before it (`zetta -c PATH profile list`). Names are
+matched case-insensitively. `profile list` prints every resolved profile,
+including hidden profiles, while `profile themes` prints the sorted bundled
+and installed theme names used for validation. Mutations preserve the other
+configuration settings and validate the complete candidate before writing it.
+Detected profiles and the active default profile cannot be removed.
+
+After a successful mutation, Zetta asks a running process using the same
+normalized configuration path to reload. Open and dormant entities are
+refreshed, and new tabs use the updated profile state. The file change remains
+successful when no matching process is running; the CLI prints a notice in
+that case.
+
 The first tab starts in the user's home directory unless `working_directory`
 is set. Setting it to `"~"` is equivalent to leaving it unset. Later native
 tabs and splits inherit the active pane's current directory by default. Set

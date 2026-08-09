@@ -26,7 +26,7 @@ use ui::IconName;
 
 use crate::pane::{OverlayFontSize, PaneOverlayRequest, overlay_color_from_value};
 
-const CONTROL_VERSION: u32 = 3;
+const CONTROL_VERSION: u32 = 4;
 const MAX_CONTROL_MESSAGE_BYTES: usize = 4096;
 const CONTROL_COMPLETION_TIMEOUT: Duration = Duration::from_secs(2);
 const CONTROL_COMPLETION_POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -42,6 +42,10 @@ pub(crate) enum ReconnectSessionResult {
 }
 
 pub(crate) enum ProcessControlCommand {
+    ReloadConfiguration {
+        config_path: String,
+        completion: Sender<bool>,
+    },
     OpenWindow {
         completion: Sender<bool>,
     },
@@ -73,6 +77,9 @@ pub(crate) enum ProcessControlCommand {
 
 #[derive(Clone, Debug, PartialEq)]
 enum ControlRequestCommand {
+    ReloadConfiguration {
+        config_path: String,
+    },
     OpenWindow,
     ReconnectSession {
         runner_id: u64,
@@ -115,6 +122,7 @@ struct ControlRequest {
     pane_overlay_font_size: Option<String>,
     pane_overlay_opacity: Option<u8>,
     pane_overlay_color: Option<String>,
+    config_path: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -172,6 +180,17 @@ impl ProcessControlServer {
                     let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
                     let mut response_themes = Vec::new();
                     let status = match handle_control_request(&mut stream, &token) {
+                        Some(ControlRequestCommand::ReloadConfiguration { config_path }) => {
+                            let (completion, completed) = channel();
+                            let accepted = commands
+                                .unbounded_send(ProcessControlCommand::ReloadConfiguration {
+                                    config_path,
+                                    completion,
+                                })
+                                .is_ok()
+                                && wait_for_control_completion(&completed, &stopping_for_thread);
+                            if accepted { "ok" } else { "rejected" }
+                        }
                         Some(ControlRequestCommand::OpenWindow) => {
                             let (completion, completed) = channel();
                             let accepted = commands
@@ -390,7 +409,30 @@ fn decode_control_request(
         }
         return None;
     }
+    if request.command != "reload_configuration" && request.config_path.is_some() {
+        if let Some(secret) = request.secret.as_mut() {
+            secret.zeroize();
+        }
+        return None;
+    }
     let command = match request.command.as_str() {
+        "reload_configuration"
+            if request.runner_id.is_none()
+                && request.session_id.is_none()
+                && request.secret.is_none()
+                && request.icon.is_none()
+                && request.pane_theme.is_none()
+                && request.pane_overlay.is_none()
+                && request.pane_overlay_font_size.is_none()
+                && request.pane_overlay_opacity.is_none()
+                && request.pane_overlay_color.is_none() =>
+        {
+            request
+                .config_path
+                .take()
+                .filter(|path| !path.is_empty())
+                .map(|config_path| ControlRequestCommand::ReloadConfiguration { config_path })
+        }
         "open_window"
             if request.runner_id.is_none()
                 && request.session_id.is_none()
@@ -656,6 +698,42 @@ pub(crate) fn request_existing_process_pane_overlay(request: PaneOverlayRequest)
     Ok(false)
 }
 
+pub(crate) fn request_existing_process_configuration_reload(path: &Path) -> Result<bool> {
+    let directory = crate::background_sessions::session_catalog_dir();
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).context("reading Zetta process control endpoints"),
+    };
+    let config_path = config_path_identity(path);
+    for entry in entries {
+        let path = entry?.path();
+        if !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("control-") && name.ends_with(".json"))
+        {
+            continue;
+        }
+        let endpoint = match fs::read(&path)
+            .ok()
+            .and_then(|contents| serde_json::from_slice::<ControlEndpoint>(&contents).ok())
+        {
+            Some(endpoint) if endpoint.version == CONTROL_VERSION => endpoint,
+            _ => continue,
+        };
+        if !process_is_running(endpoint.process_id) {
+            let _ = fs::remove_file(path);
+            let _ = fs::remove_file(endpoint.socket_path);
+            continue;
+        }
+        if send_reload_configuration_request(&endpoint, &config_path).unwrap_or(false) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub(crate) fn request_reconnect_session(
     process_id: u32,
     runner_id: u64,
@@ -696,6 +774,35 @@ fn send_open_window_request(endpoint: &ControlEndpoint) -> Result<bool> {
             pane_overlay_font_size: None,
             pane_overlay_opacity: None,
             pane_overlay_color: None,
+            config_path: None,
+        },
+    )?;
+    let response = read_message::<ControlResponse>(&mut stream)?;
+    Ok(response.status == "ok")
+}
+
+fn send_reload_configuration_request(
+    endpoint: &ControlEndpoint,
+    config_path: &str,
+) -> Result<bool> {
+    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
+    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    write_message(
+        &mut stream,
+        &ControlRequest {
+            token: endpoint.token.clone(),
+            command: "reload_configuration".to_owned(),
+            runner_id: None,
+            session_id: None,
+            secret: None,
+            icon: None,
+            pane_theme: None,
+            pane_overlay: None,
+            pane_overlay_font_size: None,
+            pane_overlay_opacity: None,
+            pane_overlay_color: None,
+            config_path: Some(config_path.to_owned()),
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
@@ -723,6 +830,7 @@ fn send_set_tab_icon_request(endpoint: &ControlEndpoint, icon: Option<IconName>)
             pane_overlay_font_size: None,
             pane_overlay_opacity: None,
             pane_overlay_color: None,
+            config_path: None,
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
@@ -747,6 +855,7 @@ fn send_set_pane_theme_request(endpoint: &ControlEndpoint, theme: Option<String>
             pane_overlay_font_size: None,
             pane_overlay_opacity: None,
             pane_overlay_color: None,
+            config_path: None,
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
@@ -771,6 +880,7 @@ fn send_list_pane_themes_request(endpoint: &ControlEndpoint) -> Result<Option<Ve
             pane_overlay_font_size: None,
             pane_overlay_opacity: None,
             pane_overlay_color: None,
+            config_path: None,
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
@@ -801,6 +911,7 @@ fn send_set_overlay_request(
                 .map(str::to_owned),
             pane_overlay_opacity: request.opacity,
             pane_overlay_color: request.color.clone(),
+            config_path: None,
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
@@ -828,6 +939,7 @@ fn send_reconnect_session_request(
         pane_overlay_font_size: None,
         pane_overlay_opacity: None,
         pane_overlay_color: None,
+        config_path: None,
     };
     let result = write_message(&mut stream, &request).and_then(|()| {
         let response = read_message::<ControlResponse>(&mut stream)?;
@@ -884,6 +996,34 @@ fn process_is_running(process_id: u32) -> bool {
     let mut system = System::new();
     system.refresh_processes(ProcessesToUpdate::Some(&[process_id]), true);
     system.process(process_id).is_some()
+}
+
+pub(crate) fn config_path_identity(path: &Path) -> String {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|directory| directory.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    let absolute = fs::canonicalize(&absolute).unwrap_or(absolute);
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    #[cfg(windows)]
+    return normalized
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+    #[cfg(not(windows))]
+    normalized.to_string_lossy().into_owned()
 }
 
 fn control_endpoint_path(process_id: u32) -> PathBuf {
