@@ -63,6 +63,10 @@ _zetta_profiles() {
     compadd -- ZETTA_PROFILES
 }
 
+_zetta_split_names() {
+    compadd -- "${(@f)$(zetta splits 2>/dev/null)}"
+}
+
 _zetta_session_ids() {
     compadd -- "${(@f)$(zetta sessions --json 2>/dev/null | awk '
         /"process_id"[[:space:]]*:/ { match($0, /[0-9]+/); process=substr($0, RSTART, RLENGTH) }
@@ -122,8 +126,8 @@ _zetta() {
     fi
 
     if (( CURRENT == 2 )); then
-        compadd -S ' ' -- benchmark benchmark-output terminal-size sessions edit vi init serial http tftp notify copy paste tabicon panetheme overlay
-        _zetta_options --help --version --config --keymap --profile --theme
+        compadd -S ' ' -- benchmark benchmark-output terminal-size sessions edit vi init serial http tftp notify copy paste splits tabicon panetheme overlay
+        _zetta_options --help --version --config --keymap --profile --split --theme
         return
     fi
 
@@ -168,8 +172,24 @@ _zetta() {
             compadd -- none odd even
             return
             ;;
-        --stop-bits|-s|--size)
+        --split)
+            _zetta_split_names
+            return
+            ;;
+        --stop-bits|--size)
             if [[ $words[2] == serial ]]; then
+                compadd -- 1 2
+            elif [[ $words[2] == notify ]]; then
+                _zetta_sound_names
+            elif [[ $words[2] == overlay ]]; then
+                compadd -- sm base lg xl 2xl 3xl
+            fi
+            return
+            ;;
+        -s)
+            if [[ $words[2] == -* || -z $words[2] ]]; then
+                _zetta_split_names
+            elif [[ $words[2] == serial ]]; then
                 compadd -- 1 2
             elif [[ $words[2] == notify ]]; then
                 _zetta_sound_names
@@ -255,7 +275,7 @@ _zetta() {
     # offering the remaining top-level flags instead of falling through to
     # the subcommand-specific cases below, which would offer nothing.
     if [[ $words[2] == -* ]]; then
-        _zetta_options --help --version --config --keymap --profile --theme
+        _zetta_options --help --version --config --keymap --profile --split --theme
         return
     fi
 
@@ -332,6 +352,9 @@ _zetta() {
             ;;
         paste)
             _zetta_options --pboard --prefer --help
+            ;;
+        splits)
+            _zetta_options --help
             ;;
         tabicon)
             if [[ $words[CURRENT] == -* ]]; then

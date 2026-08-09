@@ -410,6 +410,40 @@ fn sessions_subcommand_supports_human_and_json_output() {
 }
 
 #[test]
+fn splits_subcommand_lists_configured_templates_without_starting_the_application() {
+    let args = parse_args_from([OsString::from("splits")]).unwrap();
+    assert_eq!(args.mode, StartupMode::ListPaneSplits);
+    assert!(!should_handoff_to_existing_process(&args));
+    assert!(parse_args_from([OsString::from("splits"), OsString::from("--unknown")]).is_err());
+
+    let config = Config::defaults(None, None);
+    assert_eq!(
+        configured_split_names(&config),
+        [
+            "four-vertical".to_owned(),
+            "quarters".to_owned(),
+            "three-left".to_owned(),
+            "three-right".to_owned(),
+        ]
+    );
+
+    let custom_config = Config::parse(
+        r#"{
+            "pane_split_templates": {
+                "custom-layout": {
+                    "horizontal": ["pane", "pane"]
+                }
+            }
+        }"#,
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(configured_split_names(&custom_config).contains(&"custom-layout".to_owned()));
+    assert!(validate_launch_split(&custom_config, Some("custom-layout")).is_ok());
+}
+
+#[test]
 fn sessions_reconnect_subcommand_accepts_a_stable_id_without_a_secret_argument() {
     let args = parse_args_from([
         OsString::from("sessions"),
@@ -708,11 +742,60 @@ fn output_benchmark_subcommand_bypasses_application_startup() {
 fn only_plain_application_launches_handoff_to_the_session_runner() {
     let plain = parse_args_from(Vec::<OsString>::new()).unwrap();
     let profile = parse_args_from([OsString::from("--profile"), OsString::from("System")]).unwrap();
+    let split = parse_args_from([OsString::from("--split"), OsString::from("quarters")]).unwrap();
     let sessions = parse_args_from([OsString::from("sessions")]).unwrap();
 
     assert!(should_handoff_to_existing_process(&plain));
     assert!(!should_handoff_to_existing_process(&profile));
+    assert!(!should_handoff_to_existing_process(&split));
     assert!(!should_handoff_to_existing_process(&sessions));
+}
+
+#[test]
+fn root_split_option_accepts_configured_names_and_combines_with_profile() {
+    for name in [
+        "quarters",
+        "four-vertical",
+        "three-left",
+        "three-right",
+        "custom-layout",
+    ] {
+        let long = parse_args_from([OsString::from("--split"), OsString::from(name)]).unwrap();
+        assert_eq!(long.split.as_deref(), Some(name));
+        assert_eq!(long.mode, StartupMode::Application);
+
+        let short = parse_args_from([OsString::from("-s"), OsString::from(name)]).unwrap();
+        assert_eq!(short, long);
+
+        let profile_before = parse_args_from([
+            OsString::from("--profile"),
+            OsString::from("System"),
+            OsString::from("--split"),
+            OsString::from(name),
+        ])
+        .unwrap();
+        let profile_after = parse_args_from([
+            OsString::from("--split"),
+            OsString::from(name),
+            OsString::from("--profile"),
+            OsString::from("System"),
+        ])
+        .unwrap();
+        assert_eq!(profile_before, profile_after);
+        assert_eq!(profile_before.profile.as_deref(), Some("System"));
+        assert_eq!(profile_before.split.as_deref(), Some(name));
+        assert!(!should_handoff_to_existing_process(&profile_before));
+    }
+
+    assert!(parse_args_from([OsString::from("--split")]).is_err());
+    assert!(parse_args_from([OsString::from("--split"), OsString::from("")]).is_err());
+    assert!(parse_args_from([OsString::from("--split"), OsString::from("--profile")]).is_err());
+
+    let config = Config::defaults(None, None);
+    for invalid in ["Quarters", "two", "three-right "] {
+        assert!(validate_launch_split(&config, Some(invalid)).is_err());
+    }
+    assert!(validate_launch_split(&config, Some("quarters")).is_ok());
 }
 
 #[test]
@@ -723,6 +806,7 @@ fn benchmark_subcommand_arguments_are_cross_platform() {
             config_path: None,
             keymap_path: None,
             profile: None,
+            split: None,
             theme_override: None,
             mode: StartupMode::TerminalRenderingProfile,
             profile_report: None,
@@ -744,6 +828,7 @@ fn benchmark_subcommand_arguments_are_cross_platform() {
             config_path: None,
             keymap_path: None,
             profile: None,
+            split: None,
             theme_override: None,
             mode: StartupMode::TerminalRenderingWorkload,
             profile_report: None,

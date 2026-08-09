@@ -29,6 +29,7 @@ if (-not $IsMacOS) {
 $zettaProfiles = @(ZETTA_PROFILES)
 $zettaTabIcons = { @(& zetta tabicon --list 2>$null) }
 $zettaPaneThemes = { @(& zetta panetheme --list 2>$null) }
+$zettaSplits = { @(& zetta splits 2>$null) }
 
 # zetta-default/zetta-ok/zetta-alarm are bundled tones Zetta plays itself, so
 # they always work; the rest are the current platform's own system sound
@@ -64,7 +65,7 @@ $zettaCompletions = {
     $previous = if ($words.Count -gt 1) { $words[$words.Count - 2] } else { '' }
     $last = if ($words.Count -gt 1) { $words[$words.Count - 1] } else { '' }
     $subcommand = $words | Where-Object {
-        $_ -in 'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay'
+        $_ -in 'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'splits', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay'
     } | Select-Object -First 1
 
     $candidates = if ($commandName -eq 'ztftp') {
@@ -80,6 +81,11 @@ $zettaCompletions = {
         if ($previous -in '--pboard', '-pboard') { 'general', 'ruler', 'find', 'font' }
         elseif ($previous -in '--prefer', '-prefer', '--Prefer', '-Prefer') { 'txt', 'rtf', 'ps' }
         else { '--pboard', '--prefer', '--help' }
+    } elseif (
+        $previous -eq '--split' -or $last -eq '--split' -or
+        (($previous -eq '-s' -or $last -eq '-s') -and $null -eq $subcommand)
+    ) {
+        & $zettaSplits
     } elseif (
         $previous -eq '--profile' -or $last -eq '--profile' -or
         (($previous -eq '-p' -or $last -eq '-p') -and $null -eq $subcommand)
@@ -135,7 +141,7 @@ $zettaCompletions = {
     } elseif ($subcommand -eq 'sessions' -and $words.Count -ge 3 -and $words[2] -eq 'reconnect') {
         if ($previous -in '--session', '-s') { @() } else { & $zettaSessionIds }
     } elseif ($null -eq $subcommand) {
-        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', '--help', '--version', '--config', '--keymap', '--profile', '--theme'
+        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'splits', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', '--help', '--version', '--config', '--keymap', '--profile', '--split', '--theme'
     } else {
         switch ($subcommand) {
             'benchmark' { '--terminal-render-workload', '--terminal-checkerboard-workload', '--terminal-sparse-update-workload', '--profile-report', '--profile-duration', '--profile-pane-stress', '--profile-background-stress', '--profile-sparse-updates', '--profile-external-terminal', '--help' }
@@ -150,6 +156,7 @@ $zettaCompletions = {
                     if ($last -eq 'reconnect') { & $zettaSessionIds } else { '--session', '--help' }
                 } else { '--json', '--help' }
             }
+            'splits' { '--help' }
             'init' { 'bash', 'fish', 'powershell', 'pwsh', 'zsh', '--help' }
             'serial' {
                 if ($words.Count -le 2) { 'console', 'list', '--help' }

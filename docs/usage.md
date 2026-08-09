@@ -35,6 +35,19 @@ override is never written to `config.json` or the profile itself, so the
 Settings UI keeps showing the profile's real configured theme and the next
 launch uses it again.
 
+Launch the first tab with a configured pane layout using either form:
+
+```sh
+zetta --split quarters
+zetta -s four-vertical
+```
+
+Run `zetta splits` to list the available configured names. The built-in names
+are `quarters`, `four-vertical`, `three-left`, and `three-right`; configured
+entries can override those templates or add new ones. `--split` can be
+combined with `--profile` and `--theme`; it applies only to the initial
+window.
+
 Tab names follow the active terminal process. Press `Ctrl-Shift-R` or double-click
 a tab to set a persistent name. Use `Ctrl-Shift-Y` or the tab context menu
 to choose a tab icon. Submit an empty name to resume automatic naming.

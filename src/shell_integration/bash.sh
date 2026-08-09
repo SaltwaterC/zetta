@@ -80,6 +80,14 @@ _zetta_complete() {
         done < <(zetta panetheme --list 2>/dev/null)
     }
 
+    _zetta_complete_pane_splits() {
+        COMPREPLY=()
+        local split
+        while IFS= read -r split; do
+            [[ $split == "$current"* ]] && COMPREPLY+=("$split")
+        done < <(zetta splits 2>/dev/null)
+    }
+
     case "$previous" in
         --profile)
             _zetta_complete_profiles
@@ -123,8 +131,26 @@ _zetta_complete() {
             _zetta_compgen 'none odd even'
             return
             ;;
-        --stop-bits|-s|--size)
+        --split)
+            _zetta_complete_pane_splits
+            return
+            ;;
+        --stop-bits|--size)
             if [[ $command == serial ]]; then
+                _zetta_compgen '1 2'
+            elif [[ $command == notify ]]; then
+                _zetta_complete_sound_names
+            elif [[ $command == overlay ]]; then
+                _zetta_compgen 'sm base lg xl 2xl 3xl'
+            else
+                COMPREPLY=()
+            fi
+            return
+            ;;
+        -s)
+            if [[ $command == -* || -z $command ]]; then
+                _zetta_complete_pane_splits
+            elif [[ $command == serial ]]; then
                 _zetta_compgen '1 2'
             elif [[ $command == notify ]]; then
                 _zetta_complete_sound_names
@@ -216,7 +242,7 @@ _zetta_complete() {
     esac
 
     if (( COMP_CWORD == 1 )); then
-        _zetta_compgen 'benchmark benchmark-output terminal-size sessions edit vi init serial http tftp notify copy paste tabicon panetheme overlay --help --version --config --keymap --profile --theme'
+        _zetta_compgen 'benchmark benchmark-output terminal-size sessions edit vi init serial http tftp notify copy paste splits tabicon panetheme overlay --help --version --config --keymap --profile --split --theme'
         return
     fi
 
@@ -225,7 +251,7 @@ _zetta_complete() {
     # offering the remaining top-level flags instead of falling through to
     # the subcommand-specific cases below, which would offer nothing.
     if [[ $command == -* ]]; then
-        _zetta_compgen '--help --version --config --keymap --profile --theme'
+        _zetta_compgen '--help --version --config --keymap --profile --split --theme'
         return
     fi
 
@@ -296,6 +322,9 @@ _zetta_complete() {
             ;;
         paste)
             _zetta_compgen '--pboard --prefer --help'
+            ;;
+        splits)
+            _zetta_compgen '--help'
             ;;
         tabicon)
             if [[ $current == -* ]]; then

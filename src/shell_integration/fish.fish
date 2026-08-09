@@ -65,6 +65,10 @@ function __zetta_pane_themes
     zetta panetheme --list 2>/dev/null
 end
 
+function __zetta_pane_splits
+    zetta splits 2>/dev/null
+end
+
 # zetta-default/zetta-ok/zetta-alarm are bundled tones Zetta plays itself, so
 # they always work; the rest are the current platform's own system sound
 # names, which only work on that platform, so only that platform's names are
@@ -119,7 +123,7 @@ function __zetta_use_subcommand
             continue
         end
         switch $word
-            case --config -c --keymap -k --profile -p --theme -t
+            case --config -c --keymap -k --profile -p --split -s --theme -t
                 set skip_next 1
                 continue
             case '-*'
@@ -180,8 +184,9 @@ function __zetta_long_options
                 --config 'Use a configuration file' \
                 --keymap 'Use a keymap file' \
                 --profile 'Select a profile' \
+                --split 'Apply a configured pane split template' \
                 --theme 'Non-persistently override the profile theme'
-        case init serial http tftp
+        case init serial http tftp splits
             printf '%s\t%s\n' --help 'Print help'
         case panetheme
             printf '%s\t%s\n' \
@@ -283,17 +288,20 @@ complete -c zetta -n '__zetta_at_root' -a copy -d 'Copy standard input to the cl
 complete -c zetta -n '__zetta_at_root' -a paste -d "Print the clipboard's contents"
 complete -c zetta -n '__zetta_at_root' -a tabicon -d 'Set the active tab icon'
 complete -c zetta -n '__zetta_at_root' -a panetheme -d "Non-persistently change the active pane's theme"
+complete -c zetta -n '__zetta_at_root' -a splits -d 'List configured pane split templates'
 complete -c zetta -n '__zetta_at_root' -a overlay -d 'Non-persistently show text over the active pane'
 complete -c zetta -n '__zetta_use_subcommand' -l help -d 'Print help'
 complete -c zetta -n '__zetta_use_subcommand' -l version -d 'Print version'
 complete -c zetta -n '__zetta_use_subcommand' -l config -r -d 'Use a configuration file'
 complete -c zetta -n '__zetta_use_subcommand' -l keymap -r -d 'Use a keymap file'
 complete -c zetta -n '__zetta_use_subcommand' -l profile -r -a '(__zetta_profiles)' -d 'Select a profile'
+complete -c zetta -n '__zetta_use_subcommand' -l split -r -a '(__zetta_pane_splits)' -d 'Apply a configured pane split template'
 complete -c zetta -n '__zetta_use_subcommand' -l theme -r -a '(__zetta_pane_themes)' -d 'Non-persistently override the profile theme'
 complete -c zetta -n '__zetta_use_subcommand' -a '(__zetta_long_options root)'
 complete -c zetta -s c -r -n '__zetta_use_subcommand; and __zetta_short_option -c'
 complete -c zetta -s k -r -n '__zetta_use_subcommand; and __zetta_short_option -k'
 complete -c zetta -s p -r -a '(__zetta_profiles)' -n '__zetta_use_subcommand; and __zetta_short_option -p'
+complete -c zetta -s s -r -a '(__zetta_pane_splits)' -n '__zetta_use_subcommand; and __zetta_short_option -s'
 complete -c zetta -s t -r -a '(__zetta_pane_themes)' -n '__zetta_use_subcommand; and __zetta_short_option -t'
 complete -c zetta -n '__zetta_at_subcommand init' -a 'bash fish powershell pwsh zsh'
 complete -c zetta -n '__fish_seen_subcommand_from init' -l help -d 'Print help'
@@ -318,6 +326,8 @@ complete -c zetta -n '__fish_seen_subcommand_from sessions' -l help -d 'Print he
 complete -c zetta -n '__fish_seen_subcommand_from sessions' -a '(__zetta_long_options sessions)'
 complete -c zetta -n '__fish_seen_subcommand_from sessions; and __fish_seen_subcommand_from reconnect' -a '(__zetta_session_ids)'
 complete -c zetta -n '__fish_seen_subcommand_from sessions; and __fish_seen_subcommand_from reconnect' -l session -r -d 'Session ID to reconnect'
+complete -c zetta -n '__fish_seen_subcommand_from splits' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from splits' -a '(__zetta_long_options splits)'
 complete -c zetta -n '__fish_seen_subcommand_from edit' -l delete-after -d 'Delete a managed buffer after editing'
 complete -c zetta -n '__fish_seen_subcommand_from edit' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from edit' -a '(__zetta_long_options edit)'

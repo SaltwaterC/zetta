@@ -12,6 +12,11 @@ the built-in vi editor, `ztftp`, a shortcut for the built-in TFTP client,
 shortcuts for the clipboard; each has the same completion as its corresponding
 `zetta` command.
 
+The root `--split`/`-s` launch option runs `zetta splits` at completion time,
+so it completes every currently configured layout name without embedding a
+hardcoded list in the integration script. Run `zetta splits` directly to
+print those names, one per line.
+
 If `EDITOR` is not already set, it defaults to `zetta vi`. When no `vi`
 command, alias, function, or other executable is already available, the
 integration adds `vi` as a wrapper for Zetta's built-in editor.
@@ -41,6 +46,11 @@ a Zetta pane to non-persistently change the active pane's theme;
 `zetta panetheme --reset` restores the profile's configured theme. `--theme`
 (or `-t`) also completes pane themes when typed after `--profile` at launch,
 since it non-persistently overrides that profile's theme for the new window.
+
+Pane-split completion works dynamically too: completing the root
+`zetta --split`/`-s` option runs `zetta splits` against the current
+configuration, so newly added or renamed templates are available without
+regenerating the shell integration.
 
 `zetta overlay`'s text (`--text`/`-t`), opacity (`--opacity`/`-o`), and color
 (`--color`/`-c`) flags have no dynamic value list, since they take free-form

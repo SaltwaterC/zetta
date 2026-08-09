@@ -37,6 +37,12 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     assert!(help.contains("Profiles accepted by --profile NAME (case-insensitive):"));
     assert!(help.contains("  System\n  Operations"));
     assert!(help.contains("Select one of the profiles listed above"));
+    assert!(help.contains("-s, --split NAME"));
+    assert!(help.contains("zetta splits"));
+    assert!(
+        help.contains("splits                              List configured pane split templates")
+    );
+    assert!(help.contains("run `zetta splits` to list available names"));
     assert!(help.contains("zetta terminal-size [--json | --resize"));
     assert!(help.contains("zetta tabicon [OPTIONS] ICON"));
     assert!(help.contains("tabicon                             Set the active tab icon"));
@@ -61,6 +67,8 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
             "init                                Configure or generate shell integration"
         )
     );
+    assert!(pane_splits_help().contains("Usage: zetta splits"));
+    assert!(pane_splits_help().contains("--split or -s"));
 
     #[cfg(all(feature = "wayland", linux_like))]
     assert!(help.contains("Wayland backend"));

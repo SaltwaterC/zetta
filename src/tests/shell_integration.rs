@@ -34,6 +34,7 @@ fn supported_shells_generate_completion_and_tftp_shortcut() {
         assert!(script.contains("zetta vi"));
         assert!(script.contains("zetta tabicon --list"));
         assert!(script.contains("zetta panetheme --list"));
+        assert!(script.contains("zetta splits"));
     }
 }
 
@@ -424,6 +425,63 @@ fn profile_and_theme_root_flags_keep_completing_each_other_in_bash() {
         !after_theme.contains(&"--theme"),
         "did not expect --theme repeated after --theme: {after_theme:?}"
     );
+}
+
+#[test]
+fn bash_root_split_completion_handles_long_short_and_combined_launch_options() {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+
+    if !Command::new("bash")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return;
+    }
+
+    let script = ShellIntegration::Bash.script(&profiles());
+    let driver = format!(
+        "zetta() {{\n    if [[ $1 == splits ]]; then\n        printf '%s\\n' custom-layout quarters four-vertical three-left three-right\n    fi\n}}\n{script}\nCOMP_WORDS=(zetta --split '')\nCOMP_CWORD=2\n_zetta_complete\nprintf 'long:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta -s '')\nCOMP_CWORD=2\n_zetta_complete\nprintf 'short:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta --profile System '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'profile:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta --split quarters --profile '')\nCOMP_CWORD=4\n_zetta_complete\nprintf 'combined:%s\\n' \"${{COMPREPLY[@]}}\"\n"
+    );
+    let mut child = Command::new("bash")
+        .args(["--noprofile", "--norc"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(driver.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "Bash completion script failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let completions = String::from_utf8_lossy(&output.stdout);
+    for prefix in ["long:", "short:"] {
+        for name in [
+            "custom-layout",
+            "quarters",
+            "four-vertical",
+            "three-left",
+            "three-right",
+        ] {
+            assert!(
+                completions
+                    .lines()
+                    .any(|line| line == format!("{prefix}{name}")),
+                "expected {name:?} after {prefix}: {completions}"
+            );
+        }
+    }
+    assert!(completions.lines().any(|line| line == "profile:--split"));
+    assert!(completions.lines().any(|line| line == "combined:System"));
 }
 
 #[test]
@@ -893,6 +951,9 @@ fn generated_scripts_include_root_flags_and_configured_profiles() {
         assert!(script.contains("config"));
         assert!(script.contains("WSL: Ubuntu"));
         assert!(script.contains("profile-report"));
+        assert!(script.contains("split"));
+        assert!(script.contains("zetta splits"));
+        assert!(!script.contains("quarters four-vertical three-left three-right"));
     }
 }
 
@@ -908,14 +969,14 @@ fn generated_scripts_only_offer_long_form_flags() {
         let script = shell.script(&profiles);
         match shell {
             ShellIntegration::Bash => assert!(script.contains(
-                "terminal-size sessions edit vi init serial http tftp notify copy paste tabicon panetheme overlay --help --version --config --keymap --profile --theme'"
+                "terminal-size sessions edit vi init serial http tftp notify copy paste splits tabicon panetheme overlay --help --version --config --keymap --profile --split --theme'"
             )),
             ShellIntegration::Fish => {
                 assert!(script.contains("-l profile -r"));
                 assert!(!script.contains("-s p -l profile"));
             }
             ShellIntegration::PowerShell => assert!(script.contains(
-                "'--help', '--version', '--config', '--keymap', '--profile', '--theme'"
+                "'--help', '--version', '--config', '--keymap', '--profile', '--split', '--theme'"
             )),
             ShellIntegration::Zsh => assert!(script
                 .contains("_zetta_options --help --version --config --keymap --profile")),
@@ -946,6 +1007,7 @@ fn fish_script_emits_long_option_candidates_for_every_command_context() {
         "paste",
         "tabicon",
         "panetheme",
+        "splits",
         "overlay",
         "ztftp",
         "zntfy",
@@ -981,9 +1043,32 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
                 "--config",
                 "--keymap",
                 "--profile",
+                "--split",
                 "--theme",
             ][..],
         ),
+        (
+            "zetta --split ",
+            &[
+                "custom-layout",
+                "quarters",
+                "four-vertical",
+                "three-left",
+                "three-right",
+            ][..],
+        ),
+        (
+            "zetta -s ",
+            &[
+                "custom-layout",
+                "quarters",
+                "four-vertical",
+                "three-left",
+                "three-right",
+            ][..],
+        ),
+        ("zetta --profile System ", &["--split"][..]),
+        ("zetta --split quarters --profile ", &["System"][..]),
         (
             "zetta benchmark ",
             &[
@@ -1008,6 +1093,7 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
             &["--json", "--resize", "--columns", "--rows", "--help"][..],
         ),
         ("zetta sessions ", &["--json", "--help"][..]),
+        ("zetta splits ", &["--help"][..]),
         ("zetta tabicon ", &["--icon", "--list", "--help"][..]),
         ("zetta tabicon -i ", &[][..]),
         (
@@ -1087,7 +1173,7 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
             .args([
                 "--no-config",
                 "-c",
-                "source $argv[1]; complete -C \"$argv[2]\"",
+                "function zetta; if test \"$argv[1]\" = splits; printf '%s\\n' custom-layout quarters four-vertical three-left three-right; end; end; source $argv[1]; complete -C \"$argv[2]\"",
                 "--",
                 script_file.path().to_str().unwrap(),
                 line,

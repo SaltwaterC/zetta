@@ -34,7 +34,10 @@ mod wsl;
 pub(crate) use arg_parsing::{
     StartupArgs, StartupMode, load_startup_config, native_terminal_environment, parse_args,
 };
-use arg_parsing::{select_launch_profile, should_handoff_to_existing_process};
+use arg_parsing::{
+    configured_split_names, select_launch_profile, should_handoff_to_existing_process,
+    validate_launch_split,
+};
 #[cfg(not(feature = "tftp-client"))]
 pub(crate) use cli_help::{TftpCommand, parse_tftp_args, tftp_help};
 pub(crate) use keybindings::{
@@ -206,6 +209,7 @@ pub(crate) fn open_zetta_window(
     configuration_error: Option<String>,
     initial_profile: Option<Profile>,
     launch_theme_override: Option<(String, String)>,
+    launch_split: Option<String>,
     enable_performance_overlay: bool,
     performance_report: Option<(PerformanceReportOptions, PerformanceReportStatus)>,
     profile_pane_stress: bool,
@@ -226,6 +230,11 @@ pub(crate) fn open_zetta_window(
         });
         track_zetta_window(&zetta, window, cx);
         prepare_background_tabs_before_window_close(&zetta, window, cx);
+        if let Some(name) = launch_split {
+            zetta.update(cx, |zetta, cx| {
+                zetta.apply_pane_split_template(&ApplyPaneSplitTemplate { name }, window, cx)
+            });
+        }
         if profile_pane_stress {
             zetta.update(cx, |zetta, cx| {
                 zetta.configure_pane_profile_stress(window, cx)
@@ -419,6 +428,7 @@ pub(crate) fn open_dormant_or_new_window(cx: &mut App) -> Result<()> {
         open_zetta_window(
             config,
             configuration_error,
+            None,
             None,
             None,
             false,
@@ -716,6 +726,13 @@ pub(crate) fn run() -> Result<()> {
         }
         return Ok(());
     }
+    if args.mode == StartupMode::ListPaneSplits {
+        let (config, _) = load_startup_config(None, None);
+        for name in configured_split_names(&config) {
+            println!("{name}");
+        }
+        return Ok(());
+    }
     if let StartupMode::SetPaneOverlay(request) = args.mode {
         anyhow::ensure!(
             request_existing_process_pane_overlay(request)?,
@@ -779,6 +796,7 @@ pub(crate) fn run() -> Result<()> {
     } else {
         load_startup_config(args.config_path.as_deref(), args.keymap_path)
     };
+    validate_launch_split(&config, args.split.as_deref())?;
     let initial_profile = select_launch_profile(&config, args.profile.as_deref())?;
     // Keyed by profile name (case-insensitive) rather than baked into
     // `initial_profile.theme`, so every tab opened with this profile for the
@@ -1096,6 +1114,7 @@ pub(crate) fn run() -> Result<()> {
                 configuration_error,
                 initial_profile,
                 launch_theme_override,
+                args.split,
                 profiling,
                 report_options.map(|options| (options, report_status_for_app)),
                 args.profile_pane_stress,
