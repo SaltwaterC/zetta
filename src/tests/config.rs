@@ -353,6 +353,25 @@ fn pane_split_templates_include_built_ins_and_custom_layouts() {
         }) && matches!(second.as_ref(), PaneSplitTemplate::Pane)
     ));
     assert_eq!(config.pane_split_templates["quarters"].pane_count(), 4);
+    let four_vertical = &config.pane_split_templates["four-vertical"];
+    assert_eq!(four_vertical.pane_count(), 4);
+
+    fn assert_all_splits_are_vertical(template: &PaneSplitTemplate) {
+        match template {
+            PaneSplitTemplate::Pane => {}
+            PaneSplitTemplate::Split {
+                axis,
+                first,
+                second,
+            } => {
+                assert_eq!(*axis, PaneSplitAxis::Vertical);
+                assert_all_splits_are_vertical(first);
+                assert_all_splits_are_vertical(second);
+            }
+        }
+    }
+
+    assert_all_splits_are_vertical(four_vertical);
     assert_eq!(config.pane_split_templates["custom"].pane_count(), 3);
     assert!(matches!(
         config.pane_split_templates["custom"],

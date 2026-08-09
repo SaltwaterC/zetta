@@ -483,6 +483,22 @@ fn default_pane_split_templates() -> HashMap<String, PaneSplitTemplate> {
                 }),
             },
         ),
+        (
+            "four-vertical".to_owned(),
+            PaneSplitTemplate::Split {
+                axis: PaneSplitAxis::Vertical,
+                first: Box::new(PaneSplitTemplate::Split {
+                    axis: PaneSplitAxis::Vertical,
+                    first: pane(),
+                    second: pane(),
+                }),
+                second: Box::new(PaneSplitTemplate::Split {
+                    axis: PaneSplitAxis::Vertical,
+                    first: pane(),
+                    second: pane(),
+                }),
+            },
+        ),
     ])
 }
 

@@ -410,6 +410,58 @@ fn configured_template_layout_is_built_through_a_borrow() {
 }
 
 #[test]
+fn four_vertical_template_materializes_left_to_right_equal_columns() {
+    let template = PaneSplitTemplate::Split {
+        axis: PaneSplitAxis::Vertical,
+        first: Box::new(PaneSplitTemplate::Split {
+            axis: PaneSplitAxis::Vertical,
+            first: Box::new(PaneSplitTemplate::Pane),
+            second: Box::new(PaneSplitTemplate::Pane),
+        }),
+        second: Box::new(PaneSplitTemplate::Split {
+            axis: PaneSplitAxis::Vertical,
+            first: Box::new(PaneSplitTemplate::Pane),
+            second: Box::new(PaneSplitTemplate::Pane),
+        }),
+    };
+    let layout = PaneLayout::from_template(&template, &mut [1, 2, 3, 4].into_iter());
+
+    assert_eq!(
+        layout.regions(),
+        vec![
+            PaneRegion {
+                id: 1,
+                left: 0.,
+                right: 0.25,
+                top: 0.,
+                bottom: 1.,
+            },
+            PaneRegion {
+                id: 2,
+                left: 0.25,
+                right: 0.5,
+                top: 0.,
+                bottom: 1.,
+            },
+            PaneRegion {
+                id: 3,
+                left: 0.5,
+                right: 0.75,
+                top: 0.,
+                bottom: 1.,
+            },
+            PaneRegion {
+                id: 4,
+                left: 0.75,
+                right: 1.,
+                top: 0.,
+                bottom: 1.,
+            },
+        ]
+    );
+}
+
+#[test]
 fn tab_pane_index_resolves_panes_without_scanning() {
     let profile = Profile {
         name: "System".to_owned(),

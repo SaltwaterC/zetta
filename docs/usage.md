@@ -215,6 +215,7 @@ pane with a reusable layout. Built-in templates are:
 - `three-right`: one pane on the left, two stacked on the right
 - `three-left`: two stacked on the left, one pane on the right
 - `quarters`: a 2-by-2 grid
+- `four-vertical`: four equal-width columns
 
 Each is available by name in the command palette. Add bindings like these to
 `keymap.json` for direct access. On macOS, replace `alt` with `cmd` in these
