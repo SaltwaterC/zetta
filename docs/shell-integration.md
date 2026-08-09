@@ -52,11 +52,13 @@ Pane-split completion works dynamically too: completing the root
 configuration, so newly added or renamed templates are available without
 regenerating the shell integration.
 
-`zetta overlay`'s text (`--text`/`-t`), opacity (`--opacity`/`-o`), and color
-(`--color`/`-c`) flags have no dynamic value list, since they take free-form
-values rather than a name from a fixed set. Its size flag (`--size`/`-s`) is
-a fixed, compile-time set of names (`sm`, `base`, `lg`, `xl`, `2xl`, `3xl`),
-so the generated script completes those directly. Use `zetta overlay TEXT`
+`zetta overlay`'s text (`--text`/`-t`) and opacity (`--opacity`/`-o`) flags
+take free-form values. Its color flag (`--color`/`-c`) completes the fixed
+named presets `black`, `white`, `gray`, `red`, `orange`, `yellow`, `green`,
+`cyan`, `blue`, `purple`, `magenta`, and `pink`; hex values remain accepted
+when typed manually. Its size flag (`--size`/`-s`) is a fixed, compile-time set
+of names (`sm`, `base`, `lg`, `xl`, `2xl`, `3xl`), so the generated script
+completes those directly. Use `zetta overlay TEXT`
 (or `zetta overlay --text TEXT`) from a Zetta pane to non-persistently show
 text over the active pane's terminal content, and add `--size`, `--opacity`,
 or `--color` to customize its font size, transparency, or text color;

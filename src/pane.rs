@@ -227,6 +227,13 @@ impl OverlayStylePicker {
         self.refresh_hex();
     }
 
+    /// Replaces the selected colour with a fixed named preset and refreshes
+    /// both the HSV state and the hex buffer.
+    pub(crate) fn set_color_preset(&mut self, preset: OverlayColorPreset) {
+        let (hue, saturation, value) = overlay_picker_hsv_from_hsla(preset.color());
+        self.set_color(hue, saturation, value);
+    }
+
     /// Rotates the selected colour's hue by `delta` turns.
     pub(crate) fn adjust_hue(&mut self, delta: f32) {
         self.set_color(self.hue + delta, self.saturation, self.value);
@@ -327,8 +334,93 @@ pub(crate) fn hsv_to_hsla(hue: f32, saturation: f32, value: f32) -> gpui::Hsla {
     )
 }
 
-/// Parses a `#rrggbb` colour string into an opaque [`gpui::Hsla`]. The
-/// leading `#` is optional.
+/// A fixed, named overlay-colour preset shared by the CLI, process control,
+/// picker, and shell completions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OverlayColorPreset {
+    pub(crate) name: &'static str,
+    pub(crate) hex: &'static str,
+}
+
+/// The standard named colours accepted by `zetta overlay --color` and shown
+/// in the overlay-style picker. Keep this catalogue ordered for both the
+/// picker layout and shell completion output.
+pub(crate) const OVERLAY_COLOR_PRESETS: [OverlayColorPreset; 12] = [
+    OverlayColorPreset {
+        name: "black",
+        hex: "#000000",
+    },
+    OverlayColorPreset {
+        name: "white",
+        hex: "#ffffff",
+    },
+    OverlayColorPreset {
+        name: "gray",
+        hex: "#808080",
+    },
+    OverlayColorPreset {
+        name: "red",
+        hex: "#ff0000",
+    },
+    OverlayColorPreset {
+        name: "orange",
+        hex: "#ffa500",
+    },
+    OverlayColorPreset {
+        name: "yellow",
+        hex: "#ffff00",
+    },
+    OverlayColorPreset {
+        name: "green",
+        hex: "#008000",
+    },
+    OverlayColorPreset {
+        name: "cyan",
+        hex: "#00ffff",
+    },
+    OverlayColorPreset {
+        name: "blue",
+        hex: "#0000ff",
+    },
+    OverlayColorPreset {
+        name: "purple",
+        hex: "#800080",
+    },
+    OverlayColorPreset {
+        name: "magenta",
+        hex: "#ff00ff",
+    },
+    OverlayColorPreset {
+        name: "pink",
+        hex: "#ffc0cb",
+    },
+];
+
+impl OverlayColorPreset {
+    /// Returns the preset as an opaque GPUI colour.
+    pub(crate) fn color(self) -> gpui::Hsla {
+        overlay_color_from_hex(self.hex).expect("overlay colour presets must be valid hex")
+    }
+}
+
+/// Parses an overlay colour name or hex string into a GPUI colour. Named
+/// presets are matched case-insensitively after surrounding whitespace is
+/// removed; all existing GPUI hex formats, including alpha forms, remain
+/// accepted as the fallback.
+pub(crate) fn overlay_color_from_value(value: &str) -> Option<gpui::Hsla> {
+    let trimmed = value.trim();
+    if let Some(preset) = OVERLAY_COLOR_PRESETS
+        .iter()
+        .find(|preset| preset.name.eq_ignore_ascii_case(trimmed))
+    {
+        return Some(preset.color());
+    }
+    overlay_color_from_hex(trimmed)
+}
+
+/// Parses a hex colour string into a GPUI colour. The leading `#` is
+/// optional, and the underlying parser accepts `#rgb`, `#rgba`, `#rrggbb`,
+/// and `#rrggbbaa` forms.
 pub(crate) fn overlay_color_from_hex(value: &str) -> Option<gpui::Hsla> {
     let rgba = gpui::Rgba::try_from(normalize_overlay_color_hex(value).as_str()).ok()?;
     Some(rgba.into())
@@ -364,7 +456,7 @@ pub(crate) fn overlay_color_to_hex(hsla: gpui::Hsla) -> String {
 }
 
 /// Raw `zetta overlay` request values, before `color` is resolved from its
-/// hex string into a color and `opacity` from a 0-100 percentage into a
+/// named-or-hex value into a color and `opacity` from a 0-100 percentage into a
 /// 0.0-1.0 fraction. Shared by the CLI parser and the process-control client
 /// so neither has to thread four separate parameters around.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -373,8 +465,8 @@ pub(crate) struct PaneOverlayRequest {
     pub(crate) font_size: Option<OverlayFontSize>,
     /// A percentage from `0` to `100`.
     pub(crate) opacity: Option<u8>,
-    /// An `rgb`, `rgba`, `rrggbb`, or `rrggbbaa` hex color, with or without
-    /// a leading `#`.
+    /// A named preset or an `rgb`, `rgba`, `rrggbb`, or `rrggbbaa` hex color,
+    /// with or without a leading `#`.
     pub(crate) color: Option<String>,
 }
 

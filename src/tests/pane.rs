@@ -1319,6 +1319,62 @@ fn overlay_style_picker_percent_snaps_to_five_percent_steps() {
 }
 
 #[test]
+fn overlay_color_presets_parse_to_their_canonical_opaque_values() {
+    let expected = [
+        ("black", "#000000"),
+        ("white", "#ffffff"),
+        ("gray", "#808080"),
+        ("red", "#ff0000"),
+        ("orange", "#ffa500"),
+        ("yellow", "#ffff00"),
+        ("green", "#008000"),
+        ("cyan", "#00ffff"),
+        ("blue", "#0000ff"),
+        ("purple", "#800080"),
+        ("magenta", "#ff00ff"),
+        ("pink", "#ffc0cb"),
+    ];
+
+    assert_eq!(OVERLAY_COLOR_PRESETS.len(), expected.len());
+    for (preset, (name, hex)) in OVERLAY_COLOR_PRESETS.iter().zip(expected) {
+        assert_eq!((preset.name, preset.hex), (name, hex));
+        let color = overlay_color_from_value(preset.name).expect("preset should parse");
+        assert_eq!(overlay_color_to_hex(color), hex);
+        assert!((color.a - 1.).abs() < f32::EPSILON);
+    }
+
+    assert_eq!(
+        overlay_color_to_hex(overlay_color_from_value("  ReD  ").unwrap()),
+        "#ff0000"
+    );
+    assert_eq!(
+        overlay_color_to_hex(overlay_color_from_value("YELLOW").unwrap()),
+        "#ffff00"
+    );
+}
+
+#[test]
+fn overlay_color_value_parser_preserves_hex_forms_and_rejects_invalid_values() {
+    for (value, expected_hex, expected_alpha) in [
+        ("f0a", "#ff00aa", 1.),
+        ("#f0a8", "#ff00aa", 136. / 255.),
+        ("112233", "#112233", 1.),
+        ("#11223344", "#112233", 68. / 255.),
+    ] {
+        let color = overlay_color_from_value(value).expect("hex colour should parse");
+        assert_eq!(overlay_color_to_hex(color), expected_hex);
+        assert!((color.a - expected_alpha).abs() < 1e-6);
+    }
+
+    for value in ["", "grey", "not-a-color", "#12", "#ggg", "#12345"] {
+        assert!(
+            overlay_color_from_value(value).is_none(),
+            "expected {value:?} to be rejected"
+        );
+    }
+}
+
+#[test]
 fn overlay_style_picker_round_trips_hsl_to_hsv() {
     for hsla in [
         gpui::hsla(0., 1., 0.5, 1.),   // red
@@ -1367,6 +1423,43 @@ fn overlay_style_picker_hex_field_colors_the_selection() {
     let color = picker.color();
     assert!(color.h.abs() < 1e-3 || (color.h - 1.).abs() < 1e-3);
     assert!(color.s > 0.99);
+}
+
+#[test]
+fn overlay_style_picker_preset_selection_keeps_hsv_and_hex_editing_live() {
+    let mut picker = OverlayStylePicker {
+        pane_id: 2,
+        section: OverlayPickerSection::Color,
+        font_size: OverlayFontSize::DEFAULT,
+        original_font_size: None,
+        hue: 0.,
+        saturation: 0.,
+        value: 1.,
+        original_color: None,
+        opacity_percent: 85,
+        original_opacity: None,
+        hex_buffer: String::new(),
+    };
+
+    let orange = OVERLAY_COLOR_PRESETS
+        .iter()
+        .find(|preset| preset.name == "orange")
+        .copied()
+        .unwrap();
+    picker.set_color_preset(orange);
+    assert_eq!(picker.hex_buffer, orange.hex);
+    assert_eq!(overlay_color_to_hex(picker.color()), orange.hex);
+
+    picker.adjust_value(-0.2);
+    assert!(picker.value < 1.);
+    assert_ne!(picker.hex_buffer, orange.hex);
+
+    picker.hex_buffer = "#".to_owned();
+    for digit in ['0', '0', '8', '0', '0', '0'] {
+        picker.hex_input(digit);
+    }
+    assert_eq!(picker.hex_buffer, "#008000");
+    assert_eq!(overlay_color_to_hex(picker.color()), "#008000");
 }
 
 #[test]

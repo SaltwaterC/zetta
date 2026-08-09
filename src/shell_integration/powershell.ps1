@@ -27,6 +27,7 @@ if (-not $IsMacOS) {
 }
 
 $zettaProfiles = @(ZETTA_PROFILES)
+$zettaOverlayColors = @(ZETTA_OVERLAY_COLORS)
 $zettaTabIcons = { @(& zetta tabicon --list 2>$null) }
 $zettaPaneThemes = { @(& zetta panetheme --list 2>$null) }
 $zettaSplits = { @(& zetta splits 2>$null) }
@@ -119,8 +120,8 @@ $zettaCompletions = {
         'txt', 'rtf', 'ps'
     } elseif ($previous -in '--opacity', '-o') {
         @()
-    } elseif ($previous -eq '--color') {
-        @()
+    } elseif ($previous -in '--color', '-c') {
+        if ($subcommand -eq 'overlay') { $zettaOverlayColors } else { @() }
     } elseif ($commandName -in 'vi', 'zvi' -or $subcommand -in 'edit', 'vi') {
         if ($wordToComplete -like '-*') {
             '--help'

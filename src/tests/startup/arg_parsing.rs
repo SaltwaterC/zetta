@@ -249,6 +249,28 @@ fn overlay_subcommand_parses_style_options_and_rejects_invalid_values() {
 }
 
 #[test]
+fn overlay_subcommand_accepts_named_colours_case_insensitively() {
+    let mode = parse_args_from([
+        OsString::from("overlay"),
+        OsString::from("Prod"),
+        OsString::from("--color"),
+        OsString::from("  ReD  "),
+    ])
+    .unwrap()
+    .mode;
+
+    assert_eq!(
+        mode,
+        StartupMode::SetPaneOverlay(PaneOverlayRequest {
+            text: Some("Prod".to_owned()),
+            font_size: None,
+            opacity: None,
+            color: Some("  ReD  ".to_owned()),
+        })
+    );
+}
+
+#[test]
 fn vi_subcommand_bypasses_application_startup_and_preserves_arguments() {
     let args = parse_args_from([
         OsString::from("vi"),

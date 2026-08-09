@@ -148,6 +148,7 @@ Color, Opacity). Each section has its own controls:
 - `Home` / `End` — Jump to smallest/largest size
 
 **Color:**
+- Click a labelled preset swatch to choose a standard named colour
 - `←` / `→` — Adjust saturation
 - `↑` / `↓` — Adjust brightness
 - `Shift-←` / `Shift-→` — Adjust hue
@@ -169,7 +170,10 @@ The same change is available from any Zetta pane, or a script, with
 `--size SIZE` (`sm`, `base`, `lg`, `xl` (default), `2xl`, or `3xl`),
 `--opacity PERCENT` (`0`-`100`, default `85`), and `--color COLOR` (an
 `rgb`, `rgba`, `rrggbb`, or `rrggbbaa` hex value, with or without a leading
-`#`) to customize the font size, transparency, and text color. The leading
+`#`, or one of the named presets `black`, `white`, `gray`, `red`, `orange`,
+`yellow`, `green`, `cyan`, `blue`, `purple`, `magenta`, and `pink`) to
+customize the font size, transparency, and text color. Named colours are
+case-insensitive and ignore surrounding whitespace; the leading
 `#` is optional and can be omitted, since most shells treat it as a comment
 and would otherwise require quoting it. These apply together with the text in
 the same invocation; running `zetta overlay` again fully replaces the

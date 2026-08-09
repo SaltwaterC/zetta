@@ -117,6 +117,56 @@ fn bash_does_not_repeat_options_and_completes_vi_files() {
 }
 
 #[test]
+fn bash_color_completion_offers_named_presets_for_long_and_short_flags() {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+
+    if !Command::new("bash")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return;
+    }
+
+    let script = ShellIntegration::Bash.script(&profiles());
+    let driver = format!(
+        "{script}\nCOMP_WORDS=(zetta overlay --color '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'long:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta overlay -c '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'short:%s\\n' \"${{COMPREPLY[@]}}\"\n"
+    );
+    let mut child = Command::new("bash")
+        .args(["--noprofile", "--norc"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(driver.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "Bash completion script failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let completions = String::from_utf8_lossy(&output.stdout);
+    for prefix in ["long:", "short:"] {
+        for preset in OVERLAY_COLOR_PRESETS {
+            assert!(
+                completions
+                    .lines()
+                    .any(|line| line == format!("{prefix}{}", preset.name)),
+                "expected {} after {prefix}: {completions}",
+                preset.name
+            );
+        }
+    }
+}
+
+#[test]
 fn supported_shells_generate_notify_completion_and_zntfy_shortcut() {
     let profiles = profiles();
     for shell in [
@@ -958,6 +1008,27 @@ fn generated_scripts_include_root_flags_and_configured_profiles() {
 }
 
 #[test]
+fn generated_scripts_offer_the_shared_overlay_colour_catalogue() {
+    let profiles = profiles();
+    for shell in [
+        ShellIntegration::Bash,
+        ShellIntegration::Fish,
+        ShellIntegration::PowerShell,
+        ShellIntegration::Zsh,
+    ] {
+        let script = shell.script(&profiles);
+        assert!(!script.contains("ZETTA_OVERLAY_COLORS"));
+        for preset in OVERLAY_COLOR_PRESETS {
+            assert!(
+                script.contains(preset.name),
+                "{shell:?} script omitted {}",
+                preset.name
+            );
+        }
+    }
+}
+
+#[test]
 fn generated_scripts_only_offer_long_form_flags() {
     let profiles = profiles();
     for shell in [
@@ -1034,6 +1105,10 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
     let script = ShellIntegration::Fish.script(&profiles());
     let script_file = tempfile::NamedTempFile::new().unwrap();
     fs::write(script_file.path(), script).unwrap();
+    let overlay_color_names = OVERLAY_COLOR_PRESETS
+        .iter()
+        .map(|preset| preset.name)
+        .collect::<Vec<_>>();
     for (line, expected) in [
         (
             "zetta ",
@@ -1118,7 +1193,8 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
             &["sm", "base", "lg", "xl", "2xl", "3xl"][..],
         ),
         ("zetta overlay -o ", &[][..]),
-        ("zetta overlay -c ", &[][..]),
+        ("zetta overlay --color ", overlay_color_names.as_slice()),
+        ("zetta overlay -c ", overlay_color_names.as_slice()),
         ("zetta vi ", &["--help", "Cargo.toml"][..]),
         ("zetta vi Carg", &["Cargo.toml"][..]),
         ("zetta init ", &["--help"][..]),

@@ -242,6 +242,24 @@ impl Zetta {
         self.preview_overlay_style(cx);
     }
 
+    /// Selects a fixed named overlay colour and previews it on the affected
+    /// pane; does not commit the picker.
+    pub(crate) fn set_overlay_color_preset(
+        &mut self,
+        preset: OverlayColorPreset,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(picker) = self
+            .tabs
+            .get_mut(self.active_tab)
+            .and_then(|tab| tab.overlay_style_picker.as_mut())
+        else {
+            return;
+        };
+        picker.set_color_preset(preset);
+        self.preview_overlay_style(cx);
+    }
+
     /// Rotates the overlay colour's hue by `delta` turns.
     pub(crate) fn adjust_overlay_hue(&mut self, delta: f32, cx: &mut Context<Self>) {
         let Some(picker) = self

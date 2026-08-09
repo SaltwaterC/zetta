@@ -202,7 +202,9 @@ _zetta_complete() {
             return
             ;;
         -c)
-            if [[ $command == terminal-size || $command == overlay ]]; then
+            if [[ $command == overlay ]]; then
+                _zetta_compgen 'ZETTA_OVERLAY_COLORS'
+            elif [[ $command == terminal-size ]]; then
                 COMPREPLY=()
             else
                 COMPREPLY=( $(compgen -f -- "$current") )
@@ -210,7 +212,11 @@ _zetta_complete() {
             return
             ;;
         --color)
-            COMPREPLY=()
+            if [[ $command == overlay ]]; then
+                _zetta_compgen 'ZETTA_OVERLAY_COLORS'
+            else
+                COMPREPLY=()
+            fi
             return
             ;;
         -r)

@@ -62,7 +62,9 @@ From a Zetta pane, `zetta tabicon ICON` changes the active tab icon, and
 (`zetta panetheme --reset` restores the profile's configured theme).
 `zetta overlay TEXT` non-persistently shows text over the active pane's
 terminal content, with `--size`, `--opacity`, and `--color` options
-(`zetta overlay --reset` clears it).
+(`--color` accepts the named presets `black`, `white`, `gray`, `red`,
+`orange`, `yellow`, `green`, `cyan`, `blue`, `purple`, `magenta`, and `pink`,
+as well as the existing hex formats; `zetta overlay --reset` clears it).
 Shell integration completes the current serial-device, tab-icon, and
 pane-theme lists dynamically. See [Serial and network tools](docs/tools.md)
 for flags and safety notes.

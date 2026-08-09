@@ -233,13 +233,19 @@ _zetta() {
             return
             ;;
         -c)
-            if [[ $words[2] == terminal-size || $words[2] == overlay ]]; then
+            if [[ $words[2] == overlay ]]; then
+                compadd -- ZETTA_OVERLAY_COLORS
+                return
+            elif [[ $words[2] == terminal-size ]]; then
                 return
             fi
             _files
             return
             ;;
         --color)
+            if [[ $words[2] == overlay ]]; then
+                compadd -- ZETTA_OVERLAY_COLORS
+            fi
             return
             ;;
         -r)

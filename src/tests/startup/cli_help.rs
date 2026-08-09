@@ -133,6 +133,16 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     }
 }
 
+#[test]
+fn overlay_help_lists_named_colours() {
+    let help = overlay_help();
+    for preset in OVERLAY_COLOR_PRESETS {
+        assert!(help.contains(preset.name));
+    }
+    assert!(help.contains("named preset"));
+    assert!(help.contains("rrggbbaa"));
+}
+
 #[cfg(feature = "tftp-client")]
 #[test]
 fn tftp_subcommand_is_parsed_without_starting_the_application() {

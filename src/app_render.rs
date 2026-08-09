@@ -296,6 +296,9 @@ impl Zetta {
         let hue = picker.hue;
         let saturation = picker.saturation;
         let value = picker.value;
+        let selected_preset_index = OVERLAY_COLOR_PRESETS
+            .iter()
+            .position(|preset| preset.hex.eq_ignore_ascii_case(&hex));
         let section_boxed = |element: gpui::Div, active: bool, section: OverlayPickerSection| {
             let section_handle = handle.clone();
             element
@@ -383,6 +386,61 @@ impl Zetta {
                                     .ok();
                             })
                     }))
+            })
+            .collect::<Vec<_>>();
+
+        let preset_rows = OVERLAY_COLOR_PRESETS
+            .chunks(6)
+            .enumerate()
+            .map(|(row_index, presets)| {
+                let row_handle = handle.clone();
+                h_flex()
+                    .w_full()
+                    .gap_1()
+                    .children(
+                        presets
+                            .iter()
+                            .enumerate()
+                            .map(move |(column_index, preset)| {
+                                let preset = *preset;
+                                let preset_index = row_index * 6 + column_index;
+                                let selected = selected_preset_index == Some(preset_index);
+                                let preset_handle = row_handle.clone();
+                                div()
+                                    .id(("overlay-color-preset", preset_index))
+                                    .h(px(26.))
+                                    .flex_1()
+                                    .min_w_0()
+                                    .px_1()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .rounded(px(4.))
+                                    .cursor_pointer()
+                                    .when(selected, |swatch| swatch.bg(colors.element_selected))
+                                    .hover(|swatch| swatch.bg(colors.element_hover))
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .size(px(12.))
+                                            .rounded_full()
+                                            .border_1()
+                                            .border_color(colors.border)
+                                            .bg(preset.color()),
+                                    )
+                                    .child(
+                                        Label::new(preset.name).size(LabelSize::XSmall).truncate(),
+                                    )
+                                    .tooltip(Tooltip::text(preset.name))
+                                    .on_click(move |_, _, cx| {
+                                        preset_handle
+                                            .update(cx, |this, cx| {
+                                                this.set_overlay_color_preset(preset, cx);
+                                            })
+                                            .ok();
+                                    })
+                            }),
+                    )
             })
             .collect::<Vec<_>>();
 
@@ -634,6 +692,7 @@ impl Zetta {
                                                     ),
                                             ),
                                     )
+                                    .child(v_flex().gap_1().children(preset_rows))
                                     .child(
                                         div()
                                             .relative()

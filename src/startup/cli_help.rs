@@ -265,8 +265,15 @@ pub(crate) fn parse_pane_theme_args(args: &[OsString]) -> Result<StartupMode> {
     })
 }
 
-pub(crate) fn overlay_help() -> &'static str {
-    "Non-persistently show text over the active pane's terminal content through the running Zetta process\n\nUsage: zetta overlay [OPTIONS] TEXT\n       zetta overlay --reset\n\nTEXT is free-form text, shown over the top-right corner of the active pane. The change is never written to the configuration file: it is lost when the pane closes or the configuration reloads.\n\nOptions:\n  -t, --text TEXT        Set the overlay text by option instead of as a positional argument\n  -s, --size SIZE        Set the font size: sm, base, lg, xl (default), 2xl, or 3xl\n  -o, --opacity PERCENT  Set the opacity as a percentage from 0 to 100 (default: 85)\n  -c, --color COLOR      Set the text color as an rgb, rgba, rrggbb, or rrggbbaa hex value (no leading #)\n  -r, --reset            Clear the active pane's overlay\n  -h, --help             Print help"
+pub(crate) fn overlay_help() -> String {
+    let preset_names = OVERLAY_COLOR_PRESETS
+        .iter()
+        .map(|preset| preset.name)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Non-persistently show text over the active pane's terminal content through the running Zetta process\n\nUsage: zetta overlay [OPTIONS] TEXT\n       zetta overlay --reset\n\nTEXT is free-form text, shown over the top-right corner of the active pane. The change is never written to the configuration file: it is lost when the pane closes or the configuration reloads.\n\nOptions:\n  -t, --text TEXT        Set the overlay text by option instead of as a positional argument\n  -s, --size SIZE        Set the font size: sm, base, lg, xl (default), 2xl, or 3xl\n  -o, --opacity PERCENT  Set the opacity as a percentage from 0 to 100 (default: 85)\n  -c, --color COLOR      Set the text color as a named preset ({preset_names}) or an rgb, rgba, rrggbb, or rrggbbaa hex value (no leading #)\n  -r, --reset            Clear the active pane's overlay\n  -h, --help             Print help"
+    )
 }
 
 pub(crate) fn parse_overlay_args(args: &[OsString]) -> Result<StartupMode> {
@@ -327,11 +334,13 @@ pub(crate) fn parse_overlay_args(args: &[OsString]) -> Result<StartupMode> {
                 anyhow::ensure!(color.is_none(), "--color may only be specified once");
                 let value = arguments
                     .next()
-                    .context("--color requires a hex color")?
+                    .context("--color requires a color name or hex color")?
                     .to_string_lossy()
                     .into_owned();
-                gpui::Rgba::try_from(normalize_overlay_color_hex(&value).as_str())
-                    .with_context(|| format!("invalid overlay color {value:?}"))?;
+                anyhow::ensure!(
+                    overlay_color_from_value(&value).is_some(),
+                    "invalid overlay color {value:?}"
+                );
                 color = Some(value);
             }
             value if value.starts_with('-') => {

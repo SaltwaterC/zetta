@@ -19,12 +19,12 @@ use uds_windows::{UnixListener, UnixStream};
 
 use anyhow::{Context as _, Result};
 use futures::channel::mpsc::UnboundedSender;
-use gpui::{Hsla, Rgba};
+use gpui::Hsla;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use ui::IconName;
 
-use crate::pane::{OverlayFontSize, PaneOverlayRequest, normalize_overlay_color_hex};
+use crate::pane::{OverlayFontSize, PaneOverlayRequest, overlay_color_from_value};
 
 const CONTROL_VERSION: u32 = 3;
 const MAX_CONTROL_MESSAGE_BYTES: usize = 4096;
@@ -250,11 +250,7 @@ impl ProcessControlServer {
                             color,
                         }) => {
                             let (completion, completed) = channel();
-                            let color = color
-                                .and_then(|hex| {
-                                    Rgba::try_from(normalize_overlay_color_hex(&hex).as_str()).ok()
-                                })
-                                .map(Hsla::from);
+                            let color = color.and_then(|value| overlay_color_from_value(&value));
                             let accepted = commands
                                 .unbounded_send(ProcessControlCommand::SetPaneOverlay {
                                     text,
@@ -451,8 +447,8 @@ fn decode_control_request(
                 Some(name) => Some(OverlayFontSize::parse(&name)?),
                 None => None,
             };
-            if let Some(hex) = request.pane_overlay_color.as_deref() {
-                Rgba::try_from(normalize_overlay_color_hex(hex).as_str()).ok()?;
+            if let Some(value) = request.pane_overlay_color.as_deref() {
+                overlay_color_from_value(value)?;
             }
             Some(ControlRequestCommand::SetPaneOverlay {
                 text: request.pane_overlay.take(),

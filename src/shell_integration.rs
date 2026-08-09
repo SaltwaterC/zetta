@@ -34,7 +34,9 @@ impl ShellIntegration {
             Self::PowerShell => POWERSHELL_INTEGRATION,
             Self::Zsh => ZSH_INTEGRATION,
         };
-        template.replace("ZETTA_PROFILES", &render_profiles(self, profiles))
+        template
+            .replace("ZETTA_PROFILES", &render_profiles(self, profiles))
+            .replace("ZETTA_OVERLAY_COLORS", &render_overlay_color_names(self))
     }
 
     fn startup_file(self, home: &Path) -> PathBuf {
@@ -440,6 +442,24 @@ fn render_profiles(shell: ShellIntegration, profiles: &[Profile]) -> String {
                 shell_single_quote(&profile.name)
             }
             ShellIntegration::PowerShell => format!("'{}'", profile.name.replace('\'', "''")),
+        })
+        .collect::<Vec<_>>()
+        .join(separator)
+}
+
+fn render_overlay_color_names(shell: ShellIntegration) -> String {
+    let separator = if shell == ShellIntegration::PowerShell {
+        ", "
+    } else {
+        " "
+    };
+    OVERLAY_COLOR_PRESETS
+        .iter()
+        .map(|preset| match shell {
+            ShellIntegration::PowerShell => format!("'{}'", preset.name),
+            ShellIntegration::Bash | ShellIntegration::Fish | ShellIntegration::Zsh => {
+                preset.name.to_owned()
+            }
         })
         .collect::<Vec<_>>()
         .join(separator)

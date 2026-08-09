@@ -1,4 +1,5 @@
 use super::*;
+use crate::pane::overlay_color_to_hex;
 use futures::StreamExt as _;
 
 fn request(token: &str, command: &str) -> ControlRequest {
@@ -136,6 +137,18 @@ fn pane_overlay_control_requests_decode_style_and_reject_invalid_values() {
     prefixed_color_request.pane_overlay_color = Some("#ff8800".to_owned());
     assert!(decode_control_request(&mut prefixed_color_request, "token").is_some());
 
+    let mut named_color_request = request("token", "set_overlay");
+    named_color_request.pane_overlay_color = Some("  ReD  ".to_owned());
+    assert_eq!(
+        decode_control_request(&mut named_color_request, "token"),
+        Some(ControlRequestCommand::SetPaneOverlay {
+            text: None,
+            font_size: None,
+            opacity: None,
+            color: Some("  ReD  ".to_owned()),
+        })
+    );
+
     let mut invalid_size_request = request("token", "set_overlay");
     invalid_size_request.pane_overlay_font_size = Some("huge".to_owned());
     assert_eq!(
@@ -265,7 +278,7 @@ fn control_server_delivers_a_pane_overlay_request() {
         text: Some("Prod".to_owned()),
         font_size: Some(OverlayFontSize::Large),
         opacity: Some(50),
-        color: Some("#ff8800".to_owned()),
+        color: Some("ReD".to_owned()),
     };
     let client =
         thread::spawn(move || send_set_overlay_request(&endpoint, &overlay_request).unwrap());
@@ -283,7 +296,7 @@ fn control_server_delivers_a_pane_overlay_request() {
     assert_eq!(text, Some("Prod".to_owned()));
     assert_eq!(font_size, Some(OverlayFontSize::Large));
     assert_eq!(opacity, Some(0.5));
-    assert!(color.is_some());
+    assert_eq!(overlay_color_to_hex(color.unwrap()), "#ff0000");
     completion.send(true).unwrap();
     assert!(client.join().unwrap());
 }

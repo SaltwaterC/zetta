@@ -204,7 +204,7 @@ function __zetta_long_options
                 --text 'Set the overlay text' \
                 --size 'Set the font size' \
                 --opacity 'Set the opacity percentage (0-100)' \
-                --color 'Set the text color (hex)' \
+                --color 'Set the text color (name or hex)' \
                 --reset 'Clear the overlay' \
                 --help 'Print help'
         case terminal-size
@@ -426,8 +426,8 @@ complete -c zetta -n '__fish_seen_subcommand_from overlay' -l size -r -a 'sm bas
 complete -c zetta -s s -r -a 'sm base lg xl 2xl 3xl' -n '__fish_seen_subcommand_from overlay; and __zetta_short_option -s'
 complete -c zetta -n '__fish_seen_subcommand_from overlay' -l opacity -r -d 'Set the opacity percentage (0-100)'
 complete -c zetta -s o -r -n '__fish_seen_subcommand_from overlay; and __zetta_short_option -o'
-complete -c zetta -n '__fish_seen_subcommand_from overlay' -l color -r -d 'Set the text color (hex)'
-complete -c zetta -s c -r -n '__fish_seen_subcommand_from overlay; and __zetta_short_option -c'
+complete -c zetta -n '__fish_seen_subcommand_from overlay' -l color -r -a 'ZETTA_OVERLAY_COLORS' -d 'Set the text color (name or hex)'
+complete -c zetta -s c -r -a 'ZETTA_OVERLAY_COLORS' -n '__fish_seen_subcommand_from overlay; and __zetta_short_option -c'
 complete -c zetta -n '__fish_seen_subcommand_from overlay' -l reset -d 'Clear the overlay'
 complete -c zetta -n '__fish_seen_subcommand_from overlay' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from overlay' -a '(__zetta_long_options overlay)'
