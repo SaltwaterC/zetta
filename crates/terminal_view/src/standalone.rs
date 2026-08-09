@@ -33,7 +33,7 @@ use ui::{
     prelude::*,
     scrollbars::{self, ScrollbarVisibility},
 };
-use util::paths::PathWithPosition;
+use util::paths::{PathStyle, PathWithPosition, home_dir};
 
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -1537,6 +1537,11 @@ fn local_path_open_action(target: &terminal::PathLikeTarget) -> LocalPathOpenAct
 
 fn resolve_local_path(target: &terminal::PathLikeTarget) -> PathBuf {
     let path = PathWithPosition::parse_str(&target.maybe_path).path;
+    let path = if target.path_style == PathStyle::local() {
+        expand_local_tilde_path(path)
+    } else {
+        path
+    };
     if target.path_style.is_posix() {
         return if is_posix_absolute_path(&path) || path.is_absolute() {
             path
@@ -1562,6 +1567,27 @@ fn resolve_local_path(target: &terminal::PathLikeTarget) -> PathBuf {
     } else {
         path
     }
+}
+
+fn expand_local_tilde_path(path: PathBuf) -> PathBuf {
+    let Some(path) = path.to_str() else {
+        return path;
+    };
+    let Some(remainder) = path.strip_prefix('~') else {
+        return path.into();
+    };
+    if remainder.is_empty() {
+        return home_dir().clone();
+    }
+
+    let Some(separator) = remainder.chars().next() else {
+        return path.into();
+    };
+    if !PathStyle::local().separators_ch().contains(&separator) {
+        return path.into();
+    }
+
+    home_dir().join(&remainder[separator.len_utf8()..])
 }
 
 fn is_posix_absolute_path(path: &std::path::Path) -> bool {

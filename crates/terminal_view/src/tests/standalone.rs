@@ -2,7 +2,7 @@ use super::*;
 use gpui::Modifiers;
 use std::path::PathBuf;
 use terminal::{PathLikeTarget, is_hyperlink_modifier};
-use util::paths::PathStyle;
+use util::paths::{PathStyle, home_dir};
 
 #[test]
 fn trimmed_paste_removes_only_outer_whitespace() {
@@ -93,6 +93,56 @@ fn relative_file_links_are_resolved_from_the_terminal_directory() {
         resolve_local_path(&target),
         terminal_dir.join("src").join("main.rs")
     );
+}
+
+#[test]
+fn local_home_paths_are_expanded_after_position_suffixes_are_parsed() {
+    let target = PathLikeTarget {
+        maybe_path: "~/source/zetta/src/main.rs:12:4".to_owned(),
+        terminal_dir: None,
+        path_style: PathStyle::local(),
+    };
+
+    assert_eq!(
+        resolve_local_path(&target),
+        home_dir().join("source/zetta/src/main.rs")
+    );
+}
+
+#[test]
+fn a_bare_local_home_path_is_expanded() {
+    let target = PathLikeTarget {
+        maybe_path: "~".to_owned(),
+        terminal_dir: None,
+        path_style: PathStyle::local(),
+    };
+
+    assert_eq!(resolve_local_path(&target), *home_dir());
+}
+
+#[test]
+fn non_home_prefixed_paths_are_not_tilde_expanded() {
+    for maybe_path in ["source/zetta", "~other-user/source/zetta", "project/~/file"] {
+        let target = PathLikeTarget {
+            maybe_path: maybe_path.to_owned(),
+            terminal_dir: None,
+            path_style: PathStyle::local(),
+        };
+
+        assert_eq!(resolve_local_path(&target), PathBuf::from(maybe_path));
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn wsl_home_paths_are_left_for_the_shell() {
+    let target = PathLikeTarget {
+        maybe_path: "~/source/zetta".to_owned(),
+        terminal_dir: None,
+        path_style: PathStyle::Unix,
+    };
+
+    assert_eq!(resolve_local_path(&target), PathBuf::from("~/source/zetta"));
 }
 
 #[cfg(windows)]
