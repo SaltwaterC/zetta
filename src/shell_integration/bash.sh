@@ -189,6 +189,14 @@ _zetta_complete() {
             _zetta_complete_pane_splits
             return
             ;;
+        --replace-pane)
+            if [[ $current == -* || -z $current ]]; then
+                _zetta_compgen '--help --version --config --keymap --profile --split --theme'
+            else
+                COMPREPLY=()
+            fi
+            return
+            ;;
         --stop-bits|--size)
             if [[ $command == serial ]]; then
                 _zetta_compgen '1 2'
@@ -276,8 +284,14 @@ _zetta_complete() {
         -r)
             if [[ $command == http || ( $command == tftp && ${COMP_WORDS[2]} == server ) ]]; then
                 COMPREPLY=( $(compgen -d -- "$current") )
-            elif [[ $command == terminal-size ]]; then
+            elif [[ $command == terminal-size || $command == profile ]]; then
                 COMPREPLY=()
+            elif [[ $command == -* || -z $command ]]; then
+                if [[ $current == -* || -z $current ]]; then
+                    _zetta_compgen '--help --version --config --keymap --profile --split --theme'
+                else
+                    COMPREPLY=()
+                fi
             else
                 COMPREPLY=( $(compgen -f -- "$current") )
             fi
@@ -306,7 +320,7 @@ _zetta_complete() {
     esac
 
     if (( COMP_CWORD == 1 )); then
-        _zetta_compgen 'benchmark benchmark-output terminal-size sessions profile edit vi init serial http tftp notify copy paste splits tabicon panetheme overlay --help --version --config --keymap --profile --split --theme'
+        _zetta_compgen 'benchmark benchmark-output terminal-size sessions profile edit vi init serial http tftp notify copy paste splits tabicon panetheme overlay --help --version --config --keymap --profile --split --replace-pane --theme'
         return
     fi
 
@@ -315,7 +329,7 @@ _zetta_complete() {
     # offering the remaining top-level flags instead of falling through to
     # the subcommand-specific cases below, which would offer nothing.
     if [[ $command == -* ]]; then
-        _zetta_compgen '--help --version --config --keymap --profile --split --theme'
+        _zetta_compgen '--help --version --config --keymap --profile --split --replace-pane --theme'
         return
     fi
 

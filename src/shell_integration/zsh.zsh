@@ -173,7 +173,7 @@ _zetta() {
 
     if (( CURRENT == 2 )); then
         compadd -S ' ' -- benchmark benchmark-output terminal-size sessions profile edit vi init serial http tftp notify copy paste splits tabicon panetheme overlay
-        _zetta_options --help --version --config --keymap --profile --split --theme
+        _zetta_options --help --version --config --keymap --profile --split --replace-pane --theme
         return
     fi
 
@@ -231,6 +231,12 @@ _zetta() {
             ;;
         --split)
             _zetta_split_names
+            return
+            ;;
+        --replace-pane)
+            if [[ $words[CURRENT] == -* || -z $words[CURRENT] ]]; then
+                _zetta_options --help --version --config --keymap --profile --split --theme
+            fi
             return
             ;;
         --stop-bits|--size)
@@ -310,7 +316,10 @@ _zetta() {
                 _files -/
                 return
             fi
-            if [[ $words[2] == terminal-size ]]; then
+            if [[ $words[2] == terminal-size || $words[2] == profile || $words[2] == -* || -z $words[2] ]]; then
+                if [[ $words[2] == -* && ($words[CURRENT] == -* || -z $words[CURRENT]) ]]; then
+                    _zetta_options --help --version --config --keymap --profile --split --theme
+                fi
                 return
             fi
             _files
@@ -373,7 +382,7 @@ _zetta() {
     # offering the remaining top-level flags instead of falling through to
     # the subcommand-specific cases below, which would offer nothing.
     if [[ $words[2] == -* ]]; then
-        _zetta_options --help --version --config --keymap --profile --split --theme
+        _zetta_options --help --version --config --keymap --profile --split --replace-pane --theme
         return
     fi
 

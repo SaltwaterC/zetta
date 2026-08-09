@@ -16,6 +16,9 @@ fn request(token: &str, command: &str) -> ControlRequest {
         pane_overlay_opacity: None,
         pane_overlay_color: None,
         config_path: None,
+        split: None,
+        profile: None,
+        theme: None,
     }
 }
 
@@ -29,6 +32,56 @@ fn control_requests_require_the_endpoint_token() {
         decode_control_request(&mut request("wrong", "open_window"), "correct"),
         None
     );
+}
+
+#[test]
+fn replace_pane_control_requests_validate_the_payload() {
+    let mut replace = request("token", "replace_pane");
+    replace.split = Some("quarters".to_owned());
+    replace.profile = Some("System".to_owned());
+    replace.theme = Some("Dracula".to_owned());
+    assert_eq!(
+        decode_control_request(&mut replace, "token"),
+        Some(ControlRequestCommand::ReplacePane {
+            split: Some("quarters".to_owned()),
+            profile: Some("System".to_owned()),
+            theme: Some("Dracula".to_owned()),
+        })
+    );
+
+    let mut profile_only = request("token", "replace_pane");
+    profile_only.profile = Some("System".to_owned());
+    assert_eq!(
+        decode_control_request(&mut profile_only, "token"),
+        Some(ControlRequestCommand::ReplacePane {
+            split: None,
+            profile: Some("System".to_owned()),
+            theme: None,
+        })
+    );
+
+    for invalid in [
+        request("token", "replace_pane"),
+        ControlRequest {
+            split: Some(String::new()),
+            ..request("token", "replace_pane")
+        },
+        ControlRequest {
+            profile: Some(String::new()),
+            ..request("token", "replace_pane")
+        },
+        ControlRequest {
+            theme: Some("Dracula".to_owned()),
+            ..request("token", "replace_pane")
+        },
+    ] {
+        let mut invalid = invalid;
+        assert_eq!(decode_control_request(&mut invalid, "token"), None);
+    }
+
+    let mut wrong_token = request("wrong", "replace_pane");
+    wrong_token.profile = Some("System".to_owned());
+    assert_eq!(decode_control_request(&mut wrong_token, "token"), None);
 }
 
 #[test]
@@ -218,6 +271,9 @@ fn reconnect_requests_carry_a_session_target_and_optional_secret() {
         pane_overlay_opacity: None,
         pane_overlay_color: None,
         config_path: None,
+        split: None,
+        profile: None,
+        theme: None,
     };
     assert_eq!(
         decode_control_request(&mut request, "token"),
@@ -246,6 +302,35 @@ fn control_server_delivers_a_token_authenticated_open_request() {
     };
     completion.send(true).unwrap();
     assert!(client.join().unwrap());
+}
+
+#[test]
+fn control_server_delivers_a_replace_pane_request_and_completion_status() {
+    let directory = tempfile::tempdir().unwrap();
+    let endpoint_path = directory.path().join("control.json");
+    let (commands, mut received) = futures::channel::mpsc::unbounded();
+    let _server = ProcessControlServer::start_at(commands, endpoint_path.clone()).unwrap();
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&fs::read(endpoint_path).unwrap()).unwrap();
+    let expected = ReplacePaneRequest {
+        split: Some("quarters".to_owned()),
+        profile: Some("System".to_owned()),
+        theme: Some("Dracula".to_owned()),
+    };
+    let client_request = expected.clone();
+
+    let client = thread::spawn(move || send_replace_pane_request(&endpoint, &client_request));
+    let command = futures::executor::block_on(received.next()).unwrap();
+    let ProcessControlCommand::ReplacePane {
+        request,
+        completion,
+    } = command
+    else {
+        panic!("unexpected process control command");
+    };
+    assert_eq!(request, expected);
+    completion.send(true).unwrap();
+    assert!(client.join().unwrap().unwrap());
 }
 
 #[test]

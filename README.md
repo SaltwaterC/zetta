@@ -69,6 +69,11 @@ Shell integration completes the current serial-device, tab-icon, and
 pane-theme lists dynamically. See [Serial and network tools](docs/tools.md)
 for flags and safety notes.
 
+Use `zetta --replace-pane --split NAME` or
+`zetta --replace-pane --profile PROFILE` to replace the active pane in a
+running process; the command falls back to the normal new-window launch when
+no process accepts it. See [Using Zetta](docs/usage.md) for details.
+
 Manage persistent profiles without opening the settings UI with
 `zetta profile list`, `zetta profile themes`, and the profile mutation
 commands documented in the [configuration guide](docs/configuration.md).

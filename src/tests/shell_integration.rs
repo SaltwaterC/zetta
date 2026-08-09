@@ -18,6 +18,7 @@ fn profiles() -> [Profile; 2] {
 #[test]
 fn supported_shells_generate_completion_and_tftp_shortcut() {
     let profiles = profiles();
+    assert!(shell_integration_help().contains("--replace-pane"));
     for shell in [
         ShellIntegration::Bash,
         ShellIntegration::Fish,
@@ -35,6 +36,7 @@ fn supported_shells_generate_completion_and_tftp_shortcut() {
         assert!(script.contains("zetta tabicon --list"));
         assert!(script.contains("zetta panetheme --list"));
         assert!(script.contains("zetta splits"));
+        assert!(script.contains("replace-pane"));
     }
 }
 
@@ -1054,17 +1056,18 @@ fn generated_scripts_only_offer_long_form_flags() {
         let script = shell.script(&profiles);
         match shell {
             ShellIntegration::Bash => assert!(script.contains(
-                "terminal-size sessions profile edit vi init serial http tftp notify copy paste splits tabicon panetheme overlay --help --version --config --keymap --profile --split --theme'"
+                "terminal-size sessions profile edit vi init serial http tftp notify copy paste splits tabicon panetheme overlay --help --version --config --keymap --profile --split --replace-pane --theme'"
             )),
             ShellIntegration::Fish => {
                 assert!(script.contains("-l profile -r"));
+                assert!(script.contains("-l replace-pane"));
                 assert!(!script.contains("-s p -l profile"));
                 assert!(script.contains(
                     "-s c -r -n '__zetta_has_profile_subcommand; and __zetta_short_option -c'"
                 ));
             }
             ShellIntegration::PowerShell => assert!(script.contains(
-                "'--help', '--version', '--config', '--keymap', '--profile', '--split', '--theme'"
+                "'--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme'"
             )),
             ShellIntegration::Zsh => assert!(script
                 .contains("_zetta_options --help --version --config --keymap --profile")),
@@ -1136,6 +1139,7 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
                 "--keymap",
                 "--profile",
                 "--split",
+                "--replace-pane",
                 "--theme",
             ][..],
         ),

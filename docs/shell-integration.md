@@ -19,6 +19,11 @@ so it completes every currently configured layout name without embedding a
 hardcoded list in the integration script. Run `zetta splits` directly to
 print those names, one per line.
 
+The root `--replace-pane`/`-r` modifier is also completed as a flag without a
+value. Combine it with `--split`/`-s` or `--profile`/`-p`; split names,
+profiles, and profile themes continue to complete dynamically. When no
+running process accepts the request, Zetta keeps the normal launch behavior.
+
 If `EDITOR` is not already set, it defaults to `zetta vi`. When no `vi`
 command, alias, function, or other executable is already available, the
 integration adds `vi` as a wrapper for Zetta's built-in editor.

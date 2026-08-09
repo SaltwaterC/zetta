@@ -26,7 +26,7 @@ use ui::IconName;
 
 use crate::pane::{OverlayFontSize, PaneOverlayRequest, overlay_color_from_value};
 
-const CONTROL_VERSION: u32 = 4;
+const CONTROL_VERSION: u32 = 5;
 const MAX_CONTROL_MESSAGE_BYTES: usize = 4096;
 const CONTROL_COMPLETION_TIMEOUT: Duration = Duration::from_secs(2);
 const CONTROL_COMPLETION_POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -41,12 +41,23 @@ pub(crate) enum ReconnectSessionResult {
     Rejected,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReplacePaneRequest {
+    pub(crate) split: Option<String>,
+    pub(crate) profile: Option<String>,
+    pub(crate) theme: Option<String>,
+}
+
 pub(crate) enum ProcessControlCommand {
     ReloadConfiguration {
         config_path: String,
         completion: Sender<bool>,
     },
     OpenWindow {
+        completion: Sender<bool>,
+    },
+    ReplacePane {
+        request: ReplacePaneRequest,
         completion: Sender<bool>,
     },
     ReconnectSession {
@@ -81,6 +92,11 @@ enum ControlRequestCommand {
         config_path: String,
     },
     OpenWindow,
+    ReplacePane {
+        split: Option<String>,
+        profile: Option<String>,
+        theme: Option<String>,
+    },
     ReconnectSession {
         runner_id: u64,
         session_id: u64,
@@ -123,6 +139,9 @@ struct ControlRequest {
     pane_overlay_opacity: Option<u8>,
     pane_overlay_color: Option<String>,
     config_path: Option<String>,
+    split: Option<String>,
+    profile: Option<String>,
+    theme: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -195,6 +214,25 @@ impl ProcessControlServer {
                             let (completion, completed) = channel();
                             let accepted = commands
                                 .unbounded_send(ProcessControlCommand::OpenWindow { completion })
+                                .is_ok()
+                                && wait_for_control_completion(&completed, &stopping_for_thread);
+                            if accepted { "ok" } else { "rejected" }
+                        }
+                        Some(ControlRequestCommand::ReplacePane {
+                            split,
+                            profile,
+                            theme,
+                        }) => {
+                            let (completion, completed) = channel();
+                            let accepted = commands
+                                .unbounded_send(ProcessControlCommand::ReplacePane {
+                                    request: ReplacePaneRequest {
+                                        split,
+                                        profile,
+                                        theme,
+                                    },
+                                    completion,
+                                })
                                 .is_ok()
                                 && wait_for_control_completion(&completed, &stopping_for_thread);
                             if accepted { "ok" } else { "rejected" }
@@ -440,6 +478,31 @@ fn decode_control_request(
         {
             Some(ControlRequestCommand::OpenWindow)
         }
+        "replace_pane"
+            if request.runner_id.is_none()
+                && request.session_id.is_none()
+                && request.secret.is_none()
+                && request.icon.is_none()
+                && request.pane_theme.is_none()
+                && request.pane_overlay.is_none()
+                && request.pane_overlay_font_size.is_none()
+                && request.pane_overlay_opacity.is_none()
+                && request.pane_overlay_color.is_none() =>
+        {
+            let split = request.split.take();
+            let profile = request.profile.take();
+            let theme = request.theme.take();
+            (split.as_deref().is_none_or(|value| !value.is_empty())
+                && profile.as_deref().is_none_or(|value| !value.is_empty())
+                && theme.as_deref().is_none_or(|value| !value.is_empty())
+                && (split.is_some() || profile.is_some())
+                && (theme.is_none() || profile.is_some()))
+            .then_some(ControlRequestCommand::ReplacePane {
+                split,
+                profile,
+                theme,
+            })
+        }
         "reconnect_session" => {
             request
                 .runner_id
@@ -552,6 +615,41 @@ pub(crate) fn request_existing_process_window() -> Result<bool> {
             continue;
         }
         if send_open_window_request(&endpoint).unwrap_or(false) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+pub(crate) fn request_existing_process_replace_pane(request: ReplacePaneRequest) -> Result<bool> {
+    let directory = crate::background_sessions::session_catalog_dir();
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).context("reading Zetta process control endpoints"),
+    };
+    for entry in entries {
+        let path = entry?.path();
+        if !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("control-") && name.ends_with(".json"))
+        {
+            continue;
+        }
+        let endpoint = match fs::read(&path)
+            .ok()
+            .and_then(|contents| serde_json::from_slice::<ControlEndpoint>(&contents).ok())
+        {
+            Some(endpoint) if endpoint.version == CONTROL_VERSION => endpoint,
+            _ => continue,
+        };
+        if !process_is_running(endpoint.process_id) {
+            let _ = fs::remove_file(path);
+            let _ = fs::remove_file(endpoint.socket_path);
+            continue;
+        }
+        if send_replace_pane_request(&endpoint, &request).unwrap_or(false) {
             return Ok(true);
         }
     }
@@ -775,6 +873,40 @@ fn send_open_window_request(endpoint: &ControlEndpoint) -> Result<bool> {
             pane_overlay_opacity: None,
             pane_overlay_color: None,
             config_path: None,
+            split: None,
+            profile: None,
+            theme: None,
+        },
+    )?;
+    let response = read_message::<ControlResponse>(&mut stream)?;
+    Ok(response.status == "ok")
+}
+
+fn send_replace_pane_request(
+    endpoint: &ControlEndpoint,
+    request: &ReplacePaneRequest,
+) -> Result<bool> {
+    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
+    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    write_message(
+        &mut stream,
+        &ControlRequest {
+            token: endpoint.token.clone(),
+            command: "replace_pane".to_owned(),
+            runner_id: None,
+            session_id: None,
+            secret: None,
+            icon: None,
+            pane_theme: None,
+            pane_overlay: None,
+            pane_overlay_font_size: None,
+            pane_overlay_opacity: None,
+            pane_overlay_color: None,
+            config_path: None,
+            split: request.split.clone(),
+            profile: request.profile.clone(),
+            theme: request.theme.clone(),
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
@@ -803,6 +935,9 @@ fn send_reload_configuration_request(
             pane_overlay_opacity: None,
             pane_overlay_color: None,
             config_path: Some(config_path.to_owned()),
+            split: None,
+            profile: None,
+            theme: None,
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
@@ -831,6 +966,9 @@ fn send_set_tab_icon_request(endpoint: &ControlEndpoint, icon: Option<IconName>)
             pane_overlay_opacity: None,
             pane_overlay_color: None,
             config_path: None,
+            split: None,
+            profile: None,
+            theme: None,
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
@@ -856,6 +994,9 @@ fn send_set_pane_theme_request(endpoint: &ControlEndpoint, theme: Option<String>
             pane_overlay_opacity: None,
             pane_overlay_color: None,
             config_path: None,
+            split: None,
+            profile: None,
+            theme: None,
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
@@ -881,6 +1022,9 @@ fn send_list_pane_themes_request(endpoint: &ControlEndpoint) -> Result<Option<Ve
             pane_overlay_opacity: None,
             pane_overlay_color: None,
             config_path: None,
+            split: None,
+            profile: None,
+            theme: None,
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
@@ -912,6 +1056,9 @@ fn send_set_overlay_request(
             pane_overlay_opacity: request.opacity,
             pane_overlay_color: request.color.clone(),
             config_path: None,
+            split: None,
+            profile: None,
+            theme: None,
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
@@ -940,6 +1087,9 @@ fn send_reconnect_session_request(
         pane_overlay_opacity: None,
         pane_overlay_color: None,
         config_path: None,
+        split: None,
+        profile: None,
+        theme: None,
     };
     let result = write_message(&mut stream, &request).and_then(|()| {
         let response = read_message::<ControlResponse>(&mut stream)?;

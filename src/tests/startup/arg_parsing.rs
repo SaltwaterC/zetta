@@ -821,6 +821,89 @@ fn root_split_option_accepts_configured_names_and_combines_with_profile() {
 }
 
 #[test]
+fn replace_pane_accepts_long_and_short_forms_in_any_option_order() {
+    let long = parse_args_from([
+        OsString::from("--replace-pane"),
+        OsString::from("--split"),
+        OsString::from("quarters"),
+        OsString::from("--profile"),
+        OsString::from("System"),
+        OsString::from("--theme"),
+        OsString::from("Dracula"),
+    ])
+    .unwrap();
+    let short = parse_args_from([
+        OsString::from("-p"),
+        OsString::from("System"),
+        OsString::from("-t"),
+        OsString::from("Dracula"),
+        OsString::from("-s"),
+        OsString::from("quarters"),
+        OsString::from("-r"),
+    ])
+    .unwrap();
+
+    assert_eq!(short, long);
+    assert!(long.replace_pane);
+    assert!(should_replace_pane_in_existing_process(&long));
+    assert!(!should_handoff_to_existing_process(&long));
+
+    let profile_only = parse_args_from([
+        OsString::from("--profile"),
+        OsString::from("System"),
+        OsString::from("--replace-pane"),
+    ])
+    .unwrap();
+    assert_eq!(profile_only.split, None);
+    assert_eq!(profile_only.profile.as_deref(), Some("System"));
+    assert!(should_replace_pane_in_existing_process(&profile_only));
+}
+
+#[test]
+fn replace_pane_requires_a_split_or_profile_and_preserves_launch_fallback_options() {
+    assert!(parse_args_from([OsString::from("--replace-pane")]).is_err());
+    assert!(
+        parse_args_from([
+            OsString::from("--replace-pane"),
+            OsString::from("--theme"),
+            OsString::from("Dracula"),
+        ])
+        .is_err()
+    );
+    assert!(
+        parse_args_from([
+            OsString::from("--replace-pane"),
+            OsString::from("--split"),
+            OsString::from("quarters"),
+            OsString::from("--replace-pane"),
+        ])
+        .is_err()
+    );
+
+    let with_config = parse_args_from([
+        OsString::from("--replace-pane"),
+        OsString::from("--profile"),
+        OsString::from("System"),
+        OsString::from("--config"),
+        OsString::from("config.json"),
+    ])
+    .unwrap();
+    assert!(!should_replace_pane_in_existing_process(&with_config));
+    assert!(!should_handoff_to_existing_process(&with_config));
+
+    let with_keymap = parse_args_from([
+        OsString::from("-r"),
+        OsString::from("-s"),
+        OsString::from("quarters"),
+        OsString::from("-k"),
+        OsString::from("keymap.json"),
+    ])
+    .unwrap();
+    assert!(!should_replace_pane_in_existing_process(&with_keymap));
+    assert!(!should_handoff_to_existing_process(&with_keymap));
+}
+
+#[test]
 fn benchmark_subcommand_arguments_are_cross_platform() {
     assert_eq!(
         parse_args_from([OsString::from("benchmark")]).unwrap(),
@@ -829,6 +912,7 @@ fn benchmark_subcommand_arguments_are_cross_platform() {
             keymap_path: None,
             profile: None,
             split: None,
+            replace_pane: false,
             theme_override: None,
             mode: StartupMode::TerminalRenderingProfile,
             profile_report: None,
@@ -851,6 +935,7 @@ fn benchmark_subcommand_arguments_are_cross_platform() {
             keymap_path: None,
             profile: None,
             split: None,
+            replace_pane: false,
             theme_override: None,
             mode: StartupMode::TerminalRenderingWorkload,
             profile_report: None,

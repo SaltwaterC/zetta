@@ -116,6 +116,10 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
     );
     help
     .replace(
+        "  -s, --split NAME                    Apply a configured pane split template; run `zetta splits` to list available names\n  -t, --theme NAME                    Non-persistently override --profile's theme for this launch",
+        "  -s, --split NAME                    Apply a configured pane split template; run `zetta splits` to list available names\n  -r, --replace-pane                  Replace the active pane in a running process; requires --split or --profile\n  -t, --theme NAME                    Non-persistently override --profile's theme for this launch",
+    )
+    .replace(
         "       zetta sessions [--json]",
         "       zetta sessions [--json]\n       zetta sessions reconnect SESSION_ID\n       zetta splits\n       zetta tabicon [OPTIONS] ICON\n       zetta tabicon --list\n       zetta panetheme [OPTIONS] THEME\n       zetta panetheme --reset\n       zetta panetheme --list\n       zetta overlay [OPTIONS] TEXT\n       zetta overlay --reset\n       zetta edit [OPTIONS] [--] FILE ...\n       zetta vi [OPTIONS] [FILE ...]",
     )
@@ -204,7 +208,7 @@ pub(crate) fn pane_theme_help() -> &'static str {
 }
 
 pub(crate) fn pane_splits_help() -> &'static str {
-    "List configured pane split templates\n\nUsage: zetta splits\n\nPrints one configured pane split template name per line. Pass a listed name to the root --split or -s option.\n\nOptions:\n  -h, --help  Print help"
+    "List configured pane split templates\n\nUsage: zetta splits\n\nPrints one configured pane split template name per line. Pass a listed name to the root --split or -s option, or to --replace-pane --split when replacing the active pane in a running process.\n\nOptions:\n  -h, --help  Print help"
 }
 
 pub(crate) fn parse_pane_theme_args(args: &[OsString]) -> Result<StartupMode> {

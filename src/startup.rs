@@ -12,8 +12,9 @@ use crate::cli_services::{parse_serial_args, serial_help};
 #[cfg(feature = "tftp-server")]
 use crate::cli_services::{parse_tftp_server_args, tftp_server_help};
 use crate::process_control::{
-    request_existing_process_pane_overlay, request_existing_process_pane_theme,
-    request_existing_process_pane_theme_list, request_existing_process_tab_icon,
+    ReplacePaneRequest, request_existing_process_pane_overlay, request_existing_process_pane_theme,
+    request_existing_process_pane_theme_list, request_existing_process_replace_pane,
+    request_existing_process_tab_icon,
 };
 
 use gpui::{KeyBindingContextPredicate, Unbind};
@@ -36,7 +37,7 @@ pub(crate) use arg_parsing::{
 };
 use arg_parsing::{
     configured_split_names, select_launch_profile, should_handoff_to_existing_process,
-    validate_launch_split,
+    should_replace_pane_in_existing_process, validate_launch_split,
 };
 #[cfg(not(feature = "tftp-client"))]
 pub(crate) use cli_help::{TftpCommand, parse_tftp_args, tftp_help};
@@ -758,6 +759,16 @@ pub(crate) fn run() -> Result<()> {
     if let StartupMode::CliService(command) = &args.mode {
         return command.run();
     }
+    if should_replace_pane_in_existing_process(&args) {
+        let request = ReplacePaneRequest {
+            split: args.split.clone(),
+            profile: args.profile.clone(),
+            theme: args.theme_override.clone(),
+        };
+        if request_existing_process_replace_pane(request)? {
+            return Ok(());
+        }
+    }
     if should_handoff_to_existing_process(&args) && request_existing_process_window()? {
         return Ok(());
     }
@@ -985,6 +996,31 @@ pub(crate) fn run() -> Result<()> {
                                 }
                             });
                             let _ = completion.send(opened);
+                        }
+                        ProcessControlCommand::ReplacePane {
+                            request,
+                            completion,
+                        } => {
+                            let replaced = cx.update(|cx| {
+                                if !cx
+                                    .global::<ZettaProcessState>()
+                                    .control_server
+                                    .is_accepting()
+                                {
+                                    return false;
+                                }
+                                let Some(window_id) =
+                                    cx.active_window().map(|window| window.window_id())
+                                else {
+                                    return false;
+                                };
+                                gpui::WindowHandle::<Zetta>::new(window_id)
+                                    .update(cx, |zetta, window, cx| {
+                                        zetta.replace_active_pane_from_cli(request, window, cx)
+                                    })
+                                    .unwrap_or(false)
+                            });
+                            let _ = completion.send(replaced);
                         }
                         ProcessControlCommand::SetTabIcon { icon, completion } => {
                             let accepted = cx.update(|cx| {

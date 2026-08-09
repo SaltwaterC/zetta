@@ -38,6 +38,8 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     assert!(help.contains("  System\n  Operations"));
     assert!(help.contains("Select one of the profiles listed above"));
     assert!(help.contains("-s, --split NAME"));
+    assert!(help.contains("-r, --replace-pane"));
+    assert!(help.contains("requires --split or --profile"));
     assert!(help.contains("zetta splits"));
     assert!(
         help.contains("splits                              List configured pane split templates")
@@ -69,6 +71,7 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     );
     assert!(pane_splits_help().contains("Usage: zetta splits"));
     assert!(pane_splits_help().contains("--split or -s"));
+    assert!(pane_splits_help().contains("--replace-pane --split"));
 
     #[cfg(all(feature = "wayland", linux_like))]
     assert!(help.contains("Wayland backend"));

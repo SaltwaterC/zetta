@@ -37,6 +37,38 @@ fn launch_theme_override_applies_case_insensitively_by_name_only() {
 }
 
 #[test]
+fn cli_replacement_profile_resolution_is_case_insensitive_and_preserves_split_defaults() {
+    let profiles = [
+        Profile {
+            name: "System".to_owned(),
+            command: Shell::System,
+            theme: Some("Configured Theme".to_owned()),
+        },
+        Profile {
+            name: "Alternate".to_owned(),
+            command: Shell::Program("alternate-shell".to_owned()),
+            theme: None,
+        },
+    ];
+
+    let selected =
+        resolve_cli_replacement_profile(&profiles, Some("sYsTeM"), Some("Dracula"), None)
+            .unwrap()
+            .unwrap();
+    assert_eq!(selected.name, "System");
+    assert_eq!(selected.theme.as_deref(), Some("Dracula"));
+    assert_eq!(profiles[0].theme.as_deref(), Some("Configured Theme"));
+
+    assert_eq!(
+        resolve_cli_replacement_profile(&profiles, None, None, None),
+        Some(None)
+    );
+    assert!(resolve_cli_replacement_profile(&profiles, Some("missing"), None, None).is_none());
+    assert!(resolve_cli_replacement_profile(&profiles, None, Some("Dracula"), None).is_none());
+    assert!(resolve_cli_replacement_profile(&profiles, Some("System"), Some(""), None).is_none());
+}
+
+#[test]
 fn mouse_window_resize_clamps_each_dimension_to_the_minimum() {
     assert_eq!(
         clamp_window_size_to_minimum(size(px(400.), px(500.))),

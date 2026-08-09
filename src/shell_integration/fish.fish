@@ -310,6 +310,7 @@ function __zetta_long_options
                 --keymap 'Use a keymap file' \
                 --profile 'Select a profile' \
                 --split 'Apply a configured pane split template' \
+                --replace-pane 'Replace the active pane in a running process' \
                 --theme 'Non-persistently override the profile theme'
         case profile
             printf '%s\t%s\n' \
@@ -434,12 +435,14 @@ complete -c zetta -n '__zetta_use_subcommand' -l config -r -d 'Use a configurati
 complete -c zetta -n '__zetta_use_subcommand' -l keymap -r -d 'Use a keymap file'
 complete -c zetta -n '__zetta_use_subcommand' -l profile -r -a '(__zetta_profiles)' -d 'Select a profile'
 complete -c zetta -n '__zetta_use_subcommand' -l split -r -a '(__zetta_pane_splits)' -d 'Apply a configured pane split template'
+complete -c zetta -n '__zetta_use_subcommand' -l replace-pane -d 'Replace the active pane in a running process'
 complete -c zetta -n '__zetta_use_subcommand' -l theme -r -a '(__zetta_profile_themes)' -d 'Non-persistently override the profile theme'
 complete -c zetta -n '__zetta_use_subcommand' -a '(__zetta_long_options root)'
 complete -c zetta -s c -r -n '__zetta_use_subcommand; and __zetta_short_option -c'
 complete -c zetta -s k -r -n '__zetta_use_subcommand; and __zetta_short_option -k'
 complete -c zetta -s p -r -a '(__zetta_profiles)' -n '__zetta_use_subcommand; and __zetta_short_option -p'
 complete -c zetta -s s -r -a '(__zetta_pane_splits)' -n '__zetta_use_subcommand; and __zetta_short_option -s'
+complete -c zetta -s r -n '__zetta_use_subcommand; and __zetta_short_option -r'
 complete -c zetta -s t -r -a '(__zetta_profile_themes)' -n '__zetta_use_subcommand; and __zetta_short_option -t'
 complete -c zetta -n '__zetta_at_profile_command' -a '(__zetta_long_options profile)'
 complete -c zetta -n '__zetta_has_profile_subcommand' -l config -r -d 'Use a configuration file'

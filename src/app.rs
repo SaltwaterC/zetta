@@ -1,5 +1,6 @@
 use super::*;
 use crate::configuration_reload::ConfigurationReloadFeedback;
+use crate::process_control::ReplacePaneRequest;
 use strum::IntoEnumIterator as _;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -156,6 +157,33 @@ fn apply_launch_theme_override(
         && profile.name.to_lowercase() == *override_name
     {
         profile.theme = Some(override_theme.clone());
+    }
+}
+
+fn resolve_cli_replacement_profile(
+    profiles: &[Profile],
+    requested_name: Option<&str>,
+    requested_theme: Option<&str>,
+    launch_theme_override: Option<&(String, String)>,
+) -> Option<Option<Profile>> {
+    match requested_name {
+        Some(requested_name) if !requested_name.is_empty() => {
+            let mut profile = profiles
+                .iter()
+                .find(|profile| profile.name.eq_ignore_ascii_case(requested_name))
+                .cloned()?;
+            apply_launch_theme_override(&mut profile, launch_theme_override);
+            if let Some(theme) = requested_theme {
+                if theme.is_empty() {
+                    return None;
+                }
+                profile.theme = Some(theme.to_owned());
+            }
+            Some(Some(profile))
+        }
+        Some(_) => None,
+        None if requested_theme.is_some() => None,
+        None => Some(None),
     }
 }
 
@@ -1227,28 +1255,66 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.apply_pane_split_template_with_profile(&action.name, None, window, cx);
+    }
+
+    pub(crate) fn replace_active_pane_from_cli(
+        &mut self,
+        request: ReplacePaneRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if request.split.is_none() && request.profile.is_none() {
+            return false;
+        }
+        let Some(profile_override) = resolve_cli_replacement_profile(
+            &self.profiles,
+            request.profile.as_deref(),
+            request.theme.as_deref(),
+            self.launch_theme_override.as_ref(),
+        ) else {
+            return false;
+        };
+
+        if let Some(name) = request.split {
+            self.apply_pane_split_template_with_profile(&name, profile_override, window, cx)
+        } else {
+            self.replace_active_pane_profile(
+                profile_override.expect("a profile is required without a split template"),
+                window,
+                cx,
+            )
+        }
+    }
+
+    fn apply_pane_split_template_with_profile(
+        &mut self,
+        name: &str,
+        profile_override: Option<Profile>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(new_pane_count) = self
             .launch_config
             .pane_split_templates
-            .get(&action.name)
-            .map(|template| template.pane_count() - 1)
+            .get(name)
+            .and_then(|template| template.pane_count().checked_sub(1))
         else {
-            self.configuration_error = Some(format!(
-                "Pane split template {:?} is not configured",
-                action.name
-            ));
+            self.configuration_error =
+                Some(format!("Pane split template {:?} is not configured", name));
             cx.notify();
-            return;
+            return false;
         };
         let Some(tab) = self.tabs.get(self.active_tab) else {
-            return;
+            return false;
         };
         if !can_add_panes(tab.panes.len(), new_pane_count) {
-            return;
+            return false;
         }
         let tab_id = tab.id;
         let active_pane_id = tab.active_pane;
         let active_pane = tab.active_pane();
+        let replacing_active = profile_override.is_some();
         let inherit_working_directory = self
             .launch_config
             .working_directory_scope
@@ -1257,9 +1323,10 @@ impl Zetta {
             .filter(|_| inherit_working_directory)
             .filter(|pane| !is_wsl_shell(&pane.profile.command))
             .and_then(|pane| pane.working_directory(cx));
-        let Some(profile) = tab.active_profile().cloned() else {
-            return;
+        let Some(active_profile) = tab.active_profile().cloned() else {
+            return false;
         };
+        let profile = profile_override.unwrap_or(active_profile);
         let terminal_theme = match resolve_profile_theme(&profile, cx) {
             Ok(theme) => theme,
             Err(error) => {
@@ -1267,7 +1334,7 @@ impl Zetta {
                     "Could not apply profile theme for pane template: {error:#}"
                 ));
                 cx.notify();
-                return;
+                return false;
             }
         };
         let mut terminal_settings = TerminalSpawnSettings::current(cx);
@@ -1281,6 +1348,15 @@ impl Zetta {
             self.working_directory.clone(),
             self.launch_config.working_directory_configured,
         );
+        let active_wsl_cwd_file = replacing_active
+            .then(|| wsl_cwd_tracking_file(&profile, active_pane_id))
+            .flatten();
+
+        if !replacing_active
+            && let Some(terminal) = active_pane.and_then(|pane| pane.terminal.clone())
+        {
+            terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
+        }
 
         let new_pane_ids = (0..new_pane_count).map(|_| {
             let pane_id = self.next_pane_id;
@@ -1299,7 +1375,7 @@ impl Zetta {
             std::iter::once(active_pane_id).chain(new_panes.iter().map(|(pane_id, _)| *pane_id));
         let replacement = pane_layout_from_configured_template(
             &self.launch_config.pane_split_templates,
-            &action.name,
+            name,
             &mut all_pane_ids,
         )
         .expect("the configured pane template was resolved before allocating panes");
@@ -1307,7 +1383,18 @@ impl Zetta {
         let tab = &mut self.tabs[self.active_tab];
         tab.maximized_pane = None;
         if !tab.layout.replace(active_pane_id, replacement) {
-            return;
+            return false;
+        }
+        if replacing_active {
+            let pane = tab
+                .pane_mut(active_pane_id)
+                .expect("the active pane must remain in a template replacement");
+            let _old_terminal = pane.terminal.take();
+            pane.view = None;
+            pane.error = None;
+            pane.pending_command = None;
+            pane.profile = profile.clone();
+            pane.wsl_cwd_file = active_wsl_cwd_file.clone();
         }
         tab.panes.reserve(new_pane_count);
         for (pane_id, wsl_cwd_file) in &new_panes {
@@ -1317,9 +1404,13 @@ impl Zetta {
             );
         }
         tab.activate_pane(active_pane_id);
+        self.retain_open_visible_terminals();
 
-        let spawn_count = new_panes.len();
-        for (index, (pane_id, wsl_cwd_file)) in new_panes.into_iter().enumerate() {
+        let spawn_count = new_panes.len() + usize::from(replacing_active);
+        let active_launch = replacing_active
+            .then_some((active_pane_id, active_wsl_cwd_file.clone()))
+            .into_iter();
+        for (index, (pane_id, wsl_cwd_file)) in active_launch.chain(new_panes).enumerate() {
             let path_hyperlink_regexes =
                 terminal_settings.path_hyperlink_regexes(index + 1 == spawn_count);
             self.spawn_terminal_with_theme(
@@ -1339,6 +1430,80 @@ impl Zetta {
         }
         self.focus_active(window, cx);
         cx.notify();
+        true
+    }
+
+    fn replace_active_pane_profile(
+        &mut self,
+        profile: Profile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            return false;
+        };
+        let tab_id = tab.id;
+        let active_pane_id = tab.active_pane;
+        let active_pane = tab.active_pane();
+        let inherit_working_directory = self
+            .launch_config
+            .working_directory_scope
+            .inherits_for_new_pane();
+        let inherited_working_directory = active_pane
+            .filter(|_| inherit_working_directory)
+            .filter(|pane| !is_wsl_shell(&pane.profile.command))
+            .and_then(|pane| pane.working_directory(cx));
+        let inherited_wsl_directory = active_pane
+            .filter(|_| inherit_working_directory)
+            .and_then(|pane| pane.wsl_working_directory(cx));
+        let (working_directory, wsl_directory) = launch_working_directory(
+            &profile,
+            inherited_working_directory,
+            inherited_wsl_directory,
+            self.working_directory.clone(),
+            self.launch_config.working_directory_configured,
+        );
+        let terminal_theme = match resolve_profile_theme(&profile, cx) {
+            Ok(theme) => theme,
+            Err(error) => {
+                self.configuration_error = Some(format!(
+                    "Could not apply profile theme for pane replacement: {error:#}"
+                ));
+                cx.notify();
+                return false;
+            }
+        };
+        let mut terminal_settings = TerminalSpawnSettings::current(cx);
+        let path_hyperlink_regexes = terminal_settings.path_hyperlink_regexes(true);
+        let wsl_cwd_file = wsl_cwd_tracking_file(&profile, active_pane_id);
+
+        let Some(pane) = self.tabs[self.active_tab].pane_mut(active_pane_id) else {
+            return false;
+        };
+        let _old_terminal = pane.terminal.take();
+        pane.view = None;
+        pane.error = None;
+        pane.pending_command = None;
+        pane.profile = profile.clone();
+        pane.wsl_cwd_file = wsl_cwd_file.clone();
+        self.retain_open_visible_terminals();
+        self.spawn_terminal_with_theme(
+            tab_id,
+            active_pane_id,
+            profile,
+            working_directory,
+            wsl_directory,
+            wsl_cwd_file,
+            terminal_theme,
+            &terminal_settings,
+            path_hyperlink_regexes,
+            false,
+            window,
+            cx,
+        );
+        self.focus_active(window, cx);
+        cx.notify();
+        true
     }
 
     pub(crate) fn broadcast_input(

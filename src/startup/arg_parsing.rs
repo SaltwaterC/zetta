@@ -64,6 +64,7 @@ pub(crate) struct StartupArgs {
     pub(crate) keymap_path: Option<PathBuf>,
     pub(crate) profile: Option<String>,
     pub(crate) split: Option<String>,
+    pub(crate) replace_pane: bool,
     /// Non-persistently overrides `profile`'s configured theme for this launch only.
     pub(crate) theme_override: Option<String>,
     pub(crate) mode: StartupMode,
@@ -86,6 +87,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             keymap_path: None,
             profile: None,
             split: None,
+            replace_pane: false,
             theme_override: None,
             mode: StartupMode::Profile(parsed.command),
             profile_report: None,
@@ -106,6 +108,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             keymap_path: None,
             profile: None,
             split: None,
+            replace_pane: false,
             theme_override: None,
             mode: parse_tab_icon_args(&arguments[1..])?,
             profile_report: None,
@@ -126,6 +129,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             keymap_path: None,
             profile: None,
             split: None,
+            replace_pane: false,
             theme_override: None,
             mode: parse_pane_theme_args(&arguments[1..])?,
             profile_report: None,
@@ -156,6 +160,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             keymap_path: None,
             profile: None,
             split: None,
+            replace_pane: false,
             theme_override: None,
             mode: StartupMode::ListPaneSplits,
             profile_report: None,
@@ -176,6 +181,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             keymap_path: None,
             profile: None,
             split: None,
+            replace_pane: false,
             theme_override: None,
             mode: parse_overlay_args(&arguments[1..])?,
             profile_report: None,
@@ -238,6 +244,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             keymap_path: None,
             profile: None,
             split: None,
+            replace_pane: false,
             theme_override: None,
             mode: StartupMode::OutputBenchmark {
                 size_mib: size_mib.unwrap_or(DEFAULT_OUTPUT_BENCHMARK_MIB),
@@ -312,6 +319,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             keymap_path: None,
             profile: None,
             split: None,
+            replace_pane: false,
             theme_override: None,
             mode: StartupMode::PrintTerminalSize {
                 json,
@@ -372,6 +380,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 keymap_path: None,
                 profile: None,
                 split: None,
+                replace_pane: false,
                 theme_override: None,
                 mode: StartupMode::ReconnectBackgroundSession {
                     identifier: identifier.context(
@@ -405,6 +414,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             keymap_path: None,
             profile: None,
             split: None,
+            replace_pane: false,
             theme_override: None,
             mode: StartupMode::ListBackgroundSessions { json },
             profile_report: None,
@@ -450,6 +460,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             keymap_path: None,
             profile: None,
             split: None,
+            replace_pane: false,
             theme_override: None,
             mode: StartupMode::Edit {
                 arguments: paths,
@@ -470,6 +481,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             keymap_path: None,
             profile: None,
             split: None,
+            replace_pane: false,
             theme_override: None,
             mode: StartupMode::Vi(
                 arguments[1..]
@@ -505,6 +517,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 keymap_path: None,
                 profile: None,
                 split: None,
+                replace_pane: false,
                 theme_override: None,
                 mode: StartupMode::ConfigureCurrentShellIntegration,
                 profile_report: None,
@@ -524,6 +537,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             keymap_path: None,
             profile: None,
             split: None,
+            replace_pane: false,
             theme_override: None,
             mode: StartupMode::PrintShellIntegration(ShellIntegration::parse(shell)?),
             profile_report: None,
@@ -554,6 +568,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 keymap_path: None,
                 profile: None,
                 split: None,
+                replace_pane: false,
                 theme_override: None,
                 mode: StartupMode::CliService(parse_serial_args(serial_arguments.iter().cloned())?),
                 profile_report: None,
@@ -584,6 +599,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 keymap_path: None,
                 profile: None,
                 split: None,
+                replace_pane: false,
                 theme_override: None,
                 mode: StartupMode::CliService(parse_http_args(http_arguments.iter().cloned())?),
                 profile_report: None,
@@ -619,6 +635,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                     keymap_path: None,
                     profile: None,
                     split: None,
+                    replace_pane: false,
                     theme_override: None,
                     mode: StartupMode::CliService(parse_tftp_server_args(
                         server_arguments.iter().cloned(),
@@ -647,6 +664,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             keymap_path: None,
             profile: None,
             split: None,
+            replace_pane: false,
             theme_override: None,
             mode: StartupMode::Application,
             profile_report: None,
@@ -677,6 +695,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 keymap_path: None,
                 profile: None,
                 split: None,
+                replace_pane: false,
                 theme_override: None,
                 mode: StartupMode::CliService(parse_notify_args(notify_arguments.iter().cloned())?),
                 profile_report: None,
@@ -709,6 +728,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 keymap_path: None,
                 profile: None,
                 split: None,
+                replace_pane: false,
                 theme_override: None,
                 mode: StartupMode::CliService(parse_copy_args(copy_arguments.iter().cloned())?),
                 profile_report: None,
@@ -744,6 +764,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 keymap_path: None,
                 profile: None,
                 split: None,
+                replace_pane: false,
                 theme_override: None,
                 mode: StartupMode::CliService(parse_paste_args(paste_arguments.iter().cloned())?),
                 profile_report: None,
@@ -774,6 +795,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
     let mut keymap = None;
     let mut profile = None;
     let mut split = None;
+    let mut replace_pane = false;
     let mut theme_override = None;
     #[cfg(windows)]
     let mut mode = StartupMode::Application;
@@ -813,6 +835,10 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 );
                 split = Some(name);
             }
+            "--replace-pane" | "-r" => {
+                anyhow::ensure!(!replace_pane, "--replace-pane may only be specified once");
+                replace_pane = true;
+            }
             "--theme" | "-t" => {
                 theme_override = Some(
                     args.next()
@@ -842,6 +868,14 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
         "--split cannot be combined with another startup mode"
     );
     anyhow::ensure!(
+        !replace_pane || mode == StartupMode::Application,
+        "--replace-pane cannot be combined with another startup mode"
+    );
+    anyhow::ensure!(
+        !replace_pane || split.is_some() || profile.is_some(),
+        "--replace-pane requires --split or --profile"
+    );
+    anyhow::ensure!(
         theme_override.is_none() || profile.is_some(),
         "--theme requires --profile"
     );
@@ -850,6 +884,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
         keymap_path: keymap,
         profile,
         split,
+        replace_pane,
         theme_override,
         mode,
         profile_report: None,
@@ -937,6 +972,7 @@ fn parse_benchmark_args(arguments: &[OsString]) -> Result<StartupArgs> {
         keymap_path: None,
         profile: None,
         split: None,
+        replace_pane: false,
         theme_override: None,
         mode,
         profile_report,
@@ -1007,6 +1043,7 @@ fn profile_subcommand_index(arguments: &[OsString]) -> Option<usize> {
             | "--theme" | "-t" => {
                 index = index.checked_add(2)?;
             }
+            "--replace-pane" | "-r" => index += 1,
             "--help" | "-h" | "--version" | "-v" => index += 1,
             "profile" => return Some(index),
             _ => return None,
@@ -1040,8 +1077,16 @@ pub(crate) fn should_handoff_to_existing_process(args: &StartupArgs) -> bool {
     args.mode == StartupMode::Application
         && args.config_path.is_none()
         && args.keymap_path.is_none()
+        && !args.replace_pane
         && args.profile.is_none()
         && args.split.is_none()
+}
+
+pub(crate) fn should_replace_pane_in_existing_process(args: &StartupArgs) -> bool {
+    args.mode == StartupMode::Application
+        && args.replace_pane
+        && args.config_path.is_none()
+        && args.keymap_path.is_none()
 }
 
 fn path_with_entry_first(path: Option<&std::ffi::OsStr>, entry: &Path) -> Option<OsString> {

@@ -124,6 +124,12 @@ $zettaCompletions = {
         (($previous -eq '-s' -or $last -eq '-s') -and $null -eq $subcommand)
     ) {
         & $zettaSplits
+    } elseif ($previous -eq '--replace-pane' -or ($previous -eq '-r' -and $null -eq $subcommand)) {
+        if ($wordToComplete -like '-*' -or [string]::IsNullOrEmpty($wordToComplete)) {
+            '--help', '--version', '--config', '--keymap', '--profile', '--split', '--theme'
+        } else {
+            @()
+        }
     } elseif (
         $previous -eq '--profile' -or $last -eq '--profile' -or
         (($previous -eq '-p' -or $last -eq '-p') -and $null -eq $subcommand)
@@ -184,7 +190,7 @@ $zettaCompletions = {
     } elseif ($subcommand -eq 'sessions' -and $words.Count -ge 3 -and $words[2] -eq 'reconnect') {
         if ($previous -in '--session', '-s') { @() } else { & $zettaSessionIds }
     } elseif ($null -eq $subcommand) {
-        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'profile', 'splits', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', '--help', '--version', '--config', '--keymap', '--profile', '--split', '--theme'
+        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'profile', 'splits', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', '--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme'
     } else {
         switch ($subcommand) {
             'benchmark' { '--terminal-render-workload', '--terminal-checkerboard-workload', '--terminal-sparse-update-workload', '--profile-report', '--profile-duration', '--profile-pane-stress', '--profile-background-stress', '--profile-sparse-updates', '--profile-external-terminal', '--help' }

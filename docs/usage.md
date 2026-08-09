@@ -69,6 +69,24 @@ entries can override those templates or add new ones. `--split` can be
 combined with `--profile` and `--theme`; it applies only to the initial
 window.
 
+Replace the active pane in an already running Zetta process with either a
+configured layout or a different profile:
+
+```sh
+zetta --replace-pane --split quarters
+zetta -r -s four-vertical --profile "PROFILE" --theme "THEME"
+zetta --replace-pane --profile "PROFILE"
+```
+
+`--replace-pane` requires `--split` or `--profile` and targets the active pane
+in the active window. Profile names are case-insensitive. A split-only
+replacement keeps the current active terminal and profile for its retained
+pane; a profile or theme override respawns the retained pane, and the selected
+profile/theme is used for every pane in the replacement layout. Surrounding panes, working
+directory inheritance, focus, and pane limits are preserved. If no accepting
+Zetta process is available, the command falls back to the normal new-window
+launch; `--config` and `--keymap` always use that normal launch path.
+
 Tab names follow the active terminal process. Press `Ctrl-Shift-R` or double-click
 a tab to set a persistent name. Use `Ctrl-Shift-Y` or the tab context menu
 to choose a tab icon. Submit an empty name to resume automatic naming.
