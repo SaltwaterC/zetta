@@ -74,7 +74,15 @@ pub(crate) fn keymap_keystroke_alias(keystroke: &str) -> Option<String> {
 /// Converts a user-facing number-row alias back to GPUI's normalized keymap
 /// spelling for storage and keymap loading.
 pub(crate) fn keymap_keystroke_storage(keystroke: &str) -> String {
-    let normalized = keystroke.trim().to_ascii_lowercase().replace('+', "-");
+    let normalized = keystroke.trim().to_ascii_lowercase();
+    // A trailing `+` is the literal plus key in GPUI's `ctrl-+` spelling,
+    // not a separator in the alternate `ctrl+shift+1` spelling. Replacing it
+    // with `-` would make `ctrl-+` collide with `ctrl--` in default lookups.
+    let normalized = if normalized.ends_with('+') {
+        normalized
+    } else {
+        normalized.replace('+', "-")
+    };
     let key_index = normalized
         .strip_prefix("ctrl+shift+")
         .or_else(|| normalized.strip_prefix("ctrl-shift-"))

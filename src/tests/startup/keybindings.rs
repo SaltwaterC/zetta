@@ -452,6 +452,13 @@ fn pane_font_size_shortcuts_use_pane_control_modifiers() {
     }
 }
 
+#[test]
+fn keymap_storage_preserves_literal_plus_keys() {
+    assert_eq!(keymap_keystroke_storage("ctrl-+"), "ctrl-+");
+    assert_eq!(keymap_keystroke_storage("alt-shift-+"), "alt-shift-+");
+    assert_eq!(keymap_keystroke_storage("ctrl+shift+1"), "ctrl-shift-1");
+}
+
 #[cfg(feature = "serial-console")]
 #[test]
 fn serial_console_avoids_the_linux_unicode_input_shortcut() {
