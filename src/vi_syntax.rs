@@ -2,7 +2,8 @@ use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
     fs,
-    path::Path,
+    ops::Range,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -148,6 +149,12 @@ pub(crate) struct ZedSyntaxHighlighter {
     styles: Vec<Option<HighlightStyle>>,
     syntax_theme: Arc<SyntaxTheme>,
     highlighter: Highlighter,
+    preview_cache: Option<VisibleSyntaxCache>,
+}
+
+struct VisibleSyntaxCache {
+    context_range: Range<usize>,
+    spans: Vec<HighlightSpan>,
 }
 
 impl ZedSyntaxHighlighter {
@@ -192,6 +199,7 @@ impl ZedSyntaxHighlighter {
             styles: Vec::new(),
             syntax_theme,
             highlighter: Highlighter::new(),
+            preview_cache: None,
         })
     }
 
@@ -332,6 +340,63 @@ impl ZedSyntaxHighlighter {
         self.highlight_language_with_cancellation(language_index, buffer, cancellation_flag)
     }
 
+    fn highlight_visible_path(
+        &mut self,
+        path: Option<&Path>,
+        buffer: &[u8],
+        visible_range: Range<usize>,
+    ) -> Vec<HighlightSpan> {
+        let visible_start = visible_range.start.min(buffer.len());
+        let visible_end = visible_range.end.min(buffer.len()).max(visible_start);
+        if visible_start == visible_end {
+            return Vec::new();
+        }
+
+        let Some(language_index) = self.language_index(path, buffer) else {
+            return Vec::new();
+        };
+        let visible_range = visible_start..visible_end;
+        if self.preview_cache.as_ref().is_some_and(|cache| {
+            cache.context_range.start <= visible_range.start
+                && visible_range.end <= cache.context_range.end
+        }) {
+            return self
+                .preview_cache
+                .as_ref()
+                .map(|cache| clip_preview_spans(&cache.spans, visible_range))
+                .unwrap_or_default();
+        }
+        let context_range = syntax_preview_context_range(buffer, visible_range.clone());
+        let spans = self.highlight_language_with_cancellation(
+            language_index,
+            &buffer[context_range.clone()],
+            None,
+        );
+
+        let spans = spans
+            .into_iter()
+            .map(|span| {
+                HighlightSpan::new(
+                    span.start.saturating_add(context_range.start),
+                    span.end.saturating_add(context_range.start),
+                    span.style,
+                )
+            })
+            .collect();
+        self.preview_cache = Some(VisibleSyntaxCache {
+            context_range,
+            spans,
+        });
+        self.preview_cache
+            .as_ref()
+            .map(|cache| clip_preview_spans(&cache.spans, visible_range))
+            .unwrap_or_default()
+    }
+
+    fn invalidate_visible(&mut self) {
+        self.preview_cache = None;
+    }
+
     #[cfg(test)]
     fn highlight_language(&mut self, language_index: usize, buffer: &[u8]) -> Vec<HighlightSpan> {
         self.highlight_language_with_cancellation(language_index, buffer, None)
@@ -394,6 +459,41 @@ impl ZedSyntaxHighlighter {
             }
         }
     }
+}
+
+fn clip_preview_spans(spans: &[HighlightSpan], visible_range: Range<usize>) -> Vec<HighlightSpan> {
+    let first = spans.partition_point(|span| span.end <= visible_range.start);
+    let last = first + spans[first..].partition_point(|span| span.start < visible_range.end);
+    spans[first..last]
+        .iter()
+        .filter_map(|span| {
+            let start = span.start.max(visible_range.start);
+            let end = span.end.min(visible_range.end);
+            (start < end).then(|| HighlightSpan::new(start, end, span.style))
+        })
+        .collect()
+}
+
+fn syntax_preview_context_range(buffer: &[u8], visible_range: Range<usize>) -> Range<usize> {
+    let visible_start = visible_range.start.min(buffer.len());
+    let visible_end = visible_range.end.min(buffer.len()).max(visible_start);
+
+    let mut start = visible_start.saturating_sub(SYNTAX_PREVIEW_CONTEXT_BYTES);
+    while start > 0 && buffer[start - 1] != b'\n' {
+        start -= 1;
+    }
+
+    let mut end = visible_end
+        .saturating_add(SYNTAX_PREVIEW_CONTEXT_BYTES)
+        .min(buffer.len());
+    while end < buffer.len() && buffer[end] != b'\n' {
+        end += 1;
+    }
+    if end < buffer.len() {
+        end += 1;
+    }
+
+    start..end
 }
 
 fn highlight_spans(
@@ -473,6 +573,8 @@ struct SyntaxJob {
     buffer: Vec<u8>,
 }
 
+const SYNTAX_PREVIEW_CONTEXT_BYTES: usize = 16 * 1024;
+
 struct SyntaxResult {
     revision: usize,
     highlights: Vec<HighlightSpan>,
@@ -486,6 +588,10 @@ struct BackgroundZedSyntaxHighlighter {
     results: Receiver<SyntaxResult>,
     cancellation: Arc<AtomicUsize>,
     latest_revision: Arc<AtomicUsize>,
+    path: Option<PathBuf>,
+    configured_theme: Option<String>,
+    preview_highlighter: Option<ZedSyntaxHighlighter>,
+    preview_initialization_attempted: bool,
     revision: usize,
     in_flight: bool,
     pending: Option<SyntaxJob>,
@@ -502,13 +608,15 @@ impl BackgroundZedSyntaxHighlighter {
         let worker_cancellation = Arc::clone(&cancellation);
         let latest_revision = Arc::new(AtomicUsize::new(0));
         let worker_latest_revision = Arc::clone(&latest_revision);
+        let worker_path = path.clone();
+        let worker_configured_theme = configured_theme.clone();
 
         thread::Builder::new()
             .name("zetta-vi-syntax".to_owned())
             .spawn(move || {
                 run_syntax_worker(
-                    path,
-                    configured_theme,
+                    worker_path,
+                    worker_configured_theme,
                     worker_requests,
                     worker_results,
                     worker_cancellation,
@@ -522,6 +630,10 @@ impl BackgroundZedSyntaxHighlighter {
             results,
             cancellation,
             latest_revision,
+            path,
+            configured_theme,
+            preview_highlighter: None,
+            preview_initialization_attempted: false,
             revision: 0,
             in_flight: false,
             pending: None,
@@ -594,6 +706,35 @@ impl SyntaxHighlighter for BackgroundZedSyntaxHighlighter {
     fn highlight(&mut self, buffer: &[u8]) -> Vec<HighlightSpan> {
         self.request(buffer);
         Vec::new()
+    }
+
+    fn highlight_visible(
+        &mut self,
+        buffer: &[u8],
+        visible_range: Range<usize>,
+    ) -> Option<Vec<HighlightSpan>> {
+        if !self.preview_initialization_attempted {
+            self.preview_initialization_attempted = true;
+            self.preview_highlighter = match ZedSyntaxHighlighter::new(active_syntax_theme_for(
+                self.configured_theme.as_deref(),
+            )) {
+                Ok(highlighter) => Some(highlighter),
+                Err(error) => {
+                    eprintln!("zetta vi: syntax preview unavailable: {error:#}");
+                    None
+                }
+            };
+        }
+
+        self.preview_highlighter.as_mut().map(|highlighter| {
+            highlighter.highlight_visible_path(self.path.as_deref(), buffer, visible_range)
+        })
+    }
+
+    fn invalidate_visible(&mut self) {
+        if let Some(highlighter) = self.preview_highlighter.as_mut() {
+            highlighter.invalidate_visible();
+        }
     }
 
     fn poll(&mut self) -> Option<Vec<HighlightSpan>> {

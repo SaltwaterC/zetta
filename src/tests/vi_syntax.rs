@@ -28,6 +28,58 @@ fn highlights_a_rust_file_with_zed_queries_and_theme_styles() {
 }
 
 #[test]
+fn visible_preview_remaps_and_clips_spans_to_the_viewport() {
+    let theme = syntax_theme(&["keyword", "function"]);
+    let mut highlighter = ZedSyntaxHighlighter::new(theme).expect("load Zed grammars");
+    let source = b"let prefix = 1;\nfn main() {}\nlet suffix = 2;\n";
+    let visible_start = source
+        .windows(b"fn main() {}".len())
+        .position(|line| line == b"fn main() {}")
+        .expect("find visible Rust function");
+    let visible_end = visible_start + b"fn main() {}".len();
+
+    let spans = highlighter.highlight_visible_path(
+        Some(Path::new("main.rs")),
+        source,
+        visible_start..visible_end,
+    );
+
+    assert!(!spans.is_empty());
+    assert!(spans.iter().all(|span| visible_start <= span.start
+        && span.start < span.end
+        && span.end <= visible_end));
+    assert!(
+        spans
+            .iter()
+            .any(|span| &source[span.start..span.end] == b"fn")
+    );
+    assert!(
+        spans
+            .iter()
+            .all(|span| &source[span.start..span.end] != b"let")
+    );
+}
+
+#[test]
+fn visible_preview_uses_bounded_line_aligned_context() {
+    let mut source = Vec::new();
+    for _ in 0..(SYNTAX_PREVIEW_CONTEXT_BYTES + 1024) {
+        source.extend_from_slice(b"x\n");
+    }
+    let visible_start = source.len() / 2;
+    let visible_range = visible_start..visible_start + 1;
+    let context = syntax_preview_context_range(&source, visible_range.clone());
+
+    assert!(context.start <= visible_range.start);
+    assert!(context.end >= visible_range.end);
+    assert!(context.start == 0 || source[context.start - 1] == b'\n');
+    assert!(context.end == source.len() || source[context.end - 1] == b'\n');
+    assert!(visible_range.start - context.start <= SYNTAX_PREVIEW_CONTEXT_BYTES + 1);
+    assert!(context.end - visible_range.end <= SYNTAX_PREVIEW_CONTEXT_BYTES + 1);
+    assert!(context.len() < source.len());
+}
+
+#[test]
 fn compiles_queries_only_for_the_selected_language() {
     let theme = syntax_theme(&["keyword", "function"]);
     let mut highlighter = ZedSyntaxHighlighter::new(theme).expect("load grammar metadata");
@@ -61,6 +113,10 @@ fn background_highlighter_returns_the_current_revision() {
     let source = b"fn main() {}\n";
 
     assert!(highlighter.highlight(source).is_empty());
+    let preview = highlighter
+        .highlight_visible(source, 0..source.len())
+        .expect("create visible syntax preview");
+    assert!(preview.iter().any(|span| span.start == 0 && span.end == 2));
     let deadline = Instant::now() + Duration::from_secs(5);
     let spans = loop {
         if let Some(spans) = highlighter.poll() {
