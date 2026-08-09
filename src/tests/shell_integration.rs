@@ -43,6 +43,7 @@ fn supported_shells_generate_completion_and_tftp_shortcut() {
             assert!(script.contains(operation));
         }
         assert!(script.contains("--path-only"));
+        assert!(script.contains("--copy"));
     }
 }
 
@@ -177,7 +178,7 @@ fn bash_color_completion_offers_named_presets_for_long_and_short_flags() {
 }
 
 #[test]
-fn bash_worktree_completion_offers_operations_and_long_path_only() {
+fn bash_worktree_completion_offers_operations_and_long_worktree_options() {
     use std::io::Write as _;
     use std::process::{Command, Stdio};
 
@@ -191,7 +192,7 @@ fn bash_worktree_completion_offers_operations_and_long_path_only() {
 
     let script = ShellIntegration::Bash.script(&profiles());
     let driver = format!(
-        "{script}\nCOMP_WORDS=(zetta wt '')\nCOMP_CWORD=2\n_zetta_complete\nprintf 'operation:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta wt new --)\nCOMP_CWORD=3\n_zetta_complete\nprintf 'option:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zwt '')\nCOMP_CWORD=1\n_zetta_complete_zwt\nprintf 'wrapper:%s\\n' \"${{COMPREPLY[@]}}\"\n"
+        "{script}\nCOMP_WORDS=(zetta wt '')\nCOMP_CWORD=2\n_zetta_complete\nprintf 'operation:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta wt new --)\nCOMP_CWORD=3\n_zetta_complete\nprintf 'option:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta wt new --copy Carg)\nCOMP_CWORD=4\n_zetta_complete\nprintf 'copy-path:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta wt new -c Carg)\nCOMP_CWORD=4\n_zetta_complete\nprintf 'short-copy-path:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zwt '')\nCOMP_CWORD=1\n_zetta_complete_zwt\nprintf 'wrapper:%s\\n' \"${{COMPREPLY[@]}}\"\n"
     );
     let mut child = Command::new("bash")
         .args(["--noprofile", "--norc"])
@@ -224,7 +225,19 @@ fn bash_worktree_completion_offers_operations_and_long_path_only() {
         }
     }
     assert!(completions.lines().any(|line| line == "option:--path-only"));
+    assert!(completions.lines().any(|line| line == "option:--copy"));
     assert!(!completions.lines().any(|line| line == "option:-P"));
+    assert!(!completions.lines().any(|line| line == "option:-c"));
+    assert!(
+        completions
+            .lines()
+            .any(|line| line == "copy-path:Cargo.toml")
+    );
+    assert!(
+        completions
+            .lines()
+            .any(|line| line == "short-copy-path:Cargo.toml")
+    );
 }
 
 #[cfg(unix)]

@@ -318,6 +318,7 @@ end
 # they appear alongside subcommands at every valid argument position.
 function __zetta_option_unused
     set -l words (commandline -opc)
+    test "$argv[1]" = --copy; and return 0
     not contains -- $argv[1] $words[2..-1]
 end
 
@@ -654,9 +655,13 @@ complete -c zetta -n '__zetta_at_subcommand wt' -a 'new done status rerere'
 complete -c zetta -n '__fish_seen_subcommand_from wt' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from wt' -a '(__zetta_long_options wt)'
 complete -c zetta -n '__fish_seen_subcommand_from wt; and __fish_seen_subcommand_from new done' -l path-only -d 'Print only the resulting path'
+complete -c zetta -n '__fish_seen_subcommand_from wt; and __fish_seen_subcommand_from new' -l copy -r -F -d 'Copy a source-worktree path (repeatable)'
+complete -c zetta -s c -r -F -n '__fish_seen_subcommand_from wt; and __fish_seen_subcommand_from new; and __zetta_short_option -c'
 complete -c zwt -f
 complete -c zwt -n '__fish_use_subcommand' -a 'new done status rerere'
 complete -c zwt -n '__fish_seen_subcommand_from new done' -l path-only -d 'Print only the resulting path'
+complete -c zwt -n '__fish_seen_subcommand_from new' -l copy -r -F -d 'Copy a source-worktree path (repeatable)'
+complete -c zwt -s c -r -F -n '__fish_seen_subcommand_from new; and __zetta_short_option -c'
 complete -c zwt -n '__fish_seen_subcommand_from new done status rerere' -l help -d 'Print help'
 complete -c ztftp -f -a 'get put'
 complete -c ztftp -l port -r -d 'Server port'

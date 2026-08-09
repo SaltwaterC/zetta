@@ -42,6 +42,8 @@ fn worktree_subcommand_is_available_without_cli_services() {
     let arguments = parse_args_from([
         OsString::from("wt"),
         OsString::from("new"),
+        OsString::from("--copy"),
+        OsString::from(".zetta-local"),
         OsString::from("-P"),
         OsString::from("feature/api"),
     ])
@@ -51,6 +53,7 @@ fn worktree_subcommand_is_available_without_cli_services() {
         StartupMode::Worktree(WorktreeCommand::New {
             name: "feature/api".to_owned(),
             path_only: true,
+            copy_paths: vec![PathBuf::from(".zetta-local")],
         })
     );
     assert!(

@@ -20,8 +20,10 @@ captures `zetta wt new --path-only NAME` and changes into the created worktree;
 `zwt done` similarly changes into the integrated source worktree. Other `zwt`
 operations pass through to `zetta wt`. Arguments are forwarded as literal shell
 arguments, so nested names and paths containing spaces are supported. The
-completion scripts offer `wt`, `new`, `done`, `status`, `rerere`, and the long
-`--path-only` flag (the short `-P` remains accepted by the CLI).
+completion scripts offer `wt`, `new`, `done`, `status`, `rerere`, the long
+`--copy` and `--path-only` flags, and filesystem completion for copy paths. The
+short `-c` and `-P` forms remain accepted by the CLI but are omitted from the
+candidate list to keep completion concise.
 
 The root `--split`/`-s` launch option runs `zetta splits` at completion time,
 so it completes every currently configured layout name without embedding a

@@ -63,10 +63,10 @@ _zetta_option_used() {
 }
 
 _zetta_compgen() {
-    local options=$1 candidate
+    local options=$1 repeatable=${2:-0} candidate
     local -a available=()
     for candidate in $options; do
-        if [[ $candidate != -* ]] || ! _zetta_option_used "$candidate"; then
+        if [[ $candidate != -* ]] || ! _zetta_option_used "$candidate" || [[ $repeatable == 1 && $candidate == --copy ]]; then
             available+=("$candidate")
         fi
     done
@@ -185,6 +185,14 @@ _zetta_complete() {
     }
 
     case "$previous" in
+        --copy)
+            if [[ $command == wt && ${COMP_WORDS[2]} == new ]]; then
+                COMPREPLY=( $(compgen -f -- "$current") )
+            else
+                COMPREPLY=()
+            fi
+            return
+            ;;
         --profile)
             _zetta_complete_profiles
             return
@@ -308,7 +316,9 @@ _zetta_complete() {
             return
             ;;
         -c)
-            if [[ $command == overlay ]]; then
+            if [[ $command == wt && ${COMP_WORDS[2]} == new ]]; then
+                COMPREPLY=( $(compgen -f -- "$current") )
+            elif [[ $command == overlay ]]; then
                 _zetta_compgen 'ZETTA_OVERLAY_COLORS'
             elif [[ $command == terminal-size ]]; then
                 COMPREPLY=()
@@ -527,7 +537,11 @@ _zetta_complete() {
             if (( COMP_CWORD == 2 )); then
                 _zetta_compgen 'new done status rerere --help'
             elif [[ ${COMP_WORDS[2]} == new || ${COMP_WORDS[2]} == done ]]; then
-                _zetta_compgen '--path-only --help'
+                if [[ ${COMP_WORDS[2]} == new ]]; then
+                    _zetta_compgen '--copy --path-only --help' 1
+                else
+                    _zetta_compgen '--path-only --help'
+                fi
             else
                 _zetta_compgen '--help'
             fi

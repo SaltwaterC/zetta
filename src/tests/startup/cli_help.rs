@@ -165,6 +165,7 @@ fn worktree_help_lists_every_operation_and_path_only() {
     assert!(worktree_help().contains("zetta wt status"));
     assert!(worktree_help().contains("zetta wt rerere"));
     assert!(worktree_new_help().contains("-P, --path-only"));
+    assert!(worktree_new_help().contains("-c, --copy PATH"));
     assert!(worktree_done_help().contains("-P, --path-only"));
 }
 

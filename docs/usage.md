@@ -307,6 +307,23 @@ Zetta uses the sibling directory `<repository>-worktrees`. The root is created
 on demand by `new`; `status` only reports its resolved path and never creates
 directories.
 
+Use repeatable `--copy PATH` (or `-c PATH`) options to copy files, directories,
+or symlinks from the current source worktree into the identical relative
+locations in the new worktree:
+
+```sh
+zetta wt new --copy .env.local --copy .cache feature/api
+```
+
+Copy paths must be relative, may not contain parent-directory traversal, and may
+not traverse an intermediate symlink. Requested paths must not overlap, and the
+destination path must not already exist. Symlinks inside copied directories are
+recreated as symlinks rather than followed. Zetta uses native copy-on-write
+cloning on supported filesystems (Btrfs or reflink-enabled XFS on Linux, APFS on
+macOS, and ReFS block cloning on Windows) and falls back to a regular recursive
+copy when cloning is unavailable. A failed copy removes the new worktree,
+temporary branch, metadata, and directories created for the worktree root.
+
 When the source commit contains submodules, `new` initializes them recursively
 at the gitlink commits recorded by that source tree. For each submodule, an
 initialized matching checkout in the source worktree is supplied to Git as a

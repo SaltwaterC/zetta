@@ -63,6 +63,7 @@ fi
 
 _zetta_option_unused() {
     local option=$1 index
+    [[ $option == --copy ]] && return 0
     for (( index = 2; index < CURRENT; index++ )); do
         [[ ${words[index]} == "$option" ]] && return 1
     done
@@ -228,6 +229,12 @@ _zetta() {
     fi
 
     case $previous in
+        --copy|-c)
+            if [[ $words[2] == wt && $words[3] == new ]]; then
+                _files
+            fi
+            return
+            ;;
         --profile)
             _zetta_profiles
             return
@@ -532,7 +539,11 @@ _zetta() {
                 compadd -S ' ' -- new done status rerere
                 _zetta_options --help
             elif [[ $words[3] == new || $words[3] == done ]]; then
-                _zetta_options --path-only --help
+                if [[ $words[3] == new ]]; then
+                    _zetta_options --copy --path-only --help
+                else
+                    _zetta_options --path-only --help
+                fi
             else
                 _zetta_options --help
             fi

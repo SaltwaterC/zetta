@@ -11,6 +11,10 @@ use std::cell::RefCell;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStringExt;
 
+use crate::worktree_copy::{
+    copy_paths as copy_worktree_paths, validate_copy_path, validate_copy_paths,
+    validate_copy_sources,
+};
 use anyhow::{Context as _, Result};
 
 const WORKTREE_BRANCH_PREFIX: &str = "wt/";
@@ -47,8 +51,14 @@ fn test_current_directory() -> Option<PathBuf> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum WorktreeCommand {
-    New { name: String, path_only: bool },
-    Done { path_only: bool },
+    New {
+        name: String,
+        path_only: bool,
+        copy_paths: Vec<PathBuf>,
+    },
+    Done {
+        path_only: bool,
+    },
     Status,
     Rerere,
 }
@@ -78,7 +88,9 @@ pub(crate) fn parse_worktree_args(arguments: &[OsString]) -> Result<WorktreeComm
 fn parse_new_args(arguments: &[OsString]) -> Result<WorktreeCommand> {
     let mut path_only = false;
     let mut name = None;
-    for argument in arguments {
+    let mut copy_paths = Vec::new();
+    let mut arguments = arguments.iter();
+    while let Some(argument) = arguments.next() {
         match argument.to_string_lossy().as_ref() {
             "--help" | "-h" => {
                 println!("{}", worktree_new_help());
@@ -87,6 +99,16 @@ fn parse_new_args(arguments: &[OsString]) -> Result<WorktreeCommand> {
             PATH_ONLY_OPTION | "-P" => {
                 anyhow::ensure!(!path_only, "{PATH_ONLY_OPTION} may only be specified once");
                 path_only = true;
+            }
+            "--copy" | "-c" => {
+                let path = arguments
+                    .next()
+                    .context("--copy requires a relative PATH")?;
+                anyhow::ensure!(
+                    !path.to_string_lossy().starts_with('-'),
+                    "--copy requires a relative PATH"
+                );
+                copy_paths.push(validate_copy_path(Path::new(path))?);
             }
             value if value.starts_with('-') => {
                 anyhow::bail!("unknown zetta wt new option {value:?}")
@@ -99,7 +121,12 @@ fn parse_new_args(arguments: &[OsString]) -> Result<WorktreeCommand> {
     }
     let name = name.context("zetta wt new requires NAME; run zetta wt new --help for usage")?;
     anyhow::ensure!(!name.is_empty(), "zetta wt new requires a non-empty NAME");
-    Ok(WorktreeCommand::New { name, path_only })
+    let copy_paths = validate_copy_paths(&copy_paths)?;
+    Ok(WorktreeCommand::New {
+        name,
+        path_only,
+        copy_paths,
+    })
 }
 
 fn parse_done_args(arguments: &[OsString]) -> Result<WorktreeCommand> {
@@ -151,7 +178,34 @@ pub(crate) fn worktree_help() -> &'static str {
 }
 
 pub(crate) fn worktree_new_help() -> &'static str {
-    "Create a Git worktree for a temporary wt/NAME branch\n\nUsage: zetta wt new [OPTIONS] NAME\n\nThe current worktree must be on an attached branch. Zetta creates branch wt/NAME,\nrecords that branch source in wtbranch.wt/NAME.base, and places the worktree at\n<wt.root>/NAME. Nested NAME values are supported. The default root is sibling\n<repository>-worktrees; configure a repository root with git config --local wt.root PATH.\nFor example, use git config --local wt.root ../project-worktrees. Relative PATH values\nresolve from the repository root. Existing paths, symlinks, and branches are rejected.\n\nIf the source commit contains submodules, new recursively initializes them at their\nrecorded commits. An initialized matching submodule checkout in the source worktree\nis reused as a local Git object reference when possible; otherwise Git uses the\nsubmodule's configured remote. If initialization fails, Zetta force-removes the\npartial worktree, deletes its branch, and clears its metadata.\n\nOptions:\n  -P, --path-only                   Print exactly the created worktree path\n  -h, --help                        Print help\n\nUse zwt new NAME from generated shell integration to create the worktree and cd into\nit. The zetta wt rerere shortcut is recommended before the first conflict."
+    concat!(
+        "Create a Git worktree for a temporary wt/NAME branch\n\n",
+        "Usage: zetta wt new [OPTIONS] NAME\n\n",
+        "The current worktree must be on an attached branch. Zetta creates branch wt/NAME,\n",
+        "records that branch source in wtbranch.wt/NAME.base, and places the worktree at\n",
+        "<wt.root>/NAME. Nested NAME values are supported. The default root is sibling\n",
+        "<repository>-worktrees; configure a repository root with git config --local wt.root PATH.\n",
+        "For example, use git config --local wt.root ../project-worktrees. Relative PATH values\n",
+        "resolve from the repository root. Existing paths, symlinks, and branches are rejected.\n\n",
+        "If the source commit contains submodules, new recursively initializes them at their\n",
+        "recorded commits. An initialized matching submodule checkout in the source worktree\n",
+        "is reused as a local Git object reference when possible; otherwise Git uses the\n",
+        "submodule's configured remote. If initialization fails, Zetta force-removes the\n",
+        "partial worktree, deletes its branch, and clears its metadata.\n\n",
+        "The repeatable --copy PATH (or -c PATH) option copies a relative file, directory,\n",
+        "or symlink from the current source worktree to the identical location in the new\n",
+        "worktree. Paths may not be absolute, traverse a parent directory, or traverse an\n",
+        "intermediate symlink. Existing destination paths and overlapping copy requests are\n",
+        "rejected. Native copy-on-write cloning is used when the filesystem supports it, with\n",
+        "a regular recursive-copy fallback elsewhere. A copy failure removes the new\n",
+        "worktree, branch, metadata, and directories created for its root.\n\n",
+        "Options:\n",
+        "  -c, --copy PATH                   Copy a source-worktree path (repeatable)\n",
+        "  -P, --path-only                   Print exactly the created worktree path\n",
+        "  -h, --help                        Print help\n\n",
+        "Use zwt new NAME from generated shell integration to create the worktree and cd into\n",
+        "it. The zetta wt rerere shortcut is recommended before the first conflict."
+    )
 }
 
 pub(crate) fn worktree_done_help() -> &'static str {
@@ -172,7 +226,11 @@ pub(crate) fn run(command: &WorktreeCommand) -> Result<()> {
 
 fn run_at(command: &WorktreeCommand, current_directory: Option<&Path>) -> Result<()> {
     match command {
-        WorktreeCommand::New { name, path_only } => run_new(name, *path_only, current_directory),
+        WorktreeCommand::New {
+            name,
+            path_only,
+            copy_paths,
+        } => run_new(name, *path_only, copy_paths, current_directory),
         WorktreeCommand::Done { path_only } => run_done(*path_only, current_directory),
         WorktreeCommand::Status => run_status(current_directory),
         WorktreeCommand::Rerere => run_rerere(current_directory),
@@ -201,7 +259,12 @@ struct ResolvedRoot {
     configured: bool,
 }
 
-fn run_new(name: &str, path_only: bool, current_directory: Option<&Path>) -> Result<()> {
+fn run_new(
+    name: &str,
+    path_only: bool,
+    copy_paths: &[PathBuf],
+    current_directory: Option<&Path>,
+) -> Result<()> {
     let repository = discover_repository(current_directory)?;
     anyhow::ensure!(
         !rebase_in_progress(&repository.current_worktree)?,
@@ -220,6 +283,7 @@ fn run_new(name: &str, path_only: bool, current_directory: Option<&Path>) -> Res
     validate_branch_name(&repository.current_worktree, &branch)?;
     ensure_branch_is_available(&repository.current_worktree, &branch)?;
     let source_submodules = gitlink_paths(&repository.current_worktree, source_branch)?;
+    validate_copy_sources(&repository.current_worktree, copy_paths)?;
 
     let resolved_root = resolved_worktree_root(&repository.current_worktree, &repository.root)?;
     let destination = destination_path(&resolved_root.path, name);
@@ -256,6 +320,23 @@ fn run_new(name: &str, path_only: bool, current_directory: Option<&Path>) -> Res
             &created_directories,
         );
         let mut message = format!("initializing worktree submodules failed: {error}");
+        if !rollback_errors.is_empty() {
+            message.push_str("; rollback also failed: ");
+            message.push_str(&rollback_errors.join("; "));
+        }
+        return Err(anyhow::anyhow!(message));
+    }
+
+    if let Err(error) = copy_worktree_paths(&repository.current_worktree, &destination, copy_paths)
+    {
+        let rollback_errors = rollback_new_worktree(
+            &repository.current_worktree,
+            &destination,
+            &branch,
+            &metadata_key,
+            &created_directories,
+        );
+        let mut message = format!("copying worktree paths failed: {error}");
         if !rollback_errors.is_empty() {
             message.push_str("; rollback also failed: ");
             message.push_str(&rollback_errors.join("; "));

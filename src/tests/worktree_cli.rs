@@ -115,6 +115,7 @@ impl GitFixture {
             run(&WorktreeCommand::New {
                 name: name.to_owned(),
                 path_only: true,
+                copy_paths: Vec::new(),
             })
             .unwrap();
         });
@@ -261,6 +262,7 @@ fn parses_worktree_commands_and_path_only_aliases() {
         WorktreeCommand::New {
             name: "feature/api".to_owned(),
             path_only: false,
+            copy_paths: Vec::new(),
         }
     );
     assert_eq!(
@@ -273,6 +275,7 @@ fn parses_worktree_commands_and_path_only_aliases() {
         WorktreeCommand::New {
             name: "feature/api".to_owned(),
             path_only: true,
+            copy_paths: Vec::new(),
         }
     );
     assert_eq!(
@@ -290,6 +293,27 @@ fn parses_worktree_commands_and_path_only_aliases() {
 }
 
 #[test]
+fn parses_repeatable_copy_options_and_propagates_them() {
+    assert_eq!(
+        parse_worktree_args(&[
+            OsString::from("new"),
+            OsString::from("--copy"),
+            OsString::from("config/settings"),
+            OsString::from("-c"),
+            OsString::from("cache"),
+            OsString::from("-P"),
+            OsString::from("feature/api"),
+        ])
+        .unwrap(),
+        WorktreeCommand::New {
+            name: "feature/api".to_owned(),
+            path_only: true,
+            copy_paths: vec![PathBuf::from("config/settings"), PathBuf::from("cache")],
+        }
+    );
+}
+
+#[test]
 fn rejects_invalid_worktree_arguments() {
     assert!(parse_worktree_args(&[]).is_err());
     assert!(parse_worktree_args(&[OsString::from("unknown")]).is_err());
@@ -302,6 +326,36 @@ fn rejects_invalid_worktree_arguments() {
         .is_err()
     );
     assert!(parse_worktree_args(&[OsString::from("new"), OsString::from("--path-only")]).is_err());
+    assert!(parse_worktree_args(&[OsString::from("new"), OsString::from("--copy")]).is_err());
+    assert!(
+        parse_worktree_args(&[
+            OsString::from("new"),
+            OsString::from("--copy"),
+            OsString::from("--path-only"),
+            OsString::from("name"),
+        ])
+        .is_err()
+    );
+    assert!(
+        parse_worktree_args(&[
+            OsString::from("new"),
+            OsString::from("--copy"),
+            OsString::from("../outside"),
+            OsString::from("name"),
+        ])
+        .is_err()
+    );
+    assert!(
+        parse_worktree_args(&[
+            OsString::from("new"),
+            OsString::from("--copy"),
+            OsString::from("config"),
+            OsString::from("-c"),
+            OsString::from("config/dev"),
+            OsString::from("name"),
+        ])
+        .is_err()
+    );
     assert!(
         parse_worktree_args(&[OsString::from("status"), OsString::from("--path-only")]).is_err()
     );
@@ -311,6 +365,7 @@ fn rejects_invalid_worktree_arguments() {
 fn worktree_help_covers_the_workflow() {
     assert!(worktree_help().contains("wt.root"));
     assert!(worktree_help().contains("zetta wt rerere"));
+    assert!(worktree_new_help().contains("--copy"));
     assert!(worktree_new_help().contains("--path-only"));
     assert!(worktree_done_help().contains("stage"));
     assert!(worktree_status_help().contains("never creates"));
@@ -373,6 +428,108 @@ fn creates_nested_worktrees_and_records_the_source_branch() {
     assert_eq!(
         fixture.git(&worktree, &["branch", "--show-current"]),
         "wt/feature/api\n"
+    );
+}
+
+#[test]
+fn copies_untracked_files_and_directories_into_the_new_worktree() {
+    let fixture = GitFixture::new();
+    let local = fixture.root.join("local settings");
+    fs::create_dir_all(local.join("nested")).unwrap();
+    fs::write(local.join("settings.json"), "source settings\n").unwrap();
+    fs::write(local.join("nested/value"), "nested source\n").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("settings.json", local.join("settings-link")).unwrap();
+
+    let root = fixture.root.clone();
+    let destination = fixture.worktree_path("copied");
+    in_directory(&fixture, &root, || {
+        run(&WorktreeCommand::New {
+            name: "copied".to_owned(),
+            path_only: true,
+            copy_paths: vec![PathBuf::from("local settings")],
+        })
+        .unwrap();
+    });
+
+    assert_eq!(
+        fs::read_to_string(destination.join("local settings/settings.json")).unwrap(),
+        "source settings\n"
+    );
+    assert_eq!(
+        fs::read_to_string(destination.join("local settings/nested/value")).unwrap(),
+        "nested source\n"
+    );
+    #[cfg(unix)]
+    assert!(
+        fs::symlink_metadata(destination.join("local settings/settings-link"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+
+    fs::write(
+        destination.join("local settings/settings.json"),
+        "destination settings\n",
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(local.join("settings.json")).unwrap(),
+        "source settings\n"
+    );
+}
+
+#[test]
+fn copy_failures_roll_back_the_new_worktree_branch_and_metadata() {
+    let fixture = GitFixture::new();
+    let root = fixture.root.clone();
+    let destination = fixture.worktree_path("copy-conflict");
+    let error = in_directory(&fixture, &root, || {
+        run(&WorktreeCommand::New {
+            name: "copy-conflict".to_owned(),
+            path_only: false,
+            copy_paths: vec![PathBuf::from("file")],
+        })
+        .unwrap_err()
+    });
+
+    assert!(error.to_string().contains("copying worktree paths"));
+    assert!(!destination.exists());
+    assert_eq!(
+        fixture.git(&root, &["branch", "--list", "wt/copy-conflict"]),
+        ""
+    );
+    assert_eq!(
+        fixture
+            .git_output(
+                &root,
+                &["config", "--get", "wtbranch.wt/copy-conflict.base"]
+            )
+            .status
+            .code(),
+        Some(1)
+    );
+}
+
+#[test]
+fn missing_copy_sources_are_rejected_before_creating_a_worktree() {
+    let fixture = GitFixture::new();
+    let root = fixture.root.clone();
+    let destination = fixture.worktree_path("missing-copy");
+    let error = in_directory(&fixture, &root, || {
+        run(&WorktreeCommand::New {
+            name: "missing-copy".to_owned(),
+            path_only: false,
+            copy_paths: vec![PathBuf::from("does-not-exist")],
+        })
+        .unwrap_err()
+    });
+
+    assert!(error.to_string().contains("does not exist"));
+    assert!(!destination.exists());
+    assert_eq!(
+        fixture.git(&root, &["branch", "--list", "wt/missing-copy"]),
+        ""
     );
 }
 
@@ -465,6 +622,7 @@ fn failed_submodule_initialization_rolls_back_worktree_branch_metadata_and_modul
         run(&WorktreeCommand::New {
             name: "broken".to_owned(),
             path_only: false,
+            copy_paths: Vec::new(),
         })
         .unwrap_err()
     });
@@ -495,6 +653,7 @@ fn rejects_branch_path_and_name_collisions() {
             run(&WorktreeCommand::New {
                 name: "same".to_owned(),
                 path_only: false,
+                copy_paths: Vec::new(),
             })
         })
         .is_err()
@@ -511,6 +670,7 @@ fn rejects_branch_path_and_name_collisions() {
             run(&WorktreeCommand::New {
                 name: "link".to_owned(),
                 path_only: false,
+                copy_paths: Vec::new(),
             })
         })
         .is_err()
@@ -520,6 +680,7 @@ fn rejects_branch_path_and_name_collisions() {
             run(&WorktreeCommand::New {
                 name: "bad..name".to_owned(),
                 path_only: false,
+                copy_paths: Vec::new(),
             })
         })
         .is_err()

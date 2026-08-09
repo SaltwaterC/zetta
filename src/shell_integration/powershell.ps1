@@ -201,6 +201,8 @@ $zettaCompletions = {
         'txt', 'rtf', 'ps'
     } elseif ($previous -in '--opacity', '-o') {
         @()
+    } elseif ($worktreeCommand -and $worktreeOperation -eq 'new' -and $previous -in '--copy', '-c') {
+        @(Get-ChildItem -Name -Path "$wordToComplete*" -ErrorAction SilentlyContinue)
     } elseif ($previous -in '--color', '-c') {
         if ($subcommand -eq 'overlay') { $zettaOverlayColors } else { @() }
     } elseif ($commandName -in 'vi', 'zvi' -or $subcommand -in 'edit', 'vi') {
@@ -229,7 +231,9 @@ $zettaCompletions = {
     } elseif ($worktreeCommand) {
         if ([string]::IsNullOrEmpty($worktreeOperation)) {
             'new', 'done', 'status', 'rerere', '--help'
-        } elseif ($worktreeOperation -in 'new', 'done') {
+        } elseif ($worktreeOperation -eq 'new') {
+            '--copy', '--path-only', '--help'
+        } elseif ($worktreeOperation -eq 'done') {
             '--path-only', '--help'
         } else {
             '--help'
@@ -288,7 +292,9 @@ $zettaCompletions = {
             'wt' {
                 if ([string]::IsNullOrEmpty($worktreeOperation)) {
                     'new', 'done', 'status', 'rerere', '--help'
-                } elseif ($worktreeOperation -in 'new', 'done') {
+                } elseif ($worktreeOperation -eq 'new') {
+                    '--copy', '--path-only', '--help'
+                } elseif ($worktreeOperation -eq 'done') {
                     '--path-only', '--help'
                 } else {
                     '--help'
@@ -298,7 +304,7 @@ $zettaCompletions = {
     }
 
     $candidates = @($candidates | Where-Object {
-        if ($_ -like '-*') { $_ -notin $words } else { $true }
+        if ($_ -like '-*') { $_ -eq '--copy' -or $_ -notin $words } else { $true }
     })
     $candidates | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
         $value = $_

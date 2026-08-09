@@ -94,8 +94,13 @@ spaces and nested names. `zetta wt new` also recursively initializes source
 submodules at their pinned commits, reusing initialized source checkouts as
 local object references and falling back to configured submodule remotes when a
 source checkout is unavailable. Failed initialization cleans up the partial
-worktree, branch, and metadata. See [Using Zetta](docs/usage.md#git-worktrees)
-for configuration and safety details.
+worktree, branch, and metadata. Repeatable `--copy PATH` (or `-c PATH`) options
+copy relative files, directories, and symlinks from the source worktree into the
+same locations in the new worktree. Copy-on-write cloning is used when supported,
+with a regular-copy fallback; invalid, overlapping, or already-existing paths are
+rejected. Failed initialization or copying cleans up the partial worktree, branch,
+and metadata. See [Using Zetta](docs/usage.md#git-worktrees) for configuration
+and safety details.
 
 ## Multi-command prompt
 

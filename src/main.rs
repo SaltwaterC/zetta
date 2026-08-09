@@ -24,6 +24,7 @@ mod theme_extensions;
 #[cfg(feature = "syntax-highlighting")]
 mod vi_syntax;
 mod worktree_cli;
+mod worktree_copy;
 mod zetta_assets;
 
 const ZETTA_APP_ID: &str = "Zetta";
