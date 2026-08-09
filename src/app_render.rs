@@ -1,4 +1,5 @@
 use super::*;
+use crate::configuration_reload::CONFIGURATION_RELOAD_SUCCESS_MESSAGE;
 use gpui::{ListSizingBehavior, uniform_list};
 
 impl Zetta {
@@ -983,14 +984,21 @@ impl Zetta {
             .on_action(cx.listener(Self::toggle_performance_overlay))
     }
 
-    /// The error banners shown between the tab bar and the tab body.
-    fn render_error_banners(&self, content: gpui::Div) -> gpui::Div {
+    /// The feedback banners shown between the tab bar and the tab body.
+    fn render_feedback_banners(&self, content: gpui::Div) -> gpui::Div {
         let banner = |error: String| {
             Banner::new()
                 .severity(Severity::Error)
                 .child(Label::new(error).size(LabelSize::Small).line_clamp(3))
         };
         content
+            .when(self.configuration_reload_feedback.is_visible(), |content| {
+                content.child(div().px_2().py_1().child(
+                    Banner::new().severity(Severity::Success).child(
+                        Label::new(CONFIGURATION_RELOAD_SUCCESS_MESSAGE).size(LabelSize::Small),
+                    ),
+                ))
+            })
             .when_some(self.configuration_error.clone(), |content, error| {
                 content.child(
                     div().px_2().py_1().child(
@@ -1048,7 +1056,7 @@ impl Zetta {
             .on_key_down(cx.listener(Self::command_palette_key_down))
             .child(chrome.title_bar)
             .when_some(chrome.tab_bar, |content, tab_bar| content.child(tab_bar));
-        let content = self.render_error_banners(content);
+        let content = self.render_feedback_banners(content);
 
         // Paint order matters: later overlays sit above earlier ones.
         [

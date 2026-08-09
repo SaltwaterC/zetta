@@ -20,6 +20,12 @@ the error in the window. Correct the file and press `Ctrl-Cmd-R` on macOS or
 without restarting. Existing sessions
 and their scrollback are retained.
 
+After a successful reload started from Zetta, a green `Configuration reloaded`
+banner appears for three seconds. This also happens when saving configuration
+from the Settings UI or installing and removing theme extensions. Failed
+reloads continue to show the existing error banner, while reloads requested by
+the CLI through process control remain silent.
+
 ## Settings editor
 
 Press `Ctrl-,` or use the tab-bar settings button to open typed controls for

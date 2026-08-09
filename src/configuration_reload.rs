@@ -1,5 +1,39 @@
 use super::*;
 
+pub(crate) const CONFIGURATION_RELOAD_SUCCESS_MESSAGE: &str = "Configuration reloaded";
+const CONFIGURATION_RELOAD_SUCCESS_DURATION: Duration = Duration::from_secs(3);
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct ConfigurationReloadFeedback {
+    visible: bool,
+    generation: u64,
+}
+
+impl ConfigurationReloadFeedback {
+    fn begin_attempt(&mut self) {
+        self.visible = false;
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    fn show_success(&mut self) -> u64 {
+        self.visible = true;
+        self.generation = self.generation.wrapping_add(1);
+        self.generation
+    }
+
+    fn dismiss_if_current(&mut self, generation: u64) -> bool {
+        if self.generation != generation || !self.visible {
+            return false;
+        }
+        self.visible = false;
+        true
+    }
+
+    pub(crate) fn is_visible(&self) -> bool {
+        self.visible
+    }
+}
+
 impl Zetta {
     pub(crate) fn edit_config_file(
         &mut self,
@@ -72,6 +106,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.configuration_reload_feedback.begin_attempt();
         let config_path = self.launch_config.config_path.clone();
         let keymap_override = self.launch_config.keymap_override.clone();
         let config = match Config::load(Some(&config_path), keymap_override) {
@@ -95,6 +130,21 @@ impl Zetta {
             return;
         }
         self.configuration_error = None;
+        let generation = self.configuration_reload_feedback.show_success();
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            executor.timer(CONFIGURATION_RELOAD_SUCCESS_DURATION).await;
+            this.update(cx, |this, cx| {
+                if this
+                    .configuration_reload_feedback
+                    .dismiss_if_current(generation)
+                {
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
         self.focus_active(window, cx);
         cx.notify();
     }
@@ -169,3 +219,7 @@ impl Zetta {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "tests/configuration_reload.rs"]
+mod tests;

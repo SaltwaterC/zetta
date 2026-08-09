@@ -1,4 +1,5 @@
 use super::*;
+use crate::configuration_reload::ConfigurationReloadFeedback;
 use strum::IntoEnumIterator as _;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -185,6 +186,7 @@ pub(crate) struct Zetta {
     /// `launch_config`/`profiles` or the settings UI.
     pub(crate) launch_theme_override: Option<(String, String)>,
     pub(crate) configuration_error: Option<String>,
+    pub(crate) configuration_reload_feedback: ConfigurationReloadFeedback,
     pub(crate) pane_output_error: Option<String>,
     pub(crate) pane_output_save_in_progress: bool,
     pub(crate) tabs: Vec<Tab>,
@@ -351,6 +353,7 @@ impl Zetta {
             launch_config: config.clone(),
             launch_theme_override,
             configuration_error,
+            configuration_reload_feedback: ConfigurationReloadFeedback::default(),
             pane_output_error: None,
             pane_output_save_in_progress: false,
             tabs: Vec::new(),
