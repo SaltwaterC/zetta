@@ -1,6 +1,55 @@
 use super::*;
 use strum::IntoEnumIterator as _;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TabDropPosition {
+    Before(u64),
+    After(u64),
+    /// No tab surface was hit. The tab bar does not construct this during a
+    /// normal drag, but it keeps the outside-drop no-op explicit.
+    #[allow(dead_code)]
+    Outside,
+}
+
+fn reorder_items_by_id<T>(
+    items: &mut Vec<T>,
+    source_id: u64,
+    position: TabDropPosition,
+    active_id: u64,
+    item_id: impl Fn(&T) -> u64,
+) -> Option<usize> {
+    let (target_id, insert_after) = match position {
+        TabDropPosition::Before(target_id) => (target_id, false),
+        TabDropPosition::After(target_id) => (target_id, true),
+        TabDropPosition::Outside => return None,
+    };
+    let source_index = items.iter().position(|item| item_id(item) == source_id)?;
+    let target_index = items.iter().position(|item| item_id(item) == target_id)?;
+    if !items.iter().any(|item| item_id(item) == active_id) {
+        return None;
+    }
+
+    if source_index == target_index {
+        return None;
+    }
+
+    // The target's index is measured before removing the source. Adjust it when
+    // the source was before the target so the insertion remains relative to the
+    // same stable target item.
+    let target_index_after_removal = target_index - (source_index < target_index) as usize;
+    let insertion_index = target_index_after_removal + insert_after as usize;
+    if insertion_index == source_index {
+        return None;
+    }
+
+    let item = items.remove(source_index);
+    items.insert(insertion_index, item);
+
+    // The active item is identified before the move and found again afterward,
+    // so moving either the active or an inactive tab preserves logical focus.
+    items.iter().position(|item| item_id(item) == active_id)
+}
+
 /// Cached font enumeration for settings font picker
 pub(crate) struct FontCache {
     pub fonts: Arc<[String]>,
@@ -1350,6 +1399,28 @@ impl Zetta {
             self.tab_overflow_left_menu_handle.hide(cx);
             self.tab_overflow_right_menu_handle.hide(cx);
         }
+    }
+
+    pub(crate) fn reorder_tab(
+        &mut self,
+        tab_id: u64,
+        position: TabDropPosition,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(active_tab_id) = self.tabs.get(self.active_tab).map(|tab| tab.id) else {
+            return;
+        };
+        let Some(active_tab_index) =
+            reorder_items_by_id(&mut self.tabs, tab_id, position, active_tab_id, |tab| {
+                tab.id
+            })
+        else {
+            return;
+        };
+
+        self.active_tab = active_tab_index;
+        self.tab_overflow_selection_side = None;
+        cx.notify();
     }
 
     pub(crate) fn select_overflow_tab(

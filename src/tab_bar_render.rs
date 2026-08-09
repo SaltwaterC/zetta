@@ -18,6 +18,11 @@ pub(crate) struct TabBarChrome {
     pub(crate) right_menu_handle: PopoverMenuHandle<ui::ContextMenu>,
 }
 
+#[derive(Clone, Copy)]
+struct TabDrag {
+    tab_id: u64,
+}
+
 impl Zetta {
     /// The tab bar: a width-measured row of tabs with overflow triggers and the
     /// new-tab button, wrapped in the bar that hosts it. In compact mode the
@@ -366,6 +371,10 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
             })
         })
         .bg(tab_background)
+        .cursor(CursorStyle::OpenHand)
+        .on_drag(TabDrag { tab_id: tab.id }, |_, _, _, cx| {
+            cx.new(|_| gpui::Empty)
+        })
         .on_click(move |event, window, cx| {
             cx.stop_propagation();
             select_handle
@@ -435,11 +444,79 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
             })
             .trigger(move |_, _, _| tab_element)
             .into_any_element();
-    responsive_tab_container(
+    let tab_element = responsive_tab_container(
         tab_element,
         compact_mode,
         title_bar_height,
         is_renaming_tab && selected,
-    )
-    .into_any_element()
+    );
+    let tab_element = if cx.has_active_drag() {
+        tab_element
+            .relative()
+            .child(render_tab_drop_surface(
+                tab.id,
+                false,
+                tab_colors.drop_target_background,
+                tab_colors.drop_target_border,
+                handle.clone(),
+            ))
+            .child(render_tab_drop_surface(
+                tab.id,
+                true,
+                tab_colors.drop_target_background,
+                tab_colors.drop_target_border,
+                handle.clone(),
+            ))
+    } else {
+        tab_element
+    };
+    tab_element.into_any_element()
+}
+
+fn render_tab_drop_surface(
+    target_tab_id: u64,
+    insert_after: bool,
+    drop_target_background: Hsla,
+    drop_target_border: Hsla,
+    handle: WeakEntity<Zetta>,
+) -> gpui::Stateful<gpui::Div> {
+    let position = if insert_after {
+        TabDropPosition::After(target_tab_id)
+    } else {
+        TabDropPosition::Before(target_tab_id)
+    };
+    let drop_handle = handle;
+    div()
+        .id(format!("tab-drop-{target_tab_id}-{insert_after}"))
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .when(insert_after, |surface| surface.right_0())
+        .when(!insert_after, |surface| surface.left_0())
+        .w(gpui::relative(0.5))
+        .can_drop(move |dragged, _, _| {
+            dragged
+                .downcast_ref::<TabDrag>()
+                .is_some_and(|drag| drag.tab_id != target_tab_id)
+        })
+        .drag_over::<TabDrag>(move |surface, dragged, _, _| {
+            if dragged.tab_id == target_tab_id {
+                return surface;
+            }
+            let surface = surface
+                .bg(drop_target_background)
+                .border_color(drop_target_border);
+            if insert_after {
+                surface.border_r_2()
+            } else {
+                surface.border_l_2()
+            }
+        })
+        .on_drop(move |dragged: &TabDrag, _, cx| {
+            drop_handle
+                .update(cx, |this, cx| {
+                    this.reorder_tab(dragged.tab_id, position, cx)
+                })
+                .ok();
+        })
 }

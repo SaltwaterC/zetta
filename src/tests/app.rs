@@ -149,3 +149,102 @@ fn default_new_tabs_ignore_the_active_profile() {
 
     assert_eq!(profile.name, "System");
 }
+
+#[test]
+fn tab_reorder_moves_tabs_before_and_after_targets_in_both_directions() {
+    let mut ids = vec![1, 2, 3, 4];
+    assert_eq!(
+        reorder_items_by_id(&mut ids, 3, TabDropPosition::Before(1), 2, |id| *id),
+        Some(2)
+    );
+    assert_eq!(ids, vec![3, 1, 2, 4]);
+
+    let mut ids = vec![1, 2, 3, 4];
+    assert_eq!(
+        reorder_items_by_id(&mut ids, 3, TabDropPosition::After(1), 2, |id| *id),
+        Some(2)
+    );
+    assert_eq!(ids, vec![1, 3, 2, 4]);
+
+    let mut ids = vec![1, 2, 3, 4];
+    assert_eq!(
+        reorder_items_by_id(&mut ids, 1, TabDropPosition::Before(3), 2, |id| *id),
+        Some(0)
+    );
+    assert_eq!(ids, vec![2, 1, 3, 4]);
+
+    let mut ids = vec![1, 2, 3, 4];
+    assert_eq!(
+        reorder_items_by_id(&mut ids, 1, TabDropPosition::After(3), 2, |id| *id),
+        Some(0)
+    );
+    assert_eq!(ids, vec![2, 3, 1, 4]);
+}
+
+#[test]
+fn tab_reorder_adjusts_the_target_index_after_removing_the_source() {
+    let mut ids = vec![1, 2, 3, 4];
+    assert_eq!(
+        reorder_items_by_id(&mut ids, 1, TabDropPosition::After(3), 4, |id| *id),
+        Some(3)
+    );
+    assert_eq!(ids, vec![2, 3, 1, 4]);
+
+    let mut ids = vec![1, 2, 3, 4];
+    assert_eq!(
+        reorder_items_by_id(&mut ids, 4, TabDropPosition::Before(2), 1, |id| *id),
+        Some(0)
+    );
+    assert_eq!(ids, vec![1, 4, 2, 3]);
+}
+
+#[test]
+fn tab_reorder_preserves_the_active_tab_when_moving_active_or_inactive_tabs() {
+    let mut ids = vec![1, 2, 3, 4];
+    let active_index = reorder_items_by_id(&mut ids, 3, TabDropPosition::After(1), 3, |id| *id);
+    assert_eq!(ids, vec![1, 3, 2, 4]);
+    assert_eq!(active_index, Some(1));
+
+    let mut ids = vec![1, 2, 3, 4];
+    let active_index = reorder_items_by_id(&mut ids, 1, TabDropPosition::After(4), 3, |id| *id);
+    assert_eq!(ids, vec![2, 3, 4, 1]);
+    assert_eq!(active_index, Some(1));
+}
+
+#[test]
+fn tab_reorder_ignores_same_tab_invalid_target_empty_and_outside_drops() {
+    let mut ids = vec![1, 2, 3];
+    assert_eq!(
+        reorder_items_by_id(&mut ids, 2, TabDropPosition::Before(2), 1, |id| *id),
+        None
+    );
+    assert_eq!(ids, vec![1, 2, 3]);
+
+    assert_eq!(
+        reorder_items_by_id(&mut ids, 2, TabDropPosition::After(99), 1, |id| *id),
+        None
+    );
+    assert_eq!(ids, vec![1, 2, 3]);
+
+    assert_eq!(
+        reorder_items_by_id(&mut ids, 99, TabDropPosition::After(1), 1, |id| *id),
+        None
+    );
+    assert_eq!(ids, vec![1, 2, 3]);
+
+    assert_eq!(
+        reorder_items_by_id(
+            &mut Vec::<u64>::new(),
+            1,
+            TabDropPosition::After(2),
+            1,
+            |id| *id
+        ),
+        None
+    );
+    assert_eq!(
+        reorder_items_by_id(&mut ids, 2, TabDropPosition::Outside, 1, |id| *id),
+        None
+    );
+    assert_eq!(ids, vec![1, 2, 3]);
+}
