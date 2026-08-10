@@ -114,6 +114,7 @@ zeroize = "1"
 zed_actions = { path = "zed/crates/zed_actions" }
 
 [target.'cfg(windows)'.dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
 uds_windows = "1.2"
 windows-registry = "0.5"
 windows = { version = "0.61", features = [
@@ -126,9 +127,11 @@ windows = { version = "0.61", features = [
     "Win32_System_Registry",
     "Win32_System_SystemServices",
     "Win32_Storage_FileSystem",
+    "Win32_Graphics_Gdi",
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
     "Win32_UI_Shell_PropertiesSystem",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]

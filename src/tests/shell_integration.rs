@@ -6,11 +6,13 @@ fn profiles() -> [Profile; 2] {
             name: "System".to_owned(),
             command: Shell::System,
             theme: None,
+            icon: ProfileIcon::Zetta,
         },
         Profile {
             name: "WSL: Ubuntu".to_owned(),
             command: Shell::Program("zsh".to_owned()),
             theme: None,
+            icon: ProfileIcon::Zsh,
         },
     ]
 }
@@ -1329,9 +1331,12 @@ fn generated_scripts_only_offer_long_form_flags() {
     ] {
         let script = shell.script(&profiles);
         match shell {
-            ShellIntegration::Bash => assert!(script.contains(
-                "terminal-size sessions profile edit vi init serial http tftp notify attention copy paste splits tabicon panetheme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme'"
-            )),
+            ShellIntegration::Bash => {
+                assert!(script.contains(
+                    "terminal-size sessions profile edit vi init serial http tftp notify attention copy paste splits tabicon panetheme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme'"
+                ));
+                assert!(script.contains("auto zetta bash zsh fish"));
+            }
             ShellIntegration::Fish => {
                 assert!(script.contains("-l profile -r"));
                 assert!(script.contains("-l replace-pane"));
@@ -1339,15 +1344,21 @@ fn generated_scripts_only_offer_long_form_flags() {
                 assert!(script.contains(
                     "-s c -r -n '__zetta_has_profile_subcommand; and __zetta_short_option -c'"
                 ));
+                assert!(script.contains("auto zetta bash zsh fish"));
             }
             ShellIntegration::PowerShell => {
                 assert!(script.contains(
                     "'--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme'"
                 ));
                 assert!(script.contains("'overlay', 'wt', '--help'"));
+                assert!(script.contains("'auto', 'zetta', 'bash', 'zsh', 'fish'"));
             }
-            ShellIntegration::Zsh => assert!(script
-                .contains("_zetta_options --help --version --config --keymap --profile")),
+            ShellIntegration::Zsh => {
+                assert!(
+                    script.contains("_zetta_options --help --version --config --keymap --profile")
+                );
+                assert!(script.contains("auto zetta bash zsh fish"));
+            }
         }
     }
 }
@@ -1446,7 +1457,7 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
         (
             "zetta profile ",
             &[
-                "list", "themes", "disable", "enable", "theme", "default", "add", "remove",
+                "list", "themes", "disable", "enable", "theme", "icon", "default", "add", "remove",
             ][..],
         ),
         ("zetta profile disable ", &["System", "WSL: Ubuntu"][..]),

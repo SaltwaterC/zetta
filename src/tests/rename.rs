@@ -7,6 +7,7 @@ fn tab(attention_id: u64, custom_title: Option<&str>) -> Tab {
         name: "System".to_owned(),
         command: task::Shell::System,
         theme: None,
+        icon: ProfileIcon::Zetta,
     };
     let pane = TerminalPane {
         id: 1,

@@ -500,6 +500,7 @@ fn tab_pane_index_resolves_panes_without_scanning() {
         name: "System".to_owned(),
         command: Shell::System,
         theme: None,
+        icon: ProfileIcon::Zetta,
     };
     let panes = [1, 2, 3]
         .into_iter()
@@ -639,11 +640,13 @@ fn split_profile_comes_from_the_active_pane() {
         name: "System".to_owned(),
         command: task::Shell::System,
         theme: None,
+        icon: ProfileIcon::Zetta,
     };
     let zsh = Profile {
         name: "Zsh".to_owned(),
         command: task::Shell::Program("zsh".to_owned()),
         theme: Some("One Light".to_owned()),
+        icon: ProfileIcon::Zsh,
     };
     let tab = Tab {
         id: 1,
@@ -722,6 +725,7 @@ fn closing_active_pane_restores_previous_focus() {
         name: "System".to_owned(),
         command: task::Shell::System,
         theme: None,
+        icon: ProfileIcon::Zetta,
     };
     let pane = |id| TerminalPane {
         id,
@@ -780,6 +784,7 @@ fn closing_inactive_pane_preserves_focus() {
         name: "System".to_owned(),
         command: task::Shell::System,
         theme: None,
+        icon: ProfileIcon::Zetta,
     };
     let pane = |id| TerminalPane {
         id,
@@ -1121,6 +1126,7 @@ fn pane_management_tab() -> Tab {
         name: "System".to_owned(),
         command: task::Shell::System,
         theme: None,
+        icon: ProfileIcon::Zetta,
     };
     let pane = |id| TerminalPane {
         id,

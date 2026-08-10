@@ -105,12 +105,25 @@ impl Zetta {
             )
         };
 
+        let profile_icon_automatic = match editor.open_dropdown {
+            Some(SettingsDropdown::ProfileIcon(index)) => editor
+                .configuration
+                .profiles
+                .get(index)
+                .map(|profile| profile.automatic_icon.clone()),
+            Some(SettingsDropdown::ProfileDraftIcon) => editor
+                .profile_draft
+                .as_ref()
+                .map(|profile| ProfileIcon::automatic_for_program(&profile.program.text)),
+            _ => None,
+        };
         let dropdown_state = DropdownRenderState {
             dropdown_index: editor.dropdown_index,
             dropdown_query: editor.dropdown_query.clone(),
             dropdown_filtered_options: editor.dropdown_filtered_options.clone(),
             dropdown_scroll: editor.dropdown_scroll.clone(),
             dropdown_anchor: editor.dropdown_anchor,
+            profile_icon_automatic,
         };
         let dropdown =
             |id: String, label: String, selection: SettingsDropdown| -> gpui::AnyElement {

@@ -20,9 +20,22 @@ fn main() {
 
     let icon = "assets/icons/zetta-terminal-icon.ico";
     let resource = "resources/windows/zetta.rc";
+    let profile_icons = [
+        "assets/icons/profile/zetta.svg",
+        "assets/icons/profile/zetta.ico",
+        "assets/icons/profile/bash.svg",
+        "assets/icons/profile/bash.ico",
+        "assets/icons/profile/zsh.svg",
+        "assets/icons/profile/zsh.ico",
+        "assets/icons/profile/fish.svg",
+        "assets/icons/profile/fish.ico",
+    ];
 
     println!("cargo:rerun-if-changed={icon}");
     println!("cargo:rerun-if-changed={resource}");
+    for profile_icon in profile_icons {
+        println!("cargo:rerun-if-changed={profile_icon}");
+    }
 
     embed_resource::compile(resource, embed_resource::NONE)
         .manifest_required()

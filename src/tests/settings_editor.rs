@@ -135,7 +135,8 @@ fn configuration_form_round_trip_uses_typed_values_and_profiles() {
                 "name": "Login shell",
                 "program": "/bin/sh",
                 "args": ["-l"],
-                "theme": "One Dark"
+                "theme": "One Dark",
+                "icon": "fish"
             }]
         }"#,
     )
@@ -197,6 +198,48 @@ fn configuration_form_round_trip_uses_typed_values_and_profiles() {
     #[cfg(feature = "tftp-server")]
     assert_eq!(output["tftp_server_port"], 1069);
     assert_eq!(output["profiles"][0]["args"], json!(["-l", "-i"]));
+    let login_profile = output["profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|profile| profile["name"] == "Login shell")
+        .unwrap();
+    assert_eq!(login_profile["icon"], "fish");
+}
+
+#[test]
+fn configuration_form_omits_automatic_profile_icons() {
+    let root = std::env::temp_dir().join(format!(
+        "zetta-automatic-profile-icon-form-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::write(
+        &root,
+        r#"{"profiles":[{"name":"Automatic fish","program":"/opt/bin/fish"}]}"#,
+    )
+    .unwrap();
+    let config = Config::load(Some(&root), None).unwrap();
+    let form = ConfigurationForm::load(&root, &config).unwrap();
+    let automatic = form
+        .profiles
+        .iter()
+        .find(|profile| profile.name.text == "Automatic fish")
+        .unwrap();
+    assert_eq!(automatic.icon, None);
+    assert_eq!(automatic.automatic_icon, ProfileIcon::Fish);
+    let output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
+    let serialized = output["profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|profile| profile["name"] == "Automatic fish")
+        .unwrap();
+    assert!(serialized.get("icon").is_none());
+    fs::remove_file(root).unwrap();
 }
 
 #[test]
@@ -336,11 +379,13 @@ fn configuration_form_round_trip_serializes_the_resolved_homebrew_profile_name()
             name: "System".to_owned(),
             command: Shell::System,
             theme: None,
+            icon: ProfileIcon::Zetta,
         },
         Profile {
             name: "Fish (Homebrew)".to_owned(),
             command: Shell::Program("/opt/homebrew/bin/fish".to_owned()),
             theme: None,
+            icon: ProfileIcon::Fish,
         },
     ];
     config.default_profile = 1;

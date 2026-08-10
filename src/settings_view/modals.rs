@@ -146,6 +146,16 @@ pub(crate) fn render_profile_modal(
                 .unwrap_or_else(|| "Use application theme".to_owned()),
             SettingsDropdown::ProfileDraftTheme,
         );
+        let automatic_icon = ProfileIcon::automatic_for_program(&draft.program.text);
+        let profile_icon_value = draft.icon.as_ref().unwrap_or(&automatic_icon);
+        let profile_icon = h_flex()
+            .gap_2()
+            .child(profile_icon_value.render(IconSize::Small))
+            .child(dropdown(
+                "settings-new-profile-icon".to_owned(),
+                ProfileIcon::selector_label(draft.icon.as_ref()).to_owned(),
+                SettingsDropdown::ProfileDraftIcon,
+            ));
         let create_handle = handle.clone();
         div()
             .id("new-profile-modal")
@@ -228,6 +238,15 @@ pub(crate) fn render_profile_modal(
                             .child("Theme"),
                     )
                     .child(profile_theme)
+                    .child(
+                        div()
+                            .mt_3()
+                            .mb_1()
+                            .text_xs()
+                            .text_color(colors.text_muted)
+                            .child("Icon"),
+                    )
+                    .child(profile_icon)
                     .when_some(editor.message.clone(), |modal, (_, message)| {
                         modal.child(
                             div()
@@ -279,7 +298,11 @@ pub(crate) fn render_profile_modal(
                                                 cx.notify();
                                                 return;
                                             }
-                                            let draft = editor.profile_draft.take().unwrap();
+                                            let mut draft = editor.profile_draft.take().unwrap();
+                                            draft.automatic_icon =
+                                                ProfileIcon::automatic_for_program(
+                                                    &draft.program.text,
+                                                );
                                             editor.configuration.profiles.push(draft);
                                             editor.configuration_dirty = true;
                                             editor.focused_input = None;

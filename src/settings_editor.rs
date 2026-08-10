@@ -8,6 +8,7 @@ use ui::IconName;
 use crate::config::{
     Config, NewTabProfile, PaneControlsPosition, WorkingDirectoryScope, profile_is_hidden,
 };
+use crate::profile_icon::ProfileIcon;
 use crate::startup::{keymap_keystroke_display, keymap_keystroke_storage};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,6 +116,9 @@ pub struct ProfileForm {
     pub program: TextField,
     pub arguments: TextField,
     pub theme: Option<String>,
+    /// An explicit configuration override. None means automatic inference.
+    pub icon: Option<ProfileIcon>,
+    pub automatic_icon: ProfileIcon,
     pub hidden: bool,
     pub detected: bool,
 }
@@ -162,7 +166,7 @@ impl ConfigurationForm {
         let profiles = config
             .profiles
             .iter()
-            .map(|resolved| {
+            .map(|resolved| -> Result<ProfileForm> {
                 let configured = configured_profiles.iter().find_map(|profile| {
                     let profile = profile.as_object()?;
                     profile
@@ -171,8 +175,13 @@ impl ConfigurationForm {
                         .is_some_and(|name| name.eq_ignore_ascii_case(&resolved.name))
                         .then_some(profile)
                 });
+                let icon = configured
+                    .and_then(|profile| profile.get("icon"))
+                    .map(ProfileIcon::parse)
+                    .transpose()?
+                    .flatten();
                 let detected = configured.is_none_or(|profile| !profile.contains_key("program"));
-                ProfileForm {
+                Ok(ProfileForm {
                     name: TextField::new(resolved.name.clone()),
                     program: TextField::new(
                         configured
@@ -197,14 +206,19 @@ impl ConfigurationForm {
                         .and_then(Value::as_str)
                         .map(str::to_owned)
                         .or_else(|| resolved.theme.clone()),
+                    icon,
+                    automatic_icon: ProfileIcon::automatic_for_profile(
+                        &resolved.name,
+                        &resolved.command,
+                    ),
                     hidden: configured
                         .and_then(|profile| profile.get("hidden"))
                         .and_then(Value::as_bool)
                         .unwrap_or_else(|| profile_is_hidden(resolved, &config.hidden_profiles)),
                     detected,
-                }
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             default_profile: config.profiles[config.default_profile].name.clone(),
             new_tab_profile: config.new_tab_profile,
@@ -375,7 +389,10 @@ impl ConfigurationForm {
                     self.profiles
                         .iter()
                         .filter(|profile| {
-                            !profile.detected || profile.theme.is_some() || profile.hidden
+                            !profile.detected
+                                || profile.theme.is_some()
+                                || profile.icon.is_some()
+                                || profile.hidden
                         })
                         .map(|profile| {
                             let mut value = Map::new();
@@ -398,6 +415,11 @@ impl ConfigurationForm {
                             }
                             if let Some(theme) = &profile.theme {
                                 value.insert("theme".into(), json!(theme));
+                            }
+                            if let Some(icon) = &profile.icon
+                                && let Some(name) = icon.name()
+                            {
+                                value.insert("icon".into(), json!(name));
                             }
                             if profile.hidden {
                                 value.insert("hidden".into(), json!(true));

@@ -1,1 +1,5 @@
 1 ICON "assets/icons/zetta-terminal-icon.ico"
+2 ICON "assets/icons/profile/zetta.ico"
+3 ICON "assets/icons/profile/bash.ico"
+4 ICON "assets/icons/profile/zsh.ico"
+5 ICON "assets/icons/profile/fish.ico"

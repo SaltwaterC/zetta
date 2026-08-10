@@ -186,6 +186,7 @@ fn wsl_ignores_the_windows_side_inherited_directory() {
             title_override: None,
         },
         theme: None,
+        icon: ProfileIcon::Bash,
     };
 
     let (directory, wsl_directory) = launch_working_directory(
@@ -207,6 +208,7 @@ fn explicitly_configured_home_alias_still_uses_the_wsl_home() {
         name: "WSL: Ubuntu".to_owned(),
         command: Shell::Program("wsl.exe".to_owned()),
         theme: None,
+        icon: ProfileIcon::Bash,
     };
 
     let (directory, wsl_directory) = launch_working_directory(
@@ -227,6 +229,7 @@ fn native_profiles_still_inherit_the_active_directory() {
         name: "PowerShell".to_owned(),
         command: Shell::Program("pwsh.exe".to_owned()),
         theme: None,
+        icon: ProfileIcon::Zetta,
     };
     let inherited = PathBuf::from(r"C:\source\zetta");
 
@@ -248,6 +251,7 @@ fn configured_directory_overrides_the_windows_side_wsl_directory() {
         name: "WSL: Ubuntu".to_owned(),
         command: Shell::Program("wsl.exe".to_owned()),
         theme: None,
+        icon: ProfileIcon::Bash,
     };
     let configured = PathBuf::from(r"C:\Users\stefan");
 
@@ -269,6 +273,7 @@ fn tracked_wsl_directory_takes_precedence_over_the_initial_configuration() {
         name: "WSL: Ubuntu".to_owned(),
         command: Shell::Program("wsl.exe".to_owned()),
         theme: None,
+        icon: ProfileIcon::Bash,
     };
 
     let (directory, wsl_directory) = launch_working_directory(
@@ -289,6 +294,7 @@ fn wsl_inherits_the_tracked_linux_directory() {
         name: "WSL: Ubuntu".to_owned(),
         command: Shell::Program("wsl.exe".to_owned()),
         theme: None,
+        icon: ProfileIcon::Bash,
     };
 
     let (directory, wsl_directory) = launch_working_directory(

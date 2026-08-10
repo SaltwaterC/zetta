@@ -6,6 +6,7 @@ fn launch_theme_override_applies_case_insensitively_by_name_only() {
         name: "System".to_owned(),
         command: Shell::System,
         theme: Some("Configured Theme".to_owned()),
+        icon: ProfileIcon::Zetta,
     };
     apply_launch_theme_override(
         &mut profile,
@@ -17,6 +18,7 @@ fn launch_theme_override_applies_case_insensitively_by_name_only() {
         name: "Other".to_owned(),
         command: Shell::System,
         theme: Some("Configured Theme".to_owned()),
+        icon: ProfileIcon::Zetta,
     };
     apply_launch_theme_override(
         &mut other_profile,
@@ -28,6 +30,7 @@ fn launch_theme_override_applies_case_insensitively_by_name_only() {
         name: "System".to_owned(),
         command: Shell::System,
         theme: Some("Configured Theme".to_owned()),
+        icon: ProfileIcon::Zetta,
     };
     apply_launch_theme_override(&mut unaffected_profile, None);
     assert_eq!(
@@ -43,11 +46,13 @@ fn cli_replacement_profile_resolution_is_case_insensitive_and_preserves_split_de
             name: "System".to_owned(),
             command: Shell::System,
             theme: Some("Configured Theme".to_owned()),
+            icon: ProfileIcon::Zetta,
         },
         Profile {
             name: "Alternate".to_owned(),
             command: Shell::Program("alternate-shell".to_owned()),
             theme: None,
+            icon: ProfileIcon::Zetta,
         },
     ];
 
@@ -74,6 +79,7 @@ fn cli_replacement_profile_resolution_requires_the_exact_homebrew_name() {
         name: "Fish (Homebrew)".to_owned(),
         command: Shell::Program("/opt/homebrew/bin/fish".to_owned()),
         theme: Some("Homebrew Theme".to_owned()),
+        icon: ProfileIcon::Fish,
     };
     let launch_theme_override = ("fish (homebrew)".to_owned(), "Launch Theme".to_owned());
 
@@ -97,6 +103,23 @@ fn cli_replacement_profile_resolution_requires_the_exact_homebrew_name() {
     .unwrap();
     assert_eq!(selected.name, "Fish (Homebrew)");
     assert_eq!(selected.theme.as_deref(), Some("Launch Theme"));
+
+    let exact_profile = Profile {
+        name: "Fish".to_owned(),
+        command: Shell::Program("fish".to_owned()),
+        theme: None,
+        icon: ProfileIcon::Fish,
+    };
+    let profiles = [homebrew_profile, exact_profile];
+    let selected = resolve_cli_replacement_profile(&profiles, Some("fIsH"), None, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(selected.name, "Fish");
+
+    let selected = resolve_cli_replacement_profile(&profiles, Some("fIsH (hOmEbReW)"), None, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(selected.name, "Fish (Homebrew)");
 }
 
 #[test]
@@ -195,11 +218,13 @@ fn new_tab_inherits_the_active_profile_after_an_explicit_profile_tab_closes() {
         name: "System".to_owned(),
         command: Shell::System,
         theme: None,
+        icon: ProfileIcon::Zetta,
     };
     let alternate = Profile {
         name: "Alternate".to_owned(),
         command: Shell::Program("alternate-shell".to_owned()),
         theme: None,
+        icon: ProfileIcon::Zetta,
     };
 
     let profile = new_tab_profile(
@@ -219,11 +244,13 @@ fn first_tab_uses_the_configured_default_profile() {
         name: "System".to_owned(),
         command: Shell::System,
         theme: None,
+        icon: ProfileIcon::Zetta,
     };
     let alternate = Profile {
         name: "Alternate".to_owned(),
         command: Shell::Program("alternate-shell".to_owned()),
         theme: None,
+        icon: ProfileIcon::Zetta,
     };
 
     let profile = new_tab_profile(None, &[system, alternate], 1, NewTabProfile::Default).unwrap();
@@ -237,11 +264,13 @@ fn default_new_tabs_ignore_the_active_profile() {
         name: "System".to_owned(),
         command: Shell::System,
         theme: None,
+        icon: ProfileIcon::Zetta,
     };
     let alternate = Profile {
         name: "Alternate".to_owned(),
         command: Shell::Program("alternate-shell".to_owned()),
         theme: None,
+        icon: ProfileIcon::Zetta,
     };
 
     let profile = new_tab_profile(

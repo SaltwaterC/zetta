@@ -13,6 +13,7 @@ pub(crate) struct DropdownRenderState {
     pub(crate) dropdown_filtered_options: HashMap<SettingsDropdown, Vec<usize>>,
     pub(crate) dropdown_scroll: UniformListScrollHandle,
     pub(crate) dropdown_anchor: Point<Pixels>,
+    pub(crate) profile_icon_automatic: Option<ProfileIcon>,
 }
 
 /// Every row of the keymap list is forced to this height so `uniform_list`'s
@@ -188,6 +189,7 @@ impl Zetta {
         let active_index = state.dropdown_index.min(options.len().saturating_sub(1));
         let dropdown_query = state.dropdown_query.clone();
         let matching_indices = state.dropdown_filtered_options.get(&selection).cloned();
+        let profile_icon_automatic = state.profile_icon_automatic.clone();
         let option_handle = handle.clone();
         // Row indices into `options`, in display order; virtualized below so only the
         // visible rows are ever built regardless of how many options exist.
@@ -217,6 +219,11 @@ impl Zetta {
                             let index = row_indices[row];
                             let value = options[index].clone();
                             let selected = index == active_index;
+                            let icon = Self::profile_icon_dropdown_option(
+                                selection,
+                                &value,
+                                profile_icon_automatic.as_ref(),
+                            );
                             let handle = option_handle.clone();
                             div()
                                 .id(format!("{list_id}-option-{index}"))
@@ -229,7 +236,14 @@ impl Zetta {
                                 .text_ellipsis()
                                 .when(selected, |row| row.bg(list_colors.element_selected))
                                 .hover(|style| style.bg(list_colors.element_hover))
-                                .child(value.clone())
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .when_some(icon, |row, icon| {
+                                            row.child(icon.render(IconSize::Small))
+                                        })
+                                        .child(value.clone()),
+                                )
                                 .on_click(move |_, _, cx| {
                                     handle
                                         .update(cx, |this, cx| {
@@ -304,6 +318,27 @@ impl Zetta {
         )
         .with_priority(1)
         .into_any_element()
+    }
+
+    fn profile_icon_dropdown_option(
+        selection: SettingsDropdown,
+        value: &str,
+        automatic: Option<&ProfileIcon>,
+    ) -> Option<ProfileIcon> {
+        if !matches!(
+            selection,
+            SettingsDropdown::ProfileIcon(_) | SettingsDropdown::ProfileDraftIcon
+        ) {
+            return None;
+        }
+        match value {
+            "Automatic" => automatic.cloned(),
+            "Zetta" => Some(ProfileIcon::Zetta),
+            "Bash" => Some(ProfileIcon::Bash),
+            "Zsh" => Some(ProfileIcon::Zsh),
+            "Fish" => Some(ProfileIcon::Fish),
+            _ => None,
+        }
     }
 
     pub(crate) fn text_input_widget(

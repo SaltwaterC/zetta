@@ -14,6 +14,8 @@ fn profile_command_parser_accepts_repeatable_arguments_and_reset() {
             "-l".into(),
             "--arg".into(),
             "one two".into(),
+            "--icon".into(),
+            "fish".into(),
             "--config".into(),
             "custom.json".into(),
         ],
@@ -28,6 +30,7 @@ fn profile_command_parser_accepts_repeatable_arguments_and_reset() {
             program: "bash".to_owned(),
             args: vec!["-l".to_owned(), "one two".to_owned()],
             theme: None,
+            icon: Some(ProfileIcon::Fish),
         }
     );
 
@@ -46,6 +49,18 @@ fn profile_command_parser_accepts_repeatable_arguments_and_reset() {
 }
 
 #[test]
+fn profile_help_documents_icon_operations_and_values() {
+    let help = profile_operation_help(None);
+    assert!(help.contains("profile icon PROFILE ICON"));
+    assert!(help.contains("--icon ICON"));
+    let add_help = profile_operation_help(Some("add"));
+    assert!(add_help.contains("zetta, bash, zsh, fish, or auto"));
+    let icon_help = profile_operation_help(Some("icon"));
+    assert!(icon_help.contains("--reset"));
+    assert!(icon_help.contains("auto, zetta, bash, zsh, or fish"));
+}
+
+#[test]
 fn adding_a_profile_preserves_unrelated_configuration_fields() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.json");
@@ -57,6 +72,7 @@ fn adding_a_profile_preserves_unrelated_configuration_fields() {
             program: "bash".to_owned(),
             args: vec!["-l".to_owned(), "one two".to_owned()],
             theme: None,
+            icon: None,
         },
         Some(&path),
     )
@@ -183,6 +199,48 @@ fn theme_mutation_sets_and_resets_a_profile_override() {
 }
 
 #[test]
+fn icon_mutation_sets_and_resets_a_profile_override() {
+    let parsed =
+        parse_profile_args(&["icon".into(), "Dev Shell".into(), "zsh".into()], None).unwrap();
+    assert_eq!(
+        parsed.command,
+        ProfileCommand::Icon {
+            profile: "Dev Shell".to_owned(),
+            icon: Some(ProfileIcon::Zsh),
+        }
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.json");
+    fs::write(
+        &path,
+        r#"{"profiles":[{"name":"Dev Shell","program":"bash"}]}"#,
+    )
+    .unwrap();
+    run(
+        ProfileCommand::Icon {
+            profile: "Dev Shell".to_owned(),
+            icon: Some(ProfileIcon::Fish),
+        },
+        Some(&path),
+    )
+    .unwrap();
+    let configured: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(configured["profiles"][0]["icon"], "fish");
+
+    run(
+        ProfileCommand::Icon {
+            profile: "Dev Shell".to_owned(),
+            icon: None,
+        },
+        Some(&path),
+    )
+    .unwrap();
+    let reset: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    assert!(reset["profiles"][0].get("icon").is_none());
+}
+
+#[test]
 fn adding_a_duplicate_profile_is_rejected() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.json");
@@ -198,6 +256,7 @@ fn adding_a_duplicate_profile_is_rejected() {
             program: "zsh".to_owned(),
             args: Vec::new(),
             theme: None,
+            icon: None,
         },
         Some(&path),
     )
@@ -216,6 +275,7 @@ fn missing_configuration_is_created_for_a_profile_addition() {
             program: "bash".to_owned(),
             args: Vec::new(),
             theme: None,
+            icon: None,
         },
         Some(&path),
     )
@@ -274,6 +334,7 @@ fn malformed_configuration_is_not_overwritten() {
                 program: "bash".to_owned(),
                 args: Vec::new(),
                 theme: None,
+                icon: None,
             },
             Some(&path),
         )

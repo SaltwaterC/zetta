@@ -353,6 +353,10 @@ pub(crate) fn render_settings_pages(
                         index,
                     )))
                     || editor.focused_control
+                        == Some(SettingsControl::Dropdown(SettingsDropdown::ProfileIcon(
+                            index,
+                        )))
+                    || editor.focused_control
                         == Some(SettingsControl::Input(SettingsInput::Configuration(
                             ConfigTextField::ProfileName(index),
                         )))
@@ -378,6 +382,15 @@ pub(crate) fn render_settings_pages(
                     profile_theme,
                     SettingsDropdown::ProfileTheme(index),
                 );
+                let profile_icon_value = profile.icon.as_ref().unwrap_or(&profile.automatic_icon);
+                let profile_icon = h_flex()
+                    .gap_2()
+                    .child(profile_icon_value.render(IconSize::Small))
+                    .child(dropdown(
+                        format!("settings-profile-{index}-icon"),
+                        ProfileIcon::selector_label(profile.icon.as_ref()).to_owned(),
+                        SettingsDropdown::ProfileIcon(index),
+                    ));
                 let card = if profile.detected {
                     let visibility_handle = handle.clone();
                     let profile_visibility = switch(
@@ -417,29 +430,37 @@ pub(crate) fn render_settings_pages(
                             colors.editor_background
                         })
                         .child(
-                            div()
+                            h_flex()
                                 .min_w_0()
                                 .flex_1()
+                                .gap_2()
+                                .child(profile_icon_value.render(IconSize::Medium))
                                 .child(
                                     div()
-                                        .text_sm()
-                                        .text_color(colors.text)
-                                        .child(profile.name.text.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(colors.text_muted)
-                                        .child("Detected profile"),
+                                        .min_w_0()
+                                        .flex_1()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(colors.text)
+                                                .child(profile.name.text.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(colors.text_muted)
+                                                .child("Detected profile"),
+                                        ),
                                 ),
                         )
                         .child(
                             h_flex()
-                                .w(px(480.))
+                                .w(px(690.))
                                 .flex_none()
                                 .gap_3()
                                 .child(profile_visibility)
-                                .child(div().w(px(330.)).flex_none().child(profile_theme)),
+                                .child(div().w(px(250.)).flex_none().child(profile_theme))
+                                .child(div().w(px(250.)).flex_none().child(profile_icon)),
                         )
                         .into_any_element()
                 } else {
@@ -558,16 +579,36 @@ pub(crate) fn render_settings_pages(
                                 ),
                         )
                         .child(
-                            div()
-                                .mt_2()
-                                .child(
-                                    div()
-                                        .mb_1()
-                                        .text_xs()
-                                        .text_color(colors.text_muted)
-                                        .child("Theme"),
-                                )
-                                .child(profile_theme),
+                            div().mt_2().child(
+                                h_flex()
+                                    .gap_4()
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .flex_1()
+                                            .child(
+                                                div()
+                                                    .mb_1()
+                                                    .text_xs()
+                                                    .text_color(colors.text_muted)
+                                                    .child("Theme"),
+                                            )
+                                            .child(profile_theme),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .flex_1()
+                                            .child(
+                                                div()
+                                                    .mb_1()
+                                                    .text_xs()
+                                                    .text_color(colors.text_muted)
+                                                    .child("Icon"),
+                                            )
+                                            .child(profile_icon),
+                                    ),
+                            ),
                         )
                         .into_any_element()
                 };
@@ -611,6 +652,8 @@ pub(crate) fn render_settings_pages(
                                         program: TextField::default(),
                                         arguments: TextField::default(),
                                         theme: None,
+                                        icon: None,
+                                        automatic_icon: ProfileIcon::Zetta,
                                         hidden: false,
                                         detected: false,
                                     });

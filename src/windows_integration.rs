@@ -171,6 +171,8 @@ fn create_profile_link(target: &Path, profile: &Profile) -> Result<IShellLinkW> 
     unsafe {
         let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
             .context("creating a profile Shell link")?;
+        let (icon_path, icon_index) = profile.icon.jump_list_icon_location(target);
+        let icon_path = HSTRING::from(icon_path.as_os_str());
         let target = HSTRING::from(target.as_os_str());
         let arguments = HSTRING::from(format!(
             "--profile {}",
@@ -183,7 +185,7 @@ fn create_profile_link(target: &Path, profile: &Profile) -> Result<IShellLinkW> 
             .context("setting the profile arguments")?;
         link.SetDescription(&description)
             .context("setting the profile description")?;
-        link.SetIconLocation(&target, 0)
+        link.SetIconLocation(&icon_path, icon_index)
             .context("setting the profile icon")?;
         if let Some(home) = env::var_os("USERPROFILE") {
             link.SetWorkingDirectory(&HSTRING::from(home.as_os_str()))

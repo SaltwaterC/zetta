@@ -28,6 +28,6 @@
   },
   "profiles": [
     { "name": "System", "theme": "One Light" },
-    { "name": "Login Zsh", "program": "/bin/zsh", "args": ["-l"] }
+    { "name": "Login Zsh", "program": "/bin/zsh", "args": ["-l"], "icon": "zsh" }
   ]
 }

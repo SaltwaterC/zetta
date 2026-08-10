@@ -11,6 +11,7 @@ use serde_json::{Map, Value, json};
 use crate::{
     config::{Config, Profile, themes_dir},
     process_control::request_existing_process_configuration_reload,
+    profile_icon::ProfileIcon,
     zetta_assets::ZettaAssets,
 };
 
@@ -28,6 +29,10 @@ pub(crate) enum ProfileCommand {
         profile: String,
         theme: Option<String>,
     },
+    Icon {
+        profile: String,
+        icon: Option<ProfileIcon>,
+    },
     Default {
         profile: String,
     },
@@ -36,6 +41,7 @@ pub(crate) enum ProfileCommand {
         program: String,
         args: Vec<String>,
         theme: Option<String>,
+        icon: Option<ProfileIcon>,
     },
     Remove {
         profile: String,
@@ -100,6 +106,7 @@ pub(crate) fn parse_profile_args(
             profile: parse_one_profile_argument("profile enable", arguments)?,
         },
         "theme" => parse_theme_command(arguments)?,
+        "icon" => parse_icon_command(arguments)?,
         "default" => ProfileCommand::Default {
             profile: parse_one_profile_argument("profile default", arguments)?,
         },
@@ -168,11 +175,41 @@ fn parse_theme_command(arguments: &[String]) -> Result<ProfileCommand> {
     Ok(ProfileCommand::Theme { profile, theme })
 }
 
+fn parse_icon_command(arguments: &[String]) -> Result<ProfileCommand> {
+    let mut reset = false;
+    let mut positional = Vec::new();
+    for argument in arguments {
+        match argument.as_str() {
+            "--reset" | "-r" => {
+                anyhow::ensure!(!reset, "--reset may only be specified once");
+                reset = true;
+            }
+            value if value.starts_with('-') => {
+                anyhow::bail!("unknown zetta profile icon option {value:?}")
+            }
+            value => positional.push(value.to_owned()),
+        }
+    }
+    anyhow::ensure!(
+        (reset && positional.len() == 1) || (!reset && positional.len() == 2),
+        "usage: zetta profile icon PROFILE ICON\n       zetta profile icon PROFILE --reset"
+    );
+    let profile = validate_profile_argument(&positional[0])?;
+    let icon = if reset {
+        None
+    } else {
+        ProfileIcon::parse_name(&positional[1])?
+    };
+    Ok(ProfileCommand::Icon { profile, icon })
+}
+
 fn parse_add_command(arguments: &[String]) -> Result<ProfileCommand> {
     let mut name = None;
     let mut program = None;
     let mut args = Vec::new();
     let mut theme = None;
+    let mut icon = None;
+    let mut icon_set = false;
     let mut arguments = arguments.iter();
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -197,6 +234,15 @@ fn parse_add_command(arguments: &[String]) -> Result<ProfileCommand> {
                         .clone(),
                 );
             }
+            "--icon" | "-i" => {
+                anyhow::ensure!(!icon_set, "--icon may only be specified once");
+                icon_set = true;
+                icon = ProfileIcon::parse_name(
+                    arguments
+                        .next()
+                        .context("--icon requires auto, zetta, bash, zsh, or fish")?,
+                )?;
+            }
             value if value.starts_with('-') => {
                 anyhow::bail!("unknown zetta profile add option {value:?}")
             }
@@ -220,6 +266,7 @@ fn parse_add_command(arguments: &[String]) -> Result<ProfileCommand> {
         program,
         args,
         theme,
+        icon,
     })
 }
 
@@ -307,6 +354,10 @@ fn apply_mutation(
             }
             set_profile_theme(root, &resolved.name, theme.as_deref())
         }
+        ProfileCommand::Icon { profile, icon } => {
+            let resolved = find_profile(current, profile)?;
+            set_profile_icon(root, &resolved.name, icon.as_ref())
+        }
         ProfileCommand::Default { profile } => {
             let resolved = find_profile(current, profile)?;
             let value = Value::String(resolved.name);
@@ -319,6 +370,7 @@ fn apply_mutation(
             program,
             args,
             theme,
+            icon,
         } => {
             anyhow::ensure!(
                 !current
@@ -337,6 +389,11 @@ fn apply_mutation(
             value.insert("args".to_owned(), json!(args));
             if let Some(theme) = theme {
                 value.insert("theme".to_owned(), json!(theme));
+            }
+            if let Some(icon) = icon
+                && let Some(name) = icon.name()
+            {
+                value.insert("icon".to_owned(), json!(name));
             }
             profiles.push(Value::Object(value));
             Ok(true)
@@ -481,6 +538,49 @@ fn set_profile_theme(
     Ok(changed)
 }
 
+fn set_profile_icon(
+    root: &mut Map<String, Value>,
+    name: &str,
+    icon: Option<&ProfileIcon>,
+) -> Result<bool> {
+    let indices = configured_profile_indices(root, name);
+    if indices.is_empty() {
+        let Some(icon) = icon else {
+            return Ok(false);
+        };
+        let profiles = profiles_array_mut(root)?;
+        let mut value = Map::new();
+        value.insert("name".to_owned(), json!(name));
+        if let Some(name) = icon.name() {
+            value.insert("icon".to_owned(), json!(name));
+        }
+        profiles.push(Value::Object(value));
+        return Ok(true);
+    }
+
+    let mut changed = false;
+    let profiles = profiles_array_mut(root)?;
+    for index in indices {
+        let object = profiles[index]
+            .as_object_mut()
+            .context("each profile must be an object")?;
+        match icon.and_then(ProfileIcon::name) {
+            Some(name) => {
+                if object.get("icon").and_then(Value::as_str) != Some(name) {
+                    object.insert("icon".to_owned(), json!(name));
+                    changed = true;
+                }
+            }
+            None => {
+                if object.remove("icon").is_some() {
+                    changed = true;
+                }
+            }
+        }
+    }
+    Ok(changed)
+}
+
 fn validate_theme_name(theme: &str) -> Result<()> {
     let themes = profile_theme_names()?;
     anyhow::ensure!(
@@ -566,17 +666,20 @@ pub(crate) fn profile_operation_help(operation: Option<&str>) -> &'static str {
         Some("theme") => {
             "Set or reset a profile theme\n\nUsage: zetta profile theme PROFILE THEME [OPTIONS]\n       zetta profile theme PROFILE --reset [OPTIONS]\n\nTHEME must be listed by `zetta profile themes`.\n\nOptions:\n  -r, --reset        Remove the profile theme override\n  -c, --config PATH  Use a configuration file\n  -h, --help         Print help"
         }
+        Some("icon") => {
+            "Set or reset a profile icon\n\nUsage: zetta profile icon PROFILE ICON [OPTIONS]\n       zetta profile icon PROFILE --reset [OPTIONS]\n\nICON may be auto, zetta, bash, zsh, or fish. auto and --reset restore automatic icon inference.\n\nOptions:\n  -r, --reset        Remove the profile icon override\n  -c, --config PATH  Use a configuration file\n  -h, --help         Print help"
+        }
         Some("default") => {
             "Set the default profile\n\nUsage: zetta profile default PROFILE [OPTIONS]\n\nOptions:\n  -c, --config PATH  Use a configuration file\n  -h, --help         Print help"
         }
         Some("add") => {
-            "Add a custom profile\n\nUsage: zetta profile add NAME --program PROGRAM [OPTIONS]\n\nOptions:\n  -p, --program PROGRAM  Program to launch\n  -a, --arg ARG          Add a repeatable program argument\n  -t, --theme THEME      Set a profile theme\n  -c, --config PATH      Use a configuration file\n  -h, --help             Print help"
+            "Add a custom profile\n\nUsage: zetta profile add NAME --program PROGRAM [OPTIONS]\n\nOptions:\n  -p, --program PROGRAM  Program to launch\n  -a, --arg ARG          Add a repeatable program argument\n  -t, --theme THEME      Set a profile theme\n  -i, --icon ICON        Set zetta, bash, zsh, fish, or auto\n  -c, --config PATH      Use a configuration file\n  -h, --help             Print help"
         }
         Some("remove") => {
             "Remove a custom profile\n\nUsage: zetta profile remove PROFILE [OPTIONS]\n\nDetected profiles and the active default profile cannot be removed.\n\nOptions:\n  -c, --config PATH  Use a configuration file\n  -h, --help         Print help"
         }
         _ => {
-            "Manage Zetta profiles\n\nUsage: zetta profile list [OPTIONS]\n       zetta profile themes [OPTIONS]\n       zetta profile disable PROFILE [OPTIONS]\n       zetta profile enable PROFILE [OPTIONS]\n       zetta profile theme PROFILE THEME [OPTIONS]\n       zetta profile theme PROFILE --reset [OPTIONS]\n       zetta profile default PROFILE [OPTIONS]\n       zetta profile add NAME --program PROGRAM [--arg ARG ...] [--theme THEME] [OPTIONS]\n       zetta profile remove PROFILE [OPTIONS]\n\nOperations:\n  list       List all resolved profiles, including hidden profiles\n  themes     List available bundled and installed themes\n  disable    Hide a profile\n  enable     Show a profile\n  theme      Set or reset a profile theme\n  default    Set the default profile\n  add        Add a custom profile\n  remove     Remove a custom profile\n\nThe -c/--config option may appear anywhere after `profile`. Mutations are validated before saving and request a best-effort live reload from a matching Zetta process.\n\nOptions:\n  -c, --config PATH  Use a configuration file\n  -h, --help         Print help"
+            "Manage Zetta profiles\n\nUsage: zetta profile list [OPTIONS]\n       zetta profile themes [OPTIONS]\n       zetta profile disable PROFILE [OPTIONS]\n       zetta profile enable PROFILE [OPTIONS]\n       zetta profile theme PROFILE THEME [OPTIONS]\n       zetta profile theme PROFILE --reset [OPTIONS]\n       zetta profile icon PROFILE ICON [OPTIONS]\n       zetta profile icon PROFILE --reset [OPTIONS]\n       zetta profile default PROFILE [OPTIONS]\n       zetta profile add NAME --program PROGRAM [--arg ARG ...] [--theme THEME] [--icon ICON] [OPTIONS]\n       zetta profile remove PROFILE [OPTIONS]\n\nOperations:\n  list       List all resolved profiles, including hidden profiles\n  themes     List available bundled and installed themes\n  disable    Hide a profile\n  enable     Show a profile\n  theme      Set or reset a profile theme\n  icon       Set or reset a profile icon\n  default    Set the default profile\n  add        Add a custom profile\n  remove     Remove a custom profile\n\nThe -c/--config option may appear anywhere after `profile`. Mutations are validated before saving and request a best-effort live reload from a matching Zetta process.\n\nOptions:\n  -c, --config PATH  Use a configuration file\n  -h, --help         Print help"
         }
     }
 }

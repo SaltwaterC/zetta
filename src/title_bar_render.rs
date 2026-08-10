@@ -709,6 +709,7 @@ impl Zetta {
                     {
                         let is_default = index == default_profile;
                         let label_for_row = profile.name.clone();
+                        let profile_icon = profile.icon.clone();
                         let shortcut = profile_menu_shortcut(
                             visible_index + 1,
                             terminal_focus.as_ref(),
@@ -733,6 +734,7 @@ impl Zetta {
                                                 )
                                             })
                                             .when(!is_default, |row| row.child(div().w_4()))
+                                            .child(profile_icon.render(IconSize::Small))
                                             .child(Label::new(label_for_row.clone()).color(
                                                 if is_default {
                                                     Color::Accent

@@ -231,7 +231,7 @@ _zetta() {
     fi
 
     if (( profile_command_index >= 0 && CURRENT == profile_command_index + 1 )); then
-        compadd -S ' ' -- list themes disable enable theme default add remove
+        compadd -S ' ' -- list themes disable enable theme icon default add remove
         _zetta_options --config --help
         return
     fi
@@ -338,6 +338,8 @@ _zetta() {
         --icon|-i)
             if [[ $words[2] == tabicon ]]; then
                 _zetta_tab_icons
+            elif [[ $words[2] == profile && ($profile_operation == add || $profile_operation == icon) ]]; then
+                compadd -- auto zetta bash zsh fish
             else
                 _files
             fi
@@ -426,11 +428,22 @@ _zetta() {
                     _zetta_profile_themes "${config_args[@]}"
                 fi
                 ;;
+            icon)
+                if [[ $words[CURRENT] == -* ]]; then
+                    _zetta_options --reset --config --help
+                elif [[ $previous == icon ]]; then
+                    _zetta_profiles "${config_args[@]}"
+                elif [[ $previous == --reset || $previous == -r ]]; then
+                    _zetta_options --config --help
+                else
+                    compadd -- auto zetta bash zsh fish
+                fi
+                ;;
             add)
-                _zetta_options --program --arg --theme --config --help
+                _zetta_options --program --arg --theme --icon --config --help
                 ;;
             *)
-                _zetta_options list themes disable enable theme default add remove --config --help
+                _zetta_options list themes disable enable theme icon default add remove --config --help
                 ;;
         esac
         return

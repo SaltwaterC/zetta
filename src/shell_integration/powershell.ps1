@@ -222,6 +222,8 @@ $zettaCompletions = {
         ($previous -eq '-c' -and ($subcommand -eq 'terminal-size' -or $subcommand -eq 'overlay'))
     ) {
         @()
+    } elseif ($subcommand -eq 'profile' -and $profileOperation -in 'add', 'icon' -and $previous -in '--icon', '-i') {
+        'auto', 'zetta', 'bash', 'zsh', 'fish'
     } elseif ($subcommand -eq 'tabicon' -and (
         $previous -in '--icon', '-i' -or $wordToComplete -notlike '-*'
     )) {
@@ -262,8 +264,8 @@ $zettaCompletions = {
             }
             'splits' { '--help' }
             'profile' {
-                if ([string]::IsNullOrEmpty($profileOperation) -or ($profileOperationIndex -eq ($words.Count - 1) -and -not [string]::IsNullOrEmpty($wordToComplete)) -or $profileOperation -notin 'list', 'themes', 'disable', 'enable', 'theme', 'default', 'add', 'remove') {
-                    'list', 'themes', 'disable', 'enable', 'theme', 'default', 'add', 'remove', '--config', '--help'
+                if ([string]::IsNullOrEmpty($profileOperation) -or ($profileOperationIndex -eq ($words.Count - 1) -and -not [string]::IsNullOrEmpty($wordToComplete)) -or $profileOperation -notin 'list', 'themes', 'disable', 'enable', 'theme', 'icon', 'default', 'add', 'remove') {
+                    'list', 'themes', 'disable', 'enable', 'theme', 'icon', 'default', 'add', 'remove', '--config', '--help'
                 } elseif ($profileOperation -in 'disable', 'enable', 'default', 'remove') {
                     if ($previous -eq $profileOperation -or $last -eq $profileOperation) { & $zettaProfiles $configArguments } else { '--config', '--help' }
                 } elseif ($profileOperation -eq 'theme') {
@@ -271,8 +273,13 @@ $zettaCompletions = {
                     elseif ($previous -eq 'theme' -or $last -eq 'theme') { & $zettaProfiles $configArguments }
                     elseif ($previous -in '--reset', '-r' -or $last -in '--reset', '-r') { '--config', '--help' }
                     else { & $zettaProfileThemes $configArguments }
+                } elseif ($profileOperation -eq 'icon') {
+                    if ($wordToComplete -like '-*') { '--reset', '--config', '--help' }
+                    elseif ($previous -eq 'icon' -or $last -eq 'icon') { & $zettaProfiles $configArguments }
+                    elseif ($previous -in '--reset', '-r' -or $last -in '--reset', '-r') { '--config', '--help' }
+                    else { 'auto', 'zetta', 'bash', 'zsh', 'fish' }
                 } elseif ($profileOperation -eq 'add') {
-                    '--program', '--arg', '--theme', '--config', '--help'
+                    '--program', '--arg', '--theme', '--icon', '--config', '--help'
                 } else { '--config', '--help' }
             }
             'init' { 'bash', 'fish', 'powershell', 'pwsh', 'zsh', '--help' }

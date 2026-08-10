@@ -490,6 +490,7 @@ fn terminal_rendering_profile_config(executable: &Path, workload: PerformanceWor
             title_override: Some("Terminal rendering profiler".to_owned()),
         },
         theme: None,
+        icon: ProfileIcon::Zetta,
     }];
     config.default_profile = 0;
     config

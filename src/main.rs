@@ -10,6 +10,7 @@ mod http_server;
 mod notification_sounds;
 mod process_control;
 mod profile_cli;
+mod profile_icon;
 #[cfg(feature = "serial-console")]
 mod serial_console;
 #[cfg(servers_enabled)]
@@ -74,6 +75,7 @@ use process_control::{
     ProcessControlCommand, ProcessControlServer, ReconnectSessionResult, TabAttentionRequest,
     request_existing_process_window,
 };
+use profile_icon::ProfileIcon;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use session_auth_ui::SessionAuthenticationPrompt;

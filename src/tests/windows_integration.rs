@@ -14,3 +14,26 @@ fn quotes_profile_names_for_windows_command_lines() {
         r#""Trailing slash\\""#
     );
 }
+
+#[cfg(windows)]
+#[test]
+fn jump_list_icons_use_embedded_resources_or_executable_icons() {
+    use crate::profile_icon::ProfileIcon;
+
+    let target = PathBuf::from(r"C:\Program Files\Zetta\zetta-gui.exe");
+    assert_eq!(
+        ProfileIcon::Bash.jump_list_icon_location(&target),
+        (target.clone(), 3)
+    );
+    assert_eq!(
+        ProfileIcon::Zetta.jump_list_icon_location(&target),
+        (target.clone(), 2)
+    );
+
+    let executable = tempfile::NamedTempFile::new().unwrap();
+    let executable_path = executable.path().to_path_buf();
+    assert_eq!(
+        ProfileIcon::Executable(executable_path.clone()).jump_list_icon_location(&target),
+        (executable_path, 0)
+    );
+}

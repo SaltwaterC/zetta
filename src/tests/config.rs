@@ -39,6 +39,43 @@ fn homebrew_shells_are_profiles_with_their_installed_program_paths() {
         profiles[1].command,
         Shell::Program(bin.join("fish").to_string_lossy().into_owned())
     );
+    assert_eq!(profiles[0].icon, ProfileIcon::Bash);
+    assert_eq!(profiles[1].icon, ProfileIcon::Fish);
+}
+
+#[test]
+fn profile_icon_configuration_accepts_automatic_and_explicit_values() {
+    let config = Config::parse(
+        r#"{
+            "profiles": [
+                { "name": "Auto Fish", "program": "/custom/fish", "icon": "auto" },
+                { "name": "Explicit Shell", "program": "/custom/fish", "icon": "bash" },
+                { "name": "Null Shell", "program": "/custom/zsh", "icon": null }
+            ]
+        }"#,
+        None,
+        None,
+    )
+    .unwrap();
+
+    let profile = |name: &str| {
+        config
+            .profiles
+            .iter()
+            .find(|profile| profile.name == name)
+            .unwrap()
+    };
+    assert_eq!(profile("Auto Fish").icon, ProfileIcon::Fish);
+    assert_eq!(profile("Explicit Shell").icon, ProfileIcon::Bash);
+    assert_eq!(profile("Null Shell").icon, ProfileIcon::Zsh);
+    assert!(
+        Config::parse(
+            r#"{"profiles":[{"name":"Invalid","program":"bash","icon":"terminal"}]}"#,
+            None,
+            None,
+        )
+        .is_err()
+    );
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -548,11 +585,13 @@ fn configured_profiles_extend_detected_profiles() {
             name: "System".to_owned(),
             command: Shell::System,
             theme: None,
+            icon: ProfileIcon::Zetta,
         },
         Profile {
             name: "Zsh".to_owned(),
             command: Shell::Program("zsh".to_owned()),
             theme: None,
+            icon: ProfileIcon::Zsh,
         },
     ];
 
@@ -562,6 +601,7 @@ fn configured_profiles_extend_detected_profiles() {
             name: "Login Zsh".to_owned(),
             command: Some(Shell::Program("/bin/zsh".to_owned())),
             theme: None,
+            icon: None,
             hidden: None,
         }],
     )
@@ -584,6 +624,7 @@ fn configured_profiles_override_detected_profiles_by_name() {
         name: "Zsh".to_owned(),
         command: Shell::Program("zsh".to_owned()),
         theme: None,
+        icon: ProfileIcon::Zsh,
     }];
 
     merge_profiles(
@@ -596,6 +637,7 @@ fn configured_profiles_override_detected_profiles_by_name() {
                 title_override: Some("zsh".to_owned()),
             }),
             theme: Some("Solarized Dark".to_owned()),
+            icon: None,
             hidden: None,
         }],
     )
@@ -615,6 +657,7 @@ fn profile_theme_override_does_not_require_a_program() {
         name: "Zsh".to_owned(),
         command: Shell::Program("zsh".to_owned()),
         theme: None,
+        icon: ProfileIcon::Zsh,
     }];
     let profile = parse_profile(&serde_json::json!({
         "name": "Zsh",
@@ -654,16 +697,19 @@ fn hidden_profiles_do_not_consume_visible_profile_slots() {
             name: "System".to_owned(),
             command: Shell::System,
             theme: None,
+            icon: ProfileIcon::Zetta,
         },
         Profile {
             name: "Hidden".to_owned(),
             command: Shell::Program("hidden-shell".to_owned()),
             theme: None,
+            icon: ProfileIcon::Zetta,
         },
         Profile {
             name: "Visible".to_owned(),
             command: Shell::Program("visible-shell".to_owned()),
             theme: None,
+            icon: ProfileIcon::Zetta,
         },
     ];
     let hidden = HashSet::from(["hidden".to_owned()]);
@@ -724,6 +770,7 @@ fn creates_a_profile_for_each_wsl_distribution() {
 
     assert_eq!(profiles.len(), 2);
     assert_eq!(profiles[0].name, "WSL: Ubuntu");
+    assert_eq!(profiles[0].icon, ProfileIcon::Bash);
     assert!(matches!(
         profiles[0].command,
         Shell::WithArguments {
@@ -754,6 +801,14 @@ fn creates_msys2_profiles_for_installed_shells_using_the_launcher() {
         ["MSYS2", "MSYS2: Zsh"]
     );
     for (profile, shell) in profiles.iter().zip(["bash", "zsh"]) {
+        assert_eq!(
+            profile.icon,
+            if shell == "bash" {
+                ProfileIcon::Bash
+            } else {
+                ProfileIcon::Zsh
+            }
+        );
         assert!(matches!(
             profile.command,
             Shell::WithArguments {

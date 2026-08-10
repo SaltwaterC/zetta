@@ -302,6 +302,8 @@ _zetta_complete() {
         --icon|-i)
             if [[ $command == tabicon ]]; then
                 _zetta_complete_tab_icons
+            elif [[ $command == profile && ($profile_operation == add || $profile_operation == icon) ]]; then
+                _zetta_compgen 'auto zetta bash zsh fish'
             else
                 COMPREPLY=( $(compgen -f -- "$current") )
             fi
@@ -398,11 +400,12 @@ _zetta_complete() {
     case "$command" in
         profile)
             if (( profile_command_index >= 0 && COMP_CWORD == profile_command_index + 1 )); then
-                _zetta_compgen 'list themes disable enable theme default add remove --help'
+                _zetta_compgen 'list themes disable enable theme icon default add remove --help'
             elif [[ $current == -* ]]; then
                 case "$profile_operation" in
                     theme) _zetta_compgen '--reset --config --help' ;;
-                    add) _zetta_compgen '--program --arg --theme --config --help' ;;
+                    icon) _zetta_compgen '--reset --config --help' ;;
+                    add) _zetta_compgen '--program --arg --theme --icon --config --help' ;;
                     *) _zetta_compgen '--config --help' ;;
                 esac
             else
@@ -438,11 +441,20 @@ _zetta_complete() {
                             fi
                         fi
                         ;;
+                    icon)
+                        if [[ $previous == icon ]]; then
+                            _zetta_complete_profiles
+                        elif [[ $previous == --reset || $previous == -r ]]; then
+                            _zetta_compgen '--config --help'
+                        else
+                            _zetta_compgen 'auto zetta bash zsh fish'
+                        fi
+                        ;;
                     add)
                         if [[ $previous == --theme || $previous == -t ]]; then
                             _zetta_complete_profile_themes
                         else
-                            _zetta_compgen '--program --arg --theme --config --help'
+                            _zetta_compgen '--program --arg --theme --icon --config --help'
                         fi
                         ;;
                     *)

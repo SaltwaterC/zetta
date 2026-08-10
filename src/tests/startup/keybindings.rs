@@ -586,11 +586,13 @@ fn native_macos_menus_duplicate_the_title_bar_menus() {
             name: "System".to_owned(),
             command: Shell::System,
             theme: None,
+            icon: ProfileIcon::Zetta,
         },
         Profile {
             name: "Alternate".to_owned(),
             command: Shell::Program("alternate-shell".to_owned()),
             theme: None,
+            icon: ProfileIcon::Zetta,
         },
     ];
     let [application_menu, profile_menu, window_menu] =

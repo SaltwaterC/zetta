@@ -22,8 +22,8 @@ for active development.
 - Open paths or the complete pane scrollback in `$EDITOR`, with built-in vi as
   the fallback
 - Native command, path, and SSH-alias completion in a multi-command prompt
-- Typed settings and keymap editor, per-profile themes, and installable Zed
-  themes
+- Typed settings and keymap editor, per-profile themes and icons, and
+  installable Zed themes
 - Serial consoles plus built-in HTTP and TFTP tools, usable from panes or the
   CLI
 - Git worktree workflow with `zetta wt new`, `zetta wt done`, status, and

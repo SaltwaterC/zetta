@@ -13,6 +13,7 @@ fn background_session_is_reaped_after_its_final_pane_exits() {
         name: "System".to_owned(),
         command: Shell::System,
         theme: None,
+        icon: ProfileIcon::Zetta,
     };
     let tab = Tab {
         id: 1,

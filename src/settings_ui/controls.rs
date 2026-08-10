@@ -54,6 +54,7 @@ impl Zetta {
                 SettingsControl::Input(SettingsInput::ProfileDraft(ProfileDraftField::Program)),
                 SettingsControl::Input(SettingsInput::ProfileDraft(ProfileDraftField::Arguments)),
                 SettingsControl::Dropdown(SettingsDropdown::ProfileDraftTheme),
+                SettingsControl::Dropdown(SettingsDropdown::ProfileDraftIcon),
                 SettingsControl::CreateProfile,
             ];
         }
@@ -116,6 +117,9 @@ impl Zetta {
                         )));
                     }
                     controls.push(SettingsControl::Dropdown(SettingsDropdown::ProfileTheme(
+                        index,
+                    )));
+                    controls.push(SettingsControl::Dropdown(SettingsDropdown::ProfileIcon(
                         index,
                     )));
                 }
@@ -387,6 +391,17 @@ impl Zetta {
                     .chain(editor.themes.iter().cloned())
                     .collect(),
             ),
+            SettingsDropdown::ProfileIcon(index) => {
+                let profile = editor.configuration.profiles.get(index);
+                (
+                    profile
+                        .and_then(|profile| profile.icon.as_ref())
+                        .map(ProfileIcon::label)
+                        .unwrap_or("Automatic")
+                        .to_owned(),
+                    Arc::from(["Automatic", "Zetta", "Bash", "Zsh", "Fish"].map(str::to_owned)),
+                )
+            }
             SettingsDropdown::ProfileDraftTheme => (
                 editor
                     .profile_draft
@@ -397,6 +412,19 @@ impl Zetta {
                     .chain(editor.themes.iter().cloned())
                     .collect(),
             ),
+            SettingsDropdown::ProfileDraftIcon => {
+                let icon = editor
+                    .profile_draft
+                    .as_ref()
+                    .and_then(|profile| profile.icon.as_ref())
+                    .map(ProfileIcon::label)
+                    .unwrap_or("Automatic")
+                    .to_owned();
+                (
+                    icon,
+                    Arc::from(["Automatic", "Zetta", "Bash", "Zsh", "Fish"].map(str::to_owned)),
+                )
+            }
             SettingsDropdown::BindingAction(section, binding) => (
                 editor
                     .keymap
@@ -619,6 +647,8 @@ impl Zetta {
                         program: TextField::default(),
                         arguments: TextField::default(),
                         theme: None,
+                        icon: None,
+                        automatic_icon: ProfileIcon::Zetta,
                         hidden: false,
                         detected: false,
                     });
@@ -720,10 +750,9 @@ impl Zetta {
                     return;
                 }
                 if let Some(editor) = self.settings_editor.as_mut() {
-                    editor
-                        .configuration
-                        .profiles
-                        .push(editor.profile_draft.take().unwrap());
+                    let mut draft = editor.profile_draft.take().unwrap();
+                    draft.automatic_icon = ProfileIcon::automatic_for_program(&draft.program.text);
+                    editor.configuration.profiles.push(draft);
                     editor.configuration_dirty = true;
                     editor.focused_input = None;
                     editor.focused_control = None;
@@ -860,9 +889,31 @@ impl Zetta {
                     profile.theme = (value != "Use application theme").then_some(value);
                 }
             }
+            SettingsDropdown::ProfileIcon(index) => {
+                if let Some(profile) = editor.configuration.profiles.get_mut(index) {
+                    profile.icon = if value == "Automatic" {
+                        None
+                    } else {
+                        ProfileIcon::parse_name(&value.to_ascii_lowercase())
+                            .ok()
+                            .flatten()
+                    };
+                }
+            }
             SettingsDropdown::ProfileDraftTheme => {
                 if let Some(profile) = editor.profile_draft.as_mut() {
                     profile.theme = (value != "Use application theme").then_some(value);
+                }
+            }
+            SettingsDropdown::ProfileDraftIcon => {
+                if let Some(profile) = editor.profile_draft.as_mut() {
+                    profile.icon = if value == "Automatic" {
+                        None
+                    } else {
+                        ProfileIcon::parse_name(&value.to_ascii_lowercase())
+                            .ok()
+                            .flatten()
+                    };
                 }
             }
             SettingsDropdown::BindingAction(section, binding) => {
@@ -931,7 +982,7 @@ impl Zetta {
                 invalidate_keymap_cache(editor);
                 invalidate_controls_cache(editor);
             }
-            SettingsDropdown::ProfileDraftTheme => {}
+            SettingsDropdown::ProfileDraftTheme | SettingsDropdown::ProfileDraftIcon => {}
             _ => editor.configuration_dirty = true,
         }
         editor.message = None;

@@ -16,6 +16,8 @@ use task::Shell;
 use terminal::MAX_SCROLL_HISTORY_LINES;
 use ui::IconName;
 
+use crate::profile_icon::ProfileIcon;
+
 pub(crate) const DEFAULT_TERMINAL_FONT_FAMILY: &str = "MesloLGS NF";
 const DEFAULT_MAX_SCROLL_HISTORY_LINES: usize = MAX_SCROLL_HISTORY_LINES;
 pub(crate) const DEFAULT_INACTIVE_PANE_OPACITY: f32 = 0.8;
@@ -148,12 +150,14 @@ pub struct Profile {
     pub name: String,
     pub command: Shell,
     pub theme: Option<String>,
+    pub icon: ProfileIcon,
 }
 
 struct ProfileConfig {
     name: String,
     command: Option<Shell>,
     theme: Option<String>,
+    icon: Option<ProfileIcon>,
     hidden: Option<bool>,
 }
 
@@ -606,6 +610,9 @@ fn merge_profiles(
             if let Some(theme) = profile.theme.clone() {
                 profiles[index].theme = Some(theme);
             }
+            profiles[index].icon = profile.icon.clone().unwrap_or_else(|| {
+                ProfileIcon::automatic_for_profile(&profiles[index].name, &profiles[index].command)
+            });
         } else {
             let command = profile.command.clone().with_context(|| {
                 format!(
@@ -615,8 +622,12 @@ fn merge_profiles(
             })?;
             profiles.push(Profile {
                 name: profile.name.clone(),
-                command,
+                command: command.clone(),
                 theme: profile.theme.clone(),
+                icon: profile
+                    .icon
+                    .clone()
+                    .unwrap_or_else(|| ProfileIcon::automatic_for_profile(&profile.name, &command)),
             });
         }
     }
@@ -694,7 +705,7 @@ fn parse_profile(value: &Value) -> Result<ProfileConfig> {
     let object = value
         .as_object()
         .context("each profile must be an object")?;
-    const FIELDS: &[&str] = &["name", "program", "args", "theme", "hidden"];
+    const FIELDS: &[&str] = &["name", "program", "args", "theme", "icon", "hidden"];
     if let Some(field) = object
         .keys()
         .find(|field| !FIELDS.contains(&field.as_str()))
@@ -754,6 +765,11 @@ fn parse_profile(value: &Value) -> Result<ProfileConfig> {
                 .map(str::to_owned)
         })
         .transpose()?;
+    let icon = object
+        .get("icon")
+        .map(ProfileIcon::parse)
+        .transpose()?
+        .flatten();
     let hidden = object
         .get("hidden")
         .map(|hidden| hidden.as_bool().context("profile.hidden must be a boolean"))
@@ -762,6 +778,7 @@ fn parse_profile(value: &Value) -> Result<ProfileConfig> {
         name,
         command,
         theme,
+        icon,
         hidden,
     })
 }
@@ -776,6 +793,7 @@ fn discover_profiles() -> Vec<Profile> {
         name: "System".to_owned(),
         command: Shell::System,
         theme: None,
+        icon: ProfileIcon::automatic_for_shell(&Shell::System),
     }];
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     let homebrew_prefixes = homebrew_prefixes();
@@ -804,12 +822,14 @@ fn discover_profiles() -> Vec<Profile> {
                     name: (*name).to_owned(),
                     command: Shell::Program((*program).to_owned()),
                     theme: None,
+                    icon: ProfileIcon::automatic_for_program(program),
                 });
             #[cfg(not(any(target_os = "macos", target_os = "linux")))]
             let profile = Profile {
                 name: (*name).to_owned(),
                 command: Shell::Program((*program).to_owned()),
                 theme: None,
+                icon: ProfileIcon::automatic_for_program(program),
             };
             profiles.push(profile);
         }
@@ -875,10 +895,12 @@ fn homebrew_profile_for_path(path: &Path, prefixes: &[PathBuf]) -> Option<Profil
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn homebrew_profile(name: &str, path: PathBuf) -> Profile {
+    let command = path.to_string_lossy().into_owned();
     Profile {
         name: format!("{name} (Homebrew)"),
-        command: Shell::Program(path.to_string_lossy().into_owned()),
+        command: Shell::Program(command.clone()),
         theme: None,
+        icon: ProfileIcon::automatic_for_program(&command),
     }
 }
 
@@ -1113,6 +1135,11 @@ fn msys2_profiles(root: &Path) -> Vec<Profile> {
                     title_override: Some(name.to_owned()),
                 },
                 theme: None,
+                icon: match shell {
+                    "bash" => ProfileIcon::Bash,
+                    "zsh" => ProfileIcon::Zsh,
+                    _ => ProfileIcon::Zetta,
+                },
             }
         })
         .collect()
@@ -1165,6 +1192,7 @@ fn wsl_profiles_from_output(program: &str, output: &[u8]) -> Vec<Profile> {
                     title_override: Some(name),
                 },
                 theme: None,
+                icon: ProfileIcon::Bash,
             }
         })
         .collect()

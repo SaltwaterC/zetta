@@ -44,8 +44,10 @@ zetta profile disable "PROFILE"
 zetta profile enable "PROFILE"
 zetta profile theme "PROFILE" "THEME"
 zetta profile theme "PROFILE" --reset
+zetta profile icon "PROFILE" ICON
+zetta profile icon "PROFILE" --reset
 zetta profile default "PROFILE"
-zetta profile add "NAME" --program PROGRAM [--arg ARG ...] [--theme THEME]
+zetta profile add "NAME" --program PROGRAM [--arg ARG ...] [--theme THEME] [--icon ICON]
 zetta profile remove "PROFILE"
 ```
 
@@ -55,6 +57,11 @@ form `zetta -c PATH profile ...`. Profile names are case-insensitive, and
 source for valid profile themes. Mutations validate and write the selected
 configuration while preserving its other settings, then request a best-effort
 live reload from a matching Zetta process.
+
+Profile icons accept `auto`, `zetta`, `bash`, `zsh`, and `fish`. `auto` and
+`profile icon PROFILE --reset` restore automatic inference; automatic icon
+choices are omitted from saved configuration. See the configuration guide for
+the platform-specific discovery rules.
 
 Launch the first tab with a configured pane layout using either form:
 

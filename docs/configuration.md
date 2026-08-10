@@ -105,6 +105,17 @@ commands are immediately available inside the profile. Bash and Zsh profiles
 also report their current MSYS2 directory to Zetta, so new tabs, split panes,
 multi-command panes, and local server actions inherit the directory after `cd`.
 
+Each profile also has an icon. When `icon` is omitted, `null`, or `"auto"`,
+Zetta infers it from the shell executable on macOS and Linux (`bash`, `zsh`,
+and `fish` get their bundled artwork; other programs use the Zetta fallback).
+Windows profiles use the executable's native icon when it can be resolved and
+extracted. WSL distributions default to Bash artwork because WSL discovery does
+not expose the distribution's default shell, while MSYS2 Bash and Zsh use the
+corresponding bundled artwork. Set `icon` explicitly to `"zetta"`, `"bash"`,
+`"zsh"`, or `"fish"` to override automatic selection. Explicit icons are
+shown in the settings editor and profile menu; automatic selections are not
+written back to the configuration file.
+
 MSYS2 Bash appears as `MSYS2`. If `usr\bin\zsh.exe` is installed, Zetta also
 adds `MSYS2: Zsh` and passes MSYS2's supported `-shell zsh` launcher option.
 Select that profile as `default_profile` (or in the settings editor) to use
@@ -157,8 +168,10 @@ zetta profile disable "Bash"
 zetta profile enable "Bash"
 zetta profile theme "Bash" "One Dark"
 zetta profile theme "Bash" --reset
+zetta profile icon "Bash" fish
+zetta profile icon "Bash" --reset
 zetta profile default "Bash"
-zetta profile add "Project Shell" --program bash --arg -l --theme "One Dark"
+zetta profile add "Project Shell" --program bash --arg -l --theme "One Dark" --icon bash
 zetta profile remove "Project Shell"
 ```
 
@@ -190,10 +203,10 @@ only a Windows-side directory. On Windows, prompt integration similarly tracks
 the active filesystem directory for Windows PowerShell, PowerShell 7, and
 Command Prompt without replacing the user's prompt.
 
-Profiles may choose a Zed theme independently from the application theme. A
-detected profile needs only its name and theme; its detected command is
-retained. New profiles require `program`. Each terminal pane uses its profile's
-theme, and each tab uses its active pane's theme for its background, text,
+Profiles may choose a Zed theme and icon independently from the application
+theme. A detected profile needs only its name, theme, or icon; its detected
+command is retained. New profiles require `program`. Each terminal pane uses
+its profile's theme, and each tab uses its active pane's theme for its background, text,
 icons, border, and active indicator:
 
 ```json
