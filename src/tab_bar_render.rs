@@ -195,15 +195,32 @@ fn render_tabs_row(chrome: TabBarChrome) -> impl IntoElement {
                     .first()
                     .map(|(_, _, sel)| *sel)
                     .unwrap_or(false);
-                let visible_tabs_for_next = visible_tabs.clone();
+                let visible_tabs_for_neighbors = visible_tabs.clone();
                 let tabs = visible_tabs
                     .into_iter()
                     .enumerate()
                     .map(|(visible_index, (index, tab, selected))| {
-                        let next_selected = visible_tabs_for_next
+                        let next_selected = visible_tabs_for_neighbors
                             .get(visible_index + 1)
                             .map(|(_, _, next_sel)| *next_sel)
                             .unwrap_or(false);
+                        let (left_transition_background, right_transition_background) = if selected
+                        {
+                            let left_background = visible_index
+                                .checked_sub(1)
+                                .and_then(|index| visible_tabs_for_neighbors.get(index))
+                                .map(|(_, tab, _)| tab.theme(cx).colors().tab_inactive_background);
+                            let right_background = visible_tabs_for_neighbors
+                                .get(visible_index + 1)
+                                .map(|(_, tab, _)| tab.theme(cx).colors().tab_inactive_background);
+                            active_tab_transition_backgrounds(
+                                left_background,
+                                right_background,
+                                tab_bar_background,
+                            )
+                        } else {
+                            (tab_bar_background, tab_bar_background)
+                        };
                         render_tab(
                             TabChrome {
                                 index,
@@ -221,7 +238,8 @@ fn render_tabs_row(chrome: TabBarChrome) -> impl IntoElement {
                                 compact_tab_bottom_left,
                                 compact_tab_bottom_right,
                                 corner_radius,
-                                tab_bar_background,
+                                left_transition_background,
+                                right_transition_background,
                                 handle: &handle,
                             },
                             tab,
@@ -242,7 +260,11 @@ fn render_tabs_row(chrome: TabBarChrome) -> impl IntoElement {
             .min_w_0()
             .flex()
             .items_center()
-            .overflow_hidden()
+            // The selected compact tab deliberately paints its lower corner
+            // transitions into the neighboring controls. The visible-range
+            // calculation already constrains the row's layout; clipping is
+            // only needed for the standalone tab bar.
+            .when(!compact_mode, |tabs| tabs.overflow_hidden())
             // Buttons form one contiguous area with no dividers between them, so
             // this separator (matching the tab bar's own former left border) only
             // belongs here when a tab, not the left overflow trigger, sits first.
@@ -310,12 +332,24 @@ struct TabChrome<'a> {
     compact_tab_bottom_left: bool,
     compact_tab_bottom_right: bool,
     corner_radius: Pixels,
-    tab_bar_background: Hsla,
+    left_transition_background: Hsla,
+    right_transition_background: Hsla,
     handle: &'a WeakEntity<Zetta>,
 }
 
 fn active_tab_shape_visible(compact_mode: bool, selected: bool) -> bool {
     compact_mode && selected
+}
+
+fn active_tab_transition_backgrounds(
+    left_background: Option<Hsla>,
+    right_background: Option<Hsla>,
+    tab_bar_background: Hsla,
+) -> (Hsla, Hsla) {
+    (
+        left_background.unwrap_or(tab_bar_background),
+        right_background.unwrap_or(tab_bar_background),
+    )
 }
 
 fn render_active_tab_bottom_transition(
@@ -344,6 +378,45 @@ fn render_active_tab_bottom_transition(
         )
 }
 
+fn render_active_tab_top_transition_background(
+    is_left: bool,
+    surrounding_background: Hsla,
+    corner_radius: Pixels,
+) -> gpui::Div {
+    div()
+        .absolute()
+        .top_0()
+        // The active shape's canvas extends one radius beyond the measured
+        // tab. Its body starts one radius back in, so place this underlay at
+        // that body edge to show the neighboring tab through the rounded top
+        // corner instead of the title bar's default background.
+        .when(is_left, |background| background.left(corner_radius))
+        .when(!is_left, |background| background.right(corner_radius))
+        .size(corner_radius)
+        .bg(surrounding_background)
+}
+
+fn render_active_tab_shape_base_fill(
+    top_left: bool,
+    top_right: bool,
+    bottom_left: bool,
+    bottom_right: bool,
+    corner_radius: Pixels,
+    active_background: Hsla,
+) -> gpui::Div {
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .when(bottom_left, |body| body.left(corner_radius))
+        .when(!bottom_left, |body| body.left_0())
+        .when(bottom_right, |body| body.right(corner_radius))
+        .when(!bottom_right, |body| body.right_0())
+        .when(top_left, |body| body.rounded_tl(corner_radius))
+        .when(top_right, |body| body.rounded_tr(corner_radius))
+        .bg(active_background)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_active_tab_shape(
     top_left: bool,
@@ -351,25 +424,43 @@ fn render_active_tab_shape(
     bottom_left: bool,
     bottom_right: bool,
     active_background: Hsla,
-    tab_bar_background: Hsla,
+    left_transition_background: Hsla,
+    right_transition_background: Hsla,
     corner_radius: Pixels,
 ) -> gpui::Div {
     div()
         .absolute()
-        .inset_0()
-        .child(
-            div()
-                .absolute()
-                .top_0()
-                .bottom_0()
-                .when(bottom_left, |body| body.left(corner_radius))
-                .when(!bottom_left, |body| body.left_0())
-                .when(bottom_right, |body| body.right(corner_radius))
-                .when(!bottom_right, |body| body.right_0())
-                .when(top_left, |body| body.rounded_tl(corner_radius))
-                .when(top_right, |body| body.rounded_tr(corner_radius))
-                .bg(active_background),
-        )
+        .top_0()
+        .bottom_0()
+        // Preserve the original corner construction, but give it one radius
+        // of visual canvas outside each rounded lower edge. The body's equal
+        // positive inset then resolves exactly to the measured tab bounds.
+        .when(bottom_left, |shape| shape.left(-corner_radius))
+        .when(!bottom_left, |shape| shape.left_0())
+        .when(bottom_right, |shape| shape.right(-corner_radius))
+        .when(!bottom_right, |shape| shape.right_0())
+        .when(top_left, |shape| {
+            shape.child(render_active_tab_top_transition_background(
+                true,
+                left_transition_background,
+                corner_radius,
+            ))
+        })
+        .when(top_right, |shape| {
+            shape.child(render_active_tab_top_transition_background(
+                false,
+                right_transition_background,
+                corner_radius,
+            ))
+        })
+        .child(render_active_tab_shape_base_fill(
+            top_left,
+            top_right,
+            bottom_left,
+            bottom_right,
+            corner_radius,
+            active_background,
+        ))
         // If a lower transition is rounded while its upper corner is square,
         // fill the side above the transition so the tab does not acquire a
         // notch at the top.
@@ -399,7 +490,7 @@ fn render_active_tab_shape(
             shape.child(render_active_tab_bottom_transition(
                 true,
                 active_background,
-                tab_bar_background,
+                left_transition_background,
                 corner_radius,
             ))
         })
@@ -407,7 +498,7 @@ fn render_active_tab_shape(
             shape.child(render_active_tab_bottom_transition(
                 false,
                 active_background,
-                tab_bar_background,
+                right_transition_background,
                 corner_radius,
             ))
         })
@@ -430,7 +521,8 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
         compact_tab_bottom_left,
         compact_tab_bottom_right,
         corner_radius,
-        tab_bar_background,
+        left_transition_background,
+        right_transition_background,
         handle,
     } = chrome;
     let tab_theme = tab.theme(cx);
@@ -572,7 +664,8 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
                 compact_tab_bottom_left,
                 compact_tab_bottom_right,
                 tab_background,
-                tab_bar_background,
+                left_transition_background,
+                right_transition_background,
                 corner_radius,
             ))
         })

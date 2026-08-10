@@ -274,13 +274,12 @@ pub(crate) fn render_tab_overflow_trigger(
         .into_any_element()
 }
 
+fn compact_tab_neighbor_control_mask(background: Hsla) -> gpui::Div {
+    div().absolute().inset_0().rounded_sm().bg(background)
+}
+
 pub(crate) fn render_new_tab_button(compact_mode: bool, compact_height: Pixels) -> AnyElement {
-    tab_bar_row_height(compact_mode, compact_height)
-        .ml_1()
-        .mr_2()
-        .flex_none()
-        .flex()
-        .items_center()
+    new_tab_button_container(compact_mode, compact_height)
         .child(
             IconButton::new("new-tab", IconName::Plus)
                 .shape(IconButtonShape::Wide)
@@ -295,6 +294,15 @@ pub(crate) fn render_new_tab_button(compact_mode: bool, compact_height: Pixels) 
                 }),
         )
         .into_any_element()
+}
+
+fn new_tab_button_container(compact_mode: bool, compact_height: Pixels) -> gpui::Div {
+    tab_bar_row_height(compact_mode, compact_height)
+        .when(compact_mode, |button| button.ml(px(0.)).mr(px(12.)))
+        .when(!compact_mode, |button| button.ml_1().mr_2())
+        .flex_none()
+        .flex()
+        .items_center()
 }
 
 /// Compact mode places the tab bar inside the title bar. Keep a portion of it
@@ -875,6 +883,52 @@ impl Zetta {
             macos_title_bar_reservations_enabled(is_macos_fullscreen);
         let reserve_compact_leading_controls =
             compact_leading_controls_reservation_enabled(compact_mode, is_macos_fullscreen);
+        let broadcast_control = show_broadcast_control.then(|| {
+            let button = Button::new(
+                "toggle-broadcast-input",
+                if show_title_bar_control_labels {
+                    "Broadcast"
+                } else {
+                    ""
+                },
+            )
+            .start_icon(Icon::new(IconName::Keyboard).size(IconSize::Small).color(
+                if broadcast_input {
+                    Color::Selected
+                } else {
+                    Color::Default
+                },
+            ))
+            .style(ButtonStyle::Subtle)
+            .size(ButtonSize::Large)
+            .toggle_state(broadcast_input)
+            .aria_label("Broadcast input to all panes")
+            .tooltip(Tooltip::for_action_title(
+                if broadcast_input {
+                    "Broadcast input is on"
+                } else {
+                    "Broadcast input to all panes"
+                },
+                &ToggleBroadcastInput,
+            ))
+            .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleBroadcastInput), cx));
+
+            if compact_mode {
+                // Paint after the compact tab so the tab's left wing is
+                // revealed only around this control's rounded lower corner.
+                deferred(
+                    div()
+                        .relative()
+                        .size(px(32.))
+                        .child(compact_tab_neighbor_control_mask(title_bar_background))
+                        .child(button),
+                )
+                .into_any_element()
+            } else {
+                button.into_any_element()
+            }
+        });
+
         div()
             .id("zetta-title-bar")
             .window_control_area(WindowControlArea::Drag)
@@ -1010,39 +1064,8 @@ impl Zetta {
                     .when_some(reconnect_control, |controls, reconnect_control| {
                         controls.child(reconnect_control)
                     })
-                    .when(show_broadcast_control, |controls| {
-                        controls.child(
-                            Button::new(
-                                "toggle-broadcast-input",
-                                if show_title_bar_control_labels {
-                                    "Broadcast"
-                                } else {
-                                    ""
-                                },
-                            )
-                            .start_icon(Icon::new(IconName::Keyboard).size(IconSize::Small).color(
-                                if broadcast_input {
-                                    Color::Selected
-                                } else {
-                                    Color::Default
-                                },
-                            ))
-                            .style(ButtonStyle::Subtle)
-                            .size(ButtonSize::Large)
-                            .toggle_state(broadcast_input)
-                            .aria_label("Broadcast input to all panes")
-                            .tooltip(Tooltip::for_action_title(
-                                if broadcast_input {
-                                    "Broadcast input is on"
-                                } else {
-                                    "Broadcast input to all panes"
-                                },
-                                &ToggleBroadcastInput,
-                            ))
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(ToggleBroadcastInput), cx)
-                            }),
-                        )
+                    .when_some(broadcast_control, |controls, broadcast_control| {
+                        controls.child(broadcast_control)
                     }),
             )
             .when_some(compact_tab_bar, |title_bar, tab_bar| {

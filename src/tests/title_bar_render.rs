@@ -1,6 +1,33 @@
 use super::*;
 
 #[test]
+fn compact_neighbor_control_mask_covers_the_tab_wing() {
+    let background = gpui::white();
+    let mut mask = compact_tab_neighbor_control_mask(background);
+    let style = mask.style();
+
+    assert_eq!(
+        style.background.as_ref().and_then(gpui::Fill::color),
+        Some(background.into())
+    );
+}
+
+#[test]
+fn compact_new_tab_button_removes_the_left_gap_without_changing_its_footprint() {
+    let mut container = new_tab_button_container(true, px(36.));
+    let style = container.style();
+
+    assert_eq!(
+        style.margin.left,
+        Some(gpui::Length::Definite(Pixels::ZERO.into()))
+    );
+    assert_eq!(
+        style.margin.right,
+        Some(gpui::Length::Definite(px(12.).into()))
+    );
+}
+
+#[test]
 fn title_bar_controls_hide_labels_before_they_crowd_the_window() {
     assert!(!title_bar_shows_control_labels(
         px(719.),
