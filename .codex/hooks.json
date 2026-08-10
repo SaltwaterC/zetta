@@ -1,14 +1,14 @@
 {
-  "description": "Test and build Zetta after each completed Codex turn, then report the result.",
+  "description": "Lint, test, and build Zetta after each completed Codex turn, then report the result.",
   "hooks": {
     "Stop": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "sh scripts/codex-stop-hook.sh",
-            "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"& (Join-Path (& git rev-parse --show-toplevel) 'scripts/codex-stop-hook.ps1')\"",
-            "statusMessage": "Testing and building Zetta"
+            "command": "sh scripts/agent-stop-hook.sh",
+            "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"& (Join-Path (& git rev-parse --show-toplevel) 'scripts/agent-stop-hook.ps1')\"",
+            "statusMessage": "Linting, testing, and building Zetta"
           }
         ]
       }

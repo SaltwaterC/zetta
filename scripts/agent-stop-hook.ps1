@@ -39,13 +39,22 @@ function Show-ZettaNotification {
 
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    & $zettaCommand.Source notify --sound $Sound $Summary $Body 2>&1 | ForEach-Object {
+    & $zettaCommand.Source attention --notify --sound $Sound $Summary $Body 2>&1 | ForEach-Object {
         [Console]::Error.WriteLine($_.ToString())
     }
     if ($LASTEXITCODE -ne 0) {
         [Console]::Error.WriteLine("warning: could not show Zetta desktop notification")
     }
     $ErrorActionPreference = $previousErrorActionPreference
+}
+
+$lintExitCode = Invoke-MakeTarget lint
+if ($lintExitCode -ne 0) {
+    Show-ZettaNotification `
+        -Sound "zetta-alarm" `
+        -Summary "Zetta lint failed" `
+        -Body "The stop-hook lint step failed."
+    exit $lintExitCode
 }
 
 $testExitCode = Invoke-MakeTarget test

@@ -5,9 +5,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh scripts/codex-stop-hook.sh",
+            "command": "sh scripts/agent-stop-hook.sh",
             "timeout": 600,
-            "statusMessage": "Testing and building Zetta"
+            "statusMessage": "Linting, testing, and building Zetta"
           }
         ]
       }

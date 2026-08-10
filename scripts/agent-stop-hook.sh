@@ -5,10 +5,17 @@ notify() {
     summary=$2
     body=$3
 
-    if ! zetta notify --sound "$sound" "$summary" "$body" >&2; then
+    if ! zetta attention --notify --sound "$sound" "$summary" "$body" >&2; then
         printf '%s\n' "warning: could not show Zetta desktop notification" >&2
     fi
 }
+
+make lint >&2
+lint_status=$?
+if [ "$lint_status" -ne 0 ]; then
+    notify zetta-alarm "Zetta lint failed" "The stop-hook lint step failed."
+    exit "$lint_status"
+fi
 
 make test >&2
 test_status=$?
