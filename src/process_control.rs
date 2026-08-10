@@ -55,6 +55,12 @@ pub(crate) struct TabAttentionRequest {
     pub(crate) body: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TabNameRequest {
+    pub(crate) attention_id: u64,
+    pub(crate) name: Option<String>,
+}
+
 pub(crate) enum ProcessControlCommand {
     ReloadConfiguration {
         config_path: String,
@@ -99,6 +105,10 @@ pub(crate) enum ProcessControlCommand {
         attention_id: u64,
         completion: Sender<bool>,
     },
+    SetTabName {
+        request: TabNameRequest,
+        completion: Sender<bool>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -138,9 +148,13 @@ enum ControlRequestCommand {
     FocusTab {
         attention_id: u64,
     },
+    SetTabName {
+        attention_id: u64,
+        name: Option<String>,
+    },
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct ControlEndpoint {
     version: u32,
     process_id: u32,
@@ -165,6 +179,7 @@ struct ControlRequest {
     attention_id: Option<u64>,
     attention_summary: Option<String>,
     attention_body: Option<String>,
+    tab_name: Option<String>,
     config_path: Option<String>,
     split: Option<String>,
     profile: Option<String>,
@@ -377,6 +392,17 @@ impl ProcessControlServer {
                                 && wait_for_control_completion(&completed, &stopping_for_thread);
                             if accepted { "ok" } else { "rejected" }
                         }
+                        Some(ControlRequestCommand::SetTabName { attention_id, name }) => {
+                            let (completion, completed) = channel();
+                            let accepted = commands
+                                .unbounded_send(ProcessControlCommand::SetTabName {
+                                    request: TabNameRequest { attention_id, name },
+                                    completion,
+                                })
+                                .is_ok()
+                                && wait_for_control_completion(&completed, &stopping_for_thread);
+                            if accepted { "ok" } else { "rejected" }
+                        }
                         None => "rejected",
                     };
                     let status = if status == "ok" && stopping_for_thread.load(Ordering::Acquire) {
@@ -510,10 +536,18 @@ fn decode_control_request(
         }
         return None;
     }
-    if !matches!(request.command.as_str(), "set_tab_attention" | "focus_tab")
-        && (request.attention_id.is_some()
-            || request.attention_summary.is_some()
-            || request.attention_body.is_some())
+    if request.command != "set_tab_name" && request.tab_name.is_some() {
+        if let Some(secret) = request.secret.as_mut() {
+            secret.zeroize();
+        }
+        return None;
+    }
+    if !matches!(
+        request.command.as_str(),
+        "set_tab_attention" | "focus_tab" | "set_tab_name"
+    ) && (request.attention_id.is_some()
+        || request.attention_summary.is_some()
+        || request.attention_body.is_some())
     {
         if let Some(secret) = request.secret.as_mut() {
             secret.zeroize();
@@ -671,12 +705,39 @@ fn decode_control_request(
                 && request.attention_summary.is_none()
                 && request.attention_body.is_none()
                 && request.config_path.is_none()
+                && request.tab_name.is_none()
                 && request.split.is_none()
                 && request.profile.is_none()
                 && request.theme.is_none() =>
         {
             let attention_id = request.attention_id.take().filter(|id| *id != 0)?;
             Some(ControlRequestCommand::FocusTab { attention_id })
+        }
+        "set_tab_name"
+            if request.runner_id.is_none()
+                && request.session_id.is_none()
+                && request.secret.is_none()
+                && request.icon.is_none()
+                && request.pane_theme.is_none()
+                && request.pane_overlay.is_none()
+                && request.pane_overlay_font_size.is_none()
+                && request.pane_overlay_opacity.is_none()
+                && request.pane_overlay_color.is_none()
+                && request.config_path.is_none()
+                && request.attention_summary.is_none()
+                && request.attention_body.is_none()
+                && request.split.is_none()
+                && request.profile.is_none()
+                && request.theme.is_none() =>
+        {
+            let attention_id = request.attention_id.take().filter(|id| *id != 0)?;
+            if request.tab_name.as_deref().is_some_and(str::is_empty) {
+                return None;
+            }
+            Some(ControlRequestCommand::SetTabName {
+                attention_id,
+                name: request.tab_name.take(),
+            })
         }
         _ => None,
     };
@@ -1007,6 +1068,23 @@ pub(crate) fn request_process_focus_tab(process_id: u32, attention_id: u64) -> R
     send_focus_tab_request(&endpoint, attention_id)
 }
 
+pub(crate) fn request_process_tab_name(process_id: u32, request: TabNameRequest) -> Result<bool> {
+    let endpoint_path = control_endpoint_path(process_id);
+    let contents = fs::read(&endpoint_path).with_context(|| {
+        format!(
+            "reading Zetta process control endpoint {}",
+            endpoint_path.display()
+        )
+    })?;
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&contents).context("parsing Zetta process control endpoint")?;
+    anyhow::ensure!(
+        endpoint.version == CONTROL_VERSION && endpoint.process_id == process_id,
+        "Zetta process control endpoint is outdated"
+    );
+    send_set_tab_name_request(&endpoint, &request)
+}
+
 fn send_open_window_request(endpoint: &ControlEndpoint) -> Result<bool> {
     let mut stream = UnixStream::connect(&endpoint.socket_path)?;
     stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
@@ -1028,6 +1106,7 @@ fn send_open_window_request(endpoint: &ControlEndpoint) -> Result<bool> {
             attention_id: None,
             attention_summary: None,
             attention_body: None,
+            tab_name: None,
             config_path: None,
             split: None,
             profile: None,
@@ -1062,6 +1141,39 @@ fn send_set_tab_attention_request(
             attention_id: Some(request.attention_id),
             attention_summary: Some(request.summary.clone()),
             attention_body: request.body.clone(),
+            tab_name: None,
+            config_path: None,
+            split: None,
+            profile: None,
+            theme: None,
+        },
+    )?;
+    let response = read_message::<ControlResponse>(&mut stream)?;
+    Ok(response.status == "ok")
+}
+
+fn send_set_tab_name_request(endpoint: &ControlEndpoint, request: &TabNameRequest) -> Result<bool> {
+    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
+    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    write_message(
+        &mut stream,
+        &ControlRequest {
+            token: endpoint.token.clone(),
+            command: "set_tab_name".to_owned(),
+            runner_id: None,
+            session_id: None,
+            secret: None,
+            icon: None,
+            pane_theme: None,
+            pane_overlay: None,
+            pane_overlay_font_size: None,
+            pane_overlay_opacity: None,
+            pane_overlay_color: None,
+            attention_id: Some(request.attention_id),
+            attention_summary: None,
+            attention_body: None,
+            tab_name: request.name.clone(),
             config_path: None,
             split: None,
             profile: None,
@@ -1094,6 +1206,7 @@ fn send_focus_tab_request(endpoint: &ControlEndpoint, attention_id: u64) -> Resu
             attention_id: Some(attention_id),
             attention_summary: None,
             attention_body: None,
+            tab_name: None,
             config_path: None,
             split: None,
             profile: None,
@@ -1128,6 +1241,7 @@ fn send_replace_pane_request(
             attention_id: None,
             attention_summary: None,
             attention_body: None,
+            tab_name: None,
             config_path: None,
             split: request.split.clone(),
             profile: request.profile.clone(),
@@ -1162,6 +1276,7 @@ fn send_reload_configuration_request(
             attention_id: None,
             attention_summary: None,
             attention_body: None,
+            tab_name: None,
             config_path: Some(config_path.to_owned()),
             split: None,
             profile: None,
@@ -1196,6 +1311,7 @@ fn send_set_tab_icon_request(endpoint: &ControlEndpoint, icon: Option<IconName>)
             attention_id: None,
             attention_summary: None,
             attention_body: None,
+            tab_name: None,
             config_path: None,
             split: None,
             profile: None,
@@ -1227,6 +1343,7 @@ fn send_set_pane_theme_request(endpoint: &ControlEndpoint, theme: Option<String>
             attention_id: None,
             attention_summary: None,
             attention_body: None,
+            tab_name: None,
             config_path: None,
             split: None,
             profile: None,
@@ -1258,6 +1375,7 @@ fn send_list_pane_themes_request(endpoint: &ControlEndpoint) -> Result<Option<Ve
             attention_id: None,
             attention_summary: None,
             attention_body: None,
+            tab_name: None,
             config_path: None,
             split: None,
             profile: None,
@@ -1295,6 +1413,7 @@ fn send_set_overlay_request(
             attention_id: None,
             attention_summary: None,
             attention_body: None,
+            tab_name: None,
             config_path: None,
             split: None,
             profile: None,
@@ -1329,6 +1448,7 @@ fn send_reconnect_session_request(
         attention_id: None,
         attention_summary: None,
         attention_body: None,
+        tab_name: None,
         config_path: None,
         split: None,
         profile: None,

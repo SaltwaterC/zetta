@@ -1260,6 +1260,26 @@ pub(crate) fn run() -> Result<()> {
                             });
                             let _ = completion.send(focused);
                         }
+                        ProcessControlCommand::SetTabName {
+                            request,
+                            completion,
+                        } => {
+                            let accepted = cx.update(|cx| {
+                                if !cx
+                                    .global::<ZettaProcessState>()
+                                    .control_server
+                                    .is_accepting()
+                                {
+                                    return false;
+                                }
+                                process_zetta_entities(cx).into_iter().any(|zetta| {
+                                    zetta.update(cx, |zetta, cx| {
+                                        zetta.set_tab_name(request.clone(), cx)
+                                    })
+                                })
+                            });
+                            let _ = completion.send(accepted);
+                        }
                         ProcessControlCommand::ReconnectSession {
                             runner_id,
                             session_id,

@@ -106,7 +106,10 @@ same locations in the new worktree. Copy-on-write cloning is used when supported
 with a regular-copy fallback; invalid, overlapping, or already-existing paths are
 rejected. Failed initialization or copying cleans up the partial worktree, branch,
 and metadata. See [Using Zetta](docs/usage.md#git-worktrees) for configuration
-and safety details.
+and safety details. When these commands run inside a Zetta terminal, a successful
+`new NAME` names the originating tab exactly `NAME`; a successful `done` clears
+that custom tab name. The Git operations and `--path-only` output do not depend
+on Zetta being available.
 
 ## Multi-command prompt
 

@@ -1,6 +1,30 @@
 use super::*;
+use crate::process_control::TabNameRequest;
+
+pub(crate) fn set_tab_name_on_tabs<'a, I>(tabs: I, request: &TabNameRequest) -> bool
+where
+    I: IntoIterator<Item = &'a mut Tab>,
+{
+    let Some(tab) = tabs
+        .into_iter()
+        .find(|tab| tab.attention_id == request.attention_id)
+    else {
+        return false;
+    };
+    tab.custom_title = request.name.clone();
+    true
+}
 
 impl Zetta {
+    pub(crate) fn set_tab_name(&mut self, request: TabNameRequest, cx: &mut Context<Self>) -> bool {
+        let found = set_tab_name_on_tabs(self.tabs.iter_mut(), &request)
+            || set_tab_name_on_tabs(self.background_sessions.iter_mut(), &request);
+        if found {
+            cx.notify();
+        }
+        found
+    }
+
     pub(crate) fn rename_tab(
         &mut self,
         _: &RenameTab,
@@ -106,3 +130,7 @@ impl Zetta {
             .is_some_and(|tab| tab.overlay_buffer.is_some())
     }
 }
+
+#[cfg(test)]
+#[path = "tests/rename.rs"]
+mod tests;

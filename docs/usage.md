@@ -348,6 +348,13 @@ stage them with `git add`, and rerun `zetta wt done`.
 Run `zetta wt rerere` once to enable Git's `rerere.enabled` and
 `rerere.autoupdate` helpers for repeated conflicts.
 
+When `new NAME` or `done` is run from a terminal opened by Zetta, the originating
+tab is updated after the Git operation succeeds: `new NAME` sets its persistent
+custom name to the exact `NAME` (including nested names such as `feature/api`),
+and `done` clears that custom name. This is best-effort integration with Zetta;
+missing or unavailable Zetta process control never changes the Git result or
+`--path-only` output.
+
 The direct CLI never changes the caller's directory. After enabling shell
 integration, `zwt new NAME` changes into the new worktree and `zwt done`
 changes into the integrated source worktree. Use `--path-only` (or `-P`) with

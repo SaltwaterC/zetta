@@ -18,6 +18,7 @@ fn request(token: &str, command: &str) -> ControlRequest {
         attention_id: None,
         attention_summary: None,
         attention_body: None,
+        tab_name: None,
         config_path: None,
         split: None,
         profile: None,
@@ -196,6 +197,69 @@ fn control_request_deserialization_rejects_unknown_fields() {
             "attention_id": 42,
             "unrelated": true
         }"#
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn tab_name_control_requests_validate_target_and_support_clearing() {
+    let mut set_name = request("token", "set_tab_name");
+    set_name.attention_id = Some(42);
+    set_name.tab_name = Some("feature/api".to_owned());
+    assert_eq!(
+        decode_control_request(&mut set_name, "token"),
+        Some(ControlRequestCommand::SetTabName {
+            attention_id: 42,
+            name: Some("feature/api".to_owned()),
+        })
+    );
+
+    let mut clear_name = request("token", "set_tab_name");
+    clear_name.attention_id = Some(42);
+    assert_eq!(
+        decode_control_request(&mut clear_name, "token"),
+        Some(ControlRequestCommand::SetTabName {
+            attention_id: 42,
+            name: None,
+        })
+    );
+
+    for invalid in [
+        ControlRequest {
+            attention_id: Some(0),
+            tab_name: Some("feature/api".to_owned()),
+            ..request("token", "set_tab_name")
+        },
+        ControlRequest {
+            attention_id: Some(42),
+            tab_name: Some(String::new()),
+            ..request("token", "set_tab_name")
+        },
+        ControlRequest {
+            attention_id: Some(42),
+            attention_summary: Some("unexpected".to_owned()),
+            ..request("token", "set_tab_name")
+        },
+        ControlRequest {
+            attention_id: Some(42),
+            tab_name: Some("unexpected".to_owned()),
+            ..request("token", "set_tab_attention")
+        },
+    ] {
+        let mut invalid = invalid;
+        assert_eq!(decode_control_request(&mut invalid, "token"), None);
+    }
+
+    let mut wrong_token = set_name;
+    assert_eq!(decode_control_request(&mut wrong_token, "wrong"), None);
+    assert!(
+        request_process_tab_name(
+            u32::MAX,
+            TabNameRequest {
+                attention_id: 42,
+                name: Some("feature/api".to_owned()),
+            },
         )
         .is_err()
     );
@@ -382,6 +446,7 @@ fn reconnect_requests_carry_a_session_target_and_optional_secret() {
         attention_id: None,
         attention_summary: None,
         attention_body: None,
+        tab_name: None,
         config_path: None,
         split: None,
         profile: None,
@@ -625,6 +690,56 @@ fn control_server_reports_a_rejected_focus_tab_target() {
     assert_eq!(attention_id, 42);
     completion.send(false).unwrap();
     assert!(!client.join().unwrap().unwrap());
+}
+
+#[test]
+fn control_server_delivers_authenticated_tab_name_set_and_clear_requests() {
+    let directory = tempfile::tempdir().unwrap();
+    let endpoint_path = directory.path().join("control.json");
+    let (commands, mut received) = futures::channel::mpsc::unbounded();
+    let _server = ProcessControlServer::start_at(commands, endpoint_path.clone()).unwrap();
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&fs::read(endpoint_path).unwrap()).unwrap();
+
+    let expected = TabNameRequest {
+        attention_id: 42,
+        name: Some("feature/api".to_owned()),
+    };
+    let client = thread::spawn({
+        let endpoint = endpoint.clone();
+        let expected = expected.clone();
+        move || send_set_tab_name_request(&endpoint, &expected).unwrap()
+    });
+    let command = futures::executor::block_on(received.next()).unwrap();
+    let ProcessControlCommand::SetTabName {
+        request,
+        completion,
+    } = command
+    else {
+        panic!("unexpected process control command");
+    };
+    assert_eq!(request, expected);
+    completion.send(true).unwrap();
+    assert!(client.join().unwrap());
+
+    let clear = TabNameRequest {
+        attention_id: 42,
+        name: None,
+    };
+    let client_request = clear.clone();
+    let client =
+        thread::spawn(move || send_set_tab_name_request(&endpoint, &client_request).unwrap());
+    let command = futures::executor::block_on(received.next()).unwrap();
+    let ProcessControlCommand::SetTabName {
+        request,
+        completion,
+    } = command
+    else {
+        panic!("unexpected process control command");
+    };
+    assert_eq!(request, clear);
+    completion.send(true).unwrap();
+    assert!(client.join().unwrap());
 }
 
 #[test]
