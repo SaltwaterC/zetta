@@ -612,7 +612,7 @@ fn notification_response_activates_tab(response: &notify_rust::NotificationRespo
 #[cfg(not(target_os = "macos"))]
 fn build_notification(
     command: &NotifyCommand,
-    target: Option<NotificationTarget>,
+    _target: Option<NotificationTarget>,
 ) -> Result<notify_rust::Notification> {
     let mut notification = notify_rust::Notification::new();
     notification.summary(&command.summary);
@@ -652,7 +652,7 @@ fn build_notification(
         notification.timeout(notify_rust_timeout(timeout));
     }
     #[cfg(linux_like)]
-    if target.is_some() {
+    if _target.is_some() {
         // An explicit default action makes body clicks observable on XDG
         // notification daemons while keeping the action button itself blank.
         notification.action("default", "");

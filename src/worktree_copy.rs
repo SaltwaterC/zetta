@@ -603,7 +603,6 @@ fn windows_volume_info(path: &Path) -> Option<WindowsVolumeInfo> {
             Some(&mut flags),
             Some(&mut filesystem_name),
         )
-        .ok()
         .ok()?;
     }
     let length = filesystem_name
@@ -620,12 +619,9 @@ fn windows_volume_info(path: &Path) -> Option<WindowsVolumeInfo> {
 #[cfg(windows)]
 fn copy_windows_clone(source: &Path, destination: &Path) -> Result<CopyFileResult> {
     use std::os::windows::io::AsRawHandle as _;
-    use windows::{
-        Win32::{
-            Foundation::HANDLE,
-            System::{IO::DeviceIoControl, Ioctl::DUPLICATE_EXTENTS_DATA},
-        },
-        core::Error,
+    use windows::Win32::{
+        Foundation::HANDLE,
+        System::{IO::DeviceIoControl, Ioctl::DUPLICATE_EXTENTS_DATA},
     };
 
     let source_file = OpenOptions::new()
@@ -685,6 +681,7 @@ fn copy_windows_clone(source: &Path, destination: &Path) -> Result<CopyFileResul
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn clone_error_is_unsupported(error: &io::Error) -> bool {
     matches!(
         error.raw_os_error(),

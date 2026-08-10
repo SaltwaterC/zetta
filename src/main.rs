@@ -56,8 +56,6 @@ use config::{
     WorkingDirectoryScope, profile_is_hidden, visible_profile_count, visible_profile_index,
 };
 use futures::StreamExt as _;
-#[cfg(target_os = "windows")]
-use gpui::PlatformDisplay;
 #[cfg(any(target_os = "windows", linux_like))]
 use gpui::WindowControls;
 use gpui::{
