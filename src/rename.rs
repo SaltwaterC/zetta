@@ -1,6 +1,28 @@
 use super::*;
 use crate::process_control::TabNameRequest;
 
+/// Resolve the title shown for a tab.
+///
+/// A title assigned by the user (including the worktree name assigned through
+/// process control) is authoritative. The fallback is evaluated only when no
+/// explicit title exists, so terminal title and working-directory updates can
+/// never replace an explicit tab name.
+pub(crate) fn resolve_tab_title(
+    tab: &Tab,
+    automatic_title: impl FnOnce() -> SharedString,
+) -> SharedString {
+    tab.custom_title
+        .as_ref()
+        .map(|title| title.clone().into())
+        .unwrap_or_else(automatic_title)
+}
+
+/// Set the explicit title used by both manual renames and process-control
+/// requests.
+pub(crate) fn set_tab_title(tab: &mut Tab, title: Option<String>) {
+    tab.custom_title = title;
+}
+
 pub(crate) fn set_tab_name_on_tabs<'a, I>(tabs: I, request: &TabNameRequest) -> bool
 where
     I: IntoIterator<Item = &'a mut Tab>,
@@ -11,7 +33,7 @@ where
     else {
         return false;
     };
-    tab.custom_title = request.name.clone();
+    set_tab_title(tab, request.name.clone());
     true
 }
 
@@ -75,7 +97,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         if let Some(tab) = self.tabs.get_mut(tab_index) {
-            let title = tab.custom_title.clone().unwrap_or(automatic_title);
+            let title = resolve_tab_title(tab, || automatic_title.into()).to_string();
             tab.renaming_pane = None;
             tab.rename_cursor = title.len();
             tab.rename_buffer = Some(title);

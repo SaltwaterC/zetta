@@ -1,4 +1,5 @@
 use super::*;
+use crate::rename::set_tab_title;
 
 impl Zetta {
     pub(crate) fn toggle_command_palette(
@@ -328,7 +329,7 @@ impl Zetta {
                         pane.custom_label = title;
                     }
                 } else {
-                    tab.custom_title = title;
+                    set_tab_title(tab, title);
                 }
                 tab.rename_buffer = None;
                 tab.rename_select_all = false;

@@ -1,4 +1,5 @@
 use super::*;
+use crate::rename::resolve_tab_title;
 
 /// The per-frame inputs the tab bar needs, gathered once by `Render for Zetta`
 /// so the measured tab row does not read them back out of the entity.
@@ -571,15 +572,17 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
             let (before, after) = buffer.split_at(cursor);
             format!("{before}|{after}").into()
         }
-    } else if let Some(custom_title) = tab.custom_title.as_ref() {
-        custom_title.clone().into()
-    } else if let Some(view) = tab.active_pane().and_then(|pane| pane.view.as_ref()) {
-        view.read(cx).tab_content_text(0, cx)
     } else {
-        tab.active_pane()
-            .map(|pane| pane.profile.name.clone())
-            .unwrap_or_else(|| "Terminal".to_string())
-            .into()
+        resolve_tab_title(tab, || {
+            if let Some(view) = tab.active_pane().and_then(|pane| pane.view.as_ref()) {
+                view.read(cx).tab_content_text(0, cx)
+            } else {
+                tab.active_pane()
+                    .map(|pane| pane.profile.name.clone())
+                    .unwrap_or_else(|| "Terminal".to_string())
+                    .into()
+            }
+        })
     };
     let full_title = if let Some(buffer) = tab
         .rename_buffer

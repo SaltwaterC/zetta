@@ -1,4 +1,5 @@
 use super::*;
+use crate::rename::resolve_tab_title;
 use zeroize::Zeroizing;
 
 const BACKGROUND_PROCESS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
@@ -669,12 +670,13 @@ impl Zetta {
     }
 
     fn background_session_title(&self, tab: &Tab, cx: &App) -> String {
-        tab.custom_title.clone().unwrap_or_else(|| {
+        resolve_tab_title(tab, || {
             tab.active_pane()
                 .and_then(|pane| pane.terminal.as_ref())
-                .map(|terminal| terminal.read(cx).title(false))
-                .unwrap_or_else(|| format!("Tab {}", tab.id))
+                .map(|terminal| terminal.read(cx).title(false).into())
+                .unwrap_or_else(|| format!("Tab {}", tab.id).into())
         })
+        .to_string()
     }
 
     fn connect_terminal_view(

@@ -107,3 +107,18 @@ fn tab_name_targets_detached_tabs_too() {
         Some("feature/api")
     );
 }
+
+#[test]
+fn explicit_tab_name_wins_over_an_automatic_title_refresh() {
+    let mut tab = tab(42, None);
+    set_tab_title(&mut tab, Some("feature/api".to_owned()));
+
+    let mut automatic_title_read = false;
+    let title = resolve_tab_title(&tab, || {
+        automatic_title_read = true;
+        "switched-source".to_owned().into()
+    });
+
+    assert_eq!(title.as_ref(), "feature/api");
+    assert!(!automatic_title_read);
+}

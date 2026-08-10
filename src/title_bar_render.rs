@@ -1,4 +1,5 @@
 use super::*;
+use crate::rename::resolve_tab_title;
 
 pub(crate) const TAB_MIN_WIDTH: Pixels = px(80.);
 pub(crate) const TAB_MAX_WIDTH: Pixels = px(180.);
@@ -192,16 +193,16 @@ pub(crate) fn reconnect_control_label(show_label: bool) -> &'static str {
 /// `tab_bar_visible_tab_range` always keeps the tab being renamed in the visible
 /// range, so a hidden tab can never be the one currently being renamed.
 pub(crate) fn tab_overflow_entry_label(tab: &Tab, cx: &App) -> SharedString {
-    if let Some(custom_title) = tab.custom_title.as_ref() {
-        custom_title.clone().into()
-    } else if let Some(view) = tab.active_pane().and_then(|pane| pane.view.as_ref()) {
-        view.read(cx).tab_content_text(1, cx)
-    } else {
-        tab.active_pane()
-            .map(|pane| pane.profile.name.clone())
-            .unwrap_or_else(|| "Terminal".to_string())
-            .into()
-    }
+    resolve_tab_title(tab, || {
+        if let Some(view) = tab.active_pane().and_then(|pane| pane.view.as_ref()) {
+            view.read(cx).tab_content_text(1, cx)
+        } else {
+            tab.active_pane()
+                .map(|pane| pane.profile.name.clone())
+                .unwrap_or_else(|| "Terminal".to_string())
+                .into()
+        }
+    })
 }
 
 pub(crate) fn render_tab_overflow_trigger(
