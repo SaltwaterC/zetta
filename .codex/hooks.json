@@ -1,6 +1,19 @@
 {
   "description": "Lint, test, and build Zetta after each completed Codex turn, then report the result.",
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^request_user_input$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"$(git rev-parse --show-toplevel)/scripts/request-user-input-hook.sh\"",
+            "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"& (Join-Path (& git rev-parse --show-toplevel) 'scripts/request-user-input-hook.ps1')\"",
+            "statusMessage": "Notifying Zetta about pending Codex input"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
