@@ -520,9 +520,7 @@ impl Zetta {
                     })
                 })
                 .flatten();
-        let active_terminal_focus = active_tab
-            .and_then(Tab::active_view)
-            .map(|view| view.focus_handle(cx));
+        let active_terminal_focus = self.active_terminal_focus(cx);
 
         let left_window_controls = render_window_controls(
             self.button_layout.left,

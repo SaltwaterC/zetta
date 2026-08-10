@@ -592,7 +592,11 @@ impl PaneStack {
     }
 
     pub(crate) fn select_after_base_exit(&mut self) {
-        if self.selected_is_base() {
+        let selected_is_valid = match self.selected {
+            PaneStackSelection::Base => false,
+            PaneStackSelection::Stacked(id) => self.entries.iter().any(|entry| entry.id == id),
+        };
+        if !selected_is_valid {
             self.selected = self
                 .entries
                 .first()
@@ -663,6 +667,27 @@ impl PaneStack {
         } else {
             PaneStackSelection::Stacked(self.entries[next - 1].id)
         };
+        Some(self.selected)
+    }
+
+    pub(crate) fn cycle_without_base(&mut self, forward: bool) -> Option<PaneStackSelection> {
+        if self.entries.is_empty() {
+            self.selected = PaneStackSelection::Base;
+            return None;
+        }
+
+        let current = match self.selected {
+            PaneStackSelection::Stacked(id) => self.entries.iter().position(|entry| entry.id == id),
+            PaneStackSelection::Base => None,
+        };
+        let next = match current {
+            Some(index) if forward => (index + 1) % self.entries.len(),
+            Some(index) => index.checked_sub(1).unwrap_or(self.entries.len() - 1),
+            None if forward => 0,
+            None => self.entries.len() - 1,
+        };
+
+        self.selected = PaneStackSelection::Stacked(self.entries[next].id);
         Some(self.selected)
     }
 

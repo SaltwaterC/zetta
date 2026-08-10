@@ -22,11 +22,7 @@ impl Zetta {
             return;
         }
 
-        let terminal_focus = self
-            .tabs
-            .get(self.active_tab)
-            .and_then(Tab::active_view)
-            .map(|view| view.focus_handle(cx));
+        let terminal_focus = self.active_terminal_focus(cx);
         let mut commands = window
             .available_actions(cx)
             .into_iter()

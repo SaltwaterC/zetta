@@ -240,6 +240,11 @@ pub(crate) struct Zetta {
     pub(crate) session_authentication: Option<SessionAuthenticationPrompt>,
     pub(crate) session_authentication_generation: u64,
     pub(crate) active_tab: usize,
+    /// Focuses the active pane while its selected terminal view is being
+    /// replaced or is still starting. The corresponding render node carries
+    /// the `Terminal` key context so terminal-scoped actions remain routed to
+    /// Zetta during that transition.
+    pub(crate) terminal_placeholder_focus: gpui::FocusHandle,
     pub(crate) visible_terminals: Vec<Entity<Terminal>>,
     pub(crate) profiles: Vec<Profile>,
     pub(crate) working_directory: Option<PathBuf>,
@@ -404,6 +409,7 @@ impl Zetta {
             session_authentication: None,
             session_authentication_generation: 0,
             active_tab: 0,
+            terminal_placeholder_focus: cx.focus_handle(),
             visible_terminals: Vec::new(),
             profiles: config.profiles,
             working_directory: config.working_directory,
@@ -615,6 +621,7 @@ impl Zetta {
             window,
             cx,
         );
+        self.focus_active(window, cx);
     }
 
     pub(crate) fn close_tab_at(
@@ -966,6 +973,7 @@ impl Zetta {
             window,
             cx,
         );
+        self.focus_active(window, cx);
         cx.notify();
         true
     }
@@ -1924,8 +1932,10 @@ impl Zetta {
             return false;
         };
         if tab.pane_is_visible(tab.active_pane) {
-            tab.active_view()
-                .is_some_and(|view| view.focus_handle(cx).is_focused(window))
+            tab.active_view().map_or_else(
+                || self.terminal_placeholder_focus.is_focused(window),
+                |view| view.focus_handle(cx).is_focused(window),
+            )
         } else {
             !tab.minimized_panes.is_empty() && self.minimized_panes_focus.is_focused(window)
         }
@@ -1994,6 +2004,8 @@ impl Zetta {
             if active_is_visible {
                 if let Some(view) = tab.active_view() {
                     view.focus_handle(cx).focus(window, cx);
+                } else {
+                    self.terminal_placeholder_focus.focus(window, cx);
                 }
             } else if !tab.minimized_panes.is_empty() {
                 self.minimized_panes_focus.focus(window, cx);
@@ -2001,6 +2013,18 @@ impl Zetta {
         }
         self.clear_active_tab_attention_if_focused(window, cx);
         cx.notify();
+    }
+
+    pub(crate) fn active_terminal_focus(&self, cx: &App) -> Option<gpui::FocusHandle> {
+        let tab = self.tabs.get(self.active_tab)?;
+        if !tab.pane_is_visible(tab.active_pane) {
+            return None;
+        }
+        Some(
+            tab.active_view()
+                .map(|view| view.focus_handle(cx))
+                .unwrap_or_else(|| self.terminal_placeholder_focus.clone()),
+        )
     }
 }
 

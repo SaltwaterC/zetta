@@ -10,6 +10,14 @@ fn pane_move_menu_entry_available(pane_count: usize) -> bool {
     pane_count >= 2
 }
 
+fn terminal_focus_placeholder(focus: &gpui::FocusHandle, content: impl IntoElement) -> gpui::Div {
+    div()
+        .size_full()
+        .track_focus(focus)
+        .key_context("Terminal")
+        .child(content)
+}
+
 fn stacked_entry_status(entry: &StackedPane) -> String {
     match entry.state {
         StackedPaneState::Starting => "starting".to_owned(),
@@ -38,7 +46,7 @@ impl Zetta {
             .flex_col()
             .bg(colors.status_bar_background);
 
-        if !matches!(selected, PaneStackSelection::Base) {
+        if !pane.base_exited && !matches!(selected, PaneStackSelection::Base) {
             rows = rows.child(self.render_stacked_row(
                 tab,
                 pane,
@@ -367,6 +375,12 @@ impl Zetta {
                         .text_color(colors.text_muted)
                         .child(format!("Starting {selected_profile_name}..."))
                         .into_any_element(),
+                };
+                let content = if selected_view.is_none() && tab.active_pane == *pane_id {
+                    terminal_focus_placeholder(&self.terminal_placeholder_focus, content)
+                        .into_any_element()
+                } else {
+                    content
                 };
                 let content = if pane.stack.is_empty() {
                     content

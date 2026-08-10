@@ -21,6 +21,64 @@ fn pane_move_menu_entry_requires_at_least_two_panes() {
     assert!(pane_move_menu_entry_available(3));
 }
 
+struct TerminalPlaceholderTestView {
+    focus_handle: gpui::FocusHandle,
+    saw_new_tab: bool,
+}
+
+impl Render for TerminalPlaceholderTestView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .key_context("Zetta")
+            .size_full()
+            .on_action(cx.listener(|this, _: &NewTab, _, _| {
+                this.saw_new_tab = true;
+            }))
+            .child(terminal_focus_placeholder(
+                &self.focus_handle,
+                div().size_full(),
+            ))
+    }
+}
+
+#[gpui::test]
+fn no_view_placeholder_preserves_terminal_action_routing(cx: &mut gpui::TestAppContext) {
+    let window = cx.open_window(size(px(100.), px(100.)), |_, cx| {
+        TerminalPlaceholderTestView {
+            focus_handle: cx.focus_handle(),
+            saw_new_tab: false,
+        }
+    });
+    cx.update(|cx| {
+        cx.bind_keys([KeyBinding::new("ctrl-t", NewTab, Some("Zetta > Terminal"))]);
+    });
+    cx.run_until_parked();
+
+    window
+        .update(cx, |view, window, cx| {
+            view.focus_handle.focus(window, cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    window
+        .update(cx, |_, window, _| {
+            assert_eq!(
+                window.context_stack(),
+                vec![
+                    gpui::KeyContext::parse("Zetta").unwrap(),
+                    gpui::KeyContext::parse("Terminal").unwrap(),
+                ]
+            );
+        })
+        .unwrap();
+
+    cx.simulate_keystrokes(*window, "ctrl-t");
+    window
+        .update(cx, |view, _, _| assert!(view.saw_new_tab))
+        .unwrap();
+}
+
 #[test]
 fn pane_window_edges_follow_split_direction() {
     let edges = PaneWindowEdges::all();

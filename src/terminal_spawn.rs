@@ -204,7 +204,14 @@ impl Zetta {
                             view.set_input_enabled(input_enabled, cx);
                         });
                         cx.on_focus_in(&focus_handle, window, move |this, window, cx| {
-                            if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                            if let Some(tab) = this
+                                .tabs
+                                .iter_mut()
+                                .find(|tab| tab.id == tab_id)
+                                .filter(|tab| {
+                                    tab.pane(pane_id).is_some_and(|pane| !pane.base_exited)
+                                })
+                            {
                                 tab.activate_stack_entry(pane_id, PaneStackSelection::Base);
                                 cx.notify();
                             }

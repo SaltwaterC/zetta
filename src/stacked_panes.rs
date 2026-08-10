@@ -28,13 +28,20 @@ impl Zetta {
             let Some(pane) = tab.pane_mut(pane_id) else {
                 return;
             };
-            if pane.stack.cycle(forward).is_none() {
+            let selection = if pane.base_exited {
+                pane.stack.cycle_without_base(forward)
+            } else {
+                pane.stack.cycle(forward)
+            };
+            if selection.is_none() {
                 return;
             }
             tab.active_view()
         };
         if let Some(view) = view {
             view.focus_handle(cx).focus(window, cx);
+        } else {
+            self.focus_active(window, cx);
         }
         self.sync_visible_terminals(cx);
         cx.notify();

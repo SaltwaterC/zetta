@@ -27,6 +27,31 @@ fn stack_cycles_through_base_and_entries_with_wraparound() {
 }
 
 #[test]
+fn stack_cycles_only_through_entries_after_base_exit() {
+    let mut stack = PaneStack::default();
+    assert!(stack.push(entry(1)));
+    assert!(stack.push(entry(2)));
+
+    stack.selected = PaneStackSelection::Base;
+    assert_eq!(
+        stack.cycle_without_base(true),
+        Some(PaneStackSelection::Stacked(1))
+    );
+    assert_eq!(
+        stack.cycle_without_base(true),
+        Some(PaneStackSelection::Stacked(2))
+    );
+    assert_eq!(
+        stack.cycle_without_base(true),
+        Some(PaneStackSelection::Stacked(1))
+    );
+    assert_eq!(
+        stack.cycle_without_base(false),
+        Some(PaneStackSelection::Stacked(2))
+    );
+}
+
+#[test]
 fn removing_selected_entry_prefers_the_next_entry_then_previous_then_base() {
     let mut stack = PaneStack::default();
     assert!(stack.push(entry(1)));
@@ -80,6 +105,18 @@ fn base_exit_preserves_stack_selection_and_moves_foreground_to_a_command() {
     stack.selected = PaneStackSelection::Stacked(2);
     stack.select_after_base_exit();
     assert_eq!(stack.selected, PaneStackSelection::Stacked(2));
+}
+
+#[test]
+fn base_exit_repairs_a_stale_stack_selection_to_the_first_entry() {
+    let mut stack = PaneStack::default();
+    assert!(stack.push(entry(1)));
+    assert!(stack.push(entry(2)));
+    stack.selected = PaneStackSelection::Stacked(99);
+
+    stack.select_after_base_exit();
+
+    assert_eq!(stack.selected, PaneStackSelection::Stacked(1));
 }
 
 #[test]
