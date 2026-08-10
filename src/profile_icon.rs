@@ -100,11 +100,7 @@ impl ProfileIcon {
         Self::automatic_for_shell(shell)
     }
 
-    /// Infers a Unix shell icon from the executable basename. On Windows,
-    /// known executable paths use their native icon instead; WSL and MSYS2
-    /// profiles opt into embedded shell icons at discovery time because their
-    /// launcher executable is not the shell users see.
-    #[allow(dead_code)]
+    /// Infers a shell icon from the executable basename.
     pub(crate) fn automatic_for_program_name(program: &str) -> Self {
         match executable_basename(program).as_deref() {
             Some("bash") => Self::Bash,
@@ -158,12 +154,8 @@ pub(crate) fn automatic_for_program(program: &str) -> ProfileIcon {
         {
             return ProfileIcon::Executable(executable);
         }
-        ProfileIcon::Zetta
     }
-    #[cfg(not(windows))]
-    {
-        ProfileIcon::automatic_for_program_name(program)
-    }
+    ProfileIcon::automatic_for_program_name(program)
 }
 
 #[allow(dead_code)]
@@ -258,14 +250,16 @@ fn extract_executable_icon(executable: &Path) -> Result<PathBuf> {
     // top-down and 32-bit so its bytes can be copied into a safe Rust buffer
     // after drawing.
     let result = unsafe {
-        let mut info = BITMAPINFO::default();
-        info.bmiHeader = BITMAPINFOHEADER {
-            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: SIZE,
-            biHeight: -SIZE,
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB.0,
+        let info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: SIZE,
+                biHeight: -SIZE,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let mut bits: *mut c_void = std::ptr::null_mut();
@@ -348,6 +342,18 @@ mod tests {
         assert_eq!(
             ProfileIcon::automatic_for_program_name("custom-shell"),
             ProfileIcon::Zetta
+        );
+    }
+
+    #[test]
+    fn automatic_programs_fall_back_to_bundled_shell_icons() {
+        assert_eq!(
+            ProfileIcon::automatic_for_program(r"C:\missing\fish.exe"),
+            ProfileIcon::Fish
+        );
+        assert_eq!(
+            ProfileIcon::automatic_for_program("/missing/zsh"),
+            ProfileIcon::Zsh
         );
     }
 

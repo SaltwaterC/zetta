@@ -18,6 +18,8 @@ fn quotes_profile_names_for_windows_command_lines() {
 #[cfg(windows)]
 #[test]
 fn jump_list_icons_use_embedded_resources_or_executable_icons() {
+    use std::path::PathBuf;
+
     use crate::profile_icon::ProfileIcon;
 
     let target = PathBuf::from(r"C:\Program Files\Zetta\zetta-gui.exe");

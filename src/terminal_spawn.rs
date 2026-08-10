@@ -343,7 +343,13 @@ pub(crate) fn stacked_task_shell(
             Msys2Shell::Bash => "bash.exe",
             Msys2Shell::Zsh => "zsh.exe",
         };
-        let shell = Shell::Program(root.join("usr/bin").join(shell_name).display().to_string());
+        let shell = Shell::Program(
+            root.join("usr")
+                .join("bin")
+                .join(shell_name)
+                .display()
+                .to_string(),
+        );
         let (program, args) =
             ShellBuilder::new(&shell, true).build_no_quote(Some(command.to_owned()), &[]);
         return Shell::WithArguments {

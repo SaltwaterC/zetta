@@ -68,6 +68,13 @@ fn msys2_stacked_commands_use_the_profile_shell_inside_the_pty() {
         panic!("MSYS2 stacked command should use explicit shell arguments");
     };
 
-    assert_eq!(program, root.join("usr/bin/bash.exe").display().to_string());
+    assert_eq!(
+        program,
+        root.join("usr")
+            .join("bin")
+            .join("bash.exe")
+            .display()
+            .to_string()
+    );
     assert_eq!(args, ["-i", "-c", "pwd"]);
 }

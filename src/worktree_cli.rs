@@ -609,11 +609,16 @@ fn status_report(repository: &Repository, resolved_root: &ResolvedRoot) -> Resul
             submodule_paths.len()
         ));
         for path in submodule_paths {
-            report.push_str(&format!("  {}\n", path.display()));
+            report.push_str(&format!("  {}\n", display_git_path(&path)));
         }
     }
     report.push_str(&format!("Native CoW copying: {cow_status}\n"));
     Ok(report)
+}
+
+fn display_git_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/")
 }
 
 fn run_rerere(current_directory: Option<&Path>) -> Result<()> {
@@ -911,7 +916,7 @@ fn collect_gitlink_paths(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn parse_gitlink_paths(output: &[u8]) -> Result<Vec<PathBuf>> {
     Ok(parse_gitlink_entries(output)?
         .into_iter()
