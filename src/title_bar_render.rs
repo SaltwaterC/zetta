@@ -509,6 +509,13 @@ impl Zetta {
                     compact_mode,
                     title_bar_height,
                     is_macos_fullscreen,
+                    rounded_top_right: frame.rounded_top_right,
+                    compact_tab_top_left: frame.compact_tab_top_left,
+                    compact_tab_top_right: frame.compact_tab_top_right,
+                    compact_tab_bottom_left: frame.compact_tab_bottom_left,
+                    compact_tab_bottom_right: frame.compact_tab_bottom_right,
+                    corner_radius: frame.corner_radius,
+                    tab_bar_background: colors.tab_bar_background,
                     tab_close_button_on_left: window_close_button_on_left(self.button_layout),
                     is_renaming_tab: self.is_renaming(),
                     tab_count: self.tabs.len(),
@@ -520,8 +527,6 @@ impl Zetta {
                     right_menu_handle: self.tab_overflow_right_menu_handle.clone(),
                 },
                 colors,
-                frame.rounded_top_right,
-                frame.bottom_corner_radius,
             )
             .into_any_element();
         let (compact_tab_bar, regular_tab_bar) = if compact_mode {
@@ -580,6 +585,7 @@ impl Zetta {
             title_bar_background,
             frame.rounded_top_left,
             frame.rounded_top_right,
+            frame.corner_radius,
             left_window_controls,
             compact_mode,
             is_macos_fullscreen,
@@ -846,6 +852,7 @@ impl Zetta {
         title_bar_background: Hsla,
         rounded_top_left: bool,
         rounded_top_right: bool,
+        corner_radius: Pixels,
         left_window_controls: AnyElement,
         compact_mode: bool,
         is_macos_fullscreen: bool,
@@ -879,10 +886,10 @@ impl Zetta {
             .items_center()
             .bg(title_bar_background)
             .when(rounded_top_left, |title_bar| {
-                title_bar.rounded_tl(theme::CLIENT_SIDE_DECORATION_ROUNDING - px(1.))
+                title_bar.rounded_tl(corner_radius)
             })
             .when(rounded_top_right, |title_bar| {
-                title_bar.rounded_tr(theme::CLIENT_SIDE_DECORATION_ROUNDING - px(1.))
+                title_bar.rounded_tr(corner_radius)
             })
             .on_mouse_down(
                 MouseButton::Left,

@@ -1138,14 +1138,14 @@ impl Render for Zetta {
         let colors = cx.theme().colors().clone();
         let error_color = cx.theme().status().error;
         let handle = cx.entity().downgrade();
-        let frame = WindowFrameGeometry::new(window);
+        let frame = WindowFrameGeometry::new(window, cx);
 
         let chrome = self.render_title_bar_chrome(&frame, &colors, &handle, window, cx);
         let body = self.render_tab_body(
             window,
             frame.rounded_bottom_left,
             frame.rounded_bottom_right,
-            frame.bottom_corner_radius,
+            frame.corner_radius,
             cx,
         );
         let overlays = self.render_overlays(&colors, error_color, &handle, window, cx);

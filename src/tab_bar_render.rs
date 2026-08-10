@@ -7,6 +7,13 @@ pub(crate) struct TabBarChrome {
     pub(crate) compact_mode: bool,
     pub(crate) title_bar_height: Pixels,
     pub(crate) is_macos_fullscreen: bool,
+    pub(crate) rounded_top_right: bool,
+    pub(crate) compact_tab_top_left: bool,
+    pub(crate) compact_tab_top_right: bool,
+    pub(crate) compact_tab_bottom_left: bool,
+    pub(crate) compact_tab_bottom_right: bool,
+    pub(crate) corner_radius: Pixels,
+    pub(crate) tab_bar_background: Hsla,
     pub(crate) tab_close_button_on_left: bool,
     pub(crate) is_renaming_tab: bool,
     pub(crate) tab_count: usize,
@@ -37,12 +44,12 @@ impl Zetta {
         &self,
         chrome: TabBarChrome,
         colors: &ThemeColors,
-        rounded_top_right: bool,
-        bottom_corner_radius: Pixels,
     ) -> gpui::Stateful<gpui::Div> {
         let compact_mode = chrome.compact_mode;
         let title_bar_height = chrome.title_bar_height;
         let tab_move_mode_active = chrome.tab_move_mode_active;
+        let rounded_top_right = chrome.rounded_top_right;
+        let corner_radius = chrome.corner_radius;
         let tabs_scroll = render_tabs_row(chrome).into_any_element();
 
         tab_bar_row_height(compact_mode, title_bar_height)
@@ -60,7 +67,7 @@ impl Zetta {
             .items_center()
             .bg(colors.tab_bar_background)
             .when(compact_mode && rounded_top_right, |tab_bar| {
-                tab_bar.rounded_tr(bottom_corner_radius)
+                tab_bar.rounded_tr(corner_radius)
             })
             .when(!compact_mode, |tab_bar| {
                 tab_bar
@@ -121,6 +128,13 @@ fn render_tabs_row(chrome: TabBarChrome) -> impl IntoElement {
         compact_mode,
         title_bar_height,
         is_macos_fullscreen,
+        rounded_top_right: _,
+        compact_tab_top_left,
+        compact_tab_top_right,
+        compact_tab_bottom_left,
+        compact_tab_bottom_right,
+        corner_radius,
+        tab_bar_background,
         tab_close_button_on_left,
         is_renaming_tab,
         tab_count,
@@ -202,6 +216,12 @@ fn render_tabs_row(chrome: TabBarChrome) -> impl IntoElement {
                                 compact_mode,
                                 title_bar_height,
                                 tab_close_button_on_left,
+                                compact_tab_top_left,
+                                compact_tab_top_right,
+                                compact_tab_bottom_left,
+                                compact_tab_bottom_right,
+                                corner_radius,
+                                tab_bar_background,
                                 handle: &handle,
                             },
                             tab,
@@ -285,7 +305,112 @@ struct TabChrome<'a> {
     compact_mode: bool,
     title_bar_height: Pixels,
     tab_close_button_on_left: bool,
+    compact_tab_top_left: bool,
+    compact_tab_top_right: bool,
+    compact_tab_bottom_left: bool,
+    compact_tab_bottom_right: bool,
+    corner_radius: Pixels,
+    tab_bar_background: Hsla,
     handle: &'a WeakEntity<Zetta>,
+}
+
+fn active_tab_shape_visible(compact_mode: bool, selected: bool) -> bool {
+    compact_mode && selected
+}
+
+fn render_active_tab_bottom_transition(
+    is_left: bool,
+    active_background: Hsla,
+    tab_bar_background: Hsla,
+    corner_radius: Pixels,
+) -> gpui::Div {
+    div()
+        .absolute()
+        .bottom_0()
+        .when(is_left, |transition| transition.left_0())
+        .when(!is_left, |transition| transition.right_0())
+        .w(corner_radius)
+        .h(corner_radius)
+        .bg(active_background)
+        .child(
+            div()
+                .size_full()
+                // Leave the lower inner corner transparent so the active fill
+                // joins the tab body while the surrounding color follows the
+                // concave outer arc.
+                .when(is_left, |cutout| cutout.rounded_br(corner_radius))
+                .when(!is_left, |cutout| cutout.rounded_bl(corner_radius))
+                .bg(tab_bar_background),
+        )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_active_tab_shape(
+    top_left: bool,
+    top_right: bool,
+    bottom_left: bool,
+    bottom_right: bool,
+    active_background: Hsla,
+    tab_bar_background: Hsla,
+    corner_radius: Pixels,
+) -> gpui::Div {
+    div()
+        .absolute()
+        .inset_0()
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .when(bottom_left, |body| body.left(corner_radius))
+                .when(!bottom_left, |body| body.left_0())
+                .when(bottom_right, |body| body.right(corner_radius))
+                .when(!bottom_right, |body| body.right_0())
+                .when(top_left, |body| body.rounded_tl(corner_radius))
+                .when(top_right, |body| body.rounded_tr(corner_radius))
+                .bg(active_background),
+        )
+        // If a lower transition is rounded while its upper corner is square,
+        // fill the side above the transition so the tab does not acquire a
+        // notch at the top.
+        .when(bottom_left && !top_left, |shape| {
+            shape.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom(corner_radius)
+                    .left_0()
+                    .w(corner_radius)
+                    .bg(active_background),
+            )
+        })
+        .when(bottom_right && !top_right, |shape| {
+            shape.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom(corner_radius)
+                    .right_0()
+                    .w(corner_radius)
+                    .bg(active_background),
+            )
+        })
+        .when(bottom_left, |shape| {
+            shape.child(render_active_tab_bottom_transition(
+                true,
+                active_background,
+                tab_bar_background,
+                corner_radius,
+            ))
+        })
+        .when(bottom_right, |shape| {
+            shape.child(render_active_tab_bottom_transition(
+                false,
+                active_background,
+                tab_bar_background,
+                corner_radius,
+            ))
+        })
 }
 
 fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
@@ -300,6 +425,12 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
         compact_mode,
         title_bar_height,
         tab_close_button_on_left,
+        compact_tab_top_left,
+        compact_tab_top_right,
+        compact_tab_bottom_left,
+        compact_tab_bottom_right,
+        corner_radius,
+        tab_bar_background,
         handle,
     } = chrome;
     let tab_theme = tab.theme(cx);
@@ -319,6 +450,7 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
     } else {
         tab_colors.icon_muted
     };
+    let show_active_tab_shape = active_tab_shape_visible(compact_mode, selected);
     let select_handle = handle.clone();
     let close_handle = handle.clone();
     let rename_view = tab.active_pane().and_then(|pane| pane.view.clone());
@@ -432,7 +564,18 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
         .when(tab_move_mode_active && selected, |tab| {
             tab.border_b_2().border_color(tab_colors.text_accent)
         })
-        .bg(tab_background)
+        .when(!show_active_tab_shape, |tab| tab.bg(tab_background))
+        .when(show_active_tab_shape, |tab| {
+            tab.relative().child(render_active_tab_shape(
+                compact_tab_top_left,
+                compact_tab_top_right,
+                compact_tab_bottom_left,
+                compact_tab_bottom_right,
+                tab_background,
+                tab_bar_background,
+                corner_radius,
+            ))
+        })
         .cursor(if tab_move_mode_active {
             CursorStyle::ResizeLeftRight
         } else {

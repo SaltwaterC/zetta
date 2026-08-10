@@ -20,10 +20,11 @@ impl Zetta {
         error_color: gpui::Hsla,
         window: &Window,
         owns_window_bottom: bool,
+        corner_radius: Pixels,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let edges = PaneWindowEdges::all().with_bottom(owns_window_bottom);
-        let corner_radii = edges.client_corner_radii(window);
+        let corner_radii = edges.client_corner_radii(window, corner_radius);
         div()
             .when(self.pane_resize_mode, |layout| {
                 layout.key_context("PaneResize")
@@ -52,6 +53,7 @@ impl Zetta {
                 error_color,
                 window,
                 edges,
+                corner_radius,
                 cx,
             ))
             .into_any_element()
@@ -107,6 +109,7 @@ impl Zetta {
         error_color: gpui::Hsla,
         window: &Window,
         edges: PaneWindowEdges,
+        corner_radius: Pixels,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         match layout {
@@ -114,7 +117,7 @@ impl Zetta {
                 let Some(pane) = tab.pane(*pane_id) else {
                     return div().size_full().into_any_element();
                 };
-                let corner_radii = edges.client_corner_radii(window);
+                let corner_radii = edges.client_corner_radii(window, corner_radius);
                 let pane_label = tab
                     .displayed_pane_label(*pane_id)
                     .unwrap_or_else(|| pane.label());
@@ -523,6 +526,7 @@ impl Zetta {
                         error_color,
                         window,
                         edges.first(*axis),
+                        corner_radius,
                         cx,
                     ));
                 let second_child = div()
@@ -537,6 +541,7 @@ impl Zetta {
                         error_color,
                         window,
                         edges.second(*axis),
+                        corner_radius,
                         cx,
                     ));
                 let split = div()
@@ -624,15 +629,13 @@ impl PaneWindowEdges {
         }
     }
 
-    fn client_corner_radii(self, window: &Window) -> gpui::Corners<Pixels> {
+    fn client_corner_radii(self, window: &Window, corner_radius: Pixels) -> gpui::Corners<Pixels> {
         if !cfg!(linux_like) {
             return gpui::Corners::default();
         }
         let Decorations::Client { tiling } = window.window_decorations() else {
             return gpui::Corners::default();
         };
-        let radius = theme::CLIENT_SIDE_DECORATION_ROUNDING - px(1.);
-
         // The title and tab bars own the top window corners. A terminal pane
         // can only meet the client frame at the bottom, so applying top radii
         // here creates an internal gap above a pane (and in split layouts).
@@ -640,12 +643,12 @@ impl PaneWindowEdges {
             top_left: Pixels::ZERO,
             top_right: Pixels::ZERO,
             bottom_right: if self.bottom && self.right && !tiling.bottom && !tiling.right {
-                radius
+                corner_radius
             } else {
                 Pixels::ZERO
             },
             bottom_left: if self.bottom && self.left && !tiling.bottom && !tiling.left {
-                radius
+                corner_radius
             } else {
                 Pixels::ZERO
             },

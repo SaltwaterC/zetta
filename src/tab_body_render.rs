@@ -48,7 +48,7 @@ impl Zetta {
         window: &Window,
         rounded_bottom_left: bool,
         rounded_bottom_right: bool,
-        bottom_corner_radius: Pixels,
+        corner_radius: Pixels,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match self.tabs.get(self.active_tab) {
@@ -97,6 +97,7 @@ impl Zetta {
                             tab_error_color,
                             window,
                             panes_own_window_bottom,
+                            corner_radius,
                             cx,
                         )
                     })
@@ -126,11 +127,11 @@ impl Zetta {
                                 .border_color(tab_colors.border)
                                 .when(
                                     maximized_bar_owns_window_bottom && rounded_bottom_left,
-                                    |bar| bar.rounded_bl(bottom_corner_radius),
+                                    |bar| bar.rounded_bl(corner_radius),
                                 )
                                 .when(
                                     maximized_bar_owns_window_bottom && rounded_bottom_right,
-                                    |bar| bar.rounded_br(bottom_corner_radius),
+                                    |bar| bar.rounded_br(corner_radius),
                                 )
                                 .child(
                                     h_flex()
@@ -243,11 +244,11 @@ impl Zetta {
                                 .border_color(tab_colors.border)
                                 .when(
                                     minimized_shelf_owns_window_bottom && rounded_bottom_left,
-                                    |shelf| shelf.rounded_bl(bottom_corner_radius),
+                                    |shelf| shelf.rounded_bl(corner_radius),
                                 )
                                 .when(
                                     minimized_shelf_owns_window_bottom && rounded_bottom_right,
-                                    |shelf| shelf.rounded_br(bottom_corner_radius),
+                                    |shelf| shelf.rounded_br(corner_radius),
                                 )
                                 .child(
                                     div()

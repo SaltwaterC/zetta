@@ -172,3 +172,78 @@ fn resize_handles_cover_edges_and_respect_tiling() {
         None
     );
 }
+
+#[test]
+fn linux_corner_state_follows_client_decorations_and_tiling() {
+    let untiled = linux_corner_state(true, Tiling::default());
+    assert!(untiled.top_left);
+    assert!(untiled.top_right);
+    assert!(untiled.bottom_left);
+    assert!(untiled.bottom_right);
+
+    let maximized = linux_corner_state(true, Tiling::tiled());
+    assert!(!maximized.top_left);
+    assert!(!maximized.top_right);
+    assert!(!maximized.bottom_left);
+    assert!(!maximized.bottom_right);
+
+    let left_tiled = linux_corner_state(
+        true,
+        Tiling {
+            left: true,
+            ..Tiling::default()
+        },
+    );
+    assert!(!left_tiled.top_left);
+    assert!(left_tiled.top_right);
+    assert!(!left_tiled.bottom_left);
+    assert!(left_tiled.bottom_right);
+
+    let server_decorations = linux_corner_state(false, Tiling::default());
+    assert!(!server_decorations.top_left);
+    assert!(!server_decorations.top_right);
+    assert!(!server_decorations.bottom_left);
+    assert!(!server_decorations.bottom_right);
+}
+
+#[test]
+fn macos_corner_state_is_square_only_in_fullscreen() {
+    let windowed = macos_corner_state(false);
+    assert!(windowed.top_left);
+    assert!(windowed.top_right);
+    assert!(windowed.bottom_left);
+    assert!(windowed.bottom_right);
+
+    let fullscreen = macos_corner_state(true);
+    assert!(!fullscreen.top_left);
+    assert!(!fullscreen.top_right);
+    assert!(!fullscreen.bottom_left);
+    assert!(!fullscreen.bottom_right);
+}
+
+#[test]
+fn windows_corner_state_rejects_maximized_fullscreen_and_snapped_bounds() {
+    let work_area = Bounds::new(point(px(0.), px(0.)), size(px(1920.), px(1040.)));
+    let restored = Bounds::new(point(px(240.), px(120.)), size(px(900.), px(700.)));
+    let half_snap = Bounds::new(point(px(0.), px(0.)), size(px(960.), px(1040.)));
+    let quarter_snap = Bounds::new(point(px(0.), px(0.)), size(px(960.), px(520.)));
+
+    let restored_state = windows_corner_state(false, false, restored, Some(work_area));
+    assert!(restored_state.top_left);
+    assert!(restored_state.bottom_right);
+    assert!(!windows_corner_state(false, false, half_snap, Some(work_area)).top_left);
+    assert!(!windows_corner_state(false, false, quarter_snap, Some(work_area)).bottom_right);
+    assert!(!windows_corner_state(true, false, restored, Some(work_area)).top_left);
+    assert!(!windows_corner_state(false, true, restored, Some(work_area)).top_left);
+    assert!(windows_corner_state(false, false, restored, None).bottom_left);
+}
+
+#[test]
+fn windows_snap_detection_requires_two_work_area_edges() {
+    let work_area = Bounds::new(point(px(0.), px(0.)), size(px(1920.), px(1040.)));
+    let one_edge = Bounds::new(point(px(0.), px(120.)), size(px(900.), px(700.)));
+    let two_edges = Bounds::new(point(px(0.), px(0.)), size(px(900.), px(700.)));
+
+    assert!(!bounds_touch_at_least_two_edges(one_edge, work_area));
+    assert!(bounds_touch_at_least_two_edges(two_edges, work_area));
+}

@@ -95,7 +95,8 @@ pub(crate) struct WindowControlState {
 
 /// The decoration-derived measurements every top-level render pass needs.
 /// Gathered once per frame so the title bar, tab body, and window frame all
-/// agree on rounding and on which window controls the platform offers.
+/// agree on rounding, compact-tab corner eligibility, and on which window
+/// controls the platform offers.
 #[derive(Clone, Copy)]
 pub(crate) struct WindowFrameGeometry {
     pub(crate) window_control_state: WindowControlState,
@@ -104,11 +105,15 @@ pub(crate) struct WindowFrameGeometry {
     pub(crate) rounded_top_right: bool,
     pub(crate) rounded_bottom_left: bool,
     pub(crate) rounded_bottom_right: bool,
-    pub(crate) bottom_corner_radius: Pixels,
+    pub(crate) corner_radius: Pixels,
+    pub(crate) compact_tab_top_left: bool,
+    pub(crate) compact_tab_top_right: bool,
+    pub(crate) compact_tab_bottom_left: bool,
+    pub(crate) compact_tab_bottom_right: bool,
 }
 
 impl WindowFrameGeometry {
-    pub(crate) fn new(window: &Window) -> Self {
+    pub(crate) fn new(window: &Window, cx: &App) -> Self {
         #[cfg(any(target_os = "windows", linux_like))]
         let supported_controls = window.window_controls();
         #[cfg(any(target_os = "windows", linux_like))]
@@ -123,6 +128,7 @@ impl WindowFrameGeometry {
         };
         let rounded =
             |first: bool, second: bool| cfg!(linux_like) && client_decorations && !first && !second;
+        let compact_tab_corners = compact_tab_corner_state(window, cx, client_decorations, tiling);
         Self {
             window_control_state: WindowControlState {
                 #[cfg(any(target_os = "windows", linux_like))]
@@ -141,8 +147,119 @@ impl WindowFrameGeometry {
             rounded_top_right: rounded(tiling.top, tiling.right),
             rounded_bottom_left: rounded(tiling.bottom, tiling.left),
             rounded_bottom_right: rounded(tiling.bottom, tiling.right),
-            bottom_corner_radius: theme::CLIENT_SIDE_DECORATION_ROUNDING - px(1.),
+            corner_radius: theme::CLIENT_SIDE_DECORATION_ROUNDING - px(1.),
+            compact_tab_top_left: compact_tab_corners.top_left,
+            compact_tab_top_right: compact_tab_corners.top_right,
+            compact_tab_bottom_left: compact_tab_corners.bottom_left,
+            compact_tab_bottom_right: compact_tab_corners.bottom_right,
         }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct WindowCornerState {
+    top_left: bool,
+    top_right: bool,
+    bottom_left: bool,
+    bottom_right: bool,
+}
+
+#[cfg(any(linux_like, test))]
+fn linux_corner_state(client_decorations: bool, tiling: Tiling) -> WindowCornerState {
+    WindowCornerState {
+        top_left: client_decorations && !tiling.top && !tiling.left,
+        top_right: client_decorations && !tiling.top && !tiling.right,
+        bottom_left: client_decorations && !tiling.bottom && !tiling.left,
+        bottom_right: client_decorations && !tiling.bottom && !tiling.right,
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_corner_state(is_fullscreen: bool) -> WindowCornerState {
+    WindowCornerState {
+        top_left: !is_fullscreen,
+        top_right: !is_fullscreen,
+        bottom_left: !is_fullscreen,
+        bottom_right: !is_fullscreen,
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_corner_state(
+    is_maximized: bool,
+    is_fullscreen: bool,
+    window_bounds: Bounds<Pixels>,
+    visible_bounds: Option<Bounds<Pixels>>,
+) -> WindowCornerState {
+    let touches_snap_edges = visible_bounds.is_some_and(|visible_bounds| {
+        bounds_touch_at_least_two_edges(window_bounds, visible_bounds)
+    });
+    let enabled = !is_maximized && !is_fullscreen && !touches_snap_edges;
+    WindowCornerState {
+        top_left: enabled,
+        top_right: enabled,
+        bottom_left: enabled,
+        bottom_right: enabled,
+    }
+}
+
+/// Returns whether a window touches at least two edges of a display's visible
+/// work area. Windows uses this to identify snapped layouts, including halves
+/// and quarters, whose native corners are square.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn bounds_touch_at_least_two_edges(
+    window_bounds: Bounds<Pixels>,
+    visible_bounds: Bounds<Pixels>,
+) -> bool {
+    const EDGE_TOLERANCE: f32 = 1.;
+
+    let close_to =
+        |left: Pixels, right: Pixels| (left.as_f32() - right.as_f32()).abs() <= EDGE_TOLERANCE;
+    let window_right = window_bounds.origin.x + window_bounds.size.width;
+    let window_bottom = window_bounds.origin.y + window_bounds.size.height;
+    let visible_right = visible_bounds.origin.x + visible_bounds.size.width;
+    let visible_bottom = visible_bounds.origin.y + visible_bounds.size.height;
+    let horizontal_edges = usize::from(close_to(window_bounds.origin.x, visible_bounds.origin.x))
+        + usize::from(close_to(window_right, visible_right));
+    let vertical_edges = usize::from(close_to(window_bounds.origin.y, visible_bounds.origin.y))
+        + usize::from(close_to(window_bottom, visible_bottom));
+
+    horizontal_edges + vertical_edges >= 2
+}
+
+fn compact_tab_corner_state(
+    window: &Window,
+    cx: &App,
+    client_decorations: bool,
+    tiling: Tiling,
+) -> WindowCornerState {
+    let _ = (window, client_decorations, tiling, cx);
+
+    #[cfg(linux_like)]
+    {
+        return linux_corner_state(client_decorations, tiling);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        macos_corner_state(window.is_fullscreen())
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let is_maximized = window.is_maximized();
+        let is_fullscreen = window.is_fullscreen();
+        let visible_bounds = if is_maximized || is_fullscreen {
+            None
+        } else {
+            window.display(cx).map(|display| display.visible_bounds())
+        };
+        return windows_corner_state(is_maximized, is_fullscreen, window.bounds(), visible_bounds);
+    }
+
+    #[cfg(not(any(linux_like, target_os = "macos", target_os = "windows")))]
+    {
+        WindowCornerState::default()
     }
 }
 
