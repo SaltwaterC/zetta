@@ -237,7 +237,7 @@ fn compact_tab_corner_state(
 
     #[cfg(linux_like)]
     {
-        return linux_corner_state(client_decorations, tiling);
+        linux_corner_state(client_decorations, tiling)
     }
 
     #[cfg(target_os = "macos")]
@@ -254,7 +254,7 @@ fn compact_tab_corner_state(
         } else {
             window.display(cx).map(|display| display.visible_bounds())
         };
-        return windows_corner_state(is_maximized, is_fullscreen, window.bounds(), visible_bounds);
+        windows_corner_state(is_maximized, is_fullscreen, window.bounds(), visible_bounds)
     }
 
     #[cfg(not(any(linux_like, target_os = "macos", target_os = "windows")))]

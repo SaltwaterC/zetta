@@ -423,11 +423,11 @@ fn detect_cow_filesystem(source_root: &Path, destination_root: &Path) -> CowFile
         if source_type != destination_type {
             return CowFilesystem::Unsupported;
         }
-        return match source_type {
+        match source_type {
             LINUX_BTRFS_SUPER_MAGIC => CowFilesystem::Btrfs,
             LINUX_XFS_SUPER_MAGIC => CowFilesystem::Xfs,
             _ => CowFilesystem::Unsupported,
-        };
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -441,11 +441,11 @@ fn detect_cow_filesystem(source_root: &Path, destination_root: &Path) -> CowFile
 
     #[cfg(windows)]
     {
-        return if windows_refs_volume(source_root, destination_root) {
+        if windows_refs_volume(source_root, destination_root) {
             CowFilesystem::Refs
         } else {
             CowFilesystem::Unsupported
-        };
+        }
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]

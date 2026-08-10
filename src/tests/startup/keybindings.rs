@@ -108,13 +108,18 @@ fn default_binding_index_keeps_all_shortcuts_for_an_action() {
     let bindings = default_keybindings(0, &gpui::DummyKeyboardMapper);
     let indexed = index_default_bindings(&bindings);
     let terminal_context = Some("Zetta > Terminal".to_owned());
+    let expected_font_size_shortcuts = if cfg!(target_os = "macos") {
+        vec!["^=".to_owned(), "^+".to_owned()]
+    } else {
+        vec!["ctrl-=".to_owned(), "ctrl-+".to_owned()]
+    };
 
     assert_eq!(
         indexed.get(&(
             IncreaseTerminalFontSize.name().to_owned(),
             terminal_context.clone()
         )),
-        Some(&vec!["^=".to_owned(), "^+".to_owned()])
+        Some(&expected_font_size_shortcuts)
     );
 
     let window_context = None;
@@ -126,7 +131,7 @@ fn default_binding_index_keeps_all_shortcuts_for_an_action() {
     } else {
         assert_eq!(
             indexed.get(&(HideWindow.name().to_owned(), Some("Zetta".to_owned()))),
-            Some(&vec!["ctrl-shift-h".to_owned()])
+            Some(&vec!["ctrl-shift-H".to_owned()])
         );
     }
 }

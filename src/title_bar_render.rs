@@ -278,6 +278,23 @@ fn compact_tab_neighbor_control_mask(background: Hsla) -> gpui::Div {
     div().absolute().inset_0().rounded_sm().bg(background)
 }
 
+fn render_compact_tab_neighbor_control(
+    child: impl IntoElement + 'static,
+    background: Hsla,
+) -> AnyElement {
+    // The compact tab row paints after the leading controls and its selected
+    // tab deliberately extends into its neighbors. Defer the adjacent control
+    // so its background and contents are restored over that tab wing.
+    deferred(
+        div()
+            .relative()
+            .size(px(32.))
+            .child(compact_tab_neighbor_control_mask(background))
+            .child(child),
+    )
+    .into_any_element()
+}
+
 pub(crate) fn render_new_tab_button(compact_mode: bool, compact_height: Pixels) -> AnyElement {
     new_tab_button_container(compact_mode, compact_height)
         .child(
@@ -883,6 +900,11 @@ impl Zetta {
             macos_title_bar_reservations_enabled(is_macos_fullscreen);
         let reserve_compact_leading_controls =
             compact_leading_controls_reservation_enabled(compact_mode, is_macos_fullscreen);
+        let profile_menu = if compact_mode {
+            render_compact_tab_neighbor_control(profile_menu, title_bar_background)
+        } else {
+            profile_menu
+        };
         let broadcast_control = show_broadcast_control.then(|| {
             let button = Button::new(
                 "toggle-broadcast-input",
@@ -914,16 +936,7 @@ impl Zetta {
             .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleBroadcastInput), cx));
 
             if compact_mode {
-                // Paint after the compact tab so the tab's left wing is
-                // revealed only around this control's rounded lower corner.
-                deferred(
-                    div()
-                        .relative()
-                        .size(px(32.))
-                        .child(compact_tab_neighbor_control_mask(title_bar_background))
-                        .child(button),
-                )
-                .into_any_element()
+                render_compact_tab_neighbor_control(button, title_bar_background)
             } else {
                 button.into_any_element()
             }
