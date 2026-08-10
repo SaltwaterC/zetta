@@ -1032,38 +1032,43 @@ impl Zetta {
     }
 
     /// The feedback banners shown between the tab bar and the tab body.
-    fn render_feedback_banners(&self, content: gpui::Div) -> gpui::Div {
+    fn render_feedback_banners(&self, content: gpui::Div, colors: &ThemeColors) -> gpui::Div {
         let banner = |error: String| {
             Banner::new()
                 .severity(Severity::Error)
                 .child(Label::new(error).size(LabelSize::Small).line_clamp(3))
         };
+        let feedback_row = |banner: Banner| {
+            div()
+                .px_2()
+                .py_1()
+                .when(cfg!(linux_like), |row| row.bg(colors.editor_background))
+                .child(banner)
+        };
         content
             .when(self.configuration_reload_feedback.is_visible(), |content| {
-                content.child(div().px_2().py_1().child(
+                content.child(feedback_row(
                     Banner::new().severity(Severity::Success).child(
                         Label::new(CONFIGURATION_RELOAD_SUCCESS_MESSAGE).size(LabelSize::Small),
                     ),
                 ))
             })
             .when_some(self.configuration_error.clone(), |content, error| {
-                content.child(
-                    div().px_2().py_1().child(
-                        banner(error).action_slot(
-                            IconButton::new("reload-invalid-configuration", IconName::RotateCw)
-                                .shape(IconButtonShape::Square)
-                                .icon_size(IconSize::Small)
-                                .aria_label("Reload configuration")
-                                .tooltip(Tooltip::text("Reload configuration"))
-                                .on_click(|_, window, cx| {
-                                    window.dispatch_action(Box::new(ReloadConfiguration), cx)
-                                }),
-                        ),
+                content.child(feedback_row(
+                    banner(error).action_slot(
+                        IconButton::new("reload-invalid-configuration", IconName::RotateCw)
+                            .shape(IconButtonShape::Square)
+                            .icon_size(IconSize::Small)
+                            .aria_label("Reload configuration")
+                            .tooltip(Tooltip::text("Reload configuration"))
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(ReloadConfiguration), cx)
+                            }),
                     ),
-                )
+                ))
             })
             .when_some(self.pane_output_error.clone(), |content, error| {
-                content.child(div().px_2().py_1().child(banner(error)))
+                content.child(feedback_row(banner(error)))
             })
     }
 
@@ -1103,7 +1108,7 @@ impl Zetta {
             .on_key_down(cx.listener(Self::command_palette_key_down))
             .child(chrome.title_bar)
             .when_some(chrome.tab_bar, |content, tab_bar| content.child(tab_bar));
-        let content = self.render_feedback_banners(content);
+        let content = self.render_feedback_banners(content, colors);
 
         // Paint order matters: later overlays sit above earlier ones.
         [
