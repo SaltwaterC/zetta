@@ -1,5 +1,10 @@
 use super::*;
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use crate::config::Profile;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use task::Shell;
+
 #[test]
 fn keymap_round_trip_preserves_parameterized_actions_and_section_metadata() {
     let root = std::env::temp_dir().join(format!(
@@ -303,6 +308,52 @@ fn detected_profile_theme_overrides_are_the_only_detected_profiles_serialized() 
     let output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
     fs::remove_file(root).unwrap();
     assert_eq!(output["profiles"], json!([]));
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn configuration_form_round_trip_serializes_the_resolved_homebrew_profile_name() {
+    let root = std::env::temp_dir().join(format!(
+        "zetta-homebrew-profile-form-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::write(
+        &root,
+        r#"{
+            "default_profile": "fish (homebrew)",
+            "profiles": [{"name":"fish (homebrew)","theme":"One Dark"}]
+        }"#,
+    )
+    .unwrap();
+
+    let mut config = Config::defaults(Some(&root), None);
+    config.profiles = vec![
+        Profile {
+            name: "System".to_owned(),
+            command: Shell::System,
+            theme: None,
+        },
+        Profile {
+            name: "Fish (Homebrew)".to_owned(),
+            command: Shell::Program("/opt/homebrew/bin/fish".to_owned()),
+            theme: None,
+        },
+    ];
+    config.default_profile = 1;
+
+    let form = ConfigurationForm::load(&root, &config).unwrap();
+    let output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
+    fs::remove_file(root).unwrap();
+
+    assert_eq!(output["default_profile"], "Fish (Homebrew)");
+    assert_eq!(
+        output["profiles"],
+        json!([{"name":"Fish (Homebrew)","theme":"One Dark"}])
+    );
 }
 
 #[test]

@@ -81,7 +81,20 @@ this workflow: `rerere.enabled=true` and `rerere.autoupdate=true`.
 Zetta detects common shells. On macOS and Linux, shells installed by Homebrew
 are also detected as separate profiles (for example, `Bash (Homebrew)`), even
 when the graphical application was not launched with Homebrew's `bin`
-directory in its `PATH`. On Windows this includes Windows PowerShell,
+directory in its `PATH`. Use the exact resolved Homebrew name in configuration,
+the settings editor, and CLI arguments; for example, configure Fish as
+`Fish (Homebrew)`, not `Fish`:
+
+```json
+{
+  "default_profile": "Fish (Homebrew)",
+  "profiles": [
+    { "name": "Fish (Homebrew)", "theme": "One Dark" }
+  ]
+}
+```
+
+On Windows this includes Windows PowerShell,
 PowerShell 7, Command Prompt, MSYS2, and registered WSL distributions. The
 MSYS2 Start Menu shortcut is used to find current custom installation paths;
 legacy uninstall registration is also checked, with `C:\msys64` as a fallback.

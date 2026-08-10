@@ -1,6 +1,8 @@
 use std::{
     collections::{HashMap, HashSet},
-    env, fs,
+    env,
+    ffi::OsStr,
+    fs,
     path::{Path, PathBuf},
     sync::OnceLock,
 };
@@ -775,6 +777,8 @@ fn discover_profiles() -> Vec<Profile> {
         command: Shell::System,
         theme: None,
     }];
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    let homebrew_prefixes = homebrew_prefixes();
     let candidates: &[(&str, &str)] = if cfg!(windows) {
         &[
             ("PowerShell", "powershell.exe"),
@@ -792,18 +796,27 @@ fn discover_profiles() -> Vec<Profile> {
     let mut seen = HashSet::new();
     for (name, program) in candidates {
         if let Some(path) = command_path(program)
-            && seen.insert(path)
+            && seen.insert(path.clone())
         {
-            profiles.push(Profile {
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            let profile =
+                homebrew_profile_for_path(&path, &homebrew_prefixes).unwrap_or_else(|| Profile {
+                    name: (*name).to_owned(),
+                    command: Shell::Program((*program).to_owned()),
+                    theme: None,
+                });
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            let profile = Profile {
                 name: (*name).to_owned(),
                 command: Shell::Program((*program).to_owned()),
                 theme: None,
-            });
+            };
+            profiles.push(profile);
         }
     }
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     profiles.extend(
-        homebrew_shell_profiles(homebrew_prefixes())
+        homebrew_shell_profiles(homebrew_prefixes)
             .into_iter()
             .filter(|profile| {
                 let Shell::Program(program) = &profile.command else {
@@ -822,6 +835,14 @@ fn discover_profiles() -> Vec<Profile> {
     }
     profiles
 }
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const POSIX_PROFILE_CANDIDATES: &[(&str, &str)] = &[
+    ("Zsh", "zsh"),
+    ("Bash", "bash"),
+    ("Fish", "fish"),
+    ("Nushell", "nu"),
+];
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn homebrew_prefixes() -> Vec<PathBuf> {
@@ -843,26 +864,36 @@ fn homebrew_prefixes() -> Vec<PathBuf> {
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn homebrew_shell_profiles(prefixes: impl IntoIterator<Item = PathBuf>) -> Vec<Profile> {
-    const CANDIDATES: &[(&str, &str)] = &[
-        ("Zsh", "zsh"),
-        ("Bash", "bash"),
-        ("Fish", "fish"),
-        ("Nushell", "nu"),
-    ];
+fn homebrew_profile_for_path(path: &Path, prefixes: &[PathBuf]) -> Option<Profile> {
+    POSIX_PROFILE_CANDIDATES.iter().find_map(|(name, program)| {
+        prefixes.iter().find_map(|prefix| {
+            let homebrew_path = prefix.join("bin").join(program);
+            (homebrew_path == path).then(|| homebrew_profile(name, homebrew_path))
+        })
+    })
+}
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn homebrew_profile(name: &str, path: PathBuf) -> Profile {
+    Profile {
+        name: format!("{name} (Homebrew)"),
+        command: Shell::Program(path.to_string_lossy().into_owned()),
+        theme: None,
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn homebrew_shell_profiles(prefixes: impl IntoIterator<Item = PathBuf>) -> Vec<Profile> {
     prefixes
         .into_iter()
         .flat_map(|prefix| {
             let bin = prefix.join("bin");
-            CANDIDATES.iter().filter_map(move |(name, program)| {
-                let path = bin.join(program);
-                path.is_file().then(|| Profile {
-                    name: format!("{name} (Homebrew)"),
-                    command: Shell::Program(path.to_string_lossy().into_owned()),
-                    theme: None,
+            POSIX_PROFILE_CANDIDATES
+                .iter()
+                .filter_map(move |(name, program)| {
+                    let path = bin.join(program);
+                    path.is_file().then(|| homebrew_profile(name, path))
                 })
-            })
         })
         .collect()
 }
@@ -1186,25 +1217,27 @@ fn command_path(program: &str) -> Option<PathBuf> {
     if program_path.components().count() > 1 {
         return program_path.is_file().then(|| program_path.to_path_buf());
     }
-    env::var_os("PATH").and_then(|path| {
-        env::split_paths(&path).find_map(|directory| {
-            if cfg!(windows) {
-                if directory.join(program).is_file() {
-                    Some(directory.join(program))
-                } else if !program.to_ascii_lowercase().ends_with(".exe")
-                    && directory.join(format!("{program}.exe")).is_file()
-                {
-                    Some(directory.join(format!("{program}.exe")))
-                } else {
-                    None
-                }
+    env::var_os("PATH").and_then(|path| command_path_in(program, &path))
+}
+
+fn command_path_in(program: &str, path: &OsStr) -> Option<PathBuf> {
+    env::split_paths(path).find_map(|directory| {
+        if cfg!(windows) {
+            if directory.join(program).is_file() {
+                Some(directory.join(program))
+            } else if !program.to_ascii_lowercase().ends_with(".exe")
+                && directory.join(format!("{program}.exe")).is_file()
+            {
+                Some(directory.join(format!("{program}.exe")))
             } else {
-                directory
-                    .join(program)
-                    .is_file()
-                    .then(|| directory.join(program))
+                None
             }
-        })
+        } else {
+            directory
+                .join(program)
+                .is_file()
+                .then(|| directory.join(program))
+        }
     })
 }
 

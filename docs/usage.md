@@ -79,12 +79,9 @@ zetta --replace-pane --profile "PROFILE"
 ```
 
 `--replace-pane` requires `--split` or `--profile` and targets the active pane
-in the active window. Profile names are case-insensitive. If a requested base
-profile name has no exact match, replacement also tries its detected
-`<name> (Homebrew)` profile; for example, `Fish` falls back to the detected
-`Fish (Homebrew)` profile. An explicitly supplied Homebrew profile name always
-selects that exact profile. A split-only replacement keeps the current active terminal and
-profile for its retained pane; a profile or theme override respawns the
+in the active window. Profile names are matched case-insensitively against the
+resolved profile names. A split-only replacement keeps the current active
+terminal and profile for its retained pane; a profile or theme override respawns the
 retained pane, and the selected profile/theme is used for every pane in the
 replacement layout. Surrounding panes, working directory inheritance, focus,
 and pane limits are preserved. If no accepting Zetta process is available, the

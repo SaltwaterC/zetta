@@ -41,6 +41,32 @@ fn homebrew_shells_are_profiles_with_their_installed_program_paths() {
     );
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn path_resolved_homebrew_shells_match_direct_discovery() {
+    let prefix = tempfile::tempdir().unwrap();
+    let bin = prefix.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(bin.join("brew"), "").unwrap();
+    fs::write(bin.join("bash"), "").unwrap();
+    fs::write(bin.join("fish"), "").unwrap();
+
+    let prefix_path = prefix.path().to_path_buf();
+    let direct_profiles = homebrew_shell_profiles([prefix_path.clone()]);
+    for program in ["bash", "fish"] {
+        let path = command_path_in(program, bin.as_os_str()).unwrap();
+        let path_profile =
+            homebrew_profile_for_path(&path, std::slice::from_ref(&prefix_path)).unwrap();
+        let direct_profile = direct_profiles
+            .iter()
+            .find(|profile| profile.command == Shell::Program(path.to_string_lossy().into_owned()))
+            .cloned()
+            .unwrap();
+
+        assert_eq!(path_profile, direct_profile);
+    }
+}
+
 #[test]
 fn configuration_uses_profile_terminology() {
     assert!(
