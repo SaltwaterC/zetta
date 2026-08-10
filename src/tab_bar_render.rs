@@ -31,6 +31,19 @@ fn tab_move_menu_entry_available(tab_count: usize) -> bool {
     tab_count >= 2
 }
 
+fn tab_leading_icons(
+    background_tab: bool,
+    silent_mode: bool,
+    custom_icon: Option<IconName>,
+    custom_icon_visible: bool,
+) -> (Option<IconName>, Option<IconName>, Option<IconName>) {
+    (
+        background_tab.then_some(IconName::Pin),
+        silent_mode.then_some(IconName::BellOff),
+        custom_icon.filter(|_| custom_icon_visible),
+    )
+}
+
 #[derive(Clone, Copy)]
 struct TabDrag {
     tab_id: u64,
@@ -578,33 +591,46 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
         tab_overflow_entry_label(tab, cx)
     };
     let attention_tooltip = tab.attention.as_ref().map(TabAttention::tooltip_text);
+    let (pin_icon, silent_mode_icon, custom_icon) = tab_leading_icons(
+        matches!(tab.close_policy, TabClosePolicy::Background { .. }),
+        tab.silent_mode,
+        tab.icon,
+        !is_shrinking || (is_renaming_tab && selected),
+    );
     let content = h_flex()
         .min_w_0()
         .gap_1()
-        .when(
-            matches!(tab.close_policy, TabClosePolicy::Background { .. }),
-            |content| {
-                content.child(
-                    svg()
-                        .path(IconName::Pin.path())
-                        .size(px(12.))
-                        .flex_none()
-                        .text_color(tab_icon),
-                )
-            },
-        )
-        // The tab being renamed always keeps its icon, even if the
+        .when_some(pin_icon, |content, icon| {
+            content.child(
+                svg()
+                    .path(icon.path())
+                    .size(px(12.))
+                    .flex_none()
+                    .text_color(tab_icon),
+            )
+        })
+        .when_some(silent_mode_icon, |content, icon| {
+            content.child(
+                div()
+                    .id(("tab-silent-mode", tab.id as usize))
+                    .flex_none()
+                    .aria_label("Tab Silent Mode enabled")
+                    .tooltip(Tooltip::text(
+                        "Tab Silent Mode: terminal bells and notification sounds are muted",
+                    ))
+                    .child(svg().path(icon.path()).size(px(14.)).text_color(tab_icon)),
+            )
+        })
+        // The tab being renamed always keeps its custom icon, even if the
         // rest of the bar is shrinking enough to hide everyone else's.
-        .when(!is_shrinking || (is_renaming_tab && selected), |content| {
-            content.when_some(tab.icon, |content, icon| {
-                content.child(
-                    svg()
-                        .path(icon.path())
-                        .size(px(14.))
-                        .flex_none()
-                        .text_color(tab_icon),
-                )
-            })
+        .when_some(custom_icon, |content, icon| {
+            content.child(
+                svg()
+                    .path(icon.path())
+                    .size(px(14.))
+                    .flex_none()
+                    .text_color(tab_icon),
+            )
         })
         .when_some(attention_tooltip, |content, tooltip| {
             content.child(
@@ -720,6 +746,7 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
                 }),
         );
     let menu_handle = handle.clone();
+    let tab_silent_mode = tab.silent_mode;
     // The context menu activates this tab before it is rendered. Use
     // the clicked tab's focus so its key context remains valid after
     // that switch, including when the tab was previously inactive.
@@ -742,6 +769,11 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
                     let menu = menu.when_some(action_context, |menu, focus| menu.context(focus));
                     menu.action("Rename Tab", Box::new(RenameTab))
                         .action("Change Tab Icon", Box::new(ChangeTabIcon))
+                        .action_checked(
+                            "Tab Silent Mode",
+                            Box::new(ToggleTabSilentMode),
+                            tab_silent_mode,
+                        )
                         .when(tab_move_menu_entry_available(tab_count), |menu| {
                             menu.separator().action_checked(
                                 "Tab Move Mode",

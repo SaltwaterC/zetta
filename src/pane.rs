@@ -1553,6 +1553,7 @@ pub(crate) struct Tab {
     pub(crate) minimized_panes: Vec<u64>,
     pub(crate) selected_minimized_pane: Option<u64>,
     pub(crate) broadcast_input: bool,
+    pub(crate) silent_mode: bool,
     pub(crate) close_policy: TabClosePolicy,
     pub(crate) custom_title: Option<String>,
     pub(crate) icon: Option<IconName>,

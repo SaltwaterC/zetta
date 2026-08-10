@@ -6,7 +6,9 @@ use std::process::Command;
 use gpui::{App, AppContext as _, Context, Entity, Window};
 use terminal_view::TerminalView;
 
-use crate::{ToggleSilentMode, Zetta, ZettaProcessState, process_zetta_entities};
+use crate::{
+    ToggleSilentMode, ToggleTabSilentMode, Zetta, ZettaProcessState, process_zetta_entities,
+};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum SystemSilentState {
@@ -52,6 +54,15 @@ pub(crate) fn effective_silent_mode(cx: &App) -> bool {
     cx.has_global::<ZettaProcessState>() && cx.global::<ZettaProcessState>().silent_mode.effective()
 }
 
+pub(crate) fn combined_silent_mode(global_silent_mode: bool, tab_silent_mode: bool) -> bool {
+    global_silent_mode || tab_silent_mode
+}
+
+fn toggle_tab_silent_mode_value(tab_silent_mode: &mut bool) -> bool {
+    *tab_silent_mode = !*tab_silent_mode;
+    *tab_silent_mode
+}
+
 #[cfg(feature = "notifications")]
 pub(crate) fn system_silence_active_non_prompting() -> bool {
     detect_system_silent_state() == SystemSilentState::Active
@@ -87,20 +98,37 @@ impl Zetta {
 
     pub(crate) fn configure_terminal_view_silent_mode(
         &self,
+        tab_id: u64,
         view: &Entity<TerminalView>,
         cx: &mut Context<Self>,
     ) {
-        let enabled = effective_silent_mode(cx);
+        let tab_silent_mode = self
+            .tabs
+            .iter()
+            .chain(self.background_sessions.iter())
+            .find(|tab| tab.id == tab_id)
+            .is_some_and(|tab| tab.silent_mode);
+        let enabled = combined_silent_mode(effective_silent_mode(cx), tab_silent_mode);
         view.update(cx, |view, cx| {
             view.set_system_bell_enabled(!enabled, cx);
         });
     }
 
-    pub(crate) fn apply_silent_mode_to_views(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        let views = self
-            .tabs
+    pub(crate) fn toggle_tab_silent_mode(
+        &mut self,
+        _: &ToggleTabSilentMode,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let global_silent_mode = effective_silent_mode(cx);
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            return;
+        };
+        let tab_silent_mode = toggle_tab_silent_mode_value(&mut tab.silent_mode);
+        let enabled = combined_silent_mode(global_silent_mode, tab_silent_mode);
+        let views = tab
+            .panes
             .iter()
-            .flat_map(|tab| tab.panes.iter())
             .filter_map(|pane| pane.view.clone())
             .collect::<Vec<_>>();
         for view in views {
@@ -109,6 +137,37 @@ impl Zetta {
             });
         }
         cx.notify();
+    }
+
+    pub(crate) fn apply_silent_mode_to_views(
+        &mut self,
+        global_silent_mode: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let views = self
+            .tabs
+            .iter()
+            .flat_map(|tab| {
+                let enabled = combined_silent_mode(global_silent_mode, tab.silent_mode);
+                tab.panes
+                    .iter()
+                    .filter_map(move |pane| pane.view.clone().map(|view| (view, enabled)))
+            })
+            .collect::<Vec<_>>();
+        for (view, enabled) in views {
+            view.update(cx, |view, cx| {
+                view.set_system_bell_enabled(!enabled, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn tab_silent_mode_by_attention_id(&self, attention_id: u64) -> Option<bool> {
+        self.tabs
+            .iter()
+            .chain(self.background_sessions.iter())
+            .find(|tab| tab.attention_id == attention_id)
+            .map(|tab| tab.silent_mode)
     }
 }
 

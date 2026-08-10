@@ -44,6 +44,7 @@ fn background_session_is_reaped_after_its_final_pane_exits() {
         minimized_panes: Vec::new(),
         selected_minimized_pane: None,
         broadcast_input: false,
+        silent_mode: true,
         close_policy: TabClosePolicy::Close,
         custom_title: None,
         icon: Some(IconName::Terminal),
@@ -59,6 +60,10 @@ fn background_session_is_reaped_after_its_final_pane_exits() {
     };
     let mut sessions = BackgroundSessionRunner::default();
     sessions.detach(tab, None);
+
+    let reconnected = sessions.reconnect_at(0).unwrap();
+    assert!(reconnected.silent_mode);
+    sessions.detach(reconnected, None);
 
     assert_eq!(
         remove_exited_background_pane(&mut sessions, 3),

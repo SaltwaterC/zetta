@@ -685,7 +685,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.configure_terminal_view_silent_mode(&view, cx);
+        self.configure_terminal_view_silent_mode(tab_id, &view, cx);
         let visible = self
             .tabs
             .get(self.active_tab)

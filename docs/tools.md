@@ -139,12 +139,21 @@ builds fall back to macOS's bundled script host, so they do not require an app
 bundle merely to show a notification.
 
 Silent mode is a transient process-wide control available from the title bar
-and command palette. It suppresses terminal bells and every notification sound
-source while leaving notification content, actions, and tab-attention badges
-unchanged. Its effective state is manual Silent mode or the detected system Do
-Not Disturb state; Zetta observes system Do Not Disturb and never changes it.
-Manual toggling is temporarily disabled while system Do Not Disturb is active,
-then the previous manual preference resumes.
+and command palette. Tab Silent Mode is a separate transient control available
+from each tab's context menu and the command palette. Either one suppresses
+terminal bells and every notification sound source for the affected tab while
+leaving notification content, actions, and tab-attention badges unchanged. A
+bell-off icon in the tab bar reports the tab's own setting; it does not mirror
+process-wide silence or system Do Not Disturb.
+
+Process-wide Silent mode's effective state is its manual setting or the
+detected system Do Not Disturb state; Zetta observes system Do Not Disturb and
+never changes it. Manual process-wide toggling is temporarily disabled while
+system Do Not Disturb is active, then the previous manual preference resumes.
+Notifications launched from a Zetta tab carry that tab's process-control
+target, so its local Silent mode suppresses their sound without removing the
+notification or its click action. Untargeted notifications continue to follow
+the platform's system silence state.
 
 ```sh
 zetta notify "Build finished"

@@ -97,15 +97,37 @@ fn unknown_control_commands_are_rejected() {
 }
 
 #[test]
-fn silent_mode_control_requests_decode_without_arguments() {
+fn silent_mode_control_requests_decode_with_optional_attention_target() {
     assert_eq!(
         decode_control_request(&mut request("token", "get_silent_mode"), "token"),
-        Some(ControlRequestCommand::GetSilentMode)
+        Some(ControlRequestCommand::GetSilentMode { attention_id: None })
+    );
+
+    let mut targeted = request("token", "get_silent_mode");
+    targeted.attention_id = Some(42);
+    assert_eq!(
+        decode_control_request(&mut targeted, "token"),
+        Some(ControlRequestCommand::GetSilentMode {
+            attention_id: Some(42)
+        })
     );
 
     let mut invalid = request("token", "get_silent_mode");
     invalid.profile = Some("unexpected".to_owned());
     assert_eq!(decode_control_request(&mut invalid, "token"), None);
+
+    for mut invalid in [
+        ControlRequest {
+            attention_id: Some(0),
+            ..request("token", "get_silent_mode")
+        },
+        ControlRequest {
+            attention_summary: Some("unexpected".to_owned()),
+            ..request("token", "get_silent_mode")
+        },
+    ] {
+        assert_eq!(decode_control_request(&mut invalid, "token"), None);
+    }
 }
 
 #[test]
@@ -504,6 +526,33 @@ fn control_server_delivers_a_token_authenticated_open_request() {
     };
     completion.send(true).unwrap();
     assert!(client.join().unwrap());
+}
+
+#[cfg(feature = "notifications")]
+#[test]
+fn control_server_delivers_targeted_and_untargeted_silent_mode_queries() {
+    for attention_id in [None, Some(42)] {
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint_path = directory.path().join("control.json");
+        let (commands, mut received) = futures::channel::mpsc::unbounded();
+        let _server = ProcessControlServer::start_at(commands, endpoint_path.clone()).unwrap();
+        let endpoint: ControlEndpoint =
+            serde_json::from_slice(&fs::read(endpoint_path).unwrap()).unwrap();
+
+        let client =
+            thread::spawn(move || send_get_silent_mode_request(&endpoint, attention_id).unwrap());
+        let command = futures::executor::block_on(received.next()).unwrap();
+        let ProcessControlCommand::GetSilentMode {
+            attention_id: delivered_attention_id,
+            completion,
+        } = command
+        else {
+            panic!("unexpected process control command");
+        };
+        assert_eq!(delivered_attention_id, attention_id);
+        completion.send(attention_id.is_some()).unwrap();
+        assert_eq!(client.join().unwrap(), attention_id.is_some());
+    }
 }
 
 #[test]

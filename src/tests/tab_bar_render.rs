@@ -8,6 +8,26 @@ fn tab_move_context_menu_is_only_available_with_two_tabs() {
 }
 
 #[test]
+fn tab_silent_indicator_is_between_pin_and_custom_icon() {
+    assert_eq!(
+        tab_leading_icons(true, true, Some(IconName::Terminal), true),
+        (
+            Some(IconName::Pin),
+            Some(IconName::BellOff),
+            Some(IconName::Terminal)
+        )
+    );
+    assert_eq!(
+        tab_leading_icons(false, false, Some(IconName::Terminal), false),
+        (None, None, None)
+    );
+    assert_eq!(
+        tab_leading_icons(false, true, Some(IconName::Terminal), false),
+        (None, Some(IconName::BellOff), None)
+    );
+}
+
+#[test]
 fn active_tab_shape_requires_compact_mode_and_selection() {
     assert!(active_tab_shape_visible(true, true));
     assert!(!active_tab_shape_visible(false, true));

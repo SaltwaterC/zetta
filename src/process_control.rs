@@ -26,7 +26,7 @@ use ui::IconName;
 
 use crate::pane::{OverlayFontSize, PaneOverlayRequest, overlay_color_from_value};
 
-const CONTROL_VERSION: u32 = 8;
+const CONTROL_VERSION: u32 = 9;
 const MAX_CONTROL_MESSAGE_BYTES: usize = 4096;
 const CONTROL_COMPLETION_TIMEOUT: Duration = Duration::from_secs(2);
 const CONTROL_COMPLETION_POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -110,6 +110,7 @@ pub(crate) enum ProcessControlCommand {
         completion: Sender<bool>,
     },
     GetSilentMode {
+        attention_id: Option<u64>,
         completion: Sender<bool>,
     },
 }
@@ -155,7 +156,9 @@ enum ControlRequestCommand {
         attention_id: u64,
         name: Option<String>,
     },
-    GetSilentMode,
+    GetSilentMode {
+        attention_id: Option<u64>,
+    },
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -410,10 +413,13 @@ impl ProcessControlServer {
                                 && wait_for_control_completion(&completed, &stopping_for_thread);
                             if accepted { "ok" } else { "rejected" }
                         }
-                        Some(ControlRequestCommand::GetSilentMode) => {
+                        Some(ControlRequestCommand::GetSilentMode { attention_id }) => {
                             let (completion, completed) = channel();
                             if commands
-                                .unbounded_send(ProcessControlCommand::GetSilentMode { completion })
+                                .unbounded_send(ProcessControlCommand::GetSilentMode {
+                                    attention_id,
+                                    completion,
+                                })
                                 .is_err()
                             {
                                 "rejected"
@@ -587,12 +593,12 @@ fn decode_control_request(
         }
         return None;
     }
-    if !matches!(
+    if (!matches!(
         request.command.as_str(),
-        "set_tab_attention" | "focus_tab" | "set_tab_name"
-    ) && (request.attention_id.is_some()
-        || request.attention_summary.is_some()
-        || request.attention_body.is_some())
+        "set_tab_attention" | "focus_tab" | "set_tab_name" | "get_silent_mode"
+    ) && request.attention_id.is_some())
+        || (request.command != "set_tab_attention"
+            && (request.attention_summary.is_some() || request.attention_body.is_some()))
     {
         if let Some(secret) = request.secret.as_mut() {
             secret.zeroize();
@@ -638,7 +644,11 @@ fn decode_control_request(
                 && request.profile.is_none()
                 && request.theme.is_none() =>
         {
-            Some(ControlRequestCommand::GetSilentMode)
+            let attention_id = match request.attention_id.take() {
+                Some(0) => return None,
+                attention_id => attention_id,
+            };
+            Some(ControlRequestCommand::GetSilentMode { attention_id })
         }
         "replace_pane"
             if request.runner_id.is_none()
@@ -1110,8 +1120,12 @@ pub(crate) fn request_process_tab_attention(
 }
 
 #[cfg(feature = "notifications")]
-pub(crate) fn request_process_silent_mode(process_id: u32) -> Result<bool> {
+pub(crate) fn request_process_silent_mode(
+    process_id: u32,
+    attention_id: Option<u64>,
+) -> Result<bool> {
     anyhow::ensure!(process_id != 0, "process ID must be positive");
+    anyhow::ensure!(attention_id != Some(0), "attention ID must be positive");
     let endpoint_path = control_endpoint_path(process_id);
     let contents = fs::read(&endpoint_path).with_context(|| {
         format!(
@@ -1125,7 +1139,7 @@ pub(crate) fn request_process_silent_mode(process_id: u32) -> Result<bool> {
         endpoint.version == CONTROL_VERSION && endpoint.process_id == process_id,
         "Zetta process control endpoint is outdated"
     );
-    send_get_silent_mode_request(&endpoint)
+    send_get_silent_mode_request(&endpoint, attention_id)
 }
 
 #[cfg(feature = "notifications")]
@@ -1198,7 +1212,10 @@ fn send_open_window_request(endpoint: &ControlEndpoint) -> Result<bool> {
 }
 
 #[cfg(feature = "notifications")]
-fn send_get_silent_mode_request(endpoint: &ControlEndpoint) -> Result<bool> {
+fn send_get_silent_mode_request(
+    endpoint: &ControlEndpoint,
+    attention_id: Option<u64>,
+) -> Result<bool> {
     let mut stream = UnixStream::connect(&endpoint.socket_path)?;
     stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
     stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
@@ -1216,7 +1233,7 @@ fn send_get_silent_mode_request(endpoint: &ControlEndpoint) -> Result<bool> {
             pane_overlay_font_size: None,
             pane_overlay_opacity: None,
             pane_overlay_color: None,
-            attention_id: None,
+            attention_id,
             attention_summary: None,
             attention_body: None,
             tab_name: None,

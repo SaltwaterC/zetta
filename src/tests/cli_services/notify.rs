@@ -142,10 +142,10 @@ fn targeted_linux_notifications_add_only_the_xdg_default_action() {
 
 #[cfg(linux_like)]
 #[test]
-fn silent_notifications_keep_actions_but_suppress_all_sound_sources() {
+fn silent_targeted_notifications_keep_content_and_actions_but_suppress_sound() {
     let command = NotifyCommand {
         summary: "Build finished".to_owned(),
-        body: None,
+        body: Some("All tests passed".to_owned()),
         app_name: None,
         icon: Some("icon.png".to_owned()),
         sound: Some("message-new-instant".to_owned()),
@@ -156,6 +156,8 @@ fn silent_notifications_keep_actions_but_suppress_all_sound_sources() {
         attention_id: 7,
     };
     let notification = build_notification(&command, Some(target), true).unwrap();
+    assert_eq!(notification.summary, "Build finished");
+    assert_eq!(notification.body, "All tests passed");
     assert_eq!(notification.actions, ["default", ""]);
     assert!(
         notification

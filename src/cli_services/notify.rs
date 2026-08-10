@@ -691,8 +691,11 @@ impl NotificationRequest {
     pub(super) fn run(&self, target: Option<NotificationTarget>) -> Result<()> {
         let silent = target
             .map(|target| {
-                crate::process_control::request_process_silent_mode(target.process_id)
-                    .unwrap_or(false)
+                crate::process_control::request_process_silent_mode(
+                    target.process_id,
+                    Some(target.attention_id),
+                )
+                .unwrap_or(false)
             })
             .unwrap_or_else(crate::silent_mode::system_silence_active_non_prompting);
         #[cfg(target_os = "macos")]

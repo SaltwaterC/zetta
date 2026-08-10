@@ -31,9 +31,10 @@ for active development.
 - In-memory tab attention badges from `zetta attention`, with optional
   cross-platform desktop notifications that click back to the issuing visible
   tab
-- Transient process-wide Silent mode that suppresses terminal bells and
-  notification sounds while preserving notification content, actions, and
-  attention badges; it also follows system Do Not Disturb when available
+- Transient process-wide and tab-scoped Silent modes that suppress terminal
+  bells and notification sounds while preserving notification content,
+  actions, and attention badges; process-wide silence also follows system Do
+  Not Disturb when available
 - A small syntax-highlighted built-in [vi editor](https://github.com/SaltwaterC/busy-v),
   available as `zetta vi`, unconditionally as `zvi`, and conditionally as `vi`
   through shell integration;

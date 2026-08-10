@@ -578,6 +578,7 @@ impl Zetta {
             minimized_panes: Vec::new(),
             selected_minimized_pane: None,
             broadcast_input: false,
+            silent_mode: false,
             close_policy: TabClosePolicy::Close,
             custom_title: None,
             icon: self.launch_config.default_tab_icon,

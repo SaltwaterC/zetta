@@ -172,6 +172,7 @@ actions!(
         SelectNextMinimizedPane,
         ToggleBroadcastInput,
         ToggleSilentMode,
+        ToggleTabSilentMode,
         ToggleMultiCommand,
         IncreaseTerminalFontSize,
         DecreaseTerminalFontSize,

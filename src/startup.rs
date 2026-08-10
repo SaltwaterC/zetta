@@ -1283,14 +1283,33 @@ pub(crate) fn run() -> Result<()> {
                             });
                             let _ = completion.send(accepted);
                         }
-                        ProcessControlCommand::GetSilentMode { completion } => {
+                        ProcessControlCommand::GetSilentMode {
+                            attention_id,
+                            completion,
+                        } => {
                             let silent_mode = cx.update(|cx| {
-                                cx.has_global::<ZettaProcessState>()
-                                    && cx
+                                if !cx.has_global::<ZettaProcessState>()
+                                    || !cx
                                         .global::<ZettaProcessState>()
                                         .control_server
                                         .is_accepting()
-                                    && cx.global::<ZettaProcessState>().silent_mode.effective()
+                                {
+                                    return false;
+                                }
+                                let global_silent_mode =
+                                    cx.global::<ZettaProcessState>().silent_mode.effective();
+                                let tab_silent_mode = attention_id.is_some_and(|attention_id| {
+                                    process_zetta_entities(cx).into_iter().any(|zetta| {
+                                        zetta
+                                            .read(cx)
+                                            .tab_silent_mode_by_attention_id(attention_id)
+                                            .unwrap_or(false)
+                                    })
+                                });
+                                crate::silent_mode::combined_silent_mode(
+                                    global_silent_mode,
+                                    tab_silent_mode,
+                                )
                             });
                             let _ = completion.send(silent_mode);
                         }

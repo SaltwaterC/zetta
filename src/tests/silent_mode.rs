@@ -1,6 +1,23 @@
 use super::*;
 
 #[test]
+fn global_and_tab_silence_are_combined() {
+    assert!(!combined_silent_mode(false, false));
+    assert!(combined_silent_mode(true, false));
+    assert!(combined_silent_mode(false, true));
+    assert!(combined_silent_mode(true, true));
+}
+
+#[test]
+fn tab_silent_mode_toggles_locally() {
+    let mut enabled = false;
+    assert!(toggle_tab_silent_mode_value(&mut enabled));
+    assert!(enabled);
+    assert!(!toggle_tab_silent_mode_value(&mut enabled));
+    assert!(!enabled);
+}
+
+#[test]
 fn silent_mode_uses_manual_or_system_state() {
     let mut state = SilentModeState::default();
     assert!(!state.effective());

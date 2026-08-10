@@ -39,6 +39,7 @@ fn tab(attention_id: u64, custom_title: Option<&str>) -> Tab {
         minimized_panes: Vec::new(),
         selected_minimized_pane: None,
         broadcast_input: false,
+        silent_mode: false,
         close_policy: TabClosePolicy::Close,
         custom_title: custom_title.map(str::to_owned),
         icon: Some(IconName::Terminal),
