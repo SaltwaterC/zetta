@@ -304,6 +304,7 @@ fn render_compact_tab_neighbor_control(
             .child(compact_tab_neighbor_control_mask(background))
             .child(child),
     )
+    .with_priority(crate::app_render::TITLE_BAR_CONTROL_PAINT_PRIORITY)
     .into_any_element()
 }
 

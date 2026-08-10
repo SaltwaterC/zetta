@@ -2,6 +2,27 @@ use super::*;
 use crate::configuration_reload::CONFIGURATION_RELOAD_SUCCESS_MESSAGE;
 use gpui::{ListSizingBehavior, uniform_list};
 
+// GPUI's standard popover menus use priority 1. Keep every local deferred draw on
+// an explicit rung around that fixed priority so title-bar repairs stay below
+// menus, blocking overlays stay above them, and popups hosted by a modal stay on
+// top of their deferred parent.
+pub(crate) const TITLE_BAR_CONTROL_PAINT_PRIORITY: usize = 0;
+pub(crate) const TITLE_BAR_POPOVER_PAINT_PRIORITY: usize = 1;
+pub(crate) const MODAL_OVERLAY_PAINT_PRIORITY: usize = 2;
+pub(crate) const MODAL_POPUP_PAINT_PRIORITY: usize = 3;
+
+const _: () = assert!(TITLE_BAR_CONTROL_PAINT_PRIORITY < TITLE_BAR_POPOVER_PAINT_PRIORITY);
+const _: () = assert!(TITLE_BAR_POPOVER_PAINT_PRIORITY < MODAL_OVERLAY_PAINT_PRIORITY);
+const _: () = assert!(MODAL_OVERLAY_PAINT_PRIORITY < MODAL_POPUP_PAINT_PRIORITY);
+
+fn modal_overlay(overlay: Option<AnyElement>) -> Option<AnyElement> {
+    overlay.map(|overlay| {
+        deferred(overlay)
+            .with_priority(MODAL_OVERLAY_PAINT_PRIORITY)
+            .into_any_element()
+    })
+}
+
 impl Zetta {
     pub(crate) fn render_tab_icon_picker_overlay(
         &mut self,
@@ -934,15 +955,21 @@ impl Zetta {
 
         ZettaOverlays {
             performance: self.render_performance_overlay(colors, window),
-            palette: self.render_command_palette_overlay(colors, handle, cx),
-            multi_command: self.render_multi_command_overlay(colors, error_color, handle),
+            palette: modal_overlay(self.render_command_palette_overlay(colors, handle, cx)),
+            multi_command: modal_overlay(self.render_multi_command_overlay(
+                colors,
+                error_color,
+                handle,
+            )),
             tab_search: self.render_tab_search_overlay(colors),
-            settings: self.render_settings_overlay(window, cx),
-            tab_icon_picker: self.render_tab_icon_picker_overlay(window, cx),
-            theme_picker: self.render_pane_theme_picker_overlay(colors, handle, cx),
-            overlay_style_picker: self.render_overlay_style_picker_overlay(window, cx),
-            serial_console,
-            session_authentication: self.render_session_authentication_overlay(cx),
+            settings: modal_overlay(self.render_settings_overlay(window, cx)),
+            tab_icon_picker: modal_overlay(self.render_tab_icon_picker_overlay(window, cx)),
+            theme_picker: modal_overlay(self.render_pane_theme_picker_overlay(colors, handle, cx)),
+            overlay_style_picker: modal_overlay(
+                self.render_overlay_style_picker_overlay(window, cx),
+            ),
+            serial_console: modal_overlay(serial_console),
+            session_authentication: modal_overlay(self.render_session_authentication_overlay(cx)),
         }
     }
 
@@ -1112,7 +1139,8 @@ impl Zetta {
             .when_some(chrome.tab_bar, |content, tab_bar| content.child(tab_bar));
         let content = self.render_feedback_banners(content, colors);
 
-        // Paint order matters: later overlays sit above earlier ones.
+        // Child order preserves the existing relative order within each paint
+        // priority; later overlays on the same rung sit above earlier ones.
         [
             overlays.performance,
             overlays.palette,
@@ -1161,3 +1189,7 @@ impl Render for Zetta {
         client_window_frame(content, window, cx)
     }
 }
+
+#[cfg(test)]
+#[path = "tests/app_render.rs"]
+mod tests;

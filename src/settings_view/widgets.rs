@@ -316,7 +316,7 @@ impl Zetta {
                         }),
                 ),
         )
-        .with_priority(1)
+        .with_priority(crate::app_render::MODAL_POPUP_PAINT_PRIORITY)
         .into_any_element()
     }
 
