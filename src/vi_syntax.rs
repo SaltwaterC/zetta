@@ -5,7 +5,7 @@ use std::{
     ops::Range,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicUsize, Ordering},
         mpsc::{self, Receiver, Sender, TryRecvError},
     },
@@ -127,40 +127,100 @@ fn extension_grammars() -> Vec<(&'static str, tree_sitter::Language)> {
     ]
 }
 
-struct LanguageHighlighter {
+struct LanguageEntry {
     name: &'static str,
     language: tree_sitter::Language,
     suffixes: Vec<String>,
-    first_line_pattern: Option<Regex>,
-    configuration: Option<HighlightConfiguration>,
+    first_line_pattern: Option<String>,
 }
 
-/// A small Tree-sitter adapter for the standalone vi editor.
+/// The syntax theme, resolved on a worker thread.
 ///
-/// Grammar functions come directly from Tree-sitter crates, while Zed's
-/// upstream grammar configs and Zetta's extension configs/queries are embedded
-/// locally. The adapter owns only Tree-sitter's parser/highlighter state and
-/// language configurations; it does not depend on Zed's language buffer or
-/// syntax map.
-pub(crate) struct ZedSyntaxHighlighter {
-    languages: Vec<LanguageHighlighter>,
+/// Building a [`ThemeRegistry`] parses every bundled theme family and reads the
+/// user's theme directory, which is the one piece of vi's startup cost that
+/// does not depend on the open file's grammar. Resolving it off-thread lets it
+/// overlap with the Tree-sitter query compilation that gates the first frame.
+struct SyntaxThemeHandle {
+    configured_theme: Option<String>,
+    pending: Mutex<Option<thread::JoinHandle<Arc<SyntaxTheme>>>>,
+    theme: OnceLock<Arc<SyntaxTheme>>,
+}
+
+impl SyntaxThemeHandle {
+    fn spawn(configured_theme: Option<String>) -> Self {
+        let worker_configured_theme = configured_theme.clone();
+        let pending = thread::Builder::new()
+            .name("zetta-vi-theme".to_owned())
+            .spawn(move || active_syntax_theme_for(worker_configured_theme.as_deref()))
+            .ok();
+        Self {
+            configured_theme,
+            pending: Mutex::new(pending),
+            theme: OnceLock::new(),
+        }
+    }
+
+    #[cfg(test)]
+    fn ready(theme: Arc<SyntaxTheme>) -> Self {
+        let resolved = OnceLock::new();
+        let _ = resolved.set(theme);
+        Self {
+            configured_theme: None,
+            pending: Mutex::new(None),
+            theme: resolved,
+        }
+    }
+
+    fn get(&self) -> Arc<SyntaxTheme> {
+        if let Some(theme) = self.theme.get() {
+            return Arc::clone(theme);
+        }
+
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if self.theme.get().is_none() {
+            // Fall back to loading inline when the worker could not be spawned
+            // or panicked; vi must never lose highlighting over a thread error.
+            let theme = pending
+                .take()
+                .and_then(|handle| handle.join().ok())
+                .unwrap_or_else(|| active_syntax_theme_for(self.configured_theme.as_deref()));
+            let _ = self.theme.set(theme);
+        }
+        drop(pending);
+
+        self.theme
+            .get()
+            .cloned()
+            .unwrap_or_else(|| Arc::new(SyntaxTheme::new([])))
+    }
+}
+
+/// Grammar metadata and compiled Tree-sitter queries, shared by every
+/// highlighter in the process.
+///
+/// Compiling one grammar's queries costs tens of milliseconds, so the visible
+/// preview on the main thread and the background full-buffer parse must reach
+/// the same [`HighlightConfiguration`] rather than each compiling their own.
+/// Configurations are immutable once compiled, which is what makes sharing them
+/// across threads sound.
+pub(crate) struct GrammarSet {
+    languages: Vec<LanguageEntry>,
     language_names: HashMap<String, usize>,
     capture_names: Vec<String>,
-    styles: Vec<Option<HighlightStyle>>,
-    syntax_theme: Arc<SyntaxTheme>,
-    highlighter: Highlighter,
-    preview_cache: Option<VisibleSyntaxCache>,
+    first_line_patterns: OnceLock<Vec<(usize, Regex)>>,
+    theme: SyntaxThemeHandle,
+    styles: OnceLock<Vec<Option<HighlightStyle>>>,
+    configurations: Mutex<Vec<Option<Arc<HighlightConfiguration>>>>,
 }
 
-struct VisibleSyntaxCache {
-    context_range: Range<usize>,
-    spans: Vec<HighlightSpan>,
-}
-
-impl ZedSyntaxHighlighter {
-    pub(crate) fn new(syntax_theme: Arc<SyntaxTheme>) -> anyhow::Result<Self> {
+impl GrammarSet {
+    fn new(theme: SyntaxThemeHandle) -> anyhow::Result<Arc<Self>> {
         let mut languages = Vec::new();
         let mut language_names = HashMap::new();
+        let mut grammar_ids = Vec::new();
 
         for (name, language) in native_grammars().into_iter().chain(extension_grammars()) {
             let language_config = load_config(name)?;
@@ -180,27 +240,26 @@ impl ZedSyntaxHighlighter {
             for alias in &language_config.modeline_aliases {
                 add_language_name(&mut language_names, alias, index);
             }
-            languages.push(LanguageHighlighter {
+            grammar_ids.push(name);
+            languages.push(LanguageEntry {
                 name,
                 language,
                 suffixes: language_config.path_suffixes,
-                first_line_pattern: language_config
-                    .first_line_pattern
-                    .map(|pattern| Regex::new(&pattern))
-                    .transpose()?,
-                configuration: None,
+                first_line_pattern: language_config.first_line_pattern,
             });
         }
 
-        Ok(Self {
+        let capture_names = collect_capture_names(&grammar_ids)?;
+        let configurations = Mutex::new(vec![None; languages.len()]);
+        Ok(Arc::new(Self {
             languages,
             language_names,
-            capture_names: Vec::new(),
-            styles: Vec::new(),
-            syntax_theme,
-            highlighter: Highlighter::new(),
-            preview_cache: None,
-        })
+            capture_names,
+            first_line_patterns: OnceLock::new(),
+            theme,
+            styles: OnceLock::new(),
+            configurations,
+        }))
     }
 
     fn language_index(&self, path: Option<&Path>, source: &[u8]) -> Option<usize> {
@@ -242,75 +301,201 @@ impl ZedSyntaxHighlighter {
             .unwrap_or_default();
         let first_line = String::from_utf8_lossy(first_line);
 
-        self.languages
+        self.first_line_patterns()
             .iter()
-            .enumerate()
-            .filter_map(|(index, language)| {
-                language
-                    .first_line_pattern
-                    .as_ref()
-                    .is_some_and(|pattern| pattern.is_match(&first_line))
-                    .then_some(index)
-            })
+            .filter(|(_, pattern)| pattern.is_match(&first_line))
+            .map(|(index, _)| *index)
             .max()
     }
 
-    /// Compile a grammar's Zed queries only when that grammar is actually
-    /// selected. The initial implementation eagerly compiled every native
-    /// grammar before vi could render its first frame.
-    fn ensure_configuration(&mut self, language_index: usize) -> anyhow::Result<()> {
-        if self.languages[language_index].configuration.is_some() {
-            return Ok(());
+    /// Compile the shebang/modeline patterns only when a path suffix did not
+    /// already identify the grammar. Building these regexes is a measurable
+    /// part of startup and most files are recognized by their suffix.
+    fn first_line_patterns(&self) -> &[(usize, Regex)] {
+        self.first_line_patterns.get_or_init(|| {
+            self.languages
+                .iter()
+                .enumerate()
+                .filter_map(|(index, language)| {
+                    let pattern = language.first_line_pattern.as_deref()?;
+                    match Regex::new(pattern) {
+                        Ok(pattern) => Some((index, pattern)),
+                        Err(error) => {
+                            eprintln!(
+                                "zetta vi: ignoring first-line pattern for {:?}: {error}",
+                                language.name
+                            );
+                            None
+                        }
+                    }
+                })
+                .collect()
+        })
+    }
+
+    #[cfg(test)]
+    fn language_index_for_name(&self, name: &str) -> Option<usize> {
+        self.language_names.get(&name.to_ascii_lowercase()).copied()
+    }
+
+    /// The capture-name to style table, resolved once the theme is available.
+    fn styles(&self) -> &[Option<HighlightStyle>] {
+        self.styles.get_or_init(|| {
+            let theme = self.theme.get();
+            self.capture_names
+                .iter()
+                .map(|capture_name| style_for_capture(&theme, capture_name))
+                .collect()
+        })
+    }
+
+    /// Compile a grammar's Zed queries the first time that grammar is used.
+    ///
+    /// The lock is deliberately held across the compile: when the preview and
+    /// the background parse race for the same grammar, the loser waits for the
+    /// winner's result instead of repeating tens of milliseconds of work.
+    fn configuration(&self, language_index: usize) -> anyhow::Result<Arc<HighlightConfiguration>> {
+        let mut configurations = self
+            .configurations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(configuration) = configurations[language_index].as_ref() {
+            return Ok(Arc::clone(configuration));
         }
 
-        let name = self.languages[language_index].name;
+        let language = &self.languages[language_index];
+        let name = language.name;
         let highlights_query = load_query(name, "highlights")?;
         if highlights_query.is_empty() {
             anyhow::bail!("missing highlights query for native grammar {name:?}");
         }
         let injections_query = load_query(name, "injections")?;
-        let configuration = HighlightConfiguration::new(
-            self.languages[language_index].language.clone(),
+        let mut configuration = HighlightConfiguration::new(
+            language.language.clone(),
             name,
             &highlights_query,
             &injections_query,
             "",
         )?;
-        self.languages[language_index].configuration = Some(configuration);
+        // Every grammar resolves against the same capture table, which is what
+        // lets Tree-sitter's numeric highlight ids stay valid when an injection
+        // switches from Markdown to Rust, JSONC, and so on.
+        configuration.configure(&self.capture_names);
 
-        let mut added_capture_name = false;
-        for language in &self.languages {
-            let Some(configuration) = language.configuration.as_ref() else {
-                continue;
-            };
-            for capture_name in configuration.names() {
-                if self
-                    .capture_names
-                    .iter()
-                    .all(|known_name| known_name != capture_name)
-                {
-                    self.capture_names.push((*capture_name).to_owned());
-                    self.styles
-                        .push(style_for_capture(&self.syntax_theme, capture_name));
-                    added_capture_name = true;
+        let configuration = Arc::new(configuration);
+        configurations[language_index] = Some(Arc::clone(&configuration));
+        Ok(configuration)
+    }
+
+    fn configuration_snapshot(&self) -> Vec<Option<Arc<HighlightConfiguration>>> {
+        self.configurations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    #[cfg(test)]
+    fn loaded_configuration_count(&self) -> usize {
+        self.configuration_snapshot()
+            .iter()
+            .filter(|configuration| configuration.is_some())
+            .count()
+    }
+
+    #[cfg(test)]
+    fn has_configuration(&self, language_index: usize) -> bool {
+        self.configuration_snapshot()[language_index].is_some()
+    }
+}
+
+/// Collect every capture name the embedded queries can produce.
+///
+/// The table has to cover all grammars before any of them is configured,
+/// because a configured [`HighlightConfiguration`] is never mutated again.
+/// Scanning the query text avoids compiling grammars the open file never uses.
+fn collect_capture_names(grammar_ids: &[&'static str]) -> anyhow::Result<Vec<String>> {
+    let mut capture_names = Vec::new();
+    let mut seen = HashSet::new();
+    for name in grammar_ids {
+        for prefix in ["highlights", "injections"] {
+            let query = load_query(name, prefix)?;
+            for capture_name in query_capture_names(&query) {
+                if seen.insert(capture_name.to_owned()) {
+                    capture_names.push(capture_name.to_owned());
                 }
             }
         }
+    }
+    Ok(capture_names)
+}
 
-        // Every loaded grammar must use the same capture table. This is what
-        // lets Tree-sitter's numeric highlight ids remain valid when a Zed
-        // injection switches from Markdown to Rust, JSONC, and so on.
-        if added_capture_name {
-            for language in &mut self.languages {
-                if let Some(configuration) = language.configuration.as_mut() {
-                    configuration.configure(&self.capture_names);
+/// Yield the `@capture` names a query declares.
+///
+/// Comments and string literals are skipped so an anonymous node such as Rust's
+/// `"@"` token is not mistaken for a capture.
+fn query_capture_names(query: &str) -> Vec<&str> {
+    let bytes = query.as_bytes();
+    let mut names = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b';' => {
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
                 }
             }
-        } else if let Some(configuration) = self.languages[language_index].configuration.as_mut() {
-            configuration.configure(&self.capture_names);
+            b'"' => {
+                index += 1;
+                while index < bytes.len() && bytes[index] != b'"' {
+                    index += if bytes[index] == b'\\' { 2 } else { 1 };
+                }
+                index = index.saturating_add(1).min(bytes.len());
+            }
+            b'@' => {
+                let start = index + 1;
+                let mut end = start;
+                while end < bytes.len() && is_capture_name_byte(bytes[end]) {
+                    end += 1;
+                }
+                if end > start {
+                    names.push(&query[start..end]);
+                }
+                index = end.max(start);
+            }
+            _ => index += 1,
         }
+    }
+    names
+}
 
-        Ok(())
+fn is_capture_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-')
+}
+
+/// A small Tree-sitter adapter for the standalone vi editor.
+///
+/// Grammar functions come directly from Tree-sitter crates, while Zed's
+/// upstream grammar configs and Zetta's extension configs/queries are embedded
+/// locally. The adapter owns only Tree-sitter's per-thread parser state; the
+/// grammars, capture table, and styles live in the shared [`GrammarSet`].
+pub(crate) struct ZedSyntaxHighlighter {
+    grammars: Arc<GrammarSet>,
+    highlighter: Highlighter,
+    preview_cache: Option<VisibleSyntaxCache>,
+}
+
+struct VisibleSyntaxCache {
+    context_range: Range<usize>,
+    spans: Vec<HighlightSpan>,
+}
+
+impl ZedSyntaxHighlighter {
+    pub(crate) fn new(grammars: Arc<GrammarSet>) -> Self {
+        Self {
+            grammars,
+            highlighter: Highlighter::new(),
+            preview_cache: None,
+        }
     }
 }
 
@@ -333,7 +518,7 @@ impl ZedSyntaxHighlighter {
         buffer: &[u8],
         cancellation_flag: Option<&AtomicUsize>,
     ) -> Vec<HighlightSpan> {
-        let Some(language_index) = self.language_index(path, buffer) else {
+        let Some(language_index) = self.grammars.language_index(path, buffer) else {
             return Vec::new();
         };
 
@@ -352,7 +537,7 @@ impl ZedSyntaxHighlighter {
             return Vec::new();
         }
 
-        let Some(language_index) = self.language_index(path, buffer) else {
+        let Some(language_index) = self.grammars.language_index(path, buffer) else {
             return Vec::new();
         };
         let visible_range = visible_start..visible_end;
@@ -408,9 +593,13 @@ impl ZedSyntaxHighlighter {
         buffer: &[u8],
         cancellation_flag: Option<&AtomicUsize>,
     ) -> Vec<HighlightSpan> {
-        if self.ensure_configuration(language_index).is_err() {
+        let grammars = Arc::clone(&self.grammars);
+        let Ok(root_configuration) = grammars.configuration(language_index) else {
             return Vec::new();
-        }
+        };
+        let styles = grammars.styles();
+        let mut configurations = grammars.configuration_snapshot();
+        configurations[language_index] = Some(root_configuration);
 
         loop {
             if cancellation_flag.is_some_and(|flag| flag.load(Ordering::Acquire) != 0) {
@@ -424,28 +613,25 @@ impl ZedSyntaxHighlighter {
             // compiling all native grammar queries for every file.
             let (spans, missing_languages) = {
                 let missing_languages = RefCell::new(HashSet::new());
-                let languages = &self.languages;
-                let language_names = &self.language_names;
-                let styles = &self.styles;
-                let configuration = languages[language_index]
-                    .configuration
-                    .as_ref()
+                let language_names = &grammars.language_names;
+                let loaded = &configurations;
+                let configuration = loaded[language_index]
+                    .as_deref()
                     .expect("selected grammar configuration is loaded");
                 let events =
                     self.highlighter
                         .highlight(configuration, buffer, cancellation_flag, |name| {
                             let &injected_language =
                                 language_names.get(&name.to_ascii_lowercase())?;
-                            let Some(configuration) =
-                                languages[injected_language].configuration.as_ref()
-                            else {
-                                missing_languages.borrow_mut().insert(injected_language);
-                                return None;
-                            };
-                            Some(configuration)
+                            match loaded[injected_language].as_deref() {
+                                Some(configuration) => Some(configuration),
+                                None => {
+                                    missing_languages.borrow_mut().insert(injected_language);
+                                    None
+                                }
+                            }
                         });
-                let events_vec: Vec<_> = events.expect("highlight failed").collect();
-                let spans = highlight_spans(events_vec.into_iter(), styles);
+                let spans = highlight_spans(events.expect("highlight failed"), styles);
                 (spans, missing_languages.into_inner())
             };
 
@@ -453,9 +639,10 @@ impl ZedSyntaxHighlighter {
                 return spans;
             }
             for injected_language in missing_languages {
-                if self.ensure_configuration(injected_language).is_err() {
+                let Ok(configuration) = grammars.configuration(injected_language) else {
                     return spans;
-                }
+                };
+                configurations[injected_language] = Some(configuration);
             }
         }
     }
@@ -556,8 +743,27 @@ fn style_for_capture(syntax_theme: &SyntaxTheme, capture_name: &str) -> Option<H
 pub(crate) fn run(arguments: Vec<String>) -> i32 {
     let (config, _) = crate::startup::load_startup_config(None, None);
     let configured_theme = config.theme.clone();
+    // Built on the first editor rather than up front, so `vi --help` and
+    // argument errors do not pay for grammars they never use. Every file in one
+    // session then shares the same compiled grammars.
+    let grammars: OnceLock<Option<Arc<GrammarSet>>> = OnceLock::new();
+
     busy_v::run_with_editor_setup(arguments, move |editor| {
-        install_background(editor, configured_theme.clone());
+        let grammars = grammars.get_or_init(|| {
+            // Resolving the theme is independent of the grammar work, so it
+            // starts here and is joined only once styles are actually needed.
+            let theme = SyntaxThemeHandle::spawn(configured_theme.clone());
+            match GrammarSet::new(theme) {
+                Ok(grammars) => Some(grammars),
+                Err(error) => {
+                    eprintln!("zetta vi: syntax highlighting unavailable: {error:#}");
+                    None
+                }
+            }
+        });
+        if let Some(grammars) = grammars.as_ref() {
+            install_background(editor, Arc::clone(grammars));
+        }
     })
 }
 
@@ -565,7 +771,8 @@ pub(crate) fn run(arguments: Vec<String>) -> i32 {
 pub(crate) fn new_shared(
     syntax_theme: Arc<SyntaxTheme>,
 ) -> anyhow::Result<Rc<RefCell<ZedSyntaxHighlighter>>> {
-    ZedSyntaxHighlighter::new(syntax_theme).map(|highlighter| Rc::new(RefCell::new(highlighter)))
+    let grammars = GrammarSet::new(SyntaxThemeHandle::ready(syntax_theme))?;
+    Ok(Rc::new(RefCell::new(ZedSyntaxHighlighter::new(grammars))))
 }
 
 struct SyntaxJob {
@@ -589,19 +796,14 @@ struct BackgroundZedSyntaxHighlighter {
     cancellation: Arc<AtomicUsize>,
     latest_revision: Arc<AtomicUsize>,
     path: Option<PathBuf>,
-    configured_theme: Option<String>,
-    preview_highlighter: Option<ZedSyntaxHighlighter>,
-    preview_initialization_attempted: bool,
+    preview_highlighter: ZedSyntaxHighlighter,
     revision: usize,
     in_flight: bool,
     pending: Option<SyntaxJob>,
 }
 
 impl BackgroundZedSyntaxHighlighter {
-    fn new(
-        path: Option<std::path::PathBuf>,
-        configured_theme: Option<String>,
-    ) -> anyhow::Result<Self> {
+    fn new(path: Option<std::path::PathBuf>, grammars: Arc<GrammarSet>) -> anyhow::Result<Self> {
         let (requests, worker_requests) = mpsc::channel();
         let (worker_results, results) = mpsc::channel();
         let cancellation = Arc::new(AtomicUsize::new(0));
@@ -609,14 +811,14 @@ impl BackgroundZedSyntaxHighlighter {
         let latest_revision = Arc::new(AtomicUsize::new(0));
         let worker_latest_revision = Arc::clone(&latest_revision);
         let worker_path = path.clone();
-        let worker_configured_theme = configured_theme.clone();
+        let worker_grammars = Arc::clone(&grammars);
 
         thread::Builder::new()
             .name("zetta-vi-syntax".to_owned())
             .spawn(move || {
                 run_syntax_worker(
                     worker_path,
-                    worker_configured_theme,
+                    worker_grammars,
                     worker_requests,
                     worker_results,
                     worker_cancellation,
@@ -631,9 +833,7 @@ impl BackgroundZedSyntaxHighlighter {
             cancellation,
             latest_revision,
             path,
-            configured_theme,
-            preview_highlighter: None,
-            preview_initialization_attempted: false,
+            preview_highlighter: ZedSyntaxHighlighter::new(grammars),
             revision: 0,
             in_flight: false,
             pending: None,
@@ -713,28 +913,15 @@ impl SyntaxHighlighter for BackgroundZedSyntaxHighlighter {
         buffer: &[u8],
         visible_range: Range<usize>,
     ) -> Option<Vec<HighlightSpan>> {
-        if !self.preview_initialization_attempted {
-            self.preview_initialization_attempted = true;
-            self.preview_highlighter = match ZedSyntaxHighlighter::new(active_syntax_theme_for(
-                self.configured_theme.as_deref(),
-            )) {
-                Ok(highlighter) => Some(highlighter),
-                Err(error) => {
-                    eprintln!("zetta vi: syntax preview unavailable: {error:#}");
-                    None
-                }
-            };
-        }
-
-        self.preview_highlighter.as_mut().map(|highlighter| {
-            highlighter.highlight_visible_path(self.path.as_deref(), buffer, visible_range)
-        })
+        Some(self.preview_highlighter.highlight_visible_path(
+            self.path.as_deref(),
+            buffer,
+            visible_range,
+        ))
     }
 
     fn invalidate_visible(&mut self) {
-        if let Some(highlighter) = self.preview_highlighter.as_mut() {
-            highlighter.invalidate_visible();
-        }
+        self.preview_highlighter.invalidate_visible();
     }
 
     fn poll(&mut self) -> Option<Vec<HighlightSpan>> {
@@ -750,22 +937,13 @@ impl SyntaxHighlighter for BackgroundZedSyntaxHighlighter {
 
 fn run_syntax_worker(
     path: Option<std::path::PathBuf>,
-    configured_theme: Option<String>,
+    grammars: Arc<GrammarSet>,
     requests: Receiver<SyntaxJob>,
     results: Sender<SyntaxResult>,
     cancellation: Arc<AtomicUsize>,
     latest_revision: Arc<AtomicUsize>,
 ) {
-    // Both theme loading and grammar-query construction happen here instead
-    // of before vi's first alternate-screen frame.
-    let mut highlighter =
-        match ZedSyntaxHighlighter::new(active_syntax_theme_for(configured_theme.as_deref())) {
-            Ok(highlighter) => Some(highlighter),
-            Err(error) => {
-                eprintln!("zetta vi: syntax highlighting unavailable: {error:#}");
-                None
-            }
-        };
+    let mut highlighter = ZedSyntaxHighlighter::new(grammars);
 
     while let Ok(mut job) = requests.recv() {
         // A completed worker can race with an edit. Prefer the newest queued
@@ -780,16 +958,11 @@ fn run_syntax_worker(
             Vec::new()
         } else {
             cancellation.store(0, Ordering::Release);
-            highlighter
-                .as_mut()
-                .map(|highlighter| {
-                    highlighter.highlight_path_with_cancellation(
-                        path.as_deref(),
-                        &job.buffer,
-                        Some(&cancellation),
-                    )
-                })
-                .unwrap_or_default()
+            highlighter.highlight_path_with_cancellation(
+                path.as_deref(),
+                &job.buffer,
+                Some(&cancellation),
+            )
         };
         if results
             .send(SyntaxResult {
@@ -803,9 +976,21 @@ fn run_syntax_worker(
     }
 }
 
-fn install_background(editor: &mut busy_v::Editor, configured_theme: Option<String>) {
+fn install_background(editor: &mut busy_v::Editor, grammars: Arc<GrammarSet>) {
     let path = editor.filename().map(Path::to_path_buf);
-    match BackgroundZedSyntaxHighlighter::new(path, configured_theme) {
+
+    // Compile the open file's grammar here, on the thread that paints the first
+    // frame, before the background worker exists. Both would otherwise race for
+    // the same lock and the foreground frame could end up waiting on a compile
+    // owned by a background thread the scheduler is free to deprioritize.
+    if let Some(language_index) = path
+        .as_deref()
+        .and_then(|path| grammars.language_index_from_path(path))
+    {
+        let _ = grammars.configuration(language_index);
+    }
+
+    match BackgroundZedSyntaxHighlighter::new(path, grammars) {
         Ok(highlighter) => editor.set_syntax_highlighter(Box::new(highlighter)),
         Err(error) => eprintln!("zetta vi: syntax highlighting unavailable: {error:#}"),
     }
@@ -822,7 +1007,7 @@ pub(crate) fn install(
     let path = editor.filename().map(Path::to_path_buf);
     let language_index = path
         .as_deref()
-        .and_then(|path| highlighter.borrow().language_index_from_path(path));
+        .and_then(|path| highlighter.borrow().grammars.language_index_from_path(path));
     editor.set_syntax_highlighter(Box::new(move |buffer: &[u8]| {
         let mut highlighter = highlighter.borrow_mut();
         match language_index {

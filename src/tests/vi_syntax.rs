@@ -4,6 +4,15 @@ use gpui::{HighlightStyle as ZedHighlightStyle, red};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+fn grammar_set(capture_names: &[&str]) -> Arc<GrammarSet> {
+    GrammarSet::new(SyntaxThemeHandle::ready(syntax_theme(capture_names)))
+        .expect("load Zed grammars")
+}
+
+fn highlighter(capture_names: &[&str]) -> ZedSyntaxHighlighter {
+    ZedSyntaxHighlighter::new(grammar_set(capture_names))
+}
+
 fn syntax_theme(capture_names: &[&str]) -> Arc<SyntaxTheme> {
     Arc::new(SyntaxTheme::new(capture_names.iter().map(|capture_name| {
         (
@@ -18,8 +27,7 @@ fn syntax_theme(capture_names: &[&str]) -> Arc<SyntaxTheme> {
 
 #[test]
 fn highlights_a_rust_file_with_zed_queries_and_theme_styles() {
-    let theme = syntax_theme(&["keyword", "function"]);
-    let mut highlighter = ZedSyntaxHighlighter::new(theme).expect("load Zed grammars");
+    let mut highlighter = highlighter(&["keyword", "function"]);
 
     let spans = highlighter.highlight_path(Some(Path::new("main.rs")), b"fn main() {}");
 
@@ -29,8 +37,7 @@ fn highlights_a_rust_file_with_zed_queries_and_theme_styles() {
 
 #[test]
 fn visible_preview_remaps_and_clips_spans_to_the_viewport() {
-    let theme = syntax_theme(&["keyword", "function"]);
-    let mut highlighter = ZedSyntaxHighlighter::new(theme).expect("load Zed grammars");
+    let mut highlighter = highlighter(&["keyword", "function"]);
     let source = b"let prefix = 1;\nfn main() {}\nlet suffix = 2;\n";
     let visible_start = source
         .windows(b"fn main() {}".len())
@@ -81,35 +88,27 @@ fn visible_preview_uses_bounded_line_aligned_context() {
 
 #[test]
 fn compiles_queries_only_for_the_selected_language() {
-    let theme = syntax_theme(&["keyword", "function"]);
-    let mut highlighter = ZedSyntaxHighlighter::new(theme).expect("load grammar metadata");
+    let grammars = grammar_set(&["keyword", "function"]);
+    let mut highlighter = ZedSyntaxHighlighter::new(Arc::clone(&grammars));
 
-    assert!(
-        highlighter
-            .languages
-            .iter()
-            .all(|language| language.configuration.is_none())
-    );
+    assert_eq!(grammars.loaded_configuration_count(), 0);
 
     let _ = highlighter.highlight_path(Some(Path::new("main.rs")), b"fn main() {}\n");
-    let loaded_configurations = highlighter
-        .languages
-        .iter()
-        .filter(|language| language.configuration.is_some())
-        .count();
-    let rust_index = *highlighter
-        .language_names
-        .get("rust")
+    let rust_index = grammars
+        .language_index_for_name("rust")
         .expect("Rust is a native grammar");
 
-    assert_eq!(loaded_configurations, 1);
-    assert!(highlighter.languages[rust_index].configuration.is_some());
+    assert_eq!(grammars.loaded_configuration_count(), 1);
+    assert!(grammars.has_configuration(rust_index));
 }
 
 #[test]
 fn background_highlighter_returns_the_current_revision() {
-    let mut highlighter = BackgroundZedSyntaxHighlighter::new(Some(PathBuf::from("main.rs")), None)
-        .expect("start syntax worker");
+    let mut highlighter = BackgroundZedSyntaxHighlighter::new(
+        Some(PathBuf::from("main.rs")),
+        grammar_set(&["keyword", "function"]),
+    )
+    .expect("start syntax worker");
     let source = b"fn main() {}\n";
 
     assert!(highlighter.highlight(source).is_empty());
@@ -131,9 +130,11 @@ fn background_highlighter_returns_the_current_revision() {
 
 #[test]
 fn background_highlighter_highlights_batch_files() {
-    let mut highlighter =
-        BackgroundZedSyntaxHighlighter::new(Some(PathBuf::from("script.cmd")), None)
-            .expect("start syntax worker");
+    let mut highlighter = BackgroundZedSyntaxHighlighter::new(
+        Some(PathBuf::from("script.cmd")),
+        grammar_set(&["keyword", "function", "string", "property"]),
+    )
+    .expect("start syntax worker");
     let source = b"@echo off\nset VAR=value\n";
 
     assert!(highlighter.highlight(source).is_empty());
@@ -156,23 +157,21 @@ fn background_highlighter_highlights_batch_files() {
 
 #[test]
 fn selects_shell_syntax_from_a_shebang_without_a_suffix() {
-    let theme = syntax_theme(&["keyword"]);
-    let highlighter = ZedSyntaxHighlighter::new(theme).expect("load Zed grammars");
+    let grammars = grammar_set(&["keyword"]);
     let source = b"#!/bin/bash\nif true; then\n";
 
     assert_eq!(
-        highlighter.language_index(Some(Path::new("script")), source),
-        highlighter.language_names.get("bash").copied()
+        grammars.language_index(Some(Path::new("script")), source),
+        grammars.language_index_for_name("bash")
     );
 }
 
 #[test]
 fn only_considers_the_first_line_for_shebang_detection() {
-    let highlighter =
-        ZedSyntaxHighlighter::new(syntax_theme(&["keyword"])).expect("load Zed grammars");
+    let grammars = grammar_set(&["keyword"]);
 
     assert_eq!(
-        highlighter.language_index(
+        grammars.language_index(
             Some(Path::new("script")),
             b"plain text\n#!/bin/bash\nif true; then\n",
         ),
@@ -182,22 +181,20 @@ fn only_considers_the_first_line_for_shebang_detection() {
 
 #[test]
 fn prefers_jsonc_for_zeds_special_jsonc_file_names() {
-    let highlighter =
-        ZedSyntaxHighlighter::new(syntax_theme(&["comment"])).expect("load Zed grammars");
+    let grammars = grammar_set(&["comment"]);
 
     assert_eq!(
-        highlighter.language_index(
+        grammars.language_index(
             Some(Path::new("tsconfig.json")),
             b"{ // comments are valid here\n}\n",
         ),
-        highlighter.language_names.get("jsonc").copied()
+        grammars.language_index_for_name("jsonc")
     );
 }
 
 #[test]
 fn highlights_markdown_fenced_code() {
-    let theme = syntax_theme(&["title", "keyword"]);
-    let mut highlighter = ZedSyntaxHighlighter::new(theme).expect("load Zed grammars");
+    let mut highlighter = highlighter(&["title", "keyword"]);
     let source = b"# Heading\n\n```rust\nfn main() {}\n```\n";
 
     let spans = highlighter.highlight_path(Some(Path::new("README.md")), source);
@@ -208,9 +205,7 @@ fn highlights_markdown_fenced_code() {
 
 #[test]
 fn highlights_jsonc_tsx_and_git_commits() {
-    let mut highlighter =
-        ZedSyntaxHighlighter::new(syntax_theme(&["comment", "keyword", "markup"]))
-            .expect("load Zed grammars");
+    let mut highlighter = highlighter(&["comment", "keyword", "markup"]);
 
     for (path, source, token) in [
         (
@@ -241,7 +236,7 @@ fn highlights_jsonc_tsx_and_git_commits() {
 
 #[test]
 fn highlights_toml_and_makefiles_from_extension_grammars() {
-    let mut highlighter = ZedSyntaxHighlighter::new(syntax_theme(&[
+    let mut highlighter = highlighter(&[
         "comment",
         "function",
         "keyword",
@@ -252,8 +247,7 @@ fn highlights_toml_and_makefiles_from_extension_grammars() {
         "string.special.path",
         "string.special.symbol",
         "type",
-    ]))
-    .expect("load Zed and extension grammars");
+    ]);
 
     for (path, source, token) in [
         (
@@ -287,25 +281,24 @@ fn highlights_toml_and_makefiles_from_extension_grammars() {
 
 #[test]
 fn recognizes_common_makefile_and_toml_paths() {
-    let highlighter =
-        ZedSyntaxHighlighter::new(syntax_theme(&[])).expect("load extension grammars");
+    let grammars = grammar_set(&[]);
 
     for path in ["Makefile", "GNUmakefile", "build.mk"] {
         assert_eq!(
-            highlighter.language_index(Some(Path::new(path)), b"all:\n"),
-            highlighter.language_names.get("makefile").copied(),
+            grammars.language_index(Some(Path::new(path)), b"all:\n"),
+            grammars.language_index_for_name("makefile"),
             "expected {path} to use Makefile syntax",
         );
     }
     assert_eq!(
-        highlighter.language_index(Some(Path::new("Cargo.toml")), b"[package]\n"),
-        highlighter.language_names.get("toml").copied(),
+        grammars.language_index(Some(Path::new("Cargo.toml")), b"[package]\n"),
+        grammars.language_index_for_name("toml"),
     );
     // Test batch file detection
     for path in ["script.bat", "script.cmd", "build-windows.cmd"] {
         assert_eq!(
-            highlighter.language_index(Some(Path::new(path)), b"@echo off\n"),
-            highlighter.language_names.get("batch").copied(),
+            grammars.language_index(Some(Path::new(path)), b"@echo off\n"),
+            grammars.language_index_for_name("batch"),
             "expected {path} to use Batch syntax",
         );
     }
@@ -356,6 +349,58 @@ fn embeds_the_native_grammar_configs_and_queries_without_zeds_rust_source() {
     assert!(
         ExtensionGrammarAssets::get("batch/highlights.scm").is_some(),
         "batch highlights.scm not embedded"
+    );
+}
+
+#[test]
+fn scanned_capture_names_cover_every_compiled_grammar() {
+    // Configurations are shared across threads and so are configured exactly
+    // once, against a table scanned out of the query text. Any capture the
+    // scanner misses would silently lose its theme style.
+    let grammars = grammar_set(&[]);
+    let known: HashSet<&str> = grammars.capture_names.iter().map(String::as_str).collect();
+
+    for language_index in 0..grammars.languages.len() {
+        let name = grammars.languages[language_index].name;
+        let configuration = grammars
+            .configuration(language_index)
+            .unwrap_or_else(|error| panic!("compiling {name:?}: {error:#}"));
+        for capture_name in configuration.names() {
+            assert!(
+                known.contains(capture_name),
+                "{name:?} declares capture {capture_name:?}, which the scanner missed",
+            );
+        }
+    }
+}
+
+#[test]
+fn every_embedded_first_line_pattern_compiles() {
+    // The patterns are compiled lazily off the startup path, so a malformed one
+    // would otherwise only surface as a silently dropped shebang at runtime.
+    let grammars = grammar_set(&[]);
+    let declared = grammars
+        .languages
+        .iter()
+        .filter(|language| language.first_line_pattern.is_some())
+        .count();
+
+    assert!(declared > 0, "expected embedded first-line patterns");
+    assert_eq!(grammars.first_line_patterns().len(), declared);
+}
+
+#[test]
+fn query_capture_scanning_skips_comments_and_anonymous_nodes() {
+    let query = r#"
+; a comment with @not.a.capture
+("@" @operator)
+((identifier) @variable.special
+  (#match? @variable.special "^@[a-z]+$"))
+"#;
+
+    assert_eq!(
+        query_capture_names(query),
+        ["operator", "variable.special", "variable.special"]
     );
 }
 
