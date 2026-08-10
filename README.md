@@ -18,7 +18,7 @@ for active development.
   tracking
 - Detachable background sessions that can survive after the last window closes
 - Optional compact mode moves tabs into the title bar, keeps Menu, Profile,
-  and Broadcast available, and preserves responsive tab sizing
+  Broadcast, and Silent available, and preserves responsive tab sizing
 - Open paths or the complete pane scrollback in `$EDITOR`, with built-in vi as
   the fallback
 - Native command, path, and SSH-alias completion in a multi-command prompt
@@ -31,6 +31,9 @@ for active development.
 - In-memory tab attention badges from `zetta attention`, with optional
   cross-platform desktop notifications that click back to the issuing visible
   tab
+- Transient process-wide Silent mode that suppresses terminal bells and
+  notification sounds while preserving notification content, actions, and
+  attention badges; it also follows system Do Not Disturb when available
 - A small syntax-highlighted built-in [vi editor](https://github.com/SaltwaterC/busy-v),
   available as `zetta vi`, unconditionally as `zvi`, and conditionally as `vi`
   through shell integration;

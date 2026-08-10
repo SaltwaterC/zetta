@@ -149,6 +149,7 @@ impl Zetta {
                                 cx,
                             )
                         });
+                        this.configure_terminal_view_silent_mode(&view, cx);
                         cx.subscribe_in(
                             &terminal,
                             window,

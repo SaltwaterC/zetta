@@ -259,6 +259,7 @@ pub struct TerminalView {
     blink_manager: Entity<BlinkManager>,
     blinking_terminal_enabled: bool,
     has_bell: bool,
+    system_bell_enabled: bool,
     custom_title: Option<String>,
     pub(crate) hover: Option<HoverTarget>,
     pub(crate) mode: TerminalMode,
@@ -275,6 +276,10 @@ pub struct TerminalView {
 }
 
 impl EventEmitter<TerminalViewEvent> for TerminalView {}
+
+fn should_play_system_bell(system_bell_enabled: bool, bell: TerminalBell) -> bool {
+    system_bell_enabled && matches!(bell, TerminalBell::System)
+}
 
 impl Focusable for TerminalView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -343,7 +348,10 @@ impl TerminalView {
                 }
                 Event::Bell => {
                     view.has_bell = true;
-                    if matches!(TerminalSettings::get_global(cx).bell, TerminalBell::System) {
+                    if should_play_system_bell(
+                        view.system_bell_enabled,
+                        TerminalSettings::get_global(cx).bell,
+                    ) {
                         window.play_system_bell();
                     }
                     cx.notify();
@@ -407,6 +415,7 @@ impl TerminalView {
             blink_manager,
             blinking_terminal_enabled: false,
             has_bell: false,
+            system_bell_enabled: true,
             custom_title: None,
             hover: None,
             mode: TerminalMode::Standalone,
@@ -431,6 +440,13 @@ impl TerminalView {
 
     pub fn terminal(&self) -> &Entity<Terminal> {
         &self.terminal
+    }
+
+    pub fn set_system_bell_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.system_bell_enabled != enabled {
+            self.system_bell_enabled = enabled;
+            cx.notify();
+        }
     }
 
     fn edit_path_like_target(&mut self, target: terminal::PathLikeTarget, cx: &mut Context<Self>) {

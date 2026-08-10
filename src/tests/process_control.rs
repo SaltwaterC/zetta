@@ -97,6 +97,30 @@ fn unknown_control_commands_are_rejected() {
 }
 
 #[test]
+fn silent_mode_control_requests_decode_without_arguments() {
+    assert_eq!(
+        decode_control_request(&mut request("token", "get_silent_mode"), "token"),
+        Some(ControlRequestCommand::GetSilentMode)
+    );
+
+    let mut invalid = request("token", "get_silent_mode");
+    invalid.profile = Some("unexpected".to_owned());
+    assert_eq!(decode_control_request(&mut invalid, "token"), None);
+}
+
+#[test]
+fn silent_mode_response_round_trips_its_state() {
+    let response = ControlResponse {
+        status: "ok".to_owned(),
+        themes: Vec::new(),
+        silent_mode: true,
+    };
+    let encoded = serde_json::to_vec(&response).unwrap();
+    let decoded: ControlResponse = serde_json::from_slice(&encoded).unwrap();
+    assert!(decoded.silent_mode);
+}
+
+#[test]
 fn tab_attention_control_requests_validate_target_and_payload() {
     let mut attention = request("token", "set_tab_attention");
     attention.attention_id = Some(42);

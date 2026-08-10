@@ -1012,6 +1012,7 @@ impl Zetta {
             .on_action(cx.listener(Self::select_previous_minimized_pane))
             .on_action(cx.listener(Self::select_next_minimized_pane))
             .on_action(cx.listener(Self::toggle_broadcast_input))
+            .on_action(cx.listener(Self::toggle_silent_mode))
             .on_action(cx.listener(Self::toggle_multi_command))
             .on_action(cx.listener(Self::increase_terminal_font_size))
             .on_action(cx.listener(Self::decrease_terminal_font_size))

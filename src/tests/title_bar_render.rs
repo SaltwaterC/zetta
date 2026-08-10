@@ -122,6 +122,14 @@ fn non_macos_fullscreen_compact_chrome_keeps_reservations() {
 fn hiding_title_bar_buttons_hides_broadcast_in_compact_mode() {
     assert!(title_bar_broadcast_visible(false));
     assert!(!title_bar_broadcast_visible(true));
+    assert!(title_bar_silent_visible(false));
+    assert!(!title_bar_silent_visible(true));
+}
+
+#[test]
+fn silent_title_bar_control_uses_the_bell_state_icons() {
+    assert_eq!(title_bar_silent_icon(false), IconName::Bell);
+    assert_eq!(title_bar_silent_icon(true), IconName::BellOff);
 }
 
 #[test]

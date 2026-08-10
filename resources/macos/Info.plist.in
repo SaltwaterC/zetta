@@ -28,5 +28,7 @@
 	<string>public.app-category.utilities</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSFocusStatusUsageDescription</key>
+	<string>Zetta uses Focus status to silence terminal bells and notification sounds while Do Not Disturb is active.</string>
 </dict>
 </plist>

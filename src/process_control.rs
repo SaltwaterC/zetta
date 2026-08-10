@@ -26,7 +26,7 @@ use ui::IconName;
 
 use crate::pane::{OverlayFontSize, PaneOverlayRequest, overlay_color_from_value};
 
-const CONTROL_VERSION: u32 = 7;
+const CONTROL_VERSION: u32 = 8;
 const MAX_CONTROL_MESSAGE_BYTES: usize = 4096;
 const CONTROL_COMPLETION_TIMEOUT: Duration = Duration::from_secs(2);
 const CONTROL_COMPLETION_POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -109,6 +109,9 @@ pub(crate) enum ProcessControlCommand {
         request: TabNameRequest,
         completion: Sender<bool>,
     },
+    GetSilentMode {
+        completion: Sender<bool>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -152,6 +155,7 @@ enum ControlRequestCommand {
         attention_id: u64,
         name: Option<String>,
     },
+    GetSilentMode,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -191,6 +195,8 @@ struct ControlResponse {
     status: String,
     #[serde(default)]
     themes: Vec<String>,
+    #[serde(default)]
+    silent_mode: bool,
 }
 
 pub(crate) struct ProcessControlServer {
@@ -240,6 +246,7 @@ impl ProcessControlServer {
                     let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
                     let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
                     let mut response_themes = Vec::new();
+                    let mut response_silent_mode = false;
                     let status = match handle_control_request(&mut stream, &token) {
                         Some(ControlRequestCommand::ReloadConfiguration { config_path }) => {
                             let (completion, completed) = channel();
@@ -403,6 +410,22 @@ impl ProcessControlServer {
                                 && wait_for_control_completion(&completed, &stopping_for_thread);
                             if accepted { "ok" } else { "rejected" }
                         }
+                        Some(ControlRequestCommand::GetSilentMode) => {
+                            let (completion, completed) = channel();
+                            if commands
+                                .unbounded_send(ProcessControlCommand::GetSilentMode { completion })
+                                .is_err()
+                            {
+                                "rejected"
+                            } else if let Some(silent_mode) =
+                                wait_for_silent_mode_completion(&completed, &stopping_for_thread)
+                            {
+                                response_silent_mode = silent_mode;
+                                "ok"
+                            } else {
+                                "rejected"
+                            }
+                        }
                         None => "rejected",
                     };
                     let status = if status == "ok" && stopping_for_thread.load(Ordering::Acquire) {
@@ -415,6 +438,7 @@ impl ProcessControlServer {
                         &ControlResponse {
                             status: status.to_owned(),
                             themes: response_themes,
+                            silent_mode: response_silent_mode,
                         },
                     );
                 }
@@ -459,6 +483,27 @@ fn wait_for_control_completion(completed: &Receiver<bool>, stopping: &AtomicBool
             Ok(accepted) => return accepted && !stopping.load(Ordering::Acquire),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return false,
+        }
+    }
+}
+
+fn wait_for_silent_mode_completion(
+    completed: &Receiver<bool>,
+    stopping: &AtomicBool,
+) -> Option<bool> {
+    let deadline = Instant::now() + CONTROL_COMPLETION_TIMEOUT;
+    loop {
+        if stopping.load(Ordering::Acquire) {
+            return None;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        match completed.recv_timeout(remaining.min(CONTROL_COMPLETION_POLL_INTERVAL)) {
+            Ok(silent_mode) => return (!stopping.load(Ordering::Acquire)).then_some(silent_mode),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return None,
         }
     }
 }
@@ -578,6 +623,22 @@ fn decode_control_request(
                 && request.secret.is_none() =>
         {
             Some(ControlRequestCommand::OpenWindow)
+        }
+        "get_silent_mode"
+            if request.runner_id.is_none()
+                && request.session_id.is_none()
+                && request.secret.is_none()
+                && request.icon.is_none()
+                && request.pane_theme.is_none()
+                && request.pane_overlay.is_none()
+                && request.pane_overlay_font_size.is_none()
+                && request.pane_overlay_opacity.is_none()
+                && request.pane_overlay_color.is_none()
+                && request.split.is_none()
+                && request.profile.is_none()
+                && request.theme.is_none() =>
+        {
+            Some(ControlRequestCommand::GetSilentMode)
         }
         "replace_pane"
             if request.runner_id.is_none()
@@ -1049,6 +1110,25 @@ pub(crate) fn request_process_tab_attention(
 }
 
 #[cfg(feature = "notifications")]
+pub(crate) fn request_process_silent_mode(process_id: u32) -> Result<bool> {
+    anyhow::ensure!(process_id != 0, "process ID must be positive");
+    let endpoint_path = control_endpoint_path(process_id);
+    let contents = fs::read(&endpoint_path).with_context(|| {
+        format!(
+            "reading Zetta process control endpoint {}",
+            endpoint_path.display()
+        )
+    })?;
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&contents).context("parsing Zetta process control endpoint")?;
+    anyhow::ensure!(
+        endpoint.version == CONTROL_VERSION && endpoint.process_id == process_id,
+        "Zetta process control endpoint is outdated"
+    );
+    send_get_silent_mode_request(&endpoint)
+}
+
+#[cfg(feature = "notifications")]
 pub(crate) fn request_process_focus_tab(process_id: u32, attention_id: u64) -> Result<bool> {
     anyhow::ensure!(process_id != 0, "process ID must be positive");
     anyhow::ensure!(attention_id != 0, "attention ID must be positive");
@@ -1115,6 +1195,43 @@ fn send_open_window_request(endpoint: &ControlEndpoint) -> Result<bool> {
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
     Ok(response.status == "ok")
+}
+
+#[cfg(feature = "notifications")]
+fn send_get_silent_mode_request(endpoint: &ControlEndpoint) -> Result<bool> {
+    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
+    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    write_message(
+        &mut stream,
+        &ControlRequest {
+            token: endpoint.token.clone(),
+            command: "get_silent_mode".to_owned(),
+            runner_id: None,
+            session_id: None,
+            secret: None,
+            icon: None,
+            pane_theme: None,
+            pane_overlay: None,
+            pane_overlay_font_size: None,
+            pane_overlay_opacity: None,
+            pane_overlay_color: None,
+            attention_id: None,
+            attention_summary: None,
+            attention_body: None,
+            tab_name: None,
+            config_path: None,
+            split: None,
+            profile: None,
+            theme: None,
+        },
+    )?;
+    let response = read_message::<ControlResponse>(&mut stream)?;
+    anyhow::ensure!(
+        response.status == "ok",
+        "target process rejected silent mode query"
+    );
+    Ok(response.silent_mode)
 }
 
 fn send_set_tab_attention_request(

@@ -113,7 +113,9 @@ the current active tab. When a notification is issued from a Zetta terminal,
 clicking its body activates the issuing window and visible tab. Dismissal,
 expiry, replies, and other actions do not focus; closed, dormant, and
 background-only tabs are no-ops. Packaged macOS app builds route clicks, while
-unbundled development builds only display the notification.
+unbundled development builds only display the notification. Silent mode can
+suppress the terminal bell and notification sounds without suppressing this
+badge, notification content, or its actions.
 
 Press `Ctrl-Shift-G`, or right-click a tab and choose the checked `Tab Move
 Mode` entry, to make that tab the active moving tab. A `Move tab ← →` indicator

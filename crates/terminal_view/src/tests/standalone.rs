@@ -45,6 +45,13 @@ fn disabled_input_events_are_not_allocated() {
 }
 
 #[test]
+fn silent_mode_only_gates_the_system_bell() {
+    assert!(should_play_system_bell(true, TerminalBell::System));
+    assert!(!should_play_system_bell(false, TerminalBell::System));
+    assert!(!should_play_system_bell(true, TerminalBell::Off));
+}
+
+#[test]
 fn shifted_right_click_opens_the_context_menu() {
     assert_eq!(
         right_click_action(true, true, true),

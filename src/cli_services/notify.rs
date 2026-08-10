@@ -613,6 +613,7 @@ fn notification_response_activates_tab(response: &notify_rust::NotificationRespo
 fn build_notification(
     command: &NotifyCommand,
     _target: Option<NotificationTarget>,
+    silent: bool,
 ) -> Result<notify_rust::Notification> {
     let mut notification = notify_rust::Notification::new();
     notification.summary(&command.summary);
@@ -641,12 +642,20 @@ fn build_notification(
     #[cfg(not(target_os = "windows"))]
     set_unix_notification_identity(&mut notification, command)?;
 
-    let bundled_sound = command
-        .sound
-        .as_deref()
-        .and_then(crate::notification_sounds::BuiltinSound::parse);
-    if let Some(sound) = command.sound.as_deref().filter(|_| bundled_sound.is_none()) {
+    let bundled_sound = (!silent)
+        .then(|| {
+            command
+                .sound
+                .as_deref()
+                .and_then(crate::notification_sounds::BuiltinSound::parse)
+        })
+        .flatten();
+    if !silent && let Some(sound) = command.sound.as_deref().filter(|_| bundled_sound.is_none()) {
         notification.sound_name(sound);
+    }
+    #[cfg(linux_like)]
+    if silent {
+        notification.hint(notify_rust::Hint::SuppressSound(true));
     }
     if let Some(timeout) = command.timeout {
         notification.timeout(notify_rust_timeout(timeout));
@@ -672,35 +681,46 @@ pub(crate) fn run_notification(
     {
         return spawn_notification_worker(command, target, executable);
     }
-    // Unbundled macOS development binaries deliberately remain fire-and-forget.
-    command.run(None)
+    // Unbundled macOS development binaries deliberately remain fire-and-forget
+    // for click routing, but retain the target long enough to query its Silent
+    // mode before showing the notification.
+    command.run(target)
 }
 
 impl NotificationRequest {
     pub(super) fn run(&self, target: Option<NotificationTarget>) -> Result<()> {
+        let silent = target
+            .map(|target| {
+                crate::process_control::request_process_silent_mode(target.process_id)
+                    .unwrap_or(false)
+            })
+            .unwrap_or_else(crate::silent_mode::system_silence_active_non_prompting);
         #[cfg(target_os = "macos")]
         {
-            self.run_macos(target)
+            self.run_macos(target, silent)
         }
 
         #[cfg(not(target_os = "macos"))]
         {
-            self.run_non_macos(target)
+            self.run_non_macos(target, silent)
         }
     }
 
     #[cfg(target_os = "macos")]
-    fn run_macos(&self, target: Option<NotificationTarget>) -> Result<()> {
+    fn run_macos(&self, target: Option<NotificationTarget>, silent: bool) -> Result<()> {
         let bundled = mac_usernotifications::check_bundle().is_ok();
         if !bundled && target.is_none() && rerun_notification_from_macos_bundle(self)? {
             return Ok(());
         }
 
-        let bundled_sound = self
-            .sound
-            .as_deref()
-            .and_then(crate::notification_sounds::BuiltinSound::parse);
-        let notification_sound = macos_notification_sound(self);
+        let bundled_sound = (!silent)
+            .then(|| {
+                self.sound
+                    .as_deref()
+                    .and_then(crate::notification_sounds::BuiltinSound::parse)
+            })
+            .flatten();
+        let notification_sound = (!silent).then(|| macos_notification_sound(self)).flatten();
 
         if let Some(target) = target
             && bundled
@@ -725,14 +745,18 @@ impl NotificationRequest {
     }
 
     #[cfg(not(target_os = "macos"))]
-    fn run_non_macos(&self, target: Option<NotificationTarget>) -> Result<()> {
-        let bundled_sound = self
-            .sound
-            .as_deref()
-            .and_then(crate::notification_sounds::BuiltinSound::parse);
+    fn run_non_macos(&self, target: Option<NotificationTarget>, silent: bool) -> Result<()> {
+        let bundled_sound = (!silent)
+            .then(|| {
+                self.sound
+                    .as_deref()
+                    .and_then(crate::notification_sounds::BuiltinSound::parse)
+            })
+            .flatten();
 
         #[cfg(linux_like)]
-        if target.is_none()
+        if !silent
+            && target.is_none()
             && (bundled_sound.is_some() || self.sound.is_none())
             && try_show_portal_notification(self)?
         {
@@ -747,7 +771,7 @@ impl NotificationRequest {
             return spawn_notification_daemon(self);
         }
 
-        let notification = build_notification(self, target)?;
+        let notification = build_notification(self, target, silent)?;
         let notification_handle = notification
             .show()
             .map_err(|error| anyhow::anyhow!("{error}"))

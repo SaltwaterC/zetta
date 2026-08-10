@@ -133,11 +133,38 @@ fn targeted_linux_notifications_add_only_the_xdg_default_action() {
         process_id: 42,
         attention_id: 7,
     };
-    let targeted = build_notification(&command, Some(target)).unwrap();
+    let targeted = build_notification(&command, Some(target), false).unwrap();
     assert_eq!(targeted.actions, ["default", ""]);
 
-    let untargeted = build_notification(&command, None).unwrap();
+    let untargeted = build_notification(&command, None, false).unwrap();
     assert!(untargeted.actions.is_empty());
+}
+
+#[cfg(linux_like)]
+#[test]
+fn silent_notifications_keep_actions_but_suppress_all_sound_sources() {
+    let command = NotifyCommand {
+        summary: "Build finished".to_owned(),
+        body: None,
+        app_name: None,
+        icon: Some("icon.png".to_owned()),
+        sound: Some("message-new-instant".to_owned()),
+        timeout: None,
+    };
+    let target = NotificationTarget {
+        process_id: 42,
+        attention_id: 7,
+    };
+    let notification = build_notification(&command, Some(target), true).unwrap();
+    assert_eq!(notification.actions, ["default", ""]);
+    assert!(
+        notification
+            .hints
+            .contains(&notify_rust::Hint::SuppressSound(true))
+    );
+    assert!(!notification.hints.contains(&notify_rust::Hint::SoundName(
+        "message-new-instant".to_owned()
+    )));
 }
 
 #[test]

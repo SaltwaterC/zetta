@@ -912,12 +912,14 @@ pub(crate) fn run() -> Result<()> {
                 dormant: Vec::new(),
                 runners: HashMap::new(),
                 next_attention_id: 1,
+                silent_mode: SilentModeState::default(),
                 background_session_entries: Arc::from([]),
                 config: config.clone(),
                 configuration_error: configuration_error.clone(),
                 control_server,
                 _quit_subscription: quit_subscription,
             });
+            silent_mode::start_observer(cx);
             cx.intercept_keystrokes(|event, _window, cx| {
                 let reverse = match event.keystroke.key.as_str() {
                     "tab" => event.keystroke.modifiers.shift,
@@ -1279,6 +1281,17 @@ pub(crate) fn run() -> Result<()> {
                                 })
                             });
                             let _ = completion.send(accepted);
+                        }
+                        ProcessControlCommand::GetSilentMode { completion } => {
+                            let silent_mode = cx.update(|cx| {
+                                cx.has_global::<ZettaProcessState>()
+                                    && cx
+                                        .global::<ZettaProcessState>()
+                                        .control_server
+                                        .is_accepting()
+                                    && cx.global::<ZettaProcessState>().silent_mode.effective()
+                            });
+                            let _ = completion.send(silent_mode);
                         }
                         ProcessControlCommand::ReconnectSession {
                             runner_id,

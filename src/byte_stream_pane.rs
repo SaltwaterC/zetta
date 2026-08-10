@@ -98,6 +98,7 @@ impl Zetta {
         );
         let terminal = cx.new(|cx| builder.subscribe(cx));
         let view = cx.new(|cx| TerminalView::new_with_theme(terminal, terminal_theme, window, cx));
+        self.configure_terminal_view_silent_mode(&view, cx);
         let input_policy = request.input;
         let emit_input_events = match input_policy {
             ByteStreamInputPolicy::CloseOnInterrupt => true,

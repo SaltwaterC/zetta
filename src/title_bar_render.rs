@@ -155,6 +155,18 @@ pub(crate) fn title_bar_broadcast_visible(hide_buttons: bool) -> bool {
     !hide_buttons
 }
 
+pub(crate) fn title_bar_silent_visible(hide_buttons: bool) -> bool {
+    !hide_buttons
+}
+
+pub(crate) fn title_bar_silent_icon(silent_mode: bool) -> IconName {
+    if silent_mode {
+        IconName::BellOff
+    } else {
+        IconName::Bell
+    }
+}
+
 pub(crate) fn title_bar_background_indicator_on_right(
     compact_mode: bool,
     hide_buttons: bool,
@@ -484,6 +496,11 @@ impl Zetta {
         let title_bar_height = frame.title_bar_height;
         let active_tab = self.tabs.get(self.active_tab);
         let broadcast_input = active_tab.is_some_and(|tab| tab.broadcast_input);
+        let silent_mode_state = if cx.has_global::<ZettaProcessState>() {
+            cx.global::<ZettaProcessState>().silent_mode
+        } else {
+            SilentModeState::default()
+        };
         let (auto_background_tab, auto_background_protected) = active_tab
             .map(|tab| match &tab.close_policy {
                 TabClosePolicy::Background { authentication } => (true, authentication.is_some()),
@@ -633,6 +650,9 @@ impl Zetta {
             reconnect_control,
             title_bar_broadcast_visible(self.launch_config.hide_title_bar_buttons),
             broadcast_input,
+            title_bar_silent_visible(self.launch_config.hide_title_bar_buttons),
+            silent_mode_state.effective(),
+            silent_mode_state.system_active(),
             compact_tab_bar,
             active_pane_size,
             right_title_bar_controls,
@@ -891,6 +911,9 @@ impl Zetta {
         reconnect_control: Option<AnyElement>,
         show_broadcast_control: bool,
         broadcast_input: bool,
+        show_silent_control: bool,
+        silent_mode: bool,
+        system_silent: bool,
         compact_tab_bar: Option<AnyElement>,
         active_pane_size: Option<String>,
         right_title_bar_controls: AnyElement,
@@ -934,6 +957,51 @@ impl Zetta {
                 &ToggleBroadcastInput,
             ))
             .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleBroadcastInput), cx));
+
+            if compact_mode {
+                render_compact_tab_neighbor_control(button, title_bar_background)
+            } else {
+                button.into_any_element()
+            }
+        });
+        let silent_control = show_silent_control.then(|| {
+            let button = Button::new(
+                "toggle-silent-mode",
+                if show_title_bar_control_labels {
+                    "Silent"
+                } else {
+                    ""
+                },
+            )
+            .start_icon(
+                Icon::new(title_bar_silent_icon(silent_mode))
+                    .size(IconSize::Small)
+                    .color(if silent_mode {
+                        Color::Selected
+                    } else {
+                        Color::Default
+                    }),
+            )
+            .style(ButtonStyle::Subtle)
+            .size(ButtonSize::Large)
+            .toggle_state(silent_mode)
+            .disabled(system_silent)
+            .aria_label(if silent_mode {
+                "Silent mode is on"
+            } else {
+                "Silent mode is off"
+            })
+            .tooltip(Tooltip::for_action_title(
+                if system_silent {
+                    "Silent mode is controlled by Do Not Disturb"
+                } else if silent_mode {
+                    "Silent mode is on"
+                } else {
+                    "Silence terminal bells and notification sounds"
+                },
+                &ToggleSilentMode,
+            ))
+            .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleSilentMode), cx));
 
             if compact_mode {
                 render_compact_tab_neighbor_control(button, title_bar_background)
@@ -1079,6 +1147,9 @@ impl Zetta {
                     })
                     .when_some(broadcast_control, |controls, broadcast_control| {
                         controls.child(broadcast_control)
+                    })
+                    .when_some(silent_control, |controls, silent_control| {
+                        controls.child(silent_control)
                     }),
             )
             .when_some(compact_tab_bar, |title_bar, tab_bar| {

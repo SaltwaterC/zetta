@@ -138,6 +138,14 @@ first invocation asks macOS for notification permission. Standalone development
 builds fall back to macOS's bundled script host, so they do not require an app
 bundle merely to show a notification.
 
+Silent mode is a transient process-wide control available from the title bar
+and command palette. It suppresses terminal bells and every notification sound
+source while leaving notification content, actions, and tab-attention badges
+unchanged. Its effective state is manual Silent mode or the detected system Do
+Not Disturb state; Zetta observes system Do Not Disturb and never changes it.
+Manual toggling is temporarily disabled while system Do Not Disturb is active,
+then the previous manual preference resumes.
+
 ```sh
 zetta notify "Build finished"
 zetta notify "Build finished" "All tests passed"

@@ -5048,6 +5048,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-intents"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "80fac082e6de12282b24ea745e9707cd374363c7ae0b2f813bf1813cfc289325"
+dependencies = [
+ "block2 0.6.2",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+]
+
+[[package]]
 name = "objc2-io-kit"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10750,6 +10761,8 @@ dependencies = [
  "notify-rust",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "objc2-intents",
  "regex",
  "release_channel",
  "reqwest_client",
@@ -10800,6 +10813,7 @@ dependencies = [
  "util",
  "windows 0.61.3",
  "windows-registry 0.5.3",
+ "zbus",
  "zed_actions",
  "zeroize",
 ]

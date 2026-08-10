@@ -18,6 +18,7 @@ mod session_auth_ui;
 mod session_cli;
 mod settings_editor;
 mod shell_integration;
+mod silent_mode;
 #[cfg(tftp_enabled)]
 mod tftp;
 mod theme_extensions;
@@ -81,6 +82,7 @@ use settings_editor::{
     BindingForm, ConfigTextField, ConfigurationForm, KeymapForm, KeymapSectionForm,
     KeymapTextField, SettingsPage, TextField, save as save_settings_file,
 };
+use silent_mode::SilentModeState;
 use task::Shell;
 use terminal::{
     Clear, Event as TerminalEvent, Paste, PasteTrimmed, Search, Terminal, TerminalBuilder,
@@ -167,6 +169,7 @@ actions!(
         SelectPreviousMinimizedPane,
         SelectNextMinimizedPane,
         ToggleBroadcastInput,
+        ToggleSilentMode,
         ToggleMultiCommand,
         IncreaseTerminalFontSize,
         DecreaseTerminalFontSize,
@@ -228,6 +231,7 @@ struct ZettaProcessState {
     dormant: Vec<Entity<Zetta>>,
     runners: HashMap<u64, Entity<Zetta>>,
     next_attention_id: u64,
+    silent_mode: SilentModeState,
     background_session_entries: Arc<[ProcessBackgroundSessionEntry]>,
     config: Config,
     configuration_error: Option<String>,
