@@ -76,6 +76,50 @@ fn copies_files_directories_and_uses_regular_fallback_when_cow_is_unavailable() 
     assert_eq!(fs::read_to_string(source.join("file")).unwrap(), "source\n");
 }
 
+#[test]
+fn cow_capability_query_handles_supported_unsupported_and_missing_destinations() {
+    let temporary = TempDir::new().unwrap();
+    let source = temporary.path().join("source");
+    let destination = temporary.path().join("destination");
+    let missing_destination = destination.join("future/nested");
+    fs::create_dir(&source).unwrap();
+    fs::create_dir(&destination).unwrap();
+
+    let expected = !matches!(
+        detect_cow_filesystem(&source, &destination),
+        CowFilesystem::Unsupported
+    );
+    assert_eq!(cow_copy_supported(&source, &destination), expected);
+    assert_eq!(cow_copy_supported(&source, &missing_destination), expected);
+    assert!(!cow_copy_supported(
+        &temporary.path().join("missing-source"),
+        &destination
+    ));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn cow_capability_query_rejects_different_filesystems() {
+    let source_temporary = TempDir::new().unwrap();
+    let Ok(destination_temporary) = TempDir::new_in("/dev/shm") else {
+        return;
+    };
+    let Some(source_type) = linux_filesystem_type(source_temporary.path()) else {
+        return;
+    };
+    let Some(destination_type) = linux_filesystem_type(destination_temporary.path()) else {
+        return;
+    };
+    if source_type == destination_type {
+        return;
+    }
+
+    assert!(!cow_copy_supported(
+        source_temporary.path(),
+        &destination_temporary.path().join("missing")
+    ));
+}
+
 #[cfg(unix)]
 #[test]
 fn preserves_symlinks_without_traversing_them() {

@@ -13,7 +13,7 @@ use std::os::unix::ffi::OsStringExt;
 
 use crate::process_control::{TabNameRequest, request_process_tab_name};
 use crate::worktree_copy::{
-    copy_paths as copy_worktree_paths, validate_copy_path, validate_copy_paths,
+    copy_paths as copy_worktree_paths, cow_copy_supported, validate_copy_path, validate_copy_paths,
     validate_copy_sources,
 };
 use anyhow::{Context as _, Result};
@@ -208,6 +208,8 @@ pub(crate) fn worktree_new_help() -> &'static str {
         "rejected. Native copy-on-write cloning is used when the filesystem supports it, with\n",
         "a regular recursive-copy fallback elsewhere. A copy failure removes the new\n",
         "worktree, branch, metadata, and directories created for its root.\n\n",
+        "new reports phase progress on standard error while creating the worktree,\n",
+        "initializing submodules, copying paths, and recording metadata.\n\n",
         "Options:\n",
         "  -c, --copy PATH                   Copy a source-worktree path (repeatable)\n",
         "  -P, --path-only                   Print exactly the created worktree path\n",
@@ -222,7 +224,21 @@ pub(crate) fn worktree_done_help() -> &'static str {
 }
 
 pub(crate) fn worktree_status_help() -> &'static str {
-    "Show Git worktree workflow state\n\nUsage: zetta wt status\n\nPrints repository root, current worktree, attached or detached branch state, recorded\nsource branch, and resolved wt.root. The root is marked configured or default and\nstatus never creates the root directory. For example, configure it with\ngit config --local wt.root ../project-worktrees; relative values resolve from the\nrepository root. If it is unset, Zetta uses sibling <repository>-worktrees.\n\nRun zetta wt rerere before integrating worktrees to enable Git's recorded conflict\nresolution helpers. The direct CLI never changes directory; generated zwt new and\nzwt done wrappers enter worktrees only after successful operations."
+    concat!(
+        "Show Git worktree workflow state\n\n",
+        "Usage: zetta wt status\n\n",
+        "Prints repository root, current worktree, attached or detached branch state, recorded\n",
+        "source branch, resolved wt.root, whether the current HEAD contains submodules, the\n",
+        "detected submodule paths (including nested paths), and whether native copy-on-write\n",
+        "copying is available between the current worktree and wt.root. The root is marked\n",
+        "configured or default and status never creates it; a missing root is checked through\n",
+        "its nearest existing ancestor. For example, configure it with git config --local\n",
+        "wt.root ../project-worktrees; relative values resolve from the repository root. If it\n",
+        "is unset, Zetta uses sibling <repository>-worktrees.\n\n",
+        "Run zetta wt rerere before integrating worktrees to enable Git's recorded conflict\n",
+        "resolution helpers. The direct CLI never changes directory; generated zwt new and\n",
+        "zwt done wrappers enter worktrees only after successful operations."
+    )
 }
 
 pub(crate) fn worktree_rerere_help() -> &'static str {
@@ -345,6 +361,7 @@ fn run_new(
         destination.as_os_str().to_os_string(),
         os(source_branch),
     ];
+    eprintln!("Creating worktree at {}...", destination.display());
     let add_output = run_git(Some(&repository.current_worktree), &add_arguments)?;
     if !add_output.status.success() {
         remove_empty_directories(&created_directories);
@@ -352,28 +369,32 @@ fn run_new(
     }
 
     let metadata_key = metadata_key(&branch);
-    if !source_submodules.is_empty()
-        && let Err(error) = initialize_submodules(
+    if !source_submodules.is_empty() {
+        eprintln!("Initializing submodules...");
+        if let Err(error) = initialize_submodules(
             &destination,
             &repository.current_worktree,
             &source_submodules,
-        )
-    {
-        let rollback_errors = rollback_new_worktree(
-            &repository.current_worktree,
-            &destination,
-            &branch,
-            &metadata_key,
-            &created_directories,
-        );
-        let mut message = format!("initializing worktree submodules failed: {error}");
-        if !rollback_errors.is_empty() {
-            message.push_str("; rollback also failed: ");
-            message.push_str(&rollback_errors.join("; "));
+        ) {
+            let rollback_errors = rollback_new_worktree(
+                &repository.current_worktree,
+                &destination,
+                &branch,
+                &metadata_key,
+                &created_directories,
+            );
+            let mut message = format!("initializing worktree submodules failed: {error}");
+            if !rollback_errors.is_empty() {
+                message.push_str("; rollback also failed: ");
+                message.push_str(&rollback_errors.join("; "));
+            }
+            return Err(anyhow::anyhow!(message));
         }
-        return Err(anyhow::anyhow!(message));
     }
 
+    if !copy_paths.is_empty() {
+        eprintln!("Copying requested paths...");
+    }
     if let Err(error) = copy_worktree_paths(&repository.current_worktree, &destination, copy_paths)
     {
         let rollback_errors = rollback_new_worktree(
@@ -397,6 +418,7 @@ fn run_new(
         os(&metadata_key),
         os(source_branch),
     ];
+    eprintln!("Recording worktree metadata...");
     let metadata_output = run_git(Some(&repository.current_worktree), &metadata_arguments)?;
     if !metadata_output.status.success() {
         let rollback_errors = rollback_new_worktree(
@@ -566,13 +588,32 @@ fn status_report(repository: &Repository, resolved_root: &ResolvedRoot) -> Resul
     } else {
         "default"
     };
+    let submodule_paths = all_gitlink_paths(&repository.current_worktree, "HEAD")?;
+    let cow_status = if cow_copy_supported(&repository.current_worktree, &resolved_root.path) {
+        "available"
+    } else {
+        "unavailable"
+    };
 
-    Ok(format!(
+    let mut report = format!(
         "Repository root: {}\nCurrent worktree: {}\nCurrent branch: {branch}\nCurrent branch state: {branch_state}\nRecorded source branch: {source_branch}\nResolved wt.root: {} ({root_kind})\n",
         repository.root.display(),
         repository.current_worktree.display(),
         resolved_root.path.display()
-    ))
+    );
+    if submodule_paths.is_empty() {
+        report.push_str("Submodules: none\n");
+    } else {
+        report.push_str(&format!(
+            "Submodules: present ({})\nSubmodule paths:\n",
+            submodule_paths.len()
+        ));
+        for path in submodule_paths {
+            report.push_str(&format!("  {}\n", path.display()));
+        }
+    }
+    report.push_str(&format!("Native CoW copying: {cow_status}\n"));
+    Ok(report)
 }
 
 fn run_rerere(current_directory: Option<&Path>) -> Result<()> {
@@ -817,6 +858,18 @@ fn remove_empty_directories(directories: &[PathBuf]) {
 }
 
 fn gitlink_paths(repository: &Path, treeish: &str) -> Result<Vec<PathBuf>> {
+    Ok(gitlink_entries(repository, treeish)?
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect())
+}
+
+struct GitlinkEntry {
+    path: PathBuf,
+    commit: String,
+}
+
+fn gitlink_entries(repository: &Path, treeish: &str) -> Result<Vec<GitlinkEntry>> {
     let arguments = vec![
         os("ls-tree"),
         os("-r"),
@@ -831,10 +884,42 @@ fn gitlink_paths(repository: &Path, treeish: &str) -> Result<Vec<PathBuf>> {
         "could not inspect Git tree for submodules: {}",
         git_diagnostic(&output)
     );
-    parse_gitlink_paths(&output.stdout)
+    parse_gitlink_entries(&output.stdout)
 }
 
+fn all_gitlink_paths(repository: &Path, treeish: &str) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    collect_gitlink_paths(repository, treeish, Path::new(""), &mut paths)?;
+    Ok(paths)
+}
+
+fn collect_gitlink_paths(
+    repository: &Path,
+    treeish: &str,
+    prefix: &Path,
+    paths: &mut Vec<PathBuf>,
+) -> Result<()> {
+    for entry in gitlink_entries(repository, treeish)? {
+        let full_path = prefix.join(&entry.path);
+        paths.push(full_path.clone());
+
+        let submodule = repository.join(&entry.path);
+        if is_valid_reference_repository(&submodule) {
+            collect_gitlink_paths(&submodule, &entry.commit, &full_path, paths)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 fn parse_gitlink_paths(output: &[u8]) -> Result<Vec<PathBuf>> {
+    Ok(parse_gitlink_entries(output)?
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect())
+}
+
+fn parse_gitlink_entries(output: &[u8]) -> Result<Vec<GitlinkEntry>> {
     let mut paths = Vec::new();
     for record in output.split(|byte| *byte == 0) {
         if record.is_empty() {
@@ -847,12 +932,29 @@ fn parse_gitlink_paths(output: &[u8]) -> Result<Vec<PathBuf>> {
         if !record.starts_with(b"160000 ") {
             continue;
         }
+        let mut header = record[..tab].split(|byte| byte.is_ascii_whitespace());
+        anyhow::ensure!(
+            header.next() == Some(b"160000".as_slice())
+                && header.next() == Some(b"commit".as_slice()),
+            "Git returned a malformed gitlink entry while finding submodules"
+        );
+        let commit = header
+            .next()
+            .context("Git returned a gitlink without a commit while finding submodules")?;
+        anyhow::ensure!(
+            header.next().is_none(),
+            "Git returned a malformed gitlink entry while finding submodules"
+        );
         let path = &record[tab + 1..];
         anyhow::ensure!(
             !path.is_empty(),
             "Git returned an empty submodule path while finding submodules"
         );
-        paths.push(git_path_from_bytes(path));
+        paths.push(GitlinkEntry {
+            path: git_path_from_bytes(path),
+            commit: String::from_utf8(commit.to_vec())
+                .context("Git returned a non-text gitlink commit while finding submodules")?,
+        });
     }
     Ok(paths)
 }

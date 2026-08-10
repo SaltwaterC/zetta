@@ -109,7 +109,11 @@ and metadata. See [Using Zetta](docs/usage.md#git-worktrees) for configuration
 and safety details. When these commands run inside a Zetta terminal, a successful
 `new NAME` names the originating tab exactly `NAME`; a successful `done` clears
 that custom tab name. The Git operations and `--path-only` output do not depend
-on Zetta being available.
+on Zetta being available. `wt status` also reports whether the current `HEAD`
+contains submodules, lists detected nested submodule paths, and reports native
+copy-on-write availability for the current worktree and resolved `wt.root`.
+`wt new` emits phase progress on stderr while preserving its normal and
+`--path-only` stdout.
 
 ## Multi-command prompt
 

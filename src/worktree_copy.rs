@@ -132,6 +132,16 @@ pub(crate) fn copy_paths(
     copy_paths_with_backend(source_root, destination_root, paths, &backend)
 }
 
+pub(crate) fn cow_copy_supported(source_root: &Path, destination_root: &Path) -> bool {
+    let Some(destination_probe) = nearest_existing_path(destination_root) else {
+        return false;
+    };
+    !matches!(
+        detect_cow_filesystem(source_root, &destination_probe),
+        CowFilesystem::Unsupported
+    )
+}
+
 fn copy_paths_with_backend(
     source_root: &Path,
     destination_root: &Path,
@@ -452,6 +462,24 @@ fn detect_cow_filesystem(source_root: &Path, destination_root: &Path) -> CowFile
     {
         let _ = (source_root, destination_root);
         CowFilesystem::Unsupported
+    }
+}
+
+fn nearest_existing_path(path: &Path) -> Option<PathBuf> {
+    let mut candidate = path.to_path_buf();
+    loop {
+        if fs::metadata(&candidate).is_ok() {
+            return Some(candidate);
+        }
+        let parent = candidate.parent()?;
+        if parent == candidate {
+            return None;
+        }
+        candidate = if parent.as_os_str().is_empty() {
+            PathBuf::from(".")
+        } else {
+            parent.to_path_buf()
+        };
     }
 }
 

@@ -311,6 +311,12 @@ Zetta uses the sibling directory `<repository>-worktrees`. The root is created
 on demand by `new`; `status` only reports its resolved path and never creates
 directories.
 
+`status` also reports whether the current `HEAD` contains submodules and lists
+detected submodule paths, including nested paths. It reports whether native
+copy-on-write cloning is available between the current worktree and the
+resolved `wt.root`; when that root is missing, the nearest existing ancestor is
+inspected without creating it.
+
 Use repeatable `--copy PATH` (or `-c PATH`) options to copy files, directories,
 or symlinks from the current source worktree into the identical relative
 locations in the new worktree:
@@ -359,7 +365,7 @@ The direct CLI never changes the caller's directory. After enabling shell
 integration, `zwt new NAME` changes into the new worktree and `zwt done`
 changes into the integrated source worktree. Use `--path-only` (or `-P`) with
 `new` or `done` when scripting; it reserves standard output for exactly one
-path, while errors remain on standard error.
+path, while errors and `new`'s phase progress remain on standard error.
 
 ## Pane split templates
 

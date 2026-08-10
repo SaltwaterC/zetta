@@ -374,8 +374,11 @@ fn worktree_help_covers_the_workflow() {
     assert!(worktree_help().contains("zetta wt rerere"));
     assert!(worktree_new_help().contains("--copy"));
     assert!(worktree_new_help().contains("--path-only"));
+    assert!(worktree_new_help().contains("phase progress"));
     assert!(worktree_done_help().contains("stage"));
     assert!(worktree_status_help().contains("never creates"));
+    assert!(worktree_status_help().contains("nested paths"));
+    assert!(worktree_status_help().contains("copy-on-write"));
     assert!(worktree_rerere_help().contains("rerere.autoupdate"));
 }
 
@@ -1011,6 +1014,75 @@ fn status_report_includes_branch_source_and_root_kind() {
     assert!(report.contains("Current branch state: attached"));
     assert!(report.contains("Recorded source branch: main"));
     assert!(report.contains("(default)"));
+    assert!(report.contains("Submodules: none"));
+    assert!(report.contains("Native CoW copying: "));
+}
+
+#[test]
+fn status_report_lists_top_level_and_nested_submodule_paths() {
+    let fixture = GitFixture::new();
+    fixture.allow_file_protocol();
+    let leaf = fixture.create_repository("leaf");
+    let top = fixture.create_repository("top");
+    let top_base = fixture.git(&top, &["rev-parse", "HEAD"]).trim().to_owned();
+    fixture.add_submodule(&top, &leaf, "nested");
+    fixture.add_submodule(&fixture.root, &top, "vendor/top");
+    fixture.initialize_submodule(&fixture.root.join("vendor/top"), "nested");
+    fixture.git(
+        &fixture.root.join("vendor/top"),
+        &["checkout", "-q", "--detach", &top_base],
+    );
+
+    let report = in_directory(&fixture, &fixture.root, || {
+        let repository = discover_repository(None).unwrap();
+        let root = resolved_worktree_root(&repository.current_worktree, &repository.root).unwrap();
+        status_report(&repository, &root).unwrap()
+    });
+
+    assert!(report.contains("Submodules: present (2)"));
+    assert!(report.contains("  vendor/top\n"));
+    assert!(report.contains("  vendor/top/nested\n"));
+}
+
+#[test]
+fn status_report_checks_existing_and_missing_configured_roots_without_creating_them() {
+    let fixture = GitFixture::new();
+    let missing_root = fixture._tempdir.path().join("missing worktree root");
+    fixture.git(
+        &fixture.root,
+        &[
+            "config",
+            "--local",
+            "wt.root",
+            missing_root.to_str().unwrap(),
+        ],
+    );
+
+    let missing_report = in_directory(&fixture, &fixture.root, || {
+        let repository = discover_repository(None).unwrap();
+        let root = resolved_worktree_root(&repository.current_worktree, &repository.root).unwrap();
+        status_report(&repository, &root).unwrap()
+    });
+    assert!(!missing_root.exists());
+    assert!(missing_report.contains("Native CoW copying: "));
+
+    let existing_root = fixture._tempdir.path().join("existing worktree root");
+    fs::create_dir_all(&existing_root).unwrap();
+    fixture.git(
+        &fixture.root,
+        &[
+            "config",
+            "--local",
+            "wt.root",
+            existing_root.to_str().unwrap(),
+        ],
+    );
+    let existing_report = in_directory(&fixture, &fixture.root, || {
+        let repository = discover_repository(None).unwrap();
+        let root = resolved_worktree_root(&repository.current_worktree, &repository.root).unwrap();
+        status_report(&repository, &root).unwrap()
+    });
+    assert!(existing_report.contains("Native CoW copying: "));
 }
 
 #[test]

@@ -69,7 +69,9 @@ Relative values resolve from the repository's main worktree root. Absolute
 values are used as written. If the setting is absent, Zetta defaults to the
 sibling directory `<repository>-worktrees`. `zetta wt new` creates missing
 parent directories and rejects existing destinations and symlink collisions;
-`zetta wt status` reports the configured or default path without creating it.
+`zetta wt status` reports the configured or default path without creating it,
+along with current `HEAD` submodule paths and native CoW availability. A
+missing root is checked through its nearest existing ancestor.
 
 Run `zetta wt rerere` to enable the two global Git settings recommended for
 this workflow: `rerere.enabled=true` and `rerere.autoupdate=true`.
