@@ -22,8 +22,10 @@ fn tab(attention_id: u64, custom_title: Option<&str>) -> Tab {
         terminal: None,
         view: None,
         error: None,
+        base_exited: false,
         wsl_cwd_file: None,
         pending_command: None,
+        stack: PaneStack::default(),
     };
     Tab {
         id: attention_id,

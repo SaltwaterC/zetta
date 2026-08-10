@@ -559,7 +559,7 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
     let show_active_tab_shape = active_tab_shape_visible(compact_mode, selected);
     let select_handle = handle.clone();
     let close_handle = handle.clone();
-    let rename_view = tab.active_pane().and_then(|pane| pane.view.clone());
+    let rename_view = tab.active_view();
     let title = if let Some(buffer) = tab
         .rename_buffer
         .as_ref()
@@ -574,7 +574,7 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
         }
     } else {
         resolve_tab_title(tab, || {
-            if let Some(view) = tab.active_pane().and_then(|pane| pane.view.as_ref()) {
+            if let Some(view) = tab.active_view() {
                 view.read(cx).tab_content_text(0, cx)
             } else {
                 tab.active_pane()
@@ -753,10 +753,7 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
     // The context menu activates this tab before it is rendered. Use
     // the clicked tab's focus so its key context remains valid after
     // that switch, including when the tab was previously inactive.
-    let action_context = tab
-        .active_pane()
-        .and_then(|pane| pane.view.as_ref())
-        .map(|view| view.focus_handle(cx));
+    let action_context = tab.active_view().map(|view| view.focus_handle(cx));
     let tab_element =
         ui::right_click_menu::<ui::ContextMenu>(("tab-context-menu", tab.id as usize))
             .menu(move |window, cx| {

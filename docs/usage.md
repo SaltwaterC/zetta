@@ -141,8 +141,9 @@ range, anchored on the side from which it was selected, before it can be moved.
 
 Splits inherit the active pane's working directory and selected profile. Use
 `Cmd-Arrow` on macOS, `Alt-Arrow` on Windows/Linux, or the pointer to move
-focus. Exiting a shell removes its pane;
-exiting the final pane closes the tab.
+focus. Exiting a shell removes its pane when it has no stacked commands; a
+pane with stacked commands keeps those entries available until they are
+closed. Exiting the final empty pane closes the tab.
 
 Pane controls appear when the pointer moves over a pane and hide after a short
 period of inactivity. They can maximize, minimize, or close the pane. Each pane
@@ -294,6 +295,26 @@ takes precedence; clearing it restores the generated label.
 The prompt provides native completion. Use `Tab` and `Shift-Tab` to cycle
 through executables from `PATH`, paths relative to the active pane's working
 directory, and SSH aliases declared by `Host` entries in `~/.ssh/config`.
+
+## Stacked command panes
+
+Press `Alt-Shift-N` (`Cmd-Shift-N` on macOS) to open the command prompt for a
+single stacked command. The command runs in a task-backed PTY using the active
+pane's profile and current working directory. Stacked entries share the host
+pane's layout region: the selected terminal is expanded and every other entry
+is a one-row command/status line. The PTYs remain interactive, so `Ctrl-C`
+and other terminal input work normally; stacked input is not sent to sibling
+panes when input broadcasting is enabled.
+
+Press `Alt-Shift-[` / `Alt-Shift-]` (`Cmd` on macOS) to select the previous or
+next entry. On Linux, the shifted bracket events are also accepted as
+`Alt-{` / `Alt-}`. Cycling includes the original interactive terminal, wraps
+at both ends, and focuses the selected terminal. A completed command keeps its
+output and status, including a numeric exit code when one is available. Click
+a row to select it, then use that row's close button or `Alt-Shift-X` / the
+corresponding macOS `Cmd-Shift-X` to close the selected stacked entry. The
+pane-control strip is hidden while stacking is enabled. Closing the host pane
+explicitly closes all of its stacked entries as well.
 
 ## Git worktrees
 
@@ -569,7 +590,7 @@ become `Ctrl-Cmd`; for example, paste-trim is `Ctrl-Cmd-V` on macOS and
 | `Cmd-Shift-K` (macOS) / `Alt-Shift-K` (Windows/Linux) | Rotate the active pane layout counter-clockwise, recursively |
 | `Ctrl-Shift-J`, then Arrow keys or a split gutter drag | Toggle pane-resize mode; resize panes |
 | `Cmd-Shift-M` (macOS) / `Alt-Shift-M` (Windows/Linux), then Arrow keys | Toggle pane-move mode; move panes |
-| `Cmd-Shift-X` (macOS) / `Alt-Shift-X` (Windows/Linux) | Close the active pane or its final tab |
+| `Cmd-Shift-X` (macOS) / `Alt-Shift-X` (Windows/Linux) | Close the selected stacked entry, or the active pane/final tab when the host terminal is selected |
 | `PageUp` / `PageDown` | Send page navigation to the foreground program |
 | `Shift-PageUp` / `Shift-PageDown` | Scroll history by one page |
 | `Cmd-Shift-A` (macOS) / `Alt-Shift-A` (Windows/Linux) | Select all terminal text |
@@ -578,6 +599,8 @@ become `Ctrl-Cmd`; for example, paste-trim is `Ctrl-Cmd-V` on macOS and
 | `Cmd-Shift-Down` (macOS) / `Alt-Shift-Down` (Windows/Linux) | Minimize the active pane |
 | `Cmd-Shift-Left` / `Cmd-Shift-Right` (macOS) / `Alt-Shift-Left` / `Alt-Shift-Right` (Windows/Linux) | Select the previous / next minimized pane |
 | `Cmd-Shift-Up` (macOS) / `Alt-Shift-Up` (Windows/Linux) | Restore the selected minimized pane |
+| `Cmd-Shift-N` (macOS) / `Alt-Shift-N` (Windows/Linux) | Open the stacked-command prompt |
+| `Cmd-Shift-[` / `Cmd-Shift-]` (macOS) / `Alt-Shift-[` / `Alt-Shift-]` (Windows/Linux) | Select the previous / next stacked entry |
 | `Shift-Escape` | Maximize or restore the active pane |
 | `Ctrl-Shift-I` | Toggle input broadcasting in the active tab |
 | `Ctrl-Tab` / `Ctrl-Shift-Tab` | Next / previous tab |

@@ -53,6 +53,8 @@ pub(crate) use keybindings::{
 pub(crate) use keybindings::{RENAME_TAB_KEYBINDING, keymap_keystroke_alias};
 #[cfg(target_os = "macos")]
 pub(crate) use keybindings::{install_native_macos_menus, update_native_macos_menus};
+#[cfg(windows)]
+pub(crate) use wsl::Msys2Shell;
 use wsl::paths_for_external_editor;
 pub(crate) use wsl::{
     add_wsl_environment_variables, is_wsl_shell, launch_working_directory,

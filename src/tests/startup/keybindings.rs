@@ -66,6 +66,41 @@ fn pane_template_shortcuts_are_built_in() {
 }
 
 #[test]
+fn stacked_pane_shortcuts_are_built_in_and_platform_translated() {
+    let bindings = stacked_pane_keybindings();
+    for ((binding, shortcut), action) in bindings
+        .into_iter()
+        .zip([
+            "alt-shift-n",
+            "alt-{",
+            "alt-}",
+            "alt-shift-[",
+            "alt-shift-]",
+        ])
+        .zip([
+            ToggleStackedCommand.name(),
+            SelectPreviousStackedPane.name(),
+            SelectNextStackedPane.name(),
+            SelectPreviousStackedPane.name(),
+            SelectNextStackedPane.name(),
+        ])
+    {
+        let shortcut = gpui::Keystroke::parse(&platform_keystroke(shortcut)).unwrap();
+        assert_eq!(binding.match_keystrokes(&[shortcut]), Some(false));
+        assert_eq!(binding.action().name(), action);
+    }
+}
+
+#[test]
+fn shifted_bracket_events_match_the_stacked_cycle_aliases() {
+    let bindings = stacked_pane_keybindings();
+    let previous = gpui::Keystroke::parse(&platform_keystroke("alt-{")).unwrap();
+    let next = gpui::Keystroke::parse(&platform_keystroke("alt-}")).unwrap();
+    assert_eq!(bindings[1].match_keystrokes(&[previous]), Some(false));
+    assert_eq!(bindings[2].match_keystrokes(&[next]), Some(false));
+}
+
+#[test]
 fn tab_rename_and_configuration_reload_shortcuts_are_swapped() {
     assert_eq!(RENAME_TAB_KEYBINDING, "ctrl-shift-r");
     assert_eq!(CHANGE_TAB_ICON_KEYBINDING, "ctrl-shift-y");

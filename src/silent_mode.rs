@@ -7,7 +7,8 @@ use gpui::{App, AppContext as _, Context, Entity, Window};
 use terminal_view::TerminalView;
 
 use crate::{
-    ToggleSilentMode, ToggleTabSilentMode, Zetta, ZettaProcessState, process_zetta_entities,
+    TerminalPane, ToggleSilentMode, ToggleTabSilentMode, Zetta, ZettaProcessState,
+    process_zetta_entities,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -129,7 +130,8 @@ impl Zetta {
         let views = tab
             .panes
             .iter()
-            .filter_map(|pane| pane.view.clone())
+            .flat_map(TerminalPane::all_views)
+            .cloned()
             .collect::<Vec<_>>();
         for view in views {
             view.update(cx, |view, cx| {
@@ -151,7 +153,9 @@ impl Zetta {
                 let enabled = combined_silent_mode(global_silent_mode, tab.silent_mode);
                 tab.panes
                     .iter()
-                    .filter_map(move |pane| pane.view.clone().map(|view| (view, enabled)))
+                    .flat_map(TerminalPane::all_views)
+                    .cloned()
+                    .map(move |view| (view, enabled))
             })
             .collect::<Vec<_>>();
         for (view, enabled) in views {

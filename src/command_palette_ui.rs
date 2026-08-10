@@ -25,8 +25,7 @@ impl Zetta {
         let terminal_focus = self
             .tabs
             .get(self.active_tab)
-            .and_then(Tab::active_pane)
-            .and_then(|pane| pane.view.as_ref())
+            .and_then(Tab::active_view)
             .map(|view| view.focus_handle(cx));
         let mut commands = window
             .available_actions(cx)

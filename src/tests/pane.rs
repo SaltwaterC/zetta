@@ -517,8 +517,10 @@ fn tab_pane_index_resolves_panes_without_scanning() {
             terminal: None,
             view: None,
             error: None,
+            base_exited: false,
             wsl_cwd_file: None,
             pending_command: None,
+            stack: PaneStack::default(),
         })
         .collect::<Vec<_>>();
     let mut tab = Tab {
@@ -570,8 +572,10 @@ fn tab_pane_index_resolves_panes_without_scanning() {
         terminal: None,
         view: None,
         error: None,
+        base_exited: false,
         wsl_cwd_file: None,
         pending_command: None,
+        stack: PaneStack::default(),
     });
     assert_eq!(tab.pane(4).map(|pane| pane.id), Some(4));
 }
@@ -667,8 +671,10 @@ fn split_profile_comes_from_the_active_pane() {
                 terminal: None,
                 view: None,
                 error: None,
+                base_exited: false,
                 wsl_cwd_file: None,
                 pending_command: None,
+                stack: PaneStack::default(),
             },
             TerminalPane {
                 id: 2,
@@ -683,8 +689,10 @@ fn split_profile_comes_from_the_active_pane() {
                 terminal: None,
                 view: None,
                 error: None,
+                base_exited: false,
                 wsl_cwd_file: None,
                 pending_command: None,
+                stack: PaneStack::default(),
             },
         ],
         pane_indices: HashMap::from([(1, 0), (2, 1)]),
@@ -742,8 +750,10 @@ fn closing_active_pane_restores_previous_focus() {
         terminal: None,
         view: None,
         error: None,
+        base_exited: false,
         wsl_cwd_file: None,
         pending_command: None,
+        stack: PaneStack::default(),
     };
     let mut tab = Tab {
         id: 1,
@@ -802,8 +812,10 @@ fn closing_inactive_pane_preserves_focus() {
         terminal: None,
         view: None,
         error: None,
+        base_exited: false,
         wsl_cwd_file: None,
         pending_command: None,
+        stack: PaneStack::default(),
     };
     let mut tab = Tab {
         id: 1,
@@ -1145,8 +1157,10 @@ fn pane_management_tab() -> Tab {
         terminal: None,
         view: None,
         error: None,
+        base_exited: false,
         wsl_cwd_file: None,
         pending_command: None,
+        stack: PaneStack::default(),
     };
     let layout = PaneLayout::Split {
         axis: SplitAxis::Vertical,
@@ -1192,6 +1206,22 @@ fn pane_management_tab() -> Tab {
 #[test]
 fn transferred_tabs_receive_target_window_ids_consistently() {
     let mut tab = pane_management_tab();
+    let profile = tab.pane(2).unwrap().profile.clone();
+    let pane = tab.pane_mut(2).unwrap();
+    assert!(pane.stack.push(StackedPane::new(
+        7,
+        "first".to_owned(),
+        profile.clone(),
+        None,
+        None
+    )));
+    assert!(pane.stack.push(StackedPane::new(
+        8,
+        "second".to_owned(),
+        profile,
+        None,
+        None
+    )));
     tab.attention_id = 99;
     tab.attention = Some(TabAttention {
         summary: "Build finished".to_owned(),
@@ -1210,7 +1240,7 @@ fn transferred_tabs_receive_target_window_ids_consistently() {
         tab.attention.as_ref().unwrap().tooltip_text(),
         "Build finished\nAll tests passed"
     );
-    assert_eq!(next_pane_id, 23);
+    assert_eq!(next_pane_id, 25);
     assert_eq!(
         tab.panes.iter().map(|pane| pane.id).collect::<Vec<_>>(),
         [20, 21, 22]
@@ -1220,6 +1250,20 @@ fn transferred_tabs_receive_target_window_ids_consistently() {
     assert_eq!(tab.maximized_pane, Some(21));
     assert_eq!(tab.minimized_panes, [20, 22]);
     assert_eq!(tab.selected_minimized_pane, Some(22));
+    assert_eq!(
+        tab.pane(21)
+            .unwrap()
+            .stack
+            .entries
+            .iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>(),
+        [23, 24]
+    );
+    assert_eq!(
+        tab.pane(21).unwrap().stack.selected,
+        PaneStackSelection::Stacked(24)
+    );
     assert_eq!(
         tab.layout,
         PaneLayout::Split {
@@ -1308,8 +1352,10 @@ fn pane_labels_remain_stable_and_are_not_reused() {
         terminal: None,
         view: None,
         error: None,
+        base_exited: false,
         wsl_cwd_file: None,
         pending_command: None,
+        stack: PaneStack::default(),
     });
 
     assert_eq!(tab.pane(1).unwrap().label(), "Pane 1");

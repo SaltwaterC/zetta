@@ -85,10 +85,10 @@ use settings_editor::{
     KeymapTextField, SettingsPage, TextField, save as save_settings_file,
 };
 use silent_mode::SilentModeState;
-use task::Shell;
+use task::{Shell, ShellBuilder, SpawnInTerminal, TaskId};
 use terminal::{
-    Clear, Event as TerminalEvent, Paste, PasteTrimmed, Search, Terminal, TerminalBuilder,
-    terminal_settings::TerminalSettings,
+    Clear, Event as TerminalEvent, Paste, PasteTrimmed, Search, TaskState, TaskStatus, Terminal,
+    TerminalBuilder, terminal_settings::TerminalSettings,
 };
 use terminal_view::{
     ClearClipboard, CopyAndClearSelection, DismissSearch, EditScrollback, SavePaneOutput,
@@ -174,6 +174,10 @@ actions!(
         ToggleSilentMode,
         ToggleTabSilentMode,
         ToggleMultiCommand,
+        ToggleStackedCommand,
+        SelectPreviousStackedPane,
+        SelectNextStackedPane,
+        CloseStackedPane,
         IncreaseTerminalFontSize,
         DecreaseTerminalFontSize,
         ResetTerminalFontSize,
@@ -292,6 +296,7 @@ mod pane_overlay;
 mod pane_render;
 mod pane_theme_picker;
 mod pane_view_state;
+mod stacked_panes;
 mod tab_bar_render;
 use tab_bar_render::*;
 mod tab_body_render;

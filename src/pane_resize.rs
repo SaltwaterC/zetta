@@ -324,7 +324,7 @@ impl Zetta {
         if !tab.layout.move_pane(tab.active_pane, direction) {
             return;
         }
-        for terminal in tab.panes.iter().filter_map(|pane| pane.terminal.as_ref()) {
+        for terminal in tab.panes.iter().flat_map(TerminalPane::all_terminals) {
             terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
         }
         cx.notify();
@@ -352,7 +352,7 @@ impl Zetta {
             return;
         }
         tab.activate_pane(dragged.pane_id);
-        for terminal in tab.panes.iter().filter_map(|pane| pane.terminal.as_ref()) {
+        for terminal in tab.panes.iter().flat_map(TerminalPane::all_terminals) {
             terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
         }
         cx.notify();
@@ -556,7 +556,7 @@ impl Zetta {
             for terminal in self.tabs[tab_index]
                 .panes
                 .iter()
-                .filter_map(|pane| pane.terminal.as_ref())
+                .flat_map(TerminalPane::all_terminals)
             {
                 terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
             }
@@ -606,8 +606,7 @@ impl Zetta {
                 .panes
                 .iter()
                 .find(|pane| {
-                    pane.view
-                        .as_ref()
+                    pane.selected_view()
                         .is_some_and(|view| view.focus_handle(cx).contains_focused(window, cx))
                 })
                 .map(|pane| pane.id)
@@ -615,7 +614,7 @@ impl Zetta {
             tab.activate_pane(pane_id);
             let Some(bounds) = tab
                 .pane(pane_id)
-                .and_then(|pane| pane.terminal.as_ref())
+                .and_then(TerminalPane::selected_terminal)
                 .map(|terminal| terminal.read(cx).last_content().terminal_bounds)
             else {
                 return;
@@ -648,7 +647,7 @@ impl Zetta {
         };
         let Some(bounds) = self.tabs[tab_index]
             .pane(pane_id)
-            .and_then(|pane| pane.terminal.as_ref())
+            .and_then(TerminalPane::selected_terminal)
             .map(|terminal| terminal.read(cx).last_content().terminal_bounds)
         else {
             return;
@@ -687,7 +686,7 @@ impl Zetta {
             // The next terminal size change is driven by pane geometry, so do
             // not synchronously reflow retained scrollback for every keypress.
             if let Some(tab) = self.tabs.get(tab_index) {
-                for terminal in tab.panes.iter().filter_map(|pane| pane.terminal.as_ref()) {
+                for terminal in tab.panes.iter().flat_map(TerminalPane::all_terminals) {
                     terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
                 }
             }
@@ -786,7 +785,7 @@ impl Zetta {
         sibling_panes
             .iter()
             .filter_map(|pane_id| self.tabs[tab_index].pane(*pane_id))
-            .filter_map(|pane| pane.terminal.as_ref())
+            .filter_map(TerminalPane::selected_terminal)
             .map(|terminal| {
                 let bounds = terminal.read(cx).last_content().terminal_bounds;
                 let (available, minimum) = match axis {

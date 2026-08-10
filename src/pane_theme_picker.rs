@@ -17,8 +17,7 @@ impl Zetta {
         let current_theme_name = self
             .tabs
             .get(self.active_tab)
-            .and_then(Tab::active_pane)
-            .and_then(|pane| pane.view.as_ref())
+            .and_then(Tab::active_view)
             .and_then(|view| view.read(cx).theme().cloned())
             .or_else(|| Some(cx.theme().clone()))
             .map(|theme| theme.name.to_string());
@@ -233,7 +232,10 @@ impl Zetta {
             .tabs
             .get(self.active_tab)
             .and_then(Tab::active_pane)
-            .and_then(|pane| pane.view.clone().map(|view| (pane.profile.clone(), view)))
+            .and_then(|pane| {
+                pane.selected_view()
+                    .map(|view| (pane.profile.clone(), view))
+            })
         else {
             return false;
         };

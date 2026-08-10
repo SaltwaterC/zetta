@@ -3,6 +3,7 @@ use super::*;
 #[derive(Clone, Copy)]
 pub(crate) struct TabSearchMatch {
     pub(crate) pane_id: u64,
+    pub(crate) stack_id: Option<u64>,
     pub(crate) match_index: usize,
 }
 
@@ -49,7 +50,8 @@ impl Zetta {
             let views = tab
                 .panes
                 .iter()
-                .filter_map(|pane| pane.view.clone())
+                .flat_map(TerminalPane::all_views)
+                .cloned()
                 .collect::<Vec<_>>();
             for view in views {
                 view.update(cx, TerminalView::clear_search);
@@ -80,8 +82,8 @@ impl Zetta {
             .find(|tab| tab.id == tab_id)
             .into_iter()
             .flat_map(|tab| tab.panes.iter())
-            .filter_map(|pane| pane.view.as_ref())
-            .map(|view| view.read(cx).terminal().clone())
+            .flat_map(TerminalPane::all_terminals)
+            .cloned()
             .collect::<Vec<_>>();
         for terminal in terminals {
             terminal.update(cx, |terminal, _| {
@@ -128,13 +130,16 @@ impl Zetta {
             .find(|tab| tab.id == tab_id)
             .into_iter()
             .flat_map(|tab| tab.panes.iter())
-            .filter_map(|pane| {
-                pane.view
-                    .as_ref()
-                    .map(|view| (pane.id, view.read(cx).terminal().clone()))
+            .flat_map(|pane| {
+                pane.terminal
+                    .iter()
+                    .map(move |terminal| (pane.id, None, terminal.clone()))
+                    .chain(pane.stack.entries.iter().filter_map(move |entry| {
+                        Some((pane.id, Some(entry.id), entry.terminal.clone()?))
+                    }))
             })
             .collect::<Vec<_>>();
-        for (_, terminal) in &terminals {
+        for (_, _, terminal) in &terminals {
             terminal.update(cx, |terminal, _| {
                 Arc::make_mut(&mut terminal.matches).clear()
             });
@@ -160,11 +165,11 @@ impl Zetta {
                     valid.then(|| {
                         terminals
                             .into_iter()
-                            .map(|(pane_id, terminal)| {
+                            .map(|(pane_id, stack_id, terminal)| {
                                 let task = terminal.update(cx, |terminal, cx| {
                                     terminal.find_matches(pattern.clone(), cx)
                                 });
-                                (pane_id, terminal, task)
+                                (pane_id, stack_id, terminal, task)
                             })
                             .collect::<Vec<_>>()
                     })
@@ -175,9 +180,9 @@ impl Zetta {
                 return;
             };
             let mut results = Vec::with_capacity(tasks.len());
-            for (pane_id, terminal, task) in tasks {
+            for (pane_id, stack_id, terminal, task) in tasks {
                 let result = task.await;
-                results.push((pane_id, terminal, result));
+                results.push((pane_id, stack_id, terminal, result));
             }
             this.update(cx, |this, cx| {
                 let valid = tab_search_request_is_current(
@@ -193,13 +198,14 @@ impl Zetta {
                 let mut aggregated = Vec::new();
                 let mut limit_reached = false;
                 let mut total_count = 0usize;
-                for (pane_id, terminal, result) in results {
+                for (pane_id, stack_id, terminal, result) in results {
                     let match_count = result.ranges.len();
                     limit_reached |= result.limit_reached;
                     total_count = total_count.saturating_add(result.total_count);
                     terminal.update(cx, |terminal, _| terminal.matches = Arc::new(result.ranges));
                     aggregated.extend((0..match_count).map(|match_index| TabSearchMatch {
                         pane_id,
+                        stack_id,
                         match_index,
                     }));
                 }
@@ -237,11 +243,14 @@ impl Zetta {
         };
         tab.restore_minimized(search_match.pane_id);
         tab.maximized_pane = None;
-        tab.activate_pane(search_match.pane_id);
-        let terminal = tab
-            .pane(search_match.pane_id)
-            .and_then(|pane| pane.view.as_ref())
-            .map(|view| view.read(cx).terminal().clone());
+        tab.activate_stack_entry(
+            search_match.pane_id,
+            search_match
+                .stack_id
+                .map(PaneStackSelection::Stacked)
+                .unwrap_or(PaneStackSelection::Base),
+        );
+        let terminal = tab.active_terminal();
         if let Some(terminal) = terminal {
             terminal.update(cx, |terminal, _| {
                 terminal.activate_match(search_match.match_index)

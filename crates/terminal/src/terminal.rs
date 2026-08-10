@@ -691,8 +691,17 @@ pub enum Event {
     CloseTerminal,
     Bell,
     Wakeup,
+    /// Reports completion of a terminal backed by a task. Unlike
+    /// [`Event::CloseTerminal`], this event is emitted even when the task is
+    /// configured to remain visible after it exits.
+    TaskFinished {
+        exit_code: Option<i32>,
+    },
     BlinkChanged(bool),
-    ResizeRequested { rows: usize, columns: usize },
+    ResizeRequested {
+        rows: usize,
+        columns: usize,
+    },
     SelectionsChanged,
     NewNavigationTarget(Option<MaybeNavigationTarget>),
     Open(MaybeNavigationTarget),
@@ -1417,6 +1426,7 @@ impl TerminalBuilder {
                 window_id,
             },
             child_exited: None,
+            task_exit_code: None,
             keyboard_input_sent: false,
             init_command_startup_marker: None,
             init_command_startup_tx: None,
@@ -1749,6 +1759,7 @@ impl TerminalBuilder {
                     window_id,
                 },
                 child_exited: None,
+                task_exit_code: None,
                 keyboard_input_sent: false,
                 init_command_startup_marker: None,
                 init_command_startup_tx: None,
@@ -1947,6 +1958,7 @@ pub struct Terminal {
     template: CopyTemplate,
     activation_script: Vec<String>,
     child_exited: Option<ExitStatus>,
+    task_exit_code: Option<i32>,
     keyboard_input_sent: bool,
     init_command_startup_marker: Option<String>,
     init_command_startup_tx: Option<Sender<()>>,
@@ -3656,6 +3668,13 @@ impl Terminal {
         self.task.as_ref()
     }
 
+    /// Returns the numeric exit code reported by a completed task, if the
+    /// task exited normally. A signal or another termination without a code
+    /// is represented by `None`.
+    pub fn task_exit_code(&self) -> Option<i32> {
+        self.task_exit_code
+    }
+
     pub fn wait_for_completed_task(&self, cx: &App) -> Task<Option<ExitStatus>> {
         if let Some(task) = self.task() {
             if task.status == TaskStatus::Running {
@@ -3710,6 +3729,10 @@ impl Terminal {
                 task.status.register_terminal_exit();
             }
         };
+        self.task_exit_code = exit_status.and_then(|status| status.code());
+        cx.emit(Event::TaskFinished {
+            exit_code: self.task_exit_code,
+        });
 
         let (finished_successfully, task_line, command_line) = task_summary(task, exit_status);
         let mut lines_to_show = Vec::new();
@@ -4755,6 +4778,71 @@ mod tests {
         (terminal, completion_rx)
     }
 
+    #[cfg(unix)]
+    async fn build_test_task_terminal(
+        cx: &mut TestAppContext,
+        program: String,
+        args: Vec<String>,
+        command: String,
+    ) -> (Entity<Terminal>, Receiver<Option<ExitStatus>>) {
+        let (completion_tx, completion_rx) = async_channel::unbounded();
+        let task_state = TaskState {
+            status: TaskStatus::Running,
+            completion_rx: completion_rx.clone(),
+            spawned_task: SpawnInTerminal {
+                command: Some(command),
+                ..Default::default()
+            },
+        };
+        let builder = cx
+            .update(|cx| {
+                TerminalBuilder::new(
+                    None,
+                    Some(task_state),
+                    task::Shell::WithArguments {
+                        program,
+                        args,
+                        title_override: None,
+                    },
+                    HashMap::default(),
+                    SettingsCursorShape::default(),
+                    AlternateScroll::On,
+                    None,
+                    vec![],
+                    0,
+                    false,
+                    0,
+                    Some(completion_tx),
+                    cx,
+                    vec![],
+                    PathStyle::local(),
+                )
+            })
+            .await
+            .unwrap();
+        let terminal = cx.new(|cx| builder.subscribe(cx));
+        (terminal, completion_rx)
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn task_pty_forwards_ctrl_c_to_the_foreground_command(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+
+        let command = "sleep 30".to_owned();
+        let (program, args) =
+            ShellBuilder::new(&Shell::System, false).build(Some(command.clone()), &[]);
+        let (terminal, completion_rx) = build_test_task_terminal(cx, program, args, command).await;
+
+        cx.executor().timer(Duration::from_millis(100)).await;
+        terminal.update(cx, |terminal, _| {
+            assert!(terminal.try_keystroke(&Keystroke::parse("ctrl-c").unwrap(), false));
+        });
+        let status = completion_rx.recv().await.unwrap();
+        assert!(status.is_some(), "Ctrl-C should terminate the task PTY");
+        assert_ne!(status.and_then(|status| status.code()), Some(0));
+    }
+
     /// Builds a non-PTY (`no_pty`) task terminal, exercising the path used by
     /// headless hosts (e.g. the eval CLI) where PTY allocation fails with
     /// `ENOTTY`. The command runs as a plain subprocess whose piped output is
@@ -4850,6 +4938,48 @@ mod tests {
             Some(ExitStatus::default())
         );
         assert_content_eventually(&terminal, "hello-from-subprocess", cx).await;
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn test_task_finished_reports_success_nonzero_and_signal_exit_codes(
+        cx: &mut TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+
+        for (command, expected_code) in [
+            ("exit 0", Some(0)),
+            ("exit 7", Some(7)),
+            ("kill -TERM $$", None),
+        ] {
+            let (terminal, completion_rx) = build_test_subprocess_terminal(
+                cx,
+                "sh".to_owned(),
+                vec!["-c".to_owned(), command.to_owned()],
+            )
+            .await;
+            let (event_tx, event_rx) = async_channel::unbounded();
+            cx.update(|cx| {
+                cx.subscribe(&terminal, move |_, event: &Event, _| {
+                    event_tx.send_blocking(event.clone()).unwrap();
+                })
+            })
+            .detach();
+
+            let completion = completion_rx.recv().await.unwrap();
+            let event_code = loop {
+                match event_rx.recv().await.unwrap() {
+                    Event::TaskFinished { exit_code } => break exit_code,
+                    _ => {}
+                }
+            };
+            assert_eq!(completion.and_then(|status| status.code()), expected_code);
+            assert_eq!(event_code, expected_code);
+            assert_eq!(
+                terminal.read_with(cx, |terminal, _| terminal.task_exit_code()),
+                expected_code
+            );
+        }
     }
 
     fn init_ctrl_click_hyperlink_test(cx: &mut TestAppContext, output: &[u8]) -> Entity<Terminal> {

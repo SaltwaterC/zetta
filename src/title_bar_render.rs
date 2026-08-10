@@ -194,7 +194,7 @@ pub(crate) fn reconnect_control_label(show_label: bool) -> &'static str {
 /// range, so a hidden tab can never be the one currently being renamed.
 pub(crate) fn tab_overflow_entry_label(tab: &Tab, cx: &App) -> SharedString {
     resolve_tab_title(tab, || {
-        if let Some(view) = tab.active_pane().and_then(|pane| pane.view.as_ref()) {
+        if let Some(view) = tab.active_view() {
             view.read(cx).tab_content_text(1, cx)
         } else {
             tab.active_pane()
@@ -514,18 +514,14 @@ impl Zetta {
         let active_pane_size =
             title_bar_pane_size_visible(compact_mode, self.launch_config.hide_pane_size)
                 .then(|| {
-                    active_tab
-                        .and_then(|tab| tab.active_pane())
-                        .and_then(|pane| pane.terminal.as_ref())
-                        .map(|terminal| {
-                            let bounds = terminal.read(cx).last_content().terminal_bounds;
-                            terminal_size_label(bounds.num_columns(), bounds.num_lines())
-                        })
+                    active_tab.and_then(Tab::active_terminal).map(|terminal| {
+                        let bounds = terminal.read(cx).last_content().terminal_bounds;
+                        terminal_size_label(bounds.num_columns(), bounds.num_lines())
+                    })
                 })
                 .flatten();
         let active_terminal_focus = active_tab
-            .and_then(Tab::active_pane)
-            .and_then(|pane| pane.view.as_ref())
+            .and_then(Tab::active_view)
             .map(|view| view.focus_handle(cx));
 
         let left_window_controls = render_window_controls(

@@ -179,12 +179,23 @@ impl Zetta {
             } else {
                 pane.profile.theme = None;
             }
-            if let Some(view) = pane.view.as_ref() {
-                let theme = profile_themes
-                    .get(&pane.profile.name.to_lowercase())
-                    .cloned()
-                    .flatten();
-                view.update(cx, |view, cx| view.set_theme(theme, cx));
+            for entry in &mut pane.stack.entries {
+                if let Some(profile) = config
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.name.eq_ignore_ascii_case(&entry.profile.name))
+                {
+                    entry.profile = profile.clone();
+                } else {
+                    entry.profile.theme = None;
+                }
+            }
+            let theme = profile_themes
+                .get(&pane.profile.name.to_lowercase())
+                .cloned()
+                .flatten();
+            for view in pane.all_views().cloned().collect::<Vec<_>>() {
+                view.update(cx, |view, cx| view.set_theme(theme.clone(), cx));
             }
         }
         let profile_count = visible_profile_count(&config.profiles, &config.hidden_profiles);

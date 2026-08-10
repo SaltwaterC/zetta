@@ -10,7 +10,157 @@ fn pane_move_menu_entry_available(pane_count: usize) -> bool {
     pane_count >= 2
 }
 
+fn stacked_entry_status(entry: &StackedPane) -> String {
+    match entry.state {
+        StackedPaneState::Starting => "starting".to_owned(),
+        StackedPaneState::Running => "running".to_owned(),
+        StackedPaneState::Completed => entry
+            .exit_code
+            .map(|code| format!("exit {code}"))
+            .unwrap_or_else(|| "completed".to_owned()),
+        StackedPaneState::Failed => "failed".to_owned(),
+    }
+}
+
 impl Zetta {
+    fn render_stacked_rows(
+        &self,
+        tab: &Tab,
+        pane: &TerminalPane,
+        colors: &ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let selected = pane.stack.selected;
+        let mut rows = div()
+            .flex_none()
+            .w_full()
+            .flex()
+            .flex_col()
+            .bg(colors.status_bar_background);
+
+        if !matches!(selected, PaneStackSelection::Base) {
+            rows = rows.child(self.render_stacked_row(
+                tab,
+                pane,
+                PaneStackSelection::Base,
+                "Interactive shell".to_owned(),
+                if pane.base_exited {
+                    "exited".to_owned()
+                } else {
+                    "running".to_owned()
+                },
+                colors,
+                cx,
+            ));
+        }
+
+        for entry in &pane.stack.entries {
+            if selected == PaneStackSelection::Stacked(entry.id) {
+                continue;
+            }
+            rows = rows.child(self.render_stacked_row(
+                tab,
+                pane,
+                PaneStackSelection::Stacked(entry.id),
+                entry.command.clone(),
+                stacked_entry_status(entry),
+                colors,
+                cx,
+            ));
+        }
+        rows.into_any_element()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_stacked_row(
+        &self,
+        tab: &Tab,
+        pane: &TerminalPane,
+        selection: PaneStackSelection,
+        command: String,
+        status: String,
+        colors: &ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let tab_id = tab.id;
+        let pane_id = pane.id;
+        let select_handle = cx.entity().downgrade();
+        let close_handle = cx.entity().downgrade();
+        let row_id = match selection {
+            PaneStackSelection::Base => 0,
+            PaneStackSelection::Stacked(id) => id as usize,
+        };
+        let close_label = match selection {
+            PaneStackSelection::Base => "Close pane",
+            PaneStackSelection::Stacked(_) => "Close stacked command",
+        };
+        div()
+            .id(format!("stacked-pane-row-{pane_id}-{row_id}"))
+            .h_6()
+            .w_full()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .border_b_1()
+            .border_color(colors.border)
+            .hover(|row| row.bg(colors.element_hover))
+            .on_click(move |_, window, cx| {
+                select_handle
+                    .update(cx, |this, cx| {
+                        this.select_stacked_pane_by_id(tab_id, pane_id, selection, window, cx);
+                    })
+                    .ok();
+            })
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_sm()
+                    .text_color(colors.text)
+                    .child(command),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .text_xs()
+                    .text_color(colors.text_muted)
+                    .child(status),
+            )
+            .child(
+                IconButton::new(
+                    format!("close-stacked-pane-{pane_id}-{row_id}"),
+                    IconName::Close,
+                )
+                .style(ButtonStyle::Transparent)
+                .size(ButtonSize::Compact)
+                .icon_size(IconSize::XSmall)
+                .icon_color(Color::Custom(colors.icon))
+                .aria_label(close_label)
+                .tooltip(Tooltip::text(close_label))
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    close_handle
+                        .update(cx, |this, cx| match selection {
+                            PaneStackSelection::Base => {
+                                this.close_pane(tab_id, pane_id, window, cx);
+                            }
+                            PaneStackSelection::Stacked(entry_id) => {
+                                this.close_stacked_pane_by_id(
+                                    tab_id, pane_id, entry_id, window, cx,
+                                );
+                            }
+                        })
+                        .ok();
+                }),
+            )
+            .into_any_element()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_pane_layout(
         &self,
@@ -122,7 +272,8 @@ impl Zetta {
                     .displayed_pane_label(*pane_id)
                     .unwrap_or_else(|| pane.label());
                 let pane_overlay = tab.displayed_pane_overlay(*pane_id);
-                let pane_terminal = pane.terminal.as_ref();
+                let selected_view = pane.selected_view();
+                let pane_terminal = pane.selected_terminal();
                 let pane_size = pane_terminal.map(|terminal| {
                     let bounds = terminal.read(cx).last_content().terminal_bounds;
                     terminal_size_label(bounds.num_columns(), bounds.num_lines())
@@ -148,19 +299,34 @@ impl Zetta {
                     OverlayFontSize::ExtraExtraLarge => px(3.),
                     OverlayFontSize::ExtraExtraExtraLarge => px(0.),
                 };
-                let active = pane.view.as_ref().is_some_and(|view| {
+                let active = selected_view.as_ref().is_some_and(|view| {
                     view.focus_handle(cx).is_focused(window)
                         || view.read(cx).has_open_context_menu()
                         || view.read(cx).has_open_search()
                         || self.tab_search.as_ref().is_some_and(|search| {
                             search.tab_id == tab.id && tab.active_pane == *pane_id
                         })
-                }) || (pane.view.is_none() && tab.active_pane == *pane_id);
+                }) || (selected_view.is_none() && tab.active_pane == *pane_id);
                 let pane_resize_toggle_action = pane_resize_menu_entry_available(tab.panes.len())
                     .then(|| Box::new(TogglePaneResizeMode) as Box<dyn Action>);
                 let pane_move_toggle_action = pane_move_menu_entry_available(tab.panes.len())
                     .then(|| Box::new(TogglePaneMoveMode) as Box<dyn Action>);
-                let content = match (&pane.view, &pane.error) {
+                let selected_error = match pane.stack.selected {
+                    PaneStackSelection::Base => pane.error.as_ref(),
+                    PaneStackSelection::Stacked(_) => pane
+                        .stack
+                        .selected_entry()
+                        .and_then(|entry| entry.error.as_ref()),
+                };
+                let selected_profile_name = match pane.stack.selected {
+                    PaneStackSelection::Base => pane.profile.name.clone(),
+                    PaneStackSelection::Stacked(_) => pane
+                        .stack
+                        .selected_entry()
+                        .map(|entry| entry.profile.name.clone())
+                        .unwrap_or_else(|| pane.profile.name.clone()),
+                };
+                let content = match (&selected_view, selected_error) {
                     (Some(view), _) => {
                         view.update(cx, |view, cx| {
                             view.set_window_corner_radii(corner_radii, cx);
@@ -180,8 +346,17 @@ impl Zetta {
                         .p_4()
                         .bg(colors.editor_background)
                         .text_color(error_color)
-                        .child("Unable to start shell")
+                        .child("Unable to start command")
                         .child(div().mt_2().text_sm().child(error.clone()))
+                        .into_any_element(),
+                    (None, _) if pane.base_exited && pane.stack.selected_is_base() => div()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(colors.editor_background)
+                        .text_color(colors.text_muted)
+                        .child("Interactive shell exited")
                         .into_any_element(),
                     _ => div()
                         .size_full()
@@ -190,8 +365,28 @@ impl Zetta {
                         .justify_center()
                         .bg(colors.editor_background)
                         .text_color(colors.text_muted)
-                        .child(format!("Starting {}...", pane.profile.name))
+                        .child(format!("Starting {selected_profile_name}..."))
                         .into_any_element(),
+                };
+                let content = if pane.stack.is_empty() {
+                    content
+                } else {
+                    div()
+                        .size_full()
+                        .min_w_0()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .child(self.render_stacked_rows(tab, pane, colors, cx))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .min_h_0()
+                                .flex_grow_1()
+                                .flex_basis(gpui::relative(0.))
+                                .child(content),
+                        )
+                        .into_any_element()
                 };
                 div()
                     .id(("terminal-pane", *pane_id as usize))
@@ -285,6 +480,7 @@ impl Zetta {
                     })
                     .when(
                         tab.maximized_pane.is_none()
+                            && pane.stack.is_empty()
                             && (tab.renaming_pane == Some(*pane_id)
                                 || (tab.panes.len() > 1
                                     && self.pane_controls_visible_for == Some(*pane_id))),

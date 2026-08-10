@@ -81,6 +81,13 @@ pub(crate) enum MultiCommandExecution<T> {
     Tiled(Vec<T>),
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum CommandPromptMode {
+    #[default]
+    Multi,
+    Stacked,
+}
+
 impl<T> MultiCommandExecution<T> {
     pub(crate) fn new(mut commands: Vec<T>) -> Self {
         assert!(

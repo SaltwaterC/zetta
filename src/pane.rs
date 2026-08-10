@@ -549,8 +549,209 @@ pub(crate) struct TerminalPane {
     pub(crate) terminal: Option<Entity<Terminal>>,
     pub(crate) view: Option<Entity<TerminalView>>,
     pub(crate) error: Option<String>,
+    /// Set when the original interactive shell has exited while stacked
+    /// entries are still retaining this pane's region.
+    pub(crate) base_exited: bool,
     pub(crate) wsl_cwd_file: Option<PathBuf>,
     pub(crate) pending_command: Option<String>,
+    /// Command terminals that share this pane's layout region. They are
+    /// intentionally not part of [`PaneLayout`]: only the selected entry is
+    /// expanded, while the others occupy compact status rows.
+    pub(crate) stack: PaneStack,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum PaneStackSelection {
+    #[default]
+    Base,
+    Stacked(u64),
+}
+
+/// The command entries associated with one interactive terminal pane.
+pub(crate) struct PaneStack {
+    pub(crate) entries: Vec<StackedPane>,
+    pub(crate) selected: PaneStackSelection,
+}
+
+impl Default for PaneStack {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            selected: PaneStackSelection::Base,
+        }
+    }
+}
+
+impl PaneStack {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub(crate) fn selected_is_base(&self) -> bool {
+        matches!(self.selected, PaneStackSelection::Base)
+    }
+
+    pub(crate) fn select_after_base_exit(&mut self) {
+        if self.selected_is_base() {
+            self.selected = self
+                .entries
+                .first()
+                .map(|entry| PaneStackSelection::Stacked(entry.id))
+                .unwrap_or(PaneStackSelection::Base);
+        }
+    }
+
+    pub(crate) fn selected_entry(&self) -> Option<&StackedPane> {
+        let PaneStackSelection::Stacked(id) = self.selected else {
+            return None;
+        };
+        self.entries.iter().find(|entry| entry.id == id)
+    }
+
+    pub(crate) fn selected_view(
+        &self,
+        base: Option<&Entity<TerminalView>>,
+    ) -> Option<Entity<TerminalView>> {
+        self.selected_entry()
+            .and_then(|entry| entry.view.clone())
+            .or_else(|| self.selected_is_base().then(|| base.cloned()).flatten())
+    }
+
+    pub(crate) fn selected_terminal(
+        &self,
+        base: Option<&Entity<Terminal>>,
+    ) -> Option<Entity<Terminal>> {
+        self.selected_entry()
+            .and_then(|entry| entry.terminal.clone())
+            .or_else(|| self.selected_is_base().then(|| base.cloned()).flatten())
+    }
+
+    pub(crate) fn select(&mut self, selection: PaneStackSelection) -> bool {
+        let valid = match selection {
+            PaneStackSelection::Base => true,
+            PaneStackSelection::Stacked(id) => self.entries.iter().any(|entry| entry.id == id),
+        };
+        if valid {
+            self.selected = selection;
+        }
+        valid
+    }
+
+    pub(crate) fn cycle(&mut self, forward: bool) -> Option<PaneStackSelection> {
+        if self.entries.is_empty() {
+            self.selected = PaneStackSelection::Base;
+            return None;
+        }
+
+        let current = match self.selected {
+            PaneStackSelection::Base => 0,
+            PaneStackSelection::Stacked(id) => self
+                .entries
+                .iter()
+                .position(|entry| entry.id == id)
+                .map(|index| index + 1)
+                .unwrap_or(0),
+        };
+        let count = self.entries.len() + 1;
+        let next = if forward {
+            (current + 1) % count
+        } else {
+            current.checked_sub(1).unwrap_or(count - 1)
+        };
+        self.selected = if next == 0 {
+            PaneStackSelection::Base
+        } else {
+            PaneStackSelection::Stacked(self.entries[next - 1].id)
+        };
+        Some(self.selected)
+    }
+
+    pub(crate) fn push(&mut self, entry: StackedPane) -> bool {
+        if self.entries.len() >= MAX_PANES_PER_TAB.saturating_sub(1) {
+            return false;
+        }
+        let id = entry.id;
+        self.entries.push(entry);
+        self.selected = PaneStackSelection::Stacked(id);
+        true
+    }
+
+    pub(crate) fn remove(&mut self, id: u64) -> Option<StackedPane> {
+        let index = self.entries.iter().position(|entry| entry.id == id)?;
+        let was_selected = self.selected == PaneStackSelection::Stacked(id);
+        let entry = self.entries.remove(index);
+        if was_selected {
+            self.selected = if let Some(entry) = self.entries.get(index) {
+                PaneStackSelection::Stacked(entry.id)
+            } else if let Some(entry) = self.entries.get(index.saturating_sub(1)) {
+                PaneStackSelection::Stacked(entry.id)
+            } else {
+                PaneStackSelection::Base
+            };
+        } else if let PaneStackSelection::Stacked(selected) = self.selected
+            && !self.entries.iter().any(|entry| entry.id == selected)
+        {
+            self.selected = PaneStackSelection::Base;
+        }
+        Some(entry)
+    }
+
+    pub(crate) fn repair_selection(&mut self) {
+        if let PaneStackSelection::Stacked(id) = self.selected
+            && !self.entries.iter().any(|entry| entry.id == id)
+        {
+            self.selected = self
+                .entries
+                .last()
+                .map(|entry| PaneStackSelection::Stacked(entry.id))
+                .unwrap_or(PaneStackSelection::Base);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum StackedPaneState {
+    #[default]
+    Starting,
+    Running,
+    Completed,
+    Failed,
+}
+
+pub(crate) struct StackedPane {
+    pub(crate) id: u64,
+    pub(crate) command: String,
+    pub(crate) profile: Profile,
+    pub(crate) terminal: Option<Entity<Terminal>>,
+    pub(crate) view: Option<Entity<TerminalView>>,
+    pub(crate) state: StackedPaneState,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) error: Option<String>,
+    pub(crate) working_directory: Option<PathBuf>,
+    pub(crate) wsl_directory: Option<String>,
+}
+
+impl StackedPane {
+    pub(crate) fn new(
+        id: u64,
+        command: String,
+        profile: Profile,
+        working_directory: Option<PathBuf>,
+        wsl_directory: Option<String>,
+    ) -> Self {
+        Self {
+            id,
+            command,
+            profile,
+            terminal: None,
+            view: None,
+            state: StackedPaneState::Starting,
+            exit_code: None,
+            error: None,
+            working_directory,
+            wsl_directory,
+        }
+    }
 }
 
 pub(crate) struct TerminalSpawnSettings {
@@ -652,8 +853,10 @@ impl TerminalPane {
             terminal: None,
             view: None,
             error: None,
+            base_exited: false,
             wsl_cwd_file: None,
             pending_command: None,
+            stack: PaneStack::default(),
         }
     }
 
@@ -710,6 +913,64 @@ impl TerminalPane {
             return Some(directory);
         }
         terminal.working_directory()
+    }
+
+    pub(crate) fn selected_view(&self) -> Option<Entity<TerminalView>> {
+        self.stack.selected_view(self.view.as_ref())
+    }
+
+    pub(crate) fn selected_terminal(&self) -> Option<Entity<Terminal>> {
+        self.stack.selected_terminal(self.terminal.as_ref())
+    }
+
+    /// Returns the stack entry represented by the focused terminal view. The
+    /// model selection normally tracks focus, but keeping this fallback makes
+    /// close actions reliable while a newly spawned stack view is replacing
+    /// the host view's focus.
+    pub(crate) fn focused_stack_selection(&self, window: &Window, cx: &App) -> PaneStackSelection {
+        if let Some(entry) = self.stack.entries.iter().find(|entry| {
+            entry
+                .view
+                .as_ref()
+                .is_some_and(|view| view.focus_handle(cx).is_focused(window))
+        }) {
+            return PaneStackSelection::Stacked(entry.id);
+        }
+        if matches!(self.stack.selected, PaneStackSelection::Stacked(id) if self
+            .stack
+            .entries
+            .iter()
+            .any(|entry| entry.id == id))
+        {
+            return self.stack.selected;
+        }
+        if self
+            .view
+            .as_ref()
+            .is_some_and(|view| view.focus_handle(cx).is_focused(window))
+        {
+            PaneStackSelection::Base
+        } else {
+            self.stack.selected
+        }
+    }
+
+    pub(crate) fn all_terminals(&self) -> impl Iterator<Item = &Entity<Terminal>> {
+        self.terminal.iter().chain(
+            self.stack
+                .entries
+                .iter()
+                .filter_map(|entry| entry.terminal.as_ref()),
+        )
+    }
+
+    pub(crate) fn all_views(&self) -> impl Iterator<Item = &Entity<TerminalView>> {
+        self.view.iter().chain(
+            self.stack
+                .entries
+                .iter()
+                .filter_map(|entry| entry.view.as_ref()),
+        )
     }
 }
 
@@ -1584,6 +1845,19 @@ impl Tab {
                 (old_id, pane.id)
             })
             .collect::<HashMap<_, _>>();
+        if !pane_ids.is_empty() {
+            for pane in &mut self.panes {
+                for entry in &mut pane.stack.entries {
+                    let old_id = entry.id;
+                    entry.id = *next_pane_id;
+                    *next_pane_id += 1;
+                    if pane.stack.selected == PaneStackSelection::Stacked(old_id) {
+                        pane.stack.selected = PaneStackSelection::Stacked(entry.id);
+                    }
+                }
+                pane.stack.repair_selection();
+            }
+        }
         self.pane_indices = self
             .panes
             .iter()
@@ -1704,6 +1978,24 @@ impl Tab {
         self.focus_history.retain(|pane_id| *pane_id != id);
         self.focus_history.push(id);
         self.active_pane = id;
+    }
+
+    pub(crate) fn activate_stack_entry(&mut self, pane_id: u64, entry: PaneStackSelection) {
+        let Some(pane) = self.pane_mut(pane_id) else {
+            return;
+        };
+        if !pane.stack.select(entry) {
+            return;
+        }
+        self.activate_pane(pane_id);
+    }
+
+    pub(crate) fn active_view(&self) -> Option<Entity<TerminalView>> {
+        self.active_pane().and_then(TerminalPane::selected_view)
+    }
+
+    pub(crate) fn active_terminal(&self) -> Option<Entity<Terminal>> {
+        self.active_pane().and_then(TerminalPane::selected_terminal)
     }
 
     pub(crate) fn visible_layout(&self) -> Option<PaneLayout> {

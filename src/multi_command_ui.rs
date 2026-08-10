@@ -35,6 +35,29 @@ impl Zetta {
         if self.command_palette.is_some() {
             self.command_palette = None;
         }
+        self.multi_command_mode = CommandPromptMode::Multi;
+        self.multi_command = Some(MultiCommandPrompt::new(self.multi_command_catalog.clone()));
+        self.multi_command_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_stacked_command(
+        &mut self,
+        _: &ToggleStackedCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.multi_command.is_some() {
+            self.dismiss_multi_command(window, cx);
+            return;
+        }
+        if self.tab_search.is_some() {
+            self.dismiss_tab_search(window, cx);
+        }
+        if self.command_palette.is_some() {
+            self.command_palette = None;
+        }
+        self.multi_command_mode = CommandPromptMode::Stacked;
         self.multi_command = Some(MultiCommandPrompt::new(self.multi_command_catalog.clone()));
         self.multi_command_focus.focus(window, cx);
         cx.notify();
@@ -42,10 +65,15 @@ impl Zetta {
 
     pub(crate) fn dismiss_multi_command(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.multi_command = None;
+        self.multi_command_mode = CommandPromptMode::Multi;
         self.focus_active(window, cx);
     }
 
     pub(crate) fn submit_multi_command(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.multi_command_mode == CommandPromptMode::Stacked {
+            self.submit_stacked_command(window, cx);
+            return;
+        }
         let Some(template) = self
             .multi_command
             .as_ref()
@@ -257,7 +285,7 @@ impl Zetta {
         }
     }
 
-    fn set_multi_command_error(&mut self, error: String, cx: &mut Context<Self>) {
+    pub(crate) fn set_multi_command_error(&mut self, error: String, cx: &mut Context<Self>) {
         if let Some(prompt) = self.multi_command.as_mut() {
             prompt.error = Some(error);
         }
@@ -466,6 +494,7 @@ impl Zetta {
         handle: &WeakEntity<Self>,
     ) -> Option<AnyElement> {
         let multi_command_focus = self.multi_command_focus.clone();
+        let stacked_prompt = self.multi_command_mode == CommandPromptMode::Stacked;
         let prompt = self.multi_command.as_mut()?;
         let (query_before, query_after) = prompt.rendered_query_parts();
         let query_empty = prompt.query.is_empty();
@@ -511,7 +540,11 @@ impl Zetta {
 
         Some(
             div()
-                .id("multi-command-backdrop")
+                .id(if stacked_prompt {
+                    "stacked-command-backdrop"
+                } else {
+                    "multi-command-backdrop"
+                })
                 .absolute()
                 .inset_0()
                 .pt(px(72.))
@@ -527,7 +560,11 @@ impl Zetta {
                 })
                 .child(
                     div()
-                        .id("multi-command-prompt")
+                        .id(if stacked_prompt {
+                            "stacked-command-prompt"
+                        } else {
+                            "multi-command-prompt"
+                        })
                         .track_focus(&multi_command_focus)
                         .w_full()
                         .max_w(px(680.))
@@ -569,7 +606,11 @@ impl Zetta {
                                             input.child(
                                                 div()
                                                     .text_color(colors.text_placeholder)
-                                                    .child("ssh {{a,b,c,d}}.example.com"),
+                                                    .child(if stacked_prompt {
+                                                        "git status"
+                                                    } else {
+                                                        "ssh {{a,b,c,d}}.example.com"
+                                                    }),
                                             )
                                         }),
                                 ),
@@ -605,8 +646,13 @@ impl Zetta {
                                             if completion_count == 1 { "" } else { "s" }
                                         )
                                     } else {
-                                        "Double-brace values become tiled panes · Tab complete · Enter run · Esc cancel"
-                                            .to_owned()
+                                        if stacked_prompt {
+                                            "Run one command in a stacked pane · Tab complete · Enter run · Esc cancel"
+                                                .to_owned()
+                                        } else {
+                                            "Double-brace values become tiled panes · Tab complete · Enter run · Esc cancel"
+                                                .to_owned()
+                                        }
                                     }
                                 })),
                         ),

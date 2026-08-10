@@ -255,6 +255,7 @@ pub(crate) struct Zetta {
     pub(crate) command_palette: Option<CommandPalette>,
     pub(crate) multi_command_focus: gpui::FocusHandle,
     pub(crate) multi_command: Option<MultiCommandPrompt>,
+    pub(crate) multi_command_mode: CommandPromptMode,
     pub(crate) multi_command_catalog: CompletionCatalog,
     pub(crate) multi_command_launches: BoundedLaunchQueue<QueuedTerminalLaunch>,
     pub(crate) settings_focus: gpui::FocusHandle,
@@ -323,6 +324,7 @@ impl Zetta {
         self.tab_move_mode = false;
         self.command_palette = None;
         self.multi_command = None;
+        self.multi_command_mode = CommandPromptMode::Multi;
         self.settings_editor = None;
         #[cfg(feature = "serial-console")]
         {
@@ -414,6 +416,7 @@ impl Zetta {
             command_palette: None,
             multi_command_focus: cx.focus_handle(),
             multi_command: None,
+            multi_command_mode: CommandPromptMode::Multi,
             multi_command_catalog: CompletionCatalog::default(),
             multi_command_launches: BoundedLaunchQueue::new(MAX_CONCURRENT_MULTI_COMMAND_SPAWNS),
             settings_focus: cx.focus_handle(),
@@ -671,7 +674,7 @@ impl Zetta {
         for terminal in self.tabs[self.active_tab]
             .panes
             .iter()
-            .filter_map(|pane| pane.terminal.clone())
+            .flat_map(TerminalPane::all_terminals)
         {
             terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
         }
@@ -695,7 +698,46 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.retain_stacked_entries_after_base_exit(tab_id, pane_id, window, cx) {
+            return;
+        }
         self.close_pane_with_policy(tab_id, pane_id, false, window, cx);
+    }
+
+    /// A host shell can exit while command PTYs in its stack are still alive.
+    /// Keep the host region and those entries in that case; the base entry is
+    /// marked as exited and selection moves to the first stacked entry when
+    /// the base terminal was foreground.
+    fn retain_stacked_entries_after_base_exit(
+        &mut self,
+        tab_id: u64,
+        pane_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(pane) = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id == tab_id)
+            .and_then(|tab| tab.pane_mut(pane_id))
+        else {
+            return false;
+        };
+        if pane.stack.is_empty() {
+            return false;
+        }
+
+        pane.terminal = None;
+        pane.view = None;
+        pane.error = None;
+        pane.base_exited = true;
+        pane.pending_command = None;
+        pane.stack.select_after_base_exit();
+        self.retain_open_visible_terminals();
+        self.focus_active(window, cx);
+        self.sync_visible_terminals(cx);
+        cx.notify();
+        true
     }
 
     fn close_pane_with_policy(
@@ -729,7 +771,8 @@ impl Zetta {
             .panes
             .iter()
             .filter(|pane| pane.id != pane_id)
-            .filter_map(|pane| pane.terminal.clone())
+            .flat_map(TerminalPane::all_terminals)
+            .cloned()
             .collect::<Vec<_>>();
         for terminal in surviving_terminals {
             terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
@@ -758,12 +801,19 @@ impl Zetta {
     ///
     /// Rendering normally refreshes this cache on the next frame, but retaining a closed
     /// terminal until then also retains its scrollback and delays its background reclamation.
-    fn retain_open_visible_terminals(&mut self) {
+    pub(crate) fn retain_open_visible_terminals(&mut self) {
         let open_terminals = self
             .tabs
             .iter()
             .flat_map(|tab| tab.panes.iter())
-            .filter_map(|pane| pane.terminal.as_ref())
+            .flat_map(|pane| {
+                pane.terminal.iter().chain(
+                    pane.stack
+                        .entries
+                        .iter()
+                        .filter_map(|entry| entry.terminal.as_ref()),
+                )
+            })
             .map(Entity::entity_id)
             .collect::<HashSet<_>>();
         self.visible_terminals
@@ -783,7 +833,7 @@ impl Zetta {
             .flat_map(|tab| {
                 tab.panes.iter().filter_map(|pane| {
                     tab.pane_is_visible(pane.id)
-                        .then(|| pane.terminal.clone())
+                        .then(|| pane.selected_terminal())
                         .flatten()
                 })
             })
@@ -873,7 +923,8 @@ impl Zetta {
             .then(|| {
                 tab.panes
                     .iter()
-                    .filter_map(|pane| pane.terminal.clone())
+                    .flat_map(TerminalPane::all_terminals)
+                    .cloned()
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
@@ -1130,7 +1181,15 @@ impl Zetta {
         let Some(tab) = self.tabs.get(self.active_tab) else {
             return;
         };
-        self.close_pane(tab.id, tab.active_pane, window, cx);
+        let selection = tab
+            .active_pane()
+            .map(|pane| pane.focused_stack_selection(window, cx));
+        match selection {
+            Some(PaneStackSelection::Stacked(entry_id)) => {
+                self.close_stacked_pane_by_id(tab.id, tab.active_pane, entry_id, window, cx);
+            }
+            _ => self.close_pane(tab.id, tab.active_pane, window, cx),
+        }
     }
 
     pub(crate) fn save_pane_output(
@@ -1142,10 +1201,9 @@ impl Zetta {
         let Some(pane) = self.tabs.get(self.active_tab).and_then(Tab::active_pane) else {
             return;
         };
-        let Some(view) = pane.view.as_ref() else {
+        let Some(view) = pane.selected_view() else {
             return;
         };
-        let view = view.clone();
         let is_wsl = is_wsl_shell(&pane.profile.command);
         if !begin_pane_output_save(&mut self.pane_output_save_in_progress) {
             return;
@@ -1258,7 +1316,7 @@ impl Zetta {
         if !tab.layout.rotate_pane(tab.active_pane, direction) {
             return;
         }
-        for terminal in tab.panes.iter().filter_map(|pane| pane.terminal.as_ref()) {
+        for terminal in tab.panes.iter().flat_map(TerminalPane::all_terminals) {
             terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
         }
         cx.notify();
@@ -1399,6 +1457,22 @@ impl Zetta {
             .collect::<Vec<_>>();
         debug_assert_eq!(generated_labels.len(), new_pane_count + 1);
 
+        let replaced_stack_ids = replacing_active
+            .then(|| {
+                self.tabs[self.active_tab].pane(active_pane_id).map(|pane| {
+                    pane.stack
+                        .entries
+                        .iter()
+                        .map(|entry| entry.id)
+                        .collect::<Vec<_>>()
+                })
+            })
+            .flatten()
+            .unwrap_or_default();
+        for stack_id in replaced_stack_ids {
+            self.background_observed_panes.remove(&stack_id);
+        }
+
         let tab = &mut self.tabs[self.active_tab];
         tab.maximized_pane = None;
         if !tab.layout.replace(active_pane_id, replacement) {
@@ -1411,7 +1485,9 @@ impl Zetta {
             let _old_terminal = pane.terminal.take();
             pane.view = None;
             pane.error = None;
+            pane.base_exited = false;
             pane.pending_command = None;
+            pane.stack = PaneStack::default();
             pane.profile = profile.clone();
             pane.wsl_cwd_file = active_wsl_cwd_file.clone();
         }
@@ -1497,13 +1573,31 @@ impl Zetta {
         let path_hyperlink_regexes = terminal_settings.path_hyperlink_regexes(true);
         let wsl_cwd_file = wsl_cwd_tracking_file(&profile, active_pane_id);
 
+        let replaced_stack_ids = self
+            .tabs
+            .get(self.active_tab)
+            .and_then(|tab| tab.pane(active_pane_id))
+            .map(|pane| {
+                pane.stack
+                    .entries
+                    .iter()
+                    .map(|entry| entry.id)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for stack_id in replaced_stack_ids {
+            self.background_observed_panes.remove(&stack_id);
+        }
+
         let Some(pane) = self.tabs[self.active_tab].pane_mut(active_pane_id) else {
             return false;
         };
         let _old_terminal = pane.terminal.take();
         pane.view = None;
         pane.error = None;
+        pane.base_exited = false;
         pane.pending_command = None;
+        pane.stack = PaneStack::default();
         pane.profile = profile.clone();
         pane.wsl_cwd_file = wsl_cwd_file.clone();
         self.retain_open_visible_terminals();
@@ -1644,7 +1738,7 @@ impl Zetta {
             .tabs
             .iter()
             .flat_map(|tab| tab.panes.iter())
-            .filter_map(|pane| pane.view.as_ref())
+            .flat_map(TerminalPane::all_views)
         {
             view.update(cx, |view, cx| view.set_input_enabled(enabled, cx));
         }
@@ -1830,8 +1924,7 @@ impl Zetta {
             return false;
         };
         if tab.pane_is_visible(tab.active_pane) {
-            tab.active_pane()
-                .and_then(|pane| pane.view.as_ref())
+            tab.active_view()
                 .is_some_and(|view| view.focus_handle(cx).is_focused(window))
         } else {
             !tab.minimized_panes.is_empty() && self.minimized_panes_focus.is_focused(window)
@@ -1899,7 +1992,7 @@ impl Zetta {
         if let Some(tab) = self.tabs.get(self.active_tab) {
             let active_is_visible = tab.pane_is_visible(tab.active_pane);
             if active_is_visible {
-                if let Some(view) = tab.active_pane().and_then(|pane| pane.view.as_ref()) {
+                if let Some(view) = tab.active_view() {
                     view.focus_handle(cx).focus(window, cx);
                 }
             } else if !tab.minimized_panes.is_empty() {

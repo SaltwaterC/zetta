@@ -346,6 +346,7 @@ impl TerminalView {
                     }
                     cx.notify();
                 }
+                Event::TaskFinished { .. } => cx.notify(),
                 Event::Bell => {
                     view.has_bell = true;
                     if should_play_system_bell(

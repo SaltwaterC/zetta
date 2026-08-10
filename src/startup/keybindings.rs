@@ -510,6 +510,33 @@ pub(crate) fn minimized_pane_keybindings() -> [KeyBinding; 4] {
     ]
 }
 
+pub(crate) fn stacked_pane_keybindings() -> [KeyBinding; 5] {
+    [
+        platform_keybinding(
+            "alt-shift-n",
+            ToggleStackedCommand,
+            Some("Zetta > Terminal"),
+        ),
+        // GPUI's Linux keyboard event uses the produced symbol for shifted
+        // punctuation. On a US layout, Alt+Shift+[ therefore arrives as
+        // Alt+{ (and the closing bracket as Alt+}). Keep the documented
+        // physical-key spellings below as well so the bindings remain
+        // portable to layouts/platforms that preserve the bracket key.
+        platform_keybinding("alt-{", SelectPreviousStackedPane, Some("Zetta > Terminal")),
+        platform_keybinding("alt-}", SelectNextStackedPane, Some("Zetta > Terminal")),
+        platform_keybinding(
+            "alt-shift-[",
+            SelectPreviousStackedPane,
+            Some("Zetta > Terminal"),
+        ),
+        platform_keybinding(
+            "alt-shift-]",
+            SelectNextStackedPane,
+            Some("Zetta > Terminal"),
+        ),
+    ]
+}
+
 fn default_keybindings(
     profile_count: usize,
     keyboard_mapper: &dyn PlatformKeyboardMapper,
@@ -643,6 +670,7 @@ fn default_keybindings(
     bindings.extend(tab_menu_navigation_keybindings());
     bindings.extend(focus_pane_keybindings());
     bindings.extend(minimized_pane_keybindings());
+    bindings.extend(stacked_pane_keybindings());
     bindings.extend(pane_resize_keybindings());
     bindings.extend(pane_move_keybindings());
     bindings.extend(tab_move_keybindings());

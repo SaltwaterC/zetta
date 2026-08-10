@@ -10833,6 +10833,7 @@ dependencies = [
  "argon2",
  "ashpd",
  "assets",
+ "async-channel 2.5.0",
  "async-compression",
  "async-tar",
  "block2 0.6.2",

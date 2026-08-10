@@ -65,8 +65,7 @@ impl Zetta {
         let automatic_title = self
             .tabs
             .get(tab_index)
-            .and_then(Tab::active_pane)
-            .and_then(|pane| pane.view.as_ref())
+            .and_then(Tab::active_view)
             .map(|view| view.read(cx).tab_content_text(0, cx).to_string())
             .or_else(|| {
                 self.tabs

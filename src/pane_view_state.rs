@@ -184,12 +184,7 @@ impl Zetta {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(view) = self
-            .tabs
-            .get(self.active_tab)
-            .and_then(Tab::active_pane)
-            .and_then(|pane| pane.view.clone())
-        {
+        if let Some(view) = self.tabs.get(self.active_tab).and_then(Tab::active_view) {
             view.update(cx, TerminalView::increase_font_size);
         }
     }
@@ -200,12 +195,7 @@ impl Zetta {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(view) = self
-            .tabs
-            .get(self.active_tab)
-            .and_then(Tab::active_pane)
-            .and_then(|pane| pane.view.clone())
-        {
+        if let Some(view) = self.tabs.get(self.active_tab).and_then(Tab::active_view) {
             view.update(cx, TerminalView::decrease_font_size);
         }
     }
@@ -216,12 +206,7 @@ impl Zetta {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(view) = self
-            .tabs
-            .get(self.active_tab)
-            .and_then(Tab::active_pane)
-            .and_then(|pane| pane.view.clone())
-        {
+        if let Some(view) = self.tabs.get(self.active_tab).and_then(Tab::active_view) {
             view.update(cx, TerminalView::reset_font_size);
         }
     }

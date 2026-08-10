@@ -1135,6 +1135,10 @@ fn subscribe_for_terminal_events(
                     cx.emit(SearchEvent::MatchesInvalidated);
                 }
 
+                Event::TaskFinished { .. } => {
+                    cx.notify();
+                }
+
                 Event::Bell => {
                     terminal_view.has_bell = true;
                     if let TerminalBell::System = TerminalSettings::get_global(cx).bell {
