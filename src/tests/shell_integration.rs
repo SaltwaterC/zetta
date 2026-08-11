@@ -17,6 +17,30 @@ fn profiles() -> [Profile; 2] {
     ]
 }
 
+// On Windows, `bash.exe` is commonly the WSL launcher rather than a native
+// Bash binary. Starting several WSL instances concurrently can make the
+// launcher fail with no useful stderr, so keep all external Bash tests
+// serialized. The lock is harmless on Unix and also covers the tests that
+// invoke Bash as one shell among several.
+fn lock_bash_tests() -> std::sync::MutexGuard<'static, ()> {
+    static BASH_TEST_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    BASH_TEST_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn bash_command() -> std::process::Command {
+    let mut command = std::process::Command::new("bash");
+    // Do not let a user's shell startup environment change the exit status or
+    // behavior of a generated script under test.
+    command
+        .env_remove("BASH_ENV")
+        .env_remove("BASHOPTS")
+        .env_remove("SHELLOPTS");
+    command
+}
+
 #[test]
 fn supported_shells_generate_completion_and_tftp_shortcut() {
     let profiles = profiles();
@@ -93,9 +117,10 @@ fn vi_integration_is_conditional_and_has_cli_completion() {
 #[test]
 fn bash_does_not_repeat_options_and_completes_vi_files() {
     use std::io::Write as _;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
-    if !Command::new("bash")
+    let _bash_test_lock = lock_bash_tests();
+    if !bash_command()
         .arg("--version")
         .output()
         .is_ok_and(|output| output.status.success())
@@ -107,7 +132,7 @@ fn bash_does_not_repeat_options_and_completes_vi_files() {
     let driver = format!(
         "{script}\nCOMP_WORDS=(zetta vi --)\nCOMP_CWORD=2\n_zetta_complete\nprintf 'option:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta vi --help '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'file:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta vi Carg)\nCOMP_CWORD=2\n_zetta_complete\nprintf 'file:%s\\n' \"${{COMPREPLY[@]}}\"\n"
     );
-    let mut child = Command::new("bash")
+    let mut child = bash_command()
         .args(["--noprofile", "--norc"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -135,9 +160,10 @@ fn bash_does_not_repeat_options_and_completes_vi_files() {
 #[test]
 fn bash_color_completion_offers_named_presets_for_long_and_short_flags() {
     use std::io::Write as _;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
-    if !Command::new("bash")
+    let _bash_test_lock = lock_bash_tests();
+    if !bash_command()
         .arg("--version")
         .output()
         .is_ok_and(|output| output.status.success())
@@ -149,7 +175,7 @@ fn bash_color_completion_offers_named_presets_for_long_and_short_flags() {
     let driver = format!(
         "{script}\nCOMP_WORDS=(zetta overlay --color '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'long:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta overlay -c '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'short:%s\\n' \"${{COMPREPLY[@]}}\"\n"
     );
-    let mut child = Command::new("bash")
+    let mut child = bash_command()
         .args(["--noprofile", "--norc"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -185,9 +211,10 @@ fn bash_color_completion_offers_named_presets_for_long_and_short_flags() {
 #[test]
 fn bash_worktree_completion_offers_operations_and_long_worktree_options() {
     use std::io::Write as _;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
-    if !Command::new("bash")
+    let _bash_test_lock = lock_bash_tests();
+    if !bash_command()
         .arg("--version")
         .output()
         .is_ok_and(|output| output.status.success())
@@ -199,7 +226,7 @@ fn bash_worktree_completion_offers_operations_and_long_worktree_options() {
     let driver = format!(
         "{script}\nCOMP_WORDS=(zetta wt '')\nCOMP_CWORD=2\n_zetta_complete\nprintf 'operation:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta wt new --)\nCOMP_CWORD=3\n_zetta_complete\nprintf 'option:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta wt new --copy Carg)\nCOMP_CWORD=4\n_zetta_complete\nprintf 'copy-path:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta wt new -c Carg)\nCOMP_CWORD=4\n_zetta_complete\nprintf 'short-copy-path:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zwt '')\nCOMP_CWORD=1\n_zetta_complete_zwt\nprintf 'wrapper:%s\\n' \"${{COMPREPLY[@]}}\"\n"
     );
-    let mut child = Command::new("bash")
+    let mut child = bash_command()
         .args(["--noprofile", "--norc"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -248,12 +275,9 @@ fn bash_worktree_completion_offers_operations_and_long_worktree_options() {
 #[cfg(unix)]
 #[test]
 fn bash_zwt_changes_directory_for_nested_paths_with_spaces() {
-    use std::{
-        io::Write as _,
-        os::unix::fs::PermissionsExt as _,
-        process::{Command, Stdio},
-    };
+    use std::{io::Write as _, os::unix::fs::PermissionsExt as _, process::Stdio};
 
+    let _bash_test_lock = lock_bash_tests();
     let temporary = tempfile::tempdir().unwrap();
     let start = temporary.path().join("start directory");
     let new_path = temporary.path().join("new worktree/feature api");
@@ -282,7 +306,7 @@ fn bash_zwt_changes_directory_for_nested_paths_with_spaces() {
         "{script}\ncd '{}'\nzwt new --path-only 'feature/api'\nprintf 'new:%s\\n' \"$PWD\"\nzwt done --path-only\nprintf 'done:%s\\n' \"$PWD\"\n",
         start.display()
     );
-    let mut child = Command::new("bash")
+    let mut child = bash_command()
         .args(["--noprofile", "--norc"])
         .current_dir(&start)
         .env("PATH", path)
@@ -344,6 +368,7 @@ fn posix_zwt_help_does_not_change_directory_or_inject_path_only() {
         process::{Command, Stdio},
     };
 
+    let _bash_test_lock = lock_bash_tests();
     let temporary = tempfile::tempdir().unwrap();
     let start = temporary.path().join("start directory");
     let args_file = temporary.path().join("zetta arguments");
@@ -365,7 +390,12 @@ fn posix_zwt_help_does_not_change_directory_or_inject_path_only() {
     path = std::env::join_paths(paths).unwrap();
 
     for shell in ["bash", "zsh"] {
-        if Command::new(shell).arg("--version").output().is_err() {
+        let version = if shell == "bash" {
+            bash_command().arg("--version").output()
+        } else {
+            Command::new(shell).arg("--version").output()
+        };
+        if version.is_err() {
             continue;
         }
 
@@ -380,12 +410,11 @@ fn posix_zwt_help_does_not_change_directory_or_inject_path_only() {
             start.display()
         );
 
-        let mut command = Command::new(shell);
-        if shell == "bash" {
-            command.args(["--noprofile", "--norc"]);
+        let mut command = if shell == "bash" {
+            bash_command().args(["--noprofile", "--norc"])
         } else {
-            command.arg("-f");
-        }
+            Command::new(shell).arg("-f")
+        };
         let mut child = command
             .current_dir(&start)
             .env("PATH", &path)
@@ -691,9 +720,10 @@ fn notify_timeout_completion_does_not_leak_into_other_short_t_flags() {
 #[test]
 fn profile_and_theme_root_flags_keep_completing_each_other_in_bash() {
     use std::io::Write as _;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
-    if !Command::new("bash")
+    let _bash_test_lock = lock_bash_tests();
+    if !bash_command()
         .arg("--version")
         .output()
         .is_ok_and(|output| output.status.success())
@@ -705,7 +735,7 @@ fn profile_and_theme_root_flags_keep_completing_each_other_in_bash() {
     let driver = format!(
         "{script}\nCOMP_WORDS=(zetta --profile System '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'after-profile:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta --theme Dracula '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'after-theme:%s\\n' \"${{COMPREPLY[@]}}\"\n"
     );
-    let mut child = Command::new("bash")
+    let mut child = bash_command()
         .args(["--noprofile", "--norc"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -761,9 +791,10 @@ fn profile_and_theme_root_flags_keep_completing_each_other_in_bash() {
 #[test]
 fn bash_root_split_completion_handles_long_short_and_combined_launch_options() {
     use std::io::Write as _;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
-    if !Command::new("bash")
+    let _bash_test_lock = lock_bash_tests();
+    if !bash_command()
         .arg("--version")
         .output()
         .is_ok_and(|output| output.status.success())
@@ -775,7 +806,7 @@ fn bash_root_split_completion_handles_long_short_and_combined_launch_options() {
     let driver = format!(
         "zetta() {{\n    if [[ $1 == splits ]]; then\n        printf '%s\\n' custom-layout quarters four-vertical three-left three-right\n    elif [[ $1 == profile && $2 == list ]]; then\n        if [[ $3 == --config && $4 == profiles.json ]]; then\n            printf '%s\\n' 'Configured Shell'\n        else\n            printf '%s\\n' 'System' 'WSL: Ubuntu'\n        fi\n    fi\n}}\n{script}\nCOMP_WORDS=(zetta --split '')\nCOMP_CWORD=2\n_zetta_complete\nprintf 'long:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta -s '')\nCOMP_CWORD=2\n_zetta_complete\nprintf 'short:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta --profile System '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'profile:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta --split quarters --profile '')\nCOMP_CWORD=4\n_zetta_complete\nprintf 'combined:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta -c profiles.json profile disable '')\nCOMP_CWORD=5\n_zetta_complete\nprintf 'profile-config:%s\\n' \"${{COMPREPLY[@]}}\"\n"
     );
-    let mut child = Command::new("bash")
+    let mut child = bash_command()
         .args(["--noprofile", "--norc"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
