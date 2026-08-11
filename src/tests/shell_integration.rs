@@ -309,6 +309,7 @@ fn bash_zwt_changes_directory_for_nested_paths_with_spaces() {
     let mut child = bash_command()
         .args(["--noprofile", "--norc"])
         .current_dir(&start)
+        .env_remove("ZETTA_HOST_EXECUTABLE")
         .env("PATH", path)
         .env("ZETTA_TEST_NEW", &new_path)
         .env("ZETTA_TEST_DONE", &done_path)
@@ -411,11 +412,17 @@ fn posix_zwt_help_does_not_change_directory_or_inject_path_only() {
         );
 
         let mut command = if shell == "bash" {
-            bash_command().args(["--noprofile", "--norc"])
+            bash_command()
         } else {
-            Command::new(shell).arg("-f")
+            Command::new(shell)
         };
+        if shell == "bash" {
+            command.args(["--noprofile", "--norc"]);
+        } else {
+            command.arg("-f");
+        }
         let mut child = command
+            .env_remove("ZETTA_HOST_EXECUTABLE")
             .current_dir(&start)
             .env("PATH", &path)
             .env("ZETTA_TEST_ARGS", &args_file)
@@ -808,6 +815,7 @@ fn bash_root_split_completion_handles_long_short_and_combined_launch_options() {
     );
     let mut child = bash_command()
         .args(["--noprofile", "--norc"])
+        .env_remove("ZETTA_HOST_EXECUTABLE")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1623,6 +1631,7 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
                 script_file.path().to_str().unwrap(),
                 line,
             ])
+            .env_remove("ZETTA_HOST_EXECUTABLE")
             .output()
             .unwrap();
         assert!(
