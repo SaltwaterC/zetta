@@ -24,12 +24,24 @@ fn jump_list_icons_use_embedded_resources_or_executable_icons() {
 
     let target = PathBuf::from(r"C:\Program Files\Zetta\zetta-gui.exe");
     assert_eq!(
+        ProfileIcon::Zetta.jump_list_icon_location(&target),
+        (target.clone(), 1)
+    );
+    assert_eq!(
+        ProfileIcon::Tux.jump_list_icon_location(&target),
+        (target.clone(), 5)
+    );
+    assert_eq!(
         ProfileIcon::Bash.jump_list_icon_location(&target),
+        (target.clone(), 2)
+    );
+    assert_eq!(
+        ProfileIcon::Zsh.jump_list_icon_location(&target),
         (target.clone(), 3)
     );
     assert_eq!(
-        ProfileIcon::Zetta.jump_list_icon_location(&target),
-        (target.clone(), 2)
+        ProfileIcon::Fish.jump_list_icon_location(&target),
+        (target.clone(), 4)
     );
 
     let executable = tempfile::NamedTempFile::new().unwrap();

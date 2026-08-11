@@ -16,4 +16,8 @@ fn bundled_profile_icons_load_from_embedded_assets() {
         let path = format!("icons/profile/{icon}.svg");
         assert!(ZettaAssets.load(&path).unwrap().is_some(), "missing {path}");
     }
+    assert!(
+        ZettaAssets.load("icons/profile/tux.png").unwrap().is_some(),
+        "missing icons/profile/tux.png"
+    );
 }

@@ -109,7 +109,7 @@ Each profile also has an icon. When `icon` is omitted, `null`, or `"auto"`,
 Zetta infers it from the shell executable on macOS and Linux (`bash`, `zsh`,
 and `fish` get their bundled artwork; other programs use the Zetta fallback).
 Windows profiles use the executable's native icon when it can be resolved and
-extracted. WSL distributions default to Bash artwork because WSL discovery does
+extracted. WSL distributions use generic Tux artwork because WSL discovery does
 not expose the distribution's default shell, while MSYS2 Bash and Zsh use the
 corresponding bundled artwork. Set `icon` explicitly to `"zetta"`, `"bash"`,
 `"zsh"`, or `"fish"` to override automatic selection. Explicit icons are

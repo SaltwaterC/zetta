@@ -23,6 +23,8 @@ fn main() {
     let profile_icons = [
         "assets/icons/profile/zetta.svg",
         "assets/icons/profile/zetta.ico",
+        "assets/icons/profile/tux.png",
+        "assets/icons/profile/tux.ico",
         "assets/icons/profile/bash.svg",
         "assets/icons/profile/bash.ico",
         "assets/icons/profile/zsh.svg",

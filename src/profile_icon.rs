@@ -18,6 +18,13 @@ use ui::IconSize;
 pub(crate) enum ProfileIcon {
     #[default]
     Zetta,
+    /// Generic Linux artwork used for automatically discovered WSL profiles.
+    ///
+    /// WSL does not expose the distribution's default shell during profile
+    /// discovery, so a shell-specific icon would be misleading. This variant
+    /// is intentionally automatic-only; users can still choose an explicit
+    /// shell icon in their configuration.
+    Tux,
     Bash,
     Zsh,
     Fish,
@@ -57,6 +64,7 @@ impl ProfileIcon {
     pub(crate) fn name(&self) -> Option<&'static str> {
         match self {
             Self::Zetta => Some("zetta"),
+            Self::Tux => None,
             Self::Bash => Some("bash"),
             Self::Zsh => Some("zsh"),
             Self::Fish => Some("fish"),
@@ -67,6 +75,7 @@ impl ProfileIcon {
     pub(crate) fn label(&self) -> &'static str {
         match self {
             Self::Zetta => "Zetta",
+            Self::Tux => "Tux",
             Self::Bash => "Bash",
             Self::Zsh => "Zsh",
             Self::Fish => "Fish",
@@ -88,10 +97,10 @@ impl ProfileIcon {
 
     pub(crate) fn automatic_for_profile(name: &str, shell: &Shell) -> Self {
         let lowercase = name.to_ascii_lowercase();
-        if name.eq_ignore_ascii_case("msys2")
-            || lowercase.starts_with("wsl: ")
-            || lowercase.starts_with("msys2: ")
-        {
+        if lowercase.starts_with("wsl: ") {
+            return Self::Tux;
+        }
+        if name.eq_ignore_ascii_case("msys2") || lowercase.starts_with("msys2: ") {
             if lowercase.contains("zsh") {
                 return Self::Zsh;
             }
@@ -114,6 +123,7 @@ impl ProfileIcon {
         let size = size.rems();
         match self {
             Self::Zetta => embedded_icon("icons/profile/zetta.svg", size),
+            Self::Tux => embedded_icon("icons/profile/tux.png", size),
             Self::Bash => embedded_icon("icons/profile/bash.svg", size),
             Self::Zsh => embedded_icon("icons/profile/zsh.svg", size),
             Self::Fish => embedded_icon("icons/profile/fish.svg", size),
@@ -131,11 +141,12 @@ impl ProfileIcon {
     pub(crate) fn jump_list_icon_location(&self, target: &Path) -> (PathBuf, i32) {
         match self {
             Self::Executable(executable) if executable.is_file() => (executable.clone(), 0),
-            Self::Zetta => (target.to_path_buf(), WINDOWS_ZETTA_ICON_RESOURCE),
-            Self::Bash => (target.to_path_buf(), WINDOWS_BASH_ICON_RESOURCE),
-            Self::Zsh => (target.to_path_buf(), WINDOWS_ZSH_ICON_RESOURCE),
-            Self::Fish => (target.to_path_buf(), WINDOWS_FISH_ICON_RESOURCE),
-            Self::Executable(_) => (target.to_path_buf(), WINDOWS_ZETTA_ICON_RESOURCE),
+            Self::Zetta => (target.to_path_buf(), WINDOWS_ZETTA_ICON_INDEX),
+            Self::Tux => (target.to_path_buf(), WINDOWS_TUX_ICON_INDEX),
+            Self::Bash => (target.to_path_buf(), WINDOWS_BASH_ICON_INDEX),
+            Self::Zsh => (target.to_path_buf(), WINDOWS_ZSH_ICON_INDEX),
+            Self::Fish => (target.to_path_buf(), WINDOWS_FISH_ICON_INDEX),
+            Self::Executable(_) => (target.to_path_buf(), WINDOWS_ZETTA_ICON_INDEX),
         }
     }
 }
@@ -169,13 +180,18 @@ fn executable_basename(program: &str) -> Option<String> {
 }
 
 #[cfg(windows)]
-const WINDOWS_ZETTA_ICON_RESOURCE: i32 = 2;
+// IShellLink::SetIconLocation takes a zero-based icon-group index. The
+// resource IDs in resources/windows/zetta.rc start at 1, so these are one
+// less than the corresponding resource IDs.
+const WINDOWS_ZETTA_ICON_INDEX: i32 = 1;
 #[cfg(windows)]
-const WINDOWS_BASH_ICON_RESOURCE: i32 = 3;
+const WINDOWS_TUX_ICON_INDEX: i32 = 5;
 #[cfg(windows)]
-const WINDOWS_ZSH_ICON_RESOURCE: i32 = 4;
+const WINDOWS_BASH_ICON_INDEX: i32 = 2;
 #[cfg(windows)]
-const WINDOWS_FISH_ICON_RESOURCE: i32 = 5;
+const WINDOWS_ZSH_ICON_INDEX: i32 = 3;
+#[cfg(windows)]
+const WINDOWS_FISH_ICON_INDEX: i32 = 4;
 
 #[cfg(windows)]
 fn resolve_executable(program: &str) -> Option<PathBuf> {
@@ -358,10 +374,17 @@ mod tests {
     }
 
     #[test]
-    fn special_profiles_use_their_user_facing_shell_icon() {
+    fn special_profiles_use_their_platform_icon() {
         assert_eq!(
             ProfileIcon::automatic_for_profile("WSL: Ubuntu", &Shell::Program("wsl.exe".into())),
-            ProfileIcon::Bash
+            ProfileIcon::Tux
+        );
+        assert_eq!(
+            ProfileIcon::automatic_for_profile(
+                "WSL: Ubuntu (Zsh)",
+                &Shell::Program("wsl.exe".into()),
+            ),
+            ProfileIcon::Tux
         );
         assert_eq!(
             ProfileIcon::automatic_for_profile(

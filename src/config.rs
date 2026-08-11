@@ -1192,7 +1192,7 @@ fn wsl_profiles_from_output(program: &str, output: &[u8]) -> Vec<Profile> {
                     title_override: Some(name),
                 },
                 theme: None,
-                icon: ProfileIcon::Bash,
+                icon: ProfileIcon::Tux,
             }
         })
         .collect()

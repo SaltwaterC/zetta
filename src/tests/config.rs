@@ -770,7 +770,7 @@ fn creates_a_profile_for_each_wsl_distribution() {
 
     assert_eq!(profiles.len(), 2);
     assert_eq!(profiles[0].name, "WSL: Ubuntu");
-    assert_eq!(profiles[0].icon, ProfileIcon::Bash);
+    assert_eq!(profiles[0].icon, ProfileIcon::Tux);
     assert!(matches!(
         profiles[0].command,
         Shell::WithArguments {
