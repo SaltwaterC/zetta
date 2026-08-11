@@ -18,6 +18,10 @@ fn terminal_focus_placeholder(focus: &gpui::FocusHandle, content: impl IntoEleme
         .child(content)
 }
 
+fn with_inactive_pane_opacity(pane: gpui::Div, active: bool, inactive_opacity: f32) -> gpui::Div {
+    pane.when(!active, |pane| pane.opacity(inactive_opacity))
+}
+
 fn stacked_entry_status(entry: &StackedPane) -> String {
     match entry.state {
         StackedPaneState::Starting => "starting".to_owned(),
@@ -30,21 +34,26 @@ fn stacked_entry_status(entry: &StackedPane) -> String {
     }
 }
 
+fn stacked_rows_container(background: gpui::Hsla) -> gpui::Div {
+    div().flex_none().w_full().flex().flex_col().bg(background)
+}
+
+fn stacked_rows_backdrop(background: gpui::Hsla) -> gpui::Div {
+    div().flex_none().w_full().bg(background)
+}
+
 impl Zetta {
     fn render_stacked_rows(
         &self,
         tab: &Tab,
         pane: &TerminalPane,
         colors: &ThemeColors,
+        editor_background: gpui::Hsla,
+        terminal_background: gpui::Hsla,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let selected = pane.stack.selected;
-        let mut rows = div()
-            .flex_none()
-            .w_full()
-            .flex()
-            .flex_col()
-            .bg(colors.status_bar_background);
+        let mut rows = stacked_rows_container(terminal_background);
 
         if !pane.base_exited && !matches!(selected, PaneStackSelection::Base) {
             rows = rows.child(self.render_stacked_row(
@@ -76,7 +85,9 @@ impl Zetta {
                 cx,
             ));
         }
-        rows.into_any_element()
+        stacked_rows_backdrop(editor_background)
+            .child(rows)
+            .into_any_element()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -281,6 +292,15 @@ impl Zetta {
                     .unwrap_or_else(|| pane.label());
                 let pane_overlay = tab.displayed_pane_overlay(*pane_id);
                 let selected_view = pane.selected_view();
+                let (editor_background, terminal_background) = selected_view
+                    .as_ref()
+                    .and_then(|view| {
+                        view.read(cx).theme().map(|theme| {
+                            let colors = theme.colors();
+                            (colors.editor_background, colors.terminal_background)
+                        })
+                    })
+                    .unwrap_or((colors.editor_background, colors.terminal_background));
                 let pane_terminal = pane.selected_terminal();
                 let pane_size = pane_terminal.map(|terminal| {
                     let bounds = terminal.read(cx).last_content().terminal_bounds;
@@ -391,7 +411,14 @@ impl Zetta {
                         .min_h_0()
                         .flex()
                         .flex_col()
-                        .child(self.render_stacked_rows(tab, pane, colors, cx))
+                        .child(self.render_stacked_rows(
+                            tab,
+                            pane,
+                            colors,
+                            editor_background,
+                            terminal_background,
+                            cx,
+                        ))
                         .child(
                             div()
                                 .min_w_0()
@@ -402,6 +429,12 @@ impl Zetta {
                         )
                         .into_any_element()
                 };
+                let content = with_inactive_pane_opacity(
+                    div().size_full().child(content),
+                    active,
+                    self.launch_config.inactive_pane_opacity,
+                )
+                .into_any_element();
                 div()
                     .id(("terminal-pane", *pane_id as usize))
                     .relative()
@@ -420,14 +453,7 @@ impl Zetta {
                     .flex_grow_1()
                     .flex_basis(gpui::relative(0.))
                     .overflow_hidden()
-                    .child(
-                        div()
-                            .size_full()
-                            .when(!active, |pane| {
-                                pane.opacity(self.launch_config.inactive_pane_opacity)
-                            })
-                            .child(content),
-                    )
+                    .child(content)
                     .when_some(
                         self.pane_resize_mode.then_some(pane_size.clone()).flatten(),
                         |pane, pane_size| {

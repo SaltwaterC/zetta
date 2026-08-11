@@ -21,6 +21,36 @@ fn pane_move_menu_entry_requires_at_least_two_panes() {
     assert!(pane_move_menu_entry_available(3));
 }
 
+#[test]
+fn stacked_rows_match_the_terminal_background_layers() {
+    let mut colors = ThemeColors::light();
+    colors.tab_active_background = gpui::rgb(0x112233).into();
+    colors.editor_background = gpui::rgb(0x445566).into();
+    colors.terminal_background = gpui::rgb(0xaabbcc).into();
+
+    let mut backdrop = stacked_rows_backdrop(colors.editor_background);
+    let mut rows = stacked_rows_container(colors.terminal_background);
+    let backdrop_background = backdrop
+        .style()
+        .background
+        .as_ref()
+        .and_then(gpui::Fill::color);
+    let background = rows.style().background.as_ref().and_then(gpui::Fill::color);
+
+    assert_eq!(backdrop_background, Some(colors.editor_background.into()));
+    assert_eq!(background, Some(colors.terminal_background.into()));
+    assert_ne!(background, Some(colors.tab_active_background.into()));
+}
+
+#[test]
+fn inactive_opacity_is_shared_by_stacked_rows_and_pane_content() {
+    let mut active_surface = with_inactive_pane_opacity(div(), true, 0.65);
+    let mut inactive_surface = with_inactive_pane_opacity(div(), false, 0.65);
+
+    assert_eq!(active_surface.style().opacity, None);
+    assert_eq!(inactive_surface.style().opacity, Some(0.65));
+}
+
 struct TerminalPlaceholderTestView {
     focus_handle: gpui::FocusHandle,
     saw_new_tab: bool,
