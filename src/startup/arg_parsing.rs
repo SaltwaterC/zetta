@@ -1278,17 +1278,25 @@ fn path_with_entry_first(path: Option<&std::ffi::OsStr>, entry: &Path) -> Option
 }
 
 pub(crate) fn native_terminal_environment() -> Vec<(String, String)> {
+    let mut environment = Vec::new();
+    // A native Linux Zetta can be launched from a Windows-hosted WSL pane.
+    // Do not let that pane's host-routing marker leak into terminals owned by
+    // the native application; its executable directory below must win there.
+    #[cfg(not(windows))]
+    environment.push(("ZETTA_HOST_EXECUTABLE".to_owned(), String::new()));
+
     let Some(executable_directory) = env::current_exe()
         .ok()
         .and_then(|executable| executable.parent().map(Path::to_path_buf))
     else {
-        return Vec::new();
+        return environment;
     };
     let Some(path) = path_with_entry_first(env::var_os("PATH").as_deref(), &executable_directory)
     else {
-        return Vec::new();
+        return environment;
     };
-    vec![("PATH".to_owned(), path.to_string_lossy().into_owned())]
+    environment.push(("PATH".to_owned(), path.to_string_lossy().into_owned()));
+    environment
 }
 
 pub(crate) fn load_startup_config(

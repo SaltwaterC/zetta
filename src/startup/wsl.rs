@@ -401,6 +401,11 @@ __zetta_preexec() {
     printf '\033]2;zetta-cmd:%s\033\\' "$BASH_COMMAND"
 }
 __zetta_precmd() {
+    if [[ ${_zetta_integration_attempted:-0} != 1 && -n ${ZETTA_HOST_EXECUTABLE:-} ]] &&
+        ! declare -F _zetta_complete >/dev/null; then
+        _zetta_integration_attempted=1
+        eval "$("$ZETTA_HOST_EXECUTABLE" init bash)"
+    fi
     case "$PWD" in
         /*) printf '\033]7;file://localhost%s\033\\\033]2;zetta-cwd:%s\033\\' "$PWD" "$PWD" ;;
     esac
@@ -417,7 +422,7 @@ ZETTA_BASH_PROMPT
         exec "$shell" -l
         ;;
     fish)
-        exec "$shell" -l -C 'function __zetta_report_cwd --on-event fish_prompt; if string match -qr "^/" -- "$PWD"; printf "\033]7;file://localhost%s\033\\" "$PWD"; printf "\033]2;zetta-cwd:%s\033\\" "$PWD"; end; printf "\033]2;zetta-cmd:%s\033\\" "$ZETTA_SHELL_NAME"; end; function __zetta_report_preexec --on-event fish_preexec; printf "\033]2;zetta-cmd:%s\033\\" "$argv[1]"; end'
+        exec "$shell" -l -C 'function __zetta_report_cwd --on-event fish_prompt; if string match -qr "^/" -- "$PWD"; printf "\033]7;file://localhost%s\033\\" "$PWD"; printf "\033]2;zetta-cwd:%s\033\\" "$PWD"; end; printf "\033]2;zetta-cmd:%s\033\\" "$ZETTA_SHELL_NAME"; end; function __zetta_report_preexec --on-event fish_preexec; printf "\033]2;zetta-cmd:%s\033\\" "$argv[1]"; end; if test -n "$ZETTA_HOST_EXECUTABLE"; and not functions -q __zetta_at_subcommand; $ZETTA_HOST_EXECUTABLE init fish | source; end'
         ;;
     zsh)
         integration_zdotdir="$(mktemp -d "${TMPDIR:-/tmp}/zetta-zsh-XXXXXX" 2>/dev/null || true)"
@@ -439,7 +444,14 @@ function __zetta_report_cwd() {
 function __zetta_report_preexec() {
     printf '\033]2;zetta-cmd:%s\033\\' "$1"
 }
+function __zetta_load_shell_integration() {
+    add-zsh-hook -d precmd __zetta_load_shell_integration
+    if [[ -n ${ZETTA_HOST_EXECUTABLE:-} ]] && (( ! $+functions[_zetta] )); then
+        eval "$("$ZETTA_HOST_EXECUTABLE" init zsh)"
+    fi
+}
 autoload -Uz add-zsh-hook
+add-zsh-hook precmd __zetta_load_shell_integration
 add-zsh-hook precmd __zetta_report_cwd
 add-zsh-hook preexec __zetta_report_preexec
 command rm -rf -- "$ZETTA_INTEGRATION_ZDOTDIR"

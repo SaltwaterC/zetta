@@ -424,6 +424,11 @@ fn wsl_wrapper_prefers_prompt_cwd_reports_and_keeps_a_shell_fallback() {
     assert!(WSL_CWD_TRACKER.contains("PROMPT_COMMAND="));
     assert!(WSL_CWD_TRACKER.contains("--on-event fish_prompt"));
     assert!(WSL_CWD_TRACKER.contains("add-zsh-hook precmd __zetta_report_cwd"));
+    assert!(WSL_CWD_TRACKER.contains("\"$ZETTA_HOST_EXECUTABLE\" init bash"));
+    assert!(WSL_CWD_TRACKER.contains("$ZETTA_HOST_EXECUTABLE init fish | source"));
+    assert!(WSL_CWD_TRACKER.contains("\"$ZETTA_HOST_EXECUTABLE\" init zsh"));
+    assert!(WSL_CWD_TRACKER.contains("add-zsh-hook precmd __zetta_load_shell_integration"));
+    assert!(WSL_CWD_TRACKER.contains("add-zsh-hook -d precmd __zetta_load_shell_integration"));
     assert!(WSL_CWD_TRACKER.contains("ZETTA_HOST_EXECUTABLE"));
     assert!(WSL_CWD_TRACKER.contains("source \"$ZDOTDIR/.zshenv\""));
     assert!(WSL_CWD_TRACKER.contains("rm -rf -- \"$ZETTA_INTEGRATION_ZDOTDIR\""));

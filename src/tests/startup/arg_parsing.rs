@@ -37,6 +37,16 @@ fn executable_directory_is_prepended_to_native_terminal_path() {
     assert!(path_with_entry_first(Some(path.as_os_str()), executable_directory).is_none());
 }
 
+#[cfg(not(windows))]
+#[test]
+fn native_terminal_does_not_inherit_windows_host_zetta_routing() {
+    assert!(
+        native_terminal_environment()
+            .iter()
+            .any(|(name, value)| { name == "ZETTA_HOST_EXECUTABLE" && value.is_empty() })
+    );
+}
+
 #[test]
 fn worktree_subcommand_is_available_without_cli_services() {
     let arguments = parse_args_from([
