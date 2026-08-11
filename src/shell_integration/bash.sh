@@ -1,14 +1,18 @@
 # Zetta shell integration for Bash.
+if [[ -n ${ZETTA_HOST_EXECUTABLE:-} ]]; then
+    zetta() { command "$ZETTA_HOST_EXECUTABLE" "$@"; }
+fi
+
 if [[ -z ${EDITOR+x} ]]; then
     export EDITOR='zetta vi'
 fi
 
 if ! type -t vi >/dev/null 2>&1; then
-    eval 'vi() { command zetta vi "$@"; }'
+    eval 'vi() { zetta vi "$@"; }'
     complete -F _zetta_complete vi
 fi
 
-zvi() { command zetta vi "$@"; }
+zvi() { zetta vi "$@"; }
 
 zwt() {
     case $1 in
@@ -17,7 +21,7 @@ zwt() {
             local -a operation_args=("${@:2}")
             for path_only_arg in "${operation_args[@]}"; do
                 if [[ $path_only_arg == --help || $path_only_arg == -h ]]; then
-                    command zetta wt new "${operation_args[@]}"
+                    zetta wt new "${operation_args[@]}"
                     return
                 fi
                 if [[ $path_only_arg == --path-only || $path_only_arg == -P ]]; then
@@ -27,9 +31,9 @@ zwt() {
                 path_only_arg=''
             done
             if [[ $path_only_arg == 1 ]]; then
-                path=$(command zetta wt new "${operation_args[@]}") || return
+                path=$(zetta wt new "${operation_args[@]}") || return
             else
-                path=$(command zetta wt new --path-only "${operation_args[@]}") || return
+                path=$(zetta wt new --path-only "${operation_args[@]}") || return
             fi
             [[ -n $path ]] || return 1
             builtin cd -- "$path"
@@ -39,7 +43,7 @@ zwt() {
             local -a operation_args=("${@:2}")
             for path_only_arg in "${operation_args[@]}"; do
                 if [[ $path_only_arg == --help || $path_only_arg == -h ]]; then
-                    command zetta wt done "${operation_args[@]}"
+                    zetta wt done "${operation_args[@]}"
                     return
                 fi
                 if [[ $path_only_arg == --path-only || $path_only_arg == -P ]]; then
@@ -49,15 +53,15 @@ zwt() {
                 path_only_arg=''
             done
             if [[ $path_only_arg == 1 ]]; then
-                path=$(command zetta wt done "${operation_args[@]}") || return
+                path=$(zetta wt done "${operation_args[@]}") || return
             else
-                path=$(command zetta wt done --path-only "${operation_args[@]}") || return
+                path=$(zetta wt done --path-only "${operation_args[@]}") || return
             fi
             [[ -n $path ]] || return 1
             builtin cd -- "$path"
             ;;
         *)
-            command zetta wt "$@"
+            zetta wt "$@"
             ;;
     esac
 }

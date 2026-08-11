@@ -5,10 +5,48 @@ pub(crate) fn is_wsl_shell(shell: &Shell) -> bool {
         Shell::System => return false,
         Shell::Program(program) | Shell::WithArguments { program, .. } => program,
     };
-    program
-        .rsplit(['/', '\\'])
-        .next()
-        .is_some_and(|name| name.eq_ignore_ascii_case("wsl.exe"))
+    program.rsplit(['/', '\\']).next().is_some_and(|name| {
+        name.eq_ignore_ascii_case("wsl.exe") || (cfg!(windows) && name.eq_ignore_ascii_case("wsl"))
+    })
+}
+
+fn add_wslenv_entry(wslenv: &mut String, variable: &str) {
+    let name = variable.split('/').next().unwrap();
+    if wslenv
+        .split(':')
+        .any(|entry| entry.split('/').next() == Some(name))
+    {
+        return;
+    }
+    if !wslenv.is_empty() {
+        wslenv.push(':');
+    }
+    wslenv.push_str(variable);
+}
+
+#[cfg(windows)]
+fn set_wslenv_entry(wslenv: &mut String, variable: &str) {
+    let name = variable.split('/').next().unwrap();
+    let inherited = std::mem::take(wslenv);
+    let mut variable_seen = false;
+
+    for entry in inherited.split(':') {
+        if entry.split('/').next() == Some(name) {
+            if !variable_seen {
+                add_wslenv_entry(wslenv, variable);
+                variable_seen = true;
+            }
+        } else if !entry.is_empty() {
+            if !wslenv.is_empty() {
+                wslenv.push(':');
+            }
+            wslenv.push_str(entry);
+        }
+    }
+
+    if !variable_seen {
+        add_wslenv_entry(wslenv, variable);
+    }
 }
 
 pub(crate) fn add_wsl_environment_variables<S>(environment: &mut HashMap<String, String, S>)
@@ -21,20 +59,85 @@ where
         .unwrap_or_default();
 
     for variable in ["ZETTA_PROCESS_ID/u", "ZETTA_ATTENTION_ID/u"] {
-        let name = variable.split('/').next().unwrap();
-        if wslenv
-            .split(':')
-            .any(|entry| entry.split('/').next() == Some(name))
-        {
-            continue;
-        }
-        if !wslenv.is_empty() {
-            wslenv.push(':');
-        }
-        wslenv.push_str(variable);
+        add_wslenv_entry(&mut wslenv, variable);
     }
 
     environment.insert("WSLENV".to_owned(), wslenv);
+}
+
+#[cfg(windows)]
+fn wsl_terminal_environment_values_for(
+    executable: &Path,
+    cwd_tracking_file: Option<&Path>,
+    inherited_wslenv: Option<&str>,
+) -> (String, Option<String>, String) {
+    let mut wslenv = inherited_wslenv.unwrap_or_default().to_owned();
+    set_wslenv_entry(&mut wslenv, "ZETTA_HOST_EXECUTABLE/up");
+    if cwd_tracking_file.is_some() {
+        set_wslenv_entry(&mut wslenv, "ZETTA_CWD_TRACKING_FILE/up");
+    }
+    (
+        executable.to_string_lossy().into_owned(),
+        cwd_tracking_file.map(|path| path.to_string_lossy().into_owned()),
+        wslenv,
+    )
+}
+
+#[cfg(windows)]
+#[cfg(test)]
+fn wsl_terminal_environment_for(
+    executable: &Path,
+    cwd_tracking_file: Option<&Path>,
+    inherited_wslenv: Option<&str>,
+) -> HashMap<String, String> {
+    let (executable, cwd_tracking_file, wslenv) =
+        wsl_terminal_environment_values_for(executable, cwd_tracking_file, inherited_wslenv);
+
+    let mut environment = HashMap::from([
+        ("WSLENV".to_owned(), wslenv),
+        ("ZETTA_HOST_EXECUTABLE".to_owned(), executable),
+    ]);
+    if let Some(cwd_tracking_file) = cwd_tracking_file {
+        environment.insert("ZETTA_CWD_TRACKING_FILE".to_owned(), cwd_tracking_file);
+    }
+    environment
+}
+
+#[cfg(windows)]
+fn windows_wsl_terminal_environment_values(
+    cwd_tracking_file: Option<&Path>,
+) -> Option<(String, Option<String>, String)> {
+    let executable = env::current_exe().ok()?;
+    let inherited_wslenv = env::var("WSLENV").ok();
+    Some(wsl_terminal_environment_values_for(
+        &executable,
+        cwd_tracking_file,
+        inherited_wslenv.as_deref(),
+    ))
+}
+
+pub(crate) fn wsl_terminal_environment<S>(
+    environment: &mut HashMap<String, String, S>,
+    cwd_tracking_file: Option<&Path>,
+) where
+    S: std::hash::BuildHasher,
+{
+    #[cfg(windows)]
+    {
+        if let Some((executable, cwd_tracking_file, wslenv)) =
+            windows_wsl_terminal_environment_values(cwd_tracking_file)
+        {
+            environment.insert("WSLENV".to_owned(), wslenv);
+            environment.insert("ZETTA_HOST_EXECUTABLE".to_owned(), executable);
+            if let Some(cwd_tracking_file) = cwd_tracking_file {
+                environment.insert("ZETTA_CWD_TRACKING_FILE".to_owned(), cwd_tracking_file);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (environment, cwd_tracking_file);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -273,7 +376,8 @@ pub(crate) fn wsl_cwd_tracking_file(profile: &Profile, pane_id: u64) -> Option<P
     })
 }
 
-pub(crate) const WSL_CWD_TRACKER: &str = r#"marker="$(wslpath -u "$1" 2>/dev/null || true)"
+pub(crate) const WSL_CWD_TRACKER: &str = r#"marker="${ZETTA_CWD_TRACKING_FILE:-}"
+unset ZETTA_CWD_TRACKING_FILE
 shell="${SHELL:-}"
 if [ ! -x "$shell" ]; then
     shell="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f7)"
@@ -323,6 +427,10 @@ ZETTA_BASH_PROMPT
             cat > "$integration_zdotdir/.zshenv" <<'ZETTA_ZSHENV'
 ZDOTDIR="$ZETTA_ORIGINAL_ZDOTDIR"
 [[ -r "$ZDOTDIR/.zshenv" ]] && source "$ZDOTDIR/.zshenv"
+
+if [[ -n ${ZETTA_HOST_EXECUTABLE:-} ]]; then
+    function zetta { command "$ZETTA_HOST_EXECUTABLE" "$@"; }
+fi
 
 function __zetta_report_cwd() {
     [[ "$PWD" == /* ]] && printf '\033]7;file://localhost%s\033\\\033]2;zetta-cwd:%s\033\\' "$PWD" "$PWD"
@@ -399,16 +507,13 @@ pub(crate) fn wsl_command_with_tracking(
             ["--cd".to_owned(), directory.to_owned()],
         );
     }
-    if exec_index.is_none()
-        && let Some(cwd_file) = cwd_file
-    {
+    if exec_index.is_none() && cwd_file.is_some() {
         args.extend([
             "--exec".to_owned(),
             "/bin/sh".to_owned(),
             "-c".to_owned(),
             WSL_CWD_TRACKER.to_owned(),
             "zetta-wsl-cwd".to_owned(),
-            cwd_file.to_string_lossy().into_owned(),
         ]);
     }
     Shell::WithArguments {

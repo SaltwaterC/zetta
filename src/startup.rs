@@ -59,7 +59,7 @@ use wsl::paths_for_external_editor;
 pub(crate) use wsl::{
     add_wsl_environment_variables, is_wsl_shell, launch_working_directory,
     msys2_cwd_tracking_environment, msys2_path_to_windows, msys2_profile, wsl_cwd_tracking_file,
-    wsl_shell_with_tracking,
+    wsl_shell_with_tracking, wsl_terminal_environment,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

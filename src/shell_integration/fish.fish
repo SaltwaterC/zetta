@@ -1,4 +1,10 @@
 # Zetta shell integration for Fish.
+if set -q ZETTA_HOST_EXECUTABLE; and test -n "$ZETTA_HOST_EXECUTABLE"
+    function zetta
+        command $ZETTA_HOST_EXECUTABLE $argv
+    end
+end
+
 if not set -q EDITOR
     set -gx EDITOR 'zetta vi'
 end
@@ -6,14 +12,14 @@ end
 if not type -q vi
     if not abbr --query vi
         function vi --wraps 'zetta vi' --description 'Zetta vi editor'
-            command zetta vi $argv
+            zetta vi $argv
         end
         complete -c vi -F
     end
 end
 
 function zvi --wraps 'zetta vi' --description 'Zetta vi editor'
-    command zetta vi $argv
+    zetta vi $argv
 end
 complete -c zvi -F
 
@@ -23,12 +29,12 @@ function zwt --description 'Zetta Git worktree workflow'
             set -l operation_args $argv[2..-1]
             set -l path
             if contains -- --help $operation_args; or contains -- -h $operation_args
-                command zetta wt new $operation_args
+                zetta wt new $operation_args
                 return $status
             else if contains -- --path-only $operation_args; or contains -- -P $operation_args
-                set path (command zetta wt new $operation_args)
+                set path (zetta wt new $operation_args)
             else
-                set path (command zetta wt new --path-only $operation_args)
+                set path (zetta wt new --path-only $operation_args)
             end
             or return
             test (count $path) -eq 1
@@ -38,19 +44,19 @@ function zwt --description 'Zetta Git worktree workflow'
             set -l operation_args $argv[2..-1]
             set -l path
             if contains -- --help $operation_args; or contains -- -h $operation_args
-                command zetta wt done $operation_args
+                zetta wt done $operation_args
                 return $status
             else if contains -- --path-only $operation_args; or contains -- -P $operation_args
-                set path (command zetta wt done $operation_args)
+                set path (zetta wt done $operation_args)
             else
-                set path (command zetta wt done --path-only $operation_args)
+                set path (zetta wt done --path-only $operation_args)
             end
             or return
             test (count $path) -eq 1
             or return 1
             builtin cd -- $path[1]
         case '*'
-            command zetta wt $argv
+            zetta wt $argv
     end
 end
 

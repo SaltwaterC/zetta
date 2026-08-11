@@ -55,8 +55,9 @@ fn vi_integration_is_conditional_and_has_cli_completion() {
 
     let bash = ShellIntegration::Bash.script(&profiles);
     assert!(bash.contains("if ! type -t vi >/dev/null 2>&1"));
-    assert!(bash.contains("eval 'vi() { command zetta vi \"$@\"; }'"));
-    assert!(bash.contains("zvi() { command zetta vi \"$@\"; }"));
+    assert!(bash.contains("eval 'vi() { zetta vi \"$@\"; }'"));
+    assert!(bash.contains("zvi() { zetta vi \"$@\"; }"));
+    assert!(bash.contains("ZETTA_HOST_EXECUTABLE"));
     assert!(bash.contains("complete -F _zetta_complete zvi"));
     assert!(bash.contains("vi)\n            if [[ $current == -* ]]; then"));
 
@@ -66,6 +67,7 @@ fn vi_integration_is_conditional_and_has_cli_completion() {
     assert!(fish.contains("function zvi --wraps 'zetta vi'"));
     assert!(fish.contains("complete -c zvi -F"));
     assert!(fish.contains("function __zetta_option_unused"));
+    assert!(fish.contains("ZETTA_HOST_EXECUTABLE"));
 
     let powershell = ShellIntegration::PowerShell.script(&profiles);
     assert!(powershell.contains("$zettaViMissing = -not (Get-Command vi"));
@@ -78,7 +80,8 @@ fn vi_integration_is_conditional_and_has_cli_completion() {
     let zsh = ShellIntegration::Zsh.script(&profiles);
     assert!(zsh.contains("$+commands[vi]"));
     assert!(zsh.contains("compdef _zetta vi"));
-    assert!(zsh.contains("function zvi { command zetta vi \"$@\"; }"));
+    assert!(zsh.contains("function zvi { zetta vi \"$@\"; }"));
+    assert!(zsh.contains("ZETTA_HOST_EXECUTABLE"));
     assert!(zsh.contains("local worktree_path path_only_arg"));
     assert!(!zsh.contains("local path path_only_arg"));
     assert!(zsh.contains("compdef _zetta zvi"));

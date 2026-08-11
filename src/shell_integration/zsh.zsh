@@ -1,16 +1,20 @@
 # Zetta shell integration for Zsh.
+if [[ -n ${ZETTA_HOST_EXECUTABLE:-} ]]; then
+    function zetta { command "$ZETTA_HOST_EXECUTABLE" "$@"; }
+fi
+
 if (( ! ${+EDITOR} )); then
     export EDITOR='zetta vi'
 fi
 
 if (( ! $+commands[vi] && ! $+aliases[vi] && ! $+functions[vi] && ! $+builtins[vi] )); then
-    function vi { command zetta vi "$@"; }
+    function vi { zetta vi "$@"; }
     _zetta_vi_missing=1
 else
     _zetta_vi_missing=0
 fi
 
-function zvi { command zetta vi "$@"; }
+function zvi { zetta vi "$@"; }
 
 function zwt {
     case $1 in
@@ -19,7 +23,7 @@ function zwt {
             local -a operation_args=("${@[2,-1]}")
             for path_only_arg in "${operation_args[@]}"; do
                 if [[ $path_only_arg == --help || $path_only_arg == -h ]]; then
-                    command zetta wt new "${operation_args[@]}"
+                    zetta wt new "${operation_args[@]}"
                     return
                 fi
                 if [[ $path_only_arg == --path-only || $path_only_arg == -P ]]; then
@@ -29,9 +33,9 @@ function zwt {
                 path_only_arg=''
             done
             if [[ $path_only_arg == 1 ]]; then
-                worktree_path=$(command zetta wt new "${operation_args[@]}") || return
+                worktree_path=$(zetta wt new "${operation_args[@]}") || return
             else
-                worktree_path=$(command zetta wt new --path-only "${operation_args[@]}") || return
+                worktree_path=$(zetta wt new --path-only "${operation_args[@]}") || return
             fi
             [[ -n $worktree_path ]] || return 1
             builtin cd -- "$worktree_path"
@@ -41,7 +45,7 @@ function zwt {
             local -a operation_args=("${@[2,-1]}")
             for path_only_arg in "${operation_args[@]}"; do
                 if [[ $path_only_arg == --help || $path_only_arg == -h ]]; then
-                    command zetta wt done "${operation_args[@]}"
+                    zetta wt done "${operation_args[@]}"
                     return
                 fi
                 if [[ $path_only_arg == --path-only || $path_only_arg == -P ]]; then
@@ -51,15 +55,15 @@ function zwt {
                 path_only_arg=''
             done
             if [[ $path_only_arg == 1 ]]; then
-                worktree_path=$(command zetta wt done "${operation_args[@]}") || return
+                worktree_path=$(zetta wt done "${operation_args[@]}") || return
             else
-                worktree_path=$(command zetta wt done --path-only "${operation_args[@]}") || return
+                worktree_path=$(zetta wt done --path-only "${operation_args[@]}") || return
             fi
             [[ -n $worktree_path ]] || return 1
             builtin cd -- "$worktree_path"
             ;;
         *)
-            command zetta wt "$@"
+            zetta wt "$@"
             ;;
     esac
 }

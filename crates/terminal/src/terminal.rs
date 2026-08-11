@@ -822,7 +822,10 @@ fn posix_host(shell: &Shell) -> Option<PosixHost> {
 fn zetta_command_for_shell(shell: &Shell) -> Option<String> {
     #[cfg(windows)]
     if let Some(host) = posix_host(shell) {
-        return native_zetta_command_for_posix_host(host, &std::env::current_exe().ok()?);
+        return match host {
+            PosixHost::Wsl => Some("\"$ZETTA_HOST_EXECUTABLE\"".to_owned()),
+            PosixHost::Msys2 => native_zetta_command_for_msys2(&std::env::current_exe().ok()?),
+        };
     }
     #[cfg(not(windows))]
     let _ = shell;
@@ -830,13 +833,9 @@ fn zetta_command_for_shell(shell: &Shell) -> Option<String> {
 }
 
 #[cfg(windows)]
-fn native_zetta_command_for_posix_host(host: PosixHost, executable: &Path) -> Option<String> {
-    let converter = match host {
-        PosixHost::Wsl => "wslpath",
-        PosixHost::Msys2 => "cygpath",
-    };
+fn native_zetta_command_for_msys2(executable: &Path) -> Option<String> {
     let executable = ShellKind::Posix.try_quote(executable.to_str()?)?;
-    Some(format!("\"$({converter} -u {executable})\""))
+    Some(format!("\"$(cygpath -u {executable})\""))
 }
 
 #[cfg(windows)]
@@ -4560,15 +4559,15 @@ mod tests {
     fn windows_posix_host_shells_invoke_the_native_zetta_executable() {
         let executable = Path::new(r"C:\Program Files\Zetta\zetta.exe");
         assert_eq!(
-            native_zetta_command_for_posix_host(PosixHost::Wsl, executable),
-            Some("\"$(wslpath -u \"C:\\\\Program Files\\\\Zetta\\\\zetta.exe\")\"".to_owned())
-        );
-        assert_eq!(
-            native_zetta_command_for_posix_host(PosixHost::Msys2, executable),
+            native_zetta_command_for_msys2(executable),
             Some("\"$(cygpath -u \"C:\\\\Program Files\\\\Zetta\\\\zetta.exe\")\"".to_owned())
         );
 
         let wsl = Shell::Program(r"C:\Windows\System32\wsl.exe".to_owned());
+        assert_eq!(
+            zetta_command_for_shell(&wsl),
+            Some("\"$ZETTA_HOST_EXECUTABLE\"".to_owned())
+        );
         assert_eq!(
             interaction_shell_kind(&wsl, PathStyle::local()),
             ShellKind::Posix
@@ -4649,12 +4648,8 @@ mod tests {
             Some("\"$(wslpath -w \"$HOME\")\"".to_owned())
         );
         assert_eq!(
-            editor_invocation_command(
-                "\"$(wslpath -u \"C:\\\\Program Files\\\\Zetta\\\\zetta.exe\")\"",
-                &wsl_path_argument,
-                false,
-            ),
-            "\"$(wslpath -u \"C:\\\\Program Files\\\\Zetta\\\\zetta.exe\")\" edit -- \"$(wslpath -w /home/saltw/source/zetta/LICENSE-APACHE)\""
+            editor_invocation_command("\"$ZETTA_HOST_EXECUTABLE\"", &wsl_path_argument, false),
+            "\"$ZETTA_HOST_EXECUTABLE\" edit -- \"$(wslpath -w /home/saltw/source/zetta/LICENSE-APACHE)\""
         );
 
         let scrollback_path_argument = editor_path_argument(
@@ -4668,6 +4663,16 @@ mod tests {
             scrollback_path_argument,
             r#""C:\\Users\\saltw\\AppData\\Local\\Temp\\zetta\\scrollback.txt""#
         );
+        let scrollback_command = editor_invocation_command(
+            &zetta_command_for_shell(&wsl).unwrap(),
+            &scrollback_path_argument,
+            true,
+        );
+        assert_eq!(
+            scrollback_command,
+            r#""$ZETTA_HOST_EXECUTABLE" edit --delete-after -- "C:\\Users\\saltw\\AppData\\Local\\Temp\\zetta\\scrollback.txt""#
+        );
+        assert!(!scrollback_command.contains("wslpath"));
     }
 
     #[gpui::test]

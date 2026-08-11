@@ -85,7 +85,9 @@ impl Zetta {
             profile.command
         };
         let mut environment = if is_wsl {
-            HashMap::default()
+            let mut environment = HashMap::default();
+            wsl_terminal_environment(&mut environment, wsl_cwd_file.as_deref());
+            environment
         } else {
             let msys2_environment =
                 match msys2_cwd_tracking_environment(&command, pane_id, &env::temp_dir()) {
@@ -410,7 +412,9 @@ impl Zetta {
         };
         let shell = stacked_task_shell(&profile.command, &command, wsl_directory.as_deref());
         let mut environment = if is_wsl {
-            HashMap::default()
+            let mut environment = HashMap::default();
+            wsl_terminal_environment(&mut environment, None);
+            environment
         } else {
             let msys2_environment = match msys2_cwd_tracking_environment(
                 &profile.command,

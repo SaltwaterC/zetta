@@ -131,6 +131,12 @@ fn native_shells_are_not_treated_as_wsl() {
     assert!(!is_wsl_shell(&Shell::Program("pwsh.exe".to_owned())));
 }
 
+#[cfg(windows)]
+#[test]
+fn extensionless_windows_wsl_command_gets_wsl_integration() {
+    assert!(is_wsl_shell(&Shell::Program("wsl".to_owned())));
+}
+
 #[test]
 fn shares_attention_target_environment_with_wsl() {
     let mut environment = HashMap::from([
@@ -160,6 +166,88 @@ fn preserves_existing_wslenv_entries_without_duplicates() {
         environment.get("WSLENV").map(String::as_str),
         Some("PATH/l:ZETTA_PROCESS_ID/l:USER/u:ZETTA_ATTENTION_ID/u")
     );
+}
+
+#[cfg(windows)]
+#[test]
+fn wsl_environment_exports_the_exact_host_zetta_without_replacing_linux_path() {
+    let executable = Path::new(r"C:\Program Files\Zetta\zetta.exe");
+    let environment = wsl_terminal_environment_for(executable, None, Some("USER/u"));
+
+    assert!(!environment.contains_key("PATH"));
+    assert_eq!(
+        environment.get("WSLENV").map(String::as_str),
+        Some("USER/u:ZETTA_HOST_EXECUTABLE/up")
+    );
+    assert_eq!(
+        environment.get("ZETTA_HOST_EXECUTABLE").map(String::as_str),
+        Some(r"C:\Program Files\Zetta\zetta.exe")
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn wsl_environment_preserves_existing_wslenv_entries() {
+    let environment = wsl_terminal_environment_for(
+        Path::new(r"C:\Zetta\zetta.exe"),
+        None,
+        Some("PATH/lp:USER/u"),
+    );
+
+    assert_eq!(
+        environment.get("WSLENV").map(String::as_str),
+        Some("PATH/lp:USER/u:ZETTA_HOST_EXECUTABLE/up")
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn wsl_environment_normalizes_the_host_executable_wslenv_entry_once() {
+    let mut environment = wsl_terminal_environment_for(
+        Path::new(r"C:\Program Files\Zetta\zetta.exe"),
+        None,
+        Some("ZETTA_HOST_EXECUTABLE/u:USER/u:ZETTA_HOST_EXECUTABLE/p"),
+    );
+    environment.insert("ZETTA_PROCESS_ID".to_owned(), "123".to_owned());
+    environment.insert("ZETTA_ATTENTION_ID".to_owned(), "456".to_owned());
+    add_wsl_environment_variables(&mut environment);
+
+    assert_eq!(
+        environment.get("WSLENV").map(String::as_str),
+        Some("ZETTA_HOST_EXECUTABLE/up:USER/u:ZETTA_PROCESS_ID/u:ZETTA_ATTENTION_ID/u")
+    );
+    assert_eq!(
+        environment
+            .get("WSLENV")
+            .unwrap()
+            .split(':')
+            .filter(|entry| entry.starts_with("ZETTA_HOST_EXECUTABLE/"))
+            .count(),
+        1
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn wsl_environment_converts_the_cwd_marker_without_wslpath() {
+    let marker = Path::new(r"C:\Users\saltw\AppData\Local\Temp\zetta-cwd");
+    let environment = wsl_terminal_environment_for(
+        Path::new(r"C:\Zetta\zetta.exe"),
+        Some(marker),
+        Some("USER/u"),
+    );
+
+    assert_eq!(
+        environment
+            .get("ZETTA_CWD_TRACKING_FILE")
+            .map(String::as_str),
+        marker.to_str()
+    );
+    assert_eq!(
+        environment.get("WSLENV").map(String::as_str),
+        Some("USER/u:ZETTA_HOST_EXECUTABLE/up:ZETTA_CWD_TRACKING_FILE/up")
+    );
+    assert!(!WSL_CWD_TRACKER.contains("wslpath"));
 }
 
 #[test]
@@ -327,7 +415,7 @@ fn wsl_tracker_wraps_the_default_login_shell() {
         Shell::WithArguments { args, .. }
             if args[..4] == ["--distribution", "Ubuntu", "--cd", "/work"]
                 && args[4..8] == ["--exec", "/bin/sh", "-c", WSL_CWD_TRACKER]
-                && args.last().map(String::as_str) == marker.to_str()
+                && args.last().map(String::as_str) == Some("zetta-wsl-cwd")
     ));
 }
 
@@ -336,6 +424,7 @@ fn wsl_wrapper_prefers_prompt_cwd_reports_and_keeps_a_shell_fallback() {
     assert!(WSL_CWD_TRACKER.contains("PROMPT_COMMAND="));
     assert!(WSL_CWD_TRACKER.contains("--on-event fish_prompt"));
     assert!(WSL_CWD_TRACKER.contains("add-zsh-hook precmd __zetta_report_cwd"));
+    assert!(WSL_CWD_TRACKER.contains("ZETTA_HOST_EXECUTABLE"));
     assert!(WSL_CWD_TRACKER.contains("source \"$ZDOTDIR/.zshenv\""));
     assert!(WSL_CWD_TRACKER.contains("rm -rf -- \"$ZETTA_INTEGRATION_ZDOTDIR\""));
     assert!(!WSL_CWD_TRACKER.contains("source \"$ZDOTDIR/.zshrc\""));
