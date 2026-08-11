@@ -1,12 +1,11 @@
 use super::*;
-use crate::process_control::TabNameRequest;
+use crate::process_control::{TabNameRequest, WorktreeNameRequest};
 
 /// Resolve the title shown for a tab.
 ///
-/// A title assigned by the user (including the worktree name assigned through
-/// process control) is authoritative. The fallback is evaluated only when no
-/// explicit title exists, so terminal title and working-directory updates can
-/// never replace an explicit tab name.
+/// Resolve a tab title by source priority. The fallback is evaluated only when
+/// no explicit, detected, or process-supplied title exists, so terminal title
+/// updates never replace a more meaningful tab name.
 pub(crate) fn resolve_tab_title(
     tab: &Tab,
     automatic_title: impl FnOnce() -> SharedString,
@@ -14,13 +13,27 @@ pub(crate) fn resolve_tab_title(
     tab.custom_title
         .as_ref()
         .map(|title| title.clone().into())
+        .or_else(|| {
+            tab.worktree_title
+                .as_ref()
+                .map(|title| title.clone().into())
+        })
+        .or_else(|| tab.process_title.as_ref().map(|title| title.clone().into()))
         .unwrap_or_else(automatic_title)
 }
 
-/// Set the explicit title used by both manual renames and process-control
-/// requests.
+/// Set the title entered through the manual tab rename UI.
 pub(crate) fn set_tab_title(tab: &mut Tab, title: Option<String>) {
     tab.custom_title = title;
+}
+
+pub(crate) fn set_tab_process_title(tab: &mut Tab, title: Option<String>) {
+    tab.process_title = title;
+}
+
+pub(crate) fn set_tab_worktree_title(tab: &mut Tab, title: Option<String>) {
+    tab.worktree_detection_generation = tab.worktree_detection_generation.wrapping_add(1);
+    tab.worktree_title = title;
 }
 
 pub(crate) fn set_tab_name_on_tabs<'a, I>(tabs: I, request: &TabNameRequest) -> bool
@@ -33,16 +46,53 @@ where
     else {
         return false;
     };
-    set_tab_title(tab, request.name.clone());
+    set_tab_process_title(tab, request.name.clone());
+    true
+}
+
+pub(crate) fn set_worktree_name_on_tabs<'a, I>(tabs: I, request: &WorktreeNameRequest) -> bool
+where
+    I: IntoIterator<Item = &'a mut Tab>,
+{
+    let Some(tab) = tabs
+        .into_iter()
+        .find(|tab| tab.attention_id == request.attention_id)
+    else {
+        return false;
+    };
+    set_tab_worktree_title(tab, request.name.clone());
     true
 }
 
 impl Zetta {
     pub(crate) fn set_tab_name(&mut self, request: TabNameRequest, cx: &mut Context<Self>) -> bool {
-        let found = set_tab_name_on_tabs(self.tabs.iter_mut(), &request)
-            || set_tab_name_on_tabs(self.background_sessions.iter_mut(), &request);
+        let found_in_visible = set_tab_name_on_tabs(self.tabs.iter_mut(), &request);
+        let found_in_background = !found_in_visible
+            && set_tab_name_on_tabs(self.background_sessions.iter_mut(), &request);
+        let found = found_in_visible || found_in_background;
         if found {
             cx.notify();
+            if found_in_background {
+                self.publish_background_session_catalog(cx);
+            }
+        }
+        found
+    }
+
+    pub(crate) fn set_worktree_name(
+        &mut self,
+        request: WorktreeNameRequest,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let found_in_visible = set_worktree_name_on_tabs(self.tabs.iter_mut(), &request);
+        let found_in_background = !found_in_visible
+            && set_worktree_name_on_tabs(self.background_sessions.iter_mut(), &request);
+        let found = found_in_visible || found_in_background;
+        if found {
+            cx.notify();
+            if found_in_background {
+                self.publish_background_session_catalog(cx);
+            }
         }
         found
     }

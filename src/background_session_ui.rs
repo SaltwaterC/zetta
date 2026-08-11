@@ -145,12 +145,14 @@ impl Zetta {
                     }))
             })
             .collect::<Vec<_>>();
+        let tab_id = tab.id;
         self.background_sessions.detach(tab, authentication);
         for (pane_id, stack_id, terminal) in terminals {
             if let Some(stack_id) = stack_id {
                 self.observe_background_stacked_terminal(pane_id, stack_id, terminal.clone(), cx);
             } else {
-                self.observe_background_terminal(pane_id, terminal.clone(), cx);
+                self.observe_background_terminal(tab_id, pane_id, terminal.clone(), cx);
+                self.schedule_worktree_detection_for_pane(tab_id, pane_id, cx);
             }
             terminal.update(cx, |terminal, cx| {
                 terminal.set_ui_visible(false, cx);
@@ -560,6 +562,7 @@ impl Zetta {
 
     pub(crate) fn observe_background_terminal(
         &mut self,
+        tab_id: u64,
         pane_id: u64,
         terminal: Entity<Terminal>,
         cx: &mut Context<Self>,
@@ -570,7 +573,10 @@ impl Zetta {
         cx.subscribe(
             &terminal,
             move |this, _, event: &TerminalEvent, cx| match event {
-                TerminalEvent::TitleChanged => this.publish_background_session_catalog(cx),
+                TerminalEvent::TitleChanged => {
+                    this.schedule_worktree_detection_for_pane(tab_id, pane_id, cx);
+                    this.publish_background_session_catalog(cx);
+                }
                 TerminalEvent::CloseTerminal
                     if !this.retain_background_stacked_entries_after_base_exit(pane_id, cx) =>
                 {
@@ -859,7 +865,10 @@ impl Zetta {
             window,
             move |this, _, event, window, cx| match event {
                 TerminalViewEvent::Close => this.terminal_closed(tab_id, pane_id, window, cx),
-                TerminalViewEvent::TitleChanged => cx.notify(),
+                TerminalViewEvent::TitleChanged => {
+                    this.schedule_worktree_detection_for_pane(tab_id, pane_id, cx);
+                    cx.notify();
+                }
                 TerminalViewEvent::Input(input)
                     if server_input_stops_server(input, is_http_server, is_tftp_server) =>
                 {
@@ -906,6 +915,7 @@ impl Zetta {
             pane.error = None;
             pane.base_exited = false;
         }
+        self.schedule_worktree_detection_for_pane(tab_id, pane_id, cx);
     }
 
     fn connect_stacked_terminal_view(

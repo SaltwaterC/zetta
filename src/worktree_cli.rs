@@ -11,7 +11,7 @@ use std::cell::RefCell;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStringExt;
 
-use crate::process_control::{TabNameRequest, request_process_tab_name};
+use crate::process_control::{WorktreeNameRequest, request_process_worktree_name};
 use crate::worktree_copy::{
     copy_paths as copy_worktree_paths, cow_copy_supported, validate_copy_path, validate_copy_paths,
     validate_copy_sources,
@@ -26,7 +26,7 @@ const PATH_ONLY_OPTION: &str = "--path-only";
 thread_local! {
     static TEST_CURRENT_DIRECTORY: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
     static TEST_GIT_CONFIG: RefCell<Option<(OsString, OsString)>> = const { RefCell::new(None) };
-    static TEST_TAB_NAME_REQUESTS: RefCell<Option<Vec<Option<String>>>> = const { RefCell::new(None) };
+    static TEST_WORKTREE_NAME_REQUESTS: RefCell<Option<Vec<Option<String>>>> = const { RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -42,10 +42,10 @@ pub(crate) fn replace_test_git_config(
 }
 
 #[cfg(test)]
-pub(crate) fn replace_test_tab_name_requests(
+pub(crate) fn replace_test_worktree_name_requests(
     requests: Option<Vec<Option<String>>>,
 ) -> Option<Vec<Option<String>>> {
-    TEST_TAB_NAME_REQUESTS.with(|current| current.replace(requests))
+    TEST_WORKTREE_NAME_REQUESTS.with(|current| current.replace(requests))
 }
 
 #[cfg(test)]
@@ -284,9 +284,9 @@ struct ResolvedRoot {
     configured: bool,
 }
 
-fn request_originating_tab_name(name: Option<&str>) {
+fn request_originating_worktree_name(name: Option<&str>) {
     #[cfg(test)]
-    if TEST_TAB_NAME_REQUESTS.with(|requests| {
+    if TEST_WORKTREE_NAME_REQUESTS.with(|requests| {
         let mut requests = requests.borrow_mut();
         let Some(requests) = requests.as_mut() else {
             return false;
@@ -300,9 +300,9 @@ fn request_originating_tab_name(name: Option<&str>) {
     let Some((process_id, attention_id)) = originating_tab_target() else {
         return;
     };
-    let _ = request_process_tab_name(
+    let _ = request_process_worktree_name(
         process_id,
-        TabNameRequest {
+        WorktreeNameRequest {
             attention_id,
             name: name.map(str::to_owned),
         },
@@ -439,7 +439,7 @@ fn run_new(
         return Err(anyhow::anyhow!(message));
     }
 
-    request_originating_tab_name(Some(name));
+    request_originating_worktree_name(Some(name));
     if path_only {
         println!("{}", destination.display());
     } else {
@@ -549,7 +549,7 @@ fn run_done(path_only: bool, current_directory: Option<&Path>) -> Result<()> {
         return Err(git_error("git config --unset-all", &unset_output));
     }
 
-    request_originating_tab_name(None);
+    request_originating_worktree_name(None);
     if path_only {
         println!("{}", source_path.display());
     } else {

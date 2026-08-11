@@ -255,10 +255,10 @@ fn in_directory<T>(fixture: &GitFixture, path: &Path, operation: impl FnOnce() -
     operation()
 }
 
-fn capture_tab_name_requests<T>(operation: impl FnOnce() -> T) -> (T, Vec<Option<String>>) {
-    let previous = replace_test_tab_name_requests(Some(Vec::new()));
+fn capture_worktree_name_requests<T>(operation: impl FnOnce() -> T) -> (T, Vec<Option<String>>) {
+    let previous = replace_test_worktree_name_requests(Some(Vec::new()));
     let result = operation();
-    let requests = replace_test_tab_name_requests(previous).unwrap();
+    let requests = replace_test_worktree_name_requests(previous).unwrap();
     (result, requests)
 }
 
@@ -450,11 +450,11 @@ fn creates_nested_worktrees_and_records_the_source_branch() {
 }
 
 #[test]
-fn successful_new_requests_the_exact_name_after_metadata_setup() {
+fn successful_new_requests_the_exact_worktree_name_after_metadata_setup() {
     let fixture = GitFixture::new();
     let root = fixture.root.clone();
     let (result, requests) = in_directory(&fixture, &root, || {
-        capture_tab_name_requests(|| {
+        capture_worktree_name_requests(|| {
             run(&WorktreeCommand::New {
                 name: "feature/api".to_owned(),
                 path_only: true,
@@ -468,11 +468,11 @@ fn successful_new_requests_the_exact_name_after_metadata_setup() {
 }
 
 #[test]
-fn failed_new_does_not_request_a_tab_name() {
+fn failed_new_does_not_request_a_worktree_name() {
     let fixture = GitFixture::new();
     let root = fixture.root.clone();
     let (result, requests) = in_directory(&fixture, &root, || {
-        capture_tab_name_requests(|| {
+        capture_worktree_name_requests(|| {
             run(&WorktreeCommand::New {
                 name: "copy-failure".to_owned(),
                 path_only: true,
@@ -763,13 +763,13 @@ fn integrates_clean_worktrees_and_removes_branch_and_metadata() {
 }
 
 #[test]
-fn successful_done_clears_the_originating_tab_name_after_cleanup() {
+fn successful_done_clears_the_originating_worktree_name_after_cleanup() {
     let fixture = GitFixture::new();
     let worktree = fixture.create_worktree("clear-name");
     fixture.commit(&worktree, "work", "done\n", "work");
 
     let (result, requests) = in_directory(&fixture, &worktree, || {
-        capture_tab_name_requests(|| run(&WorktreeCommand::Done { path_only: true }))
+        capture_worktree_name_requests(|| run(&WorktreeCommand::Done { path_only: true }))
     });
 
     result.unwrap();
@@ -777,13 +777,13 @@ fn successful_done_clears_the_originating_tab_name_after_cleanup() {
 }
 
 #[test]
-fn failed_done_does_not_clear_the_originating_tab_name() {
+fn failed_done_does_not_clear_the_originating_worktree_name() {
     let fixture = GitFixture::new();
     let worktree = fixture.create_worktree("keep-name");
     fs::write(worktree.join("untracked"), "dirty\n").unwrap();
 
     let (result, requests) = in_directory(&fixture, &worktree, || {
-        capture_tab_name_requests(|| run(&WorktreeCommand::Done { path_only: true }))
+        capture_worktree_name_requests(|| run(&WorktreeCommand::Done { path_only: true }))
     });
 
     assert!(result.is_err());

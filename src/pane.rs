@@ -1841,7 +1841,16 @@ pub(crate) struct Tab {
     pub(crate) broadcast_input: bool,
     pub(crate) silent_mode: bool,
     pub(crate) close_policy: TabClosePolicy,
+    /// A title entered through the tab rename UI. This is the highest-priority
+    /// title source and is intentionally separate from process/worktree state.
     pub(crate) custom_title: Option<String>,
+    /// The name of the linked `wt/*` worktree currently associated with the
+    /// tab's terminal.
+    pub(crate) worktree_title: Option<String>,
+    /// A lower-priority title supplied by process control (for example, by a
+    /// command that reports its current source or task).
+    pub(crate) process_title: Option<String>,
+    pub(crate) worktree_detection_generation: u64,
     pub(crate) icon: Option<IconName>,
     pub(crate) renaming_pane: Option<u64>,
     pub(crate) rename_buffer: Option<String>,

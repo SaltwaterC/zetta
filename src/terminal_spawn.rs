@@ -175,6 +175,7 @@ impl Zetta {
                                     this.terminal_closed(tab_id, pane_id, window, cx);
                                 }
                                 TerminalViewEvent::TitleChanged => {
+                                    this.schedule_worktree_detection_for_pane(tab_id, pane_id, cx);
                                     cx.notify();
                                 }
                                 TerminalViewEvent::Input(input) => {
@@ -257,10 +258,11 @@ impl Zetta {
                                 }
                             };
                             if stored_in_background {
-                                this.observe_background_terminal(pane_id, terminal, cx);
+                                this.observe_background_terminal(tab_id, pane_id, terminal, cx);
                                 this.publish_background_session_catalog(cx);
                             }
                         }
+                        this.schedule_worktree_detection_for_pane(tab_id, pane_id, cx);
                         if should_focus {
                             view.focus_handle(cx).focus(window, cx);
                         }

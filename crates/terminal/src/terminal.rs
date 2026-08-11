@@ -2061,7 +2061,12 @@ impl Terminal {
         match event {
             TerminalBackendEvent::Title(title) => {
                 if let Some(directory) = reported_working_directory_from_title(&title) {
+                    let changed =
+                        self.reported_working_directory.as_deref() != Some(directory.as_str());
                     self.reported_working_directory = Some(directory);
+                    if changed {
+                        cx.emit(Event::TitleChanged);
+                    }
                     return;
                 }
 
@@ -4323,6 +4328,52 @@ mod tests {
                 Some(r"\\server\share\zetta".to_owned())
             );
         }
+    }
+
+    #[gpui::test]
+    fn reported_working_directory_changes_emit_title_events(cx: &mut TestAppContext) {
+        let builder = cx.update(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::Block,
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+        });
+        let terminal = cx.new(|cx| builder.subscribe(cx));
+        let (events_tx, events_rx) = async_channel::unbounded();
+        cx.update(|cx| {
+            cx.subscribe(&terminal, move |_, event: &Event, _| {
+                events_tx.send_blocking(event.clone()).unwrap();
+            })
+        })
+        .detach();
+
+        terminal.update(cx, |terminal, cx| {
+            terminal.process_event(
+                TerminalBackendEvent::Title("zetta-cwd:/tmp/project".to_owned()),
+                cx,
+            );
+        });
+        assert_eq!(events_rx.try_recv().unwrap(), Event::TitleChanged);
+
+        terminal.update(cx, |terminal, cx| {
+            terminal.process_event(
+                TerminalBackendEvent::Title("zetta-cwd:/tmp/project".to_owned()),
+                cx,
+            );
+        });
+        assert!(events_rx.try_recv().is_err());
+
+        terminal.update(cx, |terminal, cx| {
+            terminal.process_event(
+                TerminalBackendEvent::Title("zetta-cwd:/tmp/other".to_owned()),
+                cx,
+            );
+        });
+        assert_eq!(events_rx.try_recv().unwrap(), Event::TitleChanged);
     }
 
     #[test]

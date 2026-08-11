@@ -26,7 +26,7 @@ use ui::IconName;
 
 use crate::pane::{OverlayFontSize, PaneOverlayRequest, overlay_color_from_value};
 
-const CONTROL_VERSION: u32 = 9;
+const CONTROL_VERSION: u32 = 10;
 const MAX_CONTROL_MESSAGE_BYTES: usize = 4096;
 const CONTROL_COMPLETION_TIMEOUT: Duration = Duration::from_secs(2);
 const CONTROL_COMPLETION_POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -57,6 +57,12 @@ pub(crate) struct TabAttentionRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TabNameRequest {
+    pub(crate) attention_id: u64,
+    pub(crate) name: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorktreeNameRequest {
     pub(crate) attention_id: u64,
     pub(crate) name: Option<String>,
 }
@@ -109,6 +115,10 @@ pub(crate) enum ProcessControlCommand {
         request: TabNameRequest,
         completion: Sender<bool>,
     },
+    SetWorktreeName {
+        request: WorktreeNameRequest,
+        completion: Sender<bool>,
+    },
     GetSilentMode {
         attention_id: Option<u64>,
         completion: Sender<bool>,
@@ -156,6 +166,10 @@ enum ControlRequestCommand {
         attention_id: u64,
         name: Option<String>,
     },
+    SetWorktreeName {
+        attention_id: u64,
+        name: Option<String>,
+    },
     GetSilentMode {
         attention_id: Option<u64>,
     },
@@ -187,6 +201,7 @@ struct ControlRequest {
     attention_summary: Option<String>,
     attention_body: Option<String>,
     tab_name: Option<String>,
+    worktree_name: Option<String>,
     config_path: Option<String>,
     split: Option<String>,
     profile: Option<String>,
@@ -413,6 +428,17 @@ impl ProcessControlServer {
                                 && wait_for_control_completion(&completed, &stopping_for_thread);
                             if accepted { "ok" } else { "rejected" }
                         }
+                        Some(ControlRequestCommand::SetWorktreeName { attention_id, name }) => {
+                            let (completion, completed) = channel();
+                            let accepted = commands
+                                .unbounded_send(ProcessControlCommand::SetWorktreeName {
+                                    request: WorktreeNameRequest { attention_id, name },
+                                    completion,
+                                })
+                                .is_ok()
+                                && wait_for_control_completion(&completed, &stopping_for_thread);
+                            if accepted { "ok" } else { "rejected" }
+                        }
                         Some(ControlRequestCommand::GetSilentMode { attention_id }) => {
                             let (completion, completed) = channel();
                             if commands
@@ -593,9 +619,19 @@ fn decode_control_request(
         }
         return None;
     }
+    if request.command != "set_worktree_name" && request.worktree_name.is_some() {
+        if let Some(secret) = request.secret.as_mut() {
+            secret.zeroize();
+        }
+        return None;
+    }
     if (!matches!(
         request.command.as_str(),
-        "set_tab_attention" | "focus_tab" | "set_tab_name" | "get_silent_mode"
+        "set_tab_attention"
+            | "focus_tab"
+            | "set_tab_name"
+            | "set_worktree_name"
+            | "get_silent_mode"
     ) && request.attention_id.is_some())
         || (request.command != "set_tab_attention"
             && (request.attention_summary.is_some() || request.attention_body.is_some()))
@@ -808,6 +844,33 @@ fn decode_control_request(
             Some(ControlRequestCommand::SetTabName {
                 attention_id,
                 name: request.tab_name.take(),
+            })
+        }
+        "set_worktree_name"
+            if request.runner_id.is_none()
+                && request.session_id.is_none()
+                && request.secret.is_none()
+                && request.icon.is_none()
+                && request.pane_theme.is_none()
+                && request.pane_overlay.is_none()
+                && request.pane_overlay_font_size.is_none()
+                && request.pane_overlay_opacity.is_none()
+                && request.pane_overlay_color.is_none()
+                && request.config_path.is_none()
+                && request.attention_summary.is_none()
+                && request.attention_body.is_none()
+                && request.tab_name.is_none()
+                && request.split.is_none()
+                && request.profile.is_none()
+                && request.theme.is_none() =>
+        {
+            let attention_id = request.attention_id.take().filter(|id| *id != 0)?;
+            if request.worktree_name.as_deref().is_some_and(str::is_empty) {
+                return None;
+            }
+            Some(ControlRequestCommand::SetWorktreeName {
+                attention_id,
+                name: request.worktree_name.take(),
             })
         }
         _ => None,
@@ -1162,6 +1225,9 @@ pub(crate) fn request_process_focus_tab(process_id: u32, attention_id: u64) -> R
     send_focus_tab_request(&endpoint, attention_id)
 }
 
+// Kept for process-control callers that intentionally publish a lower-priority
+// process title outside the built-in worktree commands.
+#[allow(dead_code)]
 pub(crate) fn request_process_tab_name(process_id: u32, request: TabNameRequest) -> Result<bool> {
     let endpoint_path = control_endpoint_path(process_id);
     let contents = fs::read(&endpoint_path).with_context(|| {
@@ -1177,6 +1243,28 @@ pub(crate) fn request_process_tab_name(process_id: u32, request: TabNameRequest)
         "Zetta process control endpoint is outdated"
     );
     send_set_tab_name_request(&endpoint, &request)
+}
+
+pub(crate) fn request_process_worktree_name(
+    process_id: u32,
+    request: WorktreeNameRequest,
+) -> Result<bool> {
+    anyhow::ensure!(process_id != 0, "process ID must be positive");
+    anyhow::ensure!(request.attention_id != 0, "attention ID must be positive");
+    let endpoint_path = control_endpoint_path(process_id);
+    let contents = fs::read(&endpoint_path).with_context(|| {
+        format!(
+            "reading Zetta process control endpoint {}",
+            endpoint_path.display()
+        )
+    })?;
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&contents).context("parsing Zetta process control endpoint")?;
+    anyhow::ensure!(
+        endpoint.version == CONTROL_VERSION && endpoint.process_id == process_id,
+        "Zetta process control endpoint is outdated"
+    );
+    send_set_worktree_name_request(&endpoint, &request)
 }
 
 fn send_open_window_request(endpoint: &ControlEndpoint) -> Result<bool> {
@@ -1201,6 +1289,7 @@ fn send_open_window_request(endpoint: &ControlEndpoint) -> Result<bool> {
             attention_summary: None,
             attention_body: None,
             tab_name: None,
+            worktree_name: None,
             config_path: None,
             split: None,
             profile: None,
@@ -1237,6 +1326,7 @@ fn send_get_silent_mode_request(
             attention_summary: None,
             attention_body: None,
             tab_name: None,
+            worktree_name: None,
             config_path: None,
             split: None,
             profile: None,
@@ -1276,6 +1366,7 @@ fn send_set_tab_attention_request(
             attention_summary: Some(request.summary.clone()),
             attention_body: request.body.clone(),
             tab_name: None,
+            worktree_name: None,
             config_path: None,
             split: None,
             profile: None,
@@ -1286,6 +1377,7 @@ fn send_set_tab_attention_request(
     Ok(response.status == "ok")
 }
 
+#[allow(dead_code)]
 fn send_set_tab_name_request(endpoint: &ControlEndpoint, request: &TabNameRequest) -> Result<bool> {
     let mut stream = UnixStream::connect(&endpoint.socket_path)?;
     stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
@@ -1308,6 +1400,43 @@ fn send_set_tab_name_request(endpoint: &ControlEndpoint, request: &TabNameReques
             attention_summary: None,
             attention_body: None,
             tab_name: request.name.clone(),
+            worktree_name: None,
+            config_path: None,
+            split: None,
+            profile: None,
+            theme: None,
+        },
+    )?;
+    let response = read_message::<ControlResponse>(&mut stream)?;
+    Ok(response.status == "ok")
+}
+
+fn send_set_worktree_name_request(
+    endpoint: &ControlEndpoint,
+    request: &WorktreeNameRequest,
+) -> Result<bool> {
+    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
+    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    write_message(
+        &mut stream,
+        &ControlRequest {
+            token: endpoint.token.clone(),
+            command: "set_worktree_name".to_owned(),
+            runner_id: None,
+            session_id: None,
+            secret: None,
+            icon: None,
+            pane_theme: None,
+            pane_overlay: None,
+            pane_overlay_font_size: None,
+            pane_overlay_opacity: None,
+            pane_overlay_color: None,
+            attention_id: Some(request.attention_id),
+            attention_summary: None,
+            attention_body: None,
+            tab_name: None,
+            worktree_name: request.name.clone(),
             config_path: None,
             split: None,
             profile: None,
@@ -1341,6 +1470,7 @@ fn send_focus_tab_request(endpoint: &ControlEndpoint, attention_id: u64) -> Resu
             attention_summary: None,
             attention_body: None,
             tab_name: None,
+            worktree_name: None,
             config_path: None,
             split: None,
             profile: None,
@@ -1376,6 +1506,7 @@ fn send_replace_pane_request(
             attention_summary: None,
             attention_body: None,
             tab_name: None,
+            worktree_name: None,
             config_path: None,
             split: request.split.clone(),
             profile: request.profile.clone(),
@@ -1411,6 +1542,7 @@ fn send_reload_configuration_request(
             attention_summary: None,
             attention_body: None,
             tab_name: None,
+            worktree_name: None,
             config_path: Some(config_path.to_owned()),
             split: None,
             profile: None,
@@ -1446,6 +1578,7 @@ fn send_set_tab_icon_request(endpoint: &ControlEndpoint, icon: Option<IconName>)
             attention_summary: None,
             attention_body: None,
             tab_name: None,
+            worktree_name: None,
             config_path: None,
             split: None,
             profile: None,
@@ -1478,6 +1611,7 @@ fn send_set_pane_theme_request(endpoint: &ControlEndpoint, theme: Option<String>
             attention_summary: None,
             attention_body: None,
             tab_name: None,
+            worktree_name: None,
             config_path: None,
             split: None,
             profile: None,
@@ -1510,6 +1644,7 @@ fn send_list_pane_themes_request(endpoint: &ControlEndpoint) -> Result<Option<Ve
             attention_summary: None,
             attention_body: None,
             tab_name: None,
+            worktree_name: None,
             config_path: None,
             split: None,
             profile: None,
@@ -1548,6 +1683,7 @@ fn send_set_overlay_request(
             attention_summary: None,
             attention_body: None,
             tab_name: None,
+            worktree_name: None,
             config_path: None,
             split: None,
             profile: None,
@@ -1583,6 +1719,7 @@ fn send_reconnect_session_request(
         attention_summary: None,
         attention_body: None,
         tab_name: None,
+        worktree_name: None,
         config_path: None,
         split: None,
         profile: None,

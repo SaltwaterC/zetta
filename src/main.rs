@@ -305,6 +305,7 @@ use title_bar_render::*;
 mod window_frame;
 use window_frame::*;
 mod startup;
+mod worktree_detection;
 use shell_integration::*;
 #[cfg(windows)]
 mod windows_integration;

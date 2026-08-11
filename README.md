@@ -112,11 +112,17 @@ with a regular-copy fallback; invalid, overlapping, or already-existing paths ar
 rejected. Failed initialization or copying cleans up the partial worktree, branch,
 and metadata. See [Using Zetta](docs/usage.md#git-worktrees) for configuration
 and safety details. When these commands run inside a Zetta terminal, a successful
-`new NAME` names the originating tab exactly `NAME`; a successful `done` clears
-that custom tab name. The Git operations and `--path-only` output do not depend
-on Zetta being available. `wt status` also reports whether the current `HEAD`
-contains submodules, lists detected nested submodule paths, and reports native
-copy-on-write availability for the current worktree and resolved `wt.root`.
+`new NAME` sets the originating tab's worktree title to exactly `NAME`; a
+successful `done` clears that worktree title. Zetta also detects linked
+worktrees when a tab starts in one or later changes into one, preserving nested
+names such as `feature/api`, and clears the automatic title when the terminal
+leaves the worktree. Manual renames take precedence over worktree titles, which
+take precedence over process-control and terminal-derived titles; an empty
+manual rename resumes automatic naming. The Git operations and `--path-only`
+output do not depend on Zetta being available. `wt status` also reports whether
+the current `HEAD` contains submodules, lists detected nested submodule paths,
+and reports native copy-on-write availability for the current worktree and
+resolved `wt.root`.
 `wt new` emits phase progress on stderr while preserving its normal and
 `--path-only` stdout.
 
