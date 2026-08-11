@@ -3,7 +3,7 @@ use std::time::Duration;
 #[cfg(target_os = "linux")]
 use std::process::Command;
 
-use gpui::{App, AppContext as _, Context, Entity, Window};
+use gpui::{App, Context, Entity, Window};
 use terminal_view::TerminalView;
 
 use crate::{
