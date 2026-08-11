@@ -3,7 +3,9 @@ use std::time::Duration;
 #[cfg(target_os = "linux")]
 use std::process::Command;
 
-use gpui::{App, AppContext, Context, Entity, Window};
+#[cfg(not(target_os = "macos"))]
+use gpui::AppContext;
+use gpui::{App, Context, Entity, Window};
 use terminal_view::TerminalView;
 
 use crate::{
