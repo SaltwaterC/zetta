@@ -484,8 +484,9 @@ the `Pane N` fallback.
 
 Selecting terminal text copies it to the system clipboard while preserving the
 selection. `Ctrl-C` copies an existing selection and sends an interrupt when
-nothing is selected. `Ctrl-V` pastes and takes precedence over the shell's
-traditional quoted-insert use of that chord.
+nothing is selected, while `Ctrl-Insert` copies selected text. `Ctrl-V` and
+`Shift-Insert` paste; `Ctrl-V` takes precedence over the shell's traditional
+quoted-insert use of that chord.
 
 A plain right-click pastes when the clipboard contains text and opens the
 context menu when it does not. `Shift`-right-click always opens the context
@@ -606,7 +607,9 @@ become `Ctrl-Cmd`; for example, paste-trim is `Ctrl-Cmd-V` on macOS and
 | `Ctrl-Tab` / `Ctrl-Shift-Tab` | Next / previous tab |
 | `Ctrl-PageUp` / `Ctrl-PageDown` | Next / previous tab |
 | `Ctrl-C` | Copy selected text or send interrupt |
+| `Ctrl-Insert` | Copy selected text |
 | `Ctrl-V` | Paste |
+| `Shift-Insert` | Paste |
 | `Cmd-Shift-F` (macOS) / `Alt-Shift-F` (Windows/Linux) | Search the active pane's scrollback |
 | `Ctrl-Shift-F` | Search scrollback across the active tab |
 | `Ctrl-Cmd-V` (macOS) / `Ctrl-Alt-V` (Windows/Linux) | Paste with surrounding whitespace trimmed |

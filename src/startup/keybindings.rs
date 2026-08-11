@@ -585,8 +585,14 @@ fn default_keybindings(
             CopyAndClearSelection,
             Some("Zetta > Terminal && selection"),
         ),
+        KeyBinding::new(
+            "ctrl-insert",
+            CopyAndClearSelection,
+            Some("Zetta > Terminal && selection"),
+        ),
         terminal_clear_keybinding(),
         KeyBinding::new("ctrl-v", Paste, Some("Zetta > Terminal")),
+        KeyBinding::new("shift-insert", Paste, Some("Zetta > Terminal")),
         platform_keybinding("alt-shift-f", SearchScrollback, Some("Zetta > Terminal")),
         KeyBinding::new(
             "ctrl-shift-f",

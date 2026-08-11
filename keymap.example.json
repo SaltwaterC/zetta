@@ -35,6 +35,7 @@
       "ctrl-pagedown": "zetta::PreviousTab",
       "ctrl-shift-l": "terminal::Clear",
       "ctrl-v": "terminal::Paste",
+      "shift-insert": "terminal::Paste",
       "cmd-l": "terminal::Clear",
       "cmd-v": "terminal::Paste",
       "alt-shift-f": "terminal_view::SearchScrollback",
@@ -132,6 +133,7 @@
     "context": "Zetta > Terminal && selection",
     "bindings": {
       "ctrl-c": "terminal_view::CopyAndClearSelection",
+      "ctrl-insert": "terminal_view::CopyAndClearSelection",
       "cmd-c": "terminal_view::CopyAndClearSelection"
     }
   },

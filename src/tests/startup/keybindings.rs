@@ -389,6 +389,33 @@ fn terminal_clear_uses_ctrl_shift_l() {
     assert_eq!(terminal_clear_keybinding().action().name(), Clear.name());
 }
 
+#[test]
+fn insert_clipboard_shortcuts_use_the_terminal_contexts() {
+    let bindings = default_keybindings(0, &gpui::DummyKeyboardMapper);
+    for (shortcut, action, context) in [
+        (
+            "ctrl-insert",
+            CopyAndClearSelection.name(),
+            "Zetta > Terminal && selection",
+        ),
+        ("shift-insert", Paste.name(), "Zetta > Terminal"),
+    ] {
+        let keystroke = gpui::Keystroke::parse(shortcut).unwrap();
+        let binding = bindings
+            .iter()
+            .find(|binding| {
+                binding.action().name() == action
+                    && binding.match_keystrokes(std::slice::from_ref(&keystroke)) == Some(false)
+            })
+            .unwrap_or_else(|| panic!("missing {shortcut} binding"));
+        assert_eq!(binding.action().name(), action);
+        assert_eq!(
+            binding.predicate().map(|predicate| predicate.to_string()),
+            Some(context.into())
+        );
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_shortcuts_are_additional_application_bindings() {

@@ -528,6 +528,7 @@ fn keymap_template_exposes_all_builtin_shortcuts() {
         ("alt-shift-a", "terminal_view::SelectAll"),
         ("ctrl-shift-m", "zetta::ToggleMultiCommand"),
         ("ctrl-shift-l", "terminal::Clear"),
+        ("shift-insert", "terminal::Paste"),
         ("alt-shift-f", "terminal_view::SearchScrollback"),
         ("ctrl-alt-v", "terminal::PasteTrimmed"),
         ("ctrl-cmd-v", "terminal::PasteTrimmed"),
@@ -592,6 +593,11 @@ fn keymap_template_exposes_all_builtin_shortcuts() {
         "cmd-c",
         "terminal_view::CopyAndClearSelection",
     );
+    assert_binding(
+        "Zetta > Terminal && selection",
+        "ctrl-insert",
+        "terminal_view::CopyAndClearSelection",
+    );
     for (keystroke, action) in [
         ("left", "zetta::ActivateApplicationMenuLeft"),
         ("right", "zetta::ActivateApplicationMenuRight"),
@@ -616,6 +622,36 @@ fn keymap_template_exposes_all_builtin_shortcuts() {
         terminal["bindings"]["alt-shift-e"],
         json!(["zetta::ApplyPaneSplitTemplate", { "name": "quarters" }])
     );
+}
+
+#[test]
+fn keymap_template_displays_insert_clipboard_shortcuts_in_keymap_syntax() {
+    let path = std::env::temp_dir().join(format!(
+        "zetta-insert-keymap-template-{}",
+        std::process::id()
+    ));
+    let form = KeymapForm::load(&path).unwrap();
+
+    for (context, keystroke, action) in [
+        (
+            "Zetta > Terminal && selection",
+            "ctrl-insert",
+            "terminal_view::CopyAndClearSelection",
+        ),
+        ("Zetta > Terminal", "shift-insert", "terminal::Paste"),
+    ] {
+        let section = form
+            .sections
+            .iter()
+            .find(|section| section.context.text == context)
+            .unwrap_or_else(|| panic!("missing keymap context {context:?}"));
+        let binding = section
+            .bindings
+            .iter()
+            .find(|binding| binding.keystroke.text == keystroke)
+            .unwrap_or_else(|| panic!("missing displayed keymap binding {keystroke:?}"));
+        assert_eq!(binding.action, json!(action));
+    }
 }
 
 #[test]
