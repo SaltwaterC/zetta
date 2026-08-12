@@ -391,8 +391,8 @@ fn request_focus_status_authorization(_: &mut App) {
 }
 
 #[cfg(any(test, target_os = "macos"))]
-fn macos_focus_status(authorization_status: isize, focused: Option<bool>) -> SystemSilentState {
-    if authorization_status != 3 {
+fn macos_focus_status(authorized: bool, focused: Option<bool>) -> SystemSilentState {
+    if !authorized {
         return SystemSilentState::Unknown;
     }
     match focused {
@@ -404,18 +404,19 @@ fn macos_focus_status(authorization_status: isize, focused: Option<bool>) -> Sys
 
 #[cfg(target_os = "macos")]
 fn detect_macos_system_silent_state() -> SystemSilentState {
-    use objc2_intents::INFocusStatusCenter;
+    use objc2_intents::{INFocusStatusAuthorizationStatus, INFocusStatusCenter};
 
     if !is_packaged_gui_launch() {
         return SystemSilentState::Unknown;
     }
     let center = unsafe { INFocusStatusCenter::defaultCenter() };
-    let authorization_status = unsafe { center.authorizationStatus() }.0;
-    if authorization_status != 3 {
+    let authorized =
+        unsafe { center.authorizationStatus() } == INFocusStatusAuthorizationStatus::Authorized;
+    if !authorized {
         return SystemSilentState::Unknown;
     }
     let focused = unsafe { center.focusStatus().isFocused() }.map(|focused| focused.as_bool());
-    macos_focus_status(authorization_status, focused)
+    macos_focus_status(authorized, focused)
 }
 
 #[cfg(test)]

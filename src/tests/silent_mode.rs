@@ -82,14 +82,17 @@ fn gnome_banner_values_map_to_silence_states() {
 
 #[test]
 fn macos_focus_status_requires_authorization_and_a_known_focus_value() {
-    assert_eq!(macos_focus_status(3, Some(true)), SystemSilentState::Active);
     assert_eq!(
-        macos_focus_status(3, Some(false)),
+        macos_focus_status(true, Some(true)),
+        SystemSilentState::Active
+    );
+    assert_eq!(
+        macos_focus_status(true, Some(false)),
         SystemSilentState::Inactive
     );
     assert_eq!(
-        macos_focus_status(2, Some(true)),
+        macos_focus_status(false, Some(true)),
         SystemSilentState::Unknown
     );
-    assert_eq!(macos_focus_status(3, None), SystemSilentState::Unknown);
+    assert_eq!(macos_focus_status(true, None), SystemSilentState::Unknown);
 }
