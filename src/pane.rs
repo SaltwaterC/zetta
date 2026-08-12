@@ -52,13 +52,13 @@ pub(crate) fn prepare_pane_launches<T>(
 }
 
 pub(crate) fn pane_layout_from_configured_template(
-    templates: &HashMap<String, PaneSplitTemplate>,
+    templates: &HashMap<String, PaneSplitTemplateConfig>,
     name: &str,
     pane_ids: &mut impl Iterator<Item = u64>,
 ) -> Option<PaneLayout> {
     templates
         .get(name)
-        .map(|template| PaneLayout::from_template(template, pane_ids))
+        .map(|template| PaneLayout::from_template(&template.layout, pane_ids))
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]

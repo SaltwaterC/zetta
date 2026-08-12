@@ -431,10 +431,13 @@ fn terminal_regexes_are_cloned_then_moved_into_the_final_spawn() {
 fn configured_template_layout_is_built_through_a_borrow() {
     let templates = HashMap::from([(
         "two".to_owned(),
-        PaneSplitTemplate::Split {
-            axis: PaneSplitAxis::Vertical,
-            first: Box::new(PaneSplitTemplate::Pane(Box::default())),
-            second: Box::new(PaneSplitTemplate::Pane(Box::default())),
+        PaneSplitTemplateConfig {
+            layout: PaneSplitTemplate::Split {
+                axis: PaneSplitAxis::Vertical,
+                first: Box::new(PaneSplitTemplate::Pane(Box::default())),
+                second: Box::new(PaneSplitTemplate::Pane(Box::default())),
+            },
+            env: HashMap::new(),
         },
     )]);
     let layout = pane_layout_from_configured_template(&templates, "two", &mut [10, 11].into_iter());

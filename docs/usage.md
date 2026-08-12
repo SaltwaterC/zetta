@@ -503,24 +503,34 @@ labels are allowed. `vertical` places two children side by side, and
 {
   "pane_split_templates": {
     "three-bottom": {
-      "horizontal": [
-        { "label": "top" },
-        {
-          "vertical": [
-            { "label": "bottom-left" },
-            { "label": "bottom-right" }
-          ]
-        }
-      ]
+      "layout": {
+        "horizontal": [
+          { "label": "top" },
+          {
+            "vertical": [
+              { "label": "bottom-left" },
+              { "label": "bottom-right" }
+            ]
+          }
+        ]
+      }
     }
   }
 }
 ```
 
-Each split must have exactly two children and each template may contain 2–64
+Each template contains a required `layout` and an optional `env` object. Each
+split must have exactly two children and each template may contain 2–64
 panes. A tab is limited to 64 panes in total, including panes created by
 recursive applications. Custom entries extend the built-ins and may override
 them by using the same name.
+
+The Configuration window's Templates tab provides a visual editor for these
+layouts. Use `Cmd/Ctrl-4` to open it, choose New or Duplicate, and select an
+empty two-pane layout or one of the built-in presets. Built-ins are read-only;
+editing a duplicate creates a custom entry, while editing a built-in override
+is saved only when that override has been changed. The editor validates pane
+fields, nested split structure, and the 2–64 pane limit before saving.
 
 Leaves can independently select a configured profile or direct command,
 override its theme, add string environment variables, and show an overlay:
@@ -529,24 +539,27 @@ override its theme, add string environment variables, and show an overlay:
 {
   "pane_split_templates": {
     "server-pair": {
-      "vertical": [
-        {
-          "label": "server",
-          "profile": "Bash",
-          "theme": "One Dark",
-          "env": { "ROLE": "server" },
-          "overlay": {
-            "text": "SERVER",
-            "size": "xl",
-            "opacity": 85,
-            "color": "cyan"
+      "env": { "PROJECT": "zetta", "ROLE": "default" },
+      "layout": {
+        "vertical": [
+          {
+            "label": "server",
+            "profile": "Bash",
+            "theme": "One Dark",
+            "env": { "ROLE": "server" },
+            "overlay": {
+              "text": "SERVER",
+              "size": "xl",
+              "opacity": 85,
+              "color": "cyan"
+            }
+          },
+          {
+            "label": "client",
+            "command": { "program": "ssh", "args": ["host"] }
           }
-        },
-        {
-          "label": "client",
-          "command": { "program": "ssh", "args": ["host"] }
-        }
-      ]
+        ]
+      }
     }
   }
 }
@@ -554,10 +567,11 @@ override its theme, add string environment variables, and show an overlay:
 
 `profile` and `command` are mutually exclusive. A command is launched with
 exactly the listed program and arguments, without shell-string splitting.
-Omitting both inherits the active pane's profile. Environment values must be
-strings, overlay sizes are `sm`, `base`, `lg`, `xl`, `2xl`, or `3xl`, opacity
-is a percentage from 0 to 100, and color accepts the named overlay colors or a
-hex value.
+Omitting both inherits the active pane's profile. Template-level environment
+variables are applied to every pane; a pane-level value overrides a matching
+template key. Environment values must be strings, overlay sizes are `sm`,
+`base`, `lg`, `xl`, `2xl`, or `3xl`, opacity is a percentage from 0 to 100,
+and color accepts the named overlay colors or a hex value.
 
 The active terminal becomes the first, top-left leaf and retains focus. Leaves
 that omit both `profile` and `command` inherit its profile; all new panes keep

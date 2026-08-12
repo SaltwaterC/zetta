@@ -1,3 +1,4 @@
+use super::pane_templates::render_pane_templates_page;
 use super::widgets::{
     KEYMAP_ROW_HEIGHT, KeymapRowData, KeymapRowRenderContext, SETTINGS_SCROLLBAR_WIDTH,
     build_keymap_row_data,
@@ -1098,5 +1099,6 @@ pub(crate) fn render_settings_pages(
                     )
                     .into_any_element()
         }
+        SettingsPage::PaneTemplates => render_pane_templates_page(editor, colors, handle),
     }
 }

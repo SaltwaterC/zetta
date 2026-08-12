@@ -390,10 +390,12 @@ fn pane_split_templates_include_built_ins_and_custom_layouts() {
         r#"{
             "pane_split_templates": {
                 "custom": {
-                    "horizontal": [
-                        {},
-                        { "vertical": [{}, {}] }
-                    ]
+                    "layout": {
+                        "horizontal": [
+                            {},
+                            { "vertical": [{}, {}] }
+                        ]
+                    }
                 }
             }
         }"#,
@@ -421,7 +423,7 @@ fn pane_split_templates_include_built_ins_and_custom_layouts() {
         ]
     );
     assert!(matches!(
-        config.pane_split_templates["three-left"],
+        config.pane_split_templates["three-left"].layout,
         PaneSplitTemplate::Split {
             axis: PaneSplitAxis::Vertical,
             ref first,
@@ -468,10 +470,10 @@ fn pane_split_templates_include_built_ins_and_custom_layouts() {
         }
     }
 
-    assert_all_splits_are_vertical(four_vertical);
+    assert_all_splits_are_vertical(&four_vertical.layout);
     assert_eq!(config.pane_split_templates["custom"].pane_count(), 3);
     assert!(matches!(
-        config.pane_split_templates["custom"],
+        config.pane_split_templates["custom"].layout,
         PaneSplitTemplate::Split {
             axis: PaneSplitAxis::Horizontal,
             ..
@@ -485,13 +487,15 @@ fn pane_split_templates_parse_labeled_leaves_in_traversal_order() {
         r#"{
             "pane_split_templates": {
                 "labeled": {
-                    "horizontal": [
-                        { "label": "top" },
-                        { "vertical": [
-                            { "label": "bottom-left" },
-                            { "label": "bottom-right" }
-                        ] }
-                    ]
+                    "layout": {
+                        "horizontal": [
+                            { "label": "top" },
+                            { "vertical": [
+                                { "label": "bottom-left" },
+                                { "label": "bottom-right" }
+                            ] }
+                        ]
+                    }
                 }
             }
         }"#,
@@ -519,24 +523,27 @@ fn pane_split_templates_parse_fully_customized_leaves_and_same_file_profiles() {
             ],
             "pane_split_templates": {
                 "custom": {
-                    "vertical": [
-                        {
-                            "label": "server",
-                            "profile": "sErVeR sHeLl",
-                            "theme": "One Light",
-                            "env": { "ROLE": "server", "EMPTY": "" },
-                            "overlay": {
-                                "text": "SERVER",
-                                "size": "xl",
-                                "opacity": 85,
-                                "color": "cyan"
+                    "env": { "SHARED": "yes", "ROLE": "default" },
+                    "layout": {
+                        "vertical": [
+                            {
+                                "label": "server",
+                                "profile": "sErVeR sHeLl",
+                                "theme": "One Light",
+                                "env": { "ROLE": "server", "EMPTY": "" },
+                                "overlay": {
+                                    "text": "SERVER",
+                                    "size": "xl",
+                                    "opacity": 85,
+                                    "color": "cyan"
+                                }
+                            },
+                            {
+                                "label": "client",
+                                "command": { "program": "ssh", "args": ["host", "-p", "22"] }
                             }
-                        },
-                        {
-                            "label": "client",
-                            "command": { "program": "ssh", "args": ["host", "-p", "22"] }
-                        }
-                    ]
+                        ]
+                    }
                 }
             }
         }"##,
@@ -552,6 +559,7 @@ fn pane_split_templates_parse_fully_customized_leaves_and_same_file_profiles() {
     assert_eq!(leaves[0].theme.as_deref(), Some("One Light"));
     assert_eq!(leaves[0].env["ROLE"], "server");
     assert_eq!(leaves[0].env["EMPTY"], "");
+    assert_eq!(leaves[0].env["SHARED"], "yes");
     assert_eq!(
         leaves[0].overlay,
         Some(PaneSplitOverlay {
@@ -562,6 +570,8 @@ fn pane_split_templates_parse_fully_customized_leaves_and_same_file_profiles() {
         })
     );
     assert_eq!(leaves[1].label.as_deref(), Some("client"));
+    assert_eq!(leaves[1].env["SHARED"], "yes");
+    assert_eq!(leaves[1].env["ROLE"], "default");
     assert_eq!(
         leaves[1].command,
         Some(PaneSplitCommand {
@@ -592,7 +602,7 @@ fn pane_split_templates_reject_invalid_leaf_fields() {
     for leaf in invalid_documents {
         let document = serde_json::json!({
             "pane_split_templates": {
-                "bad": { "vertical": [leaf, {}] }
+                "bad": { "layout": { "vertical": [leaf, {}] } }
             }
         });
         assert!(
@@ -606,7 +616,7 @@ fn pane_split_templates_reject_invalid_leaf_fields() {
 fn pane_split_templates_reject_unavailable_profiles_and_more_than_64_panes() {
     let unavailable = serde_json::json!({
         "pane_split_templates": {
-            "bad": { "vertical": [{ "profile": "missing" }, {}] }
+            "bad": { "layout": { "vertical": [{ "profile": "missing" }, {}] } }
         }
     });
     let error = Config::parse(&unavailable.to_string(), None, None).unwrap_err();
@@ -623,7 +633,7 @@ fn pane_split_templates_reject_unavailable_profiles_and_more_than_64_panes() {
     }
     let tree = balanced_tree(65);
     let document = serde_json::json!({
-        "pane_split_templates": { "too-many": tree }
+        "pane_split_templates": { "too-many": { "layout": tree } }
     });
     let error = Config::parse(&document.to_string(), None, None).unwrap_err();
     assert!(
@@ -640,7 +650,7 @@ fn pane_split_templates_reject_legacy_leaf_syntax() {
     ] {
         let document = serde_json::json!({
             "pane_split_templates": {
-                "legacy": { "vertical": [leaf, {}] }
+                "legacy": { "layout": { "vertical": [leaf, {}] } }
             }
         });
         assert!(Config::parse(&document.to_string(), None, None).is_err());
@@ -650,7 +660,7 @@ fn pane_split_templates_reject_legacy_leaf_syntax() {
 #[test]
 fn pane_split_templates_reject_malformed_and_single_pane_layouts() {
     let malformed = Config::parse(
-        r#"{"pane_split_templates":{"bad":{"diagonal":["pane","pane"]}}}"#,
+        r#"{"pane_split_templates":{"bad":{"layout":{"diagonal":["pane","pane"]}}}}"#,
         None,
         None,
     )
@@ -661,8 +671,39 @@ fn pane_split_templates_reject_malformed_and_single_pane_layouts() {
             .contains("parsing pane split template")
     );
 
-    let single = Config::parse(r#"{"pane_split_templates":{"bad":{}}}"#, None, None).unwrap_err();
+    let single = Config::parse(
+        r#"{"pane_split_templates":{"bad":{"layout":{}}}}"#,
+        None,
+        None,
+    )
+    .unwrap_err();
     assert!(single.to_string().contains("between 2 and 64 panes"));
+}
+
+#[test]
+fn pane_split_templates_require_the_explicit_layout_envelope_and_validate_global_env() {
+    let old_format = Config::parse(
+        r#"{"pane_split_templates":{"bad":{"vertical":[{},{}]}}}"#,
+        None,
+        None,
+    )
+    .unwrap_err();
+    assert!(format!("{old_format:#}").contains("unrecognized pane split template field"));
+
+    for env in [
+        serde_json::json!({"": "value"}),
+        serde_json::json!({"VALID": true}),
+    ] {
+        let document = serde_json::json!({
+            "pane_split_templates": {
+                "bad": {
+                    "env": env,
+                    "layout": { "vertical": [{}, {}] }
+                }
+            }
+        });
+        assert!(Config::parse(&document.to_string(), None, None).is_err());
+    }
 }
 
 #[test]
@@ -671,10 +712,12 @@ fn pane_split_templates_reject_invalid_labels_and_label_types() {
         let document = serde_json::json!({
             "pane_split_templates": {
                 "bad": {
+                    "layout": {
                         "vertical": [
                         { "label": label },
                         {}
                     ]
+                    }
                 }
             }
         });
@@ -691,10 +734,12 @@ fn pane_split_templates_reject_invalid_labels_and_label_types() {
         let document = serde_json::json!({
             "pane_split_templates": {
                 "bad": {
+                    "layout": {
                         "vertical": [
                         { "label": pane_value },
                         {}
                     ]
+                    }
                 }
             }
         });

@@ -55,8 +55,8 @@ use background_sessions::{
 use command_palette::{CommandPalette, PaletteCommand, humanize_action_name};
 use config::{
     Config, NewTabProfile, PaneControlsPosition, PaneSplitAxis, PaneSplitOverlaySize,
-    PaneSplitPane, PaneSplitTemplate, Profile, WorkingDirectoryScope, profile_is_hidden,
-    visible_profile_count, visible_profile_index,
+    PaneSplitPane, PaneSplitTemplate, PaneSplitTemplateConfig, Profile, WorkingDirectoryScope,
+    profile_is_hidden, visible_profile_count, visible_profile_index,
 };
 use futures::StreamExt as _;
 #[cfg(any(target_os = "windows", linux_like))]
@@ -83,7 +83,8 @@ use session_auth_ui::SessionAuthenticationPrompt;
 use settings::{KeymapFile, KeymapFileLoadResult, Settings as _};
 use settings_editor::{
     BindingForm, ConfigTextField, ConfigurationForm, KeymapForm, KeymapSectionForm,
-    KeymapTextField, SettingsPage, TextField, save as save_settings_file,
+    KeymapTextField, PaneTemplateNodePath, PaneTemplateTextField, SettingsPage, TextField,
+    save as save_settings_file,
 };
 use silent_mode::{FocusStatusAccess, SilentModeState};
 use task::{Shell, ShellBuilder, SpawnInTerminal, TaskId};

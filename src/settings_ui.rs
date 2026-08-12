@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 mod controls;
 pub(crate) mod keymap;
+mod pane_templates;
 mod theme_extensions_ui;
 
 pub(crate) use controls::invalidate_controls_cache;
@@ -19,6 +20,7 @@ pub(crate) use keymap::{KeymapRow, invalidate_keymap_cache, render_keymap_sticky
 pub(crate) enum SettingsInput {
     Configuration(ConfigTextField),
     Keymap(KeymapTextField),
+    PaneTemplate(PaneTemplateTextField),
     ThemeSearch,
     FontSearch,
     KeymapSearch,
@@ -47,6 +49,10 @@ pub(crate) enum SettingsDropdown {
     BindingAction(usize, usize),
     BindingTemplate(usize, usize),
     BindingProfile(usize, usize),
+    PaneTemplateAxis(PaneTemplateNodePath),
+    PaneTemplateSource(PaneTemplateNodePath),
+    PaneTemplateTheme(PaneTemplateNodePath),
+    PaneTemplateOverlaySize(PaneTemplateNodePath),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,6 +105,21 @@ pub(crate) enum SettingsControl {
     AddKeymapSection,
     Font(usize),
     CreateProfile,
+    SelectPaneTemplate(usize),
+    SelectPaneTemplateNode(PaneTemplateNodePath),
+    NewPaneTemplate,
+    DuplicatePaneTemplate,
+    DeletePaneTemplate,
+    SplitPaneTemplate(PaneTemplateNodePath, PaneSplitAxis),
+    RemovePaneTemplateNode(PaneTemplateNodePath),
+    SwapPaneTemplateChildren(PaneTemplateNodePath),
+    AddPaneTemplateArgument(PaneTemplateNodePath),
+    RemovePaneTemplateArgument(PaneTemplateNodePath, usize),
+    AddPaneTemplateGlobalEnvironment,
+    RemovePaneTemplateGlobalEnvironment(usize),
+    AddPaneTemplateEnvironment(PaneTemplateNodePath),
+    RemovePaneTemplateEnvironment(PaneTemplateNodePath, usize),
+    TogglePaneTemplateOverlay(PaneTemplateNodePath),
 }
 
 #[derive(Clone)]
@@ -142,6 +163,9 @@ pub(crate) struct SettingsEditor {
     pub(crate) configuration_dirty: bool,
     pub(crate) keymap_dirty: bool,
     pub(crate) message: Option<(bool, String)>,
+    pub(crate) pane_template_validation_error: Option<String>,
+    pub(crate) pane_template_validation_generation: u64,
+    pub(crate) settings_save_in_progress: bool,
 
     // Cached search/filter results for performance
     pub(crate) keymap_filtered_sections: Option<Vec<usize>>,
@@ -154,6 +178,33 @@ pub(crate) struct SettingsEditor {
     // Controls cache for keyboard navigation
     pub(crate) controls_cache: Option<Vec<SettingsControl>>,
     pub(crate) controls_generation: u64,
+}
+
+struct PreparedSettingsSave {
+    configuration_text: Option<String>,
+    parsed_config: Option<Config>,
+    keymap_text: Option<String>,
+}
+
+fn prepare_settings_save(
+    configuration: Option<ConfigurationForm>,
+    keymap: Option<KeymapForm>,
+    config_path: &Path,
+    keymap_override: Option<PathBuf>,
+) -> Result<PreparedSettingsSave> {
+    let (configuration_text, parsed_config) = if let Some(configuration) = configuration {
+        let text = configuration.to_json()?;
+        let parsed = Config::parse(&text, Some(config_path), keymap_override)?;
+        (Some(text), Some(parsed))
+    } else {
+        (None, None)
+    };
+    let keymap_text = keymap.map(|keymap| keymap.to_json()).transpose()?;
+    Ok(PreparedSettingsSave {
+        configuration_text,
+        parsed_config,
+        keymap_text,
+    })
 }
 
 impl SettingsEditor {
@@ -329,30 +380,60 @@ impl Zetta {
             self.dismiss_settings(window, cx);
             return;
         }
+        if self.settings_loading {
+            return;
+        }
 
         self.command_palette = None;
         if self.tab_search.is_some() {
             self.dismiss_tab_search(window, cx);
         }
 
-        let configuration =
-            match ConfigurationForm::load(&self.launch_config.config_path, &self.launch_config) {
-                Ok(configuration) => configuration,
-                Err(error) => {
-                    self.configuration_error = Some(format!("Could not open settings: {error:#}"));
-                    cx.notify();
-                    return;
-                }
-            };
-        let keymap = match KeymapForm::load(&self.launch_config.keymap_path) {
-            Ok(keymap) => keymap,
-            Err(error) => {
-                self.configuration_error =
-                    Some(format!("Could not open keymap settings: {error:#}"));
-                cx.notify();
-                return;
-            }
-        };
+        self.settings_loading = true;
+        let launch_config = self.launch_config.clone();
+        let config_path = launch_config.config_path.clone();
+        let keymap_path = launch_config.keymap_path.clone();
+        let executor = cx.background_executor().clone();
+        let this = cx.entity().downgrade();
+        window
+            .spawn(cx, async move |cx| {
+                let loaded = executor
+                    .spawn(async move {
+                        let configuration = ConfigurationForm::load(&config_path, &launch_config)?;
+                        let keymap = KeymapForm::load(&keymap_path)?;
+                        Result::<_>::Ok((configuration, keymap))
+                    })
+                    .await;
+                this.update_in(cx, |this, window, cx| {
+                    this.settings_loading = false;
+                    match loaded {
+                        Ok((configuration, keymap)) => {
+                            this.finish_opening_settings(configuration, keymap, window, cx)
+                        }
+                        Err(error) => {
+                            this.settings_pending_page = None;
+                            this.configuration_error =
+                                Some(format!("Could not open settings: {error:#}"));
+                            cx.notify();
+                        }
+                    }
+                })
+                .ok();
+            })
+            .detach();
+    }
+
+    fn finish_opening_settings(
+        &mut self,
+        configuration: ConfigurationForm,
+        keymap: KeymapForm,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let initial_page = self
+            .settings_pending_page
+            .take()
+            .unwrap_or(SettingsPage::Configuration);
         let mut actions = window
             .available_actions(cx)
             .into_iter()
@@ -375,12 +456,7 @@ impl Zetta {
             actions.push(OpenProfile::name_for_type().to_owned());
             actions.sort();
         }
-        let mut pane_template_names = self
-            .launch_config
-            .pane_split_templates
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
+        let mut pane_template_names = configuration.pane_templates.names();
         pane_template_names.sort();
         let mut themes = ThemeRegistry::global(cx)
             .list()
@@ -407,7 +483,7 @@ impl Zetta {
             .collect::<Vec<_>>()
             .into();
         self.settings_editor = Some(SettingsEditor {
-            page: SettingsPage::Configuration,
+            page: initial_page,
             configuration,
             keymap,
             profile_names: self
@@ -437,7 +513,7 @@ impl Zetta {
             numeric_repeat_generation: 0,
             scroll_geometry_initialized: false,
             focused_input: None,
-            focused_control: Some(SettingsControl::Tab(SettingsPage::Configuration)),
+            focused_control: Some(SettingsControl::Tab(initial_page)),
             keymap_capture: None,
             open_dropdown: None,
             dropdown_index: 0,
@@ -446,6 +522,9 @@ impl Zetta {
             configuration_dirty: false,
             keymap_dirty: false,
             message: None,
+            pane_template_validation_error: None,
+            pane_template_validation_generation: 0,
+            settings_save_in_progress: false,
 
             // Cache fields
             keymap_filtered_sections: None,
@@ -490,6 +569,7 @@ impl Zetta {
             editor.keymap_capture = None;
         }
         self.settings_editor = None;
+        self.settings_pending_page = None;
         self.focus_active(window, cx);
     }
 
@@ -523,7 +603,9 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         if self.settings_editor.is_none() {
+            self.settings_pending_page = Some(page);
             self.toggle_settings(&ToggleSettings, window, cx);
+            return;
         }
         self.select_settings_page(page, window, cx);
     }
@@ -562,6 +644,9 @@ impl Zetta {
         let field = match input {
             SettingsInput::Configuration(field) => editor.configuration.text_mut(field),
             SettingsInput::Keymap(field) => editor.keymap.text_mut(field),
+            SettingsInput::PaneTemplate(field) => {
+                pane_templates::pane_template_text_mut(editor, field)
+            }
             SettingsInput::ThemeSearch => Some(&mut editor.theme_extension_query),
             SettingsInput::FontSearch => editor.font_query.as_mut(),
             SettingsInput::KeymapSearch => Some(&mut editor.keymap_search),
@@ -584,50 +669,119 @@ impl Zetta {
     }
 
     pub(crate) fn save_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(editor) = self.settings_editor.as_ref() else {
+        let Some(editor) = self.settings_editor.as_mut() else {
             return;
         };
-        let config_path = self.launch_config.config_path.clone();
-        let result = (|| -> Result<()> {
-            let keymap = if editor.keymap_dirty {
-                let keymap = editor.keymap.to_json()?;
-                validate_keymap_contents(&keymap, cx)?;
-                Some(keymap)
-            } else {
-                None
-            };
-            let configuration = if editor.configuration_dirty {
-                let configuration = editor.configuration.to_json()?;
-                Config::parse(
-                    &configuration,
-                    Some(&config_path),
-                    self.launch_config.keymap_override.clone(),
-                )?;
-                Some(configuration)
-            } else {
-                None
-            };
-
-            if let Some(keymap) = keymap {
-                save_settings_file(&self.launch_config.keymap_path, &keymap)?;
-            }
-            if let Some(configuration) = configuration {
-                save_settings_file(&config_path, &configuration)?;
-            }
-            Ok(())
-        })();
-        match result {
-            Ok(()) => {
-                self.settings_editor = None;
-                self.reload_configuration(&ReloadConfiguration, window, cx);
-            }
-            Err(error) => {
-                if let Some(editor) = self.settings_editor.as_mut() {
-                    editor.message = Some((true, format!("Not saved: {error:#}")));
-                }
-                cx.notify();
-            }
+        if editor.settings_save_in_progress {
+            return;
         }
+        if !editor.configuration_dirty && !editor.keymap_dirty {
+            self.dismiss_settings(window, cx);
+            return;
+        }
+
+        if editor.configuration_dirty {
+            pane_templates::synchronize_pane_template_keybindings(editor);
+        }
+        let configuration = editor
+            .configuration_dirty
+            .then(|| editor.configuration.clone());
+        let keymap = editor.keymap_dirty.then(|| editor.keymap.clone());
+        editor.settings_save_in_progress = true;
+        editor.message = Some((false, "Saving settings…".to_owned()));
+
+        let config_path = self.launch_config.config_path.clone();
+        let keymap_path = self.launch_config.keymap_path.clone();
+        let keymap_override = self.launch_config.keymap_override.clone();
+        let executor = cx.background_executor().clone();
+        let this = cx.entity().downgrade();
+        window
+            .spawn(cx, async move |cx| {
+                let prepare_config_path = config_path.clone();
+                let prepared = executor
+                    .spawn(async move {
+                        prepare_settings_save(
+                            configuration,
+                            keymap,
+                            &prepare_config_path,
+                            keymap_override,
+                        )
+                    })
+                    .await;
+                let PreparedSettingsSave {
+                    configuration_text,
+                    parsed_config,
+                    keymap_text,
+                } = match prepared {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        this.update_in(cx, |this, _, cx| {
+                            if let Some(editor) = this.settings_editor.as_mut() {
+                                editor.settings_save_in_progress = false;
+                                editor.message = Some((true, format!("Not saved: {error:#}")));
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                        return;
+                    }
+                };
+
+                let keymap_validation = this.update_in(cx, |_, _, cx| {
+                    keymap_text
+                        .as_deref()
+                        .map_or(Ok(()), |keymap| validate_keymap_contents(keymap, cx))
+                });
+                match keymap_validation {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        this.update_in(cx, |this, _, cx| {
+                            if let Some(editor) = this.settings_editor.as_mut() {
+                                editor.settings_save_in_progress = false;
+                                editor.message = Some((true, format!("Not saved: {error:#}")));
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                        return;
+                    }
+                    Err(_) => return,
+                }
+
+                let write_result = executor
+                    .spawn(async move {
+                        if let Some(keymap) = keymap_text {
+                            save_settings_file(&keymap_path, &keymap)?;
+                        }
+                        if let Some(configuration) = configuration_text {
+                            save_settings_file(&config_path, &configuration)?;
+                        }
+                        Result::<()>::Ok(())
+                    })
+                    .await;
+                this.update_in(cx, |this, window, cx| match write_result {
+                    Ok(()) => {
+                        let config = parsed_config.unwrap_or_else(|| this.launch_config.clone());
+                        this.settings_editor = None;
+                        if let Err(error) = this.reload_configuration_from_process(config, cx) {
+                            this.configuration_error =
+                                Some(format!("Could not apply saved settings: {error:#}"));
+                        }
+                        this.focus_active(window, cx);
+                        cx.notify();
+                    }
+                    Err(error) => {
+                        if let Some(editor) = this.settings_editor.as_mut() {
+                            editor.settings_save_in_progress = false;
+                            editor.message = Some((true, format!("Not saved: {error:#}")));
+                            cx.notify();
+                        }
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        cx.notify();
     }
 
     pub(crate) fn save_settings_action(
@@ -645,6 +799,14 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self
+            .settings_editor
+            .as_ref()
+            .is_some_and(|editor| editor.settings_save_in_progress)
+        {
+            cx.stop_propagation();
+            return;
+        }
         let command = event.keystroke.modifiers.control || event.keystroke.modifiers.platform;
         if let Some(capture) = self
             .settings_editor
@@ -753,6 +915,7 @@ impl Zetta {
             "1" if command => self.select_settings_page(SettingsPage::Configuration, window, cx),
             "2" if command => self.select_settings_page(SettingsPage::Themes, window, cx),
             "3" if command => self.select_settings_page(SettingsPage::Keymap, window, cx),
+            "4" if command => self.select_settings_page(SettingsPage::PaneTemplates, window, cx),
             "tab" => {
                 self.focus_adjacent_settings_control(event.keystroke.modifiers.shift, window, cx)
             }
@@ -797,6 +960,7 @@ impl Zetta {
                             SettingsPage::Configuration,
                             SettingsPage::Themes,
                             SettingsPage::Keymap,
+                            SettingsPage::PaneTemplates,
                         ];
                         let index = pages
                             .iter()

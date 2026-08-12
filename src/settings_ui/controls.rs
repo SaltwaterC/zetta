@@ -2,6 +2,7 @@ use super::keymap::{
     KeymapRow, invalidate_keymap_cache, keymap_filtered_indices, keymap_rows,
     rebuild_keymap_search_cache,
 };
+use super::pane_templates;
 use super::*;
 
 pub(crate) fn adjacent_settings_control_index(
@@ -67,6 +68,7 @@ impl Zetta {
             SettingsControl::Tab(SettingsPage::Configuration),
             SettingsControl::Tab(SettingsPage::Themes),
             SettingsControl::Tab(SettingsPage::Keymap),
+            SettingsControl::Tab(SettingsPage::PaneTemplates),
             SettingsControl::Close,
             SettingsControl::Save,
         ];
@@ -199,6 +201,9 @@ impl Zetta {
                     controls.push(SettingsControl::AddBinding(section_index));
                 }
                 controls.push(SettingsControl::AddKeymapSection);
+            }
+            SettingsPage::PaneTemplates => {
+                controls.extend(pane_templates::pane_template_controls(editor));
             }
         }
         controls
@@ -465,6 +470,12 @@ impl Zetta {
                     editor.profile_names.clone(),
                 )
             }
+            SettingsDropdown::PaneTemplateAxis(_)
+            | SettingsDropdown::PaneTemplateSource(_)
+            | SettingsDropdown::PaneTemplateTheme(_)
+            | SettingsDropdown::PaneTemplateOverlaySize(_) => {
+                pane_templates::pane_template_dropdown_options(editor, dropdown)
+            }
         }
     }
 
@@ -605,6 +616,13 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self
+            .settings_editor
+            .as_ref()
+            .is_some_and(|editor| editor.settings_save_in_progress)
+        {
+            return;
+        }
         match control {
             SettingsControl::Tab(page) => self.select_settings_page(page, window, cx),
             SettingsControl::Close => self.dismiss_settings(window, cx),
@@ -771,6 +789,23 @@ impl Zetta {
                     cx.notify();
                 }
             }
+            SettingsControl::SelectPaneTemplate(_)
+            | SettingsControl::SelectPaneTemplateNode(_)
+            | SettingsControl::NewPaneTemplate
+            | SettingsControl::DuplicatePaneTemplate
+            | SettingsControl::DeletePaneTemplate
+            | SettingsControl::SplitPaneTemplate(_, _)
+            | SettingsControl::RemovePaneTemplateNode(_)
+            | SettingsControl::SwapPaneTemplateChildren(_)
+            | SettingsControl::AddPaneTemplateArgument(_)
+            | SettingsControl::RemovePaneTemplateArgument(_, _)
+            | SettingsControl::AddPaneTemplateGlobalEnvironment
+            | SettingsControl::RemovePaneTemplateGlobalEnvironment(_)
+            | SettingsControl::AddPaneTemplateEnvironment(_)
+            | SettingsControl::RemovePaneTemplateEnvironment(_, _)
+            | SettingsControl::TogglePaneTemplateOverlay(_) => {
+                let _ = pane_templates::activate_pane_template_control(self, control, window, cx);
+            }
         }
     }
 
@@ -783,6 +818,9 @@ impl Zetta {
         let Some(editor) = self.settings_editor.as_mut() else {
             return;
         };
+        if editor.settings_save_in_progress {
+            return;
+        }
         editor.open_dropdown = None;
         editor.dropdown_query.clear();
         let Some(input) = editor.focused_input else {
@@ -791,6 +829,9 @@ impl Zetta {
         let field = match input {
             SettingsInput::Configuration(field) => editor.configuration.text_mut(field),
             SettingsInput::Keymap(field) => editor.keymap.text_mut(field),
+            SettingsInput::PaneTemplate(field) => {
+                pane_templates::pane_template_text_mut(editor, field)
+            }
             SettingsInput::ThemeSearch => Some(&mut editor.theme_extension_query),
             SettingsInput::FontSearch => editor.font_query.as_mut(),
             SettingsInput::KeymapSearch => Some(&mut editor.keymap_search),
@@ -849,10 +890,24 @@ impl Zetta {
                 rebuild_keymap_search_cache(editor);
                 invalidate_controls_cache(editor);
             }
+            SettingsInput::PaneTemplate(_) => {
+                editor.configuration_dirty = true;
+                if matches!(
+                    input,
+                    SettingsInput::PaneTemplate(PaneTemplateTextField::Name(_))
+                ) {
+                    pane_templates::refresh_template_names(editor);
+                }
+                invalidate_controls_cache(editor);
+            }
             SettingsInput::ProfileDraft(_) => {}
         }
         editor.message = None;
-        cx.notify();
+        if matches!(input, SettingsInput::PaneTemplate(_)) {
+            pane_templates::schedule_pane_template_validation(self, cx);
+        } else {
+            cx.notify();
+        }
     }
 
     pub(crate) fn set_settings_dropdown(
@@ -861,9 +916,19 @@ impl Zetta {
         value: String,
         cx: &mut Context<Self>,
     ) {
+        let pane_template_dropdown = matches!(
+            dropdown,
+            SettingsDropdown::PaneTemplateAxis(_)
+                | SettingsDropdown::PaneTemplateSource(_)
+                | SettingsDropdown::PaneTemplateTheme(_)
+                | SettingsDropdown::PaneTemplateOverlaySize(_)
+        );
         let Some(editor) = self.settings_editor.as_mut() else {
             return;
         };
+        if editor.settings_save_in_progress {
+            return;
+        }
         editor.open_dropdown = None;
         editor.dropdown_query.clear();
         match dropdown {
@@ -986,6 +1051,14 @@ impl Zetta {
                     arguments.insert("slot".to_owned(), serde_json::json!(slot));
                 }
             }
+            SettingsDropdown::PaneTemplateAxis(_)
+            | SettingsDropdown::PaneTemplateSource(_)
+            | SettingsDropdown::PaneTemplateTheme(_)
+            | SettingsDropdown::PaneTemplateOverlaySize(_) => {
+                if !pane_templates::set_pane_template_dropdown(editor, dropdown, &value) {
+                    return;
+                }
+            }
         }
         match dropdown {
             SettingsDropdown::BindingAction(_, _) | SettingsDropdown::BindingTemplate(_, _) => {
@@ -997,7 +1070,11 @@ impl Zetta {
             _ => editor.configuration_dirty = true,
         }
         editor.message = None;
-        cx.notify();
+        if pane_template_dropdown {
+            pane_templates::schedule_pane_template_validation(self, cx);
+        } else {
+            cx.notify();
+        }
     }
 
     pub(crate) fn set_settings_toggle(

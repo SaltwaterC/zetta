@@ -5,6 +5,7 @@ use crate::startup::keymap_keystroke_display;
 
 mod modals;
 mod pages;
+mod pane_templates;
 mod widgets;
 
 pub(crate) use widgets::{DropdownRenderState, KEYMAP_ROW_HEIGHT, SETTINGS_SCROLLBAR_WIDTH};
@@ -449,8 +450,10 @@ impl Zetta {
         let config_handle = handle.clone();
         let themes_handle = handle.clone();
         let keymap_handle = handle.clone();
+        let templates_handle = handle.clone();
         let close_handle = handle.clone();
         let save_handle = handle.clone();
+        let settings_save_in_progress = editor.settings_save_in_progress;
         let path = match editor.page {
             SettingsPage::Configuration => self.launch_config.config_path.display().to_string(),
             SettingsPage::Themes => format!(
@@ -458,6 +461,9 @@ impl Zetta {
                 config::themes_dir().display()
             ),
             SettingsPage::Keymap => self.launch_config.keymap_path.display().to_string(),
+            SettingsPage::PaneTemplates => {
+                "pane_split_templates · built-ins are read-only presets".to_owned()
+            }
         };
         Some(
             div()
@@ -581,6 +587,34 @@ impl Zetta {
                                                         .ok();
                                                 })
                                                 .child("Keymap"),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("settings-pane-templates-tab")
+                                                .px_3()
+                                                .py_1()
+                                                .rounded(px(4.))
+                                                .cursor_pointer()
+                                                .when(
+                                                    editor.page == SettingsPage::PaneTemplates
+                                                        || editor.focused_control
+                                                            == Some(SettingsControl::Tab(
+                                                                SettingsPage::PaneTemplates,
+                                                            )),
+                                                    |tab| tab.bg(colors.element_selected),
+                                                )
+                                                .on_click(move |_, window, cx| {
+                                                    templates_handle
+                                                        .update(cx, |this, cx| {
+                                                            this.select_settings_page(
+                                                                SettingsPage::PaneTemplates,
+                                                                window,
+                                                                cx,
+                                                            )
+                                                        })
+                                                        .ok();
+                                                })
+                                                .child("Templates"),
                                         ),
                                 )
                                 .child(
@@ -631,30 +665,38 @@ impl Zetta {
                                                         colors.element_selected
                                                     },
                                                 )
-                                                .cursor_pointer()
                                                 .bg(colors.element_selected)
-                                                .hover(|style| style.bg(colors.element_hover))
-                                                .tooltip(Tooltip::for_action_title_in(
-                                                    "Save settings",
-                                                    &SaveSettings,
-                                                    &self.settings_focus,
-                                                ))
-                                                .on_click(move |_, window, cx| {
-                                                    save_handle
-                                                        .update(cx, |this, cx| {
-                                                            this.save_settings(window, cx)
+                                                .when(!settings_save_in_progress, |button| {
+                                                    button
+                                                        .cursor_pointer()
+                                                        .hover(|style| {
+                                                            style.bg(colors.element_hover)
                                                         })
-                                                        .ok();
+                                                        .tooltip(Tooltip::for_action_title_in(
+                                                            "Save settings",
+                                                            &SaveSettings,
+                                                            &self.settings_focus,
+                                                        ))
+                                                        .on_click(move |_, window, cx| {
+                                                            save_handle
+                                                                .update(cx, |this, cx| {
+                                                                    this.save_settings(window, cx)
+                                                                })
+                                                                .ok();
+                                                        })
                                                 })
-                                                .child(
-                                                    if editor.configuration_dirty
-                                                        || editor.keymap_dirty
-                                                    {
-                                                        "Save *"
-                                                    } else {
-                                                        "Save"
-                                                    },
-                                                ),
+                                                .when(settings_save_in_progress, |button| {
+                                                    button.opacity(0.65)
+                                                })
+                                                .child(if settings_save_in_progress {
+                                                    "Saving…"
+                                                } else if editor.configuration_dirty
+                                                    || editor.keymap_dirty
+                                                {
+                                                    "Save *"
+                                                } else {
+                                                    "Save"
+                                                }),
                                         ),
                                 ),
                         )

@@ -1,12 +1,19 @@
-use std::{collections::HashMap, fs, io, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    fs, io,
+    path::Path,
+};
 
 use anyhow::{Context as _, Result};
+use gpui::Action;
 use indexmap::IndexMap;
 use serde_json::{Map, Value, json};
 use ui::IconName;
 
 use crate::config::{
-    Config, NewTabProfile, PaneControlsPosition, WorkingDirectoryScope, profile_is_hidden,
+    Config, NewTabProfile, PaneControlsPosition, PaneSplitAxis, PaneSplitOverlaySize,
+    PaneSplitTemplate, WorkingDirectoryScope, built_in_pane_split_templates,
+    is_valid_pane_split_label, profile_is_hidden,
 };
 use crate::profile_icon::ProfileIcon;
 use crate::startup::{keymap_keystroke_display, keymap_keystroke_storage};
@@ -16,9 +23,10 @@ pub enum SettingsPage {
     Configuration,
     Themes,
     Keymap,
+    PaneTemplates,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TextField {
     pub text: String,
     pub cursor: usize,
@@ -96,6 +104,938 @@ impl TextField {
     }
 }
 
+/// A compact, copyable path into a recursive pane-template tree.
+///
+/// Each bit records whether the corresponding child is the second child. A
+/// template with at most 64 leaves can never need more than 63 split edges,
+/// so a `u64` is sufficient while keeping settings controls cheap to clone.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct PaneTemplateNodePath {
+    bits: u64,
+    length: u8,
+}
+
+impl PaneTemplateNodePath {
+    pub const ROOT: Self = Self { bits: 0, length: 0 };
+
+    #[allow(dead_code)]
+    pub fn root() -> Self {
+        Self::ROOT
+    }
+
+    pub fn depth(self) -> usize {
+        self.length as usize
+    }
+
+    pub fn is_root(self) -> bool {
+        self.length == 0
+    }
+
+    pub fn child(self, second: bool) -> Option<Self> {
+        (self.length < 64).then_some(Self {
+            bits: (self.bits << 1) | u64::from(second),
+            length: self.length + 1,
+        })
+    }
+
+    pub fn parent(self) -> Option<Self> {
+        (self.length > 0).then_some(Self {
+            bits: self.bits >> 1,
+            length: self.length - 1,
+        })
+    }
+
+    pub fn segment(self, index: usize) -> Option<bool> {
+        if index >= self.depth() {
+            return None;
+        }
+        Some(((self.bits >> (self.length as usize - index - 1)) & 1) != 0)
+    }
+
+    fn suffix(self, start: usize) -> Option<Self> {
+        if start > self.depth() {
+            return None;
+        }
+        let length = self.depth() - start;
+        let bits = match length {
+            0 => 0,
+            64 => self.bits,
+            _ => self.bits & ((1_u64 << length) - 1),
+        };
+        Some(Self {
+            bits,
+            length: length as u8,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaneTemplateNodeField {
+    Label,
+    CommandProgram,
+    CommandArgument(usize),
+    EnvironmentName(usize),
+    EnvironmentValue(usize),
+    OverlayText,
+    OverlayOpacity,
+    OverlayColor,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaneTemplateTextField {
+    Name(usize),
+    GlobalEnvironmentName(usize, usize),
+    GlobalEnvironmentValue(usize, usize),
+    Node(usize, PaneTemplateNodePath, PaneTemplateNodeField),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaneTemplateCommandForm {
+    pub program: TextField,
+    pub args: Vec<TextField>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PaneTemplateSourceForm {
+    Inherit,
+    Profile(String),
+    Command(PaneTemplateCommandForm),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaneTemplateEnvironmentForm {
+    pub name: TextField,
+    pub value: TextField,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaneTemplateOverlayForm {
+    pub text: TextField,
+    pub size: Option<PaneSplitOverlaySize>,
+    pub opacity: TextField,
+    pub color: TextField,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaneTemplatePaneForm {
+    pub label: TextField,
+    pub source: PaneTemplateSourceForm,
+    pub theme: Option<String>,
+    pub environment: Vec<PaneTemplateEnvironmentForm>,
+    pub overlay: Option<PaneTemplateOverlayForm>,
+}
+
+// Pane leaves are the common case and are kept inline to avoid one heap
+// allocation per leaf in the bounded editor tree. Split children are already
+// boxed, and the tree is capped at 64 panes.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PaneTemplateNodeForm {
+    Pane(PaneTemplatePaneForm),
+    Split {
+        axis: PaneSplitAxis,
+        first: Box<PaneTemplateNodeForm>,
+        second: Box<PaneTemplateNodeForm>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaneTemplateForm {
+    pub name: TextField,
+    pub(crate) original_name: String,
+    pub(crate) built_in: bool,
+    pub(crate) overridden: bool,
+    pub environment: Vec<PaneTemplateEnvironmentForm>,
+    pub node: PaneTemplateNodeForm,
+}
+
+impl PaneTemplateForm {
+    pub fn editable(&self) -> bool {
+        !self.built_in || self.overridden
+    }
+
+    pub fn is_pristine_built_in(&self) -> bool {
+        self.built_in && !self.overridden
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaneTemplatesForm {
+    pub templates: Vec<PaneTemplateForm>,
+    pub selected_template: usize,
+    pub selected_node: Option<PaneTemplateNodePath>,
+    pub(crate) available_profiles: Vec<String>,
+}
+
+const BUILT_IN_PANE_TEMPLATE_NAMES: [&str; 4] =
+    ["three-right", "three-left", "quarters", "four-vertical"];
+
+impl Default for PaneTemplatePaneForm {
+    fn default() -> Self {
+        Self {
+            label: TextField::default(),
+            source: PaneTemplateSourceForm::Inherit,
+            theme: None,
+            environment: Vec::new(),
+            overlay: None,
+        }
+    }
+}
+
+impl PaneTemplateNodeForm {
+    pub fn empty_two_pane() -> Self {
+        Self::Split {
+            axis: PaneSplitAxis::Vertical,
+            first: Box::new(Self::Pane(PaneTemplatePaneForm::default())),
+            second: Box::new(Self::Pane(PaneTemplatePaneForm::default())),
+        }
+    }
+
+    pub fn pane_count(&self) -> usize {
+        match self {
+            Self::Pane(_) => 1,
+            Self::Split { first, second, .. } => first.pane_count() + second.pane_count(),
+        }
+    }
+
+    pub(crate) fn node_at(&self, path: PaneTemplateNodePath) -> Option<&Self> {
+        let mut node = self;
+        for index in 0..path.depth() {
+            let second = path.segment(index)?;
+            node = match node {
+                Self::Split {
+                    first,
+                    second: right,
+                    ..
+                } => {
+                    if second {
+                        right
+                    } else {
+                        first
+                    }
+                }
+                Self::Pane(_) => return None,
+            };
+        }
+        Some(node)
+    }
+
+    pub(crate) fn node_at_mut(&mut self, path: PaneTemplateNodePath) -> Option<&mut Self> {
+        let mut node = self;
+        for index in 0..path.depth() {
+            let second = path.segment(index)?;
+            node = match node {
+                Self::Split {
+                    first,
+                    second: right,
+                    ..
+                } => {
+                    if second {
+                        right
+                    } else {
+                        first
+                    }
+                }
+                Self::Pane(_) => return None,
+            };
+        }
+        Some(node)
+    }
+
+    fn split_leaf(&mut self, path: PaneTemplateNodePath, axis: PaneSplitAxis) -> bool {
+        let Some(node) = self.node_at_mut(path) else {
+            return false;
+        };
+        if !matches!(node, Self::Pane(_)) {
+            return false;
+        }
+        *node = Self::Split {
+            axis,
+            first: Box::new(Self::Pane(PaneTemplatePaneForm::default())),
+            second: Box::new(Self::Pane(PaneTemplatePaneForm::default())),
+        };
+        true
+    }
+
+    fn remove_at(&mut self, path: PaneTemplateNodePath) -> bool {
+        if path.is_root() {
+            return false;
+        }
+        Self::remove_inner(self, path)
+    }
+
+    fn remove_inner(node: &mut Self, path: PaneTemplateNodePath) -> bool {
+        let Some(second) = path.segment(0) else {
+            return false;
+        };
+        let Some(rest) = path.suffix(1) else {
+            return false;
+        };
+        if rest.is_root() {
+            let Self::Split {
+                first,
+                second: right,
+                ..
+            } = node
+            else {
+                return false;
+            };
+            *node = if second {
+                *first.clone()
+            } else {
+                *right.clone()
+            };
+            return true;
+        }
+        let Self::Split {
+            first,
+            second: right,
+            ..
+        } = node
+        else {
+            return false;
+        };
+        Self::remove_inner(if second { right } else { first }, rest)
+    }
+
+    fn swap_children(&mut self, path: PaneTemplateNodePath) -> bool {
+        let Some(Self::Split { first, second, .. }) = self.node_at_mut(path) else {
+            return false;
+        };
+        std::mem::swap(first, second);
+        true
+    }
+
+    fn set_axis(&mut self, path: PaneTemplateNodePath, axis: PaneSplitAxis) -> bool {
+        let Some(Self::Split { axis: current, .. }) = self.node_at_mut(path) else {
+            return false;
+        };
+        *current = axis;
+        true
+    }
+
+    fn from_template(template: &PaneSplitTemplate) -> Self {
+        match template {
+            PaneSplitTemplate::Pane(pane) => Self::Pane(PaneTemplatePaneForm {
+                label: TextField::new(pane.label.clone().unwrap_or_default()),
+                source: if let Some(profile) = &pane.profile {
+                    PaneTemplateSourceForm::Profile(profile.name.clone())
+                } else if let Some(command) = &pane.command {
+                    PaneTemplateSourceForm::Command(PaneTemplateCommandForm {
+                        program: TextField::new(command.program.clone()),
+                        args: command.args.iter().cloned().map(TextField::new).collect(),
+                    })
+                } else {
+                    PaneTemplateSourceForm::Inherit
+                },
+                theme: pane.theme.clone(),
+                environment: {
+                    let mut environment = pane
+                        .env
+                        .iter()
+                        .map(|(name, value)| PaneTemplateEnvironmentForm {
+                            name: TextField::new(name),
+                            value: TextField::new(value),
+                        })
+                        .collect::<Vec<_>>();
+                    environment.sort_by(|left, right| left.name.text.cmp(&right.name.text));
+                    environment
+                },
+                overlay: pane
+                    .overlay
+                    .as_ref()
+                    .map(|overlay| PaneTemplateOverlayForm {
+                        text: TextField::new(overlay.text.clone().unwrap_or_default()),
+                        size: overlay.size,
+                        opacity: TextField::new(
+                            overlay
+                                .opacity
+                                .map(|opacity| opacity.to_string())
+                                .unwrap_or_default(),
+                        ),
+                        color: TextField::new(overlay.color.clone().unwrap_or_default()),
+                    }),
+            }),
+            PaneSplitTemplate::Split {
+                axis,
+                first,
+                second,
+            } => Self::Split {
+                axis: *axis,
+                first: Box::new(Self::from_template(first)),
+                second: Box::new(Self::from_template(second)),
+            },
+        }
+    }
+
+    fn validate(&self, path: PaneTemplateNodePath, profiles: &[String]) -> Result<()> {
+        match self {
+            Self::Pane(pane) => {
+                if !pane.label.text.is_empty() {
+                    anyhow::ensure!(
+                        is_valid_pane_split_label(&pane.label.text),
+                        "pane {} label must be lowercase kebab-case",
+                        path_label(path)
+                    );
+                }
+                match &pane.source {
+                    PaneTemplateSourceForm::Inherit => {}
+                    PaneTemplateSourceForm::Profile(profile) => {
+                        anyhow::ensure!(
+                            profiles
+                                .iter()
+                                .any(|candidate| candidate.eq_ignore_ascii_case(profile)),
+                            "pane {} profile {profile:?} is not available",
+                            path_label(path)
+                        );
+                    }
+                    PaneTemplateSourceForm::Command(command) => {
+                        anyhow::ensure!(
+                            !command.program.text.trim().is_empty(),
+                            "pane {} command program is required",
+                            path_label(path)
+                        );
+                    }
+                }
+                validate_pane_template_environment(
+                    &pane.environment,
+                    &format!("pane {}", path_label(path)),
+                )?;
+                if let Some(overlay) = &pane.overlay {
+                    if !overlay.opacity.text.trim().is_empty() {
+                        let opacity = overlay
+                            .opacity
+                            .text
+                            .trim()
+                            .parse::<u8>()
+                            .context("overlay opacity must be an integer from 0 to 100")?;
+                        anyhow::ensure!(
+                            opacity <= 100,
+                            "pane {} overlay opacity must be between 0 and 100",
+                            path_label(path)
+                        );
+                    }
+                    if !overlay.color.text.trim().is_empty() {
+                        anyhow::ensure!(
+                            crate::pane::overlay_color_from_value(&overlay.color.text).is_some(),
+                            "pane {} overlay color must be a named color or valid hex color",
+                            path_label(path)
+                        );
+                    }
+                }
+            }
+            Self::Split { first, second, .. } => {
+                first.validate(path.child(false).unwrap_or(path), profiles)?;
+                second.validate(path.child(true).unwrap_or(path), profiles)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn to_value(&self) -> Result<Value> {
+        match self {
+            Self::Pane(pane) => {
+                let mut object = Map::new();
+                if !pane.label.text.is_empty() {
+                    object.insert("label".into(), json!(pane.label.text));
+                }
+                match &pane.source {
+                    PaneTemplateSourceForm::Inherit => {}
+                    PaneTemplateSourceForm::Profile(profile) => {
+                        object.insert("profile".into(), json!(profile));
+                    }
+                    PaneTemplateSourceForm::Command(command) => {
+                        let mut command_object = Map::new();
+                        command_object.insert("program".into(), json!(command.program.text));
+                        let args = command
+                            .args
+                            .iter()
+                            .map(|argument| json!(argument.text))
+                            .collect::<Vec<_>>();
+                        if !args.is_empty() {
+                            command_object.insert("args".into(), Value::Array(args));
+                        }
+                        object.insert("command".into(), Value::Object(command_object));
+                    }
+                }
+                if let Some(theme) = &pane.theme
+                    && !theme.is_empty()
+                {
+                    object.insert("theme".into(), json!(theme));
+                }
+                if !pane.environment.is_empty() {
+                    let mut environment = Map::new();
+                    for entry in &pane.environment {
+                        environment.insert(entry.name.text.clone(), json!(entry.value.text));
+                    }
+                    object.insert("env".into(), Value::Object(environment));
+                }
+                if let Some(overlay) = &pane.overlay {
+                    let mut overlay_object = Map::new();
+                    if !overlay.text.text.is_empty() {
+                        overlay_object.insert("text".into(), json!(overlay.text.text));
+                    }
+                    if let Some(size) = overlay.size {
+                        overlay_object.insert("size".into(), json!(size.as_str()));
+                    }
+                    if !overlay.opacity.text.trim().is_empty() {
+                        overlay_object.insert(
+                            "opacity".into(),
+                            json!(overlay.opacity.text.trim().parse::<u8>()?),
+                        );
+                    }
+                    if !overlay.color.text.trim().is_empty() {
+                        overlay_object.insert("color".into(), json!(overlay.color.text));
+                    }
+                    object.insert("overlay".into(), Value::Object(overlay_object));
+                }
+                Ok(Value::Object(object))
+            }
+            Self::Split {
+                axis,
+                first,
+                second,
+            } => Ok(json!({axis.as_str(): [first.to_value()?, second.to_value()?]})),
+        }
+    }
+}
+
+fn path_label(path: PaneTemplateNodePath) -> String {
+    if path.is_root() {
+        return "root".to_owned();
+    }
+    let mut label = String::new();
+    for index in 0..path.depth() {
+        label.push(if path.segment(index).unwrap_or(false) {
+            'R'
+        } else {
+            'L'
+        });
+    }
+    label
+}
+
+fn validate_pane_template_environment(
+    environment: &[PaneTemplateEnvironmentForm],
+    owner: &str,
+) -> Result<()> {
+    let mut names = HashSet::new();
+    for entry in environment {
+        anyhow::ensure!(
+            !entry.name.text.is_empty() && !entry.name.text.contains(['=', '\0']),
+            "{owner} environment names must not be empty or contain '='"
+        );
+        anyhow::ensure!(
+            names.insert(entry.name.text.clone()),
+            "{owner} contains duplicate environment key {:?}",
+            entry.name.text
+        );
+        anyhow::ensure!(
+            !entry.value.text.contains('\0'),
+            "{owner} environment values must not contain NUL"
+        );
+    }
+    Ok(())
+}
+
+fn pane_template_environment_form(
+    environment: &HashMap<String, String>,
+) -> Vec<PaneTemplateEnvironmentForm> {
+    let mut rows = environment
+        .iter()
+        .map(|(name, value)| PaneTemplateEnvironmentForm {
+            name: TextField::new(name),
+            value: TextField::new(value),
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| left.name.text.cmp(&right.name.text));
+    rows
+}
+
+fn pane_template_environment_value(environment: &[PaneTemplateEnvironmentForm]) -> Value {
+    Value::Object(
+        environment
+            .iter()
+            .map(|entry| (entry.name.text.clone(), json!(entry.value.text)))
+            .collect(),
+    )
+}
+
+impl PaneTemplatesForm {
+    pub fn load(value: Option<&Value>, config: &Config) -> Result<Self> {
+        let configured = match value {
+            Some(value) => value
+                .as_object()
+                .context("pane_split_templates must be an object")?,
+            None => return Self::from_configured(None, config),
+        };
+        Self::from_configured(Some(configured), config)
+    }
+
+    fn from_configured(
+        configured: Option<&serde_json::Map<String, Value>>,
+        config: &Config,
+    ) -> Result<Self> {
+        let built_ins = built_in_pane_split_templates();
+        let mut templates = Vec::new();
+        for name in BUILT_IN_PANE_TEMPLATE_NAMES {
+            let Some(template) = built_ins.get(name) else {
+                continue;
+            };
+            let overridden = configured.is_some_and(|values| values.contains_key(name));
+            let source = if overridden {
+                config.pane_split_templates.get(name).unwrap_or(template)
+            } else {
+                template
+            };
+            templates.push(PaneTemplateForm {
+                name: TextField::new(name),
+                original_name: name.to_owned(),
+                built_in: true,
+                overridden,
+                environment: pane_template_environment_form(&source.env),
+                node: PaneTemplateNodeForm::from_template(&source.layout),
+            });
+        }
+
+        let mut custom_names = configured
+            .into_iter()
+            .flat_map(|values| values.keys())
+            .filter(|name| !BUILT_IN_PANE_TEMPLATE_NAMES.contains(&name.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        custom_names.sort();
+        for name in custom_names {
+            let Some(template) = config.pane_split_templates.get(&name) else {
+                continue;
+            };
+            templates.push(PaneTemplateForm {
+                name: TextField::new(name.clone()),
+                original_name: name,
+                built_in: false,
+                overridden: true,
+                environment: pane_template_environment_form(&template.env),
+                node: PaneTemplateNodeForm::from_template(&template.layout),
+            });
+        }
+
+        Ok(Self {
+            templates,
+            selected_template: 0,
+            selected_node: Some(PaneTemplateNodePath::ROOT),
+            available_profiles: config
+                .profiles
+                .iter()
+                .map(|profile| profile.name.clone())
+                .collect(),
+        })
+    }
+
+    pub fn names(&self) -> Vec<String> {
+        self.templates
+            .iter()
+            .map(|template| template.name.text.clone())
+            .collect()
+    }
+
+    pub fn selected(&self) -> Option<&PaneTemplateForm> {
+        self.templates.get(self.selected_template)
+    }
+
+    pub fn selected_mut(&mut self) -> Option<&mut PaneTemplateForm> {
+        self.templates.get_mut(self.selected_template)
+    }
+
+    pub fn selected_node(&self) -> Option<&PaneTemplateNodeForm> {
+        self.selected()?.node.node_at(self.selected_node?)
+    }
+
+    pub fn select_template(&mut self, index: usize) -> bool {
+        if index >= self.templates.len() {
+            return false;
+        }
+        self.selected_template = index;
+        self.selected_node = Some(PaneTemplateNodePath::ROOT);
+        true
+    }
+
+    pub fn select_node(&mut self, path: PaneTemplateNodePath) -> bool {
+        if self
+            .selected()
+            .is_some_and(|template| template.node.node_at(path).is_some())
+        {
+            self.selected_node = Some(path);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn toggle_node_selection(&mut self, path: PaneTemplateNodePath) -> bool {
+        if self
+            .selected()
+            .is_none_or(|template| template.node.node_at(path).is_none())
+        {
+            return false;
+        }
+        self.selected_node = if self.selected_node == Some(path) {
+            path.parent()
+        } else {
+            Some(path)
+        };
+        true
+    }
+
+    pub fn selected_is_editable(&self) -> bool {
+        self.selected().is_some_and(PaneTemplateForm::editable)
+    }
+
+    pub fn split_selected_leaf(&mut self, axis: PaneSplitAxis) -> Result<()> {
+        anyhow::ensure!(
+            self.selected_is_editable(),
+            "built-in pane templates are read-only"
+        );
+        let path = self
+            .selected_node
+            .context("no pane-template node is selected")?;
+        let template = self
+            .selected_mut()
+            .context("no pane template is selected")?;
+        anyhow::ensure!(
+            template.node.pane_count() < 64,
+            "pane templates may contain at most 64 panes"
+        );
+        anyhow::ensure!(
+            template.node.split_leaf(path, axis),
+            "the selected node is not a pane leaf"
+        );
+        Ok(())
+    }
+
+    pub fn remove_selected_node(&mut self) -> Result<()> {
+        anyhow::ensure!(
+            self.selected_is_editable(),
+            "built-in pane templates are read-only"
+        );
+        anyhow::ensure!(
+            !self
+                .selected_node
+                .is_some_and(PaneTemplateNodePath::is_root),
+            "the template root cannot be removed"
+        );
+        let path = self
+            .selected_node
+            .context("no pane-template node is selected")?;
+        let template = self
+            .selected_mut()
+            .context("no pane template is selected")?;
+        let removed_panes = template
+            .node
+            .node_at(path)
+            .map(PaneTemplateNodeForm::pane_count)
+            .context("the selected pane-template node does not exist")?;
+        anyhow::ensure!(
+            template.node.pane_count().saturating_sub(removed_panes) >= 2,
+            "pane templates must contain at least 2 panes"
+        );
+        anyhow::ensure!(
+            template.node.remove_at(path),
+            "could not remove the selected pane-template node"
+        );
+        self.selected_node = Some(path.parent().unwrap_or(PaneTemplateNodePath::ROOT));
+        Ok(())
+    }
+
+    pub fn swap_selected_children(&mut self) -> Result<()> {
+        anyhow::ensure!(
+            self.selected_is_editable(),
+            "built-in pane templates are read-only"
+        );
+        let path = self
+            .selected_node
+            .context("no pane-template node is selected")?;
+        let template = self
+            .selected_mut()
+            .context("no pane template is selected")?;
+        anyhow::ensure!(
+            template.node.swap_children(path),
+            "the selected node is not a split"
+        );
+        Ok(())
+    }
+
+    pub fn set_selected_axis(&mut self, axis: PaneSplitAxis) -> Result<()> {
+        anyhow::ensure!(
+            self.selected_is_editable(),
+            "built-in pane templates are read-only"
+        );
+        let path = self
+            .selected_node
+            .context("no pane-template node is selected")?;
+        let template = self
+            .selected_mut()
+            .context("no pane template is selected")?;
+        anyhow::ensure!(
+            template.node.set_axis(path, axis),
+            "the selected node is not a split"
+        );
+        Ok(())
+    }
+
+    pub fn create_empty(&mut self) -> usize {
+        self.insert_custom(
+            "custom".to_owned(),
+            PaneTemplateNodeForm::empty_two_pane(),
+            Vec::new(),
+        )
+    }
+
+    pub fn duplicate_selected(&mut self) -> Result<usize> {
+        let selected = self.selected().context("no pane template is selected")?;
+        let base = format!("{}-copy", selected.name.text);
+        let node = selected.node.clone();
+        let environment = selected.environment.clone();
+        Ok(self.insert_custom(base, node, environment))
+    }
+
+    fn insert_custom(
+        &mut self,
+        base: String,
+        node: PaneTemplateNodeForm,
+        environment: Vec<PaneTemplateEnvironmentForm>,
+    ) -> usize {
+        let name = self.unique_name(&base);
+        let index = self.templates.len();
+        self.templates.push(PaneTemplateForm {
+            name: TextField::new(name.clone()),
+            original_name: name,
+            built_in: false,
+            overridden: true,
+            environment,
+            node,
+        });
+        self.selected_template = index;
+        self.selected_node = Some(PaneTemplateNodePath::ROOT);
+        index
+    }
+
+    fn unique_name(&self, base: &str) -> String {
+        let used = self
+            .templates
+            .iter()
+            .map(|template| template.name.text.as_str())
+            .collect::<HashSet<_>>();
+        if !used.contains(base) {
+            return base.to_owned();
+        }
+        for number in 2.. {
+            let candidate = format!("{base}-{number}");
+            if !used.contains(candidate.as_str()) {
+                return candidate;
+            }
+        }
+        unreachable!("a finite template list always has an available name")
+    }
+
+    pub fn delete_selected(&mut self, referenced_by_keymap: bool) -> Result<()> {
+        let index = self.selected_template;
+        let template = self
+            .templates
+            .get(index)
+            .context("no pane template is selected")?;
+        if template.is_pristine_built_in() {
+            anyhow::bail!("built-in pane templates cannot be deleted");
+        }
+        if referenced_by_keymap
+            && (!template.built_in || template.name.text != template.original_name)
+        {
+            anyhow::bail!("the pane template is referenced by a keybinding");
+        }
+        if template.built_in {
+            let built_ins = built_in_pane_split_templates();
+            let Some(built_in) = built_ins.get(template.original_name.as_str()) else {
+                anyhow::bail!("could not restore the built-in pane template");
+            };
+            let template = self.templates.get_mut(index).unwrap();
+            template.name = TextField::new(template.original_name.clone());
+            template.environment = pane_template_environment_form(&built_in.env);
+            template.node = PaneTemplateNodeForm::from_template(&built_in.layout);
+            template.overridden = false;
+        } else {
+            self.templates.remove(index);
+            if self.templates.is_empty() {
+                self.selected_template = 0;
+            } else {
+                self.selected_template = index.min(self.templates.len() - 1);
+            }
+        }
+        self.selected_node = Some(PaneTemplateNodePath::ROOT);
+        Ok(())
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        let mut names = HashSet::new();
+        for template in &self.templates {
+            anyhow::ensure!(
+                !template.name.text.trim().is_empty(),
+                "pane template names must not be empty"
+            );
+            anyhow::ensure!(
+                !template.name.text.contains('\0'),
+                "pane template names must not contain NUL"
+            );
+            anyhow::ensure!(
+                names.insert(template.name.text.to_ascii_lowercase()),
+                "pane template names must be unique"
+            );
+            if template.is_pristine_built_in() {
+                continue;
+            }
+            validate_pane_template_environment(
+                &template.environment,
+                &format!("pane template {:?}", template.name.text),
+            )?;
+            anyhow::ensure!(
+                (2..=64).contains(&template.node.pane_count()),
+                "pane template {:?} must contain between 2 and 64 panes",
+                template.name.text
+            );
+            template
+                .node
+                .validate(PaneTemplateNodePath::ROOT, &self.available_profiles)
+                .with_context(|| format!("validating pane template {:?}", template.name.text))?;
+        }
+        Ok(())
+    }
+
+    pub fn to_value(&self) -> Result<Value> {
+        self.validate()?;
+        let mut templates = Map::new();
+        for template in &self.templates {
+            if template.is_pristine_built_in() {
+                continue;
+            }
+            let mut value = Map::new();
+            value.insert("layout".into(), template.node.to_value()?);
+            if !template.environment.is_empty() {
+                value.insert(
+                    "env".into(),
+                    pane_template_environment_value(&template.environment),
+                );
+            }
+            templates.insert(template.name.text.clone(), Value::Object(value));
+        }
+        Ok(Value::Object(templates))
+    }
+
+    #[allow(dead_code)]
+    pub fn has_custom_values(&self) -> bool {
+        self.templates
+            .iter()
+            .any(|template| !template.is_pristine_built_in())
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConfigTextField {
     WorkingDirectory,
@@ -149,6 +1089,7 @@ pub struct ConfigurationForm {
     #[cfg(feature = "tftp-server")]
     pub tftp_server_port: TextField,
     pub profiles: Vec<ProfileForm>,
+    pub pane_templates: PaneTemplatesForm,
 }
 
 impl ConfigurationForm {
@@ -219,6 +1160,7 @@ impl ConfigurationForm {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+        let pane_templates = PaneTemplatesForm::load(root.get("pane_split_templates"), config)?;
         Ok(Self {
             default_profile: config.profiles[config.default_profile].name.clone(),
             new_tab_profile: config.new_tab_profile,
@@ -257,6 +1199,7 @@ impl ConfigurationForm {
             tftp_server_port: TextField::new(config.tftp_server_port.to_string()),
             root,
             profiles,
+            pane_templates,
         })
     }
 
@@ -429,6 +1372,15 @@ impl ConfigurationForm {
                         .collect(),
                 ),
             );
+        }
+        let pane_templates = self.pane_templates.to_value()?;
+        if pane_templates
+            .as_object()
+            .is_some_and(|templates| !templates.is_empty())
+        {
+            root.insert("pane_split_templates".into(), pane_templates);
+        } else {
+            root.remove("pane_split_templates");
         }
         strip_default_configuration_values(&mut root, &self.profiles, &self.working_directory);
         serde_json::to_string_pretty(&Value::Object(root)).context("serializing configuration")
@@ -718,6 +1670,37 @@ impl KeymapForm {
         let sections = strip_default_keymap_bindings(sections);
         serde_json::to_string_pretty(&Value::Array(sections)).context("serializing keymap")
     }
+}
+
+/// Renames every parameterized pane-template binding that points at one of
+/// the supplied old names. Returns whether the keymap changed.
+pub(crate) fn rename_pane_template_bindings(
+    keymap: &mut KeymapForm,
+    renames: &[(String, String)],
+) -> bool {
+    let action_name = crate::ApplyPaneSplitTemplate::name_for_type();
+    let mut changed = false;
+    for section in &mut keymap.sections {
+        for binding in &mut section.bindings {
+            let Some(action) = binding.action.as_array_mut() else {
+                continue;
+            };
+            if action.first().and_then(Value::as_str) != Some(action_name) {
+                continue;
+            }
+            let Some(arguments) = action.get_mut(1).and_then(Value::as_object_mut) else {
+                continue;
+            };
+            let Some(current) = arguments.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            if let Some((_, new_name)) = renames.iter().find(|(old_name, _)| old_name == current) {
+                arguments.insert("name".to_owned(), Value::String(new_name.clone()));
+                changed = true;
+            }
+        }
+    }
+    changed
 }
 
 /// Merges user keymap with default template, with user bindings overriding defaults.

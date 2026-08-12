@@ -114,6 +114,12 @@ pub enum PaneSplitTemplate {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaneSplitTemplateConfig {
+    pub layout: PaneSplitTemplate,
+    pub env: HashMap<String, String>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PaneSplitPane {
     pub label: Option<String>,
@@ -159,7 +165,7 @@ pub enum PaneSplitOverlaySize {
 }
 
 impl PaneSplitOverlaySize {
-    fn parse(value: &str) -> Option<Self> {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
             "sm" => Some(Self::Small),
             "base" => Some(Self::Base),
@@ -170,12 +176,50 @@ impl PaneSplitOverlaySize {
             _ => None,
         }
     }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Small => "sm",
+            Self::Base => "base",
+            Self::Large => "lg",
+            Self::ExtraLarge => "xl",
+            Self::ExtraExtraLarge => "2xl",
+            Self::ExtraExtraExtraLarge => "3xl",
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Small => "Small (sm)",
+            Self::Base => "Base",
+            Self::Large => "Large (lg)",
+            Self::ExtraLarge => "Extra large (xl)",
+            Self::ExtraExtraLarge => "2x large (2xl)",
+            Self::ExtraExtraExtraLarge => "3x large (3xl)",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PaneSplitAxis {
     Horizontal,
     Vertical,
+}
+
+impl PaneSplitAxis {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Horizontal => "horizontal",
+            Self::Vertical => "vertical",
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Horizontal => "Horizontal",
+            Self::Vertical => "Vertical",
+        }
+    }
 }
 
 impl PaneSplitTemplate {
@@ -218,6 +262,30 @@ impl PaneSplitTemplate {
                 second.collect_pane_specifications(panes);
             }
         }
+    }
+}
+
+impl PaneSplitTemplateConfig {
+    pub fn pane_count(&self) -> usize {
+        self.layout.pane_count()
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn pane_labels(&self) -> Vec<Option<String>> {
+        self.layout.pane_labels()
+    }
+
+    pub fn pane_specifications(&self) -> Vec<PaneSplitPane> {
+        self.layout
+            .pane_specifications()
+            .into_iter()
+            .map(|mut pane| {
+                let pane_environment = std::mem::take(&mut pane.env);
+                pane.env = self.env.clone();
+                pane.env.extend(pane_environment);
+                pane
+            })
+            .collect()
     }
 }
 
@@ -264,7 +332,7 @@ pub struct Config {
     pub pane_controls_hidden_by_default: bool,
     pub http_server_port: u16,
     pub tftp_server_port: u16,
-    pub pane_split_templates: HashMap<String, PaneSplitTemplate>,
+    pub pane_split_templates: HashMap<String, PaneSplitTemplateConfig>,
 }
 
 impl Config {
@@ -473,7 +541,7 @@ impl Config {
                     !name.trim().is_empty(),
                     "pane split template names must not be empty"
                 );
-                let template = parse_pane_split_template(value, &config.profiles)
+                let template = parse_pane_split_template_config(value, &config.profiles)
                     .with_context(|| format!("parsing pane split template {name:?}"))?;
                 anyhow::ensure!(
                     (2..=64).contains(&template.pane_count()),
@@ -539,7 +607,7 @@ fn parse_server_port(value: &Value, field: &str) -> Result<u16> {
         .with_context(message)
 }
 
-fn default_pane_split_templates() -> HashMap<String, PaneSplitTemplate> {
+pub(crate) fn built_in_pane_split_templates() -> HashMap<String, PaneSplitTemplateConfig> {
     let labeled_pane = |label: &str| {
         Box::new(PaneSplitTemplate::Pane(Box::new(PaneSplitPane {
             label: Some(label.to_owned()),
@@ -549,61 +617,105 @@ fn default_pane_split_templates() -> HashMap<String, PaneSplitTemplate> {
     HashMap::from([
         (
             "three-right".to_owned(),
-            PaneSplitTemplate::Split {
-                axis: PaneSplitAxis::Vertical,
-                first: labeled_pane("left"),
-                second: Box::new(PaneSplitTemplate::Split {
-                    axis: PaneSplitAxis::Horizontal,
-                    first: labeled_pane("top-right"),
-                    second: labeled_pane("bottom-right"),
-                }),
+            PaneSplitTemplateConfig {
+                env: HashMap::new(),
+                layout: PaneSplitTemplate::Split {
+                    axis: PaneSplitAxis::Vertical,
+                    first: labeled_pane("left"),
+                    second: Box::new(PaneSplitTemplate::Split {
+                        axis: PaneSplitAxis::Horizontal,
+                        first: labeled_pane("top-right"),
+                        second: labeled_pane("bottom-right"),
+                    }),
+                },
             },
         ),
         (
             "three-left".to_owned(),
-            PaneSplitTemplate::Split {
-                axis: PaneSplitAxis::Vertical,
-                first: Box::new(PaneSplitTemplate::Split {
-                    axis: PaneSplitAxis::Horizontal,
-                    first: labeled_pane("top-left"),
-                    second: labeled_pane("bottom-left"),
-                }),
-                second: labeled_pane("right"),
+            PaneSplitTemplateConfig {
+                env: HashMap::new(),
+                layout: PaneSplitTemplate::Split {
+                    axis: PaneSplitAxis::Vertical,
+                    first: Box::new(PaneSplitTemplate::Split {
+                        axis: PaneSplitAxis::Horizontal,
+                        first: labeled_pane("top-left"),
+                        second: labeled_pane("bottom-left"),
+                    }),
+                    second: labeled_pane("right"),
+                },
             },
         ),
         (
             "quarters".to_owned(),
-            PaneSplitTemplate::Split {
-                axis: PaneSplitAxis::Vertical,
-                first: Box::new(PaneSplitTemplate::Split {
-                    axis: PaneSplitAxis::Horizontal,
-                    first: labeled_pane("top-left"),
-                    second: labeled_pane("bottom-left"),
-                }),
-                second: Box::new(PaneSplitTemplate::Split {
-                    axis: PaneSplitAxis::Horizontal,
-                    first: labeled_pane("top-right"),
-                    second: labeled_pane("bottom-right"),
-                }),
+            PaneSplitTemplateConfig {
+                env: HashMap::new(),
+                layout: PaneSplitTemplate::Split {
+                    axis: PaneSplitAxis::Vertical,
+                    first: Box::new(PaneSplitTemplate::Split {
+                        axis: PaneSplitAxis::Horizontal,
+                        first: labeled_pane("top-left"),
+                        second: labeled_pane("bottom-left"),
+                    }),
+                    second: Box::new(PaneSplitTemplate::Split {
+                        axis: PaneSplitAxis::Horizontal,
+                        first: labeled_pane("top-right"),
+                        second: labeled_pane("bottom-right"),
+                    }),
+                },
             },
         ),
         (
             "four-vertical".to_owned(),
-            PaneSplitTemplate::Split {
-                axis: PaneSplitAxis::Vertical,
-                first: Box::new(PaneSplitTemplate::Split {
+            PaneSplitTemplateConfig {
+                env: HashMap::new(),
+                layout: PaneSplitTemplate::Split {
                     axis: PaneSplitAxis::Vertical,
-                    first: labeled_pane("left"),
-                    second: labeled_pane("left-center"),
-                }),
-                second: Box::new(PaneSplitTemplate::Split {
-                    axis: PaneSplitAxis::Vertical,
-                    first: labeled_pane("right-center"),
-                    second: labeled_pane("right"),
-                }),
+                    first: Box::new(PaneSplitTemplate::Split {
+                        axis: PaneSplitAxis::Vertical,
+                        first: labeled_pane("left"),
+                        second: labeled_pane("left-center"),
+                    }),
+                    second: Box::new(PaneSplitTemplate::Split {
+                        axis: PaneSplitAxis::Vertical,
+                        first: labeled_pane("right-center"),
+                        second: labeled_pane("right"),
+                    }),
+                },
             },
         ),
     ])
+}
+
+fn default_pane_split_templates() -> HashMap<String, PaneSplitTemplateConfig> {
+    built_in_pane_split_templates()
+}
+
+fn parse_pane_split_template_config(
+    value: &Value,
+    profiles: &[Profile],
+) -> Result<PaneSplitTemplateConfig> {
+    let object = value
+        .as_object()
+        .context("pane split templates must be objects")?;
+    const FIELDS: &[&str] = &["layout", "env"];
+    if let Some(field) = object
+        .keys()
+        .find(|field| !FIELDS.contains(&field.as_str()))
+    {
+        anyhow::bail!("unrecognized pane split template field {field:?}");
+    }
+    let layout = object
+        .get("layout")
+        .context("pane split template layout is required")?;
+    let env = object
+        .get("env")
+        .map(parse_pane_split_environment)
+        .transpose()?
+        .unwrap_or_default();
+    Ok(PaneSplitTemplateConfig {
+        layout: parse_pane_split_template(layout, profiles)?,
+        env,
+    })
 }
 
 fn parse_pane_split_template(value: &Value, profiles: &[Profile]) -> Result<PaneSplitTemplate> {
@@ -849,7 +961,7 @@ fn parse_pane_split_overlay(value: &Value) -> Result<PaneSplitOverlay> {
     })
 }
 
-fn is_valid_pane_split_label(label: &str) -> bool {
+pub(crate) fn is_valid_pane_split_label(label: &str) -> bool {
     let mut segment_has_character = false;
     for byte in label.bytes() {
         if byte == b'-' {

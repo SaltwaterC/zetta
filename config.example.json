@@ -20,10 +20,13 @@
   "tftp_server_port": 69,
   "pane_split_templates": {
     "three-bottom": {
-      "horizontal": [
-        { "label": "top" },
-        { "vertical": [{ "label": "bottom-left" }, { "label": "bottom-right" }] }
-      ]
+      "env": { "PROJECT": "zetta" },
+      "layout": {
+        "horizontal": [
+          { "label": "top" },
+          { "vertical": [{ "label": "bottom-left" }, { "label": "bottom-right" }] }
+        ]
+      }
     }
   },
   "profiles": [

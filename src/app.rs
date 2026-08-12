@@ -258,7 +258,7 @@ struct ResolvedPaneSplitLeaf {
 }
 
 fn resolve_pane_split_leaves(
-    template: &PaneSplitTemplate,
+    template: &PaneSplitTemplateConfig,
     inherited_profile: &Profile,
     profile_override: Option<&Profile>,
 ) -> Result<Vec<ResolvedPaneSplitLeaf>> {
@@ -408,6 +408,8 @@ pub(crate) struct Zetta {
     pub(crate) multi_command_launches: BoundedLaunchQueue<QueuedTerminalLaunch>,
     pub(crate) settings_focus: gpui::FocusHandle,
     pub(crate) settings_editor: Option<SettingsEditor>,
+    pub(crate) settings_loading: bool,
+    pub(crate) settings_pending_page: Option<SettingsPage>,
     pub(crate) font_cache: Arc<OnceLock<FontCache>>,
     pub(crate) icon_cache: Arc<OnceLock<IconCache>>,
     pub(crate) tab_icon_picker_focus: gpui::FocusHandle,
@@ -479,6 +481,8 @@ impl Zetta {
         self.multi_command = None;
         self.multi_command_mode = CommandPromptMode::Multi;
         self.settings_editor = None;
+        self.settings_loading = false;
+        self.settings_pending_page = None;
         #[cfg(feature = "serial-console")]
         {
             self.serial_console = None;
@@ -578,6 +582,8 @@ impl Zetta {
             multi_command_launches: BoundedLaunchQueue::new(MAX_CONCURRENT_MULTI_COMMAND_SPAWNS),
             settings_focus: cx.focus_handle(),
             settings_editor: None,
+            settings_loading: false,
+            settings_pending_page: None,
             font_cache: Arc::new(OnceLock::new()),
             icon_cache: Arc::new(OnceLock::new()),
             tab_icon_picker_focus: cx.focus_handle(),

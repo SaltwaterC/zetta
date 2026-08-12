@@ -176,24 +176,27 @@ fn pane_template_leaf_resolution_applies_profile_command_theme_environment_and_o
             ],
             "pane_split_templates": {
                 "custom": {
-                    "vertical": [
-                        {
-                            "label": "worker",
-                            "profile": "wOrKeR",
-                            "theme": "One Light",
-                            "env": { "ROLE": "worker" },
-                            "overlay": {
-                                "text": "WORKER",
-                                "size": "2xl",
-                                "opacity": 40,
-                                "color": "#ff00ff"
+                    "env": { "SHARED": "yes", "ROLE": "default" },
+                    "layout": {
+                        "vertical": [
+                            {
+                                "label": "worker",
+                                "profile": "wOrKeR",
+                                "theme": "One Light",
+                                "env": { "ROLE": "worker" },
+                                "overlay": {
+                                    "text": "WORKER",
+                                    "size": "2xl",
+                                    "opacity": 40,
+                                    "color": "#ff00ff"
+                                }
+                            },
+                            {
+                                "label": "ssh",
+                                "command": { "program": "ssh", "args": ["host", "-p", "2200"] }
                             }
-                        },
-                        {
-                            "label": "ssh",
-                            "command": { "program": "ssh", "args": ["host", "-p", "2200"] }
-                        }
-                    ]
+                        ]
+                    }
                 }
             }
         }"##,
@@ -214,6 +217,7 @@ fn pane_template_leaf_resolution_applies_profile_command_theme_environment_and_o
     assert_eq!(leaves[0].profile.name, "Worker");
     assert_eq!(leaves[0].profile.theme.as_deref(), Some("One Light"));
     assert_eq!(leaves[0].environment["ROLE"], "worker");
+    assert_eq!(leaves[0].environment["SHARED"], "yes");
     assert_eq!(leaves[0].overlay_text.as_deref(), Some("WORKER"));
     assert_eq!(
         leaves[0].overlay_font_size,
@@ -223,6 +227,8 @@ fn pane_template_leaf_resolution_applies_profile_command_theme_environment_and_o
     assert_eq!(leaves[0].overlay_color, overlay_color_from_value("#ff00ff"));
 
     assert_eq!(leaves[1].label.as_deref(), Some("ssh"));
+    assert_eq!(leaves[1].environment["ROLE"], "default");
+    assert_eq!(leaves[1].environment["SHARED"], "yes");
     assert_eq!(leaves[1].profile.name, "System");
     assert_eq!(
         leaves[1].profile.command,
