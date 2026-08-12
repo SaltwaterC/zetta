@@ -14,8 +14,13 @@ pub(crate) fn resolve_tab_title(
         .as_ref()
         .map(|title| title.clone().into())
         .or_else(|| {
-            tab.worktree_title
+            tab.pinned_worktree_title
                 .as_ref()
+                .map(|title| title.clone().into())
+        })
+        .or_else(|| {
+            tab.active_pane()
+                .and_then(|pane| pane.detected_worktree_title.as_ref())
                 .map(|title| title.clone().into())
         })
         .or_else(|| tab.process_title.as_ref().map(|title| title.clone().into()))
@@ -32,8 +37,12 @@ pub(crate) fn set_tab_process_title(tab: &mut Tab, title: Option<String>) {
 }
 
 pub(crate) fn set_tab_worktree_title(tab: &mut Tab, title: Option<String>) {
-    tab.worktree_detection_generation = tab.worktree_detection_generation.wrapping_add(1);
-    tab.worktree_title = title;
+    for pane in &mut tab.panes {
+        pane.worktree_detection_generation = pane.worktree_detection_generation.wrapping_add(1);
+        pane.worktree_detection_directory = None;
+        pane.detected_worktree_title = None;
+    }
+    tab.pinned_worktree_title = title;
 }
 
 pub(crate) fn set_tab_name_on_tabs<'a, I>(tabs: I, request: &TabNameRequest) -> bool

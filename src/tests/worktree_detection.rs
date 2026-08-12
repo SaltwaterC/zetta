@@ -93,3 +93,35 @@ fn ignores_linked_worktrees_on_non_worktree_branches() {
 
     assert_eq!(detect_worktree_name(&linked).unwrap(), None);
 }
+
+#[test]
+fn reported_shell_directory_wins_while_a_child_is_foreground() {
+    let reported = std::path::PathBuf::from("/shell/worktree");
+    let child = std::path::PathBuf::from("/child/switched-source");
+
+    assert_eq!(
+        select_worktree_detection_directory(Some(reported.clone()), Some(child), false),
+        Some(reported)
+    );
+}
+
+#[test]
+fn process_directory_is_ignored_while_a_child_is_foreground() {
+    assert_eq!(
+        select_worktree_detection_directory(
+            None,
+            Some(std::path::PathBuf::from("/child/switched-source")),
+            false,
+        ),
+        None
+    );
+}
+
+#[test]
+fn process_directory_is_used_while_the_shell_is_foreground() {
+    let shell = std::path::PathBuf::from("/shell/worktree");
+    assert_eq!(
+        select_worktree_detection_directory(None, Some(shell.clone()), true),
+        Some(shell)
+    );
+}

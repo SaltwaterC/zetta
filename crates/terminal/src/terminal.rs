@@ -2676,20 +2676,27 @@ impl Terminal {
             return true;
         }
 
+        !self.foreground_process_is_shell()
+    }
+
+    /// Returns whether the interactive shell currently owns the terminal's
+    /// foreground. Unknown process state and display-only terminals are
+    /// treated as non-shell.
+    pub fn foreground_process_is_shell(&self) -> bool {
         match &self.terminal_type {
             TerminalType::Pty { info, .. } => {
                 #[cfg(windows)]
                 if posix_host(&self.template.shell).is_some() {
-                    return !self
+                    return self
                         .reported_foreground_command
                         .as_deref()
                         .zip(self.reported_shell_command.as_deref())
                         .is_some_and(|(foreground, shell)| foreground == shell);
                 }
 
-                !info.foreground_process_is_shell()
+                info.foreground_process_is_shell()
             }
-            TerminalType::DisplayOnly => true,
+            TerminalType::DisplayOnly => false,
         }
     }
 
@@ -4749,6 +4756,7 @@ mod tests {
         assert!(terminal.read_with(cx, |terminal, _| {
             terminal.editor_should_open_in_new_pane()
         }));
+        assert!(!terminal.read_with(cx, |terminal, _| { terminal.foreground_process_is_shell() }));
     }
 
     #[test]

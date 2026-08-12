@@ -554,6 +554,12 @@ pub(crate) struct TerminalPane {
     pub(crate) base_exited: bool,
     pub(crate) wsl_cwd_file: Option<PathBuf>,
     pub(crate) pending_command: Option<String>,
+    /// Automatically detected linked-worktree name for this pane's
+    /// interactive-shell directory.
+    pub(crate) detected_worktree_title: Option<String>,
+    /// Shell directory associated with the current detection generation.
+    pub(crate) worktree_detection_directory: Option<PathBuf>,
+    pub(crate) worktree_detection_generation: u64,
     /// Command terminals that share this pane's layout region. They are
     /// intentionally not part of [`PaneLayout`]: only the selected entry is
     /// expanded, while the others occupy compact status rows.
@@ -881,6 +887,9 @@ impl TerminalPane {
             base_exited: false,
             wsl_cwd_file: None,
             pending_command: None,
+            detected_worktree_title: None,
+            worktree_detection_directory: None,
+            worktree_detection_generation: 0,
             stack: PaneStack::default(),
         }
     }
@@ -1844,13 +1853,12 @@ pub(crate) struct Tab {
     /// A title entered through the tab rename UI. This is the highest-priority
     /// title source and is intentionally separate from process/worktree state.
     pub(crate) custom_title: Option<String>,
-    /// The name of the linked `wt/*` worktree currently associated with the
-    /// tab's terminal.
-    pub(crate) worktree_title: Option<String>,
+    /// A worktree title pinned by `wt new` or process control for the
+    /// worktree lifecycle.
+    pub(crate) pinned_worktree_title: Option<String>,
     /// A lower-priority title supplied by process control (for example, by a
     /// command that reports its current source or task).
     pub(crate) process_title: Option<String>,
-    pub(crate) worktree_detection_generation: u64,
     pub(crate) icon: Option<IconName>,
     pub(crate) renaming_pane: Option<u64>,
     pub(crate) rename_buffer: Option<String>,
