@@ -122,7 +122,7 @@ test:
 	$(CARGO) test --locked --quiet --no-default-features --features "$(BUILD_FEATURES)" -- --format=terse
 
 fmt:
-	$(CARGO) fmt --all --check
+	$(CARGO) fmt --check
 
 lint:
 	$(CARGO) clippy --locked --all-targets --no-default-features --features "$(BUILD_FEATURES)" -- -D warnings
