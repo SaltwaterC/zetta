@@ -570,6 +570,10 @@ fn keymap_template_exposes_all_builtin_shortcuts() {
         ("alt-shift-f", "terminal_view::SearchScrollback"),
         ("ctrl-alt-v", "terminal::PasteTrimmed"),
         ("ctrl-cmd-v", "terminal::PasteTrimmed"),
+        ("ctrl-alt-left", "zetta::PreviousTab"),
+        ("ctrl-alt-right", "zetta::NextTab"),
+        ("ctrl-cmd-left", "zetta::PreviousTab"),
+        ("ctrl-cmd-right", "zetta::NextTab"),
         ("alt-shift-s", "zetta::SavePaneOutput"),
         ("ctrl-shift-y", "zetta::ChangeTabIcon"),
         ("alt-shift-t", "zetta::ChangePaneTheme"),
@@ -643,6 +647,10 @@ fn keymap_template_exposes_all_builtin_shortcuts() {
         ("ctrl-shift-tab", "zetta::PreviousTab"),
         ("ctrl-pageup", "zetta::NextTab"),
         ("ctrl-pagedown", "zetta::PreviousTab"),
+        ("ctrl-alt-left", "zetta::PreviousTab"),
+        ("ctrl-alt-right", "zetta::NextTab"),
+        ("ctrl-cmd-left", "zetta::PreviousTab"),
+        ("ctrl-cmd-right", "zetta::NextTab"),
     ] {
         assert_binding("Zetta > menu", keystroke, action);
     }

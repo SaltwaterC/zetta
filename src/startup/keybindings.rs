@@ -350,12 +350,14 @@ pub(crate) fn application_menu_navigation_keybindings() -> [KeyBinding; 2] {
     ]
 }
 
-pub(crate) fn tab_menu_navigation_keybindings() -> [KeyBinding; 4] {
+pub(crate) fn tab_menu_navigation_keybindings() -> [KeyBinding; 6] {
     [
         KeyBinding::new("ctrl-tab", NextTab, Some("Zetta > menu")),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, Some("Zetta > menu")),
         KeyBinding::new("ctrl-pageup", NextTab, Some("Zetta > menu")),
         KeyBinding::new("ctrl-pagedown", PreviousTab, Some("Zetta > menu")),
+        platform_keybinding("ctrl-alt-left", PreviousTab, Some("Zetta > menu")),
+        platform_keybinding("ctrl-alt-right", NextTab, Some("Zetta > menu")),
     ]
 }
 
@@ -579,6 +581,8 @@ fn default_keybindings(
         KeyBinding::new("ctrl-shift-tab", PreviousTab, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-pageup", NextTab, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-pagedown", PreviousTab, Some("Zetta > Terminal")),
+        platform_keybinding("ctrl-alt-left", PreviousTab, Some("Zetta > Terminal")),
+        platform_keybinding("ctrl-alt-right", NextTab, Some("Zetta > Terminal")),
         KeyBinding::new(
             "ctrl-c",
             CopyAndClearSelection,

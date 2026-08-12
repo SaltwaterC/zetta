@@ -34,6 +34,10 @@
       "ctrl-shift-tab": "zetta::PreviousTab",
       "ctrl-pageup": "zetta::NextTab",
       "ctrl-pagedown": "zetta::PreviousTab",
+      "ctrl-alt-left": "zetta::PreviousTab",
+      "ctrl-alt-right": "zetta::NextTab",
+      "ctrl-cmd-left": "zetta::PreviousTab",
+      "ctrl-cmd-right": "zetta::NextTab",
       "ctrl-shift-l": "terminal::Clear",
       "ctrl-v": "terminal::Paste",
       "shift-insert": "terminal::Paste",
@@ -156,7 +160,11 @@
       "ctrl-tab": "zetta::NextTab",
       "ctrl-shift-tab": "zetta::PreviousTab",
       "ctrl-pageup": "zetta::NextTab",
-      "ctrl-pagedown": "zetta::PreviousTab"
+      "ctrl-pagedown": "zetta::PreviousTab",
+      "ctrl-alt-left": "zetta::PreviousTab",
+      "ctrl-alt-right": "zetta::NextTab",
+      "ctrl-cmd-left": "zetta::PreviousTab",
+      "ctrl-cmd-right": "zetta::NextTab"
     }
   },
   {

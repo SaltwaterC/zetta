@@ -368,6 +368,8 @@ fn alt_shortcuts_use_the_platform_equivalent() {
         ("alt-shift-right", "cmd-shift-right"),
         ("alt-shift-f", "cmd-shift-f"),
         ("ctrl-alt-v", "ctrl-cmd-v"),
+        ("ctrl-alt-left", "ctrl-cmd-left"),
+        ("ctrl-alt-right", "ctrl-cmd-right"),
         ("alt-shift-s", "cmd-shift-s"),
         ("alt-shift-v", "cmd-shift-v"),
         ("alt-shift-r", "cmd-shift-r"),
@@ -594,12 +596,17 @@ fn application_menu_navigation_shortcuts_apply_while_a_menu_is_focused() {
 
 #[test]
 fn tab_navigation_shortcuts_apply_while_a_menu_is_focused() {
-    let shortcuts = ["ctrl-tab", "ctrl-shift-tab", "ctrl-pageup", "ctrl-pagedown"];
+    let shortcuts = [
+        "ctrl-tab",
+        "ctrl-shift-tab",
+        "ctrl-pageup",
+        "ctrl-pagedown",
+        "ctrl-alt-left",
+        "ctrl-alt-right",
+    ];
     for (binding, shortcut) in tab_menu_navigation_keybindings().into_iter().zip(shortcuts) {
-        assert_eq!(
-            binding.match_keystrokes(&[gpui::Keystroke::parse(shortcut).unwrap()]),
-            Some(false)
-        );
+        let shortcut = gpui::Keystroke::parse(&platform_keystroke(shortcut)).unwrap();
+        assert_eq!(binding.match_keystrokes(&[shortcut]), Some(false));
         assert!(
             binding
                 .predicate()

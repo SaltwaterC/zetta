@@ -694,6 +694,7 @@ become `Ctrl-Cmd`; for example, paste-trim is `Ctrl-Cmd-V` on macOS and
 | `Ctrl-Shift-S` | Toggle process-wide Silent mode |
 | `Ctrl-Tab` / `Ctrl-Shift-Tab` | Next / previous tab |
 | `Ctrl-PageUp` / `Ctrl-PageDown` | Next / previous tab |
+| `Ctrl-Cmd-Left` / `Ctrl-Cmd-Right` (macOS) / `Ctrl-Alt-Left` / `Ctrl-Alt-Right` (Windows/Linux) | Next / previous tab |
 | `Ctrl-C` | Copy selected text or send interrupt |
 | `Ctrl-Insert` | Copy selected text |
 | `Ctrl-V` | Paste |
