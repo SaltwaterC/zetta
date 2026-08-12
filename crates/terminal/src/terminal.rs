@@ -3057,9 +3057,14 @@ impl Terminal {
         self.last_content.mode.intersects(Modes::MOUSE_MODE) && !shift
     }
 
+    /// Pointer motion arrives at the mouse's polling rate, which is routinely
+    /// several times the display refresh rate. Notifying unconditionally would
+    /// re-run grid layout and text shaping for the whole viewport on every
+    /// sample, so each branch reports whether it actually changed something the
+    /// next frame would draw differently.
     pub fn mouse_move(&mut self, e: &MouseMoveEvent, cx: &mut Context<Self>) {
         let position = e.position - self.last_content.terminal_bounds.bounds.origin;
-        if self.mouse_mode(e.modifiers.shift) {
+        let needs_redraw = if self.mouse_mode(e.modifiers.shift) {
             // A ctrl/cmd press on a link suppressed its button-press report in
             // `mouse_down`. Since the app never saw the press, we must swallow
             // the whole gesture rather than forward later motion/release
@@ -3084,21 +3089,37 @@ impl Terminal {
                     if let Some(bytes) = bytes {
                         self.write_to_pty(bytes);
                     }
+                    // The cell under the pointer changed, so anything keyed to
+                    // it (such as the mouse cursor style) may need repainting.
+                    true
+                } else {
+                    false
                 }
+            } else {
+                false
             }
         } else {
-            self.schedule_find_hyperlink(e.modifiers, e.position);
+            self.schedule_find_hyperlink(e.modifiers, e.position)
+        };
+
+        if needs_redraw {
+            cx.notify();
         }
-        cx.notify();
     }
 
-    fn schedule_find_hyperlink(&mut self, modifiers: Modifiers, position: GpuiPoint<Pixels>) {
+    /// Returns whether hover state changed such that the next frame would
+    /// differ. Clearing an already-empty hover, or a sample the throttle
+    /// rejects, leaves the rendered output untouched.
+    fn schedule_find_hyperlink(
+        &mut self,
+        modifiers: Modifiers,
+        position: GpuiPoint<Pixels>,
+    ) -> bool {
         if self.selection_phase == SelectionPhase::Selecting
             || !is_hyperlink_modifier(&modifiers)
             || !self.last_content.terminal_bounds.bounds.contains(&position)
         {
-            self.last_content.last_hovered_word = None;
-            return;
+            return self.last_content.last_hovered_word.take().is_some();
         }
 
         // Throttle hyperlink searches to avoid excessive processing
@@ -3120,7 +3141,12 @@ impl Terminal {
                 position - self.last_content.terminal_bounds.bounds.origin,
                 false,
             ));
+            // The queued search is drained by the next `sync`, so a frame has
+            // to be scheduled for it to run at all.
+            return true;
         }
+
+        false
     }
 
     pub fn select_word_at_event_position(&mut self, e: &MouseDownEvent) {
@@ -4922,7 +4948,13 @@ mod tests {
             ShellBuilder::new(&Shell::System, false).build(Some(command.clone()), &[]);
         let (terminal, completion_rx) = build_test_task_terminal(cx, program, args, command).await;
 
-        cx.executor().timer(Duration::from_millis(100)).await;
+        // The PTY line discipline turns `^C` into a signal for whatever process
+        // group is in the foreground *at the moment it is written*. Waiting a
+        // fixed span here raced the shell's fork of `sleep`: under load the
+        // keystroke could land while the shell was still starting, so the signal
+        // had no `sleep` to reach and the task ran its full 30 seconds. Wait for
+        // the process the test intends to interrupt to actually be in front.
+        assert_foreground_process_command_eventually(&terminal, "sleep", cx).await;
         terminal.update(cx, |terminal, _| {
             assert!(terminal.try_keystroke(&Keystroke::parse("ctrl-c").unwrap(), false));
         });
@@ -5229,6 +5261,61 @@ mod tests {
                 "a sub-threshold click jitter should not start a selection"
             );
             assert!(terminal.selection_phase == SelectionPhase::Ended);
+        });
+    }
+
+    /// Pointer motion is sampled far more often than the display refreshes, so
+    /// a move that changes nothing observable must not schedule a frame. Only
+    /// clearing a live hover or queueing a hyperlink search may request one.
+    #[gpui::test]
+    async fn mouse_move_only_requests_a_redraw_when_hover_state_changes(cx: &mut TestAppContext) {
+        let terminal = init_ctrl_click_hyperlink_test(cx, b"https://example.com\r\n");
+
+        terminal.update(cx, |terminal, _cx| {
+            let inside = point(px(50.0), px(10.0));
+
+            // No hyperlink modifier and no hover to clear: nothing to redraw.
+            assert!(
+                !terminal.schedule_find_hyperlink(Modifiers::none(), inside),
+                "a plain move with no live hover should not request a redraw"
+            );
+
+            // Holding the modifier queues a search, which needs a frame to run.
+            assert!(
+                terminal.schedule_find_hyperlink(Modifiers::secondary_key(), inside),
+                "a queued hyperlink search should request a redraw"
+            );
+            assert!(
+                terminal
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, InternalEvent::FindHyperlink(_, _))),
+                "the search should have been queued"
+            );
+
+            // A second sample at the same spot is throttled away, so there is
+            // nothing new to draw.
+            terminal.events.clear();
+            assert!(
+                !terminal.schedule_find_hyperlink(Modifiers::secondary_key(), inside),
+                "a throttled repeat sample should not request a redraw"
+            );
+
+            // Releasing the modifier must clear a live hover exactly once.
+            terminal.last_content.last_hovered_word = Some(HoveredWord {
+                word: "https://example.com".to_owned(),
+                word_match: Range::new(Point::new(0, 0), Point::new(0, 18)),
+                id: 0,
+            });
+            assert!(
+                terminal.schedule_find_hyperlink(Modifiers::none(), inside),
+                "clearing a live hover should request a redraw"
+            );
+            assert!(terminal.last_content.last_hovered_word.is_none());
+            assert!(
+                !terminal.schedule_find_hyperlink(Modifiers::none(), inside),
+                "the hover is already cleared, so no further redraw is needed"
+            );
         });
     }
 
@@ -6694,8 +6781,14 @@ mod tests {
         expected: &str,
         cx: &mut TestAppContext,
     ) {
+        // Spawning a shell and letting it fork the command is at the mercy of
+        // whatever else the machine is doing, and this returns as soon as the
+        // command appears, so the budget only needs to be generous enough that a
+        // loaded machine is not mistaken for a broken one.
+        const ATTEMPTS: usize = 500;
+
         let mut command_name = None;
-        for _ in 0..100 {
+        for _ in 0..ATTEMPTS {
             terminal.update(cx, |terminal, _| {
                 if let TerminalType::Pty { info, .. } = &terminal.terminal_type {
                     info.load_for_test();

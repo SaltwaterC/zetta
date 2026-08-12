@@ -201,3 +201,36 @@ fn concurrent_directory_requests_are_consistent() {
         );
     }
 }
+
+/// The accept loop blocks instead of polling a shutdown flag, so dropping the
+/// control writer must actively unblock it. Without the loopback wakeup the
+/// worker would stay parked in `accept` until the next real connection.
+#[test]
+fn dropping_the_control_writer_stops_the_accept_loop() {
+    if !localhost_tcp_available() {
+        eprintln!("skipping HTTP shutdown test: localhost TCP is unavailable");
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let server = start_http_server(root.path(), 0).unwrap();
+    let address = server.address;
+
+    // Confirm the worker is accepting before shutting it down.
+    assert!(send_request(address, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").is_ok());
+
+    drop(server);
+
+    // Once the worker has exited, nothing holds the listening socket, so the
+    // port becomes bindable again. Poll briefly to absorb worker teardown.
+    let released = (0..100).any(|_| {
+        if TcpListener::bind(("0.0.0.0", address.port())).is_ok() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        false
+    });
+    assert!(
+        released,
+        "HTTP server worker did not release {address} after shutdown"
+    );
+}

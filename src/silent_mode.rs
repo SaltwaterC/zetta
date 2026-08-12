@@ -13,6 +13,10 @@ use crate::{
     ZettaProcessState, process_zetta_entities,
 };
 
+/// Fallback cadence for desktops whose silence state has no change signal this
+/// code can subscribe to.
+const SILENT_MODE_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum SystemSilentState {
     #[default]
@@ -273,8 +277,22 @@ fn apply_silent_mode_to_process(enabled: bool, cx: &mut App) {
 }
 
 pub(crate) fn start_observer(cx: &mut App) {
+    // On GNOME the state we track is a dconf key, and dconf announces writes to
+    // it. Subscribing lets the loop park until something actually changes rather
+    // than waking every few seconds to re-read an unchanged value, and it also
+    // reacts immediately instead of within one poll interval. It is created only
+    // once a reading actually comes from that key, so desktops answering through
+    // D-Bus never subscribe to signals they would just discard.
+    #[cfg(target_os = "linux")]
+    let mut settings_changes = None;
+    #[cfg(target_os = "linux")]
+    let mut subscribed = false;
+
     cx.spawn(async move |cx| {
         loop {
+            #[cfg(target_os = "linux")]
+            let source;
+
             let (observed, focus_status_access) = {
                 #[cfg(target_os = "macos")]
                 {
@@ -283,7 +301,15 @@ pub(crate) fn start_observer(cx: &mut App) {
                         (state, Some(access))
                     })
                 }
-                #[cfg(not(target_os = "macos"))]
+                #[cfg(target_os = "linux")]
+                {
+                    let (observed, observed_source) = cx
+                        .background_spawn(async { detect_linux_system_silent_state_with_source() })
+                        .await;
+                    source = observed_source;
+                    (observed, None)
+                }
+                #[cfg(not(any(target_os = "macos", target_os = "linux")))]
                 {
                     (
                         cx.background_spawn(async { detect_system_silent_state() })
@@ -305,12 +331,39 @@ pub(crate) fn start_observer(cx: &mut App) {
                     apply_silent_mode_to_process(enabled, cx);
                 }
             });
-            cx.background_executor().timer(Duration::from_secs(5)).await;
+
+            // Only the dconf-backed reading has a subscription behind it. A
+            // D-Bus property answered by KDE or XFCE still needs polling, and a
+            // dead subscription falls back to polling for good.
+            #[cfg(target_os = "linux")]
+            if source == LinuxSilentSource::GnomeShowBanners {
+                if !subscribed {
+                    subscribed = true;
+                    settings_changes = Some(cx.update(|cx| spawn_gnome_settings_watcher(cx)));
+                }
+                if let Some(changes) = settings_changes.as_ref() {
+                    match changes.recv().await {
+                        Ok(()) => continue,
+                        Err(async_channel::RecvError) => settings_changes = None,
+                    }
+                }
+            }
+
+            cx.background_executor()
+                .timer(SILENT_MODE_POLL_INTERVAL)
+                .await;
         }
     })
     .detach();
 }
 
+/// One-shot reading for callers that only want the current value. The observer
+/// uses the platform detectors directly so it can also learn which source
+/// answered; on Linux that leaves this used only by the notification path.
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "notifications")),
+    allow(dead_code)
+)]
 fn detect_system_silent_state() -> SystemSilentState {
     #[cfg(target_os = "windows")]
     {
@@ -318,7 +371,7 @@ fn detect_system_silent_state() -> SystemSilentState {
     }
     #[cfg(target_os = "linux")]
     {
-        return detect_linux_system_silent_state();
+        return detect_linux_system_silent_state_with_source().0;
     }
     #[cfg(target_os = "macos")]
     {
@@ -396,25 +449,126 @@ fn windows_notification_state(state: i32) -> SystemSilentState {
     }
 }
 
+/// Which desktop mechanism answered, so the observer knows whether a change
+/// notification exists for it or whether it has to keep polling.
 #[cfg(target_os = "linux")]
-fn detect_linux_system_silent_state() -> SystemSilentState {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LinuxSilentSource {
+    /// A D-Bus property that this code has no subscription for.
+    DbusProperty,
+    /// The `org.gnome.desktop.notifications show-banners` GSettings key, whose
+    /// writes are announced by dconf.
+    GnomeShowBanners,
+}
+
+#[cfg(target_os = "linux")]
+fn detect_linux_system_silent_state_with_source() -> (SystemSilentState, LinuxSilentSource) {
     futures::executor::block_on(async {
         if let Some(inhibited) = query_kde_inhibited().await {
-            return if inhibited {
-                SystemSilentState::Active
-            } else {
-                SystemSilentState::Inactive
-            };
+            return (
+                if inhibited {
+                    SystemSilentState::Active
+                } else {
+                    SystemSilentState::Inactive
+                },
+                LinuxSilentSource::DbusProperty,
+            );
         }
         if let Some(inhibited) = query_xfce_inhibited().await {
-            return if inhibited {
-                SystemSilentState::Active
-            } else {
-                SystemSilentState::Inactive
-            };
+            return (
+                if inhibited {
+                    SystemSilentState::Active
+                } else {
+                    SystemSilentState::Inactive
+                },
+                LinuxSilentSource::DbusProperty,
+            );
         }
-        gnome_show_banners_state()
+        (
+            gnome_show_banners_state(),
+            LinuxSilentSource::GnomeShowBanners,
+        )
     })
+}
+
+/// The dconf key backing GNOME's Do Not Disturb switch.
+#[cfg(target_os = "linux")]
+const GNOME_SHOW_BANNERS_PATH: &str = "/org/gnome/desktop/notifications/show-banners";
+
+/// dconf announces writes as `Notify(prefix, changes, tag)`. A single-key write
+/// sends the whole key path as `prefix` with one empty change; a directory write
+/// sends the directory as `prefix` and the keys relative to it. Rebuilding each
+/// full path and comparing it against the key covers both, and because either
+/// side may be the shorter one, an overlap in either direction counts.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn dconf_notify_affects(prefix: &str, changes: &[String], key: &str) -> bool {
+    fn overlaps(path: &str, key: &str) -> bool {
+        path.starts_with(key) || key.starts_with(path)
+    }
+
+    if changes.is_empty() {
+        return overlaps(prefix, key);
+    }
+
+    changes
+        .iter()
+        .any(|change| overlaps(&format!("{prefix}{change}"), key))
+}
+
+/// Subscribes to dconf's change signal so the observer can park instead of
+/// re-reading the setting on a timer.
+///
+/// The returned channel closes if the subscription cannot be established or is
+/// later lost, which the caller treats as "resume polling".
+#[cfg(target_os = "linux")]
+fn spawn_gnome_settings_watcher(cx: &App) -> async_channel::Receiver<()> {
+    use futures::StreamExt as _;
+
+    // A single slot is enough: the observer re-reads the current value on wake,
+    // so coalesced notifications lose nothing.
+    let (changes_tx, changes_rx) = async_channel::bounded(1);
+    cx.background_executor()
+        .spawn(async move {
+            let Ok(connection) = zbus::Connection::session().await else {
+                return;
+            };
+            let Ok(rule) = zbus::MatchRule::builder()
+                .msg_type(zbus::message::Type::Signal)
+                .interface("ca.desrt.dconf.Writer")
+                .and_then(|builder| builder.member("Notify"))
+                .and_then(|builder| builder.path("/ca/desrt/dconf/Writer/user"))
+                .map(|builder| builder.build())
+            else {
+                return;
+            };
+            let Ok(mut messages) =
+                zbus::MessageStream::for_match_rule(rule, &connection, Some(1)).await
+            else {
+                return;
+            };
+
+            while let Some(Ok(message)) = messages.next().await {
+                let Ok((prefix, changed_keys, _tag)) = message
+                    .body()
+                    .deserialize::<(String, Vec<String>, String)>()
+                else {
+                    continue;
+                };
+                if !dconf_notify_affects(&prefix, &changed_keys, GNOME_SHOW_BANNERS_PATH) {
+                    continue;
+                }
+                // A full slot already means "re-read pending"; dropping the
+                // duplicate is correct. A closed channel means the observer is
+                // gone, so the watcher can stop.
+                match changes_tx.try_send(()) {
+                    Ok(()) | Err(async_channel::TrySendError::Full(())) => {}
+                    Err(async_channel::TrySendError::Closed(())) => break,
+                }
+            }
+        })
+        .detach();
+
+    changes_rx
 }
 
 #[cfg(target_os = "linux")]

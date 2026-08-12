@@ -159,6 +159,50 @@ fn gnome_banner_values_map_to_silence_states() {
     assert_eq!(parse_gnome_show_banners("nothing"), None);
 }
 
+/// The observer only re-reads the setting when dconf says it changed, so this
+/// filter decides whether a wake happens at all. Both of dconf's shapes have to
+/// match, and unrelated writes must not wake it.
+#[test]
+fn dconf_notifications_match_only_the_show_banners_key() {
+    const KEY: &str = "/org/gnome/desktop/notifications/show-banners";
+
+    // Single-key write: the whole path arrives as the prefix with one empty
+    // change. This is what GNOME's Do Not Disturb switch produces.
+    assert!(dconf_notify_affects(KEY, &["".to_owned()], KEY));
+
+    // Directory write: keys arrive relative to the prefix.
+    assert!(dconf_notify_affects(
+        "/org/gnome/desktop/notifications/",
+        &["show-banners".to_owned(), "show-in-lock-screen".to_owned()],
+        KEY
+    ));
+
+    // A reset of an enclosing directory also covers the key.
+    assert!(dconf_notify_affects(
+        "/org/gnome/desktop/",
+        &["notifications/show-banners".to_owned()],
+        KEY
+    ));
+    assert!(dconf_notify_affects("/org/gnome/desktop/", &[], KEY));
+
+    // Unrelated keys must not wake the observer.
+    assert!(!dconf_notify_affects(
+        "/org/gnome/desktop/interface/gtk-theme",
+        &["".to_owned()],
+        KEY
+    ));
+    assert!(!dconf_notify_affects(
+        "/org/gnome/desktop/notifications/",
+        &["show-in-lock-screen".to_owned()],
+        KEY
+    ));
+    assert!(!dconf_notify_affects(
+        "/org/gnome/shell/",
+        &["favorite-apps".to_owned()],
+        KEY
+    ));
+}
+
 #[test]
 fn macos_focus_status_requires_authorization_and_a_known_focus_value() {
     assert_eq!(

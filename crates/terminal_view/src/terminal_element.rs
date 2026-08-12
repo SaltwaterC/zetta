@@ -327,6 +327,53 @@ impl LayoutRect {
     }
 }
 
+/// Memoizes minimum-contrast adjustment across the cells of one layout pass.
+///
+/// `ensure_minimum_contrast` linearizes both colors through `powf`, which makes
+/// it one of the more expensive things done per cell. A terminal screen draws
+/// thousands of cells from a handful of distinct foreground/background pairs, so
+/// resolving each pair once per pass removes almost all of that work. The table
+/// stays tiny in practice, and a linear scan over a few `f32` comparisons beats
+/// hashing as well as recomputing.
+#[derive(Default)]
+struct ContrastCache {
+    entries: Vec<(Hsla, Hsla, Hsla)>,
+}
+
+/// Bounds the linear scan so that content which genuinely uses a new color pair
+/// in almost every cell cannot turn the lookup into more work than the
+/// computation it replaces. Ordinary output stays far below this: a palette
+/// terminal draws from a couple of dozen pairs at most, and the truecolor art
+/// that would exceed it is usually drawn with block glyphs, which skip contrast
+/// adjustment altogether.
+const CONTRAST_CACHE_CAPACITY: usize = 32;
+
+impl ContrastCache {
+    /// Colors reaching this cache come from the same theme conversion for every
+    /// cell, so equal pairs are bit-identical rather than merely close.
+    fn resolve(&mut self, foreground: Hsla, background: Hsla, minimum_contrast: f32) -> Hsla {
+        // Matches `ensure_minimum_contrast`'s own early return, and keeps the
+        // cache empty for anyone who has turned contrast adjustment off.
+        if minimum_contrast <= 0. {
+            return foreground;
+        }
+
+        if let Some((_, _, adjusted)) = self
+            .entries
+            .iter()
+            .find(|(cached_fg, cached_bg, _)| *cached_fg == foreground && *cached_bg == background)
+        {
+            return *adjusted;
+        }
+
+        let adjusted = ensure_minimum_contrast(foreground, background, minimum_contrast);
+        if self.entries.len() < CONTRAST_CACHE_CAPACITY {
+            self.entries.push((foreground, background, adjusted));
+        }
+        adjusted
+    }
+}
+
 /// Represents a rectangular region with a specific background color
 #[derive(Debug, Clone)]
 struct BackgroundRegion {
@@ -363,33 +410,6 @@ impl BackgroundRegion {
             color,
         }
     }
-
-    /// Check if this region can be merged with another region
-    fn can_merge_with(&self, other: &BackgroundRegion) -> bool {
-        if self.color != other.color {
-            return false;
-        }
-
-        // Check if regions are adjacent horizontally
-        if self.start_line == other.start_line && self.end_line == other.end_line {
-            return self.end_col + 1 == other.start_col || other.end_col + 1 == self.start_col;
-        }
-
-        // Check if regions are adjacent vertically with same column span
-        if self.start_col == other.start_col && self.end_col == other.end_col {
-            return self.end_line + 1 == other.start_line || other.end_line + 1 == self.start_line;
-        }
-
-        false
-    }
-
-    /// Merge this region with another region
-    fn merge_with(&mut self, other: &BackgroundRegion) {
-        self.start_line = self.start_line.min(other.start_line);
-        self.start_col = self.start_col.min(other.start_col);
-        self.end_line = self.end_line.max(other.end_line);
-        self.end_col = self.end_col.max(other.end_col);
-    }
 }
 
 pub trait TerminalLayoutCell {
@@ -415,38 +435,6 @@ impl TerminalLayoutCell for &IndexedCell {
     fn cell(&self) -> &Cell {
         &self.cell
     }
-}
-
-/// Merge background regions to minimize the number of rectangles
-fn merge_background_regions(regions: Vec<BackgroundRegion>) -> Vec<BackgroundRegion> {
-    if regions.is_empty() {
-        return regions;
-    }
-
-    let mut merged = regions;
-    let mut changed = true;
-
-    // Keep merging until no more merges are possible
-    while changed {
-        changed = false;
-        let mut i = 0;
-
-        while i < merged.len() {
-            let mut j = i + 1;
-            while j < merged.len() {
-                if merged[i].can_merge_with(&merged[j]) {
-                    let other = merged.remove(j);
-                    merged[i].merge_with(&other);
-                    changed = true;
-                } else {
-                    j += 1;
-                }
-            }
-            i += 1;
-        }
-    }
-
-    merged
 }
 
 /// Merges block-element regions without the quadratic background-region pass.
@@ -589,7 +577,10 @@ impl TerminalElement {
         Vec<BatchedTextRun>,
         Vec<BlockElementLayoutRect>,
     ) {
-        let start_time = Instant::now();
+        // Only read the clock when the diagnostic below can actually be
+        // emitted; this runs for every pane on every frame.
+        let debug_logging = log::log_enabled!(log::Level::Debug);
+        let start_time = debug_logging.then(Instant::now);
 
         // Pre-allocate with estimated capacity to reduce reallocations
         let estimated_cells = grid.size_hint().0;
@@ -605,6 +596,7 @@ impl TerminalElement {
         // Collect background regions for efficient merging
         let mut background_regions: Vec<BackgroundRegion> = Vec::with_capacity(estimated_regions);
         let mut current_batch: Option<BatchedTextRun> = None;
+        let mut contrast_cache = ContrastCache::default();
 
         // First pass: collect all cells and their backgrounds
         let linegroups = grid.into_iter().chunk_by(|cell| cell.point().line);
@@ -671,6 +663,7 @@ impl TerminalElement {
                             text_style,
                             hyperlink,
                             minimum_contrast,
+                            &mut contrast_cache,
                         );
 
                         let cell_point = LayoutPoint::new(display_line, point.column as i32);
@@ -739,39 +732,46 @@ impl TerminalElement {
             batched_runs.push(batch);
         }
 
-        // Second pass: merge background regions and convert to layout rects
+        // Second pass: convert background regions to layout rects.
+        //
+        // The collection loop above already extends the trailing region across
+        // horizontally adjacent cells of the same color, so every region here
+        // spans exactly one line and is already maximal. A `LayoutRect` is
+        // itself single-line, so merging vertically adjacent regions would only
+        // be undone by splitting them back per line below. Emitting one rect
+        // per region is therefore the same output with no merge pass at all.
         let region_count = background_regions.len();
-        let merged_regions = merge_background_regions(background_regions);
-        let mut rects = Vec::with_capacity(merged_regions.len() * 2); // Estimate 2 rects per merged region
+        let mut rects = Vec::with_capacity(region_count);
 
-        // Convert merged regions to layout rects
-        // Since LayoutRect only supports single-line rectangles, we need to split multi-line regions
-        for region in merged_regions {
-            for line in region.start_line..=region.end_line {
-                rects.push(LayoutRect::new(
-                    LayoutPoint::new(line, region.start_col),
-                    (region.end_col - region.start_col + 1) as usize,
-                    region.color,
-                ));
-            }
+        for region in background_regions {
+            debug_assert_eq!(
+                region.start_line, region.end_line,
+                "background regions are collected one line at a time"
+            );
+            rects.push(LayoutRect::new(
+                LayoutPoint::new(region.start_line, region.start_col),
+                (region.end_col - region.start_col + 1) as usize,
+                region.color,
+            ));
         }
 
         let block_element_region_count = block_element_regions.len();
         let block_element_rects = Self::block_element_regions_to_rects(block_element_regions);
-        let layout_time = start_time.elapsed();
 
-        log::debug!(
-            "Terminal layout_grid: {} cells processed, \
-            {} batched runs created, {} block element rects (from {} regions), {} rects (from {} merged regions), \
-            layout took {:?}",
-            cell_count,
-            batched_runs.len(),
-            block_element_rects.len(),
-            block_element_region_count,
-            rects.len(),
-            region_count,
-            layout_time
-        );
+        if let Some(start_time) = start_time {
+            log::debug!(
+                "Terminal layout_grid: {} cells processed, \
+                {} batched runs created, {} block element rects (from {} regions), {} rects (from {} background regions), \
+                layout took {:?}",
+                cell_count,
+                batched_runs.len(),
+                block_element_rects.len(),
+                block_element_region_count,
+                rects.len(),
+                region_count,
+                start_time.elapsed()
+            );
+        }
 
         (rects, batched_runs, block_element_rects)
     }
@@ -1013,13 +1013,14 @@ impl TerminalElement {
         text_style: &TextStyle,
         hyperlink: Option<(HighlightStyle, &Range)>,
         minimum_contrast: f32,
+        contrast_cache: &mut ContrastCache,
     ) -> TextRun {
         let skip_contrast = Self::is_app_chosen_exact_color(&fg);
         let mut fg = convert_color(&fg, colors);
         let bg = convert_color(&bg, colors);
 
         if !skip_contrast && !Self::is_decorative_character(cell.character()) {
-            fg = ensure_minimum_contrast(fg, bg, minimum_contrast);
+            fg = contrast_cache.resolve(fg, bg, minimum_contrast);
         }
 
         // Use a dim multiplier that stays close to the existing Alacritty look.
@@ -1403,11 +1404,12 @@ impl Element for TerminalElement {
                     .or(settings.buffer_font.fallbacks.as_ref())
                     .cloned();
 
+                // `unwrap_or` would build the fallback on every prepaint even
+                // when the setting is present, so keep it lazy.
                 let font_features = terminal_settings
                     .font_features
-                    .as_ref()
-                    .unwrap_or(&FontFeatures::disable_ligatures())
-                    .clone();
+                    .clone()
+                    .unwrap_or_else(FontFeatures::disable_ligatures);
 
                 let font_weight = terminal_settings.font_weight.unwrap_or_default();
 
@@ -1680,7 +1682,11 @@ impl Element for TerminalElement {
                 // Layout cursor. Rectangle is used for IME, so we should lay it out even
                 // if we don't end up showing it.
                 let cursor_point = DisplayCursor::from(cursor.point, display_offset);
-                let cursor_text = {
+
+                // A cursor resting on a blank cell is the common case, and there
+                // neither the width nor the painted glyph depends on the shaped
+                // line, so skip shaping it every frame.
+                let cursor_text = (!cursor_char.is_whitespace()).then(|| {
                     let str_trxt = cursor_char.to_string();
                     let len = str_trxt.len();
                     window.text_system().shape_line(
@@ -1694,15 +1700,14 @@ impl Element for TerminalElement {
                         }],
                         None,
                     )
-                };
+                });
 
                 // For whitespace, use cell width to avoid cursor stretching.
                 // For other characters, use the larger of shaped width and cell width
                 // to properly cover wide characters like emojis.
-                let cursor_width = if cursor_char.is_whitespace() {
-                    dimensions.cell_width()
-                } else {
-                    cursor_text.width.max(dimensions.cell_width())
+                let cursor_width = match &cursor_text {
+                    Some(cursor_text) => cursor_text.width.max(dimensions.cell_width()),
+                    None => dimensions.cell_width(),
                 };
 
                 let ime_cursor_bounds = TerminalElement::cursor_position(cursor_point, dimensions)
@@ -1718,7 +1723,7 @@ impl Element for TerminalElement {
                     ime_cursor_bounds.map(move |bounds| {
                         let (shape, text) = match cursor.shape {
                             CursorShape::Block if !focused => (ViewCursorShape::Hollow, None),
-                            CursorShape::Block => (ViewCursorShape::Block, Some(cursor_text)),
+                            CursorShape::Block => (ViewCursorShape::Block, cursor_text),
                             CursorShape::Underline if !focused => (ViewCursorShape::Hollow, None),
                             CursorShape::Underline => (ViewCursorShape::Underline, None),
                             CursorShape::Bar if !focused => (ViewCursorShape::Hollow, None),
@@ -2657,100 +2662,149 @@ mod tests {
         assert_eq!(batch.style.len, 1 + combining.len_utf8());
     }
 
+    /// `layout_grid` extends the trailing background region across horizontally
+    /// adjacent cells of the same color and then emits one `LayoutRect` per
+    /// region. This pins that contract: a run collapses to a single rect whose
+    /// width is the column span, while a gap or a color change starts a new one.
     #[test]
-    fn test_background_region_can_merge() {
-        let color1 = Hsla::red();
-        let color2 = Hsla::blue();
-
-        // Test horizontal merging
-        let mut region1 = BackgroundRegion::new(0, 0, color1);
-        region1.end_col = 5;
-        let region2 = BackgroundRegion::new(0, 6, color1);
-        assert!(region1.can_merge_with(&region2));
-
-        // Test vertical merging with same column span
-        let mut region3 = BackgroundRegion::new(0, 0, color1);
-        region3.end_col = 5;
-        let mut region4 = BackgroundRegion::new(1, 0, color1);
-        region4.end_col = 5;
-        assert!(region3.can_merge_with(&region4));
-
-        // Test cannot merge different colors
-        let region5 = BackgroundRegion::new(0, 0, color1);
-        let region6 = BackgroundRegion::new(0, 1, color2);
-        assert!(!region5.can_merge_with(&region6));
-
-        // Test cannot merge non-adjacent regions
-        let region7 = BackgroundRegion::new(0, 0, color1);
-        let region8 = BackgroundRegion::new(0, 2, color1);
-        assert!(!region7.can_merge_with(&region8));
-
-        // Test cannot merge vertical regions with different column spans
-        let mut region9 = BackgroundRegion::new(0, 0, color1);
-        region9.end_col = 5;
-        let mut region10 = BackgroundRegion::new(1, 0, color1);
-        region10.end_col = 6;
-        assert!(!region9.can_merge_with(&region10));
-    }
-
-    #[test]
-    fn test_background_region_merge() {
+    fn background_regions_collapse_runs_and_split_on_gaps() {
         let color = Hsla::red();
+        let other_color = Hsla::blue();
 
-        // Test horizontal merge
-        let mut region1 = BackgroundRegion::new(0, 0, color);
-        region1.end_col = 5;
-        let mut region2 = BackgroundRegion::new(0, 6, color);
-        region2.end_col = 10;
-        region1.merge_with(&region2);
-        assert_eq!(region1.start_col, 0);
-        assert_eq!(region1.end_col, 10);
-        assert_eq!(region1.start_line, 0);
-        assert_eq!(region1.end_line, 0);
-
-        // Test vertical merge
-        let mut region3 = BackgroundRegion::new(0, 0, color);
-        region3.end_col = 5;
-        let mut region4 = BackgroundRegion::new(1, 0, color);
-        region4.end_col = 5;
-        region3.merge_with(&region4);
-        assert_eq!(region3.start_col, 0);
-        assert_eq!(region3.end_col, 5);
-        assert_eq!(region3.start_line, 0);
-        assert_eq!(region3.end_line, 1);
-    }
-
-    #[test]
-    fn test_merge_background_regions() {
-        let color = Hsla::red();
-
-        // Test merging multiple adjacent regions
-        let regions = vec![
-            BackgroundRegion::new(0, 0, color),
-            BackgroundRegion::new(0, 1, color),
-            BackgroundRegion::new(0, 2, color),
-            BackgroundRegion::new(1, 0, color),
-            BackgroundRegion::new(1, 1, color),
-            BackgroundRegion::new(1, 2, color),
+        // Mirrors the collection loop: (line, column, color) in scan order.
+        let cells = [
+            (0, 0, color),
+            (0, 1, color),
+            (0, 2, color),
+            // Gap at column 3 on line 0.
+            (0, 4, color),
+            // Same columns as the run above but a different color.
+            (1, 0, other_color),
+            (1, 1, other_color),
         ];
 
-        let merged = merge_background_regions(regions);
-        assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].start_line, 0);
-        assert_eq!(merged[0].end_line, 1);
-        assert_eq!(merged[0].start_col, 0);
-        assert_eq!(merged[0].end_col, 2);
+        let mut regions: Vec<BackgroundRegion> = Vec::new();
+        for (line, column, color) in cells {
+            if let Some(last) = regions.last_mut()
+                && last.color == color
+                && last.start_line == line
+                && last.end_line == line
+                && last.end_col + 1 == column
+            {
+                last.end_col = column;
+            } else {
+                regions.push(BackgroundRegion::new(line, column, color));
+            }
+        }
 
-        // Test with non-mergeable regions
-        let color2 = Hsla::blue();
-        let regions2 = vec![
-            BackgroundRegion::new(0, 0, color),
-            BackgroundRegion::new(0, 2, color),  // Gap at column 1
-            BackgroundRegion::new(1, 0, color2), // Different color
+        let rects: Vec<LayoutRect> = regions
+            .iter()
+            .map(|region| {
+                assert_eq!(
+                    region.start_line, region.end_line,
+                    "regions are collected one line at a time"
+                );
+                LayoutRect::new(
+                    LayoutPoint::new(region.start_line, region.start_col),
+                    (region.end_col - region.start_col + 1) as usize,
+                    region.color,
+                )
+            })
+            .collect();
+
+        assert_eq!(rects.len(), 3);
+
+        assert_eq!(rects[0].point.line, 0);
+        assert_eq!(rects[0].point.column, 0);
+        assert_eq!(rects[0].num_of_cells, 3);
+        assert_eq!(rects[0].color, color);
+
+        assert_eq!(rects[1].point.line, 0);
+        assert_eq!(rects[1].point.column, 4);
+        assert_eq!(rects[1].num_of_cells, 1);
+
+        assert_eq!(rects[2].point.line, 1);
+        assert_eq!(rects[2].point.column, 0);
+        assert_eq!(rects[2].num_of_cells, 2);
+        assert_eq!(rects[2].color, other_color);
+    }
+
+    /// Memoizing contrast adjustment must be invisible: every cached pair has to
+    /// resolve to exactly what `ensure_minimum_contrast` returns, including on
+    /// repeat lookups and after unrelated pairs have been inserted.
+    #[test]
+    fn contrast_cache_matches_uncached_contrast() {
+        let minimum_contrast = 45.;
+        let pairs = [
+            (Hsla::red(), Hsla::black()),
+            (Hsla::blue(), Hsla::white()),
+            (Hsla::black(), Hsla::black()),
+            (Hsla::red(), Hsla::white()),
         ];
 
-        let merged2 = merge_background_regions(regions2);
-        assert_eq!(merged2.len(), 3);
+        let mut cache = ContrastCache::default();
+        // Two passes so the second one is served entirely from the cache.
+        for _ in 0..2 {
+            for (foreground, background) in pairs {
+                assert_eq!(
+                    cache.resolve(foreground, background, minimum_contrast),
+                    ensure_minimum_contrast(foreground, background, minimum_contrast),
+                );
+            }
+        }
+
+        assert_eq!(
+            cache.entries.len(),
+            pairs.len(),
+            "each distinct pair should be resolved exactly once"
+        );
+    }
+
+    /// Disabling contrast adjustment must stay on the cheap path: the value is
+    /// returned untouched and nothing is retained.
+    #[test]
+    fn contrast_cache_passes_through_when_adjustment_is_disabled() {
+        let mut cache = ContrastCache::default();
+
+        assert_eq!(cache.resolve(Hsla::red(), Hsla::black(), 0.), Hsla::red());
+        assert_eq!(cache.resolve(Hsla::red(), Hsla::black(), -1.), Hsla::red());
+        assert!(cache.entries.is_empty());
+    }
+
+    /// The scan is bounded, so pathological input stops growing the table while
+    /// still returning correct colors for pairs that no longer fit.
+    #[test]
+    fn contrast_cache_is_bounded_but_stays_correct_when_full() {
+        let minimum_contrast = 45.;
+        let mut cache = ContrastCache::default();
+        let background = Hsla::black();
+
+        // More distinct foregrounds than the table can hold.
+        let foregrounds: Vec<Hsla> = (0..CONTRAST_CACHE_CAPACITY + 8)
+            .map(|index| Hsla {
+                h: index as f32 / 128.,
+                s: 0.9,
+                l: 0.5,
+                a: 1.,
+            })
+            .collect();
+
+        for foreground in &foregrounds {
+            assert_eq!(
+                cache.resolve(*foreground, background, minimum_contrast),
+                ensure_minimum_contrast(*foreground, background, minimum_contrast),
+            );
+        }
+
+        assert_eq!(cache.entries.len(), CONTRAST_CACHE_CAPACITY);
+
+        // Pairs that were evicted from consideration still resolve correctly.
+        for foreground in foregrounds.iter().rev() {
+            assert_eq!(
+                cache.resolve(*foreground, background, minimum_contrast),
+                ensure_minimum_contrast(*foreground, background, minimum_contrast),
+            );
+        }
     }
 
     #[test]

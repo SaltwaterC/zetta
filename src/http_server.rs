@@ -15,7 +15,7 @@ use std::{
 use anyhow::{Context as _, Result};
 use time::{OffsetDateTime, macros::format_description};
 
-const SERVER_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const SHUTDOWN_WAKE_TIMEOUT: Duration = Duration::from_millis(250);
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(5);
 const LOG_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_REQUEST_SIZE: usize = 64 * 1024;
@@ -34,7 +34,9 @@ pub(crate) fn start_http_server(root: &Path, port: u16) -> Result<OpenHttpServer
     anyhow::ensure!(root.is_dir(), "HTTP server root is not a directory");
     let listener = TcpListener::bind(("0.0.0.0", port))
         .with_context(|| format!("binding HTTP server to TCP port {port}"))?;
-    listener.set_nonblocking(true)?;
+    // The accept loop blocks rather than polling, so an idle server costs no
+    // wakeups and an incoming connection is served without waiting out a poll
+    // interval. `ServerControl` unblocks the pending accept on shutdown.
     let address = listener.local_addr()?;
     let active = Arc::new(AtomicBool::new(true));
     let (log_tx, log_rx) = mpsc::channel();
@@ -51,7 +53,7 @@ pub(crate) fn start_http_server(root: &Path, port: u16) -> Result<OpenHttpServer
             pending: Vec::new(),
             offset: 0,
         }),
-        writer: Box::new(ServerControl { active }),
+        writer: Box::new(ServerControl { active, address }),
         address,
         root,
     })
@@ -92,6 +94,7 @@ impl Read for LogReader {
 
 struct ServerControl {
     active: Arc<AtomicBool>,
+    address: SocketAddr,
 }
 
 impl Write for ServerControl {
@@ -107,6 +110,21 @@ impl Write for ServerControl {
 impl Drop for ServerControl {
     fn drop(&mut self) {
         self.active.store(false, Ordering::Release);
+        wake_accept_loop(self.address);
+    }
+}
+
+/// The worker parks in a blocking `accept`, so clearing `active` alone would
+/// not be observed until the next connection. A throwaway loopback connection
+/// returns the pending `accept` immediately, letting the worker see the cleared
+/// flag and exit.
+fn wake_accept_loop(address: SocketAddr) {
+    let wake_address = match address {
+        SocketAddr::V4(_) => SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, address.port())),
+        SocketAddr::V6(_) => SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, address.port())),
+    };
+    if let Ok(stream) = TcpStream::connect_timeout(&wake_address, SHUTDOWN_WAKE_TIMEOUT) {
+        let _ = stream.shutdown(std::net::Shutdown::Both);
     }
 }
 
@@ -139,16 +157,17 @@ fn server_loop(
     while active.load(Ordering::Acquire) {
         let (stream, peer) = match listener.accept() {
             Ok(connection) => connection,
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                thread::sleep(SERVER_POLL_INTERVAL);
-                continue;
-            }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) => {
                 log_line(&logs, format!("Server socket error: {error}"));
                 break;
             }
         };
+        // A shutdown wakeup arrives as a real connection; recheck before
+        // spending a worker on it.
+        if !active.load(Ordering::Acquire) {
+            break;
+        }
         if request_count
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
                 (count < MAX_CONCURRENT_REQUESTS).then_some(count + 1)
