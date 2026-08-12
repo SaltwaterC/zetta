@@ -649,6 +649,7 @@ become `Ctrl-Cmd`; for example, paste-trim is `Ctrl-Cmd-V` on macOS and
 | `Cmd-Shift-[` / `Cmd-Shift-]` (macOS) / `Alt-Shift-[` / `Alt-Shift-]` (Windows/Linux) | Select the previous / next stacked entry |
 | `Shift-Escape` | Maximize or restore the active pane |
 | `Ctrl-Shift-I` | Toggle input broadcasting in the active tab |
+| `Ctrl-Shift-S` | Toggle process-wide Silent mode |
 | `Ctrl-Tab` / `Ctrl-Shift-Tab` | Next / previous tab |
 | `Ctrl-PageUp` / `Ctrl-PageDown` | Next / previous tab |
 | `Ctrl-C` | Copy selected text or send interrupt |
@@ -661,7 +662,6 @@ become `Ctrl-Cmd`; for example, paste-trim is `Ctrl-Cmd-V` on macOS and
 | `Cmd-Shift-S` (macOS) / `Alt-Shift-S` (Windows/Linux) | Save the active pane's complete output |
 | `Ctrl-Shift-P` | Open the command palette |
 | `Ctrl-,` | Open the configuration and keymap editor |
-| `Ctrl-Shift-S` | Open a serial console in a new pane |
 | `Ctrl-Shift-R` | Rename the active tab |
 | `Ctrl-Shift-Y` | Change the active tab icon |
 | `Cmd-Shift-T` (macOS) / `Alt-Shift-T` (Windows/Linux) | Change the active pane's theme (non-persistent) |

@@ -237,6 +237,45 @@ fn pane_resize_mode_uses_a_dedicated_ctrl_shift_shortcut() {
 }
 
 #[test]
+fn silent_mode_uses_a_dedicated_ctrl_shift_shortcut_without_collisions() {
+    assert_eq!(TOGGLE_SILENT_MODE_KEYBINDING, "ctrl-shift-s");
+    let binding = toggle_silent_mode_keybinding();
+    let shortcut = gpui::Keystroke::parse(TOGGLE_SILENT_MODE_KEYBINDING).unwrap();
+    assert_eq!(
+        binding.match_keystrokes(std::slice::from_ref(&shortcut)),
+        Some(false)
+    );
+    assert_eq!(binding.action().name(), ToggleSilentMode.name());
+    assert!(
+        binding
+            .predicate()
+            .expect("silent mode toggle should be scoped to a terminal")
+            .depth_of(&[
+                gpui::KeyContext::parse("Zetta").unwrap(),
+                gpui::KeyContext::parse("Terminal").unwrap(),
+            ])
+            .is_some()
+    );
+
+    let defaults = default_keybindings(0, &gpui::DummyKeyboardMapper);
+    let matching_bindings = defaults
+        .iter()
+        .filter(|candidate| {
+            candidate.match_keystrokes(std::slice::from_ref(&shortcut)) == Some(false)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        matching_bindings.len(),
+        1,
+        "Ctrl-Shift-S must have exactly one Zetta default binding"
+    );
+    assert_eq!(
+        matching_bindings[0].action().name(),
+        ToggleSilentMode.name()
+    );
+}
+
+#[test]
 fn tab_move_mode_uses_a_dedicated_ctrl_shift_shortcut_without_collisions() {
     assert_eq!(TOGGLE_TAB_MOVE_MODE_KEYBINDING, "ctrl-shift-g");
     let binding = tab_move_mode_keybinding();
@@ -596,13 +635,12 @@ fn keymap_storage_preserves_literal_plus_keys() {
 
 #[cfg(feature = "serial-console")]
 #[test]
-fn serial_console_avoids_the_linux_unicode_input_shortcut() {
-    assert_eq!(SERIAL_CONSOLE_KEYBINDING, "ctrl-shift-s");
-    assert_ne!(SERIAL_CONSOLE_KEYBINDING, "ctrl-shift-u");
-    let shortcut = gpui::Keystroke::parse(SERIAL_CONSOLE_KEYBINDING).unwrap();
-    assert_eq!(
-        serial_console_keybinding().match_keystrokes(&[shortcut]),
-        Some(false)
+fn serial_console_has_no_built_in_keyboard_binding() {
+    let bindings = default_keybindings(0, &gpui::DummyKeyboardMapper);
+    assert!(
+        bindings
+            .iter()
+            .all(|binding| binding.action().name() != ToggleSerialConsole.name())
     );
 }
 

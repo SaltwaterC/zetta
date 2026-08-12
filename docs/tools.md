@@ -13,8 +13,8 @@ set of accepted flag values.
 
 ## Serial console
 
-Press `Ctrl-Shift-S` or choose **Zetta: Toggle Serial Console** from the command
-palette to enumerate serial devices and connect one in a new left/right split.
+Choose **Zetta: Toggle Serial Console** from the command palette to enumerate
+serial devices and connect one in a new left/right split.
 
 The same console is available without starting the graphical application:
 
@@ -138,9 +138,10 @@ first invocation asks macOS for notification permission. Standalone development
 builds fall back to macOS's bundled script host, so they do not require an app
 bundle merely to show a notification.
 
-Silent mode is a transient process-wide control available from the title bar
-and command palette. Tab Silent Mode is a separate transient control available
-from each tab's context menu and the command palette. Either one suppresses
+Silent mode is a transient process-wide control available from the title bar,
+the command palette, and `Ctrl-Shift-S`. Tab Silent Mode is a separate
+transient control available from each tab's context menu and the command
+palette. Either one suppresses
 terminal bells and every notification sound source for the affected tab while
 leaving notification content, actions, and tab-attention badges unchanged. A
 bell-off icon in the tab bar reports the tab's own setting; it does not mirror

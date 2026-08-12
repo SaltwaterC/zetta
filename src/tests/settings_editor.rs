@@ -563,6 +563,7 @@ fn keymap_template_exposes_all_builtin_shortcuts() {
         ("alt-shift-k", "zetta::RotatePaneLayoutCounterClockwise"),
         ("ctrl-shift-g", "zetta::ToggleTabMoveMode"),
         ("alt-shift-a", "terminal_view::SelectAll"),
+        ("ctrl-shift-s", "zetta::ToggleSilentMode"),
         ("ctrl-shift-m", "zetta::ToggleMultiCommand"),
         ("ctrl-shift-l", "terminal::Clear"),
         ("shift-insert", "terminal::Paste"),

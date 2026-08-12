@@ -271,9 +271,6 @@ pub(crate) const CLOSE_WINDOW_KEYBINDING: &str = "ctrl-shift-q";
 
 pub(crate) const CLOSE_ALL_WINDOWS_KEYBINDING: &str = "ctrl-shift-x";
 
-#[cfg(feature = "serial-console")]
-pub(crate) const SERIAL_CONSOLE_KEYBINDING: &str = "ctrl-shift-s";
-
 pub(crate) const AUTO_BACKGROUND_TAB_KEYBINDING: &str = "ctrl-shift-b";
 
 pub(crate) const ROTATE_PANE_LAYOUT_KEYBINDING: &str = if cfg!(target_os = "macos") {
@@ -294,6 +291,8 @@ pub(crate) const TOGGLE_PANE_RESIZE_MODE_KEYBINDING: &str = "ctrl-shift-j";
 pub(crate) const TOGGLE_PANE_MOVE_MODE_KEYBINDING: &str = "alt-shift-m";
 
 pub(crate) const TOGGLE_TAB_MOVE_MODE_KEYBINDING: &str = "ctrl-shift-g";
+
+pub(crate) const TOGGLE_SILENT_MODE_KEYBINDING: &str = "ctrl-shift-s";
 
 pub(crate) const APPLICATION_MENU_KEYBINDING: &str = "alt-space";
 
@@ -384,19 +383,18 @@ pub(crate) fn close_pane_keybinding() -> KeyBinding {
     KeyBinding::new(CLOSE_PANE_KEYBINDING, ClosePane, Some("Zetta > Terminal"))
 }
 
-#[cfg(feature = "serial-console")]
-pub(crate) fn serial_console_keybinding() -> KeyBinding {
-    KeyBinding::new(
-        SERIAL_CONSOLE_KEYBINDING,
-        ToggleSerialConsole,
-        Some("Zetta > Terminal"),
-    )
-}
-
 pub(crate) fn auto_background_tab_keybinding() -> KeyBinding {
     KeyBinding::new(
         AUTO_BACKGROUND_TAB_KEYBINDING,
         ToggleAutoBackgroundTab,
+        Some("Zetta > Terminal"),
+    )
+}
+
+pub(crate) fn toggle_silent_mode_keybinding() -> KeyBinding {
+    KeyBinding::new(
+        TOGGLE_SILENT_MODE_KEYBINDING,
+        ToggleSilentMode,
         Some("Zetta > Terminal"),
     )
 }
@@ -575,6 +573,7 @@ fn default_keybindings(
             ToggleBroadcastInput,
             Some("Zetta > Terminal"),
         ),
+        toggle_silent_mode_keybinding(),
         KeyBinding::new("ctrl-shift-m", ToggleMultiCommand, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-tab", NextTab, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, Some("Zetta > Terminal")),
@@ -669,8 +668,6 @@ fn default_keybindings(
         HideWindow,
         Some("Zetta"),
     ));
-    #[cfg(feature = "serial-console")]
-    bindings.push(serial_console_keybinding());
     bindings.extend(application_menu_keybinding());
     bindings.extend(application_menu_navigation_keybindings());
     bindings.extend(tab_menu_navigation_keybindings());
