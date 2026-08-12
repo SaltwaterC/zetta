@@ -2548,8 +2548,6 @@ impl Terminal {
     ///Resize the terminal and the PTY.
     pub fn set_size(&mut self, new_bounds: TerminalBounds) {
         let new_bounds = normalize_terminal_bounds(new_bounds);
-        let reflow = mem::replace(&mut self.reflow_on_next_resize, true);
-
         let old_bounds = self.last_content.terminal_bounds;
         self.last_content.terminal_bounds = new_bounds;
 
@@ -2563,6 +2561,8 @@ impl Terminal {
         if !requires_resize {
             return;
         }
+
+        let reflow = mem::replace(&mut self.reflow_on_next_resize, true);
 
         match self.events.back_mut() {
             Some(InternalEvent::Resize {
@@ -5913,10 +5913,16 @@ mod tests {
             )
         });
         let mut terminal = builder.terminal;
-        let mut resized = terminal.last_content.terminal_bounds;
-        resized.bounds.size.width += resized.cell_width;
+        let base_bounds = terminal.last_content.terminal_bounds;
+        let mut pixel_only = base_bounds;
+        pixel_only.bounds.size.width += Pixels::from(1.);
 
         terminal.truncate_on_next_resize();
+        terminal.set_size(pixel_only);
+        assert!(terminal.events.is_empty());
+
+        let mut resized = pixel_only;
+        resized.bounds.size.width += resized.cell_width;
         terminal.set_size(resized);
         assert!(matches!(
             terminal.events.back(),
@@ -5929,6 +5935,40 @@ mod tests {
         assert!(matches!(
             terminal.events.back(),
             Some(InternalEvent::Resize { reflow: true, .. })
+        ));
+    }
+
+    #[gpui::test]
+    async fn test_coalesced_layout_resizes_preserve_non_reflow_decision(cx: &mut TestAppContext) {
+        let builder = cx.update(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::Block,
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+        });
+        let mut terminal = builder.terminal;
+        let base_bounds = terminal.last_content.terminal_bounds;
+
+        terminal.truncate_on_next_resize();
+        let mut first_resize = base_bounds;
+        first_resize.bounds.size.width += first_resize.cell_width;
+        terminal.set_size(first_resize);
+
+        let mut coalesced_resize = first_resize;
+        coalesced_resize.bounds.size.width += coalesced_resize.cell_width;
+        terminal.set_size(coalesced_resize);
+
+        assert_eq!(terminal.events.len(), 1);
+        assert!(matches!(
+            terminal.events.back(),
+            Some(InternalEvent::Resize {
+                bounds,
+                reflow: false,
+            }) if *bounds == coalesced_resize
         ));
     }
 
