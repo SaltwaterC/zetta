@@ -3532,6 +3532,23 @@ impl Terminal {
         }
     }
 
+    /// Returns the cached working directory of the foreground process,
+    /// without consulting a shell-reported CWD marker.
+    pub fn process_working_directory(&self) -> Option<PathBuf> {
+        if self.is_remote_terminal {
+            return None;
+        }
+        match &self.terminal_type {
+            TerminalType::Pty { info, .. } => info
+                .current
+                .read()
+                .as_ref()
+                .map(|process| process.cwd.clone())
+                .filter(|directory| !directory.as_os_str().is_empty()),
+            TerminalType::DisplayOnly => None,
+        }
+    }
+
     /// Normalizes the command name of the foreground process, if one is known.
     pub fn foreground_process_command_name(&self) -> Option<String> {
         match &self.terminal_type {

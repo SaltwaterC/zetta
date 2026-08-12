@@ -1,4 +1,19 @@
 # Zetta shell integration for PowerShell.
+if (-not (Get-Variable -Name __ZettaOriginalPrompt -Scope Global -ErrorAction SilentlyContinue)) {
+    $global:__ZettaOriginalPrompt = $function:prompt
+    function global:prompt {
+        try {
+            $zettaDirectory = $ExecutionContext.SessionState.Path.CurrentFileSystemLocation.ProviderPath
+            [Console]::Write("$([char]27)]2;zetta-cwd:$zettaDirectory$([char]27)\")
+        } catch {}
+        if ($null -ne $global:__ZettaOriginalPrompt) {
+            & $global:__ZettaOriginalPrompt
+        } else {
+            "PS $($ExecutionContext.SessionState.Path.CurrentLocation)> "
+        }
+    }
+}
+
 if (-not (Test-Path Env:EDITOR)) {
     $env:EDITOR = 'zetta vi'
 }

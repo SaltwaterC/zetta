@@ -565,6 +565,10 @@ pub(crate) struct TerminalPane {
     /// Shell directory associated with the current detection generation.
     pub(crate) worktree_detection_directory: Option<PathBuf>,
     pub(crate) worktree_detection_generation: u64,
+    /// Whether the current detection directory came from an authoritative
+    /// shell CWD (or the shell-owned process CWD), so a non-worktree result
+    /// may clear the detected title.
+    pub(crate) worktree_detection_can_clear: bool,
     /// Command terminals that share this pane's layout region. They are
     /// intentionally not part of [`PaneLayout`]: only the selected entry is
     /// expanded, while the others occupy compact status rows.
@@ -896,6 +900,7 @@ impl TerminalPane {
             detected_worktree_title: None,
             worktree_detection_directory: None,
             worktree_detection_generation: 0,
+            worktree_detection_can_clear: false,
             stack: PaneStack::default(),
         }
     }
@@ -1867,11 +1872,13 @@ pub(crate) struct Tab {
     /// A title entered through the tab rename UI. This is the highest-priority
     /// title source and is intentionally separate from process/worktree state.
     pub(crate) custom_title: Option<String>,
-    /// A worktree title pinned by `wt new` or process control for the
-    /// worktree lifecycle.
-    pub(crate) pinned_worktree_title: Option<String>,
-    /// A lower-priority title supplied by process control (for example, by a
-    /// command that reports its current source or task).
+    /// A worktree title supplied by `wt new`. CWD detection may provide a
+    /// fresher title, but terminal-side title updates can never replace this
+    /// seed; `wt done` explicitly clears it.
+    pub(crate) worktree_seed_title: Option<String>,
+    /// A lower-priority title supplied by process control. It remains
+    /// available outside a worktree, but is masked by the active worktree
+    /// title.
     pub(crate) process_title: Option<String>,
     pub(crate) icon: Option<IconName>,
     /// Session-only visual pinning. Pinned tabs stay in the leading tab-bar

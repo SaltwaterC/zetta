@@ -25,7 +25,7 @@ fn pin_test_tab(id: u64, pinned: bool) -> Tab {
         silent_mode: false,
         close_policy: TabClosePolicy::Close,
         custom_title: None,
-        pinned_worktree_title: None,
+        worktree_seed_title: None,
         process_title: None,
         icon: Some(IconName::Terminal),
         pinned,

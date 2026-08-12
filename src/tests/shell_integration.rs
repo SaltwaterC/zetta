@@ -78,6 +78,32 @@ fn supported_shells_generate_completion_and_tftp_shortcut() {
 }
 
 #[test]
+fn shell_integration_reports_the_shell_cwd_while_children_run() {
+    let profiles = profiles();
+
+    assert!(
+        ShellIntegration::Bash
+            .script(&profiles)
+            .contains("__zetta_report_cwd")
+    );
+    assert!(
+        ShellIntegration::Fish
+            .script(&profiles)
+            .contains("--on-event fish_prompt")
+    );
+    assert!(
+        ShellIntegration::PowerShell
+            .script(&profiles)
+            .contains("zetta-cwd:$zettaDirectory")
+    );
+    assert!(
+        ShellIntegration::Zsh
+            .script(&profiles)
+            .contains("add-zsh-hook precmd __zetta_report_cwd")
+    );
+}
+
+#[test]
 fn vi_integration_is_conditional_and_has_cli_completion() {
     let profiles = profiles();
 

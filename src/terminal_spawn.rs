@@ -1,4 +1,5 @@
 use super::*;
+use crate::worktree_detection::terminal_event_requires_worktree_detection;
 
 impl Zetta {
     #[allow(clippy::too_many_arguments)]
@@ -263,15 +264,29 @@ impl Zetta {
                             &terminal,
                             window,
                             move |this, _, event: &TerminalEvent, window, cx| {
-                                if let TerminalEvent::ResizeRequested { rows, columns } = event {
-                                    this.resize_pane_to(
-                                        tab_id,
-                                        pane_id,
-                                        Some(*columns),
-                                        Some(*rows),
-                                        window,
-                                        cx,
-                                    );
+                                match event {
+                                    TerminalEvent::ResizeRequested { rows, columns } => {
+                                        this.resize_pane_to(
+                                            tab_id,
+                                            pane_id,
+                                            Some(*columns),
+                                            Some(*rows),
+                                            window,
+                                            cx,
+                                        );
+                                    }
+                                    event if terminal_event_requires_worktree_detection(event) => {
+                                        // A program can change the terminal's ordinary OSC
+                                        // title without changing its process metadata. Treat it
+                                        // as a worktree-detection trigger too, so that a title
+                                        // such as Codex's `switched-source` cannot become the tab
+                                        // title while the shell remains in a linked worktree.
+                                        this.schedule_worktree_detection_for_pane(
+                                            tab_id, pane_id, cx,
+                                        );
+                                        cx.notify();
+                                    }
+                                    _ => {}
                                 }
                             },
                         )

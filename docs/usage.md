@@ -427,18 +427,18 @@ Run `zetta wt rerere` once to enable Git's `rerere.enabled` and
 `rerere.autoupdate` helpers for repeated conflicts.
 
 When `new NAME` or `done` is run from a terminal opened by Zetta, the originating
-tab is updated after the Git operation succeeds: `new NAME` pins its worktree
-title to the exact `NAME` (including nested names such as `feature/api`) for the
-worktree lifecycle, and a successful `done` clears it. Zetta also detects a
-linked worktree from each pane's interactive-shell directory. The active pane's
-detected name supplies the automatic title and clears when that shell leaves.
-Only linked worktrees on `wt/<name>` branches are named; the main worktree,
-detached heads, and other branches are ignored. Manual tab renames take
-precedence over pinned and automatic worktree titles, followed by
-process-control and terminal-derived titles. An empty manual rename reveals the
-pinned title again when one exists. This is best-effort integration with Zetta;
-missing or unavailable Zetta process control never changes the Git result or
-`--path-only` output.
+tab records its worktree title after the Git operation succeeds. That title is
+kept until a successful `done` explicitly clears it. Terminal-side tab-name
+requests remain available for ordinary tabs, but are masked while a worktree
+title is active; terminal title changes likewise cannot replace it. Live
+shell-CWD detection can replace the seed when the shell reports a different
+linked worktree, and it remains stable while a child process is in the
+foreground because shell integration reports the shell's directory separately
+from the child's process metadata. Only linked worktrees on `wt/<name>` branches
+are named; the main worktree, detached heads, and other branches are ignored.
+Manual tab renames take precedence over the worktree title, and clearing a
+manual rename reveals it again. Missing or unavailable Zetta process control
+never changes the Git result or `--path-only` output.
 
 The direct CLI never changes the caller's directory. After enabling shell
 integration, `zwt new NAME` changes into the new worktree and `zwt done`

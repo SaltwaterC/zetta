@@ -3,9 +3,9 @@ use crate::process_control::{TabNameRequest, WorktreeNameRequest};
 
 /// Resolve the title shown for a tab.
 ///
-/// Resolve a tab title by source priority. The fallback is evaluated only when
-/// no explicit, detected, or process-supplied title exists, so terminal title
-/// updates never replace a more meaningful tab name.
+/// Resolve a tab title by source priority. Terminal-side title requests are
+/// deliberately below the current worktree name: they remain compatible when
+/// no worktree is active, but cannot replace a worktree title.
 pub(crate) fn resolve_tab_title(
     tab: &Tab,
     automatic_title: impl FnOnce() -> SharedString,
@@ -14,13 +14,13 @@ pub(crate) fn resolve_tab_title(
         .as_ref()
         .map(|title| title.clone().into())
         .or_else(|| {
-            tab.pinned_worktree_title
-                .as_ref()
+            tab.active_pane()
+                .and_then(|pane| pane.detected_worktree_title.as_ref())
                 .map(|title| title.clone().into())
         })
         .or_else(|| {
-            tab.active_pane()
-                .and_then(|pane| pane.detected_worktree_title.as_ref())
+            tab.worktree_seed_title
+                .as_ref()
                 .map(|title| title.clone().into())
         })
         .or_else(|| tab.process_title.as_ref().map(|title| title.clone().into()))
@@ -40,9 +40,10 @@ pub(crate) fn set_tab_worktree_title(tab: &mut Tab, title: Option<String>) {
     for pane in &mut tab.panes {
         pane.worktree_detection_generation = pane.worktree_detection_generation.wrapping_add(1);
         pane.worktree_detection_directory = None;
+        pane.worktree_detection_can_clear = false;
         pane.detected_worktree_title = None;
     }
-    tab.pinned_worktree_title = title;
+    tab.worktree_seed_title = title;
 }
 
 pub(crate) fn set_tab_name_on_tabs<'a, I>(tabs: I, request: &TabNameRequest) -> bool
@@ -80,6 +81,30 @@ impl Zetta {
             && set_tab_name_on_tabs(self.background_sessions.iter_mut(), &request);
         let found = found_in_visible || found_in_background;
         if found {
+            // A process-side title request is also a useful signal that the
+            // foreground process changed. Refresh the worktree identity here
+            // because this path does not necessarily produce a terminal CWD
+            // or title event of its own.
+            let target = self
+                .tabs
+                .iter()
+                .find(|tab| tab.attention_id == request.attention_id)
+                .or_else(|| {
+                    self.background_sessions
+                        .iter()
+                        .find(|tab| tab.attention_id == request.attention_id)
+                })
+                .map(|tab| {
+                    (
+                        tab.id,
+                        tab.panes.iter().map(|pane| pane.id).collect::<Vec<_>>(),
+                    )
+                });
+            if let Some((tab_id, pane_ids)) = target {
+                for pane_id in pane_ids {
+                    self.schedule_worktree_detection_for_pane(tab_id, pane_id, cx);
+                }
+            }
             cx.notify();
             if found_in_background {
                 self.publish_background_session_catalog(cx);

@@ -3,6 +3,14 @@ if [[ -n ${ZETTA_HOST_EXECUTABLE:-} ]]; then
     function zetta { command "$ZETTA_HOST_EXECUTABLE" "$@"; }
 fi
 
+if (( ! $+functions[__zetta_report_cwd] )); then
+    function __zetta_report_cwd() {
+        [[ "$PWD" == /* ]] && printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
+    }
+    autoload -Uz add-zsh-hook
+    add-zsh-hook precmd __zetta_report_cwd
+fi
+
 if (( ! ${+EDITOR} )); then
     export EDITOR='zetta vi'
 fi

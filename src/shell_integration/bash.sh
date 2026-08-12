@@ -3,6 +3,18 @@ if [[ -n ${ZETTA_HOST_EXECUTABLE:-} ]]; then
     zetta() { command "$ZETTA_HOST_EXECUTABLE" "$@"; }
 fi
 
+if [[ -z ${__ZETTA_CWD_TRACKING_INSTALLED:-} ]]; then
+    __ZETTA_CWD_TRACKING_INSTALLED=1
+    __zetta_report_cwd() {
+        printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
+    }
+    if [[ $(declare -p PROMPT_COMMAND 2>/dev/null) == "declare -a"* ]]; then
+        PROMPT_COMMAND+=(__zetta_report_cwd)
+    else
+        PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND;}__zetta_report_cwd"
+    fi
+fi
+
 if [[ -z ${EDITOR+x} ]]; then
     export EDITOR='zetta vi'
 fi

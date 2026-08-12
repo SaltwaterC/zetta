@@ -1,5 +1,6 @@
 use super::*;
 use crate::rename::resolve_tab_title;
+use crate::worktree_detection::terminal_event_requires_worktree_detection;
 use zeroize::Zeroizing;
 
 const BACKGROUND_PROCESS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
@@ -572,7 +573,7 @@ impl Zetta {
         cx.subscribe(
             &terminal,
             move |this, _, event: &TerminalEvent, cx| match event {
-                TerminalEvent::TitleChanged => {
+                event if terminal_event_requires_worktree_detection(event) => {
                     this.schedule_worktree_detection_for_pane(tab_id, pane_id, cx);
                     this.publish_background_session_catalog(cx);
                 }

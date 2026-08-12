@@ -1577,8 +1577,8 @@ pub(crate) fn request_process_focus_tab(process_id: u32, attention_id: u64) -> R
     send_focus_tab_request(&endpoint, attention_id)
 }
 
-// Kept for process-control callers that intentionally publish a lower-priority
-// process title outside the built-in worktree commands.
+// Kept for process-control callers for protocol compatibility. The request is
+// honored outside a worktree and is masked by the active worktree title.
 #[allow(dead_code)]
 pub(crate) fn request_process_tab_name(process_id: u32, request: TabNameRequest) -> Result<bool> {
     let endpoint_path = control_endpoint_path(process_id);

@@ -5,6 +5,12 @@ if set -q ZETTA_HOST_EXECUTABLE; and test -n "$ZETTA_HOST_EXECUTABLE"
     end
 end
 
+if not functions -q __zetta_report_cwd
+    function __zetta_report_cwd --on-event fish_prompt
+        printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
+    end
+end
+
 if not set -q EDITOR
     set -gx EDITOR 'zetta vi'
 end

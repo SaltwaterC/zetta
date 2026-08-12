@@ -8,6 +8,13 @@ use anyhow::Result;
 
 const WORKTREE_BRANCH_PREFIX: &str = "refs/heads/wt/";
 
+pub(crate) fn terminal_event_requires_worktree_detection(event: &TerminalEvent) -> bool {
+    matches!(
+        event,
+        TerminalEvent::TitleChanged | TerminalEvent::BreadcrumbsChanged
+    )
+}
+
 /// Inspect a native directory for a linked Git worktree whose branch is
 /// `wt/<name>`.
 ///
@@ -129,20 +136,33 @@ fn select_worktree_detection_directory(
     reported_directory: Option<PathBuf>,
     process_directory: Option<PathBuf>,
     foreground_process_is_shell: bool,
-) -> Option<PathBuf> {
-    reported_directory.or_else(|| {
-        foreground_process_is_shell
-            .then_some(process_directory)
-            .flatten()
-    })
+) -> Option<(PathBuf, bool)> {
+    if foreground_process_is_shell {
+        process_directory
+            .or(reported_directory)
+            .map(|directory| (directory, true))
+    } else {
+        reported_directory
+            .map(|directory| (directory, true))
+            .or_else(|| process_directory.map(|directory| (directory, false)))
+    }
+}
+
+fn worktree_detection_directory_is_current(
+    scheduled_directory: Option<&Path>,
+    current_directory: Option<&Path>,
+    directory: &Path,
+) -> bool {
+    scheduled_directory == Some(directory)
+        && current_directory.is_none_or(|current| current == directory)
 }
 
 impl TerminalPane {
     /// Returns the interactive shell's directory for automatic worktree
-    /// naming. Shell-reported markers remain authoritative while a child is
-    /// running; without one, process inspection is safe only while the shell
-    /// owns the foreground.
-    fn worktree_detection_directory(&self, cx: &App) -> Option<PathBuf> {
+    /// naming. Shell-reported markers are authoritative while a child is
+    /// running; the foreground process CWD is used as a fallback when no
+    /// shell marker is available.
+    fn worktree_detection_directory(&self, cx: &App) -> Option<(PathBuf, bool)> {
         let terminal = self.terminal.as_ref()?.read(cx);
         let reported_directory = terminal.reported_working_directory().and_then(|directory| {
             if let Some((root, _)) = msys2_profile(&self.profile.command) {
@@ -153,9 +173,7 @@ impl TerminalPane {
             }
         });
         let foreground_process_is_shell = terminal.foreground_process_is_shell();
-        let process_directory = (reported_directory.is_none() && foreground_process_is_shell)
-            .then(|| terminal.working_directory())
-            .flatten();
+        let process_directory = terminal.process_working_directory();
         select_worktree_detection_directory(
             reported_directory,
             process_directory,
@@ -171,48 +189,35 @@ impl Zetta {
         pane_id: u64,
         cx: &mut Context<Self>,
     ) {
-        let Some((pinned, directory, is_wsl)) = self
+        let Some((directory, is_wsl)) = self
             .tabs
             .iter()
             .find(|tab| tab.id == tab_id)
             .or_else(|| self.background_sessions.iter().find(|tab| tab.id == tab_id))
             .and_then(|tab| {
                 let pane = tab.pane(pane_id)?;
-                let pinned = tab.pinned_worktree_title.is_some();
                 let is_wsl = is_wsl_shell(&pane.profile.command);
-                let directory = (!pinned && !is_wsl)
+                let directory = (!is_wsl)
                     .then(|| pane.worktree_detection_directory(cx))
                     .flatten();
-                Some((pinned, directory, is_wsl))
+                Some((directory, is_wsl))
             })
         else {
             return;
         };
-        if pinned || is_wsl {
+        if is_wsl {
             // The reported WSL path belongs to a different filesystem. The
             // explicit `wt new`/`wt done` control path remains authoritative.
             return;
         }
-        let Some(directory) = directory else {
-            let pane = self
-                .tabs
-                .iter_mut()
-                .find(|tab| tab.id == tab_id)
-                .or_else(|| {
-                    self.background_sessions
-                        .iter_mut()
-                        .find(|tab| tab.id == tab_id)
-                })
-                .and_then(|tab| tab.pane_mut(pane_id));
-            if let Some(pane) = pane
-                && pane.worktree_detection_directory.take().is_some()
-            {
-                pane.worktree_detection_generation =
-                    pane.worktree_detection_generation.wrapping_add(1);
-            }
+        let Some((directory, can_clear)) = directory else {
+            // A native process tree reports the foreground child, not the
+            // shell that launched it. Keep the last shell directory and any
+            // in-flight detection while the child owns the foreground; a
+            // later shell report will replace it if the shell actually moved.
             return;
         };
-        self.schedule_worktree_detection(tab_id, pane_id, directory, cx);
+        self.schedule_worktree_detection(tab_id, pane_id, directory, can_clear, cx);
     }
 
     fn schedule_worktree_detection(
@@ -220,6 +225,7 @@ impl Zetta {
         tab_id: u64,
         pane_id: u64,
         directory: PathBuf,
+        can_clear: bool,
         cx: &mut Context<Self>,
     ) {
         let Some(generation) = self
@@ -232,16 +238,16 @@ impl Zetta {
                     .find(|tab| tab.id == tab_id)
             })
             .and_then(|tab| {
-                if tab.pinned_worktree_title.is_some() {
-                    return None;
-                }
                 let pane = tab.pane_mut(pane_id)?;
-                if pane.worktree_detection_directory.as_deref() == Some(directory.as_path()) {
+                if pane.worktree_detection_directory.as_deref() == Some(directory.as_path())
+                    && (!can_clear || pane.worktree_detection_can_clear)
+                {
                     return None;
                 }
                 pane.worktree_detection_generation =
                     pane.worktree_detection_generation.wrapping_add(1);
                 pane.worktree_detection_directory = Some(directory.clone());
+                pane.worktree_detection_can_clear = can_clear;
                 Some(pane.worktree_detection_generation)
             })
         else {
@@ -277,23 +283,26 @@ impl Zetta {
             .find(|tab| tab.id == tab_id)
             .or_else(|| self.background_sessions.iter().find(|tab| tab.id == tab_id))
             .and_then(|tab| {
-                if tab.pinned_worktree_title.is_some() {
-                    return None;
-                }
                 let pane = tab.pane(pane_id)?;
                 Some((
                     pane.worktree_detection_generation,
                     pane.worktree_detection_directory.as_deref(),
-                    pane.worktree_detection_directory(cx),
+                    pane.worktree_detection_can_clear,
+                    pane.worktree_detection_directory(cx)
+                        .map(|(directory, _)| directory),
                 ))
             });
-        let Some((current_generation, scheduled_directory, current_directory)) = current_state
+        let Some((current_generation, scheduled_directory, can_clear, current_directory)) =
+            current_state
         else {
             return;
         };
         if current_generation != generation
-            || scheduled_directory != Some(directory.as_path())
-            || current_directory.as_deref() != Some(directory.as_path())
+            || !worktree_detection_directory_is_current(
+                scheduled_directory,
+                current_directory.as_deref(),
+                &directory,
+            )
         {
             return;
         }
@@ -301,12 +310,16 @@ impl Zetta {
         let Ok(worktree_title) = result else {
             return;
         };
+        // A missing process CWD means that a child currently hides the shell
+        // from process inspection. Do not let that transient state erase a
+        // known worktree title; the next shell CWD report will schedule the
+        // authoritative replacement.
+        if worktree_title.is_none() && !can_clear {
+            return;
+        }
         let mut changed = false;
         let mut background = false;
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
-            if tab.pinned_worktree_title.is_some() {
-                return;
-            }
             let Some(pane) = tab.pane_mut(pane_id) else {
                 return;
             };
@@ -320,9 +333,6 @@ impl Zetta {
             .iter_mut()
             .find(|tab| tab.id == tab_id)
         {
-            if tab.pinned_worktree_title.is_some() {
-                return;
-            }
             let Some(pane) = tab.pane_mut(pane_id) else {
                 return;
             };

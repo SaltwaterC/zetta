@@ -130,14 +130,15 @@ same locations in the new worktree. Copy-on-write cloning is used when supported
 with a regular-copy fallback; invalid, overlapping, or already-existing paths are
 rejected. Failed initialization or copying cleans up the partial worktree, branch,
 and metadata. See [Using Zetta](docs/usage.md#git-worktrees) for configuration
-and safety details. When these commands run inside a Zetta terminal, a successful
-`new NAME` pins the originating tab's worktree title to exactly `NAME` until a
-successful `done` clears it. Zetta also detects linked worktrees from each
-pane's interactive-shell directory, preserving nested names such as
-`feature/api`; the active pane supplies the automatic title, which clears when
-that shell leaves the worktree. Manual renames take precedence over pinned and
-automatic worktree titles, followed by process-control and terminal-derived
-titles; an empty manual rename reveals the pinned title again when one exists.
+and safety details. Zetta detects linked worktrees from each pane's
+interactive-shell directory, preserving nested names such as `feature/api`;
+the active pane supplies the automatic title. A successful `new NAME` records
+the originating tab's worktree title, and only a successful `done` clears that
+record. Terminal-side title requests remain available for ordinary tabs, but
+are masked while a worktree title is active. A live detected worktree name can
+replace the seed when the shell reports a different linked worktree. Manual
+renames take precedence over the worktree title, and an empty manual rename
+reveals it again.
 The Git operations and `--path-only` output do not depend on Zetta being
 available. `wt status` also reports whether the current `HEAD` contains
 submodules, lists detected nested submodule paths, and reports native

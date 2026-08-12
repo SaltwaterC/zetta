@@ -533,6 +533,7 @@ fn tab_pane_index_resolves_panes_without_scanning() {
             detected_worktree_title: None,
             worktree_detection_directory: None,
             worktree_detection_generation: 0,
+            worktree_detection_can_clear: false,
             stack: PaneStack::default(),
         })
         .collect::<Vec<_>>();
@@ -553,7 +554,7 @@ fn tab_pane_index_resolves_panes_without_scanning() {
         silent_mode: false,
         close_policy: TabClosePolicy::Close,
         custom_title: None,
-        pinned_worktree_title: None,
+        worktree_seed_title: None,
         process_title: None,
         icon: Some(IconName::Terminal),
         pinned: false,
@@ -595,6 +596,7 @@ fn tab_pane_index_resolves_panes_without_scanning() {
         detected_worktree_title: None,
         worktree_detection_directory: None,
         worktree_detection_generation: 0,
+        worktree_detection_can_clear: false,
         stack: PaneStack::default(),
     });
     assert_eq!(tab.pane(4).map(|pane| pane.id), Some(4));
@@ -698,6 +700,7 @@ fn split_profile_comes_from_the_active_pane() {
                 detected_worktree_title: None,
                 worktree_detection_directory: None,
                 worktree_detection_generation: 0,
+                worktree_detection_can_clear: false,
                 stack: PaneStack::default(),
             },
             TerminalPane {
@@ -720,6 +723,7 @@ fn split_profile_comes_from_the_active_pane() {
                 detected_worktree_title: None,
                 worktree_detection_directory: None,
                 worktree_detection_generation: 0,
+                worktree_detection_can_clear: false,
                 stack: PaneStack::default(),
             },
         ],
@@ -740,7 +744,7 @@ fn split_profile_comes_from_the_active_pane() {
         silent_mode: false,
         close_policy: TabClosePolicy::Close,
         custom_title: None,
-        pinned_worktree_title: None,
+        worktree_seed_title: None,
         process_title: None,
         icon: Some(IconName::Terminal),
         pinned: false,
@@ -788,6 +792,7 @@ fn closing_active_pane_restores_previous_focus() {
         detected_worktree_title: None,
         worktree_detection_directory: None,
         worktree_detection_generation: 0,
+        worktree_detection_can_clear: false,
         stack: PaneStack::default(),
     };
     let mut tab = Tab {
@@ -807,7 +812,7 @@ fn closing_active_pane_restores_previous_focus() {
         silent_mode: false,
         close_policy: TabClosePolicy::Close,
         custom_title: None,
-        pinned_worktree_title: None,
+        worktree_seed_title: None,
         process_title: None,
         icon: Some(IconName::Terminal),
         pinned: false,
@@ -857,6 +862,7 @@ fn closing_inactive_pane_preserves_focus() {
         detected_worktree_title: None,
         worktree_detection_directory: None,
         worktree_detection_generation: 0,
+        worktree_detection_can_clear: false,
         stack: PaneStack::default(),
     };
     let mut tab = Tab {
@@ -876,7 +882,7 @@ fn closing_inactive_pane_preserves_focus() {
         silent_mode: false,
         close_policy: TabClosePolicy::Close,
         custom_title: None,
-        pinned_worktree_title: None,
+        worktree_seed_title: None,
         process_title: None,
         icon: Some(IconName::Terminal),
         pinned: false,
@@ -1209,6 +1215,7 @@ fn pane_management_tab() -> Tab {
         detected_worktree_title: None,
         worktree_detection_directory: None,
         worktree_detection_generation: 0,
+        worktree_detection_can_clear: false,
         stack: PaneStack::default(),
     };
     let layout = PaneLayout::Split {
@@ -1239,7 +1246,7 @@ fn pane_management_tab() -> Tab {
         silent_mode: false,
         close_policy: TabClosePolicy::Close,
         custom_title: None,
-        pinned_worktree_title: None,
+        worktree_seed_title: None,
         process_title: None,
         icon: Some(IconName::Terminal),
         pinned: false,
@@ -1411,6 +1418,7 @@ fn pane_labels_remain_stable_and_are_not_reused() {
         detected_worktree_title: None,
         worktree_detection_directory: None,
         worktree_detection_generation: 0,
+        worktree_detection_can_clear: false,
         stack: PaneStack::default(),
     });
 

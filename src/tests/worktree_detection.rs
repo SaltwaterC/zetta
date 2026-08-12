@@ -101,19 +101,16 @@ fn reported_shell_directory_wins_while_a_child_is_foreground() {
 
     assert_eq!(
         select_worktree_detection_directory(Some(reported.clone()), Some(child), false),
-        Some(reported)
+        Some((reported, true))
     );
 }
 
 #[test]
-fn process_directory_is_ignored_while_a_child_is_foreground() {
+fn process_directory_is_used_as_a_non_authoritative_fallback_while_a_child_is_foreground() {
+    let child = std::path::PathBuf::from("/child/switched-source");
     assert_eq!(
-        select_worktree_detection_directory(
-            None,
-            Some(std::path::PathBuf::from("/child/switched-source")),
-            false,
-        ),
-        None
+        select_worktree_detection_directory(None, Some(child.clone()), false),
+        Some((child, false))
     );
 }
 
@@ -122,6 +119,50 @@ fn process_directory_is_used_while_the_shell_is_foreground() {
     let shell = std::path::PathBuf::from("/shell/worktree");
     assert_eq!(
         select_worktree_detection_directory(None, Some(shell.clone()), true),
-        Some(shell)
+        Some((shell, true))
     );
+}
+
+#[test]
+fn process_directory_supersedes_a_stale_report_while_the_shell_is_foreground() {
+    let reported = std::path::PathBuf::from("/old/main");
+    let shell = std::path::PathBuf::from("/shell/worktree");
+
+    assert_eq!(
+        select_worktree_detection_directory(Some(reported), Some(shell.clone()), true),
+        Some((shell, true))
+    );
+}
+
+#[test]
+fn title_and_breadcrumb_events_refresh_worktree_detection() {
+    assert!(terminal_event_requires_worktree_detection(
+        &TerminalEvent::TitleChanged
+    ));
+    assert!(terminal_event_requires_worktree_detection(
+        &TerminalEvent::BreadcrumbsChanged
+    ));
+    assert!(!terminal_event_requires_worktree_detection(
+        &TerminalEvent::Wakeup
+    ));
+}
+
+#[test]
+fn scheduled_shell_directory_remains_current_while_a_child_hides_the_cwd() {
+    let shell = Path::new("/shell/worktree");
+
+    assert!(worktree_detection_directory_is_current(
+        Some(shell),
+        None,
+        shell,
+    ));
+}
+
+#[test]
+fn a_new_shell_directory_invalidates_an_old_detection() {
+    assert!(!worktree_detection_directory_is_current(
+        Some(Path::new("/shell/old")),
+        Some(Path::new("/shell/new")),
+        Path::new("/shell/old"),
+    ));
 }

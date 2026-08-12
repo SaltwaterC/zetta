@@ -29,6 +29,7 @@ fn tab(attention_id: u64, custom_title: Option<&str>) -> Tab {
         detected_worktree_title: None,
         worktree_detection_directory: None,
         worktree_detection_generation: 0,
+        worktree_detection_can_clear: false,
         stack: PaneStack::default(),
     };
     Tab {
@@ -48,7 +49,7 @@ fn tab(attention_id: u64, custom_title: Option<&str>) -> Tab {
         silent_mode: false,
         close_policy: TabClosePolicy::Close,
         custom_title: custom_title.map(str::to_owned),
-        pinned_worktree_title: None,
+        worktree_seed_title: None,
         process_title: None,
         icon: Some(IconName::Terminal),
         pinned: false,
@@ -74,7 +75,10 @@ fn tab_name_updates_the_exact_nested_name_without_touching_another_tab() {
 
     assert!(set_tab_name_on_tabs(tabs.iter_mut(), &request));
     assert_eq!(tabs[0].custom_title.as_deref(), Some("active"));
-    assert_eq!(tabs[1].process_title.as_deref(), Some("feature/api"));
+    assert_eq!(
+        resolve_tab_title(&tabs[1], || "terminal".to_owned().into()).as_ref(),
+        "feature/api"
+    );
 }
 
 #[test]
@@ -88,6 +92,10 @@ fn tab_name_clear_removes_only_a_previous_process_title() {
 
     assert!(set_tab_name_on_tabs(tabs.iter_mut(), &request));
     assert_eq!(tabs[0].custom_title.as_deref(), Some("manually changed"));
+    assert_eq!(
+        resolve_tab_title(&tabs[0], || "terminal".to_owned().into()).as_ref(),
+        "manually changed"
+    );
     assert_eq!(tabs[0].process_title, None);
 }
 
@@ -114,13 +122,16 @@ fn tab_name_targets_detached_tabs_too() {
 
     assert!(set_tab_name_on_tabs(sessions.iter_mut(), &request));
     assert_eq!(
-        sessions.iter().next().unwrap().process_title.as_deref(),
-        Some("feature/api")
+        resolve_tab_title(sessions.iter().next().unwrap(), || "terminal"
+            .to_owned()
+            .into())
+        .as_ref(),
+        "feature/api"
     );
 }
 
 #[test]
-fn worktree_name_request_sets_the_pinned_title() {
+fn worktree_name_request_sets_the_worktree_seed_title() {
     let mut tabs = [tab(42, None)];
     let request = WorktreeNameRequest {
         attention_id: 42,
@@ -129,25 +140,25 @@ fn worktree_name_request_sets_the_pinned_title() {
 
     assert!(set_worktree_name_on_tabs(tabs.iter_mut(), &request));
     assert_eq!(
-        tabs[0].pinned_worktree_title.as_deref(),
+        tabs[0].worktree_seed_title.as_deref(),
         Some("custom-tab-name")
     );
 }
 
 #[test]
-fn pinned_worktree_title_wins_over_detected_and_process_titles() {
+fn detected_worktree_title_wins_over_the_seed() {
     let mut tab = tab(42, None);
     set_tab_worktree_title(&mut tab, Some("custom-tab-name".to_owned()));
-    tab.panes[0].detected_worktree_title = Some("switched-source".to_owned());
+    tab.panes[0].detected_worktree_title = Some("tab-name".to_owned());
     set_tab_process_title(&mut tab, Some("switched-source".to_owned()));
 
     let title = resolve_tab_title(&tab, || "terminal".to_owned().into());
 
-    assert_eq!(title.as_ref(), "custom-tab-name");
+    assert_eq!(title.as_ref(), "tab-name");
 }
 
 #[test]
-fn manual_rename_wins_over_worktree_and_process_titles() {
+fn manual_rename_wins_over_worktree_title() {
     let mut tab = tab(42, None);
     set_tab_worktree_title(&mut tab, Some("feature/api".to_owned()));
     set_tab_process_title(&mut tab, Some("switched-source".to_owned()));
@@ -160,7 +171,7 @@ fn manual_rename_wins_over_worktree_and_process_titles() {
 }
 
 #[test]
-fn clearing_manual_rename_reveals_the_pinned_worktree_title() {
+fn clearing_manual_rename_reveals_the_worktree_title() {
     let mut tab = tab(42, None);
     set_tab_worktree_title(&mut tab, Some("feature/api".to_owned()));
     set_tab_title(&mut tab, Some("Pinned".to_owned()));
@@ -169,6 +180,20 @@ fn clearing_manual_rename_reveals_the_pinned_worktree_title() {
     assert_eq!(
         resolve_tab_title(&tab, || "terminal".to_owned().into()).as_ref(),
         "feature/api"
+    );
+}
+
+#[test]
+fn clearing_manual_rename_reveals_the_detected_worktree_title() {
+    let mut tab = tab(42, None);
+    tab.panes[0].detected_worktree_title = Some("tab-name".to_owned());
+    set_tab_process_title(&mut tab, Some("switched-source".to_owned()));
+    set_tab_title(&mut tab, Some("custom".to_owned()));
+    set_tab_title(&mut tab, None);
+
+    assert_eq!(
+        resolve_tab_title(&tab, || "terminal".to_owned().into()).as_ref(),
+        "tab-name"
     );
 }
 
@@ -204,7 +229,7 @@ fn clearing_worktree_title_invalidates_detection_and_preserves_manual_title() {
     };
 
     assert!(set_worktree_name_on_tabs(tabs.iter_mut(), &request));
-    assert_eq!(tabs[0].pinned_worktree_title, None);
+    assert_eq!(tabs[0].worktree_seed_title, None);
     assert_eq!(tabs[0].custom_title.as_deref(), Some("Pinned"));
     assert_eq!(tabs[0].panes[0].detected_worktree_title, None);
     assert_eq!(tabs[0].panes[0].worktree_detection_directory, None);
@@ -215,7 +240,7 @@ fn clearing_worktree_title_invalidates_detection_and_preserves_manual_title() {
 }
 
 #[test]
-fn clearing_process_title_does_not_affect_worktree_title() {
+fn process_tab_name_clear_does_not_affect_worktree_title() {
     let mut tabs = [tab(42, None)];
     set_tab_worktree_title(&mut tabs[0], Some("feature/api".to_owned()));
     set_tab_process_title(&mut tabs[0], Some("switched-source".to_owned()));
@@ -225,9 +250,28 @@ fn clearing_process_title_does_not_affect_worktree_title() {
     };
 
     assert!(set_tab_name_on_tabs(tabs.iter_mut(), &request));
-    assert_eq!(tabs[0].process_title, None);
     assert_eq!(
-        tabs[0].pinned_worktree_title.as_deref(),
-        Some("feature/api")
+        resolve_tab_title(&tabs[0], || "terminal".to_owned().into()).as_ref(),
+        "feature/api"
+    );
+    assert_eq!(tabs[0].process_title, None);
+    assert_eq!(tabs[0].worktree_seed_title.as_deref(), Some("feature/api"));
+}
+
+#[test]
+fn process_tab_name_is_masked_by_a_worktree_and_returns_after_done() {
+    let mut tab = tab(42, None);
+    set_tab_worktree_title(&mut tab, Some("feature/api".to_owned()));
+    set_tab_process_title(&mut tab, Some("switched-source".to_owned()));
+
+    assert_eq!(
+        resolve_tab_title(&tab, || "terminal".to_owned().into()).as_ref(),
+        "feature/api"
+    );
+
+    set_tab_worktree_title(&mut tab, None);
+    assert_eq!(
+        resolve_tab_title(&tab, || "terminal".to_owned().into()).as_ref(),
+        "switched-source"
     );
 }
