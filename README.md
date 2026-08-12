@@ -10,7 +10,7 @@ for active development.
 
 ## Highlights
 
-- Tabs with renameable titles, selectable icons, and tab reordering, recursive pane splits and
+- Tabs with renameable titles, selectable icons, session-only pinned tabs, and tab reordering, recursive pane splits and
   pane rotation, pane templates, pane minimization, input broadcasting, and
   modal keyboard or mouse pane resizing and moving
 - Automatically detected shells, including Homebrew-installed shells on

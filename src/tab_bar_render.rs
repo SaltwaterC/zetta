@@ -18,6 +18,8 @@ pub(crate) struct TabBarChrome {
     pub(crate) tab_close_button_on_left: bool,
     pub(crate) is_renaming_tab: bool,
     pub(crate) tab_count: usize,
+    pub(crate) pinned_tab_count: usize,
+    pub(crate) is_renaming_pinned: bool,
     pub(crate) selected_tab_index: usize,
     pub(crate) tab_move_mode_active: bool,
     /// `Some(true)` when the user is stepping through the right overflow menu,
@@ -52,6 +54,7 @@ fn tab_leading_icons(
 #[derive(Clone, Copy)]
 struct TabDrag {
     tab_id: u64,
+    pinned: bool,
 }
 
 impl Zetta {
@@ -156,6 +159,8 @@ fn render_tabs_row(chrome: TabBarChrome) -> impl IntoElement {
         tab_close_button_on_left,
         is_renaming_tab,
         tab_count,
+        pinned_tab_count,
+        is_renaming_pinned,
         selected_tab_index,
         tab_move_mode_active,
         overflow_selection,
@@ -175,15 +180,28 @@ fn render_tabs_row(chrome: TabBarChrome) -> impl IntoElement {
         let show_compact_drag_area = compact_drag_area_visible(compact_mode, is_macos_fullscreen);
         let reserved_chrome_width =
             TAB_OVERFLOW_TRIGGER_WIDTH + compact_drag_area_reserve_width(show_compact_drag_area);
-        let available_for_tabs = (size.width - reserved_chrome_width).max(px(0.));
+        let pinned_count = pinned_tab_count;
+        let unpinned_count = tab_count.saturating_sub(pinned_count);
+        let selected_unpinned_index = selected_tab_index
+            .saturating_sub(pinned_count)
+            .min(unpinned_count.saturating_sub(1));
+        let pinned_width = PINNED_TAB_WIDTH * pinned_count
+            + if is_renaming_pinned {
+                TAB_MAX_WIDTH - PINNED_TAB_WIDTH
+            } else {
+                px(0.)
+            };
+        let available_for_tabs = (size.width - reserved_chrome_width - pinned_width).max(px(0.));
+        let unpinned_is_renaming = is_renaming_tab && !is_renaming_pinned;
         let is_shrinking =
-            tab_bar_tabs_are_shrinking(available_for_tabs, is_renaming_tab, tab_count);
-        let visible_range = tab_bar_visible_tab_range(
+            tab_bar_tabs_are_shrinking(available_for_tabs, unpinned_is_renaming, unpinned_count);
+        let visible_range = tab_bar_visible_tab_range_with_pinned_tabs(
             available_for_tabs,
-            tab_count,
-            selected_tab_index,
-            is_renaming_tab,
+            unpinned_count,
+            selected_unpinned_index,
+            unpinned_is_renaming,
             overflow_selection,
+            pinned_count > 0,
         );
 
         let (tabs, left_overflow, right_overflow, first_visible_selected) = handle
@@ -191,19 +209,23 @@ fn render_tabs_row(chrome: TabBarChrome) -> impl IntoElement {
                 let overflow_entries = |range: std::ops::Range<usize>| {
                     range
                         .filter_map(|index| {
-                            let tab = this.tabs.get(index)?;
-                            Some((index, tab_overflow_entry_label(tab, cx)))
+                            let absolute_index = pinned_count + index;
+                            let tab = this.tabs.get(absolute_index)?;
+                            Some((absolute_index, tab_overflow_entry_label(tab, cx)))
                         })
                         .collect::<Vec<_>>()
                 };
                 let left_overflow = overflow_entries(0..visible_range.start);
-                let right_overflow = overflow_entries(visible_range.end..tab_count);
+                let right_overflow = overflow_entries(visible_range.end..unpinned_count);
 
                 let visible_tabs: Vec<_> = this
                     .tabs
                     .iter()
                     .enumerate()
-                    .filter(|(index, _)| visible_range.contains(index))
+                    .filter(|(index, _)| {
+                        *index < pinned_count
+                            || visible_range.contains(&index.saturating_sub(pinned_count))
+                    })
                     .map(|(index, tab)| {
                         let selected = index == this.active_tab;
                         (index, tab, selected)
@@ -245,6 +267,7 @@ fn render_tabs_row(chrome: TabBarChrome) -> impl IntoElement {
                                 selected,
                                 next_selected,
                                 tab_count,
+                                pinned: index < pinned_count,
                                 tab_move_mode_active,
                                 is_shrinking,
                                 is_renaming_tab,
@@ -265,10 +288,11 @@ fn render_tabs_row(chrome: TabBarChrome) -> impl IntoElement {
                         )
                     })
                     .collect::<Vec<_>>();
-
                 (tabs, left_overflow, right_overflow, first_visible_selected)
             })
             .unwrap_or_default();
+        let mut tab_iter = tabs.into_iter();
+        let pinned_tabs = tab_iter.by_ref().take(pinned_count);
 
         div()
             .id("tabs-scroll")
@@ -291,6 +315,9 @@ fn render_tabs_row(chrome: TabBarChrome) -> impl IntoElement {
                 compact_mode && left_overflow.is_empty() && !first_visible_selected,
                 |tabs| tabs.border_l_1().border_color(border_color.opacity(0.25)),
             )
+            // Keep the pinned prefix ahead of the unpinned overflow control;
+            // the overflow menu only represents tabs from the unpinned range.
+            .children(pinned_tabs)
             .when(!left_overflow.is_empty(), |bar| {
                 let overflow_border = if compact_mode {
                     border_color.opacity(0.5)
@@ -307,7 +334,7 @@ fn render_tabs_row(chrome: TabBarChrome) -> impl IntoElement {
                     handle.clone(),
                 ))
             })
-            .children(tabs)
+            .children(tab_iter)
             .when(!right_overflow.is_empty(), |bar| {
                 let overflow_border = if compact_mode {
                     border_color.opacity(0.5)
@@ -339,6 +366,7 @@ struct TabChrome<'a> {
     selected: bool,
     next_selected: bool,
     tab_count: usize,
+    pinned: bool,
     tab_move_mode_active: bool,
     is_shrinking: bool,
     is_renaming_tab: bool,
@@ -528,6 +556,7 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
         selected,
         next_selected,
         tab_count,
+        pinned,
         tab_move_mode_active,
         is_shrinking,
         is_renaming_tab,
@@ -561,6 +590,7 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
         tab_colors.icon_muted
     };
     let show_active_tab_shape = active_tab_shape_visible(compact_mode, selected);
+    let is_renaming_this_tab = pinned && is_renaming_tab && selected && tab.renaming_pane.is_none();
     let select_handle = handle.clone();
     let close_handle = handle.clone();
     let rename_view = tab.active_view();
@@ -603,8 +633,9 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
         tab_auto_background,
         tab.silent_mode,
         tab.icon,
-        !is_shrinking || (is_renaming_tab && selected),
+        pinned || !is_shrinking || (is_renaming_tab && selected),
     );
+    let accessible_title = full_title.clone();
     let content = h_flex()
         .min_w_0()
         .gap_1()
@@ -629,17 +660,6 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
                     .child(svg().path(icon.path()).size(px(14.)).text_color(tab_icon)),
             )
         })
-        // The tab being renamed always keeps its custom icon, even if the
-        // rest of the bar is shrinking enough to hide everyone else's.
-        .when_some(custom_icon, |content, icon| {
-            content.child(
-                svg()
-                    .path(icon.path())
-                    .size(px(14.))
-                    .flex_none()
-                    .text_color(tab_icon),
-            )
-        })
         .when_some(attention_tooltip, |content, tooltip| {
             content.child(
                 div()
@@ -652,24 +672,36 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
                     .tooltip(Tooltip::text(tooltip)),
             )
         })
-        .child(
-            div()
-                .id(("tab-title", tab.id as usize))
-                .min_w_0()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .text_sm()
-                .when(
-                    tab.rename_buffer.is_some()
-                        && tab.renaming_pane.is_none()
-                        && tab.rename_select_all,
-                    |title| title.bg(tab_colors.element_selection_background),
-                )
-                .tooltip(Tooltip::text(full_title))
-                .text_color(tab_text)
-                .child(title),
-        )
+        // The tab being renamed always keeps its custom icon, even if the
+        // rest of the bar is shrinking enough to hide everyone else's.
+        .when_some(custom_icon, |content, icon| {
+            content.child(
+                svg()
+                    .path(icon.path())
+                    .size(px(14.))
+                    .flex_none()
+                    .text_color(tab_icon),
+            )
+        })
+        .when(!pinned || is_renaming_this_tab, |content| {
+            content.child(
+                div()
+                    .id(("tab-title", tab.id as usize))
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_sm()
+                    .when(
+                        tab.rename_buffer.is_some()
+                            && tab.renaming_pane.is_none()
+                            && tab.rename_select_all,
+                        |title| title.bg(tab_colors.element_selection_background),
+                    )
+                    .text_color(tab_text)
+                    .child(title),
+            )
+        })
         .into_any_element();
     let tab_element = tab_bar_row_height(compact_mode, title_bar_height)
         .id(("tab", tab.id as usize))
@@ -703,14 +735,20 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
                 corner_radius,
             ))
         })
+        .aria_label(accessible_title)
+        .tooltip(Tooltip::text(full_title.clone()))
         .cursor(if tab_move_mode_active {
             CursorStyle::ResizeLeftRight
         } else {
             CursorStyle::OpenHand
         })
-        .on_drag(TabDrag { tab_id: tab.id }, |_, _, _, cx| {
-            cx.new(|_| gpui::Empty)
-        })
+        .on_drag(
+            TabDrag {
+                tab_id: tab.id,
+                pinned: tab.pinned,
+            },
+            |_, _, _, cx| cx.new(|_| gpui::Empty),
+        )
         .on_click(move |event, window, cx| {
             cx.stop_propagation();
             select_handle
@@ -728,31 +766,33 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
                 .ok();
         })
         .child(div().min_w_0().flex_1().overflow_hidden().child(content))
-        .child(
-            div()
-                .id(("close-tab", tab.id as usize))
-                .size(px(24.))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .hover(|style| style.bg(tab_colors.element_hover))
-                .aria_label("Close tab")
-                .tooltip(move |_window, cx| Tooltip::for_action("Close tab", &CloseTab, cx))
-                .child(
-                    svg()
-                        .path(IconName::Close.path())
-                        .size(px(12.))
-                        .text_color(tab_icon),
-                )
-                .on_click(move |_, window, cx| {
-                    cx.stop_propagation();
-                    close_handle
-                        .update(cx, |this, cx| this.close_tab_at(index, window, cx))
-                        .ok();
-                }),
-        );
+        .when(!pinned, |tab_element| {
+            tab_element.child(
+                div()
+                    .id(("close-tab", tab.id as usize))
+                    .size(px(24.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .hover(|style| style.bg(tab_colors.element_hover))
+                    .aria_label("Close tab")
+                    .tooltip(move |_window, cx| Tooltip::for_action("Close tab", &CloseTab, cx))
+                    .child(
+                        svg()
+                            .path(IconName::Close.path())
+                            .size(px(12.))
+                            .text_color(tab_icon),
+                    )
+                    .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        close_handle
+                            .update(cx, |this, cx| this.close_tab_at(index, window, cx))
+                            .ok();
+                    }),
+            )
+        });
     let menu_handle = handle.clone();
     let tab_silent_mode = tab.silent_mode;
     // The context menu activates this tab before it is rendered. Use
@@ -774,6 +814,7 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
                     let menu = menu.when_some(action_context, |menu, focus| menu.context(focus));
                     menu.action("Rename Tab", Box::new(RenameTab))
                         .action("Change Tab Icon", Box::new(ChangeTabIcon))
+                        .action_checked("Pin Tab", Box::new(ToggleTabPinning), pinned)
                         .action_checked(
                             "Tab Silent Mode",
                             Box::new(ToggleTabSilentMode),
@@ -797,17 +838,27 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
             })
             .trigger(move |_, _, _| tab_element)
             .into_any_element();
-    let tab_element = responsive_tab_container(
-        tab_element,
-        compact_mode,
-        title_bar_height,
-        is_renaming_tab && selected,
-    );
+    let tab_element = if pinned {
+        pinned_tab_container(
+            tab_element,
+            compact_mode,
+            title_bar_height,
+            is_renaming_this_tab,
+        )
+    } else {
+        responsive_tab_container(
+            tab_element,
+            compact_mode,
+            title_bar_height,
+            is_renaming_tab && selected,
+        )
+    };
     let tab_element = if cx.has_active_drag() {
         tab_element
             .relative()
             .child(render_tab_drop_surface(
                 tab.id,
+                tab.pinned,
                 false,
                 tab_colors.drop_target_background,
                 tab_colors.drop_target_border,
@@ -815,6 +866,7 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
             ))
             .child(render_tab_drop_surface(
                 tab.id,
+                tab.pinned,
                 true,
                 tab_colors.drop_target_background,
                 tab_colors.drop_target_border,
@@ -828,6 +880,7 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
 
 fn render_tab_drop_surface(
     target_tab_id: u64,
+    target_pinned: bool,
     insert_after: bool,
     drop_target_background: Hsla,
     drop_target_border: Hsla,
@@ -850,10 +903,10 @@ fn render_tab_drop_surface(
         .can_drop(move |dragged, _, _| {
             dragged
                 .downcast_ref::<TabDrag>()
-                .is_some_and(|drag| drag.tab_id != target_tab_id)
+                .is_some_and(|drag| drag.tab_id != target_tab_id && drag.pinned == target_pinned)
         })
         .drag_over::<TabDrag>(move |surface, dragged, _, _| {
-            if dragged.tab_id == target_tab_id {
+            if dragged.tab_id == target_tab_id || dragged.pinned != target_pinned {
                 return surface;
             }
             let surface = surface

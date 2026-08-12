@@ -51,6 +51,7 @@ fn tab(attention_id: u64, custom_title: Option<&str>) -> Tab {
         pinned_worktree_title: None,
         process_title: None,
         icon: Some(IconName::Terminal),
+        pinned: false,
         renaming_pane: None,
         rename_buffer: None,
         rename_cursor: 0,

@@ -1,5 +1,5 @@
 use super::*;
-use crate::ToggleTabMoveMode;
+use crate::{ToggleTabMoveMode, ToggleTabPinning};
 gpui::actions!(command_palette_test, [First, Second]);
 
 #[test]
@@ -8,6 +8,10 @@ fn humanizes_action_names() {
     assert_eq!(
         humanize_action_name(ToggleTabMoveMode.name()),
         "zetta: toggle tab move mode"
+    );
+    assert_eq!(
+        humanize_action_name(ToggleTabPinning.name()),
+        "zetta: toggle tab pinning"
     );
     assert_eq!(
         humanize_action_name("editor::OpenURLParser"),

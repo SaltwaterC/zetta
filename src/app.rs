@@ -92,6 +92,65 @@ fn tab_overflow_selection_side(selected_index: usize, active_index: usize) -> Op
     (selected_index != active_index).then_some(selected_index > active_index)
 }
 
+pub(crate) fn pinned_tab_count(tabs: &[Tab]) -> usize {
+    tabs.iter().take_while(|tab| tab.pinned).count()
+}
+
+pub(crate) fn tab_drop_preserves_pinning(
+    tabs: &[Tab],
+    source_id: u64,
+    position: TabDropPosition,
+) -> bool {
+    let Some(source_pinned) = tabs
+        .iter()
+        .find(|tab| tab.id == source_id)
+        .map(|tab| tab.pinned)
+    else {
+        return false;
+    };
+    let target_id = match position {
+        TabDropPosition::Before(target_id) | TabDropPosition::After(target_id) => target_id,
+        TabDropPosition::Outside => return false,
+    };
+    tabs.iter()
+        .find(|tab| tab.id == target_id)
+        .is_some_and(|tab| tab.pinned == source_pinned)
+}
+
+fn tab_move_preserves_pinning(tabs: &[Tab], index: usize, direction: TabMoveDirection) -> bool {
+    let Some(tab) = tabs.get(index) else {
+        return false;
+    };
+    let target_index = match direction {
+        TabMoveDirection::Left => index.checked_sub(1),
+        TabMoveDirection::Right => index.checked_add(1),
+    };
+    target_index
+        .and_then(|target_index| tabs.get(target_index))
+        .is_some_and(|target| target.pinned == tab.pinned)
+}
+
+pub(crate) fn insert_tab_in_pin_order(tabs: &mut Vec<Tab>, tab: Tab) -> usize {
+    let insertion_index = if tab.pinned {
+        pinned_tab_count(tabs)
+    } else {
+        tabs.len()
+    };
+    tabs.insert(insertion_index, tab);
+    insertion_index
+}
+
+pub(crate) fn toggle_tab_pinning_in_order(tabs: &mut Vec<Tab>, index: usize) -> Option<usize> {
+    if index >= tabs.len() {
+        return None;
+    }
+    let mut tab = tabs.remove(index);
+    tab.pinned = !tab.pinned;
+    let insertion_index = pinned_tab_count(tabs);
+    tabs.insert(insertion_index, tab);
+    Some(insertion_index)
+}
+
 /// Cached font enumeration for settings font picker
 pub(crate) struct FontCache {
     pub fonts: Arc<[String]>,
@@ -321,6 +380,8 @@ pub(crate) struct Zetta {
     pub(crate) session_authentication_focus: gpui::FocusHandle,
     pub(crate) session_authentication: Option<SessionAuthenticationPrompt>,
     pub(crate) session_authentication_generation: u64,
+    pub(crate) close_confirmation_focus: gpui::FocusHandle,
+    pub(crate) close_tab_confirmation: Option<CloseTabConfirmation>,
     pub(crate) active_tab: usize,
     /// Focuses the active pane while its selected terminal view is being
     /// replaced or is still starting. The corresponding render node carries
@@ -383,6 +444,11 @@ pub(crate) struct Zetta {
     pub(crate) _subscriptions: Vec<Subscription>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CloseTabConfirmation {
+    pub(crate) tab_id: u64,
+}
+
 impl Zetta {
     fn serial_console_is_open(&self) -> bool {
         #[cfg(feature = "serial-console")]
@@ -418,6 +484,7 @@ impl Zetta {
             self.serial_console = None;
         }
         self.session_authentication = None;
+        self.close_tab_confirmation = None;
         self.tab_search = None;
         cx.notify();
     }
@@ -490,6 +557,8 @@ impl Zetta {
             session_authentication_focus: cx.focus_handle(),
             session_authentication: None,
             session_authentication_generation: 0,
+            close_confirmation_focus: cx.focus_handle(),
+            close_tab_confirmation: None,
             active_tab: 0,
             terminal_placeholder_focus: cx.focus_handle(),
             visible_terminals: Vec::new(),
@@ -675,6 +744,7 @@ impl Zetta {
             pinned_worktree_title: None,
             process_title: None,
             icon: self.launch_config.default_tab_icon,
+            pinned: false,
             renaming_pane: None,
             rename_buffer: None,
             rename_cursor: 0,
@@ -1121,7 +1191,29 @@ impl Zetta {
     }
 
     pub(crate) fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_tab_at(self.active_tab, window, cx);
+        let Some(tab_id) = self.tabs.get(self.active_tab).map(|tab| tab.id) else {
+            return;
+        };
+        if self.tabs[self.active_tab].pinned {
+            self.prompt_to_confirm_tab_close(tab_id, window, cx);
+        } else {
+            self.close_tab_at(self.active_tab, window, cx);
+        }
+    }
+
+    pub(crate) fn toggle_tab_pinning(
+        &mut self,
+        _: &ToggleTabPinning,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(insertion_index) = toggle_tab_pinning_in_order(&mut self.tabs, self.active_tab)
+        else {
+            return;
+        };
+        self.active_tab = insertion_index;
+        self.tab_overflow_selection_side = None;
+        cx.notify();
     }
 
     pub(crate) fn close_window(
@@ -1279,6 +1371,9 @@ impl Zetta {
         match selection {
             Some(PaneStackSelection::Stacked(entry_id)) => {
                 self.close_stacked_pane_by_id(tab.id, tab.active_pane, entry_id, window, cx);
+            }
+            _ if tab.panes.len() == 1 && tab.pinned => {
+                self.prompt_to_confirm_tab_close(tab.id, window, cx);
             }
             _ => self.close_pane(tab.id, tab.active_pane, window, cx),
         }
@@ -1953,12 +2048,13 @@ impl Zetta {
         let Some(source_id) = self.tabs.get(self.active_tab).map(|tab| tab.id) else {
             return;
         };
+        let enabled = tab_move_preserves_pinning(&self.tabs, self.active_tab, direction);
         let Some(active_tab_index) = move_item_by_id(
             &mut self.tabs,
             source_id,
             direction,
             source_id,
-            true,
+            enabled,
             |tab| tab.id,
         ) else {
             return;
@@ -1979,6 +2075,9 @@ impl Zetta {
         let Some(active_tab_id) = self.tabs.get(self.active_tab).map(|tab| tab.id) else {
             return;
         };
+        if !tab_drop_preserves_pinning(&self.tabs, tab_id, position) {
+            return;
+        }
         let Some(active_tab_index) =
             reorder_items_by_id(&mut self.tabs, tab_id, position, active_tab_id, |tab| {
                 tab.id

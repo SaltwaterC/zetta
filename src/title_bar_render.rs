@@ -3,6 +3,10 @@ use crate::rename::resolve_tab_title;
 
 pub(crate) const TAB_MIN_WIDTH: Pixels = px(80.);
 pub(crate) const TAB_MAX_WIDTH: Pixels = px(180.);
+// Four pinned-tab indicators (keep-running pin, silent mode, attention, and
+// the tab icon), their gaps, and the tab's horizontal padding fit in this
+// fixed slot. A pinned tab never participates in unpinned overflow.
+pub(crate) const PINNED_TAB_WIDTH: Pixels = px(76.);
 // Matches the new-tab button's own footprint (ml_1 + a 32px button + mr_2), so a
 // trigger reserved at the edge of the tab bar takes up the same visual space.
 pub(crate) const TAB_OVERFLOW_TRIGGER_WIDTH: Pixels = px(44.);
@@ -79,6 +83,25 @@ pub(crate) fn responsive_tab_container(
         .child(child)
 }
 
+pub(crate) fn pinned_tab_container(
+    child: impl IntoElement + 'static,
+    compact_mode: bool,
+    compact_height: Pixels,
+    is_renaming: bool,
+) -> gpui::Div {
+    let width = if is_renaming {
+        TAB_MAX_WIDTH
+    } else {
+        PINNED_TAB_WIDTH
+    };
+    tab_bar_row_height(compact_mode, compact_height)
+        .w(width)
+        .min_w(width)
+        .max_w(width)
+        .flex_none()
+        .child(child)
+}
+
 /// Whether the tab bar no longer has room to give every tab (plus, while a
 /// rename is in progress, the extra full-width room that tab needs) its max
 /// width — used to hide tab icons before labels start getting clipped.
@@ -110,6 +133,51 @@ pub(crate) fn tab_bar_visible_tab_range(
     is_renaming: bool,
     overflow_selection: Option<bool>,
 ) -> std::ops::Range<usize> {
+    tab_bar_visible_tab_range_with_empty_capacity(
+        available_width,
+        tab_count,
+        selected_index,
+        is_renaming,
+        overflow_selection,
+        false,
+    )
+}
+
+pub(crate) fn tab_bar_visible_tab_range_with_pinned_tabs(
+    available_width: Pixels,
+    tab_count: usize,
+    selected_index: usize,
+    is_renaming: bool,
+    overflow_selection: Option<bool>,
+    pinned_tabs_present: bool,
+) -> std::ops::Range<usize> {
+    if !pinned_tabs_present {
+        return tab_bar_visible_tab_range(
+            available_width,
+            tab_count,
+            selected_index,
+            is_renaming,
+            overflow_selection,
+        );
+    }
+    tab_bar_visible_tab_range_with_empty_capacity(
+        available_width,
+        tab_count,
+        selected_index,
+        is_renaming,
+        overflow_selection,
+        pinned_tabs_present,
+    )
+}
+
+fn tab_bar_visible_tab_range_with_empty_capacity(
+    available_width: Pixels,
+    tab_count: usize,
+    selected_index: usize,
+    is_renaming: bool,
+    overflow_selection: Option<bool>,
+    allow_empty_capacity: bool,
+) -> std::ops::Range<usize> {
     if tab_count == 0 {
         return 0..0;
     }
@@ -121,7 +189,14 @@ pub(crate) fn tab_bar_visible_tab_range(
     } else {
         (effective_width / TAB_MIN_WIDTH).floor() as usize
     };
-    let capacity = capacity.clamp(1, tab_count);
+    let capacity = if allow_empty_capacity {
+        capacity.min(tab_count)
+    } else {
+        capacity.clamp(1, tab_count)
+    };
+    if capacity == 0 {
+        return 0..0;
+    }
 
     let selected_index = selected_index.min(tab_count - 1);
     let max_start = tab_count - capacity;
@@ -558,6 +633,9 @@ impl Zetta {
                     tab_close_button_on_left: window_close_button_on_left(self.button_layout),
                     is_renaming_tab: self.is_renaming(),
                     tab_count: self.tabs.len(),
+                    pinned_tab_count: pinned_tab_count(&self.tabs),
+                    is_renaming_pinned: self.is_renaming()
+                        && active_tab.is_some_and(|tab| tab.pinned && tab.renaming_pane.is_none()),
                     selected_tab_index: self.active_tab,
                     tab_move_mode_active: self.tab_move_mode,
                     overflow_selection: self.tab_overflow_selection_side,

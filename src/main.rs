@@ -119,6 +119,7 @@ actions!(
         ActivateApplicationMenuLeft,
         ActivateApplicationMenuRight,
         CloseTab,
+        ToggleTabPinning,
         CloseWindow,
         CloseAllWindows,
         MinimizeWindow,
@@ -295,6 +296,7 @@ use pane_resize::*;
 mod app_render;
 mod background_session_ui;
 mod cli_service_stubs;
+mod close_confirmation_ui;
 mod pane_overlay;
 mod pane_render;
 mod pane_theme_picker;

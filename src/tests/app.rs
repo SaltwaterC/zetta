@@ -1,5 +1,50 @@
 use super::*;
 
+fn pin_test_tab(id: u64, pinned: bool) -> Tab {
+    let profile = Profile {
+        name: "System".to_owned(),
+        command: Shell::System,
+        theme: None,
+        icon: ProfileIcon::Zetta,
+    };
+    let pane = TerminalPane::new(id, profile).with_label_number(1);
+    Tab {
+        id,
+        attention_id: id,
+        attention: None,
+        panes: vec![pane],
+        pane_indices: HashMap::from([(id, 0)]),
+        next_pane_label: 2,
+        layout: PaneLayout::Pane(id),
+        active_pane: id,
+        focus_history: vec![id],
+        maximized_pane: None,
+        minimized_panes: Vec::new(),
+        selected_minimized_pane: None,
+        broadcast_input: false,
+        silent_mode: false,
+        close_policy: TabClosePolicy::Close,
+        custom_title: None,
+        pinned_worktree_title: None,
+        process_title: None,
+        icon: Some(IconName::Terminal),
+        pinned,
+        renaming_pane: None,
+        rename_buffer: None,
+        rename_cursor: 0,
+        rename_select_all: false,
+        editing_overlay_pane: None,
+        overlay_buffer: None,
+        overlay_cursor: 0,
+        overlay_select_all: false,
+        overlay_style_picker: None,
+    }
+}
+
+fn tab_ids(tabs: &[Tab]) -> Vec<u64> {
+    tabs.iter().map(|tab| tab.id).collect()
+}
+
 #[test]
 fn launch_theme_override_applies_case_insensitively_by_name_only() {
     let mut profile = Profile {
@@ -266,6 +311,84 @@ fn tab_move_mode_stops_at_boundaries_and_when_disabled() {
         None
     );
     assert_eq!(ids, vec![1, 2, 3]);
+}
+
+#[test]
+fn visual_pinning_toggles_at_the_pinned_prefix_without_losing_the_active_tab() {
+    let mut tabs = vec![
+        pin_test_tab(1, true),
+        pin_test_tab(2, false),
+        pin_test_tab(3, false),
+    ];
+
+    let active_index = toggle_tab_pinning_in_order(&mut tabs, 2);
+    assert_eq!(active_index, Some(1));
+    assert_eq!(tab_ids(&tabs), vec![1, 3, 2]);
+    assert!(tabs[1].pinned);
+
+    let active_index = toggle_tab_pinning_in_order(&mut tabs, 0);
+    assert_eq!(active_index, Some(1));
+    assert_eq!(tab_ids(&tabs), vec![3, 1, 2]);
+    assert!(!tabs[1].pinned);
+    assert_eq!(pinned_tab_count(&tabs), 1);
+}
+
+#[test]
+fn reconnected_tabs_reenter_the_pinned_prefix() {
+    let mut tabs = vec![pin_test_tab(1, true), pin_test_tab(2, false)];
+    let pinned_index = insert_tab_in_pin_order(&mut tabs, pin_test_tab(3, true));
+    assert_eq!(pinned_index, 1);
+    assert_eq!(tab_ids(&tabs), vec![1, 3, 2]);
+
+    let unpinned_index = insert_tab_in_pin_order(&mut tabs, pin_test_tab(4, false));
+    assert_eq!(unpinned_index, 3);
+    assert_eq!(tab_ids(&tabs), vec![1, 3, 2, 4]);
+}
+
+#[test]
+fn tab_move_and_drag_boundaries_preserve_the_pinned_prefix() {
+    let tabs = vec![
+        pin_test_tab(1, true),
+        pin_test_tab(2, true),
+        pin_test_tab(3, false),
+        pin_test_tab(4, false),
+    ];
+    assert!(tab_move_preserves_pinning(&tabs, 1, TabMoveDirection::Left));
+    assert!(!tab_move_preserves_pinning(
+        &tabs,
+        1,
+        TabMoveDirection::Right
+    ));
+    assert!(!tab_move_preserves_pinning(
+        &tabs,
+        2,
+        TabMoveDirection::Left
+    ));
+    assert!(tab_move_preserves_pinning(
+        &tabs,
+        2,
+        TabMoveDirection::Right
+    ));
+    assert!(tab_drop_preserves_pinning(
+        &tabs,
+        1,
+        TabDropPosition::Before(2)
+    ));
+    assert!(!tab_drop_preserves_pinning(
+        &tabs,
+        1,
+        TabDropPosition::After(3)
+    ));
+    assert!(tab_drop_preserves_pinning(
+        &tabs,
+        3,
+        TabDropPosition::After(4)
+    ));
+    assert!(!tab_drop_preserves_pinning(
+        &tabs,
+        3,
+        TabDropPosition::Before(2)
+    ));
 }
 
 #[test]

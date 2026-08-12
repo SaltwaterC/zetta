@@ -80,11 +80,12 @@ verifier. Hashing and verification run away from the UI thread.
 
 ## Automatically background a tab
 
-Use `Ctrl-Shift-B`, the pin toggle in the tab bar, or **Zetta: Toggle Auto
-Background Tab** in the command palette to keep a tab running when the tab or
-its window closes.
+Use `Ctrl-Shift-B` or **Zetta: Toggle Auto Background Tab** in the command
+palette to keep a tab running when the tab or its window closes. This
+**Keep running** setting is separate from the visual `Pin Tab` action, which
+only keeps a tab at the leading edge of the current tab bar.
 
 Enabling the toggle requires choosing reattachment authentication immediately:
-select **No authentication**, or enter and confirm a secret. Pinned tabs display
-a pin in their label and move to the background automatically on close.
-Unpinned tabs retain normal close behavior.
+select **No authentication**, or enter and confirm a secret. Tabs with **Keep
+running** enabled move to the background automatically on close; their tab-bar
+pin indicator refers to that session policy, not to visual tab pinning.

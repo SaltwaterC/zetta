@@ -1874,6 +1874,9 @@ pub(crate) struct Tab {
     /// command that reports its current source or task).
     pub(crate) process_title: Option<String>,
     pub(crate) icon: Option<IconName>,
+    /// Session-only visual pinning. Pinned tabs stay in the leading tab-bar
+    /// prefix and are independent from the keep-running close policy.
+    pub(crate) pinned: bool,
     pub(crate) renaming_pane: Option<u64>,
     pub(crate) rename_buffer: Option<String>,
     pub(crate) rename_cursor: usize,

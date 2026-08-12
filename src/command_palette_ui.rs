@@ -69,6 +69,25 @@ impl Zetta {
             shortcut: change_tab_icon_shortcut,
             action: Box::new(change_tab_icon),
         });
+        let toggle_tab_pinning = ToggleTabPinning;
+        let toggle_tab_pinning_shortcut = terminal_focus
+            .as_ref()
+            .and_then(|focus| {
+                window.highest_precedence_binding_for_action_in(&toggle_tab_pinning, focus)
+            })
+            .map(|binding| {
+                binding
+                    .keystrokes()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            });
+        commands.push(PaletteCommand {
+            name: humanize_action_name(toggle_tab_pinning.name()),
+            shortcut: toggle_tab_pinning_shortcut,
+            action: Box::new(toggle_tab_pinning),
+        });
         let change_pane_theme = ChangePaneTheme;
         let change_pane_theme_shortcut = terminal_focus
             .as_ref()
@@ -162,6 +181,9 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.close_confirmation_key_down(event, window, cx) {
+            return;
+        }
         if self.session_authentication_key_down(event, window, cx) {
             return;
         }

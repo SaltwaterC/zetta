@@ -206,11 +206,40 @@ fn a_renamed_tab_does_not_grow_even_in_compact_mode() {
 }
 
 #[test]
+fn pinned_tab_container_uses_a_fixed_indicator_slot_and_expands_for_rename() {
+    let mut container = pinned_tab_container(div(), false, px(32.), false);
+    let style = container.style();
+    assert_eq!(style.size.width, Some(PINNED_TAB_WIDTH.into()));
+    assert_eq!(style.min_size.width, Some(PINNED_TAB_WIDTH.into()));
+    assert_eq!(style.max_size.width, Some(PINNED_TAB_WIDTH.into()));
+    assert_eq!(style.flex_grow, Some(0.));
+    assert_eq!(style.flex_shrink, Some(0.));
+
+    let mut renamed = pinned_tab_container(div(), false, px(32.), true);
+    let renamed_style = renamed.style();
+    assert_eq!(renamed_style.size.width, Some(TAB_MAX_WIDTH.into()));
+    assert_eq!(renamed_style.min_size.width, Some(TAB_MAX_WIDTH.into()));
+    assert_eq!(renamed_style.max_size.width, Some(TAB_MAX_WIDTH.into()));
+}
+
+#[test]
 fn tab_overflow_reserves_room_for_the_trigger() {
     assert_eq!(tab_bar_visible_tab_range(px(520.), 6, 0, false, None), 0..5);
     assert_eq!(tab_bar_visible_tab_range(px(520.), 5, 0, false, None), 0..5);
     assert_eq!(tab_bar_visible_tab_range(px(160.), 4, 0, false, None), 0..1);
     assert_eq!(tab_bar_visible_tab_range(px(520.), 0, 0, false, None), 0..0);
+}
+
+#[test]
+fn pinned_tabs_can_leave_all_unpinned_tabs_in_overflow() {
+    assert_eq!(
+        tab_bar_visible_tab_range_with_pinned_tabs(px(0.), 3, 0, false, None, true),
+        0..0
+    );
+    assert_eq!(
+        tab_bar_visible_tab_range_with_pinned_tabs(px(160.), 3, 0, false, None, true),
+        0..1
+    );
 }
 
 #[test]

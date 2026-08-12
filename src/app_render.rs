@@ -937,6 +937,7 @@ struct ZettaOverlays {
     overlay_style_picker: Option<AnyElement>,
     serial_console: Option<AnyElement>,
     session_authentication: Option<AnyElement>,
+    close_confirmation: Option<AnyElement>,
 }
 
 impl Zetta {
@@ -970,6 +971,7 @@ impl Zetta {
             ),
             serial_console: modal_overlay(serial_console),
             session_authentication: modal_overlay(self.render_session_authentication_overlay(cx)),
+            close_confirmation: modal_overlay(self.render_tab_close_confirmation_overlay(cx)),
         }
     }
 
@@ -983,6 +985,7 @@ impl Zetta {
             .on_action(cx.listener(Self::activate_application_menu_right))
             .on_action(cx.listener(Self::open_profile))
             .on_action(cx.listener(Self::close_tab))
+            .on_action(cx.listener(Self::toggle_tab_pinning))
             .on_action(cx.listener(Self::close_window))
             .on_action(cx.listener(Self::close_all_windows))
             .on_action(cx.listener(Self::minimize_window))
@@ -1138,6 +1141,9 @@ impl Zetta {
             .when(self.theme_picker.is_some(), |content| {
                 content.track_focus(&self.theme_picker_focus)
             })
+            .when(self.close_tab_confirmation.is_some(), |content| {
+                content.track_focus(&self.close_confirmation_focus)
+            })
             .capture_key_up(cx.listener(Self::pane_resize_key_up))
             .on_key_down(cx.listener(Self::command_palette_key_down))
             .child(chrome.title_bar)
@@ -1157,6 +1163,7 @@ impl Zetta {
             overlays.overlay_style_picker,
             overlays.serial_console,
             overlays.session_authentication,
+            overlays.close_confirmation,
         ]
         .into_iter()
         .flatten()

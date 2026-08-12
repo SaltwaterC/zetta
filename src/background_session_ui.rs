@@ -462,8 +462,7 @@ impl Zetta {
                 base.into_iter().chain(stacked)
             })
             .collect::<Vec<_>>();
-        self.tabs.push(tab);
-        self.active_tab = self.tabs.len() - 1;
+        self.active_tab = insert_tab_in_pin_order(&mut self.tabs, tab);
 
         for (pane_id, stack_id, terminal, terminal_theme) in panes {
             match terminal_theme {

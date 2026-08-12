@@ -103,6 +103,15 @@ From a Zetta pane, `zetta tabicon ICON` changes the active tab icon;
 built-in icon names.
 Tabs retain a fixed width as their names change.
 
+Right-click a tab and choose the checked `Pin Tab` entry, or run **Zetta: Toggle
+Tab Pinning** from the command palette, to keep it at the leading edge of the
+tab bar for the current session. Pinned tabs use a narrow icon-only slot; their
+title remains available through the tooltip and accessibility label, and the
+slot expands while the tab is renamed. Pinned tabs can be reordered among one
+another but cannot cross the pinned/unpinned boundary. This visual pin is
+independent from **Keep running**, which controls whether closing a tab moves
+its terminal session into the background.
+
 ### Tab attention
 
 Commands running in a Zetta terminal can mark their originating tab with
