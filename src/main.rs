@@ -85,7 +85,7 @@ use settings_editor::{
     BindingForm, ConfigTextField, ConfigurationForm, KeymapForm, KeymapSectionForm,
     KeymapTextField, SettingsPage, TextField, save as save_settings_file,
 };
-use silent_mode::SilentModeState;
+use silent_mode::{FocusStatusAccess, SilentModeState};
 use task::{Shell, ShellBuilder, SpawnInTerminal, TaskId};
 use terminal::{
     Clear, Event as TerminalEvent, Paste, PasteTrimmed, Search, TaskState, TaskStatus, Terminal,
@@ -173,6 +173,7 @@ actions!(
         SelectNextMinimizedPane,
         ToggleBroadcastInput,
         ToggleSilentMode,
+        RequestFocusStatusAccess,
         ToggleTabSilentMode,
         ToggleMultiCommand,
         ToggleStackedCommand,
@@ -202,6 +203,7 @@ fn action_is_enabled_in_build(name: &str) -> bool {
         name if name == ToggleSerialConsole.name() => cfg!(feature = "serial-console"),
         name if name == StartHttpServer.name() => cfg!(feature = "http-server"),
         name if name == StartTftpServer.name() => cfg!(feature = "tftp-server"),
+        name if name == RequestFocusStatusAccess.name() => cfg!(target_os = "macos"),
         _ => true,
     }
 }

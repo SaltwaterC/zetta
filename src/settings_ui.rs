@@ -86,6 +86,8 @@ pub(crate) enum SettingsControl {
     DefaultTabIconPicker,
     Opacity,
     AddProfile,
+    #[cfg(target_os = "macos")]
+    RequestFocusStatusAccess,
     RemoveProfile(usize),
     SearchThemes,
     InstallTheme(Arc<str>),

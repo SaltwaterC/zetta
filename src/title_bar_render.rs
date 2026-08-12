@@ -503,6 +503,7 @@ impl Zetta {
         } else {
             SilentModeState::default()
         };
+        let focus_status_access = silent_mode_state.focus_status_access();
         let (auto_background_tab, auto_background_protected) = active_tab
             .map(|tab| match &tab.close_policy {
                 TabClosePolicy::Background { authentication } => (true, authentication.is_some()),
@@ -649,6 +650,7 @@ impl Zetta {
             title_bar_silent_visible(self.launch_config.hide_title_bar_buttons),
             silent_mode_state.effective(),
             silent_mode_state.system_active(),
+            focus_status_access,
             compact_tab_bar,
             active_pane_size,
             right_title_bar_controls,
@@ -913,6 +915,7 @@ impl Zetta {
         show_silent_control: bool,
         silent_mode: bool,
         system_silent: bool,
+        focus_status_access: FocusStatusAccess,
         compact_tab_bar: Option<AnyElement>,
         active_pane_size: Option<String>,
         right_title_bar_controls: AnyElement,
@@ -964,6 +967,14 @@ impl Zetta {
             }
         });
         let silent_control = show_silent_control.then(|| {
+            let silent_tooltip_title = if system_silent {
+                "Silent mode is controlled by Do Not Disturb"
+            } else if cfg!(target_os = "macos") {
+                focus_status_access.tooltip()
+            } else {
+                "Silence terminal bells and notification sounds"
+            };
+            let silent_tooltip = Tooltip::for_action_title(silent_tooltip_title, &ToggleSilentMode);
             let button = Button::new(
                 "toggle-silent-mode",
                 if show_title_bar_control_labels {
@@ -990,16 +1001,7 @@ impl Zetta {
             } else {
                 "Silent mode is off"
             })
-            .tooltip(Tooltip::for_action_title(
-                if system_silent {
-                    "Silent mode is controlled by Do Not Disturb"
-                } else if silent_mode {
-                    "Silent mode is on"
-                } else {
-                    "Silence terminal bells and notification sounds"
-                },
-                &ToggleSilentMode,
-            ))
+            .tooltip(silent_tooltip)
             .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleSilentMode), cx));
 
             if compact_mode {

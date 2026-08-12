@@ -9,8 +9,8 @@ use gpui::{App, Context, Entity, Window};
 use terminal_view::TerminalView;
 
 use crate::{
-    TerminalPane, ToggleSilentMode, ToggleTabSilentMode, Zetta, ZettaProcessState,
-    process_zetta_entities,
+    RequestFocusStatusAccess, TerminalPane, ToggleSilentMode, ToggleTabSilentMode, Zetta,
+    ZettaProcessState, process_zetta_entities,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -22,9 +22,58 @@ pub(crate) enum SystemSilentState {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum FocusStatusAccess {
+    #[default]
+    Unknown,
+    NotDetermined,
+    Denied,
+    Restricted,
+    Authorized,
+    AuthorizedButUnavailable,
+}
+
+impl FocusStatusAccess {
+    #[cfg(target_os = "macos")]
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Unknown => "Unavailable",
+            Self::NotDetermined => "Not requested",
+            Self::Denied => "Denied",
+            Self::Restricted => "Restricted",
+            Self::Authorized => "Authorized",
+            Self::AuthorizedButUnavailable => "Live status unavailable",
+        }
+    }
+
+    pub(crate) fn tooltip(self) -> &'static str {
+        match self {
+            Self::Unknown => {
+                "macOS Focus status is unavailable. Zetta falls back to manual Silent Mode."
+            }
+            Self::NotDetermined => {
+                "Focus status access has not been requested. Use Request Focus Status Access."
+            }
+            Self::Denied => {
+                "Focus status access was denied. Enable Zetta under System Settings > Privacy & Security > Focus."
+            }
+            Self::Restricted => {
+                "macOS restricts Focus status access for Zetta. Zetta falls back to manual Silent Mode."
+            }
+            Self::Authorized => {
+                "Focus status access is authorized and its live status is available. Zetta follows the app-specific Focus status; a Focus that allows Zetta through reports inactive. Manual Silent Mode remains available."
+            }
+            Self::AuthorizedButUnavailable => {
+                "Focus access is authorized, but macOS did not provide a live status. Live Focus status also requires notification authorization and the Communication Notifications capability; Zetta falls back to manual Silent Mode."
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct SilentModeState {
     manual: bool,
     system: SystemSilentState,
+    focus_status_access: FocusStatusAccess,
 }
 
 impl SilentModeState {
@@ -36,6 +85,10 @@ impl SilentModeState {
         self.system == SystemSilentState::Active
     }
 
+    pub(crate) fn focus_status_access(self) -> FocusStatusAccess {
+        self.focus_status_access
+    }
+
     pub(crate) fn toggle_manual(&mut self) -> bool {
         if self.system_active() {
             return false;
@@ -45,10 +98,21 @@ impl SilentModeState {
     }
 
     fn observe_system(&mut self, observed: SystemSilentState) -> bool {
-        if observed == SystemSilentState::Unknown || self.system == observed {
+        if self.system == observed {
             return false;
         }
         self.system = observed;
+        true
+    }
+
+    fn observe_focus_status_access(&mut self, observed: FocusStatusAccess) -> bool {
+        if self.focus_status_access == observed {
+            return false;
+        }
+        self.focus_status_access = observed;
+        if observed != FocusStatusAccess::Authorized {
+            self.system = SystemSilentState::Unknown;
+        }
         true
     }
 }
@@ -72,6 +136,24 @@ pub(crate) fn system_silence_active_non_prompting() -> bool {
 }
 
 impl Zetta {
+    pub(crate) fn request_focus_status_access(
+        &mut self,
+        _: &RequestFocusStatusAccess,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        #[cfg(target_os = "macos")]
+        if let Some(access) = request_focus_status_authorization() {
+            let state = &mut cx.global_mut::<ZettaProcessState>().silent_mode;
+            let system_was_active = state.system_active();
+            if state.observe_focus_status_access(access) && system_was_active {
+                let enabled = state.effective();
+                cx.defer(move |cx| apply_silent_mode_to_process(enabled, cx));
+            }
+        }
+        cx.notify();
+    }
+
     pub(crate) fn toggle_silent_mode(
         &mut self,
         _: &ToggleSilentMode,
@@ -188,31 +270,34 @@ fn apply_silent_mode_to_process(enabled: bool, cx: &mut App) {
 
 pub(crate) fn start_observer(cx: &mut App) {
     cx.spawn(async move |cx| {
-        #[cfg(target_os = "macos")]
-        cx.update(request_focus_status_authorization);
-
         loop {
-            let observed = {
+            let (observed, focus_status_access) = {
                 #[cfg(target_os = "macos")]
                 {
-                    cx.update(|_| detect_system_silent_state())
+                    cx.update(|_| {
+                        let (access, state) = detect_macos_focus_observation();
+                        (state, Some(access))
+                    })
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
-                    cx.background_spawn(async { detect_system_silent_state() })
-                        .await
+                    (
+                        cx.background_spawn(async { detect_system_silent_state() })
+                            .await,
+                        None,
+                    )
                 }
             };
             cx.update(|cx| {
                 if !cx.has_global::<ZettaProcessState>() {
                     return;
                 }
-                let changed = cx
-                    .global_mut::<ZettaProcessState>()
-                    .silent_mode
-                    .observe_system(observed);
-                if changed {
-                    let enabled = cx.global::<ZettaProcessState>().silent_mode.effective();
+                let state = &mut cx.global_mut::<ZettaProcessState>().silent_mode;
+                let access_changed = focus_status_access
+                    .is_some_and(|access| state.observe_focus_status_access(access));
+                let system_changed = state.observe_system(observed);
+                if access_changed || system_changed {
+                    let enabled = state.effective();
                     apply_silent_mode_to_process(enabled, cx);
                 }
             });
@@ -370,29 +455,34 @@ fn is_packaged_gui_launch() -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn request_focus_status_authorization(_: &mut App) {
+fn request_focus_status_authorization() -> Option<FocusStatusAccess> {
     use block2::RcBlock;
     use objc2_intents::{INFocusStatusAuthorizationStatus, INFocusStatusCenter};
 
     if !is_packaged_gui_launch() {
-        return;
+        return None;
     }
     let center = unsafe { INFocusStatusCenter::defaultCenter() };
     let status = unsafe { center.authorizationStatus() };
-    if status != INFocusStatusAuthorizationStatus::NotDetermined {
-        return;
+    let access = focus_status_access(status);
+    if status == INFocusStatusAuthorizationStatus::NotDetermined {
+        let completion = RcBlock::new(|status: INFocusStatusAuthorizationStatus| {
+            eprintln!("zetta: macOS Focus status authorization result: {status:?}");
+        });
+        unsafe {
+            center.requestAuthorizationWithCompletionHandler(Some(&completion));
+        }
     }
-    let completion = RcBlock::new(|status: INFocusStatusAuthorizationStatus| {
-        eprintln!("zetta: macOS Focus status authorization result: {status:?}");
-    });
-    unsafe {
-        center.requestAuthorizationWithCompletionHandler(Some(&completion));
-    }
+    Some(if access == FocusStatusAccess::Authorized {
+        detect_macos_focus_observation().0
+    } else {
+        access
+    })
 }
 
 #[cfg(any(test, target_os = "macos"))]
-fn macos_focus_status(authorized: bool, focused: Option<bool>) -> SystemSilentState {
-    if !authorized {
+fn macos_focus_status(access: FocusStatusAccess, focused: Option<bool>) -> SystemSilentState {
+    if access != FocusStatusAccess::Authorized {
         return SystemSilentState::Unknown;
     }
     match focused {
@@ -403,20 +493,48 @@ fn macos_focus_status(authorized: bool, focused: Option<bool>) -> SystemSilentSt
 }
 
 #[cfg(target_os = "macos")]
-fn detect_macos_system_silent_state() -> SystemSilentState {
-    use objc2_intents::{INFocusStatusAuthorizationStatus, INFocusStatusCenter};
+fn focus_status_access(
+    status: objc2_intents::INFocusStatusAuthorizationStatus,
+) -> FocusStatusAccess {
+    use objc2_intents::INFocusStatusAuthorizationStatus;
+
+    if status == INFocusStatusAuthorizationStatus::NotDetermined {
+        FocusStatusAccess::NotDetermined
+    } else if status == INFocusStatusAuthorizationStatus::Denied {
+        FocusStatusAccess::Denied
+    } else if status == INFocusStatusAuthorizationStatus::Restricted {
+        FocusStatusAccess::Restricted
+    } else if status == INFocusStatusAuthorizationStatus::Authorized {
+        FocusStatusAccess::Authorized
+    } else {
+        FocusStatusAccess::Unknown
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn detect_macos_focus_observation() -> (FocusStatusAccess, SystemSilentState) {
+    use objc2_intents::INFocusStatusCenter;
 
     if !is_packaged_gui_launch() {
-        return SystemSilentState::Unknown;
+        return (FocusStatusAccess::Unknown, SystemSilentState::Unknown);
     }
     let center = unsafe { INFocusStatusCenter::defaultCenter() };
-    let authorized =
-        unsafe { center.authorizationStatus() } == INFocusStatusAuthorizationStatus::Authorized;
-    if !authorized {
-        return SystemSilentState::Unknown;
+    let access = focus_status_access(unsafe { center.authorizationStatus() });
+    if access != FocusStatusAccess::Authorized {
+        return (access, SystemSilentState::Unknown);
     }
-    let focused = unsafe { center.focusStatus().isFocused() }.map(|focused| focused.as_bool());
-    macos_focus_status(authorized, focused)
+    let Some(focused) = (unsafe { center.focusStatus().isFocused() }) else {
+        return (
+            FocusStatusAccess::AuthorizedButUnavailable,
+            SystemSilentState::Unknown,
+        );
+    };
+    (access, macos_focus_status(access, Some(focused.as_bool())))
+}
+
+#[cfg(target_os = "macos")]
+fn detect_macos_system_silent_state() -> SystemSilentState {
+    detect_macos_focus_observation().1
 }
 
 #[cfg(test)]

@@ -49,13 +49,51 @@ fn manual_preference_returns_after_system_silence_clears() {
 }
 
 #[test]
-fn unknown_detector_results_retain_the_last_known_state() {
+fn unknown_detector_results_fall_back_to_manual_silence() {
     let mut state = SilentModeState::default();
     assert!(!state.observe_system(SystemSilentState::Unknown));
     assert!(state.observe_system(SystemSilentState::Active));
-    assert!(!state.observe_system(SystemSilentState::Unknown));
-    assert!(state.effective());
+    assert!(state.observe_system(SystemSilentState::Unknown));
+    assert!(!state.effective());
     assert!(state.observe_system(SystemSilentState::Inactive));
+    assert!(!state.effective());
+}
+
+#[test]
+fn focus_status_access_requires_explicit_authorization_and_explains_fallbacks() {
+    assert_eq!(FocusStatusAccess::default(), FocusStatusAccess::Unknown);
+    assert!(
+        FocusStatusAccess::Denied
+            .tooltip()
+            .contains("System Settings")
+    );
+    assert!(
+        FocusStatusAccess::Restricted
+            .tooltip()
+            .contains("manual Silent Mode")
+    );
+    assert!(
+        FocusStatusAccess::AuthorizedButUnavailable
+            .tooltip()
+            .contains("Communication Notifications")
+    );
+}
+
+#[test]
+fn focus_status_access_clears_system_silence_when_authorization_is_lost() {
+    let mut state = SilentModeState::default();
+    assert!(state.observe_focus_status_access(FocusStatusAccess::Authorized));
+    assert!(state.observe_system(SystemSilentState::Active));
+    assert!(state.effective());
+
+    assert!(state.observe_focus_status_access(FocusStatusAccess::Denied));
+    assert!(!state.system_active());
+    assert!(!state.effective());
+
+    assert!(state.observe_focus_status_access(FocusStatusAccess::Authorized));
+    assert!(state.observe_system(SystemSilentState::Active));
+    assert!(state.observe_focus_status_access(FocusStatusAccess::AuthorizedButUnavailable));
+    assert!(!state.system_active());
     assert!(!state.effective());
 }
 
@@ -83,16 +121,19 @@ fn gnome_banner_values_map_to_silence_states() {
 #[test]
 fn macos_focus_status_requires_authorization_and_a_known_focus_value() {
     assert_eq!(
-        macos_focus_status(true, Some(true)),
+        macos_focus_status(FocusStatusAccess::Authorized, Some(true)),
         SystemSilentState::Active
     );
     assert_eq!(
-        macos_focus_status(true, Some(false)),
+        macos_focus_status(FocusStatusAccess::Authorized, Some(false)),
         SystemSilentState::Inactive
     );
     assert_eq!(
-        macos_focus_status(false, Some(true)),
+        macos_focus_status(FocusStatusAccess::Denied, Some(true)),
         SystemSilentState::Unknown
     );
-    assert_eq!(macos_focus_status(true, None), SystemSilentState::Unknown);
+    assert_eq!(
+        macos_focus_status(FocusStatusAccess::Authorized, None),
+        SystemSilentState::Unknown
+    );
 }

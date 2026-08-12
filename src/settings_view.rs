@@ -125,6 +125,13 @@ impl Zetta {
             dropdown_anchor: editor.dropdown_anchor,
             profile_icon_automatic,
         };
+        let focus_status_access = if cx.has_global::<ZettaProcessState>() {
+            cx.global::<ZettaProcessState>()
+                .silent_mode
+                .focus_status_access()
+        } else {
+            FocusStatusAccess::Unknown
+        };
         let dropdown =
             |id: String, label: String, selection: SettingsDropdown| -> gpui::AnyElement {
                 let focused = editor.focused_control == Some(SettingsControl::Dropdown(selection));
@@ -365,6 +372,7 @@ impl Zetta {
             &colors,
             &handle,
             &cx.entity(),
+            focus_status_access,
             &scroll_indicator,
             &text_input,
             &dropdown,

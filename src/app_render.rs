@@ -1040,6 +1040,7 @@ impl Zetta {
             .on_action(cx.listener(Self::select_next_minimized_pane))
             .on_action(cx.listener(Self::toggle_broadcast_input))
             .on_action(cx.listener(Self::toggle_silent_mode))
+            .on_action(cx.listener(Self::request_focus_status_access))
             .on_action(cx.listener(Self::toggle_tab_silent_mode))
             .on_action(cx.listener(Self::toggle_multi_command))
             .on_action(cx.listener(Self::toggle_stacked_command))

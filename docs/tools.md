@@ -155,6 +155,23 @@ target, so its local Silent mode suppresses their sound without removing the
 notification or its click action. Untargeted notifications continue to follow
 the platform's system silence state.
 
+On macOS, Focus status access is requested only when you choose
+`Request Focus Status Access` in Settings or from the command palette. If access
+is unavailable, denied, or restricted, Zetta leaves manual Silent mode
+available and does not assume that the system is silent. Enable Zetta under
+System Settings > Privacy & Security > Focus if you want Zetta to follow the
+Focus status available to the app.
+
+An `Authorized` permission does not guarantee that macOS supplies a live Focus
+value. Apple also requires notification authorization and the Communication
+Notifications capability for that value; the ad-hoc developer bundle does not
+request that restricted capability, so Zetta reports live status as unavailable
+and uses manual Silent mode.
+
+Even when the live value is available, Apple exposes Zetta's app-specific
+communication-notification status rather than a global DND switch. If Zetta is
+allowed through the active Focus, macOS reports that Zetta is not focused.
+
 ```sh
 zetta notify "Build finished"
 zetta notify "Build finished" "All tests passed"

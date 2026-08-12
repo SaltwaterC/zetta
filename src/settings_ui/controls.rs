@@ -90,6 +90,8 @@ impl Zetta {
                     SettingsControl::Toggle(SettingsToggle::TitleBarButtons),
                     #[cfg(target_os = "macos")]
                     SettingsControl::Toggle(SettingsToggle::TitleBarMenus),
+                    #[cfg(target_os = "macos")]
+                    SettingsControl::RequestFocusStatusAccess,
                     SettingsControl::Dropdown(SettingsDropdown::PaneControlsPosition),
                     SettingsControl::Dropdown(SettingsDropdown::PaneControlsDefaultVisibility),
                 ]);
@@ -627,6 +629,10 @@ impl Zetta {
                 if let Some(value) = value {
                     self.set_settings_toggle(toggle, !value, window, cx);
                 }
+            }
+            #[cfg(target_os = "macos")]
+            SettingsControl::RequestFocusStatusAccess => {
+                window.dispatch_action(Box::new(RequestFocusStatusAccess), cx);
             }
             SettingsControl::FontPicker => {
                 if let Some(editor) = self.settings_editor.as_mut() {

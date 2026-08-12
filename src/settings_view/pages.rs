@@ -11,6 +11,7 @@ pub(crate) fn render_settings_pages(
     colors: &ThemeColors,
     handle: &WeakEntity<Zetta>,
     zetta_entity: &gpui::Entity<Zetta>,
+    focus_status_access: FocusStatusAccess,
     scroll_indicator: &impl Fn(String, &ScrollHandle) -> AnyElement,
     text_input: &impl Fn(String, TextField, SettingsInput) -> AnyElement,
     dropdown: &impl Fn(String, String, SettingsDropdown) -> AnyElement,
@@ -19,6 +20,9 @@ pub(crate) fn render_settings_pages(
     numeric: &impl Fn(&'static str, TextField, NumericSetting, ConfigTextField) -> AnyElement,
     opacity_slider: &impl Fn(f32) -> AnyElement,
 ) -> AnyElement {
+    #[cfg(not(target_os = "macos"))]
+    let _ = focus_status_access;
+
     match editor.page {
         SettingsPage::Configuration => {
             let configuration = &editor.configuration;
@@ -292,6 +296,35 @@ pub(crate) fn render_settings_pages(
                         configuration.hide_title_bar_menus,
                         SettingsToggle::TitleBarMenus,
                     ),
+                ),
+                #[cfg(target_os = "macos")]
+                setting_row(
+                    "macOS Focus status",
+                    "Allow Zetta to follow Focus status; manual Silent Mode remains available",
+                    editor.focused_control == Some(SettingsControl::RequestFocusStatusAccess),
+                    h_flex()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(colors.text_muted)
+                                .child(focus_status_access.label()),
+                        )
+                        .child(
+                            Button::new("settings-request-focus-status-access", "Request access")
+                                .style(ButtonStyle::Outlined)
+                                .size(ButtonSize::Compact)
+                                .aria_label("Request macOS Focus status access")
+                                .tooltip(Tooltip::for_action_title(
+                                    "Request Focus Status Access",
+                                    &RequestFocusStatusAccess,
+                                ))
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(Box::new(RequestFocusStatusAccess), cx);
+                                }),
+                        )
+                        .into_any_element(),
                 ),
                 setting_row(
                     "Pane controls position",
