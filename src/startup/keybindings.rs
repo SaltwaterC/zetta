@@ -830,6 +830,7 @@ fn native_macos_menus(
             MenuItem::action("New Tab", NewTab),
             MenuItem::action("New Window", NewWindow),
             MenuItem::separator(),
+            MenuItem::action("Command Palette", ToggleCommandPalette),
             MenuItem::action("Open Settings", ToggleSettings),
             MenuItem::action("Open Themes", OpenThemes),
             MenuItem::action("Open Keymap", OpenKeymap),

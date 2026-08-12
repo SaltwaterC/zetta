@@ -796,6 +796,7 @@ impl Zetta {
                     menu.action("New Tab", Box::new(NewTab))
                         .action("New Window", Box::new(NewWindow))
                         .separator()
+                        .action("Command Palette", Box::new(ToggleCommandPalette))
                         .action("Open Settings", Box::new(ToggleSettings))
                         .action("Open Themes", Box::new(OpenThemes))
                         .action("Open Keymap", Box::new(OpenKeymap))
