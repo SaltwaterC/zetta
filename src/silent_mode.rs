@@ -22,6 +22,7 @@ pub(crate) enum SystemSilentState {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) enum FocusStatusAccess {
     #[default]
     Unknown,
