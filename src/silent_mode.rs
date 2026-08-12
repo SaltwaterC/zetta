@@ -381,72 +381,92 @@ fn detect_system_silent_state() -> SystemSilentState {
     SystemSilentState::Unknown
 }
 
-// Windows 10 1803 replaced "Quiet Hours" with Focus Assist, and never shipped
-// a supported API to read its live profile: SHQueryUserNotificationState's
-// only DND-adjacent value, QUNS_QUIET_TIME, is the automatic one-hour grace
-// period after a fresh login/upgrade, not the user's Focus Assist toggle. The
-// only place that toggle is observable is the per-user CloudStore cache that
-// Settings itself reads from, an undocumented REG_BINARY blob embedding a
-// UTF-16LE `Microsoft.QuietHoursProfile.*` profile name. Try that first and
-// fall back to the legacy API (still valid for QUNS_BUSY/PRESENTATION_MODE)
-// when the key is missing (never provisioned until Focus Assist is toggled
-// once) or the blob doesn't parse.
 #[cfg(target_os = "windows")]
-const QUIET_HOURS_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\Cache\DefaultAccount\$$windows.data.notifications.quiethourssettings\Current";
+#[repr(C)]
+struct WnfStateName {
+    data: [u32; 2],
+}
+
 #[cfg(target_os = "windows")]
-const QUIET_HOURS_VALUE: &str = "Data";
+type NtQueryWnfStateData = unsafe extern "system" fn(
+    state_name: *const WnfStateName,
+    type_id: *const std::ffi::c_void,
+    explicit_scope: *const std::ffi::c_void,
+    change_stamp: *mut u32,
+    buffer: *mut std::ffi::c_void,
+    buffer_size: *mut u32,
+) -> i32;
+
+// This state is updated by the Windows shell whenever the live Do Not Disturb
+// profile changes. Its four-byte payload is 0 for off, 1 for priority-only,
+// and 2 for alarms-only.
+#[cfg(target_os = "windows")]
+const WNF_SHEL_QUIETHOURS_ACTIVE_PROFILE_CHANGED: WnfStateName = WnfStateName {
+    data: [0xA3BF_1C75, 0x0D83_063E],
+};
 
 #[cfg(target_os = "windows")]
 fn detect_windows_system_silent_state() -> SystemSilentState {
-    let quiet_hours = windows_registry::CURRENT_USER
-        .open(QUIET_HOURS_KEY)
-        .and_then(|key| key.get_value(QUIET_HOURS_VALUE))
-        .map(|value| parse_quiet_hours_profile(value.as_ref()))
-        .unwrap_or(SystemSilentState::Unknown);
-    if quiet_hours != SystemSilentState::Unknown {
-        return quiet_hours;
-    }
-    detect_windows_notification_state()
+    let Some(query) = nt_query_wnf_state_data() else {
+        return SystemSilentState::Unknown;
+    };
+    let mut change_stamp = 0;
+    let mut profile = 0_u32;
+    let mut buffer_size = size_of::<u32>() as u32;
+    // SAFETY: The cached address is resolved from ntdll under the exact
+    // NtQueryWnfStateData ABI. Every pointer is either null for an optional
+    // parameter or points to writable storage of the advertised size.
+    let status = unsafe {
+        query(
+            &WNF_SHEL_QUIETHOURS_ACTIVE_PROFILE_CHANGED,
+            std::ptr::null(),
+            std::ptr::null(),
+            &mut change_stamp,
+            std::ptr::addr_of_mut!(profile).cast(),
+            &mut buffer_size,
+        )
+    };
+    classify_windows_dnd_query(Some((status, buffer_size, profile)))
 }
 
 #[cfg(any(test, target_os = "windows"))]
-fn parse_quiet_hours_profile(data: &[u8]) -> SystemSilentState {
-    let wide = data
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-        .collect::<Vec<_>>();
-    let decoded = String::from_utf16_lossy(&wide);
-    if decoded.contains("Microsoft.QuietHoursProfile.Unrestricted") {
-        SystemSilentState::Inactive
-    } else if decoded.contains("Microsoft.QuietHoursProfile.PriorityOnly")
-        || decoded.contains("Microsoft.QuietHoursProfile.AlarmsOnly")
-    {
-        SystemSilentState::Active
-    } else {
-        SystemSilentState::Unknown
+fn classify_windows_dnd_query(result: Option<(i32, u32, u32)>) -> SystemSilentState {
+    let Some((status, buffer_size, profile)) = result else {
+        return SystemSilentState::Unknown;
+    };
+    if status < 0 || buffer_size != size_of::<u32>() as u32 {
+        return SystemSilentState::Unknown;
+    }
+    match profile {
+        0 => SystemSilentState::Inactive,
+        1 | 2 => SystemSilentState::Active,
+        _ => SystemSilentState::Unknown,
     }
 }
 
 #[cfg(target_os = "windows")]
-fn detect_windows_notification_state() -> SystemSilentState {
-    use windows::Win32::UI::Shell::SHQueryUserNotificationState;
+fn nt_query_wnf_state_data() -> Option<NtQueryWnfStateData> {
+    use std::sync::OnceLock;
 
-    match unsafe { SHQueryUserNotificationState() } {
-        Ok(state) => windows_notification_state(state.0),
-        Err(_) => SystemSilentState::Unknown,
-    }
-}
+    static QUERY: OnceLock<Option<NtQueryWnfStateData>> = OnceLock::new();
+    *QUERY.get_or_init(|| {
+        use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+        use windows::core::{s, w};
 
-#[cfg(any(test, target_os = "windows"))]
-fn windows_notification_state(state: i32) -> SystemSilentState {
-    // QUNS_RUNNING_D3D_FULL_SCREEN is intentionally inactive: fullscreen by
-    // itself is not Do Not Disturb. QUNS_BUSY is the Windows state used for
-    // presentation/blocked-notification modes and is therefore active.
-    match state {
-        2 | 4 | 6 => SystemSilentState::Active, // BUSY, PRESENTATION_MODE, QUIET_TIME
-        3 | 5 | 7 => SystemSilentState::Inactive, // FULL_SCREEN, ACCEPTS_NOTIFICATIONS, APP
-        _ => SystemSilentState::Unknown,
-    }
+        // SAFETY: ntdll is loaded for every Windows process. GetProcAddress
+        // returns None when this private API is absent, which is cached as a
+        // conservative Unknown result by the caller.
+        let module = unsafe { GetModuleHandleW(w!("ntdll.dll")) }.ok()?;
+        let address = unsafe { GetProcAddress(module, s!("NtQueryWnfStateData")) }?;
+        // SAFETY: The named ntdll export has the NtQueryWnfStateData ABI
+        // declared above. The pointer remains valid because ntdll cannot be
+        // unloaded during the process lifetime.
+        Some(unsafe {
+            std::mem::transmute::<unsafe extern "system" fn() -> isize, NtQueryWnfStateData>(
+                address,
+            )
+        })
+    })
 }
 
 /// Which desktop mechanism answered, so the observer knows whether a change

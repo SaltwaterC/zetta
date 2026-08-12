@@ -45,8 +45,8 @@ const CONTROL_CLIENT_TIMEOUT: Duration = Duration::from_secs(3);
 // one: otherwise raising the Argon2 cost or the anti-guessing delay would
 // silently turn "the session secret was incorrect" into "Zetta rejected the
 // reconnect request". `session_cli` covers the resulting ordering.
-const RECONNECT_COMPLETION_TIMEOUT: Duration = Duration::from_secs(4);
-const RECONNECT_CLIENT_TIMEOUT: Duration = Duration::from_secs(6);
+const RECONNECT_COMPLETION_TIMEOUT: Duration = Duration::from_secs(6);
+const RECONNECT_CLIENT_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReconnectSessionResult {

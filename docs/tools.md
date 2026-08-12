@@ -170,6 +170,12 @@ target, so its local Silent mode suppresses their sound without removing the
 notification or its click action. Untargeted notifications continue to follow
 the platform's system silence state.
 
+On Windows, Zetta reads the shell's live Do Not Disturb profile every five
+seconds. If that private system query is unavailable, fails, or returns an
+unrecognized response, Zetta conservatively treats the system state as unknown
+and immediately leaves manual Silent mode available instead of assuming that
+Do Not Disturb is active.
+
 On macOS, Focus status access is requested only when you choose
 `Request Focus Status Access` in Settings or from the command palette. If access
 is unavailable, denied, or restricted, Zetta leaves manual Silent mode
