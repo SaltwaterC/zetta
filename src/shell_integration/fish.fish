@@ -135,6 +135,10 @@ function __zetta_pane_splits
     zetta splits 2>/dev/null
 end
 
+function __zetta_pane_labels
+    zetta pane --list 2>/dev/null
+end
+
 # zetta-default/zetta-ok/zetta-alarm are bundled tones Zetta plays itself, so
 # they always work; the rest are the current platform's own system sound
 # names, which only work on that platform, so only that platform's names are
@@ -377,6 +381,18 @@ function __zetta_long_options
                 --help 'Print help'
         case init serial http tftp splits
             printf '%s\t%s\n' --help 'Print help'
+        case pane
+            printf '%s\t%s\n' \
+                --direction 'Direction for a new split' \
+                --label 'Label for a new split pane' \
+                --pane 'Target pane label' \
+                --overlay 'Overlay text for a new split pane' \
+                --overlay-size 'Overlay font size' \
+                --overlay-opacity 'Overlay opacity percentage' \
+                --overlay-color 'Overlay text color' \
+                --stack 'Run in a stacked task pane' \
+                --list 'List pane labels' \
+                --help 'Print help'
         case panetheme
             printf '%s\t%s\n' \
                 --theme 'Set the pane theme' \
@@ -495,6 +511,7 @@ complete -c zetta -n '__zetta_at_root' -a paste -d "Print the clipboard's conten
 complete -c zetta -n '__zetta_at_root' -a tabicon -d 'Set the active tab icon'
 complete -c zetta -n '__zetta_at_root' -a panetheme -d "Non-persistently change the active pane's theme"
 complete -c zetta -n '__zetta_at_root' -a splits -d 'List configured pane split templates'
+complete -c zetta -n '__zetta_at_root' -a pane -d 'Run a command in a pane'
 complete -c zetta -n '__zetta_at_root' -a overlay -d 'Non-persistently show text over the active pane'
 complete -c zetta -n '__zetta_at_root' -a wt -d 'Create and integrate Git worktrees'
 complete -c zetta -n '__zetta_use_subcommand' -l help -d 'Print help'
@@ -561,6 +578,24 @@ complete -c zetta -n '__fish_seen_subcommand_from sessions; and __fish_seen_subc
 complete -c zetta -n '__fish_seen_subcommand_from sessions; and __fish_seen_subcommand_from reconnect' -l session -r -d 'Session ID to reconnect'
 complete -c zetta -n '__fish_seen_subcommand_from splits' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from splits' -a '(__zetta_long_options splits)'
+complete -c zetta -n '__fish_seen_subcommand_from pane' -l direction -r -a 'left right up down' -d 'Direction for a new split'
+complete -c zetta -n '__fish_seen_subcommand_from pane' -l label -r -d 'Label for a new split pane'
+complete -c zetta -n '__fish_seen_subcommand_from pane' -l pane -r -a '(__zetta_pane_labels)' -d 'Target pane label'
+complete -c zetta -n '__fish_seen_subcommand_from pane' -l overlay -r -d 'Overlay text for a new split pane'
+complete -c zetta -n '__fish_seen_subcommand_from pane' -l overlay-size -r -a 'sm base lg xl 2xl 3xl' -d 'Overlay font size'
+complete -c zetta -n '__fish_seen_subcommand_from pane' -l overlay-opacity -r -d 'Overlay opacity percentage'
+complete -c zetta -n '__fish_seen_subcommand_from pane' -l overlay-color -r -a 'ZETTA_OVERLAY_COLORS' -d 'Overlay text color'
+complete -c zetta -n '__fish_seen_subcommand_from pane' -l stack -d 'Run in a stacked task pane'
+complete -c zetta -n '__fish_seen_subcommand_from pane' -l list -d 'List pane labels'
+complete -c zetta -n '__fish_seen_subcommand_from pane' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from pane' -a '(__zetta_long_options pane)'
+complete -c zetta -s d -r -a 'left right up down' -n '__fish_seen_subcommand_from pane; and __zetta_short_option -d'
+complete -c zetta -s l -r -n '__fish_seen_subcommand_from pane; and __zetta_short_option -l'
+complete -c zetta -s p -r -a '(__zetta_pane_labels)' -n '__fish_seen_subcommand_from pane; and __zetta_short_option -p'
+complete -c zetta -s o -r -n '__fish_seen_subcommand_from pane; and __zetta_short_option -o'
+complete -c zetta -s S -r -a 'sm base lg xl 2xl 3xl' -n '__fish_seen_subcommand_from pane; and __zetta_short_option -S'
+complete -c zetta -s O -r -n '__fish_seen_subcommand_from pane; and __zetta_short_option -O'
+complete -c zetta -s c -r -a 'ZETTA_OVERLAY_COLORS' -n '__fish_seen_subcommand_from pane; and __zetta_short_option -c'
 complete -c zetta -n '__fish_seen_subcommand_from edit' -l delete-after -d 'Delete a managed buffer after editing'
 complete -c zetta -n '__fish_seen_subcommand_from edit' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from edit' -a '(__zetta_long_options edit)'

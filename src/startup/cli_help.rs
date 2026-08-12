@@ -117,6 +117,14 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
     help
     .replace(
         "       zetta profile <COMMAND>",
+        "       zetta pane [OPTIONS] -- COMMAND [ARGUMENT ...]\n       zetta pane --list\n       zetta profile <COMMAND>",
+    )
+    .replace(
+        "  profile                             List and manage profiles",
+        "  pane                                Run a command in an existing or new pane\n  profile                             List and manage profiles",
+    )
+    .replace(
+        "       zetta profile <COMMAND>",
         "       zetta profile <COMMAND>\n       zetta attention [OPTIONS] [SUMMARY] [BODY]",
     )
     .replace(
@@ -225,6 +233,10 @@ pub(crate) fn pane_theme_help() -> &'static str {
 
 pub(crate) fn pane_splits_help() -> &'static str {
     "List configured pane split templates\n\nUsage: zetta splits\n\nPrints one configured pane split template name per line. Pass a listed name to the root --split or -s option, or to --replace-pane --split when replacing the active pane in a running process.\n\nOptions:\n  -h, --help  Print help"
+}
+
+pub(crate) fn pane_help() -> &'static str {
+    "Run a command in an existing or newly created pane\n\nUsage: zetta pane [OPTIONS] -- COMMAND [ARGUMENT ...]\n       zetta pane --list\n\nWithout --direction, the command is sent to the selected pane's existing base shell. With --stack, it runs in a task-backed stacked terminal. With --direction, a new split is created relative to the active pane; up and down split horizontally, while left and right split vertically. Commands are passed as exact argv values, and must follow --. An overlay can be shown on a newly created split with --overlay.\n\nOptions:\n  -d, --direction DIRECTION  Create a split to the left, right, up, or down of the active pane\n  -l, --label LABEL          Assign a generated label to a newly created split pane\n  -p, --pane LABEL           Target an existing pane by its exact, case-sensitive label\n  -o, --overlay TEXT         Show TEXT over a newly created split pane\n  -S, --overlay-size SIZE    Set overlay size: sm, base, lg, xl, 2xl, or 3xl\n  -O, --overlay-opacity PCT  Set overlay opacity from 0 to 100\n  -c, --overlay-color COLOR  Set overlay color by name or hex value\n  -s, --stack                 Run the command in a stacked task terminal\n  -L, --list                  Print labels for panes in the active tab\n  -h, --help                  Print help\n\nExamples:\n  zetta pane --direction right --label api --overlay API -- npm run dev\n  zetta pane --direction up --overlay TESTS --overlay-color cyan -- cargo test\n  zetta pane --pane api -- make test\n  zetta pane --pane api --stack -- tail -f server.log"
 }
 
 pub(crate) fn parse_pane_theme_args(args: &[OsString]) -> Result<StartupMode> {

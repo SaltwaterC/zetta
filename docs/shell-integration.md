@@ -80,6 +80,16 @@ Pane-split completion works dynamically too: completing the root
 configuration, so newly added or renamed templates are available without
 regenerating the shell integration.
 
+The `pane` subcommand is completed in the same generated scripts. Its
+`--direction`/`-d` value offers `left`, `right`, `up`, and `down`, while
+`--pane`/`-p` runs `zetta pane --list` against the active Zetta process so
+current pane labels are available without regenerating the integration. The
+`--label` value remains free-form, and `--stack` and `--list` are offered as
+flags. New split overlays complete their fixed size and named-color values;
+use `--overlay TEXT` with `--overlay-size`, `--overlay-opacity`, and
+`--overlay-color` to configure them. Commands still begin after `--`,
+preserving their exact argument boundaries.
+
 `zetta overlay`'s text (`--text`/`-t`) and opacity (`--opacity`/`-o`) flags
 take free-form values. Its color flag (`--color`/`-c`) completes the fixed
 named presets `black`, `white`, `gray`, `red`, `orange`, `yellow`, `green`,

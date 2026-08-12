@@ -130,6 +130,10 @@ _zetta_split_names() {
     compadd -- "${(@f)$(zetta splits 2>/dev/null)}"
 }
 
+_zetta_pane_labels() {
+    compadd -- "${(@f)$(zetta pane --list 2>/dev/null)}"
+}
+
 _zetta_session_ids() {
     compadd -- "${(@f)$(zetta sessions --json 2>/dev/null | awk '
         /"process_id"[[:space:]]*:/ { match($0, /[0-9]+/); process=substr($0, RSTART, RLENGTH) }
@@ -229,7 +233,7 @@ _zetta() {
     fi
 
     if (( CURRENT == 2 )); then
-        compadd -S ' ' -- benchmark benchmark-output terminal-size sessions profile edit vi init serial http tftp notify attention copy paste splits tabicon panetheme overlay wt
+        compadd -S ' ' -- benchmark benchmark-output terminal-size sessions profile edit vi init serial http tftp notify attention copy paste splits pane tabicon panetheme overlay wt
         _zetta_options --help --version --config --keymap --profile --split --replace-pane --theme
         return
     fi
@@ -251,8 +255,16 @@ _zetta() {
             _zetta_profiles
             return
             ;;
+        --pane)
+            if [[ $words[2] == pane ]]; then
+                _zetta_pane_labels
+            fi
+            return
+            ;;
         -p)
-            if [[ $words[2] == profile && $profile_operation == add ]]; then
+            if [[ $words[2] == pane ]]; then
+                _zetta_pane_labels
+            elif [[ $words[2] == profile && $profile_operation == add ]]; then
                 return
             elif [[ $words[2] == serial ]]; then
                 compadd -- none odd even
@@ -276,8 +288,25 @@ _zetta() {
             compadd -- "${(@f)$(zetta serial list 2>/dev/null)}"
             return
             ;;
+        --direction)
+            if [[ $words[2] == pane ]]; then
+                compadd -- left right up down
+            fi
+            return
+            ;;
+        --overlay-size|-S)
+            if [[ $words[2] == pane ]]; then
+                compadd -- sm base lg xl 2xl 3xl
+            fi
+            return
+            ;;
+        --overlay-opacity|-O|--overlay)
+            return
+            ;;
         -d)
-            if [[ $words[2] == serial ]]; then
+            if [[ $words[2] == pane ]]; then
+                compadd -- left right up down
+            elif [[ $words[2] == serial ]]; then
                 compadd -- "${(@f)$(zetta serial list 2>/dev/null)}"
             fi
             return
@@ -361,7 +390,7 @@ _zetta() {
             return
             ;;
         -c)
-            if [[ $words[2] == overlay ]]; then
+            if [[ $words[2] == overlay || $words[2] == pane ]]; then
                 compadd -- ZETTA_OVERLAY_COLORS
                 return
             elif [[ $words[2] == terminal-size ]]; then
@@ -370,8 +399,8 @@ _zetta() {
             _files
             return
             ;;
-        --color)
-            if [[ $words[2] == overlay ]]; then
+        --color|--overlay-color)
+            if [[ $words[2] == overlay || $words[2] == pane ]]; then
                 compadd -- ZETTA_OVERLAY_COLORS
             fi
             return
@@ -541,6 +570,9 @@ _zetta() {
             ;;
         splits)
             _zetta_options --help
+            ;;
+        pane)
+            _zetta_options --direction --label --pane --overlay --overlay-size --overlay-opacity --overlay-color --stack --list --help
             ;;
         tabicon)
             if [[ $words[CURRENT] == -* ]]; then

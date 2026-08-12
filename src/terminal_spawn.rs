@@ -80,6 +80,41 @@ impl Zetta {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub(crate) fn spawn_terminal_with_shell(
+        &mut self,
+        tab_id: u64,
+        pane_id: u64,
+        profile: Profile,
+        shell: Shell,
+        working_directory: Option<PathBuf>,
+        wsl_directory: Option<String>,
+        wsl_cwd_file: Option<PathBuf>,
+        terminal_theme: Option<Arc<Theme>>,
+        settings: &TerminalSpawnSettings,
+        path_hyperlink_regexes: Vec<String>,
+        tracked_multi_command_launch: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.spawn_terminal_with_shell_and_environment(
+            tab_id,
+            pane_id,
+            profile,
+            shell,
+            working_directory,
+            wsl_directory,
+            wsl_cwd_file,
+            terminal_theme,
+            settings,
+            path_hyperlink_regexes,
+            HashMap::new(),
+            tracked_multi_command_launch,
+            window,
+            cx,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn spawn_terminal_with_theme_and_environment(
         &mut self,
         tab_id: u64,
@@ -87,6 +122,51 @@ impl Zetta {
         profile: Profile,
         working_directory: Option<PathBuf>,
         wsl_directory: Option<String>,
+        wsl_cwd_file: Option<PathBuf>,
+        terminal_theme: Option<Arc<Theme>>,
+        settings: &TerminalSpawnSettings,
+        path_hyperlink_regexes: Vec<String>,
+        environment_overrides: HashMap<String, String>,
+        tracked_multi_command_launch: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let shell = if is_wsl_shell(&profile.command) {
+            wsl_shell_with_tracking(
+                profile.command.clone(),
+                wsl_directory.as_deref(),
+                wsl_cwd_file.as_deref(),
+            )
+        } else {
+            profile.command.clone()
+        };
+        self.spawn_terminal_with_shell_and_environment(
+            tab_id,
+            pane_id,
+            profile,
+            shell,
+            working_directory,
+            wsl_directory,
+            wsl_cwd_file,
+            terminal_theme,
+            settings,
+            path_hyperlink_regexes,
+            environment_overrides,
+            tracked_multi_command_launch,
+            window,
+            cx,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_terminal_with_shell_and_environment(
+        &mut self,
+        tab_id: u64,
+        pane_id: u64,
+        profile: Profile,
+        shell: Shell,
+        working_directory: Option<PathBuf>,
+        _wsl_directory: Option<String>,
         wsl_cwd_file: Option<PathBuf>,
         terminal_theme: Option<Arc<Theme>>,
         settings: &TerminalSpawnSettings,
@@ -109,20 +189,11 @@ impl Zetta {
             cx.notify();
             return;
         };
-        let command = if is_wsl {
-            wsl_shell_with_tracking(
-                profile.command,
-                wsl_directory.as_deref(),
-                wsl_cwd_file.as_deref(),
-            )
-        } else {
-            profile.command
-        };
         let mut environment = if is_wsl {
             HashMap::default()
         } else {
             let msys2_environment =
-                match msys2_cwd_tracking_environment(&command, pane_id, &env::temp_dir()) {
+                match msys2_cwd_tracking_environment(&profile.command, pane_id, &env::temp_dir()) {
                     Ok(environment) => environment,
                     Err(error) => {
                         if let Some(pane) = self
@@ -158,7 +229,7 @@ impl Zetta {
         let builder = TerminalBuilder::new(
             working_directory,
             None,
-            command,
+            shell,
             environment,
             settings.cursor_shape,
             settings.alternate_scroll,

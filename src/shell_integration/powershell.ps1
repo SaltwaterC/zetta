@@ -66,6 +66,7 @@ $zettaOverlayColors = @(ZETTA_OVERLAY_COLORS)
 $zettaTabIcons = { @(& zetta tabicon --list 2>$null) }
 $zettaPaneThemes = { @(& zetta panetheme --list 2>$null) }
 $zettaSplits = { @(& zetta splits 2>$null) }
+$zettaPaneLabels = { @(& zetta pane --list 2>$null) }
 
 # zetta-default/zetta-ok/zetta-alarm are bundled tones Zetta plays itself, so
 # they always work; the rest are the current platform's own system sound
@@ -121,7 +122,7 @@ $zettaCompletions = {
         }
     }
     $subcommand = $words | Where-Object {
-        $_ -in 'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'splits', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', 'wt'
+        $_ -in 'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'splits', 'pane', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', 'wt'
     } | Select-Object -First 1
     $worktreeCommand = $false
     $worktreeOperation = ''
@@ -173,6 +174,14 @@ $zettaCompletions = {
         } else {
             @()
         }
+    } elseif ($previous -in '--pane', '-p' -and $subcommand -eq 'pane') {
+        & $zettaPaneLabels
+    } elseif ($previous -in '--direction', '-d' -and $subcommand -eq 'pane') {
+        'left', 'right', 'up', 'down'
+    } elseif ($previous -in '--overlay-size', '-S' -and $subcommand -eq 'pane') {
+        'sm', 'base', 'lg', 'xl', '2xl', '3xl'
+    } elseif ($previous -in '--overlay-color', '-c' -and $subcommand -eq 'pane') {
+        $zettaOverlayColors
     } elseif (
         $previous -eq '--profile' -or $last -eq '--profile' -or
         (($previous -eq '-p' -or $last -eq '-p') -and $null -eq $subcommand)
@@ -205,7 +214,7 @@ $zettaCompletions = {
         'general', 'ruler', 'find', 'font'
     } elseif ($previous -in '--prefer', '-prefer', '--Prefer', '-Prefer') {
         'txt', 'rtf', 'ps'
-    } elseif ($previous -in '--opacity', '-o') {
+    } elseif ($previous -in '--opacity', '-o', '--overlay-opacity', '-O', '--overlay') {
         @()
     } elseif ($worktreeCommand -and $worktreeOperation -eq 'new' -and $previous -in '--copy', '-c') {
         @(Get-ChildItem -Name -Path "$wordToComplete*" -ErrorAction SilentlyContinue)
@@ -247,7 +256,7 @@ $zettaCompletions = {
             '--help'
         }
     } elseif ($null -eq $subcommand) {
-        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'profile', 'splits', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', 'wt', '--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme'
+        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'profile', 'splits', 'pane', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', 'wt', '--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme'
     } else {
         switch ($subcommand) {
             'benchmark' { '--terminal-render-workload', '--terminal-checkerboard-workload', '--terminal-sparse-update-workload', '--profile-report', '--profile-duration', '--profile-pane-stress', '--profile-background-stress', '--profile-sparse-updates', '--profile-external-terminal', '--help' }
@@ -263,6 +272,7 @@ $zettaCompletions = {
                 } else { '--json', '--help' }
             }
             'splits' { '--help' }
+            'pane' { '--direction', '--label', '--pane', '--overlay', '--overlay-size', '--overlay-opacity', '--overlay-color', '--stack', '--list', '--help' }
             'profile' {
                 if ([string]::IsNullOrEmpty($profileOperation) -or ($profileOperationIndex -eq ($words.Count - 1) -and -not [string]::IsNullOrEmpty($wordToComplete)) -or $profileOperation -notin 'list', 'themes', 'disable', 'enable', 'theme', 'icon', 'default', 'add', 'remove') {
                     'list', 'themes', 'disable', 'enable', 'theme', 'icon', 'default', 'add', 'remove', '--config', '--help'

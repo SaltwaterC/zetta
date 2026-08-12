@@ -196,6 +196,14 @@ _zetta_complete() {
         done < <(zetta splits 2>/dev/null)
     }
 
+    _zetta_complete_pane_labels() {
+        COMPREPLY=()
+        local label
+        while IFS= read -r label; do
+            [[ $label == "$current"* ]] && COMPREPLY+=("$label")
+        done < <(zetta pane --list 2>/dev/null)
+    }
+
     case "$previous" in
         --copy)
             if [[ $command == wt && ${COMP_WORDS[2]} == new ]]; then
@@ -209,8 +217,38 @@ _zetta_complete() {
             _zetta_complete_profiles
             return
             ;;
+        --pane)
+            if [[ $command == pane ]]; then
+                _zetta_complete_pane_labels
+            else
+                COMPREPLY=()
+            fi
+            return
+            ;;
+        --direction)
+            if [[ $command == pane ]]; then
+                _zetta_compgen 'left right up down'
+            else
+                COMPREPLY=()
+            fi
+            return
+            ;;
+        --overlay-size|-S)
+            if [[ $command == pane ]]; then
+                _zetta_compgen 'sm base lg xl 2xl 3xl'
+            else
+                COMPREPLY=()
+            fi
+            return
+            ;;
+        --overlay-opacity|-O|--overlay)
+            COMPREPLY=()
+            return
+            ;;
         -p)
-            if [[ $command == profile && $profile_operation == add ]]; then
+            if [[ $command == pane ]]; then
+                _zetta_complete_pane_labels
+            elif [[ $command == profile && $profile_operation == add ]]; then
                 COMPREPLY=()
             elif [[ $command == serial ]]; then
                 _zetta_compgen 'none odd even'
@@ -230,7 +268,9 @@ _zetta_complete() {
             return
             ;;
         -d)
-            if [[ $command == serial ]]; then
+            if [[ $command == pane ]]; then
+                _zetta_compgen 'left right up down'
+            elif [[ $command == serial ]]; then
                 _zetta_complete_serial_devices
             else
                 COMPREPLY=()
@@ -334,6 +374,8 @@ _zetta_complete() {
                 COMPREPLY=( $(compgen -f -- "$current") )
             elif [[ $command == overlay ]]; then
                 _zetta_compgen 'ZETTA_OVERLAY_COLORS'
+            elif [[ $command == pane ]]; then
+                _zetta_compgen 'ZETTA_OVERLAY_COLORS'
             elif [[ $command == terminal-size ]]; then
                 COMPREPLY=()
             else
@@ -341,8 +383,8 @@ _zetta_complete() {
             fi
             return
             ;;
-        --color)
-            if [[ $command == overlay ]]; then
+        --color|--overlay-color)
+            if [[ $command == overlay || $command == pane ]]; then
                 _zetta_compgen 'ZETTA_OVERLAY_COLORS'
             else
                 COMPREPLY=()
@@ -388,7 +430,7 @@ _zetta_complete() {
     esac
 
     if (( COMP_CWORD == 1 )); then
-        _zetta_compgen 'benchmark benchmark-output terminal-size sessions profile edit vi init serial http tftp notify attention copy paste splits tabicon panetheme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme'
+        _zetta_compgen 'benchmark benchmark-output terminal-size sessions pane profile edit vi init serial http tftp notify attention copy paste splits tabicon panetheme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme'
         return
     fi
 
@@ -539,6 +581,9 @@ _zetta_complete() {
             ;;
         splits)
             _zetta_compgen '--help'
+            ;;
+        pane)
+            _zetta_compgen '--direction --label --pane --overlay --overlay-size --overlay-opacity --overlay-color --stack --list --help'
             ;;
         tabicon)
             if [[ $current == -* ]]; then

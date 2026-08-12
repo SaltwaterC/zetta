@@ -82,14 +82,33 @@ terminal content, with `--size`, `--opacity`, and `--color` options
 (`--color` accepts the named presets `black`, `white`, `gray`, `red`,
 `orange`, `yellow`, `green`, `cyan`, `blue`, `purple`, `magenta`, and `pink`,
 as well as the existing hex formats; `zetta overlay --reset` clears it).
-Shell integration completes the current serial-device, tab-icon, and
-pane-theme lists dynamically. See [Serial and network tools](docs/tools.md)
+Shell integration completes the current serial-device, tab-icon, pane-theme,
+and command-pane label lists dynamically. See [Serial and network tools](docs/tools.md)
 for flags and safety notes.
 
 Use `zetta --replace-pane --split NAME` or
 `zetta --replace-pane --profile PROFILE` to replace the active pane in a
 running process; the command falls back to the normal new-window launch when
 no process accepts it. See [Using Zetta](docs/usage.md) for details.
+
+Run an exact command in an existing or new pane with `zetta pane`:
+
+```sh
+zetta pane --direction right --label api -- npm run dev
+zetta pane --direction right --label api --overlay API -- npm run dev
+zetta pane --pane api -- make test
+zetta pane --pane api --stack -- tail -f server.log
+zetta pane --list
+```
+
+`--direction` creates a split relative to the active pane (`up`/`down` are
+horizontal and `left`/`right` are vertical). Without it, the command targets
+the active pane or the exact, case-sensitive label supplied by `--pane`;
+`--stack` uses a task-backed PTY. Arguments after `--` are preserved as
+individual argv values. This command requires an accepting Zetta process and
+reports an error instead of opening a new window when none is available.
+New split panes can show an overlay with `--overlay TEXT`; use
+`--overlay-size`, `--overlay-opacity`, and `--overlay-color` to style it.
 
 Manage persistent profiles without opening the settings UI with
 `zetta profile list`, `zetta profile themes`, and the profile mutation

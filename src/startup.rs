@@ -15,7 +15,8 @@ use crate::cli_services::{parse_serial_args, serial_help};
 #[cfg(feature = "tftp-server")]
 use crate::cli_services::{parse_tftp_server_args, tftp_server_help};
 use crate::process_control::{
-    ReplacePaneRequest, TabAttentionRequest, request_existing_process_pane_overlay,
+    ReplacePaneRequest, TabAttentionRequest, request_existing_process_pane,
+    request_existing_process_pane_labels, request_existing_process_pane_overlay,
     request_existing_process_pane_theme, request_existing_process_pane_theme_list,
     request_existing_process_replace_pane, request_existing_process_tab_icon,
     request_process_tab_attention,
@@ -711,6 +712,21 @@ pub(crate) fn run() -> Result<()> {
     {
         return run_output_benchmark(*size_mib, *output_type);
     }
+    if let StartupMode::Pane(request) = &args.mode {
+        if request.list {
+            let labels = request_existing_process_pane_labels()?
+                .context("no running Zetta process accepted the pane list request")?;
+            for label in labels {
+                println!("{label}");
+            }
+        } else {
+            anyhow::ensure!(
+                request_existing_process_pane(request.clone())?,
+                "no running Zetta process accepted the pane command request"
+            );
+        }
+        return Ok(());
+    }
     if let StartupMode::Attention(command) = &args.mode {
         let inherited_process_id = env::var("ZETTA_PROCESS_ID")
             .context("zetta attention must run inside a Zetta terminal")?;
@@ -1098,6 +1114,57 @@ pub(crate) fn run() -> Result<()> {
                                     .unwrap_or(false)
                             });
                             let _ = completion.send(replaced);
+                        }
+                        ProcessControlCommand::RunPane {
+                            request,
+                            completion,
+                        } => {
+                            let result = cx.update(|cx| -> Result<(), String> {
+                                if !cx
+                                    .global::<ZettaProcessState>()
+                                    .control_server
+                                    .is_accepting()
+                                {
+                                    return Err("the Zetta process is shutting down".to_owned());
+                                }
+                                let Some(window_id) =
+                                    cx.active_window().map(|window| window.window_id())
+                                else {
+                                    return Err(
+                                        "the running Zetta process has no active window".to_owned()
+                                    );
+                                };
+                                gpui::WindowHandle::<Zetta>::new(window_id)
+                                    .update(cx, |zetta, window, cx| {
+                                        zetta
+                                            .run_command_pane(request, window, cx)
+                                            .map_err(|error| format!("{error:#}"))
+                                    })
+                                    .map_err(|error| format!("{error:#}"))?
+                            });
+                            let _ = completion.send(result);
+                        }
+                        ProcessControlCommand::ListPaneLabels { completion } => {
+                            let result = cx.update(|cx| -> Result<Vec<String>, String> {
+                                if !cx
+                                    .global::<ZettaProcessState>()
+                                    .control_server
+                                    .is_accepting()
+                                {
+                                    return Err("the Zetta process is shutting down".to_owned());
+                                }
+                                let Some(window_id) =
+                                    cx.active_window().map(|window| window.window_id())
+                                else {
+                                    return Err(
+                                        "the running Zetta process has no active window".to_owned()
+                                    );
+                                };
+                                gpui::WindowHandle::<Zetta>::new(window_id)
+                                    .update(cx, |zetta, _, _| Ok(zetta.command_pane_labels()))
+                                    .map_err(|error| format!("{error:#}"))?
+                            });
+                            let _ = completion.send(result);
                         }
                         ProcessControlCommand::SetTabIcon { icon, completion } => {
                             let accepted = cx.update(|cx| {

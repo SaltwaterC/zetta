@@ -45,6 +45,7 @@ fn bash_command() -> std::process::Command {
 fn supported_shells_generate_completion_and_tftp_shortcut() {
     let profiles = profiles();
     assert!(shell_integration_help().contains("--replace-pane"));
+    assert!(shell_integration_help().contains("zetta pane"));
     for shell in [
         ShellIntegration::Bash,
         ShellIntegration::Fish,
@@ -62,6 +63,9 @@ fn supported_shells_generate_completion_and_tftp_shortcut() {
         assert!(script.contains("zetta tabicon --list"));
         assert!(script.contains("zetta panetheme --list"));
         assert!(script.contains("zetta splits"));
+        assert!(script.contains("zetta pane --list"));
+        assert!(script.contains("--direction"));
+        assert!(script.contains("--pane"));
         assert!(script.contains("replace-pane"));
         assert!(script.contains("zwt"));
         assert!(script.contains("wt"));
@@ -860,6 +864,87 @@ fn bash_root_split_completion_handles_long_short_and_combined_launch_options() {
 }
 
 #[test]
+fn bash_pane_completion_offers_directions_and_live_labels() {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let _bash_test_lock = lock_bash_tests();
+    if !bash_command()
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return;
+    }
+
+    let script = ShellIntegration::Bash.script(&profiles());
+    let driver = format!(
+        "zetta() {{
+    if [[ $1 == pane && $2 == --list ]]; then
+        printf '%s\\n' 'Pane 1' api 'Build runner'
+    fi
+}}
+{script}
+COMP_WORDS=(zetta pane '')
+COMP_CWORD=2
+_zetta_complete
+printf 'options:%s\\n' \"${{COMPREPLY[@]}}\"
+COMP_WORDS=(zetta pane --direction '')
+COMP_CWORD=3
+_zetta_complete
+printf 'directions:%s\\n' \"${{COMPREPLY[@]}}\"
+COMP_WORDS=(zetta pane --pane '')
+COMP_CWORD=3
+_zetta_complete
+printf 'labels:%s\\n' \"${{COMPREPLY[@]}}\"
+"
+    );
+    let mut child = bash_command()
+        .args(["--noprofile", "--norc"])
+        .env_remove("ZETTA_HOST_EXECUTABLE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(driver.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "Bash pane completion script failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let completions = String::from_utf8_lossy(&output.stdout);
+    for direction in ["left", "right", "up", "down"] {
+        assert!(
+            completions
+                .lines()
+                .any(|line| line == format!("directions:{direction}")),
+            "expected {direction:?} in pane direction completions: {completions}"
+        );
+    }
+    for label in ["Pane 1", "api", "Build runner"] {
+        assert!(
+            completions
+                .lines()
+                .any(|line| line == format!("labels:{label}")),
+            "expected {label:?} in pane label completions: {completions}"
+        );
+    }
+    assert!(
+        completions
+            .lines()
+            .any(|line| line == "options:--direction")
+    );
+    assert!(completions.lines().any(|line| line == "options:--stack"));
+}
+
+#[test]
 fn serial_completion_enumerates_devices_when_completion_is_requested() {
     let profiles = profiles();
     let scripts = [
@@ -1375,7 +1460,7 @@ fn generated_scripts_only_offer_long_form_flags() {
         match shell {
             ShellIntegration::Bash => {
                 assert!(script.contains(
-                    "terminal-size sessions profile edit vi init serial http tftp notify attention copy paste splits tabicon panetheme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme'"
+                    "terminal-size sessions pane profile edit vi init serial http tftp notify attention copy paste splits tabicon panetheme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme'"
                 ));
                 assert!(script.contains("auto zetta bash zsh fish"));
             }
@@ -1430,6 +1515,7 @@ fn fish_script_emits_long_option_candidates_for_every_command_context() {
         "tabicon",
         "panetheme",
         "splits",
+        "pane",
         "overlay",
         "ztftp",
         "zntfy",
@@ -1534,6 +1620,42 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
         ),
         ("zetta sessions ", &["--json", "--help"][..]),
         ("zetta splits ", &["--help"][..]),
+        (
+            "zetta pane ",
+            &[
+                "--direction",
+                "--label",
+                "--pane",
+                "--overlay",
+                "--overlay-size",
+                "--overlay-opacity",
+                "--overlay-color",
+                "--stack",
+                "--list",
+                "--help",
+            ][..],
+        ),
+        (
+            "zetta pane --direction ",
+            &["left", "right", "up", "down"][..],
+        ),
+        ("zetta pane -d ", &["left", "right", "up", "down"][..]),
+        ("zetta pane --overlay ", &[][..]),
+        (
+            "zetta pane --overlay-size ",
+            &["sm", "base", "lg", "xl", "2xl", "3xl"][..],
+        ),
+        ("zetta pane --overlay-opacity ", &[][..]),
+        (
+            "zetta pane --overlay-color ",
+            overlay_color_names.as_slice(),
+        ),
+        (
+            "zetta pane -S ",
+            &["sm", "base", "lg", "xl", "2xl", "3xl"][..],
+        ),
+        ("zetta pane -O ", &[][..]),
+        ("zetta pane -c ", overlay_color_names.as_slice()),
         ("zetta tabicon ", &["--icon", "--list", "--help"][..]),
         ("zetta tabicon -i ", &[][..]),
         (

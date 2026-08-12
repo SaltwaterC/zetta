@@ -255,6 +255,7 @@ impl Global for ZettaProcessState {}
 mod pane;
 use pane::*;
 mod byte_stream_pane;
+mod command_panes;
 #[cfg(byte_stream_panes)]
 use byte_stream_pane::*;
 mod multi_command;

@@ -1,5 +1,5 @@
 use super::*;
-use crate::pane::overlay_color_to_hex;
+use crate::pane::{PaneDirection, overlay_color_to_hex};
 use futures::StreamExt as _;
 
 fn request(token: &str, command: &str) -> ControlRequest {
@@ -24,6 +24,7 @@ fn request(token: &str, command: &str) -> ControlRequest {
         split: None,
         profile: None,
         theme: None,
+        pane_request: None,
     }
 }
 
@@ -90,6 +91,192 @@ fn replace_pane_control_requests_validate_the_payload() {
 }
 
 #[test]
+fn pane_control_requests_validate_authentication_and_payloads() {
+    let expected = PaneCommand {
+        direction: Some(PaneDirection::Right),
+        label: Some("api".to_owned()),
+        pane: None,
+        overlay: Some(PaneOverlayRequest {
+            text: Some("API".to_owned()),
+            font_size: Some(OverlayFontSize::Large),
+            opacity: Some(70),
+            color: Some("cyan".to_owned()),
+        }),
+        stack: false,
+        list: false,
+        command: vec![
+            "npm".to_owned(),
+            "run dev".to_owned(),
+            "--host=127.0.0.1".to_owned(),
+        ],
+    };
+    let mut valid = request("token", "run_pane");
+    valid.pane_request = Some((&expected).into());
+    assert_eq!(
+        decode_control_request(&mut valid, "token"),
+        Some(ControlRequestCommand::RunPane {
+            request: expected.clone(),
+        })
+    );
+
+    let mut wrong_token = request("wrong", "run_pane");
+    wrong_token.pane_request = Some((&expected).into());
+    assert_eq!(decode_control_request(&mut wrong_token, "token"), None);
+
+    let invalid_requests = [
+        PaneControlRequest {
+            direction: None,
+            label: None,
+            pane: None,
+            overlay: None,
+            stack: false,
+            command: Vec::new(),
+        },
+        PaneControlRequest {
+            direction: Some("sideways".to_owned()),
+            label: None,
+            pane: None,
+            overlay: None,
+            stack: false,
+            command: vec!["echo".to_owned()],
+        },
+        PaneControlRequest {
+            direction: None,
+            label: Some("api".to_owned()),
+            pane: None,
+            overlay: None,
+            stack: false,
+            command: vec!["echo".to_owned()],
+        },
+        PaneControlRequest {
+            direction: Some("right".to_owned()),
+            label: None,
+            pane: Some("api".to_owned()),
+            overlay: None,
+            stack: false,
+            command: vec!["echo".to_owned()],
+        },
+        PaneControlRequest {
+            direction: Some("right".to_owned()),
+            label: None,
+            pane: None,
+            overlay: None,
+            stack: true,
+            command: vec!["echo".to_owned()],
+        },
+        PaneControlRequest {
+            direction: None,
+            label: None,
+            pane: None,
+            overlay: None,
+            stack: false,
+            command: vec!["x".repeat(MAX_PANE_COMMAND_BYTES + 1)],
+        },
+        PaneControlRequest {
+            direction: None,
+            label: None,
+            pane: None,
+            overlay: Some(PaneControlOverlayRequest {
+                text: Some("API".to_owned()),
+                font_size: None,
+                opacity: None,
+                color: None,
+            }),
+            stack: false,
+            command: vec!["echo".to_owned()],
+        },
+        PaneControlRequest {
+            direction: Some("right".to_owned()),
+            label: None,
+            pane: None,
+            overlay: Some(PaneControlOverlayRequest {
+                text: None,
+                font_size: Some("xl".to_owned()),
+                opacity: None,
+                color: None,
+            }),
+            stack: false,
+            command: vec!["echo".to_owned()],
+        },
+        PaneControlRequest {
+            direction: Some("right".to_owned()),
+            label: None,
+            pane: None,
+            overlay: Some(PaneControlOverlayRequest {
+                text: Some("API".to_owned()),
+                font_size: Some("huge".to_owned()),
+                opacity: None,
+                color: None,
+            }),
+            stack: false,
+            command: vec!["echo".to_owned()],
+        },
+        PaneControlRequest {
+            direction: Some("right".to_owned()),
+            label: None,
+            pane: None,
+            overlay: Some(PaneControlOverlayRequest {
+                text: Some("API".to_owned()),
+                font_size: None,
+                opacity: Some(101),
+                color: None,
+            }),
+            stack: false,
+            command: vec!["echo".to_owned()],
+        },
+        PaneControlRequest {
+            direction: Some("right".to_owned()),
+            label: None,
+            pane: None,
+            overlay: Some(PaneControlOverlayRequest {
+                text: Some("API".to_owned()),
+                font_size: None,
+                opacity: None,
+                color: Some("nope".to_owned()),
+            }),
+            stack: false,
+            command: vec!["echo".to_owned()],
+        },
+    ];
+    for pane_request in invalid_requests {
+        let mut invalid = request("token", "run_pane");
+        invalid.pane_request = Some(pane_request);
+        assert_eq!(decode_control_request(&mut invalid, "token"), None);
+    }
+
+    let mut list = request("token", "list_panes");
+    assert_eq!(
+        decode_control_request(&mut list, "token"),
+        Some(ControlRequestCommand::ListPaneLabels)
+    );
+    let mut list_with_payload = request("token", "list_panes");
+    list_with_payload.pane_request = Some((&expected).into());
+    assert_eq!(
+        decode_control_request(&mut list_with_payload, "token"),
+        None
+    );
+}
+
+#[test]
+fn pane_control_responses_round_trip_labels_and_structured_errors() {
+    let response = ControlResponse {
+        status: "rejected".to_owned(),
+        themes: Vec::new(),
+        silent_mode: false,
+        pane_labels: vec!["Pane 1".to_owned(), "api".to_owned()],
+        error: Some(ControlError {
+            code: "pane_rejected".to_owned(),
+            message: "pane label \"missing\" was not found".to_owned(),
+        }),
+    };
+    let encoded = serde_json::to_vec(&response).unwrap();
+    let decoded: ControlResponse = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(decoded.status, "rejected");
+    assert_eq!(decoded.pane_labels, ["Pane 1", "api"]);
+    assert_eq!(decoded.error.as_ref().unwrap().code, "pane_rejected");
+}
+
+#[test]
 fn unknown_control_commands_are_rejected() {
     assert_eq!(
         decode_control_request(&mut request("token", "delete_sessions"), "token"),
@@ -137,6 +324,8 @@ fn silent_mode_response_round_trips_its_state() {
         status: "ok".to_owned(),
         themes: Vec::new(),
         silent_mode: true,
+        pane_labels: Vec::new(),
+        error: None,
     };
     let encoded = serde_json::to_vec(&response).unwrap();
     let decoded: ControlResponse = serde_json::from_slice(&encoded).unwrap();
@@ -549,6 +738,7 @@ fn reconnect_requests_carry_a_session_target_and_optional_secret() {
         split: None,
         profile: None,
         theme: None,
+        pane_request: None,
     };
     assert_eq!(
         decode_control_request(&mut request, "token"),
@@ -634,6 +824,64 @@ fn control_server_delivers_a_replace_pane_request_and_completion_status() {
     assert_eq!(request, expected);
     completion.send(true).unwrap();
     assert!(client.join().unwrap().unwrap());
+}
+
+#[test]
+fn control_server_delivers_a_pane_command_and_reports_structured_rejection() {
+    let directory = tempfile::tempdir().unwrap();
+    let endpoint_path = directory.path().join("control.json");
+    let (commands, mut received) = futures::channel::mpsc::unbounded();
+    let _server = ProcessControlServer::start_at(commands, endpoint_path.clone()).unwrap();
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&fs::read(endpoint_path).unwrap()).unwrap();
+    let expected = PaneCommand {
+        direction: None,
+        label: None,
+        pane: Some("api".to_owned()),
+        overlay: None,
+        stack: true,
+        list: false,
+        command: vec!["tail".to_owned(), "server log".to_owned()],
+    };
+    let client_request = expected.clone();
+    let client = thread::spawn(move || send_run_pane_request(&endpoint, &client_request));
+    let command = futures::executor::block_on(received.next()).unwrap();
+    let ProcessControlCommand::RunPane {
+        request,
+        completion,
+    } = command
+    else {
+        panic!("unexpected process control command");
+    };
+    assert_eq!(request, expected);
+    completion
+        .send(Err("no pane named \"api\"".to_owned()))
+        .unwrap();
+    let error = client.join().unwrap().unwrap_err().to_string();
+    assert!(error.contains("pane_rejected"));
+    assert!(error.contains("no pane named"));
+}
+
+#[test]
+fn control_server_delivers_pane_label_listing() {
+    let directory = tempfile::tempdir().unwrap();
+    let endpoint_path = directory.path().join("control.json");
+    let (commands, mut received) = futures::channel::mpsc::unbounded();
+    let _server = ProcessControlServer::start_at(commands, endpoint_path.clone()).unwrap();
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&fs::read(endpoint_path).unwrap()).unwrap();
+    let client = thread::spawn(move || send_list_pane_labels_request(&endpoint));
+    let command = futures::executor::block_on(received.next()).unwrap();
+    let ProcessControlCommand::ListPaneLabels { completion } = command else {
+        panic!("unexpected process control command");
+    };
+    completion
+        .send(Ok(vec!["Pane 1".to_owned(), "api".to_owned()]))
+        .unwrap();
+    assert_eq!(
+        client.join().unwrap().unwrap(),
+        Some(vec!["Pane 1".to_owned(), "api".to_owned()])
+    );
 }
 
 #[test]

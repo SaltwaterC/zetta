@@ -160,6 +160,262 @@ fn panetheme_subcommand_parses_names_resets_and_dynamic_listing() {
 }
 
 #[test]
+fn pane_subcommand_preserves_exact_command_arguments_and_modes() {
+    let args = parse_args_from([
+        OsString::from("pane"),
+        OsString::from("--direction"),
+        OsString::from("right"),
+        OsString::from("-l"),
+        OsString::from("api"),
+        OsString::from("--"),
+        OsString::from("npm"),
+        OsString::from("run dev"),
+        OsString::from("--host=127.0.0.1"),
+    ])
+    .unwrap();
+    assert_eq!(
+        args.mode,
+        StartupMode::Pane(PaneCommand {
+            direction: Some(PaneDirection::Right),
+            label: Some("api".to_owned()),
+            pane: None,
+            overlay: None,
+            stack: false,
+            list: false,
+            command: vec![
+                "npm".to_owned(),
+                "run dev".to_owned(),
+                "--host=127.0.0.1".to_owned()
+            ],
+        })
+    );
+
+    assert_eq!(
+        parse_args_from([
+            OsString::from("pane"),
+            OsString::from("-p"),
+            OsString::from("api"),
+            OsString::from("-s"),
+            OsString::from("--"),
+            OsString::from("tail"),
+            OsString::from("-f"),
+            OsString::from("server log"),
+        ])
+        .unwrap()
+        .mode,
+        StartupMode::Pane(PaneCommand {
+            direction: None,
+            label: None,
+            pane: Some("api".to_owned()),
+            overlay: None,
+            stack: true,
+            list: false,
+            command: vec!["tail".to_owned(), "-f".to_owned(), "server log".to_owned()],
+        })
+    );
+}
+
+#[test]
+fn pane_subcommand_supports_short_options_and_listing() {
+    assert_eq!(
+        parse_args_from([OsString::from("pane"), OsString::from("-L")])
+            .unwrap()
+            .mode,
+        StartupMode::Pane(PaneCommand {
+            direction: None,
+            label: None,
+            pane: None,
+            overlay: None,
+            stack: false,
+            list: true,
+            command: Vec::new(),
+        })
+    );
+    assert_eq!(
+        parse_args_from([
+            OsString::from("pane"),
+            OsString::from("-d"),
+            OsString::from("up"),
+            OsString::from("--"),
+            OsString::from("cargo"),
+            OsString::from("test"),
+        ])
+        .unwrap()
+        .mode,
+        StartupMode::Pane(PaneCommand {
+            direction: Some(PaneDirection::Up),
+            label: None,
+            pane: None,
+            overlay: None,
+            stack: false,
+            list: false,
+            command: vec!["cargo".to_owned(), "test".to_owned()],
+        })
+    );
+}
+
+#[test]
+fn pane_subcommand_parses_new_split_overlays_and_styles() {
+    assert_eq!(
+        parse_args_from([
+            OsString::from("pane"),
+            OsString::from("-d"),
+            OsString::from("right"),
+            OsString::from("-o"),
+            OsString::from("API"),
+            OsString::from("--overlay-size"),
+            OsString::from("2xl"),
+            OsString::from("-O"),
+            OsString::from("70"),
+            OsString::from("--overlay-color"),
+            OsString::from("cyan"),
+            OsString::from("--"),
+            OsString::from("npm"),
+            OsString::from("run"),
+        ])
+        .unwrap()
+        .mode,
+        StartupMode::Pane(PaneCommand {
+            direction: Some(PaneDirection::Right),
+            label: None,
+            pane: None,
+            overlay: Some(PaneOverlayRequest {
+                text: Some("API".to_owned()),
+                font_size: Some(OverlayFontSize::ExtraExtraLarge),
+                opacity: Some(70),
+                color: Some("cyan".to_owned()),
+            }),
+            stack: false,
+            list: false,
+            command: vec!["npm".to_owned(), "run".to_owned()],
+        })
+    );
+
+    for args in [
+        vec!["pane", "--overlay", "API", "--", "echo"],
+        vec![
+            "pane",
+            "--direction",
+            "right",
+            "--overlay-size",
+            "xl",
+            "--",
+            "echo",
+        ],
+        vec![
+            "pane",
+            "--direction",
+            "right",
+            "--overlay",
+            "API",
+            "--overlay",
+            "Other",
+            "--",
+            "echo",
+        ],
+        vec![
+            "pane",
+            "--direction",
+            "right",
+            "--overlay",
+            "API",
+            "--overlay-opacity",
+            "101",
+            "--",
+            "echo",
+        ],
+        vec![
+            "pane",
+            "--direction",
+            "right",
+            "--overlay",
+            "API",
+            "--overlay-color",
+            "nope",
+            "--",
+            "echo",
+        ],
+    ] {
+        assert!(
+            parse_args_from(args.clone().into_iter().map(OsString::from)).is_err(),
+            "expected pane overlay arguments to be rejected: {args:?}"
+        );
+    }
+}
+
+#[test]
+fn pane_subcommand_preserves_labels_starting_with_a_dash() {
+    assert_eq!(
+        parse_args_from([
+            OsString::from("pane"),
+            OsString::from("--direction"),
+            OsString::from("right"),
+            OsString::from("--label"),
+            OsString::from("-api"),
+            OsString::from("--"),
+            OsString::from("echo"),
+        ])
+        .unwrap()
+        .mode,
+        StartupMode::Pane(PaneCommand {
+            direction: Some(PaneDirection::Right),
+            label: Some("-api".to_owned()),
+            pane: None,
+            overlay: None,
+            stack: false,
+            list: false,
+            command: vec!["echo".to_owned()],
+        })
+    );
+    assert_eq!(
+        parse_args_from([
+            OsString::from("pane"),
+            OsString::from("--pane"),
+            OsString::from("-api"),
+            OsString::from("--"),
+            OsString::from("echo"),
+        ])
+        .unwrap()
+        .mode,
+        StartupMode::Pane(PaneCommand {
+            direction: None,
+            label: None,
+            pane: Some("-api".to_owned()),
+            overlay: None,
+            stack: false,
+            list: false,
+            command: vec!["echo".to_owned()],
+        })
+    );
+}
+
+#[test]
+fn pane_subcommand_rejects_missing_commands_invalid_directions_and_conflicts() {
+    for args in [
+        vec!["pane"],
+        vec!["pane", "--direction", "diagonal", "--", "echo"],
+        vec!["pane", "--label", "api", "--", "echo"],
+        vec!["pane", "--direction", "right", "--stack", "--", "echo"],
+        vec![
+            "pane",
+            "--direction",
+            "right",
+            "--pane",
+            "api",
+            "--",
+            "echo",
+        ],
+        vec!["pane", "--list", "--", "echo"],
+        vec!["pane", "echo"],
+    ] {
+        assert!(
+            parse_args_from(args.clone().into_iter().map(OsString::from)).is_err(),
+            "expected pane arguments to be rejected: {args:?}"
+        );
+    }
+}
+
+#[test]
 fn overlay_subcommand_parses_text_and_reset() {
     assert_eq!(
         parse_args_from([OsString::from("overlay"), OsString::from("Prod")])

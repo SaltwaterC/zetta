@@ -1,9 +1,13 @@
 use super::cli_help::{
-    attention_help, help_text, is_version_argument, pane_splits_help, parse_overlay_args,
-    parse_pane_theme_args, parse_tab_icon_args, parse_terminal_resize_dimension, version_text,
+    attention_help, help_text, is_version_argument, pane_help, pane_splits_help,
+    parse_overlay_args, parse_pane_theme_args, parse_tab_icon_args,
+    parse_terminal_resize_dimension, version_text,
 };
 use super::*;
 use crate::cli_services::{NotificationRequest, parse_notification_timeout};
+use crate::command_panes::{
+    MAX_PANE_COMMAND_BYTES, PaneCommand, pane_command_byte_len, parse_pane_direction,
+};
 use crate::profile_cli::{ProfileCommand, parse_profile_args};
 use crate::worktree_cli::{WorktreeCommand, parse_worktree_args};
 
@@ -12,6 +16,7 @@ const DEFAULT_PERFORMANCE_REPORT_DURATION: Duration = Duration::from_secs(10);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StartupMode {
     Application,
+    Pane(PaneCommand),
     Attention(AttentionCommand),
     Worktree(WorktreeCommand),
     #[cfg(cli_services)]
@@ -215,8 +220,241 @@ pub(crate) fn parse_attention_target(process_id: &str, attention_id: &str) -> Re
     Ok((process_id, attention_id))
 }
 
+pub(crate) fn parse_pane_args(args: &[OsString]) -> Result<PaneCommand> {
+    let mut direction = None;
+    let mut label = None;
+    let mut pane = None;
+    let mut overlay = None;
+    let mut stack = false;
+    let mut list = false;
+    let mut command = Vec::new();
+    let mut after_delimiter = false;
+    let mut arguments = args.iter();
+
+    while let Some(argument) = arguments.next() {
+        let value = argument.to_string_lossy();
+        if after_delimiter {
+            command.push(value.into_owned());
+            continue;
+        }
+        match value.as_ref() {
+            "--" => after_delimiter = true,
+            "--help" | "-h" => {
+                println!("{}", pane_help());
+                std::process::exit(0);
+            }
+            "--direction" | "-d" => {
+                anyhow::ensure!(
+                    direction.is_none(),
+                    "--direction may only be specified once"
+                );
+                let value = arguments
+                    .next()
+                    .context("--direction requires left, right, up, or down")?
+                    .to_string_lossy()
+                    .into_owned();
+                direction = Some(parse_pane_direction(&value).with_context(|| {
+                    format!("unknown pane direction {value:?}; use left, right, up, or down")
+                })?);
+            }
+            "--label" | "-l" => {
+                anyhow::ensure!(label.is_none(), "--label may only be specified once");
+                let value = arguments
+                    .next()
+                    .context("--label requires a non-empty pane label")?
+                    .to_string_lossy()
+                    .into_owned();
+                anyhow::ensure!(!value.is_empty(), "--label requires a non-empty pane label");
+                label = Some(value);
+            }
+            "--pane" | "-p" => {
+                anyhow::ensure!(pane.is_none(), "--pane may only be specified once");
+                let value = arguments
+                    .next()
+                    .context("--pane requires an existing pane label")?
+                    .to_string_lossy()
+                    .into_owned();
+                anyhow::ensure!(!value.is_empty(), "--pane requires a non-empty pane label");
+                pane = Some(value);
+            }
+            "--overlay" | "-o" => {
+                let overlay = overlay.get_or_insert(PaneOverlayRequest {
+                    text: None,
+                    font_size: None,
+                    opacity: None,
+                    color: None,
+                });
+                anyhow::ensure!(
+                    overlay.text.is_none(),
+                    "--overlay may only be specified once"
+                );
+                overlay.text = Some(
+                    arguments
+                        .next()
+                        .context("--overlay requires overlay text")?
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+            "--overlay-size" | "-S" => {
+                let overlay = overlay.get_or_insert(PaneOverlayRequest {
+                    text: None,
+                    font_size: None,
+                    opacity: None,
+                    color: None,
+                });
+                anyhow::ensure!(
+                    overlay.font_size.is_none(),
+                    "--overlay-size may only be specified once"
+                );
+                let value = arguments
+                    .next()
+                    .context("--overlay-size requires sm, base, lg, xl, 2xl, or 3xl")?
+                    .to_string_lossy()
+                    .into_owned();
+                overlay.font_size = Some(OverlayFontSize::parse(&value).with_context(|| {
+                    format!(
+                        "unknown overlay size {value:?}; expected one of {}",
+                        OverlayFontSize::CLI_NAMES.join(", ")
+                    )
+                })?);
+            }
+            "--overlay-opacity" | "-O" => {
+                let overlay = overlay.get_or_insert(PaneOverlayRequest {
+                    text: None,
+                    font_size: None,
+                    opacity: None,
+                    color: None,
+                });
+                anyhow::ensure!(
+                    overlay.opacity.is_none(),
+                    "--overlay-opacity may only be specified once"
+                );
+                let value = arguments
+                    .next()
+                    .context("--overlay-opacity requires a percentage from 0 to 100")?
+                    .to_string_lossy()
+                    .into_owned();
+                let percent = value.parse::<u8>().with_context(|| {
+                    format!("--overlay-opacity {value:?} must be a whole number")
+                })?;
+                anyhow::ensure!(
+                    percent <= 100,
+                    "--overlay-opacity must be between 0 and 100"
+                );
+                overlay.opacity = Some(percent);
+            }
+            "--overlay-color" | "-c" => {
+                let overlay = overlay.get_or_insert(PaneOverlayRequest {
+                    text: None,
+                    font_size: None,
+                    opacity: None,
+                    color: None,
+                });
+                anyhow::ensure!(
+                    overlay.color.is_none(),
+                    "--overlay-color may only be specified once"
+                );
+                let value = arguments
+                    .next()
+                    .context("--overlay-color requires a color name or hex color")?
+                    .to_string_lossy()
+                    .into_owned();
+                anyhow::ensure!(
+                    overlay_color_from_value(&value).is_some(),
+                    "invalid overlay color {value:?}"
+                );
+                overlay.color = Some(value);
+            }
+            "--stack" | "-s" => {
+                anyhow::ensure!(!stack, "--stack may only be specified once");
+                stack = true;
+            }
+            "--list" | "-L" => {
+                anyhow::ensure!(!list, "--list may only be specified once");
+                list = true;
+            }
+            option if option.starts_with('-') => anyhow::bail!("unknown pane option {option:?}"),
+            positional => anyhow::bail!(
+                "pane command arguments must follow --; found positional argument {positional:?}"
+            ),
+        }
+    }
+
+    if list {
+        anyhow::ensure!(
+            direction.is_none(),
+            "--list cannot be combined with --direction"
+        );
+        anyhow::ensure!(label.is_none(), "--list cannot be combined with --label");
+        anyhow::ensure!(pane.is_none(), "--list cannot be combined with --pane");
+        anyhow::ensure!(!stack, "--list cannot be combined with --stack");
+        anyhow::ensure!(
+            !after_delimiter && command.is_empty(),
+            "--list cannot be combined with a command"
+        );
+    } else {
+        anyhow::ensure!(after_delimiter, "pane commands require arguments after --");
+        anyhow::ensure!(
+            !command.is_empty(),
+            "pane commands require a command after --"
+        );
+        anyhow::ensure!(
+            pane_command_byte_len(&command) <= MAX_PANE_COMMAND_BYTES,
+            "pane command exceeds the {} KiB limit",
+            MAX_PANE_COMMAND_BYTES / 1024
+        );
+        anyhow::ensure!(
+            label.is_none() || direction.is_some(),
+            "--label requires --direction"
+        );
+        anyhow::ensure!(
+            direction.is_none() || (pane.is_none() && !stack),
+            "--direction cannot be combined with --pane or --stack"
+        );
+        anyhow::ensure!(
+            overlay.is_none() || direction.is_some(),
+            "--overlay options require --direction"
+        );
+        anyhow::ensure!(
+            overlay
+                .as_ref()
+                .is_none_or(|overlay| overlay.text.is_some()),
+            "an overlay requires --overlay TEXT"
+        );
+    }
+
+    Ok(PaneCommand {
+        direction,
+        label,
+        pane,
+        overlay,
+        stack,
+        list,
+        command,
+    })
+}
+
 pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Result<StartupArgs> {
     let arguments = args.into_iter().collect::<Vec<_>>();
+    if arguments.first().is_some_and(|argument| argument == "pane") {
+        return Ok(StartupArgs {
+            config_path: None,
+            keymap_path: None,
+            profile: None,
+            split: None,
+            replace_pane: false,
+            theme_override: None,
+            mode: StartupMode::Pane(parse_pane_args(&arguments[1..])?),
+            profile_report: None,
+            profile_duration: None,
+            profile_pane_stress: false,
+            profile_background_stress: false,
+            profile_sparse_updates: false,
+            profile_external_terminal: false,
+            tftp_command: None,
+        });
+    }
     if arguments.first().is_some_and(|argument| argument == "wt") {
         return Ok(StartupArgs {
             config_path: None,

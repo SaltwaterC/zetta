@@ -95,6 +95,39 @@ and pane limits are preserved. If no accepting Zetta process is available, the
 command falls back to the normal new-window launch; `--config` and `--keymap`
 always use that normal launch path.
 
+## CLI command panes
+
+Run a command in the active pane, a pane selected by label, or a newly created
+split with `zetta pane`:
+
+```sh
+zetta pane --direction right --label api -- npm run dev
+zetta pane --direction right --label api --overlay API -- npm run dev
+zetta pane --direction up -- cargo test
+zetta pane --pane api -- make test
+zetta pane --pane api --stack -- tail -f server.log
+zetta pane --stack -- cargo test
+zetta pane --list
+```
+
+`--direction` always splits the active pane: `left` and `right` create a
+vertical split, while `up` and `down` create a horizontal split. `--label`
+optionally assigns the generated label of that new split. Direct commands use
+the target pane's existing base shell; `--stack` creates a task-backed stacked
+PTY. If `--pane` is omitted, the active pane is used. Pane labels are matched
+exactly, with case sensitivity, and missing or ambiguous labels include the
+available labels in the error. `--list` prints labels for the active tab and is
+also used by shell completion.
+
+Everything after `--` is retained as command argv. Split panes launch that
+argv directly; direct and stacked commands quote each argument for the target
+shell. New splits inherit the active pane's profile, theme, and working
+directory. Use `--overlay TEXT` on a directional split to show text over the
+new pane; `--overlay-size`, `--overlay-opacity`, and `--overlay-color` configure
+its style. Overlay options apply only to newly created splits. A stopped base
+shell cannot receive a direct command, and the CLI returns an error when no
+accepting Zetta process is available rather than silently opening a new window.
+
 Tab names follow the active terminal process. Press `Ctrl-Shift-R` or double-click
 a tab to set a persistent name. Use `Ctrl-Shift-Y` or the tab context menu
 to choose a tab icon. Submit an empty name to resume automatic naming.

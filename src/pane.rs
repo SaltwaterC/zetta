@@ -1028,13 +1028,13 @@ pub(crate) enum SplitAxis {
     Vertical,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SplitPosition {
     Before,
     After,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PaneDirection {
     Left,
     Right,
