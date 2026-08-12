@@ -49,8 +49,8 @@ use std::{
 use anyhow::{Context as _, Result};
 use background_sessions::{
     BackgroundPaneLayout, BackgroundPaneState, BackgroundPaneSummary, BackgroundSessionRunner,
-    BackgroundSessionSummary, SessionAuthentication, application_from_command_line,
-    print_session_catalogs,
+    BackgroundSessionSummary, SessionAuthentication, SessionSecret, VerifiedSession,
+    application_from_command_line, print_session_catalogs,
 };
 use command_palette::{CommandPalette, PaletteCommand, humanize_action_name};
 use config::{

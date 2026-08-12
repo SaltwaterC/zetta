@@ -1360,8 +1360,8 @@ fn tab_close_policy_distinguishes_close_from_unprotected_backgrounding() {
     .background_authentication()
     .flatten()
     .unwrap();
-    assert!(selected.verify("correct horse battery staple"));
-    assert!(!selected.verify("wrong"));
+    assert!(selected.verify("correct horse battery staple").is_some());
+    assert!(selected.verify("wrong").is_none());
 }
 
 #[test]

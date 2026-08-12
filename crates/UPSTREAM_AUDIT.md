@@ -102,3 +102,12 @@ merge with Zetta's fork, not an automatic cherry-pick.
 This queue is intentionally recorded rather than silently applied: the forks
 contain substantial standalone rewrites, so each candidate needs a source-level
 merge and focused platform validation.
+
+## Deliberate behavioural divergences from upstream
+
+Changes where Zetta intentionally differs from the upstream source, so a future
+synchronization does not quietly revert them.
+
+| Divergence | Upstream behaviour | Why Zetta differs |
+| --- | --- | --- |
+| OSC 8 hyperlinks require the hyperlink modifier (`crates/terminal/src/terminal.rs`, `mouse_up`) | A plain left click on a cell carrying an OSC 8 hyperlink calls `open_url` immediately; only heuristically detected URLs require the modifier. | The URI in an OSC 8 sequence is chosen by whatever writes to the terminal and need not match the visible text, so ordinary output could turn a single click into a system-handled open of a `file://`, `smb://`, or registered custom-scheme target. Requiring the same modifier as a detected URL makes both link kinds behave alike and keeps opening an explicit act. Recorded in the 2026-08-12 security review. |

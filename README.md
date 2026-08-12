@@ -218,6 +218,32 @@ Use [`config.example.json`](config.example.json) and
 [`keymap.example.json`](keymap.example.json) as starting points for local
 customization.
 
+## Security notes
+
+Two areas are worth knowing about before you rely on them.
+
+The built-in HTTP and TFTP servers listen on `0.0.0.0` and have no
+authentication or encryption, so every host that can route to the port can read
+the served directory. That is deliberate — their purpose is handing files to
+another device — but it means the GUI **Start HTTP server** and **Start TFTP
+server** actions expose the active pane's working directory to the network in
+one step. TFTP uploads are refused unless you pass `zetta tftp server
+--writable`, and the GUI action is always read only. Restrict access with a
+firewall on untrusted networks; see [Serial and network tools](docs/tools.md).
+
+Background-session protection stores a salted Argon2id verifier in memory only,
+keeps a protected session's commands, titles, and directories out of the on-disk
+catalog, and makes protected sessions unreachable over the process control
+socket — the endpoint token cannot reattach one, modify one, or confirm one
+exists.
+
+It rests on one assumption: that other processes running as your user cannot
+read Zetta's memory. On Linux that means `kernel.yama.ptrace_scope` must be `1`
+or higher, since a detached session's terminals are PTYs whose file descriptors
+belong to the Zetta process. Verify this before relying on protection for a
+session running a privileged shell. See
+[Background sessions](docs/background-sessions.md#the-prerequisite-process-memory-must-be-protected).
+
 ## Design philosophy
 
 Zetta favors useful conventions and a consistent experience across platforms,

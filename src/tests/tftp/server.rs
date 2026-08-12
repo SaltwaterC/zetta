@@ -97,6 +97,43 @@ fn server_paths_cannot_escape_the_served_directory() {
     assert!(safe_server_path(&root, "/outside.bin").is_err());
 }
 
+/// Sends one request packet to a running server and returns its first reply.
+fn exchange(address: SocketAddr, packet: &[u8]) -> Option<Vec<u8>> {
+    let client = UdpSocket::bind(("127.0.0.1", 0)).ok()?;
+    client.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
+    client.send_to(packet, address).ok()?;
+    let mut response = vec![0; 1024];
+    let (size, _) = client.recv_from(&mut response).ok()?;
+    response.truncate(size);
+    Some(response)
+}
+
+#[test]
+fn a_read_only_server_refuses_uploads_without_creating_a_file() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let server = start_server(tempdir.path(), 0, false).unwrap();
+    let request = request_packet(OP_WRQ, "planted.bin", Some(11));
+
+    let Some(response) = exchange(
+        SocketAddr::from(([127, 0, 0, 1], server.address.port())),
+        &request,
+    ) else {
+        eprintln!("skipping TFTP upload refusal: localhost UDP is unavailable");
+        return;
+    };
+
+    assert_eq!(packet_opcode(&response), Some(OP_ERROR));
+    // Error code 2 is "access violation", which is what a client expects when a
+    // server declines the operation rather than failing to perform it.
+    assert_eq!(packet_block(&response), Some(2));
+    assert!(error_message(&response).contains("uploads are disabled"));
+    assert!(
+        !tempdir.path().join("planted.bin").exists(),
+        "a refused upload must not leave a file behind"
+    );
+    drop(server);
+}
+
 #[test]
 fn incomplete_uploads_are_removed_and_completed_uploads_are_preserved() {
     let tempdir = tempfile::tempdir().unwrap();

@@ -2233,7 +2233,7 @@ impl Zetta {
         }
         if let Some(tab) = self
             .background_sessions
-            .iter_mut()
+            .iter_unprotected_mut()
             .find(|tab| tab.attention_id == request.attention_id)
         {
             tab.attention = Some(attention);

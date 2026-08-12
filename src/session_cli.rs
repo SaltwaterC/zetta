@@ -10,7 +10,9 @@ use zeroize::Zeroizing;
 use std::io::{self, IsTerminal as _};
 
 use crate::{
-    background_sessions::{BackgroundSessionCatalog, read_session_catalogs, session_catalog_dir},
+    background_sessions::{
+        BackgroundSessionCatalog, SessionSecret, read_session_catalogs, session_catalog_dir,
+    },
     process_control::{ReconnectSessionResult, request_reconnect_session},
 };
 
@@ -33,7 +35,7 @@ pub(crate) fn run_reconnect_session(identifier: &str) -> Result<()> {
         target.process_id,
         target.runner_id,
         target.session_id,
-        secret.map(|secret| secret.to_string()),
+        secret,
     )? {
         ReconnectSessionResult::Reconnected => {
             println!("Reconnected session {identifier}.");
@@ -128,7 +130,11 @@ fn find_session(catalogs: &[BackgroundSessionCatalog], identifier: &str) -> Resu
     target.with_context(|| format!("background session {identifier:?} was not found"))
 }
 
-fn read_private_secret() -> Result<Zeroizing<String>> {
+fn read_private_secret() -> Result<SessionSecret> {
+    read_private_secret_text().map(SessionSecret::from_zeroizing)
+}
+
+fn read_private_secret_text() -> Result<Zeroizing<String>> {
     #[cfg(unix)]
     {
         let mut terminal = OpenOptions::new()

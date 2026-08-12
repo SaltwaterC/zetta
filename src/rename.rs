@@ -78,7 +78,7 @@ impl Zetta {
     pub(crate) fn set_tab_name(&mut self, request: TabNameRequest, cx: &mut Context<Self>) -> bool {
         let found_in_visible = set_tab_name_on_tabs(self.tabs.iter_mut(), &request);
         let found_in_background = !found_in_visible
-            && set_tab_name_on_tabs(self.background_sessions.iter_mut(), &request);
+            && set_tab_name_on_tabs(self.background_sessions.iter_unprotected_mut(), &request);
         let found = found_in_visible || found_in_background;
         if found {
             // A process-side title request is also a useful signal that the
@@ -120,7 +120,7 @@ impl Zetta {
     ) -> bool {
         let found_in_visible = set_worktree_name_on_tabs(self.tabs.iter_mut(), &request);
         let found_in_background = !found_in_visible
-            && set_worktree_name_on_tabs(self.background_sessions.iter_mut(), &request);
+            && set_worktree_name_on_tabs(self.background_sessions.iter_unprotected_mut(), &request);
         let found = found_in_visible || found_in_background;
         if found {
             cx.notify();

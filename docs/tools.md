@@ -5,6 +5,14 @@ command-line TFTP client, and desktop notifications. The servers have no
 authentication or encryption; expose them only on networks whose clients you
 trust.
 
+Both servers listen on `0.0.0.0`, so they answer every host that can route to
+the port, not only the local machine. This is deliberate: their purpose is
+serving files to another device. There is no bind-address option, so restrict
+access with a firewall when the network is not trusted. The **Start HTTP
+server** and **Start TFTP server** actions do the same thing from the GUI, and
+they serve the active pane's working directory — check which directory that is
+before starting one.
+
 These components are enabled in normal builds. Distribution builds can omit
 them with `make build SERIAL=0 HTTP=0 TFTP=0 NOTIFY=0`; `TFTP_SERVER=0` and
 `TFTP_CLIENT=0` select the two TFTP components separately. See the
@@ -62,9 +70,15 @@ log to standard output and stops on `Ctrl-C`. Set `tftp_server_port` in
 next time either server form starts.
 
 Absolute paths, parent-directory traversal, and symlinks resolving outside the
-served directory are rejected. Uploads may create files below that directory,
-but never overwrite existing files. Incomplete uploads are removed after failed
-or cancelled transfers.
+served directory are rejected.
+
+Uploads are refused unless `zetta tftp server --writable` (short form `-w`) is
+given. TFTP has no authentication, so a writable server lets any host that can
+reach the port create files under `--root`; keeping that opt-in means it cannot
+happen by accident. Existing files are never overwritten, a single upload is
+capped at 4 GiB, and incomplete uploads are removed after failed or cancelled
+transfers. The GUI **Start TFTP server** action is always read only — use the
+command line when you intend to receive files.
 
 Binding port 69 may require privileges or firewall permission. On Linux, the
 [installation guide](installation.md) explains how to grant the installed

@@ -745,10 +745,82 @@ fn reconnect_requests_carry_a_session_target_and_optional_secret() {
         Some(ControlRequestCommand::ReconnectSession {
             runner_id: 7,
             session_id: 42,
-            secret: Some("not-an-argument".to_owned()),
+            secret: Some(SessionSecret::new("not-an-argument".to_owned())),
         })
     );
     assert!(request.secret.is_none());
+}
+
+#[test]
+fn a_token_differing_only_in_its_last_byte_is_rejected() {
+    // The token compare is constant time, which means it must not short-circuit
+    // on the first differing byte. A mismatch confined to the final byte is the
+    // case a short-circuiting compare would still get right, so this guards the
+    // rest of the property indirectly: it fails loudly if the comparison is
+    // ever swapped for something that only inspects a prefix.
+    let token = "0123456789abcdef";
+    for wrong in [
+        "0123456789abcdee",
+        "0123456789abcdefa",
+        "0123456789abcde",
+        "",
+        "f123456789abcdef",
+    ] {
+        assert!(
+            !token_matches(wrong, token),
+            "{wrong:?} must not authenticate against {token:?}"
+        );
+    }
+    assert!(token_matches(token, token));
+}
+
+#[test]
+fn an_authentication_failure_still_fits_the_completion_budget() {
+    // A wrong secret costs one Argon2 verification. Guess-rate limiting refuses
+    // early attempts rather than sleeping on them, precisely so it stays out of
+    // this budget: a delay long enough to matter would exceed the timeout, and
+    // `zetta session reconnect` would report that Zetta refused the request
+    // rather than that the secret was wrong. If verification alone ever
+    // approaches the budget, raise the budget rather than the Argon2 cost.
+    let authentication =
+        crate::background_sessions::SessionAuthentication::create("secret").unwrap();
+    let started = Instant::now();
+    assert!(authentication.verify("wrong").is_none());
+    let verification = started.elapsed();
+
+    assert!(
+        verification * 4 < RECONNECT_COMPLETION_TIMEOUT,
+        "verification takes {verification:?}, too close to the \
+         {RECONNECT_COMPLETION_TIMEOUT:?} reconnect budget"
+    );
+    // The client must outlast the server's own deadline, or a slow failure
+    // would surface as a dropped connection instead of an answer.
+    assert!(RECONNECT_COMPLETION_TIMEOUT < RECONNECT_CLIENT_TIMEOUT);
+}
+
+#[cfg(unix)]
+#[test]
+fn the_control_socket_is_not_reachable_by_other_users() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = tempfile::tempdir().unwrap();
+    let endpoint_path = directory.path().join("sessions").join("control.json");
+    let (commands, _received) = futures::channel::mpsc::unbounded();
+    let server = ProcessControlServer::start_at(commands, endpoint_path.clone()).unwrap();
+
+    // Connecting to a Unix socket requires write permission on it, so the mode
+    // is what keeps another local user off the control channel regardless of
+    // the umask Zetta happened to inherit.
+    let socket = fs::metadata(&server.socket_path).unwrap().permissions();
+    assert_eq!(socket.mode() & 0o777, 0o600);
+
+    let endpoint = fs::metadata(&endpoint_path).unwrap().permissions();
+    assert_eq!(endpoint.mode() & 0o777, 0o600);
+
+    let parent = fs::metadata(endpoint_path.parent().unwrap())
+        .unwrap()
+        .permissions();
+    assert_eq!(parent.mode() & 0o777, 0o700);
 }
 
 #[test]

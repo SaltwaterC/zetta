@@ -10,7 +10,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use zeroize::Zeroize as _;
+use zeroize::{Zeroize as _, Zeroizing};
 
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -21,9 +21,11 @@ use anyhow::{Context as _, Result};
 use futures::channel::mpsc::UnboundedSender;
 use gpui::Hsla;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use subtle::ConstantTimeEq as _;
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use ui::IconName;
 
+use crate::background_sessions::SessionSecret;
 use crate::command_panes::{
     MAX_PANE_COMMAND_BYTES, PaneCommand, pane_command_byte_len, parse_pane_direction,
 };
@@ -37,6 +39,14 @@ const MAX_CONTROL_MESSAGE_BYTES: usize = 256 * 1024;
 const CONTROL_COMPLETION_TIMEOUT: Duration = Duration::from_secs(2);
 const CONTROL_COMPLETION_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const CONTROL_CLIENT_TIMEOUT: Duration = Duration::from_secs(3);
+// Reconnecting a protected session costs an Argon2 verification and, when the
+// secret is wrong, `background_sessions::FAILED_AUTHENTICATION_DELAY` on top of
+// it. Give that path its own budget instead of squeezing it into the generic
+// one: otherwise raising the Argon2 cost or the anti-guessing delay would
+// silently turn "the session secret was incorrect" into "Zetta rejected the
+// reconnect request". `session_cli` covers the resulting ordering.
+const RECONNECT_COMPLETION_TIMEOUT: Duration = Duration::from_secs(4);
+const RECONNECT_CLIENT_TIMEOUT: Duration = Duration::from_secs(6);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReconnectSessionResult {
@@ -95,7 +105,7 @@ pub(crate) enum ProcessControlCommand {
     ReconnectSession {
         runner_id: u64,
         session_id: u64,
-        secret: Option<String>,
+        secret: Option<SessionSecret>,
         completion: Sender<ReconnectSessionResult>,
     },
     SetTabIcon {
@@ -156,7 +166,7 @@ enum ControlRequestCommand {
     ReconnectSession {
         runner_id: u64,
         session_id: u64,
-        secret: Option<String>,
+        secret: Option<SessionSecret>,
     },
     SetTabIcon {
         icon: Option<IconName>,
@@ -373,11 +383,15 @@ impl ProcessControlServer {
         let parent = endpoint_path
             .parent()
             .context("control endpoint has no parent")?;
-        fs::create_dir_all(parent)?;
+        crate::background_sessions::create_private_dir(parent)?;
         let socket_path = control_socket_path(&endpoint_path);
         remove_socket_if_present(&socket_path)?;
         let listener = UnixListener::bind(&socket_path)
             .context("binding the Zetta process control listener")?;
+        // Connecting to a Unix socket requires write permission on it, so the
+        // umask alone decides who may reach this listener. Do not leave that to
+        // the environment: the endpoint token is the only other gate.
+        restrict_socket_permissions(&socket_path)?;
         let token = random_hex(32).context("generating the Zetta process control token")?;
         let endpoint = ControlEndpoint {
             version: CONTROL_VERSION,
@@ -777,7 +791,7 @@ fn wait_for_reconnect_completion(
     completed: &Receiver<ReconnectSessionResult>,
     stopping: &AtomicBool,
 ) -> ReconnectSessionResult {
-    let deadline = Instant::now() + CONTROL_COMPLETION_TIMEOUT;
+    let deadline = Instant::now() + RECONNECT_COMPLETION_TIMEOUT;
     loop {
         if stopping.load(Ordering::Acquire) {
             return ReconnectSessionResult::Rejected;
@@ -809,11 +823,23 @@ fn handle_control_request(stream: &mut UnixStream, token: &str) -> Option<Contro
     decode_control_request(&mut request, token)
 }
 
+/// Compares the endpoint token without leaking how many leading bytes matched.
+/// This is the only authentication check guarding the process control socket,
+/// so it must not short-circuit the way `str` equality does.
+fn token_matches(supplied: &str, expected: &str) -> bool {
+    let supplied = supplied.as_bytes();
+    let expected = expected.as_bytes();
+    // ConstantTimeEq over slices already folds the length comparison in, but it
+    // requires equal lengths to produce a meaningful choice, so gate on that
+    // first. The length of the expected token is not itself a secret.
+    supplied.len() == expected.len() && bool::from(supplied.ct_eq(expected))
+}
+
 fn decode_control_request(
     request: &mut ControlRequest,
     token: &str,
 ) -> Option<ControlRequestCommand> {
-    if request.token != token {
+    if !token_matches(&request.token, token) {
         if let Some(secret) = request.secret.as_mut() {
             secret.zeroize();
         }
@@ -980,7 +1006,24 @@ fn decode_control_request(
         {
             Some(ControlRequestCommand::ListPaneLabels)
         }
-        "reconnect_session" => {
+        "reconnect_session"
+            if request.icon.is_none()
+                && request.pane_theme.is_none()
+                && request.pane_overlay.is_none()
+                && request.pane_overlay_font_size.is_none()
+                && request.pane_overlay_opacity.is_none()
+                && request.pane_overlay_color.is_none()
+                && request.attention_id.is_none()
+                && request.attention_summary.is_none()
+                && request.attention_body.is_none()
+                && request.tab_name.is_none()
+                && request.worktree_name.is_none()
+                && request.config_path.is_none()
+                && request.split.is_none()
+                && request.profile.is_none()
+                && request.theme.is_none()
+                && request.pane_request.is_none() =>
+        {
             request
                 .runner_id
                 .zip(request.session_id)
@@ -988,7 +1031,7 @@ fn decode_control_request(
                     |(runner_id, session_id)| ControlRequestCommand::ReconnectSession {
                         runner_id,
                         session_id,
-                        secret: request.secret.take(),
+                        secret: request.secret.take().map(SessionSecret::new),
                     },
                 )
         }
@@ -1495,7 +1538,7 @@ pub(crate) fn request_reconnect_session(
     process_id: u32,
     runner_id: u64,
     session_id: u64,
-    secret: Option<String>,
+    secret: Option<SessionSecret>,
 ) -> Result<ReconnectSessionResult> {
     let endpoint_path = control_endpoint_path(process_id);
     let contents = fs::read(&endpoint_path).with_context(|| {
@@ -2143,17 +2186,17 @@ fn send_reconnect_session_request(
     endpoint: &ControlEndpoint,
     runner_id: u64,
     session_id: u64,
-    mut secret: Option<String>,
+    secret: Option<SessionSecret>,
 ) -> Result<ReconnectSessionResult> {
     let mut stream = UnixStream::connect(&endpoint.socket_path)?;
-    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    stream.set_read_timeout(Some(RECONNECT_CLIENT_TIMEOUT))?;
+    stream.set_write_timeout(Some(RECONNECT_CLIENT_TIMEOUT))?;
     let mut request = ControlRequest {
         token: endpoint.token.clone(),
         command: "reconnect_session".to_owned(),
         runner_id: Some(runner_id),
         session_id: Some(session_id),
-        secret: secret.take(),
+        secret: secret.as_ref().map(|secret| secret.expose().to_owned()),
         icon: None,
         pane_theme: None,
         pane_overlay: None,
@@ -2187,8 +2230,11 @@ fn send_reconnect_session_request(
     result
 }
 
+/// Reads one newline-framed message. A reconnect request carries the session
+/// secret in this buffer, so it is zeroized on every exit path rather than left
+/// in freed heap memory.
 fn read_message<T: DeserializeOwned>(stream: &mut UnixStream) -> Result<T> {
-    let mut bytes = Vec::new();
+    let mut bytes = Zeroizing::new(Vec::new());
     let mut reader = BufReader::new(stream).take((MAX_CONTROL_MESSAGE_BYTES + 1) as u64);
     reader.read_until(b'\n', &mut bytes)?;
     anyhow::ensure!(
@@ -2264,6 +2310,24 @@ fn control_socket_path(endpoint_path: &Path) -> PathBuf {
     endpoint_path.with_extension("sock")
 }
 
+/// Restricts the bound control socket to the current user. Windows places the
+/// endpoint under per-user `%APPDATA%`, so only unix needs an explicit mode.
+fn restrict_socket_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).with_context(|| {
+            format!(
+                "restricting the Zetta process control socket {}",
+                path.display()
+            )
+        })?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
 fn remove_socket_if_present(path: &Path) -> Result<()> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
@@ -2276,7 +2340,7 @@ fn remove_socket_if_present(path: &Path) -> Result<()> {
 
 fn write_endpoint(path: &Path, endpoint: &ControlEndpoint) -> Result<()> {
     let parent = path.parent().context("control endpoint has no parent")?;
-    fs::create_dir_all(parent)?;
+    crate::background_sessions::create_private_dir(parent)?;
     let temporary = path.with_extension("json.tmp");
     let contents = serde_json::to_vec(endpoint)?;
     #[cfg(unix)]

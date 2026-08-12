@@ -317,7 +317,7 @@ $zettaCompletions = {
             }
             'tftp' {
                 if ($words.Count -le 2) { 'get', 'put', 'server', '--help' }
-                elseif ($words[2] -eq 'server') { '--root', '--port', '--config', '--help' }
+                elseif ($words[2] -eq 'server') { '--root', '--port', '--config', '--writable', '--help' }
                 else { '--port', '--help' }
             }
             'notify' { '--app-name', '--icon', '--sound', '--timeout', '--help' }

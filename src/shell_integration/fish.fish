@@ -464,11 +464,18 @@ function __zetta_long_options
                 --stop-bits 'Stop bits' \
                 --flow-control 'Flow control' \
                 --help 'Print help'
-        case http-server tftp-server
+        case http-server
             printf '%s\t%s\n' \
                 --root 'Directory to serve' \
                 --port 'Server port' \
                 --config 'Configuration file' \
+                --help 'Print help'
+        case tftp-server
+            printf '%s\t%s\n' \
+                --root 'Directory to serve' \
+                --port 'Server port' \
+                --config 'Configuration file' \
+                --writable 'Accept uploads into the served directory' \
                 --help 'Print help'
         case tftp-client ztftp
             printf '%s\t%s\n' --port 'Server port' --help 'Print help'
@@ -653,6 +660,7 @@ complete -c zetta -n '__zetta_at_subcommand tftp' -a 'get put server'
 complete -c zetta -n '__zetta_tftp_client' -l port -r -d 'Server port'
 complete -c zetta -n '__zetta_tftp_server' -l root -r -a '(__fish_complete_directories)' -d 'Directory to serve'
 complete -c zetta -n '__zetta_tftp_server' -l config -r -d 'Configuration file'
+complete -c zetta -n '__zetta_tftp_server' -l writable -d 'Accept uploads into the served directory'
 complete -c zetta -n '__fish_seen_subcommand_from tftp' -l help -d 'Print help'
 complete -c zetta -n '__zetta_at_subcommand tftp' -a '(__zetta_long_options tftp)'
 complete -c zetta -n '__zetta_tftp_client' -a '(__zetta_long_options tftp-client)'

@@ -35,10 +35,95 @@ fn session_authentication_uses_a_salted_argon2id_verifier() {
     assert!(first.encoded().starts_with("$argon2id$"));
     assert!(!first.encoded().contains("sensitive session"));
     assert_ne!(first.encoded(), second.encoded());
-    assert!(first.is_same_verifier(&first.clone()));
-    assert!(!first.is_same_verifier(&second));
-    assert!(first.verify("sensitive session"));
-    assert!(!first.verify("changed value"));
+    assert!(first.verify("sensitive session").is_some());
+    assert!(first.verify("changed value").is_none());
+
+    // Authorization is scoped to the session whose secret was checked.
+    let authorization = first.verify("sensitive session").unwrap();
+    assert!(first.authorizes(&authorization));
+    assert!(!second.authorizes(&authorization));
+}
+
+#[test]
+fn only_verifying_a_secret_produces_a_reconnect_authorization() {
+    let authentication = SessionAuthentication::create("secret").unwrap();
+
+    // A clone of the verifier is not itself authorization: `authorizes` takes a
+    // `VerifiedSession`, and `verify` is the only way to construct one. This is
+    // the invariant `take_background_session_by_id` relies on, so if a future
+    // refactor reintroduces a public constructor this stops compiling.
+    assert!(authentication.verify("wrong").is_none());
+    let authorization = authentication
+        .verify("secret")
+        .expect("the correct secret must authorize");
+    assert!(authentication.clone().authorizes(&authorization));
+}
+
+#[test]
+fn failed_authentication_backoff_doubles_and_saturates() {
+    assert_eq!(failed_authentication_delay(0), Duration::from_secs(1));
+    assert_eq!(failed_authentication_delay(1), Duration::from_secs(1));
+    assert_eq!(failed_authentication_delay(2), Duration::from_secs(2));
+    assert_eq!(failed_authentication_delay(3), Duration::from_secs(4));
+    assert_eq!(failed_authentication_delay(4), Duration::from_secs(8));
+    assert_eq!(failed_authentication_delay(5), Duration::from_secs(16));
+    // Capped, and no overflow at absurd failure counts.
+    assert_eq!(failed_authentication_delay(6), Duration::from_secs(30));
+    assert_eq!(failed_authentication_delay(64), Duration::from_secs(30));
+    assert_eq!(
+        failed_authentication_delay(u32::MAX),
+        Duration::from_secs(30)
+    );
+}
+
+#[test]
+fn a_wrong_secret_opens_a_refusal_window_scoped_to_that_session() {
+    let mut runner = BackgroundSessionRunner::default();
+    runner.detach(
+        "privileged",
+        Some(SessionAuthentication::create("secret").unwrap()),
+    );
+    runner.detach(
+        "other",
+        Some(SessionAuthentication::create("secret").unwrap()),
+    );
+
+    assert!(!runner.authentication_is_refused_at(0));
+    runner.record_failed_authentication_at(0);
+    assert!(runner.authentication_is_refused_at(0));
+    // Backoff is per session: guessing at one must not lock the user out of
+    // another, and must not be shared state an attacker can pile onto.
+    assert!(!runner.authentication_is_refused_at(1));
+
+    // A correct secret clears the penalty.
+    runner.clear_failed_authentications_at(0);
+    assert!(!runner.authentication_is_refused_at(0));
+
+    // An out-of-range index is inert rather than panicking.
+    runner.record_failed_authentication_at(99);
+    assert!(!runner.authentication_is_refused_at(99));
+}
+
+#[test]
+fn session_secrets_are_not_rendered_by_debug() {
+    let secret = SessionSecret::new("hunter2".to_owned());
+
+    assert_eq!(format!("{secret:?}"), "SessionSecret(<redacted>)");
+    assert!(!format!("{secret:?}").contains("hunter2"));
+    assert_eq!(secret.expose(), "hunter2");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_session_directory_is_private_to_the_current_user() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = tempfile::tempdir().unwrap();
+    let sessions = directory.path().join("sessions");
+    create_private_dir(&sessions).unwrap();
+
+    let mode = fs::metadata(&sessions).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o700, "session directory must not be shared");
 }
 
 #[test]
@@ -51,7 +136,13 @@ fn authentication_is_attached_only_to_the_selected_session() {
     );
 
     assert!(runner.authentication_at(0).is_none());
-    assert!(runner.authentication_at(1).unwrap().verify("secret"));
+    assert!(
+        runner
+            .authentication_at(1)
+            .unwrap()
+            .verify("secret")
+            .is_some()
+    );
     assert_eq!(
         runner.iter().copied().collect::<Vec<_>>(),
         ["ordinary", "sensitive"]

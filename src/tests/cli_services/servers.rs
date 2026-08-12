@@ -74,7 +74,51 @@ fn tftp_server_parser_accepts_root_and_port() {
             root: PathBuf::from("images"),
             port: Some(1069),
             config_path: Some(PathBuf::from("zetta.json")),
+            writable: false,
         })
+    );
+}
+
+#[cfg(feature = "tftp-server")]
+#[test]
+fn tftp_server_uploads_require_an_explicit_opt_in() {
+    // Anonymous uploads are the whole exposure, so the default must be off and
+    // both spellings of the opt-in must reach the server.
+    let read_only =
+        parse_tftp_server_args([OsString::from("-r"), OsString::from("images")]).unwrap();
+    assert_eq!(
+        read_only,
+        CliServiceCommand::Tftp(TftpServerCommand {
+            root: PathBuf::from("images"),
+            port: None,
+            config_path: None,
+            writable: false,
+        })
+    );
+
+    for flag in ["--writable", "-w"] {
+        assert_eq!(
+            parse_tftp_server_args([
+                OsString::from(flag),
+                OsString::from("-r"),
+                OsString::from("images"),
+            ])
+            .unwrap(),
+            CliServiceCommand::Tftp(TftpServerCommand {
+                root: PathBuf::from("images"),
+                port: None,
+                config_path: None,
+                writable: true,
+            })
+        );
+    }
+
+    let repeated =
+        parse_tftp_server_args([OsString::from("--writable"), OsString::from("-w")]).unwrap_err();
+    assert!(
+        repeated
+            .to_string()
+            .contains("--writable may only be specified once")
     );
 }
 
@@ -88,6 +132,7 @@ fn tftp_server_uses_the_configured_port_unless_the_cli_overrides_it() {
         root: PathBuf::from("."),
         port: None,
         config_path: Some(config_path.clone()),
+        writable: false,
     };
     assert_eq!(configured.resolved_port().unwrap(), 1069);
     assert_eq!(

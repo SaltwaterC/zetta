@@ -9,16 +9,16 @@ use std::sync::{
     mpsc::{self, Receiver, Sender},
 };
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use time::{OffsetDateTime, macros::format_description};
 
 use super::{
-    DEFAULT_BLOCK_SIZE, MAX_BLOCK_SIZE, MAX_RETRIES, MIN_BLOCK_SIZE, OP_ACK, OP_DATA, OP_ERROR,
-    OP_RRQ, OP_WRQ, SOCKET_TIMEOUT, ack_packet, error_message, option_ack_packet, packet_block,
-    packet_opcode, read_block, send_error, send_packet, set_data_packet,
-    socket_operation_was_interrupted, transfer_socket, zero_terminated_fields,
+    DEFAULT_BLOCK_SIZE, MAX_BLOCK_SIZE, MAX_RETRIES, MAX_UPLOAD_BYTES, MIN_BLOCK_SIZE, OP_ACK,
+    OP_DATA, OP_ERROR, OP_RRQ, OP_WRQ, SOCKET_TIMEOUT, ack_packet, error_message,
+    option_ack_packet, packet_block, packet_opcode, read_block, send_error, send_packet,
+    set_data_packet, socket_operation_was_interrupted, transfer_socket, zero_terminated_fields,
 };
 
 const SERVER_POLL_INTERVAL: Duration = Duration::from_millis(200);
@@ -32,7 +32,10 @@ pub(crate) struct OpenTftpServer {
     pub(crate) root: PathBuf,
 }
 
-pub(crate) fn start_server(root: &Path, port: u16) -> Result<OpenTftpServer> {
+/// Starts a TFTP server. `writable` enables uploads, which are anonymous and
+/// reachable by any host that can route to the port, so callers opt in
+/// explicitly rather than inheriting them.
+pub(crate) fn start_server(root: &Path, port: u16, writable: bool) -> Result<OpenTftpServer> {
     let root = fs::canonicalize(root)
         .with_context(|| format!("resolving TFTP server root {}", root.display()))?;
     anyhow::ensure!(root.is_dir(), "TFTP server root is not a directory");
@@ -46,7 +49,7 @@ pub(crate) fn start_server(root: &Path, port: u16) -> Result<OpenTftpServer> {
     let worker_active = active.clone();
     thread::Builder::new()
         .name("tftp-server".to_owned())
-        .spawn(move || server_loop(socket, worker_root, worker_active, log_tx))
+        .spawn(move || server_loop(socket, worker_root, worker_active, writable, log_tx))
         .context("starting TFTP server worker")?;
 
     Ok(OpenTftpServer {
@@ -159,9 +162,26 @@ fn remove_active_request(active_requests: &Mutex<HashSet<RequestKey>>, request: 
         .remove(request);
 }
 
-fn server_loop(socket: UdpSocket, root: PathBuf, active: Arc<AtomicBool>, logs: Sender<Vec<u8>>) {
+fn server_loop(
+    socket: UdpSocket,
+    root: PathBuf,
+    active: Arc<AtomicBool>,
+    writable: bool,
+    logs: Sender<Vec<u8>>,
+) {
     log_line(&logs, "Zetta TFTP server".to_owned());
-    log_line(&logs, format!("Serving {}", root.display()));
+    log_line(
+        &logs,
+        format!(
+            "Serving {} ({})",
+            root.display(),
+            if writable {
+                "uploads enabled"
+            } else {
+                "read only"
+            }
+        ),
+    );
     log_line(
         &logs,
         format!(
@@ -202,6 +222,17 @@ fn server_loop(socket: UdpSocket, root: PathBuf, active: Arc<AtomicBool>, logs: 
                 continue;
             }
         };
+        if request.write && !writable {
+            send_error(&socket, peer, 2, "uploads are disabled on this server");
+            log_line(
+                &logs,
+                format!(
+                    "Refused upload {:?} from {peer}: the server is read only\r\n",
+                    request.filename
+                ),
+            );
+            continue;
+        }
         let request_key = RequestKey {
             peer,
             write: request.write,
@@ -471,6 +502,12 @@ fn serve_write_request(
     let socket = transfer_socket(peer.ip())?;
     socket.set_read_timeout(Some(SOCKET_TIMEOUT))?;
     let (block_size, expected_size, option_ack) = negotiated_write_options(&request.options);
+    if let Some(expected_size) = expected_size
+        && expected_size > MAX_UPLOAD_BYTES
+    {
+        send_error(&socket, peer, 3, "upload is larger than the server allows");
+        anyhow::bail!("announced upload size {expected_size} exceeds {MAX_UPLOAD_BYTES} bytes");
+    }
     let mut response_packet = if option_ack.is_empty() {
         ack_packet(0).to_vec()
     } else {
@@ -491,6 +528,14 @@ fn serve_write_request(
         let data = response
             .get(4..size)
             .context("received a malformed DATA packet")?;
+        // Checked before the write, not after, so the cap is a real ceiling on
+        // what reaches the disk rather than one overshot by a final block. A
+        // peer may also simply omit or understate `tsize`, so the running total
+        // is what actually enforces the limit.
+        if total + data.len() as u64 > MAX_UPLOAD_BYTES {
+            send_error(&socket, peer, 3, "upload is larger than the server allows");
+            anyhow::bail!("upload exceeded the {MAX_UPLOAD_BYTES} byte limit");
+        }
         upload.write_all(data)?;
         total += data.len() as u64;
         let acknowledgement = ack_packet(expected_block);
@@ -647,14 +692,25 @@ fn receive_data_after_response(
     anyhow::bail!("transfer timed out waiting for DATA {expected_block}")
 }
 
+/// Re-acknowledges a retransmitted final block so a client that lost the last
+/// ACK can finish cleanly.
+///
+/// Bounded by a deadline rather than by the socket timeout alone: every received
+/// packet resets that timeout, so a peer that keeps replaying the final block
+/// would otherwise hold its transfer slot forever and, with enough peers,
+/// exhaust `MAX_CONCURRENT_TRANSFERS`.
 fn dally_after_final_ack(
     socket: &UdpSocket,
     peer: SocketAddr,
     final_block: u16,
     acknowledgement: &[u8],
 ) {
+    let deadline = Instant::now() + SOCKET_TIMEOUT;
     let mut response = vec![0; MAX_BLOCK_SIZE + 4];
     loop {
+        if Instant::now() >= deadline {
+            return;
+        }
         match socket.recv_from(&mut response) {
             Ok((size, source)) if source == peer => {
                 let packet = &response[..size];

@@ -251,10 +251,13 @@ impl Zetta {
         cx.notify();
     }
 
+    /// Answers `zetta notify --silent`-style queries, which arrive over the
+    /// process control socket. Protected sessions are excluded so the reply
+    /// cannot be used to confirm that one exists.
     pub(crate) fn tab_silent_mode_by_attention_id(&self, attention_id: u64) -> Option<bool> {
         self.tabs
             .iter()
-            .chain(self.background_sessions.iter())
+            .chain(self.background_sessions.iter_unprotected())
             .find(|tab| tab.attention_id == attention_id)
             .map(|tab| tab.silent_mode)
     }

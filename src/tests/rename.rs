@@ -131,6 +131,53 @@ fn tab_name_targets_detached_tabs_too() {
 }
 
 #[test]
+fn protected_sessions_are_invisible_to_token_authenticated_requests() {
+    // Process control requests prove only that the caller could read the
+    // endpoint token, which any process running as this user can do. A session
+    // holding a secret must therefore be neither modifiable nor detectable
+    // through them: returning `true` here would confirm it exists.
+    let mut sessions = BackgroundSessionRunner::default();
+    sessions.detach(tab(7, None), None);
+    sessions.detach(
+        tab(42, None),
+        Some(SessionAuthentication::create("secret").unwrap()),
+    );
+
+    let request = TabNameRequest {
+        attention_id: 42,
+        name: Some("attacker chosen".to_owned()),
+    };
+    assert!(!set_tab_name_on_tabs(
+        sessions.iter_unprotected_mut(),
+        &request
+    ));
+
+    let worktree = WorktreeNameRequest {
+        attention_id: 42,
+        name: Some("attacker chosen".to_owned()),
+    };
+    assert!(!set_worktree_name_on_tabs(
+        sessions.iter_unprotected_mut(),
+        &worktree
+    ));
+
+    // The protected session kept its own name, and the unprotected one beside
+    // it is still reachable, so this is isolation rather than a blanket refusal.
+    let protected = sessions.iter().find(|tab| tab.attention_id == 42).unwrap();
+    assert_eq!(
+        resolve_tab_title(protected, || "terminal".to_owned().into()).as_ref(),
+        "terminal"
+    );
+    assert!(set_tab_name_on_tabs(
+        sessions.iter_unprotected_mut(),
+        &TabNameRequest {
+            attention_id: 7,
+            name: Some("ordinary".to_owned()),
+        }
+    ));
+}
+
+#[test]
 fn worktree_name_request_sets_the_worktree_seed_title() {
     let mut tabs = [tab(42, None)];
     let request = WorktreeNameRequest {

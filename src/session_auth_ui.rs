@@ -14,6 +14,14 @@ pub(crate) enum SessionAuthenticationField {
     Confirmation,
 }
 
+/// What the background verification task produced. Creating a verifier and
+/// checking one against a typed secret yield different types now, so they
+/// cannot be confused for one another when the result is matched below.
+enum Outcome {
+    Created(SessionAuthentication),
+    Verified(Option<VerifiedSession>),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DetachAuthenticationChoice {
     Unprotected,
@@ -172,13 +180,31 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(mode) = self
+            .session_authentication
+            .as_ref()
+            .filter(|prompt| !prompt.working)
+            .map(|prompt| prompt.mode)
+        else {
+            return;
+        };
+        // Checked before the prompt is borrowed mutably, and before the secret
+        // is read, so a refused attempt never reaches the verifier.
+        if let SessionAuthenticationPromptMode::Reconnect {
+            runner_id,
+            session_id,
+        } = mode
+            && self.process_authentication_is_refused(runner_id, session_id, cx)
+        {
+            if let Some(prompt) = self.session_authentication.as_mut() {
+                prompt.error = Some("Too many failed attempts. Try again shortly.".into());
+            }
+            cx.notify();
+            return;
+        }
         let Some(prompt) = self.session_authentication.as_mut() else {
             return;
         };
-        if prompt.working {
-            return;
-        }
-        let mode = prompt.mode;
         let secret = Zeroizing::new(prompt.secret.text.clone());
         match mode {
             SessionAuthenticationPromptMode::Detach { .. }
@@ -222,11 +248,11 @@ impl Zetta {
                     match mode {
                         SessionAuthenticationPromptMode::Detach { .. }
                         | SessionAuthenticationPromptMode::ConfigureAutoBackground { .. } => {
-                            SessionAuthentication::create(&secret).map(Some)
+                            SessionAuthentication::create(&secret).map(Outcome::Created)
                         }
                         SessionAuthenticationPromptMode::Reconnect { .. } => verifier
                             .context("the protected session is no longer available")
-                            .map(|verifier| verifier.verify(&secret).then_some(verifier)),
+                            .map(|verifier| Outcome::Verified(verifier.verify(&secret))),
                     }
                 })
                 .await;
@@ -237,14 +263,14 @@ impl Zetta {
                 match (mode, result) {
                     (
                         SessionAuthenticationPromptMode::Detach { tab_id },
-                        Ok(Some(authentication)),
+                        Ok(Outcome::Created(authentication)),
                     ) => {
                         this.session_authentication = None;
                         this.detach_tab_by_id(tab_id, Some(authentication), window, cx);
                     }
                     (
                         SessionAuthenticationPromptMode::ConfigureAutoBackground { tab_id },
-                        Ok(Some(authentication)),
+                        Ok(Outcome::Created(authentication)),
                     ) => {
                         this.session_authentication = None;
                         this.set_auto_background(tab_id, Some(authentication), window, cx);
@@ -254,18 +280,26 @@ impl Zetta {
                             runner_id,
                             session_id,
                         },
-                        Ok(Some(authentication)),
+                        Ok(Outcome::Verified(Some(authorization))),
                     ) => {
                         this.session_authentication = None;
+                        this.process_clear_failed_authentications(runner_id, session_id, cx);
                         this.complete_authenticated_reconnect(
                             runner_id,
                             session_id,
-                            &authentication,
+                            &authorization,
                             window,
                             cx,
                         );
                     }
-                    (SessionAuthenticationPromptMode::Reconnect { .. }, Ok(None)) => {
+                    (
+                        SessionAuthenticationPromptMode::Reconnect {
+                            runner_id,
+                            session_id,
+                        },
+                        Ok(Outcome::Verified(None)),
+                    ) => {
+                        this.process_record_failed_authentication(runner_id, session_id, cx);
                         if let Some(prompt) = this.session_authentication.as_mut() {
                             prompt.working = false;
                             prompt.secret = TextField::default();

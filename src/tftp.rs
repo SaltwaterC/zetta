@@ -24,6 +24,11 @@ const MIN_BLOCK_SIZE: usize = 8;
 const MAX_BLOCK_SIZE: usize = 65_464;
 const SOCKET_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_RETRIES: usize = 5;
+/// Ceiling on a single upload. TFTP has no authentication, so without a bound
+/// any host that can reach the port could fill the disk that holds the served
+/// directory.
+#[cfg(feature = "tftp-server")]
+const MAX_UPLOAD_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 const OP_RRQ: u16 = 1;
 const OP_WRQ: u16 = 2;

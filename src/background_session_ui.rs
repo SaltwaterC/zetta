@@ -1,7 +1,6 @@
 use super::*;
 use crate::rename::resolve_tab_title;
 use crate::worktree_detection::terminal_event_requires_worktree_detection;
-use zeroize::Zeroizing;
 
 const BACKGROUND_PROCESS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -261,7 +260,7 @@ impl Zetta {
         &mut self,
         runner_id: u64,
         session_id: u64,
-        secret: Option<String>,
+        secret: Option<SessionSecret>,
         completion: std::sync::mpsc::Sender<ReconnectSessionResult>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -276,17 +275,23 @@ impl Zetta {
             let _ = completion.send(result);
             return;
         }
-        let Some(secret) = secret.map(Zeroizing::new) else {
+        let Some(secret) = secret else {
             let _ = completion.send(ReconnectSessionResult::AuthenticationFailed);
             return;
         };
+        // Refused attempts report the same status as wrong ones, so the backoff
+        // window cannot be probed to learn whether a guess was even evaluated.
+        if self.process_authentication_is_refused(runner_id, session_id, cx) {
+            let _ = completion.send(ReconnectSessionResult::AuthenticationFailed);
+            return;
+        }
         let generation = self.session_authentication_generation;
         cx.spawn_in(window, async move |this, cx| {
-            let authenticated = cx
+            let authorization = cx
                 .background_spawn(async move {
                     let verifier =
                         verifier.context("the protected session is no longer available")?;
-                    Ok::<_, anyhow::Error>(verifier.verify(&secret).then_some(verifier))
+                    Ok::<_, anyhow::Error>(verifier.verify(secret.expose()))
                 })
                 .await
                 .ok()
@@ -296,17 +301,17 @@ impl Zetta {
                     if this.session_authentication_generation != generation {
                         return ReconnectSessionResult::Rejected;
                     }
-                    authenticated.map_or(
-                        ReconnectSessionResult::AuthenticationFailed,
-                        |authentication| {
-                            this.complete_authenticated_reconnect(
-                                runner_id,
-                                session_id,
-                                &authentication,
-                                window,
-                                cx,
-                            )
-                        },
+                    let Some(authorization) = authorization else {
+                        this.process_record_failed_authentication(runner_id, session_id, cx);
+                        return ReconnectSessionResult::AuthenticationFailed;
+                    };
+                    this.process_clear_failed_authentications(runner_id, session_id, cx);
+                    this.complete_authenticated_reconnect(
+                        runner_id,
+                        session_id,
+                        &authorization,
+                        window,
+                        cx,
                     )
                 })
                 .unwrap_or(ReconnectSessionResult::Rejected);
@@ -356,11 +361,86 @@ impl Zetta {
             .background_session_authentication(session_id)
     }
 
+    fn background_session_index(&self, session_id: u64) -> Option<usize> {
+        self.background_sessions
+            .iter()
+            .position(|tab| tab.id == session_id)
+    }
+
+    fn authentication_is_refused(&self, session_id: u64) -> bool {
+        self.background_session_index(session_id)
+            .is_some_and(|index| self.background_sessions.authentication_is_refused_at(index))
+    }
+
+    fn record_failed_authentication(&mut self, session_id: u64) {
+        if let Some(index) = self.background_session_index(session_id) {
+            self.background_sessions
+                .record_failed_authentication_at(index);
+        }
+    }
+
+    fn clear_failed_authentications(&mut self, session_id: u64) {
+        if let Some(index) = self.background_session_index(session_id) {
+            self.background_sessions
+                .clear_failed_authentications_at(index);
+        }
+    }
+
+    /// Whether the owning runner is currently refusing attempts for this
+    /// session. Checked before the secret is evaluated, so a refused attempt
+    /// costs an attacker a full Argon2 verification's worth of nothing.
+    pub(crate) fn process_authentication_is_refused(
+        &self,
+        runner_id: u64,
+        session_id: u64,
+        cx: &App,
+    ) -> bool {
+        if runner_id == self.background_sessions.runner_id() {
+            return self.authentication_is_refused(session_id);
+        }
+        zetta_for_runner(runner_id, cx)
+            .is_some_and(|source| source.read(cx).authentication_is_refused(session_id))
+    }
+
+    pub(crate) fn process_record_failed_authentication(
+        &mut self,
+        runner_id: u64,
+        session_id: u64,
+        cx: &mut Context<Self>,
+    ) {
+        if runner_id == self.background_sessions.runner_id() {
+            self.record_failed_authentication(session_id);
+            return;
+        }
+        if let Some(source) = zetta_for_runner(runner_id, cx) {
+            source.update(cx, |source, _| {
+                source.record_failed_authentication(session_id)
+            });
+        }
+    }
+
+    pub(crate) fn process_clear_failed_authentications(
+        &mut self,
+        runner_id: u64,
+        session_id: u64,
+        cx: &mut Context<Self>,
+    ) {
+        if runner_id == self.background_sessions.runner_id() {
+            self.clear_failed_authentications(session_id);
+            return;
+        }
+        if let Some(source) = zetta_for_runner(runner_id, cx) {
+            source.update(cx, |source, _| {
+                source.clear_failed_authentications(session_id)
+            });
+        }
+    }
+
     pub(crate) fn complete_authenticated_reconnect(
         &mut self,
         runner_id: u64,
         session_id: u64,
-        authorization: &SessionAuthentication,
+        authorization: &VerifiedSession,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> ReconnectSessionResult {
@@ -398,7 +478,7 @@ impl Zetta {
     pub(crate) fn take_background_session_by_id(
         &mut self,
         session_id: u64,
-        authorization: Option<&SessionAuthentication>,
+        authorization: Option<&VerifiedSession>,
         cx: &mut Context<Self>,
     ) -> Option<Tab> {
         let index = self
@@ -410,7 +490,7 @@ impl Zetta {
             authorization,
         ) {
             (None, None) => {}
-            (Some(expected), Some(supplied)) if expected.is_same_verifier(supplied) => {}
+            (Some(expected), Some(supplied)) if expected.authorizes(supplied) => {}
             _ => return None,
         }
         let tab = self.background_sessions.reconnect_at(index)?;

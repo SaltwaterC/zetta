@@ -76,7 +76,73 @@ runner. Neither the secret nor verifier is written to `config.json`, control
 JSON, or the session catalog. Protected catalog entries expose only a stable ID
 and protection flag, so commands, titles, and working directories remain
 private. Editing catalog or configuration files cannot replace the live
-verifier. Hashing and verification run away from the UI thread.
+verifier. Hashing and verification run away from the UI thread, and a failed
+attempt is answered after a fixed delay so a weak secret cannot be guessed at
+speed.
+
+### What session protection covers
+
+Session protection is intended as a real boundary, including for a session
+running a privileged shell. Three properties hold it up.
+
+Reattaching a protected session requires the secret. The process control socket
+is mode `0600` in a `0700` directory, and its endpoint token authenticates the
+*channel*, not the session: no control command can reattach a protected
+session, and none can observe or modify one. Renaming, attention, and
+silent-mode queries all skip protected sessions, so the token cannot even be
+used to confirm one exists.
+
+The secret is never stored. Only a uniquely salted Argon2id verifier lives in
+the session runner, and it is never written to `config.json`, control JSON, or
+the session catalog. Editing files on disk cannot replace it. Protected catalog
+entries carry only an ID and a protection flag, so commands, titles, and
+working directories stay private while detached.
+
+Wrong secrets are rate limited with an escalating backoff. Each consecutive
+failure doubles the window during which that session refuses further attempts,
+from one second up to thirty, and a correct secret resets it. Attempts arriving
+inside the window are refused without being evaluated and report the same
+failure as a wrong secret, so the window cannot be probed. Backoff is per
+session, so guessing at one session neither locks you out of another nor
+accumulates into shared state. Attempts also serialize through the control
+socket, making this a global bound on the guessing rate rather than a
+per-connection one.
+
+### The prerequisite: process memory must be protected
+
+There is one assumption underneath all of the above, and it is worth checking
+rather than assuming.
+
+A detached session's terminals are ordinary PTYs whose master file descriptors
+belong to the Zetta process. Any process able to read that process's memory or
+open its file descriptors can talk to those terminals directly, without ever
+presenting the secret. If the session runs a root shell, that is a privilege
+escalation, and no amount of authentication inside Zetta can prevent it.
+
+On Linux, the setting that governs this is the Yama LSM:
+
+```sh
+sysctl kernel.yama.ptrace_scope
+```
+
+A value of `1` or higher is required. `1` (the default on Debian, Ubuntu, and
+most derivatives) restricts `ptrace` to descendants, which also gates
+`/proc/<pid>/fd`, so an unrelated process running as your user cannot reach
+Zetta's terminals. A value of `0` — set by some distributions and by developers
+who need unrestricted debuggers — removes that restriction and voids session
+protection entirely against any code running as your user. Values of `2` or `3`
+are stronger still.
+
+macOS restricts `task_for_pid` to root or specially entitled processes by
+default, which provides the equivalent guarantee. Windows requires
+`SeDebugPrivilege` or matching ownership to open a process for memory access.
+
+Two things remain outside the boundary on every platform. Root can always read
+any process, so protection is against other unprivileged code, not against a
+compromised superuser. And a privileged shell survives detachment as a running
+process: if you would not leave it running unattended in a `screen` or `tmux`
+session, session protection does not change that calculation — it narrows who
+can pick it back up.
 
 ## Automatically background a tab
 

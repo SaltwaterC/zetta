@@ -31,7 +31,11 @@ impl Zetta {
             let result = cx
                 .background_spawn(async move {
                     let root = root.resolve()?;
-                    start_server(&root, port)
+                    // Read only: this action serves the active pane's working
+                    // directory to the whole network on a single keystroke, so
+                    // uploads stay behind `zetta tftp server --writable`, where
+                    // the user has stated the directory and the intent.
+                    start_server(&root, port, false)
                 })
                 .await;
             this.update_in(cx, |this, window, cx| match result {

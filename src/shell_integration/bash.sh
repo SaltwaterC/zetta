@@ -653,7 +653,7 @@ _zetta_tftp_complete() {
     operation=${COMP_WORDS[operation_index]}
     if [[ $operation == server ]]; then
         if [[ $current == -* || -z $current ]]; then
-            _zetta_compgen '--root --port --config --help'
+            _zetta_compgen '--root --port --config --writable --help'
         fi
         return
     fi

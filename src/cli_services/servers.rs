@@ -73,11 +73,12 @@ pub(crate) struct TftpServerCommand {
     root: PathBuf,
     port: Option<u16>,
     config_path: Option<PathBuf>,
+    writable: bool,
 }
 
 #[cfg(feature = "tftp-server")]
 pub(crate) fn tftp_server_help() -> &'static str {
-    "Serve files with TFTP\n\nUsage: zetta tftp server [OPTIONS]\n\nOptions:\n  -r, --root PATH                   Directory to serve (default: current directory)\n  -p, --port PORT                   UDP port (default: tftp_server_port from configuration)\n  -c, --config PATH                 Read the TFTP port default from this configuration file\n  -h, --help                        Print help\n\nPress Ctrl-C to stop the server."
+    "Serve files with TFTP\n\nUsage: zetta tftp server [OPTIONS]\n\nOptions:\n  -r, --root PATH                   Directory to serve (default: current directory)\n  -p, --port PORT                   UDP port (default: tftp_server_port from configuration)\n  -c, --config PATH                 Read the TFTP port default from this configuration file\n  -w, --writable                    Accept uploads into the served directory\n  -h, --help                        Print help\n\nTFTP has no authentication: the server answers any host that can reach the\nport, and --writable lets those hosts create files under --root. Existing\nfiles are never overwritten. Uploads are off unless --writable is given.\n\nPress Ctrl-C to stop the server."
 }
 
 #[cfg(feature = "tftp-server")]
@@ -91,11 +92,23 @@ pub(crate) fn parse_tftp_server_args(
     {
         anyhow::bail!(tftp_server_help());
     }
-    let (root, port, config_path) = parse_server_options(&args, "TFTP")?;
+    let mut writable = false;
+    let mut remaining = Vec::with_capacity(args.len());
+    for argument in args {
+        match argument.to_string_lossy().as_ref() {
+            "--writable" | "-w" => {
+                anyhow::ensure!(!writable, "--writable may only be specified once");
+                writable = true;
+            }
+            _ => remaining.push(argument),
+        }
+    }
+    let (root, port, config_path) = parse_server_options(&remaining, "TFTP")?;
     Ok(CliServiceCommand::Tftp(TftpServerCommand {
         root,
         port,
         config_path,
+        writable,
     }))
 }
 
@@ -161,11 +174,16 @@ impl TftpServerCommand {
 
     pub(super) fn run(&self) -> Result<()> {
         let port = self.resolved_port()?;
-        let server = crate::start_server(&self.root, port)?;
+        let server = crate::start_server(&self.root, port, self.writable)?;
         eprintln!(
-            "Serving {} with TFTP at {}; press Ctrl-C to stop.",
+            "Serving {} with TFTP at {} ({}); press Ctrl-C to stop.",
             server.root.display(),
-            server.address
+            server.address,
+            if self.writable {
+                "uploads enabled"
+            } else {
+                "read only"
+            }
         );
         stream_server_logs(server.reader, server.writer)
     }

@@ -635,7 +635,7 @@ _zetta_tftp() {
     operation=${words[operation_index]}
     if [[ $operation == server ]]; then
         if [[ $current == -* || -z $current ]]; then
-            _zetta_options --root --port --config --help
+            _zetta_options --root --port --config --writable --help
         fi
         return
     fi

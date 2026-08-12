@@ -3408,7 +3408,14 @@ impl Terminal {
             }
 
             //Hyperlinks
-            if self.selection_phase == SelectionPhase::Ended {
+            //
+            // An OSC 8 hyperlink carries a URI chosen by whatever wrote to the
+            // terminal, and the visible text need not resemble it. Requiring the
+            // same modifier as a detected URL means output cannot turn an
+            // ordinary click into a system-handled open of, say, a `file://` or
+            // custom-scheme target.
+            if self.selection_phase == SelectionPhase::Ended && is_hyperlink_modifier(&e.modifiers)
+            {
                 let mouse_cell_index =
                     content_index_for_mouse(position, &self.last_content.terminal_bounds);
                 if let Some(link) = self
@@ -3418,7 +3425,7 @@ impl Terminal {
                     .and_then(|cell| cell.hyperlink())
                 {
                     cx.open_url(link.uri());
-                } else if is_hyperlink_modifier(&e.modifiers) {
+                } else {
                     self.events
                         .push_back(InternalEvent::FindHyperlink(position, true));
                 }

@@ -5,6 +5,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context as _, Result};
@@ -12,10 +13,35 @@ use argon2::{
     Argon2, PasswordHash, PasswordHasher as _, PasswordVerifier as _, password_hash::SaltString,
 };
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq as _;
 use sysinfo::{Pid, ProcessesToUpdate, System};
+use zeroize::Zeroizing;
 
 static NEXT_RUNNER_ID: AtomicU64 = AtomicU64::new(1);
 const CATALOG_VERSION: u32 = 3;
+
+/// How long a session refuses reconnect attempts after one wrong secret, and
+/// the ceiling that doubling reaches.
+///
+/// The window is enforced by *rejecting* early attempts rather than sleeping on
+/// them. Sleeping would hold the process control thread, which answers one
+/// request at a time, so a wrong secret could be used deliberately to stall
+/// every other control command for the length of the backoff. Rejecting costs
+/// an attacker exactly the same waiting time and costs everyone else nothing.
+const FAILED_AUTHENTICATION_DELAY: Duration = Duration::from_secs(1);
+const MAX_FAILED_AUTHENTICATION_DELAY: Duration = Duration::from_secs(30);
+
+/// The refusal window after `failures` consecutive wrong secrets: doubling from
+/// [`FAILED_AUTHENTICATION_DELAY`] up to [`MAX_FAILED_AUTHENTICATION_DELAY`].
+///
+/// Attempts serialize through the control socket, so this is a global bound on
+/// the guessing rate for a session, not a per-connection one.
+pub(crate) fn failed_authentication_delay(failures: u32) -> Duration {
+    let doublings = failures.saturating_sub(1).min(u32::BITS - 1);
+    FAILED_AUTHENTICATION_DELAY
+        .saturating_mul(1_u32.checked_shl(doublings).unwrap_or(u32::MAX))
+        .min(MAX_FAILED_AUTHENTICATION_DELAY)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct BackgroundSessionCatalog {
@@ -115,8 +141,7 @@ impl SessionCatalogPublisher {
             .path
             .parent()
             .context("session catalog has no parent")?;
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating session catalog directory {}", parent.display()))?;
+        create_private_dir(parent)?;
         let temporary = self.path.with_extension("json.tmp");
         write_private_file(&temporary, &contents)
             .with_context(|| format!("writing session catalog {}", temporary.display()))?;
@@ -140,6 +165,21 @@ impl SessionCatalogPublisher {
                 .with_context(|| format!("removing session catalog {}", self.path.display())),
         }
     }
+}
+
+/// Creates a directory that only the current user may traverse. The session
+/// directory holds the process control token and the session catalogs, so the
+/// umask must not be allowed to widen it.
+pub(crate) fn create_private_dir(path: &Path) -> Result<()> {
+    fs::create_dir_all(path)
+        .with_context(|| format!("creating session directory {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("restricting session directory {}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
@@ -178,10 +218,55 @@ pub(crate) struct BackgroundSessionRunner<T> {
 struct DetachedSession<T> {
     value: T,
     authentication: Option<SessionAuthentication>,
+    failed_authentications: u32,
+    refuse_until: Option<Instant>,
+}
+
+/// A session secret in transit between the CLI and the process that owns the
+/// session. The inner value is zeroized on drop and never rendered by `Debug`,
+/// so it cannot leak through a derived `Debug` on a containing message type.
+#[derive(Clone, Default, Eq)]
+pub(crate) struct SessionSecret(Zeroizing<String>);
+
+impl SessionSecret {
+    pub(crate) fn new(secret: String) -> Self {
+        Self(Zeroizing::new(secret))
+    }
+
+    /// Takes ownership of an already-protected buffer. Used by the CLI prompt,
+    /// which accumulates the typed secret in place: copying it out to call
+    /// [`Self::new`] would leave the plaintext behind in freed memory.
+    pub(crate) fn from_zeroizing(secret: Zeroizing<String>) -> Self {
+        Self(secret)
+    }
+
+    pub(crate) fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for SessionSecret {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SessionSecret(<redacted>)")
+    }
+}
+
+impl PartialEq for SessionSecret {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.as_bytes().ct_eq(other.0.as_bytes()).into()
+    }
 }
 
 #[derive(Clone)]
 pub(crate) struct SessionAuthentication {
+    verifier: Arc<str>,
+}
+
+/// Proof that a secret was checked against a session's verifier. It can only be
+/// produced by [`SessionAuthentication::verify`], so a caller holding one has
+/// necessarily authenticated rather than merely obtained a verifier clone.
+#[derive(Clone)]
+pub(crate) struct VerifiedSession {
     verifier: Arc<str>,
 }
 
@@ -203,18 +288,28 @@ impl SessionAuthentication {
         Ok(Self { verifier })
     }
 
-    pub(crate) fn verify(&self, secret: &str) -> bool {
+    /// Checks `secret` against this verifier, returning proof of the check on
+    /// success. Returning [`VerifiedSession`] rather than `bool` is what keeps
+    /// authorization and authentication from drifting apart: the only way to
+    /// obtain the value `take_background_session_by_id` demands is to pass a
+    /// correct secret through here.
+    pub(crate) fn verify(&self, secret: &str) -> Option<VerifiedSession> {
         PasswordHash::new(&self.verifier)
             .ok()
-            .is_some_and(|verifier| {
+            .filter(|verifier| {
                 Argon2::default()
-                    .verify_password(secret.as_bytes(), &verifier)
+                    .verify_password(secret.as_bytes(), verifier)
                     .is_ok()
+            })
+            .map(|_| VerifiedSession {
+                verifier: self.verifier.clone(),
             })
     }
 
-    pub(crate) fn is_same_verifier(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.verifier, &other.verifier)
+    /// Whether `authorization` was produced by verifying a secret against *this*
+    /// session's verifier, rather than some other session's.
+    pub(crate) fn authorizes(&self, authorization: &VerifiedSession) -> bool {
+        Arc::ptr_eq(&self.verifier, &authorization.verifier)
     }
 
     #[cfg(test)]
@@ -241,7 +336,38 @@ impl<T> BackgroundSessionRunner<T> {
         self.sessions.push(DetachedSession {
             value: session,
             authentication,
+            failed_authentications: 0,
+            refuse_until: None,
         });
+    }
+
+    /// Whether this session is inside its backoff window and must refuse a
+    /// reconnect attempt without evaluating the secret.
+    pub(crate) fn authentication_is_refused_at(&self, index: usize) -> bool {
+        self.sessions
+            .get(index)
+            .and_then(|session| session.refuse_until)
+            .is_some_and(|until| Instant::now() < until)
+    }
+
+    /// Records a wrong secret and opens the next backoff window.
+    ///
+    /// Only called for attempts that were actually evaluated. Attempts already
+    /// refused by the window do not extend it, so someone retrying too eagerly
+    /// cannot drive their own lockout upward.
+    pub(crate) fn record_failed_authentication_at(&mut self, index: usize) {
+        if let Some(session) = self.sessions.get_mut(index) {
+            session.failed_authentications = session.failed_authentications.saturating_add(1);
+            session.refuse_until = Instant::now()
+                .checked_add(failed_authentication_delay(session.failed_authentications));
+        }
+    }
+
+    pub(crate) fn clear_failed_authentications_at(&mut self, index: usize) {
+        if let Some(session) = self.sessions.get_mut(index) {
+            session.failed_authentications = 0;
+            session.refuse_until = None;
+        }
     }
 
     pub(crate) fn reconnect_at(&mut self, index: usize) -> Option<T> {
@@ -267,6 +393,29 @@ impl<T> BackgroundSessionRunner<T> {
 
     pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
         self.sessions.iter_mut().map(|session| &mut session.value)
+    }
+
+    /// Sessions that reattach without a secret.
+    ///
+    /// Process control requests are authenticated only by the endpoint token,
+    /// and that token sits in a file which every process running as this user
+    /// can read. Anything reachable from the control socket must therefore go
+    /// through these iterators rather than [`Self::iter`]/[`Self::iter_mut`]:
+    /// otherwise the token alone would reveal that a protected session exists
+    /// and let its state be modified, which is exactly what holding a secret is
+    /// supposed to prevent.
+    pub(crate) fn iter_unprotected(&self) -> impl Iterator<Item = &T> {
+        self.sessions
+            .iter()
+            .filter(|session| session.authentication.is_none())
+            .map(|session| &session.value)
+    }
+
+    pub(crate) fn iter_unprotected_mut(&mut self) -> impl Iterator<Item = &mut T> {
+        self.sessions
+            .iter_mut()
+            .filter(|session| session.authentication.is_none())
+            .map(|session| &mut session.value)
     }
 
     pub(crate) fn publish(&mut self, sessions: Vec<BackgroundSessionSummary>) -> Result<()> {

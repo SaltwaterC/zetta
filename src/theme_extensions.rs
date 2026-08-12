@@ -14,6 +14,11 @@ use gpui::http_client::{AsyncBody, HttpClient, Url};
 use serde::Deserialize;
 
 const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+/// Ceiling on what one extension archive may expand to. `MAX_RESPONSE_BYTES`
+/// bounds the compressed download only; gzip can expand far past it, so without
+/// this a hostile or compromised extension host could fill the disk through the
+/// staging directory.
+const MAX_UNPACKED_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct ThemeExtension {
@@ -70,9 +75,14 @@ pub async fn download(
     themes_dir: &Path,
     executor: BackgroundExecutor,
 ) -> Result<usize> {
+    // The id and version come from the extension index, not from us. Reject
+    // anything that could add or escape a path segment rather than trusting the
+    // index to be well behaved.
+    let id = url_path_segment(&extension.id).context("extension has an unusable id")?;
+    let version =
+        url_path_segment(&extension.version).context("extension has an unusable version")?;
     let url = Url::parse(&format!(
-        "https://api.zed.dev/extensions/{}/{}/download",
-        extension.id, extension.version
+        "https://api.zed.dev/extensions/{id}/{version}/download"
     ))?;
     let archive = get(http, url.as_ref()).await?;
     let extension_id = extension.id.to_string();
@@ -110,9 +120,53 @@ async fn get(http: Arc<dyn HttpClient>, url: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Fails the read once the wrapped stream has produced more than `limit` bytes.
+///
+/// Applied to the decompressed side of the gzip stream, so the bound is on what
+/// actually reaches the disk rather than on the compressed download.
+struct LimitedReader<R> {
+    inner: R,
+    produced: u64,
+    limit: u64,
+}
+
+impl<R> LimitedReader<R> {
+    fn new(inner: R, limit: u64) -> Self {
+        Self {
+            inner,
+            produced: 0,
+            limit,
+        }
+    }
+}
+
+impl<R: futures::AsyncRead + Unpin> futures::AsyncRead for LimitedReader<R> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut [u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let this = &mut *self;
+        let polled = std::pin::Pin::new(&mut this.inner).poll_read(cx, buf);
+        if let std::task::Poll::Ready(Ok(count)) = &polled {
+            this.produced += *count as u64;
+            if this.produced > this.limit {
+                return std::task::Poll::Ready(Err(std::io::Error::other(format!(
+                    "extension archive expands past {} bytes",
+                    this.limit
+                ))));
+            }
+        }
+        polled
+    }
+}
+
 async fn install_archive(archive: &[u8], extension_id: &str, themes_dir: &Path) -> Result<usize> {
     let unpacked = tempfile::tempdir().context("creating extension staging directory")?;
-    let decompressed = GzipDecoder::new(BufReader::new(archive));
+    let decompressed = LimitedReader::new(
+        GzipDecoder::new(BufReader::new(archive)),
+        MAX_UNPACKED_BYTES,
+    );
     Archive::new(decompressed)
         .unpack(unpacked.path())
         .await
@@ -259,6 +313,20 @@ fn validate_relative_theme_path(path: &Path) -> Result<()> {
         bail!("invalid theme path {}", path.display());
     }
     Ok(())
+}
+
+/// Accepts a value only if it is already safe to splice into a URL path: no
+/// separators, no percent escapes, no dot segments, nothing non-ASCII.
+/// Sanitising instead of rejecting would silently request a different extension
+/// than the one the user chose.
+fn url_path_segment(value: &str) -> Option<&str> {
+    let usable = !value.is_empty()
+        && value != "."
+        && value != ".."
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        });
+    usable.then_some(value)
 }
 
 fn safe_file_component(value: &str) -> String {

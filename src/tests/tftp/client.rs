@@ -73,7 +73,7 @@ fn client_downloads_from_the_embedded_server() {
         .map(|index| (index % 251) as u8)
         .collect::<Vec<_>>();
     std::fs::write(root.path().join("firmware.bin"), &contents).unwrap();
-    let server = crate::tftp::start_server(root.path(), 0).unwrap();
+    let server = crate::tftp::start_server(root.path(), 0, false).unwrap();
     let destination = output.path().join("received.bin");
 
     download(
@@ -97,7 +97,7 @@ fn missing_server_file_returns_an_error() {
     }
     let root = tempfile::tempdir().unwrap();
     let output = tempfile::tempdir().unwrap();
-    let server = crate::tftp::start_server(root.path(), 0).unwrap();
+    let server = crate::tftp::start_server(root.path(), 0, false).unwrap();
     let error = download(
         "127.0.0.1",
         server.address.port(),
@@ -123,7 +123,7 @@ fn client_uploads_to_the_embedded_server() {
         .map(|index| (index % 239) as u8)
         .collect::<Vec<_>>();
     std::fs::write(source.path(), &contents).unwrap();
-    let server = crate::tftp::start_server(root.path(), 0).unwrap();
+    let server = crate::tftp::start_server(root.path(), 0, true).unwrap();
 
     upload(
         "127.0.0.1",
