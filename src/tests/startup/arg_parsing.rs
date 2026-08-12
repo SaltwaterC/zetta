@@ -616,7 +616,7 @@ fn splits_subcommand_lists_configured_templates_without_starting_the_application
         r#"{
             "pane_split_templates": {
                 "custom-layout": {
-                    "horizontal": ["pane", "pane"]
+                    "horizontal": [{}, {}]
                 }
             }
         }"#,

@@ -54,8 +54,9 @@ use background_sessions::{
 };
 use command_palette::{CommandPalette, PaletteCommand, humanize_action_name};
 use config::{
-    Config, NewTabProfile, PaneControlsPosition, PaneSplitAxis, PaneSplitTemplate, Profile,
-    WorkingDirectoryScope, profile_is_hidden, visible_profile_count, visible_profile_index,
+    Config, NewTabProfile, PaneControlsPosition, PaneSplitAxis, PaneSplitOverlaySize,
+    PaneSplitPane, PaneSplitTemplate, Profile, WorkingDirectoryScope, profile_is_hidden,
+    visible_profile_count, visible_profile_index,
 };
 use futures::StreamExt as _;
 #[cfg(any(target_os = "windows", linux_like))]

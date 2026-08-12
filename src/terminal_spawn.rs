@@ -62,6 +62,40 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.spawn_terminal_with_theme_and_environment(
+            tab_id,
+            pane_id,
+            profile,
+            working_directory,
+            wsl_directory,
+            wsl_cwd_file,
+            terminal_theme,
+            settings,
+            path_hyperlink_regexes,
+            HashMap::new(),
+            tracked_multi_command_launch,
+            window,
+            cx,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn spawn_terminal_with_theme_and_environment(
+        &mut self,
+        tab_id: u64,
+        pane_id: u64,
+        profile: Profile,
+        working_directory: Option<PathBuf>,
+        wsl_directory: Option<String>,
+        wsl_cwd_file: Option<PathBuf>,
+        terminal_theme: Option<Arc<Theme>>,
+        settings: &TerminalSpawnSettings,
+        path_hyperlink_regexes: Vec<String>,
+        environment_overrides: HashMap<String, String>,
+        tracked_multi_command_launch: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let is_wsl = is_wsl_shell(&profile.command);
         let Some(attention_id) = self.attention_id_for_tab(tab_id) else {
             if let Some(pane) = self
@@ -85,9 +119,7 @@ impl Zetta {
             profile.command
         };
         let mut environment = if is_wsl {
-            let mut environment = HashMap::default();
-            wsl_terminal_environment(&mut environment, wsl_cwd_file.as_deref());
-            environment
+            HashMap::default()
         } else {
             let msys2_environment =
                 match msys2_cwd_tracking_environment(&command, pane_id, &env::temp_dir()) {
@@ -111,11 +143,15 @@ impl Zetta {
                 .chain(msys2_environment)
                 .collect()
         };
-        environment.insert(
-            "ZETTA_PROCESS_ID".to_owned(),
-            std::process::id().to_string(),
+        if is_wsl {
+            wsl_terminal_environment(&mut environment, wsl_cwd_file.as_deref());
+        }
+        apply_terminal_environment_overrides(
+            &mut environment,
+            &environment_overrides,
+            std::process::id(),
+            attention_id,
         );
-        environment.insert("ZETTA_ATTENTION_ID".to_owned(), attention_id.to_string());
         if is_wsl {
             add_wsl_environment_variables(&mut environment);
         }
@@ -313,6 +349,26 @@ impl Zetta {
         })
         .detach();
     }
+}
+
+pub(crate) fn apply_terminal_environment_overrides<S>(
+    environment: &mut HashMap<String, String, S>,
+    overrides: &HashMap<String, String>,
+    process_id: u32,
+    attention_id: u64,
+) where
+    S: std::hash::BuildHasher,
+{
+    for (name, value) in overrides {
+        if !name
+            .get(..6)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("ZETTA_"))
+        {
+            environment.insert(name.clone(), value.clone());
+        }
+    }
+    environment.insert("ZETTA_PROCESS_ID".to_owned(), process_id.to_string());
+    environment.insert("ZETTA_ATTENTION_ID".to_owned(), attention_id.to_string());
 }
 
 /// Builds the shell invocation used by a stacked command. Native profiles go

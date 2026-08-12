@@ -106,12 +106,70 @@ impl WorkingDirectoryScope {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PaneSplitTemplate {
-    Pane(Option<String>),
+    Pane(Box<PaneSplitPane>),
     Split {
         axis: PaneSplitAxis,
         first: Box<PaneSplitTemplate>,
         second: Box<PaneSplitTemplate>,
     },
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PaneSplitPane {
+    pub label: Option<String>,
+    pub profile: Option<Profile>,
+    pub command: Option<PaneSplitCommand>,
+    pub theme: Option<String>,
+    pub env: HashMap<String, String>,
+    pub overlay: Option<PaneSplitOverlay>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaneSplitCommand {
+    pub program: String,
+    pub args: Vec<String>,
+}
+
+impl PaneSplitCommand {
+    pub fn shell(&self) -> Shell {
+        Shell::WithArguments {
+            program: self.program.clone(),
+            args: self.args.clone(),
+            title_override: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaneSplitOverlay {
+    pub text: Option<String>,
+    pub size: Option<PaneSplitOverlaySize>,
+    pub opacity: Option<u8>,
+    pub color: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaneSplitOverlaySize {
+    Small,
+    Base,
+    Large,
+    ExtraLarge,
+    ExtraExtraLarge,
+    ExtraExtraExtraLarge,
+}
+
+impl PaneSplitOverlaySize {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "sm" => Some(Self::Small),
+            "base" => Some(Self::Base),
+            "lg" => Some(Self::Large),
+            "xl" => Some(Self::ExtraLarge),
+            "2xl" => Some(Self::ExtraExtraLarge),
+            "3xl" => Some(Self::ExtraExtraExtraLarge),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,18 +186,36 @@ impl PaneSplitTemplate {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn pane_labels(&self) -> Vec<Option<String>> {
         let mut labels = Vec::with_capacity(self.pane_count());
         self.collect_pane_labels(&mut labels);
         labels
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn collect_pane_labels(&self, labels: &mut Vec<Option<String>>) {
         match self {
-            Self::Pane(label) => labels.push(label.clone()),
+            Self::Pane(pane) => labels.push(pane.label.clone()),
             Self::Split { first, second, .. } => {
                 first.collect_pane_labels(labels);
                 second.collect_pane_labels(labels);
+            }
+        }
+    }
+
+    pub fn pane_specifications(&self) -> Vec<PaneSplitPane> {
+        let mut panes = Vec::with_capacity(self.pane_count());
+        self.collect_pane_specifications(&mut panes);
+        panes
+    }
+
+    fn collect_pane_specifications(&self, panes: &mut Vec<PaneSplitPane>) {
+        match self {
+            Self::Pane(pane) => panes.push((**pane).clone()),
+            Self::Split { first, second, .. } => {
+                first.collect_pane_specifications(panes);
+                second.collect_pane_specifications(panes);
             }
         }
     }
@@ -377,24 +453,6 @@ impl Config {
         if let Some(port) = root.get("tftp_server_port") {
             config.tftp_server_port = parse_server_port(port, "tftp_server_port")?;
         }
-        if let Some(templates) = root.get("pane_split_templates") {
-            let templates = templates
-                .as_object()
-                .context("pane_split_templates must be an object")?;
-            for (name, value) in templates {
-                anyhow::ensure!(
-                    !name.trim().is_empty(),
-                    "pane split template names must not be empty"
-                );
-                let template = parse_pane_split_template(value)
-                    .with_context(|| format!("parsing pane split template {name:?}"))?;
-                anyhow::ensure!(
-                    (2..=64).contains(&template.pane_count()),
-                    "pane split template {name:?} must contain between 2 and 64 panes"
-                );
-                config.pane_split_templates.insert(name.clone(), template);
-            }
-        }
 
         if let Some(profiles) = root.get("profiles") {
             let profiles = profiles.as_array().context("profiles must be an array")?;
@@ -404,6 +462,25 @@ impl Config {
                 .collect::<Result<Vec<_>>>()?;
             merge_profiles(&mut config.profiles, &parsed)?;
             merge_profile_visibility(&mut config.hidden_profiles, &parsed);
+        }
+
+        if let Some(templates) = root.get("pane_split_templates") {
+            let templates = templates
+                .as_object()
+                .context("pane_split_templates must be an object")?;
+            for (name, value) in templates {
+                anyhow::ensure!(
+                    !name.trim().is_empty(),
+                    "pane split template names must not be empty"
+                );
+                let template = parse_pane_split_template(value, &config.profiles)
+                    .with_context(|| format!("parsing pane split template {name:?}"))?;
+                anyhow::ensure!(
+                    (2..=64).contains(&template.pane_count()),
+                    "pane split template {name:?} must contain between 2 and 64 panes"
+                );
+                config.pane_split_templates.insert(name.clone(), template);
+            }
         }
 
         if let Some(default_profile) = root.get("default_profile") {
@@ -463,7 +540,12 @@ fn parse_server_port(value: &Value, field: &str) -> Result<u16> {
 }
 
 fn default_pane_split_templates() -> HashMap<String, PaneSplitTemplate> {
-    let labeled_pane = |label: &str| Box::new(PaneSplitTemplate::Pane(Some(label.to_owned())));
+    let labeled_pane = |label: &str| {
+        Box::new(PaneSplitTemplate::Pane(Box::new(PaneSplitPane {
+            label: Some(label.to_owned()),
+            ..PaneSplitPane::default()
+        })))
+    };
     HashMap::from([
         (
             "three-right".to_owned(),
@@ -524,50 +606,247 @@ fn default_pane_split_templates() -> HashMap<String, PaneSplitTemplate> {
     ])
 }
 
-fn parse_pane_split_template(value: &Value) -> Result<PaneSplitTemplate> {
-    if value.as_str() == Some("pane") {
-        return Ok(PaneSplitTemplate::Pane(None));
-    }
-
+fn parse_pane_split_template(value: &Value, profiles: &[Profile]) -> Result<PaneSplitTemplate> {
     let object = value
         .as_object()
-        .context("template nodes must be \"pane\" or a split object")?;
-    anyhow::ensure!(
-        object.len() == 1,
-        "split objects must have exactly one axis"
-    );
-    let (kind, value) = object.iter().next().unwrap();
-    match kind.as_str() {
-        "pane" => {
-            let label = value
+        .context("template nodes must be a pane object or a split object")?;
+
+    if let Some(axis_name) = object
+        .keys()
+        .find(|key| matches!(key.as_str(), "horizontal" | "vertical"))
+    {
+        anyhow::ensure!(
+            object.len() == 1,
+            "split objects must contain exactly one axis"
+        );
+        let axis = match axis_name.as_str() {
+            "horizontal" => PaneSplitAxis::Horizontal,
+            "vertical" => PaneSplitAxis::Vertical,
+            _ => unreachable!(),
+        };
+        let children = object
+            .get(axis_name)
+            .expect("the selected split axis must be present")
+            .as_array()
+            .context("split children must be a two-element array")?;
+        anyhow::ensure!(children.len() == 2, "splits must have exactly two children");
+        return Ok(PaneSplitTemplate::Split {
+            axis,
+            first: Box::new(parse_pane_split_template(&children[0], profiles)?),
+            second: Box::new(parse_pane_split_template(&children[1], profiles)?),
+        });
+    }
+
+    parse_pane_split_pane(object, profiles).map(|pane| PaneSplitTemplate::Pane(Box::new(pane)))
+}
+
+fn parse_pane_split_pane(
+    object: &serde_json::Map<String, Value>,
+    profiles: &[Profile],
+) -> Result<PaneSplitPane> {
+    const FIELDS: &[&str] = &["label", "profile", "command", "theme", "env", "overlay"];
+    if let Some(field) = object
+        .keys()
+        .find(|field| !FIELDS.contains(&field.as_str()))
+    {
+        anyhow::bail!("unrecognized pane template field {field:?}");
+    }
+
+    let label = object
+        .get("label")
+        .map(|label| {
+            let label = label
                 .as_str()
-                .context("labeled pane leaves must contain a string label")?;
+                .context("pane template label must be a string")?;
             anyhow::ensure!(
                 is_valid_pane_split_label(label),
                 "pane labels must be lowercase kebab-case"
             );
-            Ok(PaneSplitTemplate::Pane(Some(label.to_owned())))
-        }
-        "horizontal" | "vertical" => {
-            let axis = match kind.as_str() {
-                "horizontal" => PaneSplitAxis::Horizontal,
-                "vertical" => PaneSplitAxis::Vertical,
-                _ => unreachable!(),
-            };
-            let children = value
-                .as_array()
-                .context("split children must be a two-element array")?;
-            anyhow::ensure!(children.len() == 2, "splits must have exactly two children");
-            Ok(PaneSplitTemplate::Split {
-                axis,
-                first: Box::new(parse_pane_split_template(&children[0])?),
-                second: Box::new(parse_pane_split_template(&children[1])?),
-            })
-        }
-        _ => {
-            anyhow::bail!("template objects must contain \"pane\", \"horizontal\", or \"vertical\"")
-        }
+            Ok(label.to_owned())
+        })
+        .transpose()?;
+
+    let profile = object
+        .get("profile")
+        .map(|profile| {
+            let name = profile
+                .as_str()
+                .context("pane template profile must be a string")?;
+            profiles
+                .iter()
+                .find(|profile| profile.name.eq_ignore_ascii_case(name))
+                .cloned()
+                .with_context(|| format!("pane template profile {name:?} is not available"))
+        })
+        .transpose()?;
+
+    let command = object
+        .get("command")
+        .map(parse_pane_split_command)
+        .transpose()?;
+    anyhow::ensure!(
+        profile.is_none() || command.is_none(),
+        "pane template profile and command are mutually exclusive"
+    );
+
+    let theme = object
+        .get("theme")
+        .map(|theme| {
+            let theme = theme
+                .as_str()
+                .context("pane template theme must be a string")?;
+            anyhow::ensure!(!theme.is_empty(), "pane template theme must not be empty");
+            Ok(theme.to_owned())
+        })
+        .transpose()?;
+
+    let env = object
+        .get("env")
+        .map(parse_pane_split_environment)
+        .transpose()?
+        .unwrap_or_default();
+
+    let overlay = object
+        .get("overlay")
+        .map(parse_pane_split_overlay)
+        .transpose()?;
+
+    Ok(PaneSplitPane {
+        label,
+        profile,
+        command,
+        theme,
+        env,
+        overlay,
+    })
+}
+
+fn parse_pane_split_command(value: &Value) -> Result<PaneSplitCommand> {
+    let object = value
+        .as_object()
+        .context("pane template command must be an object")?;
+    const FIELDS: &[&str] = &["program", "args"];
+    if let Some(field) = object
+        .keys()
+        .find(|field| !FIELDS.contains(&field.as_str()))
+    {
+        anyhow::bail!("unrecognized pane template command field {field:?}");
     }
+    let program = object
+        .get("program")
+        .and_then(Value::as_str)
+        .context("pane template command.program must be a string")?
+        .to_owned();
+    anyhow::ensure!(
+        !program.is_empty(),
+        "pane template command.program must not be empty"
+    );
+    let args = object
+        .get("args")
+        .map(|args| {
+            args.as_array()
+                .context("pane template command.args must be an array")?
+                .iter()
+                .map(|arg| {
+                    arg.as_str()
+                        .map(str::to_owned)
+                        .context("pane template command arguments must be strings")
+                })
+                .collect::<Result<Vec<_>>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    Ok(PaneSplitCommand { program, args })
+}
+
+fn parse_pane_split_environment(value: &Value) -> Result<HashMap<String, String>> {
+    let object = value
+        .as_object()
+        .context("pane template env must be an object of strings")?;
+    object
+        .iter()
+        .map(|(name, value)| {
+            anyhow::ensure!(
+                !name.is_empty() && !name.contains(['=', '\0']),
+                "pane template environment variable names must not be empty or contain '='"
+            );
+            let value = value
+                .as_str()
+                .context("pane template environment values must be strings")?;
+            anyhow::ensure!(
+                !value.contains('\0'),
+                "pane template environment values must not contain NUL"
+            );
+            Ok((name.clone(), value.to_owned()))
+        })
+        .collect()
+}
+
+fn parse_pane_split_overlay(value: &Value) -> Result<PaneSplitOverlay> {
+    let object = value
+        .as_object()
+        .context("pane template overlay must be an object")?;
+    const FIELDS: &[&str] = &["text", "size", "opacity", "color"];
+    if let Some(field) = object
+        .keys()
+        .find(|field| !FIELDS.contains(&field.as_str()))
+    {
+        anyhow::bail!("unrecognized pane template overlay field {field:?}");
+    }
+    let text = object
+        .get("text")
+        .map(|text| {
+            text.as_str()
+                .map(str::to_owned)
+                .context("pane template overlay.text must be a string")
+        })
+        .transpose()?;
+    let size = object
+        .get("size")
+        .map(|size| {
+            let size = size
+                .as_str()
+                .context("pane template overlay.size must be a string")?;
+            PaneSplitOverlaySize::parse(size).with_context(
+                || "pane template overlay.size must be one of sm, base, lg, xl, 2xl, or 3xl",
+            )
+        })
+        .transpose()?;
+    let opacity = object
+        .get("opacity")
+        .map(|opacity| {
+            let opacity = opacity
+                .as_u64()
+                .context("pane template overlay.opacity must be an integer from 0 to 100")?;
+            u8::try_from(opacity)
+                .ok()
+                .filter(|opacity| *opacity <= 100)
+                .context("pane template overlay.opacity must be an integer from 0 to 100")
+        })
+        .transpose()?;
+    let color = object
+        .get("color")
+        .map(|color| {
+            let color = color
+                .as_str()
+                .context("pane template overlay.color must be a string")?;
+            anyhow::ensure!(
+                !color.trim().is_empty(),
+                "pane template overlay.color must not be empty"
+            );
+            anyhow::ensure!(
+                crate::pane::overlay_color_from_value(color).is_some(),
+                "pane template overlay.color must be a named color or a valid hex color"
+            );
+            Ok(color.to_owned())
+        })
+        .transpose()?;
+    Ok(PaneSplitOverlay {
+        text,
+        size,
+        opacity,
+        color,
+    })
 }
 
 fn is_valid_pane_split_label(label: &str) -> bool {

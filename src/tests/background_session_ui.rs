@@ -29,6 +29,7 @@ fn background_session_is_reaped_after_its_final_pane_exits() {
             overlay_opacity: None,
             overlay_color: None,
             profile,
+            environment_overrides: HashMap::new(),
             terminal: None,
             view: None,
             error: None,

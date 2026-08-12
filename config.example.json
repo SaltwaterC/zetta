@@ -21,8 +21,8 @@
   "pane_split_templates": {
     "three-bottom": {
       "horizontal": [
-        { "pane": "top" },
-        { "vertical": [{ "pane": "bottom-left" }, { "pane": "bottom-right" }] }
+        { "label": "top" },
+        { "vertical": [{ "label": "bottom-left" }, { "label": "bottom-right" }] }
       ]
     }
   },

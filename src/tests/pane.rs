@@ -201,8 +201,8 @@ fn pane_rotation_recurses_only_into_the_active_group() {
 fn pane_template_replaces_only_the_target_leaf() {
     let template = PaneSplitTemplate::Split {
         axis: PaneSplitAxis::Horizontal,
-        first: Box::new(PaneSplitTemplate::Pane(None)),
-        second: Box::new(PaneSplitTemplate::Pane(None)),
+        first: Box::new(PaneSplitTemplate::Pane(Box::default())),
+        second: Box::new(PaneSplitTemplate::Pane(Box::default())),
     };
     let mut layout = PaneLayout::Split {
         axis: SplitAxis::Vertical,
@@ -233,11 +233,20 @@ fn pane_template_replaces_only_the_target_leaf() {
 fn pane_template_labels_follow_the_materialized_leaf_order() {
     let template = PaneSplitTemplate::Split {
         axis: PaneSplitAxis::Vertical,
-        first: Box::new(PaneSplitTemplate::Pane(Some("left".to_owned()))),
+        first: Box::new(PaneSplitTemplate::Pane(Box::new(PaneSplitPane {
+            label: Some("left".to_owned()),
+            ..PaneSplitPane::default()
+        }))),
         second: Box::new(PaneSplitTemplate::Split {
             axis: PaneSplitAxis::Horizontal,
-            first: Box::new(PaneSplitTemplate::Pane(Some("top-right".to_owned()))),
-            second: Box::new(PaneSplitTemplate::Pane(Some("bottom-right".to_owned()))),
+            first: Box::new(PaneSplitTemplate::Pane(Box::new(PaneSplitPane {
+                label: Some("top-right".to_owned()),
+                ..PaneSplitPane::default()
+            }))),
+            second: Box::new(PaneSplitTemplate::Pane(Box::new(PaneSplitPane {
+                label: Some("bottom-right".to_owned()),
+                ..PaneSplitPane::default()
+            }))),
         }),
     };
 
@@ -424,8 +433,8 @@ fn configured_template_layout_is_built_through_a_borrow() {
         "two".to_owned(),
         PaneSplitTemplate::Split {
             axis: PaneSplitAxis::Vertical,
-            first: Box::new(PaneSplitTemplate::Pane(None)),
-            second: Box::new(PaneSplitTemplate::Pane(None)),
+            first: Box::new(PaneSplitTemplate::Pane(Box::default())),
+            second: Box::new(PaneSplitTemplate::Pane(Box::default())),
         },
     )]);
     let layout = pane_layout_from_configured_template(&templates, "two", &mut [10, 11].into_iter());
@@ -448,13 +457,13 @@ fn four_vertical_template_materializes_left_to_right_equal_columns() {
         axis: PaneSplitAxis::Vertical,
         first: Box::new(PaneSplitTemplate::Split {
             axis: PaneSplitAxis::Vertical,
-            first: Box::new(PaneSplitTemplate::Pane(None)),
-            second: Box::new(PaneSplitTemplate::Pane(None)),
+            first: Box::new(PaneSplitTemplate::Pane(Box::default())),
+            second: Box::new(PaneSplitTemplate::Pane(Box::default())),
         }),
         second: Box::new(PaneSplitTemplate::Split {
             axis: PaneSplitAxis::Vertical,
-            first: Box::new(PaneSplitTemplate::Pane(None)),
-            second: Box::new(PaneSplitTemplate::Pane(None)),
+            first: Box::new(PaneSplitTemplate::Pane(Box::default())),
+            second: Box::new(PaneSplitTemplate::Pane(Box::default())),
         }),
     };
     let layout = PaneLayout::from_template(&template, &mut [1, 2, 3, 4].into_iter());
@@ -514,6 +523,7 @@ fn tab_pane_index_resolves_panes_without_scanning() {
             overlay_opacity: None,
             overlay_color: None,
             profile: profile.clone(),
+            environment_overrides: HashMap::new(),
             terminal: None,
             view: None,
             error: None,
@@ -574,6 +584,7 @@ fn tab_pane_index_resolves_panes_without_scanning() {
         overlay_opacity: None,
         overlay_color: None,
         profile,
+        environment_overrides: HashMap::new(),
         terminal: None,
         view: None,
         error: None,
@@ -676,6 +687,7 @@ fn split_profile_comes_from_the_active_pane() {
                 overlay_opacity: None,
                 overlay_color: None,
                 profile: system,
+                environment_overrides: HashMap::new(),
                 terminal: None,
                 view: None,
                 error: None,
@@ -697,6 +709,7 @@ fn split_profile_comes_from_the_active_pane() {
                 overlay_opacity: None,
                 overlay_color: None,
                 profile: zsh,
+                environment_overrides: HashMap::new(),
                 terminal: None,
                 view: None,
                 error: None,
@@ -763,6 +776,7 @@ fn closing_active_pane_restores_previous_focus() {
         overlay_opacity: None,
         overlay_color: None,
         profile: profile.clone(),
+        environment_overrides: HashMap::new(),
         terminal: None,
         view: None,
         error: None,
@@ -830,6 +844,7 @@ fn closing_inactive_pane_preserves_focus() {
         overlay_opacity: None,
         overlay_color: None,
         profile: profile.clone(),
+        environment_overrides: HashMap::new(),
         terminal: None,
         view: None,
         error: None,
@@ -1180,6 +1195,7 @@ fn pane_management_tab() -> Tab {
         overlay_opacity: None,
         overlay_color: None,
         profile: profile.clone(),
+        environment_overrides: HashMap::new(),
         terminal: None,
         view: None,
         error: None,
@@ -1380,6 +1396,7 @@ fn pane_labels_remain_stable_and_are_not_reused() {
         overlay_opacity: None,
         overlay_color: None,
         profile,
+        environment_overrides: HashMap::new(),
         terminal: None,
         view: None,
         error: None,

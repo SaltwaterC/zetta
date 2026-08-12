@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::PaneSplitCommand;
 
 #[test]
 fn native_stacked_commands_use_one_interactive_shell_command() {
@@ -12,6 +13,52 @@ fn native_stacked_commands_use_one_interactive_shell_command() {
                 "-i".to_owned(),
                 "-c".to_owned(),
                 "echo {one,two}".to_owned()
+            ],
+            title_override: None,
+        }
+    );
+}
+
+#[test]
+fn pane_template_environment_overrides_merge_without_replacing_zetta_variables() {
+    let mut environment = HashMap::from([
+        ("PATH".to_owned(), "base-path".to_owned()),
+        ("ZETTA_HOST_EXECUTABLE".to_owned(), "host".to_owned()),
+    ]);
+    let overrides = HashMap::from([
+        ("PATH".to_owned(), "custom-path".to_owned()),
+        ("ROLE".to_owned(), "server".to_owned()),
+        ("ZETTA_PROCESS_ID".to_owned(), "spoofed".to_owned()),
+    ]);
+
+    apply_terminal_environment_overrides(&mut environment, &overrides, 42, 7);
+
+    assert_eq!(environment["PATH"], "custom-path");
+    assert_eq!(environment["ROLE"], "server");
+    assert_eq!(environment["ZETTA_HOST_EXECUTABLE"], "host");
+    assert_eq!(environment["ZETTA_PROCESS_ID"], "42");
+    assert_eq!(environment["ZETTA_ATTENTION_ID"], "7");
+}
+
+#[test]
+fn pane_template_commands_preserve_the_program_and_argument_boundaries() {
+    let command = PaneSplitCommand {
+        program: "ssh".to_owned(),
+        args: vec![
+            "host name".to_owned(),
+            "--identity".to_owned(),
+            "key file".to_owned(),
+        ],
+    };
+
+    assert_eq!(
+        command.shell(),
+        Shell::WithArguments {
+            program: "ssh".to_owned(),
+            args: vec![
+                "host name".to_owned(),
+                "--identity".to_owned(),
+                "key file".to_owned()
             ],
             title_override: None,
         }

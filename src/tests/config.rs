@@ -391,8 +391,8 @@ fn pane_split_templates_include_built_ins_and_custom_layouts() {
             "pane_split_templates": {
                 "custom": {
                     "horizontal": [
-                        "pane",
-                        { "vertical": ["pane", "pane"] }
+                        {},
+                        { "vertical": [{}, {}] }
                     ]
                 }
             }
@@ -480,21 +480,18 @@ fn pane_split_templates_include_built_ins_and_custom_layouts() {
 }
 
 #[test]
-fn pane_split_templates_parse_labeled_and_legacy_leaves_in_traversal_order() {
+fn pane_split_templates_parse_labeled_leaves_in_traversal_order() {
     let config = Config::parse(
         r#"{
             "pane_split_templates": {
                 "labeled": {
                     "horizontal": [
-                        { "pane": "top" },
+                        { "label": "top" },
                         { "vertical": [
-                            { "pane": "bottom-left" },
-                            { "pane": "bottom-right" }
+                            { "label": "bottom-left" },
+                            { "label": "bottom-right" }
                         ] }
                     ]
-                },
-                "legacy": {
-                    "vertical": ["pane", "pane"]
                 }
             }
         }"#,
@@ -511,10 +508,143 @@ fn pane_split_templates_parse_labeled_and_legacy_leaves_in_traversal_order() {
             Some("bottom-right".to_owned()),
         ]
     );
+}
+
+#[test]
+fn pane_split_templates_parse_fully_customized_leaves_and_same_file_profiles() {
+    let config = Config::parse(
+        r##"{
+            "profiles": [
+                { "name": "Server Shell", "program": "/bin/bash", "theme": "One Dark" }
+            ],
+            "pane_split_templates": {
+                "custom": {
+                    "vertical": [
+                        {
+                            "label": "server",
+                            "profile": "sErVeR sHeLl",
+                            "theme": "One Light",
+                            "env": { "ROLE": "server", "EMPTY": "" },
+                            "overlay": {
+                                "text": "SERVER",
+                                "size": "xl",
+                                "opacity": 85,
+                                "color": "cyan"
+                            }
+                        },
+                        {
+                            "label": "client",
+                            "command": { "program": "ssh", "args": ["host", "-p", "22"] }
+                        }
+                    ]
+                }
+            }
+        }"##,
+        None,
+        None,
+    )
+    .unwrap();
+
+    let leaves = config.pane_split_templates["custom"].pane_specifications();
+    assert_eq!(leaves.len(), 2);
+    assert_eq!(leaves[0].label.as_deref(), Some("server"));
+    assert_eq!(leaves[0].profile.as_ref().unwrap().name, "Server Shell");
+    assert_eq!(leaves[0].theme.as_deref(), Some("One Light"));
+    assert_eq!(leaves[0].env["ROLE"], "server");
+    assert_eq!(leaves[0].env["EMPTY"], "");
     assert_eq!(
-        config.pane_split_templates["legacy"].pane_labels(),
-        vec![None, None]
+        leaves[0].overlay,
+        Some(PaneSplitOverlay {
+            text: Some("SERVER".to_owned()),
+            size: Some(PaneSplitOverlaySize::ExtraLarge),
+            opacity: Some(85),
+            color: Some("cyan".to_owned()),
+        })
     );
+    assert_eq!(leaves[1].label.as_deref(), Some("client"));
+    assert_eq!(
+        leaves[1].command,
+        Some(PaneSplitCommand {
+            program: "ssh".to_owned(),
+            args: vec!["host".to_owned(), "-p".to_owned(), "22".to_owned()],
+        })
+    );
+}
+
+#[test]
+fn pane_split_templates_reject_invalid_leaf_fields() {
+    let invalid_documents = [
+        serde_json::json!({
+            "profile": "System",
+            "command": { "program": "ssh" }
+        }),
+        serde_json::json!({ "command": { "args": ["host"] } }),
+        serde_json::json!({ "command": { "program": "ssh", "args": [1] } }),
+        serde_json::json!({ "env": { "ROLE": true } }),
+        serde_json::json!({ "env": { "": "value" } }),
+        serde_json::json!({ "overlay": { "size": "huge" } }),
+        serde_json::json!({ "overlay": { "opacity": 101 } }),
+        serde_json::json!({ "overlay": { "opacity": 12.5 } }),
+        serde_json::json!({ "overlay": { "color": "not-a-color" } }),
+        serde_json::json!({ "unknown": true }),
+    ];
+
+    for leaf in invalid_documents {
+        let document = serde_json::json!({
+            "pane_split_templates": {
+                "bad": { "vertical": [leaf, {}] }
+            }
+        });
+        assert!(
+            Config::parse(&document.to_string(), None, None).is_err(),
+            "expected invalid pane leaf: {document}"
+        );
+    }
+}
+
+#[test]
+fn pane_split_templates_reject_unavailable_profiles_and_more_than_64_panes() {
+    let unavailable = serde_json::json!({
+        "pane_split_templates": {
+            "bad": { "vertical": [{ "profile": "missing" }, {}] }
+        }
+    });
+    let error = Config::parse(&unavailable.to_string(), None, None).unwrap_err();
+    assert!(format!("{error:#}").contains("is not available"));
+
+    fn balanced_tree(leaves: usize) -> serde_json::Value {
+        if leaves == 1 {
+            return serde_json::json!({});
+        }
+        let first = leaves / 2;
+        serde_json::json!({
+            "vertical": [balanced_tree(first), balanced_tree(leaves - first)]
+        })
+    }
+    let tree = balanced_tree(65);
+    let document = serde_json::json!({
+        "pane_split_templates": { "too-many": tree }
+    });
+    let error = Config::parse(&document.to_string(), None, None).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("between 2 and 64 panes"),
+        "unexpected pane limit error: {error:#}"
+    );
+}
+
+#[test]
+fn pane_split_templates_reject_legacy_leaf_syntax() {
+    for leaf in [
+        serde_json::json!("pane"),
+        serde_json::json!({"pane": "label"}),
+    ] {
+        let document = serde_json::json!({
+            "pane_split_templates": {
+                "legacy": { "vertical": [leaf, {}] }
+            }
+        });
+        assert!(Config::parse(&document.to_string(), None, None).is_err());
+    }
 }
 
 #[test]
@@ -531,8 +661,7 @@ fn pane_split_templates_reject_malformed_and_single_pane_layouts() {
             .contains("parsing pane split template")
     );
 
-    let single =
-        Config::parse(r#"{"pane_split_templates":{"bad":"pane"}}"#, None, None).unwrap_err();
+    let single = Config::parse(r#"{"pane_split_templates":{"bad":{}}}"#, None, None).unwrap_err();
     assert!(single.to_string().contains("between 2 and 64 panes"));
 }
 
@@ -542,9 +671,9 @@ fn pane_split_templates_reject_invalid_labels_and_label_types() {
         let document = serde_json::json!({
             "pane_split_templates": {
                 "bad": {
-                    "vertical": [
-                        { "pane": label },
-                        "pane"
+                        "vertical": [
+                        { "label": label },
+                        {}
                     ]
                 }
             }
@@ -562,9 +691,9 @@ fn pane_split_templates_reject_invalid_labels_and_label_types() {
         let document = serde_json::json!({
             "pane_split_templates": {
                 "bad": {
-                    "vertical": [
-                        { "pane": pane_value },
-                        "pane"
+                        "vertical": [
+                        { "label": pane_value },
+                        {}
                     ]
                 }
             }
@@ -572,7 +701,7 @@ fn pane_split_templates_reject_invalid_labels_and_label_types() {
         let error = Config::parse(&document.to_string(), None, None).unwrap_err();
         let error = format!("{error:#}");
         assert!(
-            error.contains("string label"),
+            error.contains("pane template label must be a string"),
             "unexpected error for {value}: {error:#}"
         );
     }

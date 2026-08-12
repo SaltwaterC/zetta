@@ -40,6 +40,7 @@ pub(crate) fn finish_pane_output_save(in_progress: &mut bool) {
     *in_progress = false;
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn prepare_pane_launches<T>(
     pane_ids: impl IntoIterator<Item = u64>,
     mut prepare: impl FnMut(u64) -> T,
@@ -546,6 +547,10 @@ pub(crate) struct TerminalPane {
     /// Text color for `overlay_text`; falls back to the theme's text color.
     pub(crate) overlay_color: Option<gpui::Hsla>,
     pub(crate) profile: Profile,
+    /// Environment overrides requested by a pane split template. Keeping the
+    /// unexpanded overrides on the pane lets template application determine
+    /// whether the active terminal actually needs to be restarted.
+    pub(crate) environment_overrides: HashMap<String, String>,
     pub(crate) terminal: Option<Entity<Terminal>>,
     pub(crate) view: Option<Entity<TerminalView>>,
     pub(crate) error: Option<String>,
@@ -881,6 +886,7 @@ impl TerminalPane {
             overlay_opacity: None,
             overlay_color: None,
             profile,
+            environment_overrides: HashMap::new(),
             terminal: None,
             view: None,
             error: None,
@@ -911,6 +917,14 @@ impl TerminalPane {
 
     pub(crate) fn with_wsl_cwd_file(mut self, file: Option<PathBuf>) -> Self {
         self.wsl_cwd_file = file;
+        self
+    }
+
+    pub(crate) fn with_environment_overrides(
+        mut self,
+        environment: HashMap<String, String>,
+    ) -> Self {
+        self.environment_overrides = environment;
         self
     }
 

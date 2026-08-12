@@ -123,6 +123,100 @@ fn cli_replacement_profile_resolution_requires_the_exact_homebrew_name() {
 }
 
 #[test]
+fn pane_template_leaf_resolution_applies_profile_command_theme_environment_and_overlay() {
+    let config = Config::parse(
+        r##"{
+            "profiles": [
+                { "name": "Worker", "program": "worker-shell", "theme": "One Dark" }
+            ],
+            "pane_split_templates": {
+                "custom": {
+                    "vertical": [
+                        {
+                            "label": "worker",
+                            "profile": "wOrKeR",
+                            "theme": "One Light",
+                            "env": { "ROLE": "worker" },
+                            "overlay": {
+                                "text": "WORKER",
+                                "size": "2xl",
+                                "opacity": 40,
+                                "color": "#ff00ff"
+                            }
+                        },
+                        {
+                            "label": "ssh",
+                            "command": { "program": "ssh", "args": ["host", "-p", "2200"] }
+                        }
+                    ]
+                }
+            }
+        }"##,
+        None,
+        None,
+    )
+    .unwrap();
+    let active = config
+        .profiles
+        .iter()
+        .find(|profile| profile.name == "System")
+        .cloned()
+        .unwrap();
+    let leaves =
+        resolve_pane_split_leaves(&config.pane_split_templates["custom"], &active, None).unwrap();
+
+    assert_eq!(leaves[0].label.as_deref(), Some("worker"));
+    assert_eq!(leaves[0].profile.name, "Worker");
+    assert_eq!(leaves[0].profile.theme.as_deref(), Some("One Light"));
+    assert_eq!(leaves[0].environment["ROLE"], "worker");
+    assert_eq!(leaves[0].overlay_text.as_deref(), Some("WORKER"));
+    assert_eq!(
+        leaves[0].overlay_font_size,
+        Some(OverlayFontSize::ExtraExtraLarge)
+    );
+    assert_eq!(leaves[0].overlay_opacity, Some(0.4));
+    assert_eq!(leaves[0].overlay_color, overlay_color_from_value("#ff00ff"));
+
+    assert_eq!(leaves[1].label.as_deref(), Some("ssh"));
+    assert_eq!(leaves[1].profile.name, "System");
+    assert_eq!(
+        leaves[1].profile.command,
+        Shell::WithArguments {
+            program: "ssh".to_owned(),
+            args: vec!["host".to_owned(), "-p".to_owned(), "2200".to_owned()],
+            title_override: None,
+        }
+    );
+}
+
+#[test]
+fn pane_template_labels_and_overlays_do_not_require_a_terminal_restart() {
+    let profile = Profile {
+        name: "System".to_owned(),
+        command: Shell::System,
+        theme: None,
+        icon: ProfileIcon::Zetta,
+    };
+    let pane = TerminalPane::new(1, profile.clone());
+    let leaf = ResolvedPaneSplitLeaf {
+        label: Some("new-label".to_owned()),
+        profile,
+        environment: HashMap::new(),
+        overlay_text: Some("overlay".to_owned()),
+        overlay_font_size: Some(OverlayFontSize::Large),
+        overlay_opacity: Some(0.5),
+        overlay_color: overlay_color_from_value("cyan"),
+    };
+
+    assert!(!pane_split_leaf_requires_restart(&pane, &leaf));
+    let mut changed = leaf.clone();
+    changed
+        .environment
+        .insert("ROLE".to_owned(), "worker".to_owned());
+    assert!(pane_split_leaf_requires_restart(&pane, &changed));
+}
+
+#[test]
 fn mouse_window_resize_clamps_each_dimension_to_the_minimum() {
     assert_eq!(
         clamp_window_size_to_minimum(size(px(400.), px(500.))),

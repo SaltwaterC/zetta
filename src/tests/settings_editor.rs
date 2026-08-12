@@ -208,6 +208,43 @@ fn configuration_form_round_trip_uses_typed_values_and_profiles() {
 }
 
 #[test]
+fn configuration_form_round_trip_preserves_custom_pane_template_trees() {
+    let root = std::env::temp_dir().join(format!(
+        "zetta-pane-template-form-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let template = json!({
+        "vertical": [
+            {
+                "label": "server",
+                "profile": "System",
+                "env": { "ROLE": "server" },
+                "overlay": { "text": "SERVER", "size": "xl", "opacity": 85, "color": "cyan" }
+            },
+            { "command": { "program": "ssh", "args": ["host"] } }
+        ]
+    });
+    fs::write(
+        &root,
+        serde_json::to_string(&json!({
+            "pane_split_templates": { "custom": template.clone() }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let config = Config::load(Some(&root), None).unwrap();
+    let form = ConfigurationForm::load(&root, &config).unwrap();
+    let output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
+    fs::remove_file(root).unwrap();
+
+    assert_eq!(output["pane_split_templates"]["custom"], template);
+}
+
+#[test]
 fn configuration_form_omits_automatic_profile_icons() {
     let root = std::env::temp_dir().join(format!(
         "zetta-automatic-profile-icon-form-{}-{}.json",

@@ -451,22 +451,22 @@ unbound by default. Add custom bindings when needed:
 On macOS, use `ctrl-cmd-shift` instead of `ctrl-alt-shift` for these custom
 bindings.
 
-Templates are recursive. `"pane"` is an unlabeled leaf, while
-`{ "pane": "label" }` assigns a label to that leaf. Labels must use lowercase
-kebab-case (`[a-z0-9]+(?:-[a-z0-9]+)*`); duplicate labels are allowed.
-`vertical` places two children side by side, and `horizontal` stacks two
-children. Define named templates in `config.json`:
+Templates are recursive. Each leaf is an object; an empty object is an
+unlabeled pane, while `{ "label": "label" }` assigns a label to that leaf.
+Labels must use lowercase kebab-case (`[a-z0-9]+(?:-[a-z0-9]+)*`); duplicate
+labels are allowed. `vertical` places two children side by side, and
+`horizontal` stacks two children. Define named templates in `config.json`:
 
 ```json
 {
   "pane_split_templates": {
     "three-bottom": {
       "horizontal": [
-        { "pane": "top" },
+        { "label": "top" },
         {
           "vertical": [
-            { "pane": "bottom-left" },
-            { "pane": "bottom-right" }
+            { "label": "bottom-left" },
+            { "label": "bottom-right" }
           ]
         }
       ]
@@ -480,8 +480,46 @@ panes. A tab is limited to 64 panes in total, including panes created by
 recursive applications. Custom entries extend the built-ins and may override
 them by using the same name.
 
-The active terminal becomes the first, top-left leaf and retains focus. New
-panes inherit its profile and working directory. Applying a template again
+Leaves can independently select a configured profile or direct command,
+override its theme, add string environment variables, and show an overlay:
+
+```json
+{
+  "pane_split_templates": {
+    "server-pair": {
+      "vertical": [
+        {
+          "label": "server",
+          "profile": "Bash",
+          "theme": "One Dark",
+          "env": { "ROLE": "server" },
+          "overlay": {
+            "text": "SERVER",
+            "size": "xl",
+            "opacity": 85,
+            "color": "cyan"
+          }
+        },
+        {
+          "label": "client",
+          "command": { "program": "ssh", "args": ["host"] }
+        }
+      ]
+    }
+  }
+}
+```
+
+`profile` and `command` are mutually exclusive. A command is launched with
+exactly the listed program and arguments, without shell-string splitting.
+Omitting both inherits the active pane's profile. Environment values must be
+strings, overlay sizes are `sm`, `base`, `lg`, `xl`, `2xl`, or `3xl`, opacity
+is a percentage from 0 to 100, and color accepts the named overlay colors or a
+hex value.
+
+The active terminal becomes the first, top-left leaf and retains focus. Leaves
+that omit both `profile` and `command` inherit its profile; all new panes keep
+the existing working-directory inheritance rules. Applying a template again
 therefore recurses into the active pane without changing the rest of the tab.
 Labeled leaves replace automatic pane labels when a template is applied;
 manually assigned labels still take precedence, and an unlabeled leaf restores
