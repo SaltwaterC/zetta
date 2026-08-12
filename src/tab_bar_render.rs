@@ -32,6 +32,10 @@ fn tab_move_menu_entry_available(tab_count: usize) -> bool {
     tab_count >= 2
 }
 
+fn tab_auto_background_enabled(close_policy: &TabClosePolicy) -> bool {
+    matches!(close_policy, TabClosePolicy::Background { .. })
+}
+
 fn tab_leading_icons(
     background_tab: bool,
     silent_mode: bool,
@@ -594,8 +598,9 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
         tab_overflow_entry_label(tab, cx)
     };
     let attention_tooltip = tab.attention.as_ref().map(TabAttention::tooltip_text);
+    let tab_auto_background = tab_auto_background_enabled(&tab.close_policy);
     let (pin_icon, silent_mode_icon, custom_icon) = tab_leading_icons(
-        matches!(tab.close_policy, TabClosePolicy::Background { .. }),
+        tab_auto_background,
         tab.silent_mode,
         tab.icon,
         !is_shrinking || (is_renaming_tab && selected),
@@ -774,6 +779,13 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
                             Box::new(ToggleTabSilentMode),
                             tab_silent_mode,
                         )
+                        .separator()
+                        .action_checked(
+                            "Keep running",
+                            Box::new(ToggleAutoBackgroundTab),
+                            tab_auto_background,
+                        )
+                        .action("Detach", Box::new(DetachTab))
                         .when(tab_move_menu_entry_available(tab_count), |menu| {
                             menu.separator().action_checked(
                                 "Tab Move Mode",

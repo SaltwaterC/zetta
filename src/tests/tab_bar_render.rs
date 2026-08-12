@@ -8,6 +8,17 @@ fn tab_move_context_menu_is_only_available_with_two_tabs() {
 }
 
 #[test]
+fn keep_running_context_menu_state_follows_tab_close_policy() {
+    assert!(!tab_auto_background_enabled(&TabClosePolicy::Close));
+    assert!(tab_auto_background_enabled(&TabClosePolicy::Background {
+        authentication: None,
+    }));
+    assert!(tab_auto_background_enabled(&TabClosePolicy::Background {
+        authentication: Some(SessionAuthentication::create("secret").unwrap()),
+    }));
+}
+
+#[test]
 fn tab_silent_indicator_is_between_pin_and_custom_icon() {
     assert_eq!(
         tab_leading_icons(true, true, Some(IconName::Terminal), true),
