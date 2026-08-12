@@ -149,6 +149,12 @@ fn compact_mode_hides_pane_size() {
 }
 
 #[test]
+fn zetta_title_bar_label_is_visible_only_outside_compact_mode() {
+    assert!(title_bar_app_label_visible(false));
+    assert!(!title_bar_app_label_visible(true));
+}
+
+#[test]
 fn title_bar_menu_visibility_is_platform_specific() {
     assert_eq!(
         title_bar_menus_visible(true),

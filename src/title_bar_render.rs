@@ -255,6 +255,10 @@ pub(crate) fn title_bar_pane_size_visible(compact_mode: bool, hide_pane_size: bo
     !compact_mode && !hide_pane_size
 }
 
+pub(crate) fn title_bar_app_label_visible(compact_mode: bool) -> bool {
+    !compact_mode
+}
+
 pub(crate) fn title_bar_menus_visible(hide_menus: bool) -> bool {
     cfg!(not(target_os = "macos")) || !hide_menus
 }
@@ -693,6 +697,15 @@ impl Zetta {
             .ml_auto()
             .when_some(right_reconnect_control, |controls, reconnect_control| {
                 controls.child(reconnect_control)
+            })
+            .when(title_bar_app_label_visible(compact_mode), |controls| {
+                controls.child(
+                    div().flex_none().px_2().child(
+                        Label::new("Zetta")
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    ),
+                )
             })
             .child(right_window_controls)
             .into_any_element();
