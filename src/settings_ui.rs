@@ -303,6 +303,10 @@ pub(crate) fn next_char_boundary(text: &str, cursor: usize) -> usize {
 }
 
 impl Zetta {
+    pub(crate) fn profile_draft_has_required_fields(name: &str, program: &str) -> bool {
+        !name.trim().is_empty() && !program.trim().is_empty()
+    }
+
     fn rebuild_font_search_cache(editor: &mut SettingsEditor) {
         if let Some(font_query) = editor.font_query.as_ref() {
             let query = font_query.text.clone();
@@ -821,8 +825,24 @@ impl Zetta {
                     .and_then(|editor| editor.focused_control.clone());
                 if control == Some(SettingsControl::Input(SettingsInput::ThemeSearch)) {
                     self.fetch_theme_extensions(window, cx);
+                } else if matches!(
+                    control,
+                    Some(SettingsControl::CreateProfile)
+                        | Some(SettingsControl::Input(SettingsInput::ProfileDraft(_)))
+                ) {
+                    let ready = self.settings_editor.as_ref().is_some_and(|editor| {
+                        editor.profile_draft.as_ref().is_some_and(|draft| {
+                            Self::profile_draft_has_required_fields(
+                                &draft.name.text,
+                                &draft.program.text,
+                            )
+                        })
+                    });
+                    if ready {
+                        self.activate_settings_control(SettingsControl::CreateProfile, window, cx);
+                    }
                 } else if matches!(control, Some(SettingsControl::Input(_))) {
-                    // A text input keeps its editing state when Enter is pressed.
+                    // Other text inputs keep their editing state when Enter is pressed.
                 } else if let Some(control) = control {
                     self.activate_settings_control(control, window, cx);
                 }

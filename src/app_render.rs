@@ -133,6 +133,26 @@ impl Zetta {
                     .ok();
             });
 
+        let close_handle = handle.clone();
+        let close = div()
+            .id("close-tab-icon-picker")
+            .flex_none()
+            .px_3()
+            .py_1()
+            .rounded(px(4.))
+            .border_1()
+            .border_color(colors.element_selected)
+            .cursor_pointer()
+            .bg(colors.element_selected)
+            .hover(|style| style.bg(colors.element_hover))
+            .tooltip(Tooltip::text("Close tab icon picker (Esc)"))
+            .on_click(move |_, window, cx| {
+                close_handle
+                    .update(cx, |this, cx| this.dismiss_tab_icon_picker(window, cx))
+                    .ok();
+            })
+            .child("Close");
+
         // Virtualized icon grid using uniform_list
         let row_colors = colors.clone();
         let row_entries = entries.clone();
@@ -261,7 +281,7 @@ impl Zetta {
                         .border_color(colors.border)
                         .bg(colors.elevated_surface_background)
                         .shadow_lg()
-                        .child(h_flex().mb_3().gap_2().child(search))
+                        .child(h_flex().mb_3().gap_2().child(search).child(close))
                         .child(
                             div()
                                 .relative()

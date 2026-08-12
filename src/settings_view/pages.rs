@@ -1,5 +1,6 @@
 use super::widgets::{
-    KeymapRowData, KeymapRowRenderContext, SETTINGS_SCROLLBAR_WIDTH, build_keymap_row_data,
+    KEYMAP_ROW_HEIGHT, KeymapRowData, KeymapRowRenderContext, SETTINGS_SCROLLBAR_WIDTH,
+    build_keymap_row_data,
 };
 use super::*;
 use crate::settings_ui::keymap::{compute_keymap_sticky_candidates, keymap_rows};
@@ -648,58 +649,44 @@ pub(crate) fn render_settings_pages(
                 rows.push(card);
             }
             let add_handle = handle.clone();
+            let add_focused = editor.focused_control == Some(SettingsControl::AddProfile);
             rows.push(
-                div()
-                    .id("add-settings-profile")
-                    .h_9()
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.))
-                    .border_1()
-                    .border_color(
-                        if editor.focused_control == Some(SettingsControl::AddProfile) {
-                            colors.border_focused
-                        } else {
-                            colors.border
-                        },
+                h_flex()
+                    .w_full()
+                    .h(px(KEYMAP_ROW_HEIGHT))
+                    .border_t_1()
+                    .border_color(colors.border_variant)
+                    .child(
+                        Button::new("add-settings-profile", "Add profile")
+                            .style(ButtonStyle::Outlined)
+                            .toggle_state(add_focused)
+                            .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
+                            .on_click(move |_, window, cx| {
+                                add_handle
+                                    .update(cx, |this, cx| {
+                                        if let Some(editor) = this.settings_editor.as_mut() {
+                                            editor.profile_draft =
+                                                Some(settings_editor::ProfileForm {
+                                                    name: TextField::default(),
+                                                    program: TextField::default(),
+                                                    arguments: TextField::default(),
+                                                    theme: None,
+                                                    icon: None,
+                                                    automatic_icon: ProfileIcon::Zetta,
+                                                    hidden: false,
+                                                    detected: false,
+                                                });
+                                            editor.message = None;
+                                        }
+                                        this.focus_settings_input(
+                                            SettingsInput::ProfileDraft(ProfileDraftField::Name),
+                                            window,
+                                            cx,
+                                        );
+                                    })
+                                    .ok();
+                            }),
                     )
-                    .when(
-                        editor.focused_control == Some(SettingsControl::AddKeymapSection),
-                        |button| button.bg(colors.element_selected),
-                    )
-                    .when(
-                        editor.focused_control == Some(SettingsControl::AddProfile),
-                        |button| button.bg(colors.element_selected),
-                    )
-                    .cursor_pointer()
-                    .hover(|style| style.bg(colors.element_hover))
-                    .child("Add profile")
-                    .on_click(move |_, window, cx| {
-                        add_handle
-                            .update(cx, |this, cx| {
-                                if let Some(editor) = this.settings_editor.as_mut() {
-                                    editor.profile_draft = Some(settings_editor::ProfileForm {
-                                        name: TextField::default(),
-                                        program: TextField::default(),
-                                        arguments: TextField::default(),
-                                        theme: None,
-                                        icon: None,
-                                        automatic_icon: ProfileIcon::Zetta,
-                                        hidden: false,
-                                        detected: false,
-                                    });
-                                    editor.message = None;
-                                }
-                                this.focus_settings_input(
-                                    SettingsInput::ProfileDraft(ProfileDraftField::Name),
-                                    window,
-                                    cx,
-                                );
-                            })
-                            .ok();
-                    })
                     .into_any_element(),
             );
             div().children(rows).into_any_element()

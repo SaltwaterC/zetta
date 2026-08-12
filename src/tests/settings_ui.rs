@@ -1,6 +1,15 @@
 use super::*;
 
 #[test]
+fn profile_creation_requires_a_name_and_program() {
+    assert!(!Zetta::profile_draft_has_required_fields("", "bash"));
+    assert!(!Zetta::profile_draft_has_required_fields("Profile", ""));
+    assert!(!Zetta::profile_draft_has_required_fields("  ", "bash"));
+    assert!(!Zetta::profile_draft_has_required_fields("Profile", "  "));
+    assert!(Zetta::profile_draft_has_required_fields("Profile", "bash"));
+}
+
+#[test]
 fn font_filter_uses_pre_normalized_names_and_preserves_indices() {
     let fonts = vec![
         "jetbrains mono".to_owned(),

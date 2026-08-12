@@ -746,7 +746,10 @@ impl Zetta {
             SettingsControl::CreateProfile => {
                 let valid = self.settings_editor.as_ref().is_some_and(|editor| {
                     editor.profile_draft.as_ref().is_some_and(|draft| {
-                        !draft.name.text.trim().is_empty() && !draft.program.text.trim().is_empty()
+                        Self::profile_draft_has_required_fields(
+                            &draft.name.text,
+                            &draft.program.text,
+                        )
                     })
                 });
                 if !valid {

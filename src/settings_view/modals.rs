@@ -20,6 +20,7 @@ pub(crate) fn render_font_modal(
         };
         let fonts = editor.fonts.clone();
         let font_handle = handle.clone();
+        let close_handle = handle.clone();
         let font_colors = colors.clone();
         let focused_control = editor.focused_control.clone();
         let font_rows = uniform_list(
@@ -117,9 +118,31 @@ pub(crate) fn render_font_modal(
                             .child(
                                 div()
                                     .flex_none()
-                                    .text_xs()
-                                    .text_color(colors.text_muted)
-                                    .child("Esc: close"),
+                                    .id("close-font-picker")
+                                    .px_3()
+                                    .py_1()
+                                    .rounded(px(4.))
+                                    .border_1()
+                                    .border_color(colors.element_selected)
+                                    .cursor_pointer()
+                                    .bg(colors.element_selected)
+                                    .hover(|style| style.bg(colors.element_hover))
+                                    .tooltip(Tooltip::text("Close font picker (Esc)"))
+                                    .on_click(move |_, _, cx| {
+                                        close_handle
+                                            .update(cx, |this, cx| {
+                                                if let Some(editor) = this.settings_editor.as_mut()
+                                                {
+                                                    editor.font_query = None;
+                                                    editor.focused_input = None;
+                                                    editor.focused_control = None;
+                                                    editor.message = None;
+                                                    cx.notify();
+                                                }
+                                            })
+                                            .ok();
+                                    })
+                                    .child("Close"),
                             ),
                     )
                     .child(div().relative().min_h_0().flex_1().child(font_rows).child(
@@ -156,6 +179,7 @@ pub(crate) fn render_profile_modal(
                 ProfileIcon::selector_label(draft.icon.as_ref()).to_owned(),
                 SettingsDropdown::ProfileDraftIcon,
             ));
+        let close_handle = handle.clone();
         let create_handle = handle.clone();
         div()
             .id("new-profile-modal")
@@ -181,15 +205,7 @@ pub(crate) fn render_profile_modal(
                     .child(
                         h_flex()
                             .mb_4()
-                            .gap_2()
-                            .child(div().min_w_0().flex_1().text_lg().child("Add profile"))
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_xs()
-                                    .text_color(colors.text_muted)
-                                    .child("Esc: close"),
-                            ),
+                            .child(div().min_w_0().flex_1().text_lg().child("Add profile")),
                     )
                     .child(
                         div()
@@ -257,61 +273,100 @@ pub(crate) fn render_profile_modal(
                         )
                     })
                     .child(
-                        h_flex().mt_5().justify_end().child(
-                            div()
-                                .id("create-settings-profile")
-                                .px_4()
-                                .py_2()
-                                .rounded(px(4.))
-                                .border_1()
-                                .border_color(
-                                    if editor.focused_control
-                                        == Some(SettingsControl::CreateProfile)
-                                    {
-                                        colors.border_focused
-                                    } else {
-                                        colors.element_selected
-                                    },
-                                )
-                                .cursor_pointer()
-                                .bg(colors.element_selected)
-                                .hover(|style| style.bg(colors.element_hover))
-                                .child("Create profile")
-                                .on_click(move |_, _, cx| {
-                                    create_handle
-                                        .update(cx, |this, cx| {
-                                            let Some(editor) = this.settings_editor.as_mut() else {
-                                                return;
-                                            };
-                                            let valid = editor.profile_draft.as_ref().is_some_and(
-                                                |draft| {
-                                                    !draft.name.text.trim().is_empty()
-                                                        && !draft.program.text.trim().is_empty()
-                                                },
-                                            );
-                                            if !valid {
-                                                editor.message = Some((
-                                                    true,
-                                                    "Profile name and program are required."
-                                                        .to_owned(),
-                                                ));
+                        h_flex()
+                            .mt_5()
+                            .gap_2()
+                            .justify_end()
+                            .child(
+                                div()
+                                    .id("close-settings-profile")
+                                    .flex_none()
+                                    .px_4()
+                                    .py_2()
+                                    .rounded(px(4.))
+                                    .border_1()
+                                    .border_color(colors.element_selected)
+                                    .cursor_pointer()
+                                    .bg(colors.element_selected)
+                                    .hover(|style| style.bg(colors.element_hover))
+                                    .tooltip(Tooltip::text("Close add profile (Esc)"))
+                                    .on_click(move |_, _, cx| {
+                                        close_handle
+                                            .update(cx, |this, cx| {
+                                                if let Some(editor) = this.settings_editor.as_mut()
+                                                {
+                                                    editor.profile_draft = None;
+                                                    editor.focused_input = None;
+                                                    editor.focused_control = None;
+                                                    editor.message = None;
+                                                    cx.notify();
+                                                }
+                                            })
+                                            .ok();
+                                    })
+                                    .child("Close"),
+                            )
+                            .child(
+                                div()
+                                    .id("create-settings-profile")
+                                    .px_4()
+                                    .py_2()
+                                    .rounded(px(4.))
+                                    .border_1()
+                                    .border_color(
+                                        if editor.focused_control
+                                            == Some(SettingsControl::CreateProfile)
+                                        {
+                                            colors.border_focused
+                                        } else {
+                                            colors.element_selected
+                                        },
+                                    )
+                                    .cursor_pointer()
+                                    .bg(colors.element_selected)
+                                    .hover(|style| style.bg(colors.element_hover))
+                                    .tooltip(Tooltip::text("Create profile (Enter)"))
+                                    .child("Create profile")
+                                    .on_click(move |_, _, cx| {
+                                        create_handle
+                                            .update(cx, |this, cx| {
+                                                let Some(editor) = this.settings_editor.as_mut()
+                                                else {
+                                                    return;
+                                                };
+                                                let valid = editor
+                                                    .profile_draft
+                                                    .as_ref()
+                                                    .is_some_and(|draft| {
+                                                        Zetta::profile_draft_has_required_fields(
+                                                            &draft.name.text,
+                                                            &draft.program.text,
+                                                        )
+                                                    });
+                                                if !valid {
+                                                    editor.message = Some((
+                                                        true,
+                                                        "Profile name and program are required."
+                                                            .to_owned(),
+                                                    ));
+                                                    cx.notify();
+                                                    return;
+                                                }
+                                                let mut draft =
+                                                    editor.profile_draft.take().unwrap();
+                                                draft.automatic_icon =
+                                                    ProfileIcon::automatic_for_program(
+                                                        &draft.program.text,
+                                                    );
+                                                editor.configuration.profiles.push(draft);
+                                                editor.configuration_dirty = true;
+                                                editor.focused_input = None;
+                                                editor.message = None;
                                                 cx.notify();
-                                                return;
-                                            }
-                                            let mut draft = editor.profile_draft.take().unwrap();
-                                            draft.automatic_icon =
-                                                ProfileIcon::automatic_for_program(
-                                                    &draft.program.text,
-                                                );
-                                            editor.configuration.profiles.push(draft);
-                                            editor.configuration_dirty = true;
-                                            editor.focused_input = None;
-                                            editor.message = None;
-                                            cx.notify();
-                                        })
-                                        .ok();
-                                }),
-                        ),
+                                            })
+                                            .ok();
+                                    }),
+                            ),
                     ),
             )
             .into_any_element()
