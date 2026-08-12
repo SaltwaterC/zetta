@@ -67,6 +67,7 @@ impl Zetta {
             SettingsControl::Tab(SettingsPage::Configuration),
             SettingsControl::Tab(SettingsPage::Themes),
             SettingsControl::Tab(SettingsPage::Keymap),
+            SettingsControl::Close,
             SettingsControl::Save,
         ];
         match editor.page {
@@ -606,6 +607,7 @@ impl Zetta {
     ) {
         match control {
             SettingsControl::Tab(page) => self.select_settings_page(page, window, cx),
+            SettingsControl::Close => self.dismiss_settings(window, cx),
             SettingsControl::Save => self.save_settings(window, cx),
             SettingsControl::Input(input) => self.focus_settings_input(input, window, cx),
             SettingsControl::CaptureKeymap(target) => self.start_keymap_capture(target, window, cx),

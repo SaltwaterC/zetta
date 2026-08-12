@@ -76,6 +76,7 @@ pub(crate) enum NumericSetting {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SettingsControl {
     Tab(SettingsPage),
+    Close,
     Save,
     Input(SettingsInput),
     CaptureKeymap(KeymapTextField),

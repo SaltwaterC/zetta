@@ -449,6 +449,7 @@ impl Zetta {
         let config_handle = handle.clone();
         let themes_handle = handle.clone();
         let keymap_handle = handle.clone();
+        let close_handle = handle.clone();
         let save_handle = handle.clone();
         let path = match editor.page {
             SettingsPage::Configuration => self.launch_config.config_path.display().to_string(),
@@ -587,9 +588,32 @@ impl Zetta {
                                         .gap_2()
                                         .child(
                                             div()
-                                                .text_xs()
-                                                .text_color(colors.text_muted)
-                                                .child("Esc: close"),
+                                                .id("close-settings")
+                                                .px_3()
+                                                .py_1()
+                                                .rounded(px(4.))
+                                                .border_1()
+                                                .border_color(
+                                                    if editor.focused_control
+                                                        == Some(SettingsControl::Close)
+                                                    {
+                                                        colors.border_focused
+                                                    } else {
+                                                        colors.element_selected
+                                                    },
+                                                )
+                                                .cursor_pointer()
+                                                .bg(colors.element_selected)
+                                                .hover(|style| style.bg(colors.element_hover))
+                                                .tooltip(Tooltip::text("Close settings (Esc)"))
+                                                .on_click(move |_, window, cx| {
+                                                    close_handle
+                                                        .update(cx, |this, cx| {
+                                                            this.dismiss_settings(window, cx)
+                                                        })
+                                                        .ok();
+                                                })
+                                                .child("Close"),
                                         )
                                         .child(
                                             div()
