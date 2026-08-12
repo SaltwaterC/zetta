@@ -325,8 +325,54 @@ fn detect_system_silent_state() -> SystemSilentState {
     SystemSilentState::Unknown
 }
 
+// Windows 10 1803 replaced "Quiet Hours" with Focus Assist, and never shipped
+// a supported API to read its live profile: SHQueryUserNotificationState's
+// only DND-adjacent value, QUNS_QUIET_TIME, is the automatic one-hour grace
+// period after a fresh login/upgrade, not the user's Focus Assist toggle. The
+// only place that toggle is observable is the per-user CloudStore cache that
+// Settings itself reads from, an undocumented REG_BINARY blob embedding a
+// UTF-16LE `Microsoft.QuietHoursProfile.*` profile name. Try that first and
+// fall back to the legacy API (still valid for QUNS_BUSY/PRESENTATION_MODE)
+// when the key is missing (never provisioned until Focus Assist is toggled
+// once) or the blob doesn't parse.
+#[cfg(target_os = "windows")]
+const QUIET_HOURS_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\Cache\DefaultAccount\$$windows.data.notifications.quiethourssettings\Current";
+#[cfg(target_os = "windows")]
+const QUIET_HOURS_VALUE: &str = "Data";
+
 #[cfg(target_os = "windows")]
 fn detect_windows_system_silent_state() -> SystemSilentState {
+    let quiet_hours = windows_registry::CURRENT_USER
+        .open(QUIET_HOURS_KEY)
+        .and_then(|key| key.get_value(QUIET_HOURS_VALUE))
+        .map(|value| parse_quiet_hours_profile(value.as_ref()))
+        .unwrap_or(SystemSilentState::Unknown);
+    if quiet_hours != SystemSilentState::Unknown {
+        return quiet_hours;
+    }
+    detect_windows_notification_state()
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn parse_quiet_hours_profile(data: &[u8]) -> SystemSilentState {
+    let wide = data
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect::<Vec<_>>();
+    let decoded = String::from_utf16_lossy(&wide);
+    if decoded.contains("Microsoft.QuietHoursProfile.Unrestricted") {
+        SystemSilentState::Inactive
+    } else if decoded.contains("Microsoft.QuietHoursProfile.PriorityOnly")
+        || decoded.contains("Microsoft.QuietHoursProfile.AlarmsOnly")
+    {
+        SystemSilentState::Active
+    } else {
+        SystemSilentState::Unknown
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn detect_windows_notification_state() -> SystemSilentState {
     use windows::Win32::UI::Shell::SHQueryUserNotificationState;
 
     match unsafe { SHQueryUserNotificationState() } {

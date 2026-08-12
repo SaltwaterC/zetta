@@ -97,6 +97,47 @@ fn focus_status_access_clears_system_silence_when_authorization_is_lost() {
     assert!(!state.effective());
 }
 
+// Real HKCU\...\CloudStore\...\$$windows.data.notifications.quiethourssettings
+// `Data` blobs captured from Windows 10/11 machines in each Focus Assist
+// state, so the parser is exercised against actual Windows-produced bytes
+// rather than a guessed layout.
+const QUIET_HOURS_PRIORITY_ONLY_HEX: &str = "02,00,00,00,15,7c,93,f1,9a,7c,d8,01,00,00,00,00,43,42,01,00,c2,0a,01,d2,14,28,4d,00,69,00,63,00,72,00,6f,00,73,00,6f,00,66,00,74,00,2e,00,51,00,75,00,69,00,65,00,74,00,48,00,6f,00,75,00,72,00,73,00,50,00,72,00,6f,00,66,00,69,00,6c,00,65,00,2e,00,50,00,72,00,69,00,6f,00,72,00,69,00,74,00,79,00,4f,00,6e,00,6c,00,79,00,ca,28,d0,14,02,00,00";
+const QUIET_HOURS_UNRESTRICTED_HEX: &str = "02,00,00,00,B4,67,2B,68,F0,0B,D8,01,00,00,00,00,43,42,01,00,C2,0A,01,D2,14,28,4D,00,69,00,63,00,72,00,6F,00,73,00,6F,00,66,00,74,00,2E,00,51,00,75,00,69,00,65,00,74,00,48,00,6F,00,75,00,72,00,73,00,50,00,72,00,6F,00,66,00,69,00,6C,00,65,00,2E,00,55,00,6E,00,72,00,65,00,73,00,74,00,72,00,69,00,63,00,74,00,65,00,64,00,CA,28,D0,14,02,00,00";
+const QUIET_HOURS_ALARMS_ONLY_HEX: &str = "020000002bc05e5d177dd4010000000043420100c20a01d214264d006900630072006f0073006f00660074002e005100750069006500740048006f00750072007300500072006f00660069006c0065002e0041006c00610072006d0073004f006e006c00790000";
+
+fn hex_bytes(spec: &str) -> Vec<u8> {
+    let cleaned = spec
+        .chars()
+        .filter(char::is_ascii_hexdigit)
+        .collect::<String>();
+    cleaned
+        .as_bytes()
+        .chunks(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+        .collect()
+}
+
+#[test]
+fn quiet_hours_profile_maps_real_registry_blobs() {
+    assert_eq!(
+        parse_quiet_hours_profile(&hex_bytes(QUIET_HOURS_UNRESTRICTED_HEX)),
+        SystemSilentState::Inactive
+    );
+    assert_eq!(
+        parse_quiet_hours_profile(&hex_bytes(QUIET_HOURS_PRIORITY_ONLY_HEX)),
+        SystemSilentState::Active
+    );
+    assert_eq!(
+        parse_quiet_hours_profile(&hex_bytes(QUIET_HOURS_ALARMS_ONLY_HEX)),
+        SystemSilentState::Active
+    );
+    assert_eq!(parse_quiet_hours_profile(&[]), SystemSilentState::Unknown);
+    assert_eq!(
+        parse_quiet_hours_profile(b"garbage"),
+        SystemSilentState::Unknown
+    );
+}
+
 #[test]
 fn windows_notification_states_ignore_fullscreen_only() {
     assert_eq!(windows_notification_state(3), SystemSilentState::Inactive);
