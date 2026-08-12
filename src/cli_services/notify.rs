@@ -4,6 +4,10 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+#[cfg(target_os = "macos")]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(target_os = "macos")]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 
@@ -17,6 +21,11 @@ pub(crate) type NotifyCommand = NotificationRequest;
 const NOTIFICATION_WORKER_ENV: &str = "ZETTA_NOTIFICATION_WORKER";
 const NOTIFICATION_TARGET_PROCESS_ID_ENV: &str = "ZETTA_NOTIFICATION_TARGET_PROCESS_ID";
 const NOTIFICATION_TARGET_ATTENTION_ID_ENV: &str = "ZETTA_NOTIFICATION_TARGET_ATTENTION_ID";
+
+#[cfg(target_os = "macos")]
+const MACOS_TARGETED_NOTIFICATION_PREFIX: &str = "zetta-target";
+#[cfg(target_os = "macos")]
+static NEXT_MACOS_TARGETED_NOTIFICATION_ID: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) fn parse_notification_target(
     process_id: &str,
@@ -218,6 +227,65 @@ fn notification_worker_executable() -> Result<Option<PathBuf>> {
     }
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_targeted_notification_id(target: NotificationTarget) -> String {
+    let sequence = NEXT_MACOS_TARGETED_NOTIFICATION_ID.fetch_add(1, Ordering::Relaxed);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!(
+        "{MACOS_TARGETED_NOTIFICATION_PREFIX}:{}:{}:{}-{}-{sequence}",
+        target.process_id,
+        target.attention_id,
+        std::process::id(),
+        timestamp,
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn parse_macos_targeted_notification_id(tag: &str) -> Option<NotificationTarget> {
+    let mut parts = tag.split(':');
+    (parts.next() == Some(MACOS_TARGETED_NOTIFICATION_PREFIX)).then_some(())?;
+    let process_id = parts.next()?.parse::<u32>().ok().filter(|id| *id != 0)?;
+    let attention_id = parts.next()?.parse::<u64>().ok().filter(|id| *id != 0)?;
+    let suffix = parts.next()?;
+    let mut suffix_parts = suffix.split('-');
+    suffix_parts
+        .next()?
+        .parse::<u32>()
+        .ok()
+        .filter(|id| *id != 0)?;
+    suffix_parts.next()?.parse::<u128>().ok()?;
+    suffix_parts
+        .next()?
+        .parse::<u64>()
+        .ok()
+        .filter(|id| *id != 0)?;
+    if suffix_parts.next().is_some() || parts.next().is_some() {
+        return None;
+    }
+    Some(NotificationTarget {
+        process_id,
+        attention_id,
+    })
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_notification_target_for_response(
+    tag: &str,
+    action_id: Option<&str>,
+) -> Option<NotificationTarget> {
+    // Only a body activation should focus the issuing tab. Custom action
+    // buttons belong to the notification itself and must not change Zetta's
+    // current tab.
+    if action_id.is_some() {
+        return None;
+    }
+    let target = parse_macos_targeted_notification_id(tag)?;
+    (target.process_id == std::process::id()).then_some(target)
+}
+
 fn spawn_notification_worker(
     notification: &NotificationRequest,
     target: NotificationTarget,
@@ -334,6 +402,7 @@ fn keep_notification_worker_alive(timeout: Option<NotificationTimeout>) {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn notify_rust_timeout(timeout: NotificationTimeout) -> notify_rust::Timeout {
     match timeout {
         NotificationTimeout::Default => notify_rust::Timeout::Default,
@@ -519,7 +588,11 @@ function run(argv) {
 }
 
 #[cfg(target_os = "macos")]
-fn show_bundled_macos_notification(command: &NotifyCommand, sound: Option<&str>) -> Result<()> {
+fn show_bundled_macos_notification(
+    command: &NotifyCommand,
+    sound: Option<&str>,
+    notification_id: Option<&str>,
+) -> Result<()> {
     let authorized = mac_usernotifications::blocking::request_auth()
         .map_err(|error| anyhow::anyhow!("{error}"))
         .context("requesting macOS desktop notification authorization")?;
@@ -538,58 +611,13 @@ fn show_bundled_macos_notification(command: &NotifyCommand, sound: Option<&str>)
     if let Some(icon) = macos_notification_attachment(command) {
         notification = notification.image_path(icon);
     }
+    if let Some(notification_id) = notification_id {
+        notification = notification.id(notification_id);
+    }
     mac_usernotifications::blocking::send(notification)
         .map_err(|error| anyhow::anyhow!("{error}"))
         .context("showing the desktop notification")?;
     Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn show_targeted_bundled_macos_notification(
-    command: &NotifyCommand,
-    bundled_sound: Option<crate::notification_sounds::BuiltinSound>,
-    sound: Option<&str>,
-) -> Result<notify_rust::NotificationResponse> {
-    let authorized = mac_usernotifications::blocking::request_auth()
-        .map_err(|error| anyhow::anyhow!("{error}"))
-        .context("requesting macOS desktop notification authorization")?;
-    anyhow::ensure!(
-        authorized,
-        "macOS desktop notification authorization was denied; enable notifications for Zetta in System Settings"
-    );
-
-    let mut notification = notify_rust::Notification::new();
-    notification.summary(&command.summary);
-    if let Some(body) = &command.body {
-        notification.body(body);
-    }
-    // The signed app bundle supplies Zetta's identity. Only an explicit icon is
-    // an attachment, matching the existing bundled macOS notification path.
-    if let Some(icon) = macos_notification_attachment(command) {
-        notification.image_path(icon);
-    }
-    if let Some(sound) = sound {
-        notification.sound_name(sound);
-    }
-    if let Some(timeout) = command.timeout {
-        notification.timeout(notify_rust_timeout(timeout));
-    }
-    let handle = notification
-        .show()
-        .map_err(|error| anyhow::anyhow!("{error}"))
-        .context("showing the desktop notification")?;
-    if let Some(sound) = bundled_sound {
-        sound.play()?;
-    }
-
-    let mut response = None;
-    handle
-        .wait_for_response(|received: &notify_rust::NotificationResponse| {
-            response = Some(received.clone())
-        })
-        .map_err(|error| anyhow::anyhow!("{error}"))
-        .context("waiting for the desktop notification response")?;
-    response.context("desktop notification returned no response")
 }
 
 #[cfg(target_os = "macos")]
@@ -605,6 +633,7 @@ fn macos_notification_sound(command: &NotifyCommand) -> Option<&str> {
         .filter(|sound| crate::notification_sounds::BuiltinSound::parse(sound).is_none())
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 fn notification_response_activates_tab(response: &notify_rust::NotificationResponse) -> bool {
     response.is_default_action()
 }
@@ -728,16 +757,13 @@ impl NotificationRequest {
         if let Some(target) = target
             && bundled
         {
-            let response =
-                show_targeted_bundled_macos_notification(self, bundled_sound, notification_sound)?;
-            if notification_response_activates_tab(&response) {
-                let _ = crate::process_control::request_process_focus_tab(
-                    target.process_id,
-                    target.attention_id,
-                );
+            let notification_id = macos_targeted_notification_id(target);
+            show_bundled_macos_notification(self, notification_sound, Some(&notification_id))?;
+            if let Some(sound) = bundled_sound {
+                sound.play()?;
             }
         } else if bundled {
-            show_bundled_macos_notification(self, notification_sound)?;
+            show_bundled_macos_notification(self, notification_sound, None)?;
             if let Some(sound) = bundled_sound {
                 sound.play()?;
             }

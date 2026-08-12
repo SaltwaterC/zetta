@@ -321,3 +321,73 @@ fn macos_routes_system_sounds_through_notification_center() {
     command.sound = Some("zetta-alarm".to_owned());
     assert_eq!(macos_notification_sound(&command), None);
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_targeted_notification_ids_round_trip_and_are_unique() {
+    let target = NotificationTarget {
+        process_id: std::process::id(),
+        attention_id: 7,
+    };
+    let first = macos_targeted_notification_id(target);
+    let second = macos_targeted_notification_id(target);
+
+    assert_ne!(first, second);
+    assert!(first.starts_with("zetta-target:"));
+    assert_eq!(parse_macos_targeted_notification_id(&first), Some(target));
+    assert_eq!(parse_macos_targeted_notification_id(&second), Some(target));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_targeted_notification_ids_reject_malformed_values() {
+    for tag in [
+        "",
+        "zetta-target",
+        "zetta-target:1:2",
+        "zetta-target:0:2:suffix",
+        "zetta-target:1:0:suffix",
+        "zetta-target:not-a-process:2:suffix",
+        "zetta-target:1:not-an-attention:suffix",
+        "zetta-target:1:2:",
+        "zetta-target:1:2:not-a-suffix",
+        "zetta-target:1:2:1-0-1- extra",
+        "zetta-target:1:2:1-1-0",
+        "zetta-target:1:2:suffix:extra",
+        "other-target:1:2:suffix",
+    ] {
+        assert_eq!(parse_macos_targeted_notification_id(tag), None, "{tag:?}");
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_notification_responses_only_route_body_clicks_for_this_process() {
+    let target = NotificationTarget {
+        process_id: std::process::id(),
+        attention_id: 7,
+    };
+    let tag = macos_targeted_notification_id(target);
+    assert_eq!(
+        macos_notification_target_for_response(&tag, None),
+        Some(target)
+    );
+    assert_eq!(
+        macos_notification_target_for_response(&tag, Some("default")),
+        None
+    );
+    assert_eq!(
+        macos_notification_target_for_response(&tag, Some("custom-action")),
+        None
+    );
+
+    let other_process = NotificationTarget {
+        process_id: std::process::id().wrapping_add(1).max(1),
+        attention_id: target.attention_id,
+    };
+    let other_tag = macos_targeted_notification_id(other_process);
+    assert_eq!(
+        macos_notification_target_for_response(&other_tag, None),
+        None
+    );
+}

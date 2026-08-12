@@ -16,6 +16,8 @@ pub(crate) use servers::{parse_tftp_server_args, tftp_server_help};
 
 #[cfg(feature = "notifications")]
 mod notify;
+#[cfg(all(target_os = "macos", feature = "notifications"))]
+pub(crate) use notify::macos_notification_target_for_response;
 #[cfg(feature = "notifications")]
 pub(crate) use notify::{notify_help, parse_notify_args, run_notification};
 

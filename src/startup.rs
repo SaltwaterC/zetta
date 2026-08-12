@@ -2,6 +2,8 @@ use super::*;
 #[cfg(cli_services)]
 use crate::cli_services::CliServiceCommand;
 use crate::cli_services::NotificationTarget;
+#[cfg(all(target_os = "macos", feature = "notifications"))]
+use crate::cli_services::macos_notification_target_for_response;
 #[cfg(feature = "clipboard")]
 use crate::cli_services::{copy_help, parse_copy_args, parse_paste_args, paste_help};
 #[cfg(feature = "http-server")]
@@ -622,6 +624,27 @@ fn selected_performance_workload(args: &StartupArgs) -> PerformanceWorkload {
     }
 }
 
+fn focus_visible_tab_by_attention_id(cx: &mut App, attention_id: u64) -> bool {
+    let windows = cx
+        .global::<ZettaProcessState>()
+        .windows
+        .keys()
+        .copied()
+        .collect::<Vec<_>>();
+    windows.into_iter().any(|window_id| {
+        gpui::WindowHandle::<Zetta>::new(window_id)
+            .update(cx, |zetta, window, cx| {
+                if zetta.has_visible_tab_by_attention_id(attention_id) {
+                    window.activate_window();
+                    zetta.focus_tab_by_attention_id(attention_id, window, cx)
+                } else {
+                    false
+                }
+            })
+            .unwrap_or(false)
+    })
+}
+
 pub(crate) fn run() -> Result<()> {
     let args = parse_args()?;
     if args.mode == StartupMode::Application {
@@ -923,6 +946,16 @@ pub(crate) fn run() -> Result<()> {
                 _quit_subscription: quit_subscription,
             });
             silent_mode::start_observer(cx);
+            #[cfg(all(target_os = "macos", feature = "notifications"))]
+            cx.on_system_notification_response(|response, cx| {
+                let target = macos_notification_target_for_response(
+                    response.tag.as_ref(),
+                    response.action_id.as_deref(),
+                );
+                if let Some(target) = target {
+                    focus_visible_tab_by_attention_id(cx, target.attention_id);
+                }
+            });
             cx.intercept_keystrokes(|event, _window, cx| {
                 let reverse = match event.keystroke.key.as_str() {
                     "tab" => event.keystroke.modifiers.shift,
@@ -1240,28 +1273,7 @@ pub(crate) fn run() -> Result<()> {
                                 {
                                     return false;
                                 }
-                                let windows = cx
-                                    .global::<ZettaProcessState>()
-                                    .windows
-                                    .keys()
-                                    .copied()
-                                    .collect::<Vec<_>>();
-                                windows.into_iter().any(|window_id| {
-                                    gpui::WindowHandle::<Zetta>::new(window_id)
-                                        .update(cx, |zetta, window, cx| {
-                                            if zetta.has_visible_tab_by_attention_id(attention_id) {
-                                                window.activate_window();
-                                                zetta.focus_tab_by_attention_id(
-                                                    attention_id,
-                                                    window,
-                                                    cx,
-                                                )
-                                            } else {
-                                                false
-                                            }
-                                        })
-                                        .unwrap_or(false)
-                                })
+                                focus_visible_tab_by_attention_id(cx, attention_id)
                             });
                             let _ = completion.send(focused);
                         }

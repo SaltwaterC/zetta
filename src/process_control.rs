@@ -1206,6 +1206,7 @@ pub(crate) fn request_process_silent_mode(
 }
 
 #[cfg(feature = "notifications")]
+#[allow(dead_code)]
 pub(crate) fn request_process_focus_tab(process_id: u32, attention_id: u64) -> Result<bool> {
     anyhow::ensure!(process_id != 0, "process ID must be positive");
     anyhow::ensure!(attention_id != 0, "attention ID must be positive");
@@ -1448,6 +1449,7 @@ fn send_set_worktree_name_request(
 }
 
 #[cfg(feature = "notifications")]
+#[allow(dead_code)]
 fn send_focus_tab_request(endpoint: &ControlEndpoint, attention_id: u64) -> Result<bool> {
     let mut stream = UnixStream::connect(&endpoint.socket_path)?;
     stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
