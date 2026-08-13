@@ -104,6 +104,7 @@ impl Zetta {
                             if let Some(editor) = this.settings_editor.as_mut() {
                                 editor.installed_theme_extensions = installed_theme_extensions;
                                 editor.themes = themes.into();
+                                Self::refresh_open_dropdown_options(editor);
                                 editor.message = Some((
                                     false,
                                     format!(
@@ -215,6 +216,7 @@ impl Zetta {
                             if let Some(editor) = this.settings_editor.as_mut() {
                                 editor.themes = themes.into();
                                 editor.installed_theme_extensions = installed_theme_extensions;
+                                Self::refresh_open_dropdown_options(editor);
                                 editor.message = Some((
                                     false,
                                     format!(

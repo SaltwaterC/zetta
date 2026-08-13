@@ -46,6 +46,9 @@ and the process entry point. Put behavior in the module that owns it:
 - `app_render.rs`: top-level `Render for Zetta` composition (action
   registration, overlay collection, and the tab-icon-picker/overlay-style-picker
   overlays); delegates to `title_bar_render.rs` and `tab_body_render.rs`
+- `view_boundary.rs`: `ZettaSubview`, the entity wrapper that lets part of the
+  render tree be cached and be the target of its own scroll/hover
+  notifications; see "Render boundaries" below
 - `title_bar_render.rs`: title bar composition, its menus (application,
   profile, reconnect), and the layout predicates the bar shares with the tab bar
 - `tab_bar_render.rs`: the measured tab row, individual tabs, and the bar
@@ -76,7 +79,9 @@ and the process entry point. Put behavior in the module that owns it:
   `settings_ui/theme_extensions_ui.rs` (fetch/download/remove)
 - `settings_view.rs`: settings rendering; a module directory —
   `settings_view/pages.rs` (per-`SettingsPage` content),
-  `settings_view/modals.rs` (font/profile/keymap-capture modals), and
+  `settings_view/modals.rs` (font/profile/keymap-capture modals),
+  `settings_view/form_widgets.rs` (the form's shared controls, held in a struct
+  so the page and the modals can be built in separate passes), and
   `settings_view/widgets.rs` (shared widget building blocks)
 - `command_palette.rs`: palette model and matching
 - `command_palette_ui.rs`: palette interaction, rendering, and its overlay
@@ -141,6 +146,28 @@ Zetta-authored files in `crates/` with no upstream counterpart (for example
 Remember that `include_str!` and `include_bytes!` paths are relative to the
 file containing the macro; update such paths when moving tests or source.
 
+### Windowed tests
+
+`gpui` is a dev-dependency with `test-support`, so rendering behaviour can be
+tested against a real window on GPUI's test platform — no display required.
+Write these with `#[gpui::test]` and a `&mut TestAppContext`:
+
+- `cx.add_window_view(..)` opens a window and hands back the root view plus a
+  `VisualTestContext`; `cx.open_window(size, ..)` picks the window size when the
+  test is layout-sensitive.
+- `cx.run_until_parked()` drains the executor, which draws any dirty window. A
+  view that should *not* have re-rendered is asserted by counting renders in the
+  view itself (see `src/tests/view_boundary.rs`).
+- `.debug_selector(|| ..)` on an element records its bounds in
+  `cx.debug_bounds(..)`, which is how layout is asserted.
+
+`src/tests/view_boundary.rs` is the worked example: it drives a stand-in parent
+view through the render-boundary contract below. Prefer a stand-in over a real
+`Zetta` — `Zetta::new` opens a tab, which spawns a shell.
+
+Assertions about caching are easy to write vacuously. Check a new one fails when
+the property it names is removed before trusting it.
+
 ## Validation
 
 Use the smallest useful check while iterating, then validate the completed
@@ -185,6 +212,41 @@ cargo check --no-default-features --features wayland
 Do not run `make install`, uninstall targets, or system-cache refresh targets
 as validation; they mutate the host system. `make build` produces the release
 artifact and is only necessary for release, packaging, or installation work.
+
+## Render boundaries
+
+GPUI re-renders the root view on every frame it draws, so anything built
+directly inside `Zetta::render` is rebuilt and re-laid-out even when nothing it
+displays changed. Scrolling an overlay is the pathological case: one notify per
+wheel step otherwise redraws the title bar, the tab bar, the pane chrome and the
+whole settings page for a frame in which none of them moved.
+
+`ZettaSubview` (`view_boundary.rs`) wraps part of the tree in its own entity,
+which does two things: GPUI can cache the subtree with `Entity::cached`, and
+GPUI's interaction handlers notify *that* view rather than the root, because
+they notify `window.current_view()`.
+
+The current boundaries are the window column (title bar, tab bar, tab body —
+cached), the settings dialog and the tab icon picker (boundaries only), and the
+settings page inside the dialog (cached).
+
+When adding one:
+
+- Invalidation is the observer in `ZettaSubview::new`: every `cx.notify()` on
+  `Zetta` marks the subview dirty. Keep subviews rendering purely from `Zetta`
+  state so that stays a complete contract. Descendants are GPUI's job —
+  notifying a view marks its whole ancestor chain dirty, which is why terminal
+  output still repaints through the cached window column.
+- A cached view is laid out from the style passed to `cached`, not measured from
+  its contents, so that style has to give it a definite size. Position it from
+  the composing side: an `absolute` root inside a cached view has no containing
+  block to resolve against and collapses to its content size.
+- Cache a boundary only when it can actually be reused. A cached view that
+  misses pays an extra layout pass, which measurably costs more than it saves
+  for whichever overlay the pointer is currently scrolling.
+
+The contract is pinned by `src/tests/view_boundary.rs`; extend it when adding a
+boundary whose invalidation or layout differs from the ones there.
 
 ## Performance profiling
 

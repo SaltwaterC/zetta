@@ -385,7 +385,7 @@ pub(crate) fn synchronize_pane_template_keybindings(editor: &mut SettingsEditor)
     }
     if changed {
         editor.keymap_dirty = true;
-        invalidate_keymap_cache(editor);
+        refresh_keymap_cache(editor);
     }
     refresh_template_names(editor);
 }

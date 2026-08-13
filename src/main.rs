@@ -311,6 +311,8 @@ mod title_bar_render;
 use title_bar_render::*;
 mod window_frame;
 use window_frame::*;
+mod view_boundary;
+use view_boundary::{ZettaSubview, overlay_boundary, overlay_boundary_root};
 mod startup;
 mod worktree_detection;
 use shell_integration::*;

@@ -35,6 +35,19 @@ pub(crate) fn tab_search_targets_tab(search: Option<&TabSearch>, tab_id: u64) ->
     search.is_some_and(|search| search.tab_id == tab_id)
 }
 
+/// Drops a terminal's highlighted matches. Notifying the terminal is what
+/// repaints the panes: the highlights come from terminal state, so the search
+/// overlay's own `cx.notify()` doesn't cover them.
+fn clear_terminal_matches(terminal: &Entity<Terminal>, cx: &mut Context<Zetta>) {
+    terminal.update(cx, |terminal, cx| {
+        if terminal.matches.is_empty() {
+            return;
+        }
+        Arc::make_mut(&mut terminal.matches).clear();
+        cx.notify();
+    });
+}
+
 impl Zetta {
     pub(crate) fn search_tab_scrollback(
         &mut self,
@@ -86,9 +99,7 @@ impl Zetta {
             .cloned()
             .collect::<Vec<_>>();
         for terminal in terminals {
-            terminal.update(cx, |terminal, _| {
-                Arc::make_mut(&mut terminal.matches).clear()
-            });
+            clear_terminal_matches(&terminal, cx);
         }
     }
 
@@ -140,9 +151,7 @@ impl Zetta {
             })
             .collect::<Vec<_>>();
         for (_, _, terminal) in &terminals {
-            terminal.update(cx, |terminal, _| {
-                Arc::make_mut(&mut terminal.matches).clear()
-            });
+            clear_terminal_matches(terminal, cx);
         }
         if query.is_empty() {
             cx.notify();
@@ -202,7 +211,13 @@ impl Zetta {
                     let match_count = result.ranges.len();
                     limit_reached |= result.limit_reached;
                     total_count = total_count.saturating_add(result.total_count);
-                    terminal.update(cx, |terminal, _| terminal.matches = Arc::new(result.ranges));
+                    terminal.update(cx, |terminal, cx| {
+                        terminal.matches = Arc::new(result.ranges);
+                        // The match highlights are painted from the terminal's own
+                        // state, so the terminal has to repaint even though this
+                        // update was driven by the search overlay.
+                        cx.notify();
+                    });
                     aggregated.extend((0..match_count).map(|match_index| TabSearchMatch {
                         pane_id,
                         stack_id,
@@ -252,8 +267,9 @@ impl Zetta {
         );
         let terminal = tab.active_terminal();
         if let Some(terminal) = terminal {
-            terminal.update(cx, |terminal, _| {
-                terminal.activate_match(search_match.match_index)
+            terminal.update(cx, |terminal, cx| {
+                terminal.activate_match(search_match.match_index);
+                cx.notify();
             });
         }
         cx.notify();

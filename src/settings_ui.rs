@@ -12,9 +12,10 @@ mod theme_extensions_ui;
 pub(crate) use controls::invalidate_controls_cache;
 use keymap::{
     KeymapCapture, is_modifier_key, is_unmodified_capture_control, keybinding_for_capture,
-    rebuild_keymap_search_cache,
 };
-pub(crate) use keymap::{KeymapRow, invalidate_keymap_cache, render_keymap_sticky_candidate};
+pub(crate) use keymap::{
+    KeymapRow, KeymapRowData, refresh_keymap_cache, render_keymap_sticky_candidate,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SettingsInput {
@@ -171,7 +172,20 @@ pub(crate) struct SettingsEditor {
     pub(crate) keymap_filtered_sections: Option<Vec<usize>>,
     pub(crate) keymap_search_query_cache: String,
     pub(crate) keymap_filtered_bindings: HashMap<usize, Vec<usize>>,
-    pub(crate) dropdown_filtered_options: HashMap<SettingsDropdown, Vec<usize>>,
+    /// The keymap list's rows and per-row render data, rebuilt by
+    /// `refresh_keymap_cache` whenever the keymap form or its search query
+    /// changes so rendering never rebuilds them per frame.
+    pub(crate) keymap_rows_cache: Option<Arc<[KeymapRow]>>,
+    pub(crate) keymap_row_data_cache: Option<Arc<[KeymapRowData]>>,
+    /// Render-ready snapshot of the open dropdown's option popover: every option,
+    /// the rows to display (all of them, or the query's fuzzy matches, in display
+    /// order), and the row `uniform_list` must measure to size the popover. Only
+    /// one dropdown is ever open at a time, and rendering it must not rebuild
+    /// these per frame, so they are refreshed when it opens and when its query
+    /// changes.
+    pub(crate) open_dropdown_options: Arc<[String]>,
+    pub(crate) open_dropdown_rows: Arc<[usize]>,
+    pub(crate) open_dropdown_widest_row: Option<usize>,
     pub(crate) font_filtered_indices: Option<Arc<[usize]>>,
     pub(crate) font_search_query_cache: String,
 
@@ -530,7 +544,11 @@ impl Zetta {
             keymap_filtered_sections: None,
             keymap_search_query_cache: String::new(),
             keymap_filtered_bindings: HashMap::new(),
-            dropdown_filtered_options: HashMap::new(),
+            keymap_rows_cache: None,
+            keymap_row_data_cache: None,
+            open_dropdown_options: Arc::from([]),
+            open_dropdown_rows: Arc::from([]),
+            open_dropdown_widest_row: None,
             font_filtered_indices: None,
             font_search_query_cache: String::new(),
             controls_cache: None,
@@ -539,7 +557,7 @@ impl Zetta {
 
         // Initialize keymap search cache on first load
         if let Some(editor) = self.settings_editor.as_mut() {
-            rebuild_keymap_search_cache(editor);
+            refresh_keymap_cache(editor);
         }
         let themes_dir = config::themes_dir();
         let executor = cx.background_executor().clone();

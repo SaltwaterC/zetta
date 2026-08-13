@@ -1,131 +1,54 @@
 use super::*;
-use crate::settings_ui::{KeymapRow, invalidate_controls_cache, invalidate_keymap_cache};
+use crate::settings_ui::{invalidate_controls_cache, refresh_keymap_cache};
 
 use crate::startup::keymap_keystroke_display;
 
+mod form_widgets;
 mod modals;
 mod pages;
 mod pane_templates;
 mod widgets;
 
+pub(crate) use form_widgets::SettingsFormWidgets;
 pub(crate) use widgets::{DropdownRenderState, KEYMAP_ROW_HEIGHT, SETTINGS_SCROLLBAR_WIDTH};
 
 impl Zetta {
-    pub(crate) fn render_settings_overlay(
+    /// The settings page and the scroll region it lives in.
+    ///
+    /// Rendered inside its own cached view (see `view_boundary`) so scrolling a
+    /// modal or a dropdown popup layered over the dialog reuses the page
+    /// instead of rebuilding every row of it.
+    pub(crate) fn render_settings_page_region(
         &self,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let editor = self.settings_editor.as_ref()?;
         let colors = cx.theme().colors().clone();
         let handle = cx.entity().downgrade();
-        if !editor.scroll_geometry_initialized {
-            let geometry_handle = handle.clone();
-            window.on_next_frame(move |_, cx| {
-                geometry_handle
-                    .update(cx, |this, cx| {
-                        if let Some(editor) = this.settings_editor.as_mut() {
-                            editor.scroll_geometry_initialized = true;
-                            cx.notify();
-                        }
-                    })
-                    .ok();
-            });
-        }
-
-        let scroll_indicator = |id: String, scroll: &ScrollHandle| -> gpui::AnyElement {
-            let viewport = scroll.bounds().size.height;
-            let maximum = scroll.max_offset().y;
-            let content_height = viewport + maximum;
-            let thumb_fraction = if content_height > px(0.) {
-                (viewport / content_height).clamp(0.08, 1.)
-            } else {
-                1.
-            };
-            let progress = if maximum > px(0.) {
-                (-scroll.offset().y / maximum).clamp(0., 1.)
-            } else {
-                0.
-            };
-            let top_fraction = progress * (1. - thumb_fraction);
-            let click_scroll = scroll.clone();
-            let click_handle = handle.clone();
-            let wheel_scroll = scroll.clone();
-            let wheel_handle = handle.clone();
-            div()
-                .id(id)
-                .absolute()
-                .top_0()
-                .right_0()
-                .bottom_0()
-                .w(px(SETTINGS_SCROLLBAR_WIDTH))
-                .bg(colors.scrollbar_track_background)
-                .cursor_pointer()
-                .child(
-                    div()
-                        .absolute()
-                        .right(px(2.))
-                        .top(gpui::relative(top_fraction))
-                        .h(gpui::relative(thumb_fraction))
-                        .w(px(6.))
-                        .rounded_full()
-                        .bg(colors.scrollbar_thumb_background),
-                )
-                .on_scroll_wheel(move |event, window, cx| {
-                    let delta = event.delta.pixel_delta(window.line_height());
-                    let offset = wheel_scroll.offset();
-                    let minimum = -wheel_scroll.max_offset().y;
-                    wheel_scroll
-                        .set_offset(point(offset.x, (offset.y + delta.y).clamp(minimum, px(0.))));
-                    wheel_handle.update(cx, |_, cx| cx.notify()).ok();
-                    cx.stop_propagation();
-                })
-                .on_click(move |event, _, cx| {
-                    let bounds = click_scroll.bounds();
-                    let maximum = click_scroll.max_offset().y;
-                    if bounds.size.height > px(0.) && maximum > px(0.) {
-                        let progress = ((event.position().y - bounds.top()) / bounds.size.height)
-                            .clamp(0., 1.);
-                        let offset = click_scroll.offset();
-                        click_scroll.set_offset(point(offset.x, -(maximum * progress)));
-                        click_handle.update(cx, |_, cx| cx.notify()).ok();
-                    }
-                    cx.stop_propagation();
-                })
-                .into_any_element()
+        let widgets = SettingsFormWidgets::new(editor, colors.clone(), handle.clone());
+        let scroll_indicator =
+            |id: String, scroll: &ScrollHandle| widgets.scroll_indicator(id, scroll);
+        let text_input = |id: String, field: TextField, input: SettingsInput| {
+            widgets.text_input(id, field, input)
         };
-
-        let text_input = |id: String, field: TextField, input: SettingsInput| -> gpui::AnyElement {
-            Self::text_input_widget(
-                id,
-                field,
-                input,
-                editor.focused_input,
-                colors.clone(),
-                handle.clone(),
-            )
+        let dropdown = |id: String, label: String, selection: SettingsDropdown| {
+            widgets.dropdown(id, label, selection)
         };
-
-        let profile_icon_automatic = match editor.open_dropdown {
-            Some(SettingsDropdown::ProfileIcon(index)) => editor
-                .configuration
-                .profiles
-                .get(index)
-                .map(|profile| profile.automatic_icon.clone()),
-            Some(SettingsDropdown::ProfileDraftIcon) => editor
-                .profile_draft
-                .as_ref()
-                .map(|profile| ProfileIcon::automatic_for_program(&profile.program.text)),
-            _ => None,
+        let setting_row = |label: &'static str,
+                           description: &'static str,
+                           focused: bool,
+                           control: gpui::AnyElement| {
+            widgets.setting_row(label, description, focused, control)
         };
-        let dropdown_state = DropdownRenderState {
-            dropdown_index: editor.dropdown_index,
-            dropdown_query: editor.dropdown_query.clone(),
-            dropdown_filtered_options: editor.dropdown_filtered_options.clone(),
-            dropdown_scroll: editor.dropdown_scroll.clone(),
-            dropdown_anchor: editor.dropdown_anchor,
-            profile_icon_automatic,
+        let setting_toggle = |id: &'static str, value: bool, toggle: SettingsToggle| {
+            widgets.setting_toggle(id, value, toggle)
         };
+        let numeric =
+            |id: &'static str,
+             field: TextField,
+             setting: NumericSetting,
+             input: ConfigTextField| widgets.numeric(id, field, setting, input);
+        let opacity_slider = |opacity: f32| widgets.opacity_slider(opacity);
         let focus_status_access = if cx.has_global::<ZettaProcessState>() {
             cx.global::<ZettaProcessState>()
                 .silent_mode
@@ -133,241 +56,6 @@ impl Zetta {
         } else {
             FocusStatusAccess::Unknown
         };
-        let dropdown =
-            |id: String, label: String, selection: SettingsDropdown| -> gpui::AnyElement {
-                let focused = editor.focused_control == Some(SettingsControl::Dropdown(selection));
-                Self::dropdown_trigger_widget(
-                    id,
-                    label,
-                    selection,
-                    focused,
-                    colors.clone(),
-                    handle.clone(),
-                )
-            };
-
-        let setting_row = |label: &'static str,
-                           description: &'static str,
-                           focused: bool,
-                           control: gpui::AnyElement| {
-            h_flex()
-                .w_full()
-                .min_h(px(54.))
-                .px_2()
-                .py_2()
-                .gap_4()
-                .justify_between()
-                .border_b_1()
-                .border_color(if focused {
-                    colors.border_focused
-                } else {
-                    colors.border_variant
-                })
-                .when(focused, |row| row.bg(colors.element_selected))
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .child(div().text_sm().text_color(colors.text).child(label))
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(colors.text_muted)
-                                .child(description),
-                        ),
-                )
-                .child(div().w(px(330.)).flex_none().child(control))
-                .into_any_element()
-        };
-
-        let setting_toggle =
-            |id: &'static str, value: bool, toggle: SettingsToggle| -> gpui::AnyElement {
-                let toggle_handle = handle.clone();
-                switch(id, value.into())
-                    .label(if value { "On" } else { "Off" })
-                    .full_width(true)
-                    .aria_label(id)
-                    .on_click(move |state, window, cx| {
-                        toggle_handle
-                            .update(cx, |this, cx| {
-                                this.set_settings_toggle(toggle, state.selected(), window, cx);
-                            })
-                            .ok();
-                    })
-                    .into_any_element()
-            };
-
-        let numeric = |id: &'static str,
-                       field: TextField,
-                       setting: NumericSetting,
-                       input: ConfigTextField|
-         -> gpui::AnyElement {
-            let focused = editor.focused_control == Some(SettingsControl::Numeric(setting));
-            let decrease_down = handle.clone();
-            let decrease_up = handle.clone();
-            let decrease_out = handle.clone();
-            let increase_down = handle.clone();
-            let increase_up = handle.clone();
-            let increase_out = handle.clone();
-            h_flex()
-                .id(id)
-                .h_9()
-                .w_full()
-                .rounded(px(4.))
-                .border_1()
-                .border_color(if focused {
-                    colors.border_focused
-                } else {
-                    colors.border
-                })
-                .bg(colors.editor_background)
-                .child(
-                    div()
-                        .id(format!("{id}-decrease"))
-                        .h_full()
-                        .w_9()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .hover(|style| style.bg(colors.element_hover))
-                        .child("−")
-                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                            decrease_down
-                                .update(cx, |this, cx| this.begin_numeric_repeat(setting, -1, cx))
-                                .ok();
-                        })
-                        .on_mouse_up(MouseButton::Left, move |_, _, cx| {
-                            decrease_up
-                                .update(cx, |this, cx| this.end_numeric_repeat(cx))
-                                .ok();
-                        })
-                        .on_mouse_up_out(MouseButton::Left, move |_, _, cx| {
-                            decrease_out
-                                .update(cx, |this, cx| this.end_numeric_repeat(cx))
-                                .ok();
-                        }),
-                )
-                .child(div().min_w_0().flex_1().child(text_input(
-                    format!("{id}-value"),
-                    field,
-                    SettingsInput::Configuration(input),
-                )))
-                .child(
-                    div()
-                        .id(format!("{id}-increase"))
-                        .h_full()
-                        .w_9()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .hover(|style| style.bg(colors.element_hover))
-                        .child("+")
-                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                            increase_down
-                                .update(cx, |this, cx| this.begin_numeric_repeat(setting, 1, cx))
-                                .ok();
-                        })
-                        .on_mouse_up(MouseButton::Left, move |_, _, cx| {
-                            increase_up
-                                .update(cx, |this, cx| this.end_numeric_repeat(cx))
-                                .ok();
-                        })
-                        .on_mouse_up_out(MouseButton::Left, move |_, _, cx| {
-                            increase_out
-                                .update(cx, |this, cx| this.end_numeric_repeat(cx))
-                                .ok();
-                        }),
-                )
-                .into_any_element()
-        };
-        let opacity_slider = |opacity: f32| -> gpui::AnyElement {
-            let selected = (opacity.clamp(0., 1.) * 20.).round() as usize;
-            let focused = editor.focused_control == Some(SettingsControl::Opacity);
-            let stops = (0usize..=20)
-                .map(|step| {
-                    let slider_handle = handle.clone();
-                    div()
-                        .id(("inactive-opacity-stop", step))
-                        .h_full()
-                        .flex_1()
-                        .cursor_pointer()
-                        .on_click(move |_, _, cx| {
-                            slider_handle
-                                .update(cx, |this, cx| {
-                                    if let Some(editor) = this.settings_editor.as_mut() {
-                                        editor.configuration.inactive_pane_opacity =
-                                            step as f32 / 20.;
-                                        editor.configuration_dirty = true;
-                                        editor.message = None;
-                                        cx.notify();
-                                    }
-                                })
-                                .ok();
-                        })
-                })
-                .collect::<Vec<_>>();
-            let fraction = selected as f32 / 20.;
-            h_flex()
-                .w_full()
-                .gap_3()
-                .rounded(px(4.))
-                .border_1()
-                .border_color(if focused {
-                    colors.border_focused
-                } else {
-                    colors.border
-                })
-                .child(
-                    div()
-                        .relative()
-                        .h_5()
-                        .min_w_0()
-                        .flex_1()
-                        .flex()
-                        .items_center()
-                        .child(
-                            div()
-                                .absolute()
-                                .left_0()
-                                .right_0()
-                                .h_1()
-                                .rounded_full()
-                                .bg(colors.element_background),
-                        )
-                        .child(
-                            div()
-                                .absolute()
-                                .left_0()
-                                .w(gpui::relative(fraction))
-                                .h_1()
-                                .rounded_full()
-                                .bg(colors.text_accent),
-                        )
-                        .child(
-                            div()
-                                .absolute()
-                                .left(gpui::relative(fraction))
-                                .ml(px(-5.))
-                                .size(px(10.))
-                                .rounded_full()
-                                .border_1()
-                                .border_color(colors.border_focused)
-                                .bg(colors.text_accent),
-                        )
-                        .child(h_flex().absolute().inset_0().children(stops)),
-                )
-                .child(
-                    div()
-                        .w(px(44.))
-                        .text_right()
-                        .text_sm()
-                        .child(format!("{}%", selected * 5)),
-                )
-                .into_any_element()
-        };
-
         let content = pages::render_settings_pages(
             editor,
             &colors,
@@ -388,11 +76,10 @@ impl Zetta {
         // parent gives its child unconstrained height so it can be scrolled over, which would
         // make the list size itself to fit every row instead of virtualizing). So the keymap
         // page owns its own scroll region instead of sharing the generic one below.
-        let scroll_region = if editor.page == SettingsPage::Keymap {
+        let region = if editor.page == SettingsPage::Keymap {
             div()
+                .size_full()
                 .relative()
-                .flex_1()
-                .min_h_0()
                 .child(
                     div()
                         .id("settings-keymap-form")
@@ -405,9 +92,8 @@ impl Zetta {
                 .into_any_element()
         } else {
             div()
+                .size_full()
                 .relative()
-                .flex_1()
-                .min_h_0()
                 .child(
                     div()
                         .id("settings-form-scroll")
@@ -426,6 +112,67 @@ impl Zetta {
                 .into_any_element()
         };
 
+        Some(region)
+    }
+
+    pub(crate) fn render_settings_overlay(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let editor = self.settings_editor.as_ref()?;
+        let colors = cx.theme().colors().clone();
+        let handle = cx.entity().downgrade();
+        if !editor.scroll_geometry_initialized {
+            let geometry_handle = handle.clone();
+            window.on_next_frame(move |_, cx| {
+                geometry_handle
+                    .update(cx, |this, cx| {
+                        if let Some(editor) = this.settings_editor.as_mut() {
+                            editor.scroll_geometry_initialized = true;
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+            });
+        }
+
+        let widgets = SettingsFormWidgets::new(editor, colors.clone(), handle.clone());
+        let scroll_indicator =
+            |id: String, scroll: &ScrollHandle| widgets.scroll_indicator(id, scroll);
+        let text_input = |id: String, field: TextField, input: SettingsInput| {
+            widgets.text_input(id, field, input)
+        };
+        let dropdown = |id: String, label: String, selection: SettingsDropdown| {
+            widgets.dropdown(id, label, selection)
+        };
+
+        let profile_icon_automatic = match editor.open_dropdown {
+            Some(SettingsDropdown::ProfileIcon(index)) => editor
+                .configuration
+                .profiles
+                .get(index)
+                .map(|profile| profile.automatic_icon.clone()),
+            Some(SettingsDropdown::ProfileDraftIcon) => editor
+                .profile_draft
+                .as_ref()
+                .map(|profile| ProfileIcon::automatic_for_program(&profile.program.text)),
+            _ => None,
+        };
+        let dropdown_state = DropdownRenderState {
+            dropdown_index: editor.dropdown_index,
+            dropdown_query: editor.dropdown_query.clone(),
+            options: editor.open_dropdown_options.clone(),
+            rows: editor.open_dropdown_rows.clone(),
+            widest_row: editor.open_dropdown_widest_row,
+            dropdown_scroll: editor.dropdown_scroll.clone(),
+            dropdown_anchor: editor.dropdown_anchor,
+            profile_icon_automatic,
+        };
+
+        let page_region = self.settings_page_region_element(cx);
+
+        let editor = self.settings_editor.as_ref()?;
         let font_modal =
             modals::render_font_modal(editor, &colors, &handle, &scroll_indicator, &text_input);
 
@@ -437,14 +184,7 @@ impl Zetta {
         // Rendered once, as a sibling of the dialog content, regardless of which page or
         // row opened it (see `DropdownRenderState` for why it can't render inline).
         let dropdown_popup = editor.open_dropdown.map(|selection| {
-            let (_, options) = Self::settings_dropdown_options(editor, selection);
-            Self::dropdown_popup_widget(
-                options,
-                selection,
-                colors.clone(),
-                handle.clone(),
-                dropdown_state.clone(),
-            )
+            Self::dropdown_popup_widget(selection, colors.clone(), handle.clone(), dropdown_state)
         });
 
         let config_handle = handle.clone();
@@ -711,7 +451,7 @@ impl Zetta {
                                 .text_color(colors.text_muted)
                                 .child(path),
                         )
-                        .child(scroll_region)
+                        .child(page_region)
                         .when_some(editor.message.clone(), |dialog, (error, message)| {
                             dialog.child(
                                 div()

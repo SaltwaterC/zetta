@@ -1,5 +1,5 @@
 use super::*;
-use crate::settings_ui::keymap::{GLOBAL_CONTEXT_LABEL, keymap_context_label};
+use crate::settings_ui::keymap::GLOBAL_CONTEXT_LABEL;
 
 /// Owned snapshot of the state needed to render the currently open dropdown's option
 /// popover. The popover is always rendered once, as a sibling of the settings dialog
@@ -10,7 +10,11 @@ use crate::settings_ui::keymap::{GLOBAL_CONTEXT_LABEL, keymap_context_label};
 pub(crate) struct DropdownRenderState {
     pub(crate) dropdown_index: usize,
     pub(crate) dropdown_query: String,
-    pub(crate) dropdown_filtered_options: HashMap<SettingsDropdown, Vec<usize>>,
+    /// The options, display rows, and measurement row snapshotted when the
+    /// dropdown opened or its query last changed (see `SettingsEditor`).
+    pub(crate) options: Arc<[String]>,
+    pub(crate) rows: Arc<[usize]>,
+    pub(crate) widest_row: Option<usize>,
     pub(crate) dropdown_scroll: UniformListScrollHandle,
     pub(crate) dropdown_anchor: Point<Pixels>,
     pub(crate) profile_icon_automatic: Option<ProfileIcon>,
@@ -24,105 +28,6 @@ pub(crate) const KEYMAP_ROW_HEIGHT: f32 = 56.;
 /// Width of the settings dialog's custom scrollbar track. Lists that draw the track over
 /// their own rows reserve this much trailing padding so the two never overlap.
 pub(crate) const SETTINGS_SCROLLBAR_WIDTH: f32 = 10.;
-
-/// Owned per-row data for the virtualized keymap list, extracted from
-/// `SettingsEditor` once per render since the list's row closure must be
-/// `'static` and so cannot hold a borrow of it.
-pub(crate) enum KeymapRowData {
-    SectionHeader {
-        section_index: usize,
-        context: TextField,
-    },
-    Binding {
-        section_index: usize,
-        binding_index: usize,
-        keystroke: TextField,
-        action_name: String,
-        template_name: Option<String>,
-        profile_name: Option<String>,
-        is_default: bool,
-    },
-    UnboundDefault {
-        section_index: usize,
-        binding_index: usize,
-        keystroke: TextField,
-        action_name: String,
-    },
-    AddBinding {
-        section_index: usize,
-        context: String,
-    },
-    AddSection,
-}
-
-pub(crate) fn build_keymap_row_data(
-    editor: &SettingsEditor,
-    rows: &[KeymapRow],
-) -> Vec<KeymapRowData> {
-    rows.iter()
-        .filter_map(|row| match *row {
-            KeymapRow::SectionHeader(section_index) => {
-                let section = editor.keymap.sections.get(section_index)?;
-                Some(KeymapRowData::SectionHeader {
-                    section_index,
-                    context: section.context.clone(),
-                })
-            }
-            KeymapRow::Binding(section_index, binding_index) => {
-                let binding = editor
-                    .keymap
-                    .sections
-                    .get(section_index)?
-                    .bindings
-                    .get(binding_index)?;
-                let profile_name = binding.action_usize_parameter("slot").map(|slot| {
-                    editor
-                        .profile_names
-                        .get(slot.saturating_sub(1))
-                        .cloned()
-                        .unwrap_or_else(|| format!("Profile {slot}"))
-                });
-                let is_default = editor.is_default_binding(section_index, binding_index);
-                Some(KeymapRowData::Binding {
-                    section_index,
-                    binding_index,
-                    keystroke: binding.keystroke.clone(),
-                    action_name: binding.action_name(),
-                    template_name: binding.action_parameter("name"),
-                    profile_name,
-                    is_default,
-                })
-            }
-            KeymapRow::AddBinding(section_index) => {
-                let context = editor
-                    .keymap
-                    .sections
-                    .get(section_index)
-                    .map(|section| keymap_context_label(&section.context.text).to_owned())
-                    .unwrap_or_default();
-                Some(KeymapRowData::AddBinding {
-                    section_index,
-                    context,
-                })
-            }
-            KeymapRow::UnboundDefault(section_index, binding_index) => {
-                let binding = editor
-                    .keymap
-                    .sections
-                    .get(section_index)?
-                    .unbound_defaults
-                    .get(binding_index)?;
-                Some(KeymapRowData::UnboundDefault {
-                    section_index,
-                    binding_index,
-                    keystroke: binding.keystroke.clone(),
-                    action_name: binding.action_name(),
-                })
-            }
-            KeymapRow::AddSection => Some(KeymapRowData::AddSection),
-        })
-        .collect()
-}
 
 /// Owned snapshot of everything a keymap row needs to render, cloned once into
 /// the `uniform_list` row closure (see [`DropdownRenderState`] for why this
@@ -179,33 +84,22 @@ impl Zetta {
     /// Renders the currently open dropdown's option popover, anchored at the window-space
     /// point captured when it was opened. Called once per render (see [`DropdownRenderState`]).
     pub(crate) fn dropdown_popup_widget(
-        options: Arc<[String]>,
         selection: SettingsDropdown,
         colors: ThemeColors,
         handle: WeakEntity<Self>,
         state: DropdownRenderState,
     ) -> gpui::AnyElement {
         let id = format!("settings-dropdown-popup-{selection:?}");
+        let options = state.options.clone();
         let active_index = state.dropdown_index.min(options.len().saturating_sub(1));
         let dropdown_query = state.dropdown_query.clone();
-        let matching_indices = state.dropdown_filtered_options.get(&selection).cloned();
         let profile_icon_automatic = state.profile_icon_automatic.clone();
         let option_handle = handle.clone();
         // Row indices into `options`, in display order; virtualized below so only the
         // visible rows are ever built regardless of how many options exist.
-        let row_indices: Arc<[usize]> = match matching_indices {
-            Some(indices) => indices.into(),
-            None => (0..options.len()).collect::<Vec<_>>().into(),
-        };
+        let row_indices = state.rows.clone();
         let no_matches = row_indices.is_empty();
-        // `uniform_list` derives the whole list's width from a single measured row, so it has
-        // to measure the longest option; measuring the first one leaves every longer option
-        // wrapping inside a row whose height is pinned to the measured row's single line.
-        let widest_row = row_indices
-            .iter()
-            .enumerate()
-            .max_by_key(|(_, index)| options[**index].chars().count())
-            .map(|(row, _)| row);
+        let widest_row = state.widest_row;
         let option_rows = {
             let row_indices = row_indices.clone();
             let list_colors = colors.clone();
@@ -639,7 +533,7 @@ impl Zetta {
                                             });
                                         }
                                         editor.keymap_dirty = true;
-                                        invalidate_keymap_cache(editor);
+                                        refresh_keymap_cache(editor);
                                         invalidate_controls_cache(editor);
                                         cx.notify();
                                     }
@@ -728,7 +622,7 @@ impl Zetta {
                                             action: binding.action,
                                         });
                                         editor.keymap_dirty = true;
-                                        invalidate_keymap_cache(editor);
+                                        refresh_keymap_cache(editor);
                                         invalidate_controls_cache(editor);
                                         cx.notify();
                                     }
@@ -776,7 +670,7 @@ impl Zetta {
                                             ),
                                         });
                                         editor.keymap_dirty = true;
-                                        invalidate_keymap_cache(editor);
+                                        refresh_keymap_cache(editor);
                                         invalidate_controls_cache(editor);
                                         cx.notify();
                                     }
@@ -811,7 +705,7 @@ impl Zetta {
                                                 .sections
                                                 .push(KeymapSectionForm::new("Zetta > Terminal"));
                                             editor.keymap_dirty = true;
-                                            invalidate_keymap_cache(editor);
+                                            refresh_keymap_cache(editor);
                                             invalidate_controls_cache(editor);
                                             cx.notify();
                                         }

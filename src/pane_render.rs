@@ -367,7 +367,18 @@ impl Zetta {
                                 pane_move_toggle_action,
                             );
                         });
-                        div().size_full().child(view.clone()).into_any_element()
+                        // Cached so a frame the terminal did not cause — an overlay
+                        // scrolling, a title-bar hover, a tab rename — does not re-lay
+                        // out every visible cell of every pane. GPUI busts the cache on
+                        // `cx.notify()` from the view (output, blink, focus, theme),
+                        // on a bounds/text-style change, and on `cx.refresh()`.
+                        div()
+                            .size_full()
+                            .child(
+                                view.clone()
+                                    .cached(gpui::StyleRefinement::default().size_full()),
+                            )
+                            .into_any_element()
                     }
                     (_, Some(error)) => div()
                         .size_full()

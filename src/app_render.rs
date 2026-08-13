@@ -969,6 +969,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> ZettaOverlays {
+        let entity = cx.entity();
         #[cfg(feature = "serial-console")]
         let serial_console = self.render_serial_console_overlay(cx);
         #[cfg(not(feature = "serial-console"))]
@@ -983,8 +984,28 @@ impl Zetta {
                 handle,
             )),
             tab_search: self.render_tab_search_overlay(colors),
-            settings: modal_overlay(self.render_settings_overlay(window, cx)),
-            tab_icon_picker: modal_overlay(self.render_tab_icon_picker_overlay(window, cx)),
+            // Both are rendered inside their own cached view: scrolling or
+            // hovering one notifies that view instead of `Zetta`, so the other
+            // one — and the window column — is reused for the frame. Each fills
+            // the window, matching the `absolute inset_0` backdrop it renders.
+            settings: modal_overlay(self.settings_editor.is_some().then(|| {
+                overlay_boundary(ZettaSubview::get_or_insert(
+                    &mut self.settings_surface_view,
+                    render_settings_boundary,
+                    &entity,
+                    cx,
+                ))
+                .into_any_element()
+            })),
+            tab_icon_picker: modal_overlay(self.tab_icon_picker.is_some().then(|| {
+                overlay_boundary(ZettaSubview::get_or_insert(
+                    &mut self.tab_icon_picker_view,
+                    render_tab_icon_picker_boundary,
+                    &entity,
+                    cx,
+                ))
+                .into_any_element()
+            })),
             theme_picker: modal_overlay(self.render_pane_theme_picker_overlay(colors, handle, cx)),
             overlay_style_picker: modal_overlay(
                 self.render_overlay_style_picker_overlay(window, cx),
@@ -1129,11 +1150,39 @@ impl Zetta {
             })
     }
 
-    /// Stacks the chrome, the tab body, and the overlays into the root element.
+    /// The chrome and the tab body, in the column they share.
+    ///
+    /// Rendered inside its own view so a frame driven by an overlay — a
+    /// settings list scrolling, the icon picker moving — reuses it instead of
+    /// rebuilding the title bar, the tab bar and every pane's chrome. See
+    /// `view_boundary`.
+    fn render_window_column(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let colors = cx.theme().colors().clone();
+        let handle = cx.entity().downgrade();
+        let frame = WindowFrameGeometry::new(window, cx);
+        let chrome = self.render_title_bar_chrome(&frame, &colors, &handle, window, cx);
+        let body = self.render_tab_body(
+            window,
+            frame.rounded_bottom_left,
+            frame.rounded_bottom_right,
+            frame.corner_radius,
+            cx,
+        );
+        let column = div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(chrome.title_bar)
+            .when_some(chrome.tab_bar, |column, tab_bar| column.child(tab_bar));
+        self.render_feedback_banners(column, &colors)
+            .child(div().flex_1().min_h_0().child(body))
+            .into_any_element()
+    }
+
+    /// Stacks the window column and the overlays into the root element.
     fn compose_window_content(
         &self,
-        chrome: TitleBarChrome,
-        body: AnyElement,
+        column: AnyElement,
         overlays: ZettaOverlays,
         colors: &ThemeColors,
         cx: &mut Context<Self>,
@@ -1166,9 +1215,7 @@ impl Zetta {
             })
             .capture_key_up(cx.listener(Self::pane_resize_key_up))
             .on_key_down(cx.listener(Self::command_palette_key_down))
-            .child(chrome.title_bar)
-            .when_some(chrome.tab_bar, |content, tab_bar| content.child(tab_bar));
-        let content = self.render_feedback_banners(content, colors);
+            .child(column);
 
         // Child order preserves the existing relative order within each paint
         // priority; later overlays on the same rung sit above earlier ones.
@@ -1187,10 +1234,63 @@ impl Zetta {
         ]
         .into_iter()
         .flatten()
-        .fold(
-            content.child(div().flex_1().min_h_0().child(body)),
-            |content, overlay| content.child(overlay),
+        .fold(content, |content, overlay| content.child(overlay))
+    }
+}
+
+fn render_settings_page_boundary(
+    zetta: &mut Zetta,
+    _window: &mut Window,
+    cx: &mut Context<Zetta>,
+) -> AnyElement {
+    div()
+        .size_full()
+        .relative()
+        .children(zetta.render_settings_page_region(cx))
+        .into_any_element()
+}
+
+/// Adapters that give `ZettaSubview` a plain function pointer per boundary.
+fn render_window_column_boundary(
+    zetta: &mut Zetta,
+    window: &mut Window,
+    cx: &mut Context<Zetta>,
+) -> AnyElement {
+    zetta.render_window_column(window, cx)
+}
+
+fn render_settings_boundary(
+    zetta: &mut Zetta,
+    window: &mut Window,
+    cx: &mut Context<Zetta>,
+) -> AnyElement {
+    overlay_boundary_root(zetta.render_settings_overlay(window, cx))
+}
+
+fn render_tab_icon_picker_boundary(
+    zetta: &mut Zetta,
+    window: &mut Window,
+    cx: &mut Context<Zetta>,
+) -> AnyElement {
+    overlay_boundary_root(zetta.render_tab_icon_picker_overlay(window, cx))
+}
+
+impl Zetta {
+    /// The settings page, wrapped in the cached boundary that keeps it out of
+    /// frames driven by a modal or a dropdown popup above it.
+    pub(crate) fn settings_page_region_element(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let entity = cx.entity();
+        ZettaSubview::get_or_insert(
+            &mut self.settings_page_view,
+            render_settings_page_boundary,
+            &entity,
+            cx,
         )
+        .cached(gpui::StyleRefinement::default().flex_1().min_h_0().w_full())
+        .into_any_element()
     }
 }
 
@@ -1205,19 +1305,22 @@ impl Render for Zetta {
         let colors = cx.theme().colors().clone();
         let error_color = cx.theme().status().error;
         let handle = cx.entity().downgrade();
-        let frame = WindowFrameGeometry::new(window, cx);
+        let entity = cx.entity();
 
-        let chrome = self.render_title_bar_chrome(&frame, &colors, &handle, window, cx);
-        let body = self.render_tab_body(
-            window,
-            frame.rounded_bottom_left,
-            frame.rounded_bottom_right,
-            frame.corner_radius,
+        // Cached: the column is a pure function of `Zetta` state, and the
+        // subview's observer busts it on every notify, so a frame the column
+        // did not cause reuses the previous prepaint and paint.
+        let column = ZettaSubview::get_or_insert(
+            &mut self.window_column_view,
+            render_window_column_boundary,
+            &entity,
             cx,
-        );
+        )
+        .cached(gpui::StyleRefinement::default().size_full())
+        .into_any_element();
         let overlays = self.render_overlays(&colors, error_color, &handle, window, cx);
 
-        let content = self.compose_window_content(chrome, body, overlays, &colors, cx);
+        let content = self.compose_window_content(column, overlays, &colors, cx);
         client_window_frame(content, window, cx)
     }
 }

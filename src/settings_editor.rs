@@ -2,9 +2,10 @@ use std::{
     collections::{HashMap, HashSet},
     fs, io,
     path::Path,
+    sync::OnceLock,
 };
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, anyhow};
 use gpui::Action;
 use indexmap::IndexMap;
 use serde_json::{Map, Value, json};
@@ -1540,7 +1541,7 @@ impl KeymapForm {
     pub fn load(path: &Path) -> Result<Self> {
         let default_template = bundled_keymap_template()?;
         let user_value = read_json_or(path, Value::Array(vec![]))?;
-        let merged = merge_keymap_with_defaults(user_value, &default_template)?;
+        let merged = merge_keymap_with_defaults(user_value, default_template)?;
         let sections = merged
             .as_array()
             .context("keymap root must be an array")?
@@ -1795,16 +1796,33 @@ fn merge_keymap_with_defaults(user_value: Value, default_template: &[Value]) -> 
     Ok(Value::Array(merged))
 }
 
-pub fn bundled_keymap_template() -> Result<Vec<Value>> {
-    serde_json::from_str(include_str!("../keymap.example.json"))
-        .context("parsing bundled keymap template")
+/// A lookup of default bindings as context -> (storage keystroke -> action).
+pub type DefaultBindingsByContext = HashMap<String, IndexMap<String, Value>>;
+
+/// The parsed bundled template, parsed at most once per process. The payload is
+/// compiled in, so the parse result never changes.
+pub fn bundled_keymap_template() -> Result<&'static [Value]> {
+    static TEMPLATE: OnceLock<std::result::Result<Vec<Value>, String>> = OnceLock::new();
+    match TEMPLATE.get_or_init(|| {
+        serde_json::from_str::<Vec<Value>>(include_str!("../keymap.example.json"))
+            .map_err(|error| format!("parsing bundled keymap template: {error}"))
+    }) {
+        Ok(template) => Ok(template.as_slice()),
+        Err(error) => Err(anyhow!("{error}")),
+    }
 }
 
-/// Build a lookup map of default bindings by context for efficient checking.
-/// Returns a map of context -> (keystroke -> action) for default bindings.
-pub fn default_bindings_by_context() -> Result<HashMap<String, IndexMap<String, Value>>> {
+/// A lookup map of default bindings by context for efficient checking, built at
+/// most once per process. `is_default_binding` consults this once per keymap row
+/// on every settings frame, so rebuilding it per call would reparse the bundled
+/// template hundreds of times per frame.
+pub fn default_bindings_by_context() -> Result<&'static DefaultBindingsByContext> {
+    static BINDINGS: OnceLock<DefaultBindingsByContext> = OnceLock::new();
+    if let Some(bindings) = BINDINGS.get() {
+        return Ok(bindings);
+    }
     let template = bundled_keymap_template()?;
-    let mut map = HashMap::new();
+    let mut map = DefaultBindingsByContext::new();
     for section in template {
         if let Some(context) = section.get("context").and_then(|v| v.as_str())
             && let Some(bindings) = section.get("bindings").and_then(|v| v.as_object())
@@ -1816,7 +1834,7 @@ pub fn default_bindings_by_context() -> Result<HashMap<String, IndexMap<String, 
             map.insert(context.to_owned(), section_bindings);
         }
     }
-    Ok(map)
+    Ok(BINDINGS.get_or_init(|| map))
 }
 
 /// A keymap section's `bindings` map paired with everything else in the

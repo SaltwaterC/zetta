@@ -132,3 +132,59 @@ fn captured_shifted_number_row_uses_gpui_keymap_normalization() {
     );
     assert_eq!(keymap_keystroke_display("ctrl-shift-10"), "ctrl-shift-10");
 }
+
+#[test]
+fn keymap_rows_list_headers_bindings_unbound_defaults_then_add_rows() {
+    let mut sections = vec![
+        section(
+            "Zetta > Terminal",
+            vec![
+                binding("ctrl-t", "zetta::NewTab"),
+                binding("ctrl-w", "zetta::CloseTab"),
+            ],
+        ),
+        section("Zetta > Pane", vec![binding("ctrl-d", "zetta::SplitPane")]),
+    ];
+    sections[0].unbound_defaults = vec![binding("ctrl-q", "zetta::CloseWindow")];
+
+    let (filtered_sections, filtered_bindings) = keymap_search_matches(&sections, "");
+    let rows = keymap_rows_from_matches(&sections, &filtered_sections, &filtered_bindings);
+
+    assert_eq!(
+        rows,
+        vec![
+            KeymapRow::SectionHeader(0),
+            KeymapRow::Binding(0, 0),
+            KeymapRow::Binding(0, 1),
+            KeymapRow::UnboundDefault(0, 0),
+            KeymapRow::AddBinding(0),
+            KeymapRow::SectionHeader(1),
+            KeymapRow::Binding(1, 0),
+            KeymapRow::AddBinding(1),
+            KeymapRow::AddSection,
+        ]
+    );
+}
+
+#[test]
+fn keymap_rows_follow_the_search_filter() {
+    let sections = vec![
+        section("Zetta > Terminal", vec![binding("ctrl-t", "zetta::NewTab")]),
+        section("Zetta > Pane", vec![binding("ctrl-w", "zetta::CloseTab")]),
+    ];
+
+    let (filtered_sections, filtered_bindings) = keymap_search_matches(&sections, "closetab");
+    let rows = keymap_rows_from_matches(&sections, &filtered_sections, &filtered_bindings);
+
+    // Only the matching section's rows survive, and the add-section footer is
+    // always the last row so the list never loses its "add" affordance.
+    assert_eq!(
+        rows,
+        vec![
+            KeymapRow::SectionHeader(1),
+            KeymapRow::Binding(1, 0),
+            KeymapRow::AddBinding(1),
+            KeymapRow::AddSection,
+        ]
+    );
+}

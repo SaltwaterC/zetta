@@ -542,6 +542,11 @@ impl TerminalView {
     /// Surfaces a "Pane Resize Mode" entry in the right-click context menu.
     /// `toggle_action` is only `Some` when the containing tab has 2+ panes,
     /// since resize mode has nothing to do with a single pane.
+    ///
+    /// Deliberately does not notify: `deploy_context_menu` snapshots this when
+    /// the menu opens, so nothing currently on screen depends on it, and the
+    /// caller updates it from `Zetta::render`, where an unconditional notify
+    /// would schedule a frame on every frame.
     pub fn set_pane_resize_mode_entry(
         &mut self,
         active: bool,
@@ -554,6 +559,9 @@ impl TerminalView {
     /// Surfaces a "Pane Move Mode" entry in the right-click context menu.
     /// `toggle_action` is only `Some` when the containing tab has 2+ panes,
     /// since move mode has nothing to do with a single pane.
+    ///
+    /// Does not notify, for the same reason as
+    /// [`Self::set_pane_resize_mode_entry`].
     pub fn set_pane_move_mode_entry(
         &mut self,
         active: bool,

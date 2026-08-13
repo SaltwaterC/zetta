@@ -89,18 +89,20 @@ pub(crate) fn keymap_search_matches(
     (filtered_sections, filtered_bindings)
 }
 
-pub(crate) fn rebuild_keymap_search_cache(editor: &mut SettingsEditor) {
+/// Recomputes every derived view of the keymap: the search-filtered indices, the
+/// row list, and the per-row render data. Called from each site that edits the
+/// keymap form or its search query, so rendering only ever clones `Arc`s — the
+/// keymap page renders this model twice per frame (list plus sticky headers) and
+/// rebuilding it there costs a `is_default_binding` lookup per row per frame.
+pub(crate) fn refresh_keymap_cache(editor: &mut SettingsEditor) {
     let query = editor.keymap_search.text.trim().to_lowercase();
     let (sections, bindings) = keymap_search_matches(&editor.keymap.sections, &query);
     editor.keymap_search_query_cache = query;
     editor.keymap_filtered_sections = Some(sections);
     editor.keymap_filtered_bindings = bindings;
-}
-
-pub(crate) fn invalidate_keymap_cache(editor: &mut SettingsEditor) {
-    editor.keymap_filtered_sections = None;
-    editor.keymap_search_query_cache.clear();
-    editor.keymap_filtered_bindings.clear();
+    let rows = build_keymap_rows(editor);
+    editor.keymap_row_data_cache = Some(build_keymap_row_data(editor, &rows).into());
+    editor.keymap_rows_cache = Some(rows.into());
 }
 
 /// Returns the current search-filtered (section, bindings) indices, using the cache
@@ -131,10 +133,48 @@ pub(crate) enum KeymapRow {
     AddSection,
 }
 
-pub(crate) fn keymap_rows(editor: &SettingsEditor) -> Vec<KeymapRow> {
+/// The rows the keymap list displays, from the cache when it is still valid for
+/// the current search query and recomputed inline otherwise (render only has
+/// `&SettingsEditor`, so it cannot refresh the cache in place).
+pub(crate) fn keymap_rows(editor: &SettingsEditor) -> Arc<[KeymapRow]> {
+    if keymap_cache_is_current(editor)
+        && let Some(rows) = editor.keymap_rows_cache.as_ref()
+    {
+        return rows.clone();
+    }
+    build_keymap_rows(editor).into()
+}
+
+/// The per-row render data for [`keymap_rows`], with the same cache contract.
+pub(crate) fn keymap_row_data(editor: &SettingsEditor) -> Arc<[KeymapRowData]> {
+    if keymap_cache_is_current(editor)
+        && let Some(row_data) = editor.keymap_row_data_cache.as_ref()
+    {
+        return row_data.clone();
+    }
+    build_keymap_row_data(editor, &keymap_rows(editor)).into()
+}
+
+fn keymap_cache_is_current(editor: &SettingsEditor) -> bool {
+    editor.keymap_search_query_cache == editor.keymap_search.text.trim().to_lowercase()
+}
+
+fn build_keymap_rows(editor: &SettingsEditor) -> Vec<KeymapRow> {
     let (filtered_sections, filtered_bindings) = keymap_filtered_indices(editor);
+    keymap_rows_from_matches(
+        &editor.keymap.sections,
+        &filtered_sections,
+        &filtered_bindings,
+    )
+}
+
+pub(crate) fn keymap_rows_from_matches(
+    sections: &[KeymapSectionForm],
+    filtered_sections: &[usize],
+    filtered_bindings: &HashMap<usize, Vec<usize>>,
+) -> Vec<KeymapRow> {
     let mut rows = Vec::new();
-    for section_index in filtered_sections {
+    for &section_index in filtered_sections {
         rows.push(KeymapRow::SectionHeader(section_index));
         if let Some(binding_indices) = filtered_bindings.get(&section_index) {
             rows.extend(
@@ -144,7 +184,7 @@ pub(crate) fn keymap_rows(editor: &SettingsEditor) -> Vec<KeymapRow> {
             );
         }
         // Add unbound default bindings for this section
-        if let Some(section) = editor.keymap.sections.get(section_index) {
+        if let Some(section) = sections.get(section_index) {
             for (unbound_index, _) in section.unbound_defaults.iter().enumerate() {
                 rows.push(KeymapRow::UnboundDefault(section_index, unbound_index));
             }
@@ -153,6 +193,102 @@ pub(crate) fn keymap_rows(editor: &SettingsEditor) -> Vec<KeymapRow> {
     }
     rows.push(KeymapRow::AddSection);
     rows
+}
+
+/// Owned per-row data for the virtualized keymap list, extracted from
+/// `SettingsEditor` because the list's row closure must be `'static` and so
+/// cannot hold a borrow of it.
+pub(crate) enum KeymapRowData {
+    SectionHeader {
+        section_index: usize,
+        context: TextField,
+    },
+    Binding {
+        section_index: usize,
+        binding_index: usize,
+        keystroke: TextField,
+        action_name: String,
+        template_name: Option<String>,
+        profile_name: Option<String>,
+        is_default: bool,
+    },
+    UnboundDefault {
+        section_index: usize,
+        binding_index: usize,
+        keystroke: TextField,
+        action_name: String,
+    },
+    AddBinding {
+        section_index: usize,
+        context: String,
+    },
+    AddSection,
+}
+
+fn build_keymap_row_data(editor: &SettingsEditor, rows: &[KeymapRow]) -> Vec<KeymapRowData> {
+    rows.iter()
+        .filter_map(|row| match *row {
+            KeymapRow::SectionHeader(section_index) => {
+                let section = editor.keymap.sections.get(section_index)?;
+                Some(KeymapRowData::SectionHeader {
+                    section_index,
+                    context: section.context.clone(),
+                })
+            }
+            KeymapRow::Binding(section_index, binding_index) => {
+                let binding = editor
+                    .keymap
+                    .sections
+                    .get(section_index)?
+                    .bindings
+                    .get(binding_index)?;
+                let profile_name = binding.action_usize_parameter("slot").map(|slot| {
+                    editor
+                        .profile_names
+                        .get(slot.saturating_sub(1))
+                        .cloned()
+                        .unwrap_or_else(|| format!("Profile {slot}"))
+                });
+                let is_default = editor.is_default_binding(section_index, binding_index);
+                Some(KeymapRowData::Binding {
+                    section_index,
+                    binding_index,
+                    keystroke: binding.keystroke.clone(),
+                    action_name: binding.action_name(),
+                    template_name: binding.action_parameter("name"),
+                    profile_name,
+                    is_default,
+                })
+            }
+            KeymapRow::AddBinding(section_index) => {
+                let context = editor
+                    .keymap
+                    .sections
+                    .get(section_index)
+                    .map(|section| keymap_context_label(&section.context.text).to_owned())
+                    .unwrap_or_default();
+                Some(KeymapRowData::AddBinding {
+                    section_index,
+                    context,
+                })
+            }
+            KeymapRow::UnboundDefault(section_index, binding_index) => {
+                let binding = editor
+                    .keymap
+                    .sections
+                    .get(section_index)?
+                    .unbound_defaults
+                    .get(binding_index)?;
+                Some(KeymapRowData::UnboundDefault {
+                    section_index,
+                    binding_index,
+                    keystroke: binding.keystroke.clone(),
+                    action_name: binding.action_name(),
+                })
+            }
+            KeymapRow::AddSection => Some(KeymapRowData::AddSection),
+        })
+        .collect()
 }
 
 /// A candidate for sticky section headers in the keymap list.
@@ -271,7 +407,7 @@ pub(crate) fn render_keymap_sticky_candidate(
                                             .sections
                                             .push(KeymapSectionForm::new("Zetta > Terminal"));
                                         editor.keymap_dirty = true;
-                                        invalidate_keymap_cache(editor);
+                                        refresh_keymap_cache(editor);
                                         invalidate_controls_cache(editor);
                                         cx.notify();
                                     }

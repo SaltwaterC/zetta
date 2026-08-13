@@ -1,7 +1,4 @@
-use super::keymap::{
-    KeymapRow, invalidate_keymap_cache, keymap_filtered_indices, keymap_rows,
-    rebuild_keymap_search_cache,
-};
+use super::keymap::{KeymapRow, keymap_filtered_indices, keymap_rows, refresh_keymap_cache};
 use super::pane_templates;
 use super::*;
 
@@ -19,6 +16,30 @@ pub(crate) fn adjacent_settings_control_index(
     } else {
         (current + 1) % len
     })
+}
+
+/// The rows an open dropdown displays for `query` — every option, or its fuzzy
+/// matches, in display order — paired with the row `uniform_list` has to measure.
+///
+/// `uniform_list` derives the whole list's width from a single measured row, so
+/// that row has to be the longest option; measuring the first one instead leaves
+/// every longer option wrapping inside a row whose height is pinned to the
+/// measured row's single line.
+pub(crate) fn dropdown_snapshot_rows(
+    options: &[String],
+    query: &str,
+) -> (Arc<[usize]>, Option<usize>) {
+    let rows: Arc<[usize]> = if query.is_empty() {
+        (0..options.len()).collect::<Vec<_>>().into()
+    } else {
+        fuzzy_match_indices(options, query).into()
+    };
+    let widest_row = rows
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, index)| options[**index].chars().count())
+        .map(|(row, _)| row);
+    (rows, widest_row)
 }
 
 pub(crate) fn invalidate_controls_cache(editor: &mut SettingsEditor) {
@@ -479,6 +500,31 @@ impl Zetta {
         }
     }
 
+    /// Re-snapshots the open dropdown (if any) after its underlying options
+    /// changed while it was open, for example when installing or removing a
+    /// theme extension rebuilds the theme list.
+    pub(crate) fn refresh_open_dropdown_options(editor: &mut SettingsEditor) {
+        let Some(dropdown) = editor.open_dropdown else {
+            return;
+        };
+        let (_, options) = Self::settings_dropdown_options(editor, dropdown);
+        Self::refresh_open_dropdown_snapshot(editor, options);
+    }
+
+    /// Refreshes the open dropdown's render snapshot for `options` and the
+    /// current query. Called when a dropdown opens and whenever its query
+    /// changes, so rendering the popover is `Arc` clones rather than a rebuild
+    /// of the option list on every frame.
+    pub(crate) fn refresh_open_dropdown_snapshot(
+        editor: &mut SettingsEditor,
+        options: Arc<[String]>,
+    ) {
+        let (rows, widest_row) = dropdown_snapshot_rows(&options, &editor.dropdown_query);
+        editor.open_dropdown_options = options;
+        editor.open_dropdown_rows = rows;
+        editor.open_dropdown_widest_row = widest_row;
+    }
+
     pub(crate) fn open_settings_dropdown(
         &mut self,
         dropdown: SettingsDropdown,
@@ -497,9 +543,7 @@ impl Zetta {
             .position(|option| option == &selected)
             .unwrap_or(0);
         editor.dropdown_query.clear();
-        // Only one dropdown is ever open at a time, so the previous dropdown's
-        // filtered-options entry is dead weight the moment a different one opens.
-        editor.dropdown_filtered_options.clear();
+        Self::refresh_open_dropdown_snapshot(editor, options);
         editor
             .dropdown_scroll
             .scroll_to_item(editor.dropdown_index, ScrollStrategy::Nearest);
@@ -516,11 +560,10 @@ impl Zetta {
         let Some(editor) = self.settings_editor.as_mut() else {
             return false;
         };
-        let Some(dropdown) = editor.open_dropdown else {
+        if editor.open_dropdown.is_none() {
             return false;
-        };
-        let (_, options) = Self::settings_dropdown_options(editor, dropdown);
-        let matching_indices = fuzzy_match_indices(&options, &editor.dropdown_query);
+        }
+        let matching_indices = editor.open_dropdown_rows.clone();
         if matching_indices.is_empty() {
             return false;
         }
@@ -578,13 +621,7 @@ impl Zetta {
                 .dropdown_scroll
                 .scroll_to_item(index, ScrollStrategy::Nearest);
         }
-        if query.is_empty() {
-            editor.dropdown_filtered_options.remove(&dropdown);
-        } else {
-            editor
-                .dropdown_filtered_options
-                .insert(dropdown, fuzzy_match_indices(&options, &query));
-        }
+        Self::refresh_open_dropdown_snapshot(editor, options);
         cx.notify();
         true
     }
@@ -592,14 +629,12 @@ impl Zetta {
     pub(crate) fn commit_open_settings_dropdown(&mut self, cx: &mut Context<Self>) -> bool {
         let Some((dropdown, value)) = self.settings_editor.as_mut().and_then(|editor| {
             let dropdown = editor.open_dropdown.take()?;
-            let (_, options) = Self::settings_dropdown_options(editor, dropdown);
-            if !editor.dropdown_query.is_empty()
-                && fuzzy_match_indices(&options, &editor.dropdown_query).is_empty()
-            {
+            if !editor.dropdown_query.is_empty() && editor.open_dropdown_rows.is_empty() {
                 editor.open_dropdown = Some(dropdown);
                 return None;
             }
-            options
+            editor
+                .open_dropdown_options
                 .get(editor.dropdown_index)
                 .cloned()
                 .map(|value| (dropdown, value))
@@ -879,7 +914,7 @@ impl Zetta {
             }
             SettingsInput::Keymap(_) => {
                 editor.keymap_dirty = true;
-                invalidate_keymap_cache(editor);
+                refresh_keymap_cache(editor);
                 invalidate_controls_cache(editor);
             }
             SettingsInput::ThemeSearch => {}
@@ -887,7 +922,7 @@ impl Zetta {
                 Self::rebuild_font_search_cache(editor);
             }
             SettingsInput::KeymapSearch => {
-                rebuild_keymap_search_cache(editor);
+                refresh_keymap_cache(editor);
                 invalidate_controls_cache(editor);
             }
             SettingsInput::PaneTemplate(_) => {
@@ -1063,7 +1098,7 @@ impl Zetta {
         match dropdown {
             SettingsDropdown::BindingAction(_, _) | SettingsDropdown::BindingTemplate(_, _) => {
                 editor.keymap_dirty = true;
-                invalidate_keymap_cache(editor);
+                refresh_keymap_cache(editor);
                 invalidate_controls_cache(editor);
             }
             SettingsDropdown::ProfileDraftTheme | SettingsDropdown::ProfileDraftIcon => {}

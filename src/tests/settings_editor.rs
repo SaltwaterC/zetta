@@ -1322,7 +1322,7 @@ fn merge_keymap_with_defaults_merges_unbind() {
         "unbind": {"ctrl-shift-w": "zetta::CloseTab"}
     }]);
     let default_template = bundled_keymap_template().unwrap();
-    let merged = merge_keymap_with_defaults(user_value, &default_template).unwrap();
+    let merged = merge_keymap_with_defaults(user_value, default_template).unwrap();
     let sections = merged.as_array().unwrap();
     let terminal_section = sections
         .iter()
@@ -1340,4 +1340,32 @@ fn merge_keymap_with_defaults_merges_unbind() {
         close_tab_binding.is_none(),
         "unbind should remove default binding"
     );
+}
+
+#[test]
+fn bundled_keymap_defaults_are_parsed_once_and_shared() {
+    let first = bundled_keymap_template().unwrap();
+    let second = bundled_keymap_template().unwrap();
+    assert!(std::ptr::eq(first, second));
+
+    let first_bindings = default_bindings_by_context().unwrap();
+    let second_bindings = default_bindings_by_context().unwrap();
+    assert!(std::ptr::eq(first_bindings, second_bindings));
+
+    // The shared map still describes the shared template: every context in the
+    // template is present, with the same number of bindings.
+    for section in first {
+        let Some(context) = section.get("context").and_then(Value::as_str) else {
+            continue;
+        };
+        let bindings = section
+            .get("bindings")
+            .and_then(Value::as_object)
+            .expect("each bundled section has bindings");
+        assert_eq!(
+            first_bindings.get(context).map(IndexMap::len),
+            Some(bindings.len()),
+            "context {context:?} lost bindings when the defaults were cached"
+        );
+    }
 }

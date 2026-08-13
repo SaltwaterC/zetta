@@ -1,10 +1,7 @@
 use super::pane_templates::render_pane_templates_page;
-use super::widgets::{
-    KEYMAP_ROW_HEIGHT, KeymapRowData, KeymapRowRenderContext, SETTINGS_SCROLLBAR_WIDTH,
-    build_keymap_row_data,
-};
+use super::widgets::{KEYMAP_ROW_HEIGHT, KeymapRowRenderContext, SETTINGS_SCROLLBAR_WIDTH};
 use super::*;
-use crate::settings_ui::keymap::{compute_keymap_sticky_candidates, keymap_rows};
+use crate::settings_ui::keymap::{compute_keymap_sticky_candidates, keymap_row_data};
 use ui::sticky_items;
 
 #[allow(clippy::too_many_arguments)]
@@ -1017,8 +1014,7 @@ pub(crate) fn render_settings_pages(
             div().children(rows).into_any_element()
         }
         SettingsPage::Keymap => {
-            let rows = keymap_rows(editor);
-            let row_data: Arc<[KeymapRowData]> = build_keymap_row_data(editor, &rows).into();
+            let row_data = keymap_row_data(editor);
             let row_count = row_data.len();
             let no_results = row_count == 0 && !editor.keymap_search.text.trim().is_empty();
 
