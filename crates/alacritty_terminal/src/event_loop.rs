@@ -240,6 +240,10 @@ where
         thread::spawn_named("PTY reader", move || {
             let mut state = State::default();
             let mut buf = [0u8; READ_BUFFER_SIZE];
+            // A normal child exit and an explicit shutdown both leave the
+            // loop intentionally. Any other exit is an infrastructure
+            // failure and must be visible to the owning terminal.
+            let mut backend_shutdown = true;
 
             let poll_opts = PollMode::Level;
             let mut interest = PollingEvent::readable(0);
@@ -247,6 +251,7 @@ where
             // Register TTY through EventedRW interface.
             if let Err(err) = unsafe { self.pty.register(&self.poll, interest, poll_opts) } {
                 error!("Event loop registration error: {err}");
+                self.event_proxy.send_event(Event::BackendShutdown);
                 return (self, state);
             }
 
@@ -284,23 +289,33 @@ where
 
                 // Handle channel events, if there are any.
                 if !self.drain_recv_channel(&mut state) {
+                    backend_shutdown = false;
                     break;
                 }
 
                 for event in events.iter() {
                     match event.key {
                         tty::PTY_CHILD_EVENT_TOKEN => {
-                            if let Some(tty::ChildEvent::Exited(status)) =
-                                self.pty.next_child_event()
-                            {
-                                if let Some(status) = status {
-                                    self.event_proxy.send_event(Event::ChildExit(status));
+                            if let Some(child_event) = self.pty.next_child_event() {
+                                match child_event {
+                                    tty::ChildEvent::Exited(status) => {
+                                        self.event_proxy.send_event(Event::ChildExit(status));
+                                    },
+                                    tty::ChildEvent::ExitStatusUnavailable => {
+                                        self.event_proxy
+                                            .send_event(Event::ChildExitStatusUnavailable);
+                                    },
+                                    tty::ChildEvent::WatcherDisconnected => {
+                                        self.event_proxy
+                                            .send_event(Event::ChildWatcherDisconnected);
+                                    },
                                 }
                                 if self.drain_on_exit {
                                     let _ = self.pty_read(&mut state, &mut buf, pipe.as_mut());
                                 }
                                 self.terminal.lock().exit();
                                 self.event_proxy.send_event(Event::Wakeup);
+                                backend_shutdown = false;
                                 break 'event_loop;
                             }
                         },
@@ -353,12 +368,19 @@ where
                     interest.writable = needs_write;
 
                     // Re-register with new interest.
-                    self.pty.reregister(&self.poll, interest, poll_opts).unwrap();
+                    if let Err(err) = self.pty.reregister(&self.poll, interest, poll_opts) {
+                        error!("Event loop reregistration error: {err}");
+                        break 'event_loop;
+                    }
                 }
             }
 
             // The evented instances are not dropped here so deregister them explicitly.
             let _ = self.pty.deregister(&self.poll);
+
+            if backend_shutdown {
+                self.event_proxy.send_event(Event::BackendShutdown);
+            }
 
             #[cfg(windows)]
             if let Ok(path) = std::env::var("ZETTA_PTY_PROFILE_REPORT") {

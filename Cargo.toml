@@ -56,6 +56,7 @@ argon2 = "0.5"
 busy-v = { path = "busy-v" }
 indexmap = { version = "2", features = ["serde"] }
 libc = "0.2"
+log = "0.4"
 async-compression = { version = "0.4", features = ["gzip", "futures-io"] }
 async-tar = "0.6"
 assets = { path = "zed/crates/assets" }

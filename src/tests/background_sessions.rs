@@ -171,7 +171,16 @@ fn catalog_round_trips_pane_process_details() {
             foreground_command: Some(vec!["cargo".to_owned(), "test".to_owned()]),
             terminal_title: Some("cargo test".to_owned()),
             working_directory: Some(PathBuf::from("/work/zetta")),
-            state: BackgroundPaneState::Running,
+            state: BackgroundPaneState::Failed,
+            exit: Some(BackgroundPaneExit {
+                source: BackgroundPaneExitSource::Child,
+                reason: BackgroundPaneExitReason::ForegroundCommand,
+                exit_code: Some(1),
+                child_pid: Some(1234),
+                input_sent: true,
+                foreground_is_shell: Some(false),
+                foreground_command: Some("htop".to_owned()),
+            }),
         }],
     };
     publisher
@@ -190,6 +199,77 @@ fn catalog_round_trips_pane_process_details() {
     let catalogs = read_session_catalogs(directory.path()).unwrap();
     assert_eq!(catalogs.len(), 1);
     assert_eq!(catalogs[0].sessions, vec![session]);
+}
+
+#[test]
+fn legacy_catalogs_are_ignored_after_the_schema_bump() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory
+        .path()
+        .join(format!("zetta-{}-legacy.json", std::process::id()));
+    let legacy = r#"{
+                "version": 3,
+                "process_id": PROCESS_ID,
+                "runner_id": 9,
+                "sessions": [{
+                    "id": 1,
+                    "title": "old",
+                    "authentication_required": false,
+                    "active_pane": 1,
+                    "layout": {"type": "pane", "pane_id": 1},
+                    "panes": [{
+                        "id": 1,
+                        "label": "shell",
+                        "profile": "System",
+                        "configured_command": "powershell",
+                        "application": "powershell",
+                        "foreground_command": null,
+                        "terminal_title": null,
+                        "working_directory": null,
+                        "state": "running"
+                    }]
+                }]
+            }"#
+    .replace("PROCESS_ID", &std::process::id().to_string());
+    fs::write(&path, legacy).unwrap();
+
+    assert!(read_session_catalogs(directory.path()).unwrap().is_empty());
+}
+
+#[test]
+fn unexpected_exit_metadata_is_sanitized_and_actionable() {
+    let event = TerminalExited {
+        exit_code: Some(1),
+        source: TerminalExitSource::Child,
+        child_pid: Some(77),
+        input_sent: true,
+        foreground_is_shell: Some(false),
+        foreground_command: Some("htop".to_owned()),
+    };
+    let exit = BackgroundPaneExit::from_terminal(&event).unwrap();
+    assert_eq!(exit.reason, BackgroundPaneExitReason::ForegroundCommand);
+    assert_eq!(exit.foreground_command.as_deref(), Some("htop"));
+    assert!(exit.reason_text().contains("htop"));
+    assert!(exit.reason_text().contains("child PID 77"));
+
+    let unsafe_event = TerminalExited {
+        foreground_command: Some("sh -c secret=value".to_owned()),
+        ..event
+    };
+    let sanitized = BackgroundPaneExit::from_terminal(&unsafe_event).unwrap();
+    assert_eq!(sanitized.foreground_command, None);
+    assert!(!sanitized.reason_text().contains("secret=value"));
+
+    let unknown_status = TerminalExited {
+        exit_code: None,
+        ..unsafe_event
+    };
+    assert_eq!(
+        BackgroundPaneExit::from_terminal(&unknown_status)
+            .unwrap()
+            .reason,
+        BackgroundPaneExitReason::StatusUnavailable
+    );
 }
 
 #[test]
@@ -219,6 +299,7 @@ fn protected_catalog_entries_do_not_publish_session_details_or_verifiers() {
                 terminal_title: None,
                 working_directory: None,
                 state: BackgroundPaneState::Running,
+                exit: None,
             }],
         }])
         .unwrap();

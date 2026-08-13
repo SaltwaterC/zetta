@@ -697,6 +697,11 @@ pub enum Event {
     TaskFinished {
         exit_code: Option<i32>,
     },
+    /// Reports the one-shot exit classification for an interactive terminal.
+    ///
+    /// Task-backed terminals continue to report [`Event::TaskFinished`] and
+    /// retain their existing hide/close behavior instead of using this event.
+    TerminalExited(TerminalExited),
     BlinkChanged(bool),
     ResizeRequested {
         rows: usize,
@@ -705,6 +710,74 @@ pub enum Event {
     SelectionsChanged,
     NewNavigationTarget(Option<MaybeNavigationTarget>),
     Open(MaybeNavigationTarget),
+}
+
+/// Where the terminal learned that its child had stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalExitSource {
+    /// The child watcher supplied a normal exit status.
+    Child,
+    /// The child stopped, but the operating system did not provide a usable
+    /// status (or only the terminal's final event was observed).
+    StatusUnavailable,
+    /// The watcher channel disconnected before a status was delivered.
+    WatcherDisconnected,
+    /// The PTY backend stopped because of an infrastructure failure.
+    BackendShutdown,
+}
+
+/// Why an interactive terminal exit should remain visible instead of closing
+/// its pane automatically.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalExitReason {
+    StatusUnavailable,
+    WatcherDisconnected,
+    BackendShutdown,
+    ExitedBeforeInput,
+    ForegroundCommand,
+}
+
+/// The complete, one-shot exit observation for an interactive terminal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalExited {
+    pub exit_code: Option<i32>,
+    pub source: TerminalExitSource,
+    pub child_pid: Option<u32>,
+    pub input_sent: bool,
+    /// Whether the last available process metadata identified the shell as
+    /// the foreground process. `None` means that the platform had no reliable
+    /// answer at exit time.
+    pub foreground_is_shell: Option<bool>,
+    /// A normalized foreground command name when one was available. This is
+    /// deliberately only a name, not a shell output line or full argv.
+    pub foreground_command: Option<String>,
+}
+
+impl TerminalExited {
+    pub fn unexpected_reason(&self) -> Option<TerminalExitReason> {
+        let source_reason = match self.source {
+            TerminalExitSource::Child if self.exit_code.is_none() => {
+                Some(TerminalExitReason::StatusUnavailable)
+            }
+            TerminalExitSource::Child => None,
+            TerminalExitSource::StatusUnavailable => Some(TerminalExitReason::StatusUnavailable),
+            TerminalExitSource::WatcherDisconnected => {
+                Some(TerminalExitReason::WatcherDisconnected)
+            }
+            TerminalExitSource::BackendShutdown => Some(TerminalExitReason::BackendShutdown),
+        };
+        source_reason
+            .or_else(|| (!self.input_sent).then_some(TerminalExitReason::ExitedBeforeInput))
+            .or_else(|| {
+                (self.foreground_is_shell == Some(false)
+                    && !matches!(self.foreground_command.as_deref(), Some("exit" | "logout")))
+                .then_some(TerminalExitReason::ForegroundCommand)
+            })
+    }
+
+    pub fn is_unexpected(&self) -> bool {
+        self.unexpected_reason().is_some()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -898,6 +971,9 @@ pub(crate) enum TerminalBackendEvent {
     Bell,
     Exit,
     ChildExit(ExitStatus),
+    ChildExitStatusUnavailable,
+    ChildWatcherDisconnected,
+    BackendShutdown,
 }
 
 const REPORTED_WORKING_DIRECTORY_TITLE_PREFIX: &str = "zetta-cwd:";
@@ -1038,6 +1114,16 @@ fn reported_foreground_command_from_title(title: &str) -> Option<String> {
     Some(command.to_owned())
 }
 
+/// Reduces a shell-reported command marker to a safe command name for exit
+/// diagnostics. The full marker is intentionally not copied into failure
+/// messages because it may contain user arguments or secrets.
+#[cfg(windows)]
+fn reported_foreground_command_name(command: &str) -> Option<String> {
+    let command = command.split_whitespace().next()?;
+    let command = command.rsplit(['/', '\\']).next().unwrap_or(command);
+    normalize_path_command_name(command)
+}
+
 impl fmt::Debug for TerminalBackendEvent {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
@@ -1057,6 +1143,9 @@ impl fmt::Debug for TerminalBackendEvent {
             Self::Bell => f.write_str("Bell"),
             Self::Exit => f.write_str("Exit"),
             Self::ChildExit(status) => write!(f, "ChildExit({status})"),
+            Self::ChildExitStatusUnavailable => f.write_str("ChildExitStatusUnavailable"),
+            Self::ChildWatcherDisconnected => f.write_str("ChildWatcherDisconnected"),
+            Self::BackendShutdown => f.write_str("BackendShutdown"),
         }
     }
 }
@@ -1296,6 +1385,33 @@ const INIT_COMMAND_STARTUP_MARKER_PREFIX: &str = "__zed_init_command_ready_";
 const INIT_COMMAND_STARTUP_MARKER_SUFFIX: &str = "__";
 const INIT_COMMAND_STARTUP_MARKER_SEARCH_LINES: usize = 64;
 
+#[cfg(windows)]
+struct WslStartupTiming {
+    started_at: Instant,
+    pty_ready_at: Instant,
+}
+
+#[cfg(windows)]
+fn log_wsl_startup_phase(
+    phase: &str,
+    started_at: Instant,
+    pty_ready_at: Instant,
+    observed_at: Instant,
+) {
+    log::debug!(
+        "WSL terminal startup phase={phase} spawn_to_pty_ready_ms={} pty_ready_to_marker_ms={} total_ms={}",
+        pty_ready_at
+            .saturating_duration_since(started_at)
+            .as_millis(),
+        observed_at
+            .saturating_duration_since(pty_ready_at)
+            .as_millis(),
+        observed_at
+            .saturating_duration_since(started_at)
+            .as_millis(),
+    );
+}
+
 fn init_command_startup_marker(marker_id: u64) -> String {
     format!("{INIT_COMMAND_STARTUP_MARKER_PREFIX}{marker_id}{INIT_COMMAND_STARTUP_MARKER_SUFFIX}")
 }
@@ -1413,6 +1529,8 @@ impl TerminalBuilder {
             editor_click_started: false,
             #[cfg(windows)]
             shell_program: None,
+            #[cfg(windows)]
+            wsl_startup_timing: None,
             activation_script: Vec::new(),
             template: CopyTemplate {
                 shell: Shell::System,
@@ -1425,6 +1543,7 @@ impl TerminalBuilder {
                 window_id,
             },
             child_exited: None,
+            terminal_exit_reported: false,
             task_exit_code: None,
             keyboard_input_sent: false,
             init_command_startup_marker: None,
@@ -1502,6 +1621,10 @@ impl TerminalBuilder {
     ) -> Task<Result<TerminalBuilder>> {
         let version = release_channel::AppVersion::global(cx);
         let background_executor = cx.background_executor().clone();
+        #[cfg(windows)]
+        let wsl_startup_started_at = Instant::now();
+        #[cfg(windows)]
+        let is_wsl_startup = matches!(posix_host(&shell), Some(PosixHost::Wsl));
         // Headless hosts (e.g. the eval CLI) have no controlling TTY, so PTY
         // allocation / acquiring a controlling terminal fails with `ENOTTY`.
         // When set, run the command as a plain subprocess instead.
@@ -1628,6 +1751,8 @@ impl TerminalBuilder {
             // When `no_pty` is set (headless hosts), run the task as a plain
             // subprocess and pump its piped output into the same emulator the
             // PTY path would feed.
+            #[cfg(windows)]
+            let mut wsl_startup_timing = None;
             let (terminal_type, subprocess) = if no_pty {
                 let (program, args) = match &shell_params {
                     Some(params) => (
@@ -1657,6 +1782,20 @@ impl TerminalBuilder {
                         });
                     }
                 };
+                #[cfg(windows)]
+                if is_wsl_startup {
+                    let pty_ready_at = Instant::now();
+                    wsl_startup_timing = Some(WslStartupTiming {
+                        started_at: wsl_startup_started_at,
+                        pty_ready_at,
+                    });
+                    log_wsl_startup_phase(
+                        "subprocess_ready",
+                        wsl_startup_started_at,
+                        pty_ready_at,
+                        pty_ready_at,
+                    );
+                }
                 (TerminalType::DisplayOnly, Some(subprocess))
             } else {
                 let alacritty_shell = shell_params.as_ref().map(|params| {
@@ -1692,6 +1831,21 @@ impl TerminalBuilder {
                         });
                     }
                 };
+
+                #[cfg(windows)]
+                if is_wsl_startup {
+                    let pty_ready_at = Instant::now();
+                    wsl_startup_timing = Some(WslStartupTiming {
+                        started_at: wsl_startup_started_at,
+                        pty_ready_at,
+                    });
+                    log_wsl_startup_phase(
+                        "pty_ready",
+                        wsl_startup_started_at,
+                        pty_ready_at,
+                        pty_ready_at,
+                    );
+                }
 
                 let pty_info = PtyProcessInfo::new(ProcessIdGetter::from(&pty));
 
@@ -1746,6 +1900,8 @@ impl TerminalBuilder {
                 editor_click_started: false,
                 #[cfg(windows)]
                 shell_program,
+                #[cfg(windows)]
+                wsl_startup_timing,
                 activation_script: activation_script.clone(),
                 template: CopyTemplate {
                     shell,
@@ -1758,6 +1914,7 @@ impl TerminalBuilder {
                     window_id,
                 },
                 child_exited: None,
+                terminal_exit_reported: false,
                 task_exit_code: None,
                 keyboard_input_sent: false,
                 init_command_startup_marker: None,
@@ -1954,9 +2111,12 @@ pub struct Terminal {
     editor_click_started: bool,
     #[cfg(windows)]
     shell_program: Option<String>,
+    #[cfg(windows)]
+    wsl_startup_timing: Option<WslStartupTiming>,
     template: CopyTemplate,
     activation_script: Vec<String>,
     child_exited: Option<ExitStatus>,
+    terminal_exit_reported: bool,
     task_exit_code: Option<i32>,
     keyboard_input_sent: bool,
     init_command_startup_marker: Option<String>,
@@ -2070,8 +2230,21 @@ impl Terminal {
                 }
 
                 if let Some(command) = reported_foreground_command_from_title(&title) {
+                    let first_shell_marker = self.reported_shell_command.is_none();
                     self.reported_shell_command
                         .get_or_insert_with(|| command.clone());
+                    #[cfg(windows)]
+                    if first_shell_marker {
+                        if let Some(timing) = self.wsl_startup_timing.take() {
+                            let marker_at = Instant::now();
+                            log_wsl_startup_phase(
+                                "first_shell_marker",
+                                timing.started_at,
+                                timing.pty_ready_at,
+                                marker_at,
+                            );
+                        }
+                    }
                     if self.reported_foreground_command.as_deref() != Some(command.as_str()) {
                         self.reported_foreground_command = Some(command);
                         cx.emit(Event::TitleChanged);
@@ -2126,7 +2299,9 @@ impl Terminal {
             TerminalBackendEvent::Bell => {
                 cx.emit(Event::Bell);
             }
-            TerminalBackendEvent::Exit => self.register_task_finished(None, cx),
+            TerminalBackendEvent::Exit => {
+                self.register_terminal_exit(None, TerminalExitSource::StatusUnavailable, cx)
+            }
             TerminalBackendEvent::MouseCursorDirty => {
                 //NOOP, Handled in render
             }
@@ -2158,7 +2333,16 @@ impl Terminal {
                 self.write_to_pty(format(color).into_bytes());
             }
             TerminalBackendEvent::ChildExit(exit_status) => {
-                self.register_task_finished(Some(exit_status), cx);
+                self.register_terminal_exit(Some(exit_status), TerminalExitSource::Child, cx);
+            }
+            TerminalBackendEvent::ChildExitStatusUnavailable => {
+                self.register_terminal_exit(None, TerminalExitSource::StatusUnavailable, cx);
+            }
+            TerminalBackendEvent::ChildWatcherDisconnected => {
+                self.register_terminal_exit(None, TerminalExitSource::WatcherDisconnected, cx);
+            }
+            TerminalBackendEvent::BackendShutdown => {
+                self.register_terminal_exit(None, TerminalExitSource::BackendShutdown, cx);
             }
         }
     }
@@ -2683,21 +2867,7 @@ impl Terminal {
     /// foreground. Unknown process state and display-only terminals are
     /// treated as non-shell.
     pub fn foreground_process_is_shell(&self) -> bool {
-        match &self.terminal_type {
-            TerminalType::Pty { info, .. } => {
-                #[cfg(windows)]
-                if posix_host(&self.template.shell).is_some() {
-                    return self
-                        .reported_foreground_command
-                        .as_deref()
-                        .zip(self.reported_shell_command.as_deref())
-                        .is_some_and(|(foreground, shell)| foreground == shell);
-                }
-
-                info.foreground_process_is_shell()
-            }
-            TerminalType::DisplayOnly => false,
-        }
+        self.foreground_process_is_shell_context() == Some(true)
     }
 
     /// Sends an already-built editor command through this terminal's shell.
@@ -2720,7 +2890,7 @@ impl Terminal {
     /// Call at most once per terminal: a second handshake drops the previous
     /// `Sender`, which would write the init command twice.
     pub fn start_init_command_startup_handshake(&mut self) -> Task<()> {
-        if !self.is_pty() || self.child_exited.is_some() {
+        if !self.is_pty() || self.child_exited.is_some() || self.terminal_exit_reported {
             return Task::ready(());
         }
 
@@ -2795,7 +2965,7 @@ impl Terminal {
         // fallback), so detection stops scanning on every wakeup.
         self.complete_init_command_startup_handshake();
 
-        if self.keyboard_input_sent || self.child_exited.is_some() {
+        if self.keyboard_input_sent || self.child_exited.is_some() || self.terminal_exit_reported {
             return false;
         }
 
@@ -3584,6 +3754,13 @@ impl Terminal {
 
     /// Normalizes the command name of the foreground process, if one is known.
     pub fn foreground_process_command_name(&self) -> Option<String> {
+        #[cfg(windows)]
+        if posix_host(&self.template.shell).is_some() {
+            return self
+                .reported_foreground_command
+                .as_deref()
+                .and_then(reported_foreground_command_name);
+        }
         match &self.terminal_type {
             TerminalType::Pty { info, .. } => info
                 .current
@@ -3596,6 +3773,13 @@ impl Terminal {
 
     /// Returns the full argument vector of the foreground process, if one is known.
     pub fn foreground_process_command_line(&self) -> Option<Vec<String>> {
+        #[cfg(windows)]
+        if posix_host(&self.template.shell).is_some() {
+            return self
+                .reported_foreground_command
+                .clone()
+                .map(|command| vec![command]);
+        }
         match &self.terminal_type {
             TerminalType::Pty { info, .. } => info.current.read().as_ref().map(|process| {
                 if process.argv.is_empty() {
@@ -3612,6 +3796,24 @@ impl Terminal {
     pub fn refresh_foreground_process(&mut self, cx: &mut Context<Self>) {
         if let TerminalType::Pty { info, .. } = &self.terminal_type {
             info.emit_title_changed_if_changed(cx);
+        }
+    }
+
+    /// Returns the best available answer to whether the shell owns the
+    /// foreground at this instant. Unknown process state is preserved as
+    /// `None` so an exit is not mislabeled as a running-command failure.
+    pub fn foreground_process_is_shell_context(&self) -> Option<bool> {
+        #[cfg(windows)]
+        if posix_host(&self.template.shell).is_some() {
+            return self
+                .reported_foreground_command
+                .as_deref()
+                .zip(self.reported_shell_command.as_deref())
+                .map(|(foreground, shell)| foreground == shell);
+        }
+        match &self.terminal_type {
+            TerminalType::Pty { info, .. } => info.foreground_process_is_shell_context(),
+            TerminalType::DisplayOnly => None,
         }
     }
 
@@ -3746,6 +3948,56 @@ impl Terminal {
             }
         }
         Task::ready(None)
+    }
+
+    fn register_terminal_exit(
+        &mut self,
+        exit_status: Option<ExitStatus>,
+        source: TerminalExitSource,
+        cx: &mut Context<Terminal>,
+    ) {
+        if self.task.is_some() {
+            // Task terminals retain their established completion and hide
+            // semantics. The richer interactive classification is for PTY
+            // shells whose pane would otherwise disappear on CloseTerminal.
+            self.register_task_finished(exit_status, cx);
+            return;
+        }
+        if self.terminal_exit_reported {
+            return;
+        }
+        self.terminal_exit_reported = true;
+        #[cfg(windows)]
+        if let Some(timing) = self.wsl_startup_timing.take() {
+            let observed_at = Instant::now();
+            log_wsl_startup_phase(
+                "exit_before_first_shell_marker",
+                timing.started_at,
+                timing.pty_ready_at,
+                observed_at,
+            );
+        }
+        if let Some(exit_status) = exit_status.as_ref() {
+            self.child_exited = Some(exit_status.clone());
+        }
+        self.complete_init_command_startup_handshake();
+
+        let exited = TerminalExited {
+            exit_code: exit_status.as_ref().and_then(|status| status.code()),
+            source,
+            child_pid: self
+                .pid_getter()
+                .map(|pid_getter| pid_getter.fallback_pid())
+                .filter(|pid| pid.as_u32() != 0)
+                .map(|pid| pid.as_u32()),
+            input_sent: self.keyboard_input_sent,
+            foreground_is_shell: self.foreground_process_is_shell_context(),
+            foreground_command: self.foreground_process_command_name(),
+        };
+        cx.emit(Event::TerminalExited(exited.clone()));
+        if !exited.is_unexpected() {
+            cx.emit(Event::CloseTerminal);
+        }
     }
 
     fn register_task_finished(
@@ -4449,6 +4701,130 @@ mod tests {
         assert_eq!(
             reported_foreground_command_from_title("zetta-cmd:with\ncontrol"),
             None
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn foreground_exit_diagnostics_keep_only_a_safe_command_name() {
+        assert_eq!(
+            reported_foreground_command_name(r"C:\\Tools\\htop.exe --secret value"),
+            Some("htop".to_owned())
+        );
+        assert_eq!(
+            reported_foreground_command_name("exit 1"),
+            Some("exit".to_owned())
+        );
+        assert_eq!(
+            reported_foreground_command_name("./local-agent secret=value"),
+            None
+        );
+    }
+
+    fn exit_observation(
+        source: TerminalExitSource,
+        input_sent: bool,
+        foreground_is_shell: Option<bool>,
+    ) -> TerminalExited {
+        TerminalExited {
+            exit_code: Some(1),
+            source,
+            child_pid: Some(42),
+            input_sent,
+            foreground_is_shell,
+            foreground_command: Some("htop".to_owned()),
+        }
+    }
+
+    #[test]
+    fn terminal_exit_classification_preserves_unknown_foreground_state() {
+        let user_exit = exit_observation(TerminalExitSource::Child, true, None);
+        assert!(!user_exit.is_unexpected());
+
+        let shell_builtin_exit = TerminalExited {
+            foreground_command: Some("exit".to_owned()),
+            foreground_is_shell: Some(false),
+            ..user_exit.clone()
+        };
+        assert!(!shell_builtin_exit.is_unexpected());
+
+        let startup_failure = exit_observation(TerminalExitSource::Child, false, None);
+        assert_eq!(
+            startup_failure.unexpected_reason(),
+            Some(TerminalExitReason::ExitedBeforeInput)
+        );
+
+        let foreground_failure = exit_observation(TerminalExitSource::Child, true, Some(false));
+        assert_eq!(
+            foreground_failure.unexpected_reason(),
+            Some(TerminalExitReason::ForegroundCommand)
+        );
+
+        let unavailable = exit_observation(TerminalExitSource::StatusUnavailable, true, Some(true));
+        assert_eq!(
+            unavailable.unexpected_reason(),
+            Some(TerminalExitReason::StatusUnavailable)
+        );
+
+        let unknown_status = TerminalExited {
+            exit_code: None,
+            ..exit_observation(TerminalExitSource::Child, true, Some(true))
+        };
+        assert_eq!(
+            unknown_status.unexpected_reason(),
+            Some(TerminalExitReason::StatusUnavailable)
+        );
+
+        for source in [
+            TerminalExitSource::WatcherDisconnected,
+            TerminalExitSource::BackendShutdown,
+        ] {
+            assert!(exit_observation(source, true, Some(true)).is_unexpected());
+        }
+    }
+
+    #[gpui::test]
+    fn terminal_exit_events_are_one_shot(cx: &mut TestAppContext) {
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::Block,
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+        let (events_tx, events_rx) = async_channel::unbounded();
+        cx.update(|cx| {
+            cx.subscribe(&terminal, move |_, event: &Event, _| {
+                events_tx.send_blocking(event.clone()).unwrap();
+            })
+        })
+        .detach();
+
+        terminal.update(cx, |terminal, cx| {
+            terminal.keyboard_input_sent = true;
+            terminal.process_event(TerminalBackendEvent::ChildExit(ExitStatus::from_raw(0)), cx);
+            // The event loop emits a final Exit notification after ChildExit.
+            terminal.process_event(TerminalBackendEvent::Exit, cx);
+        });
+
+        let events = std::iter::from_fn(|| events_rx.try_recv().ok()).collect::<Vec<_>>();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, Event::TerminalExited(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, Event::CloseTerminal))
+                .count(),
+            1
         );
     }
 

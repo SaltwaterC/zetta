@@ -6,25 +6,31 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(target_os = "windows")]
-use windows::Win32::{Foundation::HANDLE, System::Threading::GetProcessId};
-
 use sysinfo::{Pid, Process, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 use crate::{Event, Terminal};
 
 #[derive(Clone, Copy)]
 pub struct ProcessIdGetter {
+    #[cfg(unix)]
     handle: i32,
+    #[cfg(windows)]
+    pid: Option<u32>,
     fallback_pid: u32,
 }
 
 impl ProcessIdGetter {
+    #[cfg(unix)]
     pub(crate) fn new(handle: i32, fallback_pid: u32) -> ProcessIdGetter {
         ProcessIdGetter {
             handle,
             fallback_pid,
         }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn new(pid: Option<u32>, fallback_pid: u32) -> ProcessIdGetter {
+        ProcessIdGetter { pid, fallback_pid }
     }
 
     pub fn fallback_pid(&self) -> Pid {
@@ -54,18 +60,9 @@ impl ProcessIdGetter {
 #[cfg(windows)]
 impl ProcessIdGetter {
     fn pid(&self) -> Option<Pid> {
-        let pid = unsafe { GetProcessId(HANDLE(self.handle as _)) };
-        // the GetProcessId may fail and returns zero, which will lead to a stack overflow issue
-        if pid == 0 {
-            // in the builder process, there is a small chance, almost negligible,
-            // that this value could be zero, which means child_watcher returns None,
-            // GetProcessId returns 0.
-            if self.fallback_pid == 0 {
-                return None;
-            }
-            return Some(Pid::from_u32(self.fallback_pid));
-        }
-        Some(Pid::from_u32(pid))
+        self.pid
+            .or_else(|| (self.fallback_pid > 0).then_some(self.fallback_pid))
+            .map(Pid::from_u32)
     }
 }
 
@@ -258,21 +255,32 @@ impl PtyProcessInfo {
     /// Returns whether the process currently owning the terminal is the shell
     /// process that was created for the PTY. Unknown process state is treated
     /// as non-shell so callers can choose the safe fallback.
+    #[allow(dead_code)]
     pub(crate) fn foreground_process_is_shell(&self) -> bool {
-        let Some(foreground) = self.resolve_foreground_pid() else {
-            return false;
-        };
+        self.foreground_process_is_shell_context() == Some(true)
+    }
+
+    /// Returns the shell ownership decision when the platform can make one.
+    /// `None` is different from `Some(false)`: the former means that process
+    /// metadata was unavailable, while the latter means a foreground command
+    /// was observed.
+    pub(crate) fn foreground_process_is_shell_context(&self) -> Option<bool> {
+        let foreground =
+            (*self.last_foreground_pid.lock()).or_else(|| self.resolve_foreground_pid())?;
 
         let shell = self.pid_getter.fallback_pid();
+        if shell.as_u32() == 0 {
+            return None;
+        }
         if foreground == shell {
-            return true;
+            return Some(true);
         }
 
         #[cfg(target_os = "macos")]
-        return self.foreground_process_is_macos_login_shell(foreground, shell);
+        return Some(self.foreground_process_is_macos_login_shell(foreground, shell));
 
         #[cfg(not(target_os = "macos"))]
-        false
+        Some(false)
     }
 
     #[cfg(target_os = "macos")]
@@ -453,6 +461,13 @@ mod tests {
 
         let unknown = PtyProcessInfo::new(ProcessIdGetter::new(-1, 0));
         assert!(!unknown.foreground_process_is_shell());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_process_id_getter_keeps_the_full_pid_width() {
+        let getter = ProcessIdGetter::new(Some(u32::MAX), 1);
+        assert_eq!(getter.pid(), Some(Pid::from_u32(u32::MAX)));
     }
 
     #[cfg(target_os = "macos")]

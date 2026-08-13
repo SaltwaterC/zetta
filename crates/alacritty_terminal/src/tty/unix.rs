@@ -441,7 +441,7 @@ impl EventedPty for Pty {
         match self.child.try_wait() {
             Err(err) => {
                 error!("Error checking child process termination: {err}");
-                None
+                Some(ChildEvent::ExitStatusUnavailable)
             },
             Ok(None) => None,
             Ok(exit_status) => Some(ChildEvent::Exited(exit_status)),

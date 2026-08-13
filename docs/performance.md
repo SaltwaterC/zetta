@@ -171,6 +171,37 @@ like-for-like optimized builds, workload settings, platforms, and GPU backends;
 do not compare headless or software-rendered results with an interactive
 hardware-rendered baseline.
 
+## WSL2 startup diagnostics
+
+On Windows, WSL-backed terminals emit debug-level startup timing records. The
+records use this format:
+
+```text
+WSL terminal startup phase=<phase> spawn_to_pty_ready_ms=<ms> pty_ready_to_marker_ms=<ms> total_ms=<ms>
+```
+
+The useful phases are:
+
+- `pty_ready`: the WSL/ConPTY process was created and the PTY became ready.
+- `first_shell_marker`: the first shell-integration marker arrived after the
+  PTY was ready.
+- `exit_before_first_shell_marker`: the terminal exited before shell
+  integration produced its first marker.
+- `subprocess_ready`: a headless/no-PTY WSL launch reached its subprocess-ready
+  point.
+
+`spawn_to_pty_ready_ms` includes WSL boot and process/PTY creation. The
+`pty_ready_to_marker_ms` value measures shell startup and shell-integration
+initialization after the PTY exists. Comparing those two values separates WSL
+boot latency from slow shell startup. An exit-before-marker record identifies a
+startup failure or an incomplete shell initialization rather than a normal
+interactive shell exit.
+
+These diagnostics do not change the WSL startup wrapper; they only measure the
+existing launch and shell-integration phases. Collect the debug records with
+the rest of the application's platform diagnostics when investigating slow or
+unexpected WSL terminal startup.
+
 ## Pane stress workload
 
 Add `--profile-pane-stress` or `-s` to exercise multi-pane terminal rendering

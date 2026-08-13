@@ -48,9 +48,9 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use background_sessions::{
-    BackgroundPaneLayout, BackgroundPaneState, BackgroundPaneSummary, BackgroundSessionRunner,
-    BackgroundSessionSummary, SessionAuthentication, SessionSecret, VerifiedSession,
-    application_from_command_line, print_session_catalogs,
+    BackgroundPaneExit, BackgroundPaneLayout, BackgroundPaneState, BackgroundPaneSummary,
+    BackgroundSessionRunner, BackgroundSessionSummary, SessionAuthentication, SessionSecret,
+    VerifiedSession, application_from_command_line, print_session_catalogs,
 };
 use command_palette::{CommandPalette, PaletteCommand, humanize_action_name};
 use config::{
@@ -90,7 +90,7 @@ use silent_mode::{FocusStatusAccess, SilentModeState};
 use task::{Shell, ShellBuilder, SpawnInTerminal, TaskId};
 use terminal::{
     Clear, Event as TerminalEvent, Paste, PasteTrimmed, Search, TaskState, TaskStatus, Terminal,
-    TerminalBuilder, terminal_settings::TerminalSettings,
+    TerminalBuilder, TerminalExited, terminal_settings::TerminalSettings,
 };
 use terminal_view::{
     ClearClipboard, CopyAndClearSelection, DismissSearch, EditScrollback, SavePaneOutput,

@@ -37,10 +37,15 @@ zetta sessions -j # or --json
 The human-readable listing includes a stable `process:runner:session` ID, saved
 split layout, active pane, profile, configured launch command, live foreground
 application and full command line, terminal title, working directory, and
-whether each pane is starting, running, exited, or failed.
+whether each pane is starting, running, exited, or failed. A failed pane also
+has an `exit:` line describing why Zetta retained it, with an exit code and
+child PID when those values are available.
 
 `--json` provides the same catalog as structured, versioned JSON for scripts
-and future remote-session tooling.
+and future remote-session tooling. Failed panes include structured exit metadata
+such as the source of the report, the classification, and the sanitized
+foreground command name. Catalogs written by older schema versions are ignored
+until their owning process publishes the current format.
 
 Reconnect a session by its stable ID:
 
@@ -53,6 +58,28 @@ session with the same numeric ID. Reconnecting a protected session prompts for
 the secret on the controlling terminal with terminal echo disabled. The secret
 is read from the prompt rather than a command-line option, so it is not stored
 in shell history or exposed in the process list.
+
+## Unexpected terminal exits
+
+Zetta closes an interactive pane automatically when its shell reports an
+ordinary user-initiated exit. If the exit status cannot be obtained, the child
+watcher or terminal backend disconnects, the shell exits before receiving user
+input, or process metadata shows a command such as `htop` still in the
+foreground, Zetta treats the exit as unexpected.
+
+Unexpected exits are retained instead of silently removing the pane. The pane
+shows a **Terminal exited unexpectedly** message and keeps its tab and split
+layout, so the failure can be inspected or the other panes can continue to be
+used. The same pane is marked `failed` in a detached session's catalog.
+
+Reconnecting a failed session restores the tab and displays the diagnostic pane;
+healthy panes in the same split remain available. Closing that tab dismisses the
+retained failed session rather than moving it into another background session.
+The retained `exit` metadata and failure log context contain only structured
+exit metadata and a sanitized command name. They do not copy terminal output,
+environment values, or a full command line. The catalog's existing foreground
+`command line` field remains separate and may still be present when that
+metadata was available.
 
 ## Closing the last window
 

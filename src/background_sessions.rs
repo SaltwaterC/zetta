@@ -15,10 +15,11 @@ use argon2::{
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq as _;
 use sysinfo::{Pid, ProcessesToUpdate, System};
+use terminal::{TerminalExitReason, TerminalExitSource, TerminalExited};
 use zeroize::Zeroizing;
 
 static NEXT_RUNNER_ID: AtomicU64 = AtomicU64::new(1);
-const CATALOG_VERSION: u32 = 3;
+const CATALOG_VERSION: u32 = 4;
 
 /// How long a session refuses reconnect attempts after one wrong secret, and
 /// the ceiling that doubling reaches.
@@ -85,6 +86,8 @@ pub(crate) struct BackgroundPaneSummary {
     pub(crate) terminal_title: Option<String>,
     pub(crate) working_directory: Option<PathBuf>,
     pub(crate) state: BackgroundPaneState,
+    #[serde(default)]
+    pub(crate) exit: Option<BackgroundPaneExit>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,6 +97,117 @@ pub(crate) enum BackgroundPaneState {
     Running,
     Exited,
     Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BackgroundPaneExitSource {
+    Child,
+    StatusUnavailable,
+    WatcherDisconnected,
+    BackendShutdown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BackgroundPaneExitReason {
+    StatusUnavailable,
+    WatcherDisconnected,
+    BackendShutdown,
+    ExitedBeforeInput,
+    ForegroundCommand,
+}
+
+/// Sanitized exit metadata retained with a failed pane. It intentionally
+/// contains no terminal output, environment values, working directory, or
+/// full command line.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct BackgroundPaneExit {
+    pub(crate) source: BackgroundPaneExitSource,
+    pub(crate) reason: BackgroundPaneExitReason,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) child_pid: Option<u32>,
+    pub(crate) input_sent: bool,
+    pub(crate) foreground_is_shell: Option<bool>,
+    pub(crate) foreground_command: Option<String>,
+}
+
+impl BackgroundPaneExit {
+    pub(crate) fn from_terminal(exit: &TerminalExited) -> Option<Self> {
+        let reason = exit.unexpected_reason()?;
+        Some(Self {
+            source: match exit.source {
+                TerminalExitSource::Child => BackgroundPaneExitSource::Child,
+                TerminalExitSource::StatusUnavailable => {
+                    BackgroundPaneExitSource::StatusUnavailable
+                }
+                TerminalExitSource::WatcherDisconnected => {
+                    BackgroundPaneExitSource::WatcherDisconnected
+                }
+                TerminalExitSource::BackendShutdown => BackgroundPaneExitSource::BackendShutdown,
+            },
+            reason: match reason {
+                TerminalExitReason::StatusUnavailable => {
+                    BackgroundPaneExitReason::StatusUnavailable
+                }
+                TerminalExitReason::WatcherDisconnected => {
+                    BackgroundPaneExitReason::WatcherDisconnected
+                }
+                TerminalExitReason::BackendShutdown => BackgroundPaneExitReason::BackendShutdown,
+                TerminalExitReason::ExitedBeforeInput => {
+                    BackgroundPaneExitReason::ExitedBeforeInput
+                }
+                TerminalExitReason::ForegroundCommand => {
+                    BackgroundPaneExitReason::ForegroundCommand
+                }
+            },
+            exit_code: exit.exit_code,
+            child_pid: exit.child_pid,
+            input_sent: exit.input_sent,
+            foreground_is_shell: exit.foreground_is_shell,
+            foreground_command: exit
+                .foreground_command
+                .as_deref()
+                .filter(|command| {
+                    !command.is_empty()
+                        && command.len() <= 64
+                        && command.chars().all(|character| {
+                            character.is_ascii_alphanumeric()
+                                || matches!(character, '-' | '_' | '.')
+                        })
+                })
+                .map(ToOwned::to_owned),
+        })
+    }
+
+    pub(crate) fn reason_text(&self) -> String {
+        let mut text = match self.reason {
+            BackgroundPaneExitReason::StatusUnavailable => {
+                "the child exited but its exit status was unavailable".to_owned()
+            }
+            BackgroundPaneExitReason::WatcherDisconnected => {
+                "the child watcher disconnected before reporting an exit status".to_owned()
+            }
+            BackgroundPaneExitReason::BackendShutdown => {
+                "the terminal backend shut down unexpectedly".to_owned()
+            }
+            BackgroundPaneExitReason::ExitedBeforeInput => {
+                "the shell exited before receiving user input".to_owned()
+            }
+            BackgroundPaneExitReason::ForegroundCommand => self
+                .foreground_command
+                .as_deref()
+                .map(|command| format!("the shell exited while {command:?} was foreground"))
+                .unwrap_or_else(|| "the shell exited while a command was foreground".to_owned()),
+        };
+        if let Some(code) = self.exit_code {
+            text.push_str(&format!(" (exit code {code})"));
+        }
+        if let Some(pid) = self.child_pid {
+            text.push_str(&format!(" [child PID {pid}]"));
+        }
+        text
+    }
 }
 
 impl std::fmt::Display for BackgroundPaneState {
@@ -568,6 +682,9 @@ pub(crate) fn print_session_catalogs(json: bool) -> Result<()> {
                         "    directory: {}",
                         display_text(&directory.to_string_lossy())
                     );
+                }
+                if let Some(exit) = pane.exit {
+                    println!("    exit: {}", display_text(&exit.reason_text()));
                 }
             }
         }

@@ -16,7 +16,8 @@ for active development.
 - Automatically detected shells, including Homebrew-installed shells on
   macOS and Linux, plus first-class WSL/MSYS2 profiles with working directory
   tracking
-- Detachable background sessions that can survive after the last window closes
+- Detachable background sessions that can survive after the last window closes,
+  with retained diagnostics for unexpected terminal exits
 - Optional compact mode moves tabs into the title bar, keeps Menu, Profile,
   Broadcast, and Silent available, and preserves responsive tab sizing
 - Open paths or the complete pane scrollback in `$EDITOR`, with built-in vi as

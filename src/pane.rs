@@ -554,6 +554,8 @@ pub(crate) struct TerminalPane {
     pub(crate) terminal: Option<Entity<Terminal>>,
     pub(crate) view: Option<Entity<TerminalView>>,
     pub(crate) error: Option<String>,
+    /// Sanitized metadata for an unexpected interactive-terminal exit.
+    pub(crate) exit: Option<BackgroundPaneExit>,
     /// Set when the original interactive shell has exited while stacked
     /// entries are still retaining this pane's region.
     pub(crate) base_exited: bool,
@@ -894,6 +896,7 @@ impl TerminalPane {
             terminal: None,
             view: None,
             error: None,
+            exit: None,
             base_exited: false,
             wsl_cwd_file: None,
             pending_command: None,

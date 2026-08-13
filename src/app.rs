@@ -182,8 +182,9 @@ fn adjacent_application_menu_index(
 fn background_authentication_for_close(
     policy: &TabClosePolicy,
     background_if_pinned: bool,
+    failed_pane: bool,
 ) -> Option<Option<SessionAuthentication>> {
-    if background_if_pinned {
+    if background_if_pinned && !failed_pane {
         policy.background_authentication()
     } else {
         None
@@ -814,9 +815,14 @@ impl Zetta {
         }
         let tab_id = self.tabs[index].id;
         self.cancel_tab_search_for_tab(tab_id, cx);
+        let has_failed_pane = self.tabs[index]
+            .panes
+            .iter()
+            .any(|pane| pane.exit.is_some());
         let background_authentication = background_authentication_for_close(
             &self.tabs[index].close_policy,
             background_if_pinned,
+            has_failed_pane,
         );
         if let Some(authentication) = background_authentication {
             self.move_tab_to_background(index, authentication, cx);
@@ -880,6 +886,91 @@ impl Zetta {
         self.close_pane_with_policy(tab_id, pane_id, false, window, cx);
     }
 
+    /// Retains an interactive terminal whose exit cannot be trusted as an
+    /// ordinary user close. The terminal entity is kept for reconnect, while
+    /// its view is replaced by the sanitized diagnostic pane.
+    pub(crate) fn retain_unexpected_terminal_exit(
+        &mut self,
+        tab_id: u64,
+        pane_id: u64,
+        exit: &TerminalExited,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(exit_info) = BackgroundPaneExit::from_terminal(exit) else {
+            return false;
+        };
+        let mut profile_name = None;
+        let mut terminal = None;
+        let mut updated = false;
+
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+            if let Some(pane) = tab.pane_mut(pane_id)
+                && pane.exit.is_none()
+            {
+                profile_name = Some(pane.profile.name.clone());
+                terminal = pane.terminal.clone();
+                pane.view = None;
+                pane.error = Some(exit_info.reason_text());
+                pane.exit = Some(exit_info.clone());
+                pane.pending_command = None;
+                updated = true;
+            }
+        } else if let Some(tab) = self
+            .background_sessions
+            .iter_mut()
+            .find(|tab| tab.id == tab_id)
+            && let Some(pane) = tab.pane_mut(pane_id)
+            && pane.exit.is_none()
+        {
+            profile_name = Some(pane.profile.name.clone());
+            terminal = pane.terminal.clone();
+            pane.view = None;
+            pane.error = Some(exit_info.reason_text());
+            pane.exit = Some(exit_info.clone());
+            pane.pending_command = None;
+            updated = true;
+        }
+
+        if !updated {
+            return false;
+        }
+
+        if let Some(terminal) = terminal {
+            terminal.update(cx, |terminal, cx| terminal.set_ui_visible(false, cx));
+        }
+        let profile_name = profile_name
+            .as_deref()
+            .map(Self::sanitize_exit_context)
+            .unwrap_or_else(|| "<unknown>".to_owned());
+        log::warn!(
+            "unexpected terminal exit: profile={:?} pane_id={} session_id={} child_pid={:?} source={:?} exit_code={:?} input_sent={} foreground_command={:?}",
+            profile_name,
+            pane_id,
+            tab_id,
+            exit.child_pid,
+            exit.source,
+            exit.exit_code,
+            exit.input_sent,
+            exit_info.foreground_command,
+        );
+        cx.notify();
+        true
+    }
+
+    fn sanitize_exit_context(value: &str) -> String {
+        let mut sanitized = value
+            .chars()
+            .filter(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | ' ')
+            })
+            .take(64)
+            .collect::<String>();
+        if sanitized.trim().is_empty() {
+            sanitized = "<unnamed>".to_owned();
+        }
+        sanitized
+    }
+
     /// A host shell can exit while command PTYs in its stack are still alive.
     /// Keep the host region and those entries in that case; the base entry is
     /// marked as exited and selection moves to the first stacked entry when
@@ -906,6 +997,7 @@ impl Zetta {
         pane.terminal = None;
         pane.view = None;
         pane.error = None;
+        pane.exit = None;
         pane.base_exited = true;
         pane.pending_command = None;
         pane.stack.select_after_base_exit();
@@ -1008,9 +1100,10 @@ impl Zetta {
             .into_iter()
             .flat_map(|tab| {
                 tab.panes.iter().filter_map(|pane| {
-                    tab.pane_is_visible(pane.id)
-                        .then(|| pane.selected_terminal())
-                        .flatten()
+                    (tab.pane_is_visible(pane.id)
+                        && (!pane.stack.selected_is_base() || pane.exit.is_none()))
+                    .then(|| pane.selected_terminal())
+                    .flatten()
                 })
             })
             .collect::<Vec<_>>();
@@ -1717,6 +1810,7 @@ impl Zetta {
             let _old_terminal = pane.terminal.take();
             pane.view = None;
             pane.error = None;
+            pane.exit = None;
             pane.base_exited = false;
             pane.pending_command = None;
             pane.stack = PaneStack::default();
@@ -1852,6 +1946,7 @@ impl Zetta {
         let _old_terminal = pane.terminal.take();
         pane.view = None;
         pane.error = None;
+        pane.exit = None;
         pane.base_exited = false;
         pane.pending_command = None;
         pane.stack = PaneStack::default();

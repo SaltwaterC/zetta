@@ -93,7 +93,13 @@ pub trait EventedReadWrite {
 #[derive(Debug, PartialEq, Eq)]
 pub enum ChildEvent {
     /// Indicates the child has exited.
-    Exited(Option<ExitStatus>),
+    Exited(ExitStatus),
+    /// The child has exited, but the operating system did not provide a
+    /// usable exit status.
+    ExitStatusUnavailable,
+    /// The child watcher stopped communicating before the exit status could
+    /// be observed.
+    WatcherDisconnected,
 }
 
 /// A pseudoterminal (or PTY).

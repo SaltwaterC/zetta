@@ -6,7 +6,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::IntoRawHandle;
 use std::{mem, ptr};
 
-use windows_sys::Win32::Foundation::{HANDLE, S_OK};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, S_OK};
 use windows_sys::Win32::System::Console::{
     COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole,
 };
@@ -237,7 +237,14 @@ pub fn new(config: &Options, window_size: WindowSize) -> Result<Pty> {
     let conin = UnblockedWriter::new(conin, PIPE_CAPACITY);
     let conout = UnblockedReader::new(conout, PIPE_CAPACITY);
 
-    let child_watcher = ChildExitWatcher::new(proc_info.hProcess)?;
+    // `ChildExitWatcher` takes ownership of the process handle. The thread
+    // handle is not needed after CreateProcessW returns and must be closed
+    // independently.
+    let child_watcher = ChildExitWatcher::new(proc_info.hProcess);
+    unsafe {
+        CloseHandle(proc_info.hThread);
+    }
+    let child_watcher = child_watcher?;
     let conpty = Conpty { handle: pty_handle as HPCON, api };
 
     Ok(Pty::new(conpty, conout, conin, child_watcher))

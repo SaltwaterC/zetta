@@ -117,11 +117,17 @@ impl EventedReadWrite for Pty {
 
 impl EventedPty for Pty {
     fn next_child_event(&mut self) -> Option<ChildEvent> {
-        match self.child_watcher.event_rx().try_recv() {
-            Ok(ev) => Some(ev),
-            Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Disconnected) => Some(ChildEvent::Exited(None)),
-        }
+        child_event_from_recv(self.child_watcher.event_rx().try_recv())
+    }
+}
+
+fn child_event_from_recv(
+    result: std::result::Result<ChildEvent, TryRecvError>,
+) -> Option<ChildEvent> {
+    match result {
+        Ok(event) => Some(event),
+        Err(TryRecvError::Empty) => None,
+        Err(TryRecvError::Disconnected) => Some(ChildEvent::WatcherDisconnected),
     }
 }
 
@@ -188,7 +194,17 @@ pub fn win32_string<S: AsRef<OsStr> + ?Sized>(value: &S) -> Vec<u16> {
 #[cfg(test)]
 mod test {
     use crate::tty::windows::{cmdline, push_escaped_arg};
-    use crate::tty::{Options, Shell};
+    use crate::tty::{ChildEvent, Options, Shell};
+    use std::sync::mpsc::TryRecvError;
+
+    #[test]
+    fn disconnected_child_watcher_is_classified() {
+        assert_eq!(
+            super::child_event_from_recv(Err(TryRecvError::Disconnected)),
+            Some(ChildEvent::WatcherDisconnected)
+        );
+        assert_eq!(super::child_event_from_recv(Err(TryRecvError::Empty)), None);
+    }
 
     #[test]
     fn test_escape() {

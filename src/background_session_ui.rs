@@ -524,14 +524,18 @@ impl Zetta {
             .panes
             .iter()
             .flat_map(|pane| {
-                let base = pane.terminal.clone().map(|terminal| {
-                    (
-                        pane.id,
-                        None,
-                        terminal,
-                        resolve_profile_theme(&pane.profile, cx),
-                    )
-                });
+                let base = pane
+                    .terminal
+                    .clone()
+                    .filter(|_| pane.exit.is_none())
+                    .map(|terminal| {
+                        (
+                            pane.id,
+                            None,
+                            terminal,
+                            resolve_profile_theme(&pane.profile, cx),
+                        )
+                    });
                 let stacked = pane.stack.entries.iter().filter_map(|entry| {
                     Some((
                         pane.id,
@@ -635,6 +639,10 @@ impl Zetta {
                     details.push_str(" · ");
                     details.push_str(&applications.join(", "));
                 }
+                if let Some(exit) = session.panes.iter().find_map(|pane| pane.exit.as_ref()) {
+                    details.push_str(" · failed: ");
+                    details.push_str(&exit.reason_text());
+                }
                 (session.id, session.title.clone(), details)
             })
             .collect()
@@ -653,6 +661,12 @@ impl Zetta {
         cx.subscribe(
             &terminal,
             move |this, _, event: &TerminalEvent, cx| match event {
+                TerminalEvent::TerminalExited(exit)
+                    if exit.is_unexpected()
+                        && this.retain_unexpected_terminal_exit(tab_id, pane_id, exit, cx) =>
+                {
+                    this.publish_background_session_catalog(cx);
+                }
                 event if terminal_event_requires_worktree_detection(event) => {
                     this.schedule_worktree_detection_for_pane(tab_id, pane_id, cx);
                     this.publish_background_session_catalog(cx);
@@ -849,7 +863,7 @@ impl Zetta {
                     })
                     .unwrap_or_default();
                 let working_directory = pane.working_directory(cx);
-                let state = if pane.error.is_some() {
+                let state = if pane.error.is_some() || pane.exit.is_some() {
                     BackgroundPaneState::Failed
                 } else if pane.terminal.is_some() {
                     BackgroundPaneState::Running
@@ -889,6 +903,7 @@ impl Zetta {
                     terminal_title,
                     working_directory,
                     state,
+                    exit: pane.exit.clone(),
                 }
             })
             .collect();
@@ -993,6 +1008,7 @@ impl Zetta {
         {
             pane.view = Some(view);
             pane.error = None;
+            pane.exit = None;
             pane.base_exited = false;
         }
         self.schedule_worktree_detection_for_pane(tab_id, pane_id, cx);

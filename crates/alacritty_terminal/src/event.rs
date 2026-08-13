@@ -61,6 +61,15 @@ pub enum Event {
 
     /// Child process exited.
     ChildExit(ExitStatus),
+
+    /// The child exited, but its exit status was unavailable.
+    ChildExitStatusUnavailable,
+
+    /// The child watcher disconnected before reporting a usable status.
+    ChildWatcherDisconnected,
+
+    /// The PTY event backend stopped because of an I/O or polling failure.
+    BackendShutdown,
 }
 
 impl Debug for Event {
@@ -82,6 +91,9 @@ impl Debug for Event {
             Event::Bell => write!(f, "Bell"),
             Event::Exit => write!(f, "Exit"),
             Event::ChildExit(status) => write!(f, "ChildExit({status:?})"),
+            Event::ChildExitStatusUnavailable => f.write_str("ChildExitStatusUnavailable"),
+            Event::ChildWatcherDisconnected => f.write_str("ChildWatcherDisconnected"),
+            Event::BackendShutdown => f.write_str("BackendShutdown"),
         }
     }
 }

@@ -431,8 +431,9 @@ fn exited_terminal_is_not_backgrounded_by_the_tab_pin() {
         authentication: None,
     };
 
-    assert!(background_authentication_for_close(&pinned, true).is_some());
-    assert!(background_authentication_for_close(&pinned, false).is_none());
+    assert!(background_authentication_for_close(&pinned, true, false).is_some());
+    assert!(background_authentication_for_close(&pinned, false, false).is_none());
+    assert!(background_authentication_for_close(&pinned, true, true).is_none());
 }
 
 #[test]

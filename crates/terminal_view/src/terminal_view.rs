@@ -1139,6 +1139,13 @@ fn subscribe_for_terminal_events(
                     cx.notify();
                 }
 
+                Event::TerminalExited(_) => {
+                    // Hosts such as Zetta decide whether an unexpected exit
+                    // should remain visible. The view must not translate this
+                    // diagnostic event into an item close.
+                    cx.notify();
+                }
+
                 Event::Bell => {
                     terminal_view.has_bell = true;
                     if let TerminalBell::System = TerminalSettings::get_global(cx).bell {

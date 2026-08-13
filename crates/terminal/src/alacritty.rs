@@ -1,5 +1,3 @@
-#[cfg(target_os = "windows")]
-use std::num::NonZeroU32;
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::{
@@ -17,6 +15,13 @@ use std::{
 
 mod hyperlinks;
 
+use crate::{
+    Cell, Color, Content, Cursor, CursorShape, Hyperlink, HyperlinkData, IndexedCell, Modes, Point,
+    PtyEvent, Range, RenderableCells, Scroll, Search, Selection, SelectionRange, SelectionSide,
+    SelectionType, TerminalBackendEvent, TerminalBounds, ViMotion,
+    pty_info::ProcessIdGetter,
+    terminal_settings::{AlternateScroll, CursorShape as SettingsCursorShape},
+};
 use alacritty_terminal::{
     event::{Event as AlacTermEvent, EventListener, Notify, WindowSize},
     event_loop::{EventLoop, Msg, Notifier},
@@ -43,16 +48,6 @@ use anyhow::{Context as _, Result};
 use futures::channel::mpsc::UnboundedSender;
 use util::paths::PathStyle;
 use vte::ansi::Handler;
-#[cfg(target_os = "windows")]
-use windows::Win32::{Foundation::HANDLE, System::Threading::GetProcessId};
-
-use crate::{
-    Cell, Color, Content, Cursor, CursorShape, Hyperlink, HyperlinkData, IndexedCell, Modes, Point,
-    PtyEvent, Range, RenderableCells, Scroll, Search, Selection, SelectionRange, SelectionSide,
-    SelectionType, TerminalBackendEvent, TerminalBounds, ViMotion,
-    pty_info::ProcessIdGetter,
-    terminal_settings::{AlternateScroll, CursorShape as SettingsCursorShape},
-};
 
 pub(super) use hyperlinks::{HyperlinkMatch, RegexSearches};
 
@@ -114,12 +109,8 @@ impl From<&AlacrittyPty> for ProcessIdGetter {
 impl From<&AlacrittyPty> for ProcessIdGetter {
     fn from(pty: &AlacrittyPty) -> Self {
         let child = pty.child_watcher();
-        let handle = child.raw_handle();
-        let fallback_pid = child.pid().unwrap_or_else(|| unsafe {
-            NonZeroU32::new_unchecked(GetProcessId(HANDLE(handle as _)))
-        });
-
-        Self::new(handle as i32, u32::from(fallback_pid))
+        let pid = child.pid().map(|pid| pid.get());
+        Self::new(pid, pid.unwrap_or_default())
     }
 }
 
@@ -380,6 +371,9 @@ impl From<AlacTermEvent> for TerminalBackendEvent {
             AlacTermEvent::Bell => Self::Bell,
             AlacTermEvent::Exit => Self::Exit,
             AlacTermEvent::ChildExit(status) => Self::ChildExit(status),
+            AlacTermEvent::ChildExitStatusUnavailable => Self::ChildExitStatusUnavailable,
+            AlacTermEvent::ChildWatcherDisconnected => Self::ChildWatcherDisconnected,
+            AlacTermEvent::BackendShutdown => Self::BackendShutdown,
         }
     }
 }

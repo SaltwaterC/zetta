@@ -265,6 +265,16 @@ impl Zetta {
                             window,
                             move |this, _, event: &TerminalEvent, window, cx| {
                                 match event {
+                                    TerminalEvent::TerminalExited(exit)
+                                        if exit.is_unexpected()
+                                            && this.retain_unexpected_terminal_exit(
+                                                tab_id, pane_id, exit, cx,
+                                            ) =>
+                                    {
+                                        this.publish_background_session_catalog(cx);
+                                        this.sync_visible_terminals(cx);
+                                        this.focus_active(window, cx);
+                                    }
                                     TerminalEvent::ResizeRequested { rows, columns } => {
                                         this.resize_pane_to(
                                             tab_id,
@@ -359,6 +369,7 @@ impl Zetta {
                             pane.view = Some(view.clone());
                             pane.base_exited = false;
                             pane.error = None;
+                            pane.exit = None;
                             if let Some(command) = pane.pending_command.take() {
                                 view.update(cx, |view, cx| {
                                     view.apply_input(

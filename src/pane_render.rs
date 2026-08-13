@@ -55,13 +55,17 @@ impl Zetta {
         let selected = pane.stack.selected;
         let mut rows = stacked_rows_container(terminal_background);
 
-        if !pane.base_exited && !matches!(selected, PaneStackSelection::Base) {
+        if (!pane.base_exited || pane.exit.is_some())
+            && !matches!(selected, PaneStackSelection::Base)
+        {
             rows = rows.child(self.render_stacked_row(
                 tab,
                 pane,
                 PaneStackSelection::Base,
                 "Interactive shell".to_owned(),
-                if pane.base_exited {
+                if pane.exit.is_some() {
+                    "failed".to_owned()
+                } else if pane.base_exited {
                     "exited".to_owned()
                 } else {
                     "running".to_owned()
@@ -380,14 +384,21 @@ impl Zetta {
                             )
                             .into_any_element()
                     }
-                    (_, Some(error)) => div()
-                        .size_full()
-                        .p_4()
-                        .bg(colors.editor_background)
-                        .text_color(error_color)
-                        .child("Unable to start command")
-                        .child(div().mt_2().text_sm().child(error.clone()))
-                        .into_any_element(),
+                    (_, Some(error)) => {
+                        let heading = pane
+                            .exit
+                            .as_ref()
+                            .map(|_| "Terminal exited unexpectedly")
+                            .unwrap_or("Unable to start command");
+                        div()
+                            .size_full()
+                            .p_4()
+                            .bg(colors.editor_background)
+                            .text_color(error_color)
+                            .child(heading)
+                            .child(div().mt_2().text_sm().child(error.clone()))
+                            .into_any_element()
+                    }
                     (None, _) if pane.base_exited && pane.stack.selected_is_base() => div()
                         .size_full()
                         .flex()
