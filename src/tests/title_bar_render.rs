@@ -304,3 +304,58 @@ fn tenth_profile_shortcut_alias_uses_zero() {
     assert!(inner.modifiers.shift);
     assert!(!inner.modifiers.platform);
 }
+
+/// The chrome renders inside a cached view, so `Zetta::render` has to state its
+/// height rather than let layout measure it. This lays out the same rows the
+/// chrome is built from and checks the number matches what they actually
+/// occupy — the first version added the tab-bar row's borders on top of its
+/// height and pushed every pane down by two pixels, because layout is
+/// border-box and the borders were already inside it.
+#[gpui::test]
+fn title_bar_chrome_height_matches_the_rows_it_covers(cx: &mut gpui::TestAppContext) {
+    struct ChromeRows {
+        compact_mode: bool,
+        title_bar_height: Pixels,
+    }
+
+    impl Render for ChromeRows {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let tab_bar = tab_bar_row_height(self.compact_mode, self.title_bar_height)
+                .when(!self.compact_mode, |row| row.border_t_1().border_b_1());
+            // The rows sit in a column that takes its natural height, the way
+            // the chrome does above the tab body, rather than stretching to
+            // fill the window as a root view would.
+            div().size_full().flex().flex_col().child(
+                div()
+                    .w_full()
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .debug_selector(|| "chrome".to_owned())
+                    .child(div().w_full().h(self.title_bar_height))
+                    // Compact mode folds the tab bar into the title bar's row.
+                    .when(!self.compact_mode, |column| column.child(tab_bar)),
+            )
+        }
+    }
+
+    for compact_mode in [false, true] {
+        let (_view, cx) = cx.add_window_view(move |window, _| ChromeRows {
+            compact_mode,
+            title_bar_height: platform_title_bar_height(window),
+        });
+        cx.run_until_parked();
+
+        let (title_bar_height, rem_size) =
+            cx.update(|window, _| (platform_title_bar_height(window), window.rem_size()));
+        assert_eq!(
+            cx.debug_bounds("chrome").map(|bounds| bounds.size.height),
+            Some(title_bar_chrome_height(
+                compact_mode,
+                title_bar_height,
+                rem_size
+            )),
+            "compact_mode={compact_mode}"
+        );
+    }
+}

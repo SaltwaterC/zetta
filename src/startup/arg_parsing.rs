@@ -59,6 +59,7 @@ pub(crate) enum StartupMode {
     },
     Vi(Vec<String>),
     TerminalSparseUpdateWorkload,
+    TerminalAltScreenScrollWorkload,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,8 +87,10 @@ pub(crate) struct StartupArgs {
     pub(crate) profile_report: Option<PathBuf>,
     pub(crate) profile_duration: Option<Duration>,
     pub(crate) profile_pane_stress: bool,
-    pub(crate) profile_background_stress: bool,
-    pub(crate) profile_sparse_updates: bool,
+    /// The producer pattern the benchmark drives the renderer with. One
+    /// pattern per run, so the mutually exclusive workload flags cannot be
+    /// combined by construction.
+    pub(crate) profile_workload: PerformanceWorkload,
     pub(crate) profile_external_terminal: bool,
     pub(crate) tftp_command: Option<TftpCommand>,
 }
@@ -195,8 +198,7 @@ pub(crate) fn parse_attention_args(args: &[OsString]) -> Result<StartupArgs> {
         profile_report: None,
         profile_duration: None,
         profile_pane_stress: false,
-        profile_background_stress: false,
-        profile_sparse_updates: false,
+        profile_workload: PerformanceWorkload::Standard,
         profile_external_terminal: false,
         tftp_command: None,
     })
@@ -449,8 +451,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,
-            profile_background_stress: false,
-            profile_sparse_updates: false,
+            profile_workload: PerformanceWorkload::Standard,
             profile_external_terminal: false,
             tftp_command: None,
         });
@@ -467,8 +468,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,
-            profile_background_stress: false,
-            profile_sparse_updates: false,
+            profile_workload: PerformanceWorkload::Standard,
             profile_external_terminal: false,
             tftp_command: None,
         });
@@ -487,8 +487,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,
-            profile_background_stress: false,
-            profile_sparse_updates: false,
+            profile_workload: PerformanceWorkload::Standard,
             profile_external_terminal: false,
             tftp_command: None,
         });
@@ -508,8 +507,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,
-            profile_background_stress: false,
-            profile_sparse_updates: false,
+            profile_workload: PerformanceWorkload::Standard,
             profile_external_terminal: false,
             tftp_command: None,
         });
@@ -529,8 +527,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,
-            profile_background_stress: false,
-            profile_sparse_updates: false,
+            profile_workload: PerformanceWorkload::Standard,
             profile_external_terminal: false,
             tftp_command: None,
         });
@@ -560,8 +557,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,
-            profile_background_stress: false,
-            profile_sparse_updates: false,
+            profile_workload: PerformanceWorkload::Standard,
             profile_external_terminal: false,
             tftp_command: None,
         });
@@ -581,8 +577,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,
-            profile_background_stress: false,
-            profile_sparse_updates: false,
+            profile_workload: PerformanceWorkload::Standard,
             profile_external_terminal: false,
             tftp_command: None,
         });
@@ -660,8 +655,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,
-            profile_background_stress: false,
-            profile_sparse_updates: false,
+            profile_workload: PerformanceWorkload::Standard,
             profile_external_terminal: false,
             tftp_command: None,
         });
@@ -735,8 +729,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,
-            profile_background_stress: false,
-            profile_sparse_updates: false,
+            profile_workload: PerformanceWorkload::Standard,
             profile_external_terminal: false,
             tftp_command: None,
         });
@@ -797,8 +790,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 profile_report: None,
                 profile_duration: None,
                 profile_pane_stress: false,
-                profile_background_stress: false,
-                profile_sparse_updates: false,
+                profile_workload: PerformanceWorkload::Standard,
                 profile_external_terminal: false,
                 tftp_command: None,
             });
@@ -827,8 +819,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,
-            profile_background_stress: false,
-            profile_sparse_updates: false,
+            profile_workload: PerformanceWorkload::Standard,
             profile_external_terminal: false,
             tftp_command: None,
         });
@@ -876,8 +867,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,
-            profile_background_stress: false,
-            profile_sparse_updates: false,
+            profile_workload: PerformanceWorkload::Standard,
             profile_external_terminal: false,
             tftp_command: None,
         });
@@ -899,8 +889,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,
-            profile_background_stress: false,
-            profile_sparse_updates: false,
+            profile_workload: PerformanceWorkload::Standard,
             profile_external_terminal: false,
             tftp_command: None,
         });
@@ -930,8 +919,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 profile_report: None,
                 profile_duration: None,
                 profile_pane_stress: false,
-                profile_background_stress: false,
-                profile_sparse_updates: false,
+                profile_workload: PerformanceWorkload::Standard,
                 profile_external_terminal: false,
                 tftp_command: None,
             });
@@ -950,8 +938,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,
-            profile_background_stress: false,
-            profile_sparse_updates: false,
+            profile_workload: PerformanceWorkload::Standard,
             profile_external_terminal: false,
             tftp_command: None,
         });
@@ -981,8 +968,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 profile_report: None,
                 profile_duration: None,
                 profile_pane_stress: false,
-                profile_background_stress: false,
-                profile_sparse_updates: false,
+                profile_workload: PerformanceWorkload::Standard,
                 profile_external_terminal: false,
                 tftp_command: None,
             });
@@ -1012,8 +998,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 profile_report: None,
                 profile_duration: None,
                 profile_pane_stress: false,
-                profile_background_stress: false,
-                profile_sparse_updates: false,
+                profile_workload: PerformanceWorkload::Standard,
                 profile_external_terminal: false,
                 tftp_command: None,
             });
@@ -1050,8 +1035,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                     profile_report: None,
                     profile_duration: None,
                     profile_pane_stress: false,
-                    profile_background_stress: false,
-                    profile_sparse_updates: false,
+                    profile_workload: PerformanceWorkload::Standard,
                     profile_external_terminal: false,
                     tftp_command: None,
                 });
@@ -1077,8 +1061,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,
-            profile_background_stress: false,
-            profile_sparse_updates: false,
+            profile_workload: PerformanceWorkload::Standard,
             profile_external_terminal: false,
             tftp_command: Some(parse_tftp_args(tftp_arguments.iter().cloned())?),
         });
@@ -1108,8 +1091,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 profile_report: None,
                 profile_duration: None,
                 profile_pane_stress: false,
-                profile_background_stress: false,
-                profile_sparse_updates: false,
+                profile_workload: PerformanceWorkload::Standard,
                 profile_external_terminal: false,
                 tftp_command: None,
             });
@@ -1141,8 +1123,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 profile_report: None,
                 profile_duration: None,
                 profile_pane_stress: false,
-                profile_background_stress: false,
-                profile_sparse_updates: false,
+                profile_workload: PerformanceWorkload::Standard,
                 profile_external_terminal: false,
                 tftp_command: None,
             });
@@ -1177,8 +1158,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 profile_report: None,
                 profile_duration: None,
                 profile_pane_stress: false,
-                profile_background_stress: false,
-                profile_sparse_updates: false,
+                profile_workload: PerformanceWorkload::Standard,
                 profile_external_terminal: false,
                 tftp_command: None,
             });
@@ -1297,11 +1277,28 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
         profile_report: None,
         profile_duration: None,
         profile_pane_stress: false,
-        profile_background_stress: false,
-        profile_sparse_updates: false,
+        profile_workload: PerformanceWorkload::Standard,
         profile_external_terminal: false,
         tftp_command: None,
     })
+}
+
+/// Records which producer pattern the benchmark should run. The workload flags
+/// select one pattern between them, so this remembers which flag asked for
+/// which and rejects a second, different request rather than letting the last
+/// flag on the command line silently win.
+fn select_benchmark_workload(
+    selected: &mut Option<(String, PerformanceWorkload)>,
+    flag: &str,
+    workload: PerformanceWorkload,
+) -> Result<()> {
+    if let Some((selected_flag, selected_workload)) = selected
+        && *selected_workload != workload
+    {
+        anyhow::bail!("{selected_flag} cannot be combined with {flag}");
+    }
+    *selected = Some((flag.to_owned(), workload));
+    Ok(())
 }
 
 fn parse_benchmark_args(arguments: &[OsString]) -> Result<StartupArgs> {
@@ -1309,19 +1306,34 @@ fn parse_benchmark_args(arguments: &[OsString]) -> Result<StartupArgs> {
     let mut profile_report = None;
     let mut profile_duration = None;
     let mut profile_pane_stress = false;
-    let mut profile_background_stress = false;
-    let mut profile_sparse_updates = false;
+    let mut profile_workload = None;
     let mut profile_external_terminal = false;
     let mut args = arguments.iter();
     while let Some(argument) = args.next() {
         match argument.to_string_lossy().as_ref() {
             "--profile-pane-stress" | "-s" => profile_pane_stress = true,
-            "--profile-background-stress" | "-b" => profile_background_stress = true,
-            "--profile-sparse-updates" | "-u" => profile_sparse_updates = true,
+            flag @ ("--profile-background-stress" | "-b") => select_benchmark_workload(
+                &mut profile_workload,
+                flag,
+                PerformanceWorkload::CheckerboardBackground,
+            )?,
+            flag @ ("--profile-sparse-updates" | "-u") => select_benchmark_workload(
+                &mut profile_workload,
+                flag,
+                PerformanceWorkload::SparseUpdates,
+            )?,
+            flag @ ("--profile-alt-screen-scroll" | "-a") => select_benchmark_workload(
+                &mut profile_workload,
+                flag,
+                PerformanceWorkload::AltScreenScroll,
+            )?,
             "--profile-external-terminal" | "-x" => profile_external_terminal = true,
             "--terminal-render-workload" => mode = StartupMode::TerminalRenderingWorkload,
             "--terminal-checkerboard-workload" => mode = StartupMode::TerminalCheckerboardWorkload,
             "--terminal-sparse-update-workload" => mode = StartupMode::TerminalSparseUpdateWorkload,
+            "--terminal-alt-screen-scroll-workload" => {
+                mode = StartupMode::TerminalAltScreenScrollWorkload
+            }
             "--profile-report" | "-r" => {
                 profile_report = Some(
                     args.next()
@@ -1344,7 +1356,7 @@ fn parse_benchmark_args(arguments: &[OsString]) -> Result<StartupArgs> {
             }
             "--help" | "-h" => {
                 println!(
-                    "Benchmark terminal rendering\n\nUsage: zetta benchmark [OPTIONS]\n\nOptions:\n  -s, --profile-pane-stress           Use four visible producer panes\n  -b, --profile-background-stress     Render alternating cell backgrounds\n  -u, --profile-sparse-updates        Update a dense terminal at 40 Hz\n  -x, --profile-external-terminal     Run the workload in the current terminal\n  -r, --profile-report PATH           Write a profiling report\n  -d, --profile-duration SECONDS      Set the profiling duration\n  -h, --help                          Print help"
+                    "Benchmark terminal rendering\n\nUsage: zetta benchmark [OPTIONS]\n\nThe workload options select one producer pattern and cannot be combined with\neach other. Without one, the standard text and line-drawing workload runs.\n\nOptions:\n  -s, --profile-pane-stress           Use four visible producer panes\n  -b, --profile-background-stress     Render alternating cell backgrounds\n  -u, --profile-sparse-updates        Update a dense terminal at 40 Hz\n  -a, --profile-alt-screen-scroll     Scroll a colourised diff on the alternate screen\n  -x, --profile-external-terminal     Run the workload in the current terminal\n  -r, --profile-report PATH           Write a profiling report\n  -d, --profile-duration SECONDS      Set the profiling duration\n  -h, --help                          Print help"
                 );
                 std::process::exit(0);
             }
@@ -1367,10 +1379,6 @@ fn parse_benchmark_args(arguments: &[OsString]) -> Result<StartupArgs> {
         profile_duration.is_none() || profile_report.is_some() || profile_external_terminal,
         "--profile-duration requires --profile-report or --profile-external-terminal"
     );
-    anyhow::ensure!(
-        !(profile_background_stress && profile_sparse_updates),
-        "--profile-background-stress and --profile-sparse-updates cannot be combined"
-    );
     if profile_report.is_some() && profile_duration.is_none() {
         profile_duration = Some(DEFAULT_PERFORMANCE_REPORT_DURATION);
     }
@@ -1385,8 +1393,9 @@ fn parse_benchmark_args(arguments: &[OsString]) -> Result<StartupArgs> {
         profile_report,
         profile_duration,
         profile_pane_stress,
-        profile_background_stress,
-        profile_sparse_updates,
+        profile_workload: profile_workload
+            .map(|(_, workload)| workload)
+            .unwrap_or_default(),
         profile_external_terminal,
         tftp_command: None,
     })

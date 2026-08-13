@@ -362,7 +362,9 @@ impl TerminalView {
                     view.blinking_terminal_enabled = *blinking;
                     view.update_blinking(window, cx);
                 }
-                Event::ResizeRequested { .. } => {}
+                // The view already repaints through `terminal_observer`; this is
+                // for the chrome outside it, which subscribes separately.
+                Event::ResizeRequested { .. } | Event::GridSizeChanged => {}
                 Event::TitleChanged => cx.emit(TerminalViewEvent::TitleChanged),
                 Event::CloseTerminal => cx.emit(TerminalViewEvent::Close),
                 Event::NewNavigationTarget(target) => {

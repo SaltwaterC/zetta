@@ -408,7 +408,7 @@ pub(crate) struct Zetta {
     pub(crate) multi_command_catalog: CompletionCatalog,
     pub(crate) multi_command_launches: BoundedLaunchQueue<QueuedTerminalLaunch>,
     /// Render boundaries created on first use; see `view_boundary`.
-    pub(crate) window_column_view: Option<Entity<ZettaSubview>>,
+    pub(crate) title_bar_chrome_view: Option<Entity<ZettaSubview>>,
     pub(crate) settings_surface_view: Option<Entity<ZettaSubview>>,
     pub(crate) tab_icon_picker_view: Option<Entity<ZettaSubview>>,
     pub(crate) settings_page_view: Option<Entity<ZettaSubview>>,
@@ -587,7 +587,7 @@ impl Zetta {
             multi_command_catalog: CompletionCatalog::default(),
             multi_command_launches: BoundedLaunchQueue::new(MAX_CONCURRENT_MULTI_COMMAND_SPAWNS),
             settings_focus: cx.focus_handle(),
-            window_column_view: None,
+            title_bar_chrome_view: None,
             settings_surface_view: None,
             tab_icon_picker_view: None,
             settings_page_view: None,

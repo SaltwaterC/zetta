@@ -522,7 +522,7 @@ _zetta_complete() {
             fi
             ;;
         benchmark)
-            _zetta_compgen '--terminal-render-workload --terminal-checkerboard-workload --terminal-sparse-update-workload --profile-report --profile-duration --profile-pane-stress --profile-background-stress --profile-sparse-updates --profile-external-terminal --help'
+            _zetta_compgen '--terminal-render-workload --terminal-checkerboard-workload --terminal-sparse-update-workload --terminal-alt-screen-scroll-workload --profile-report --profile-duration --profile-pane-stress --profile-background-stress --profile-sparse-updates --profile-alt-screen-scroll --profile-external-terminal --help'
             ;;
         benchmark-output)
             _zetta_compgen '--size --output-type --help'

@@ -106,11 +106,14 @@ cargo build --release
 target/release/zetta benchmark -x -d 10
 target/release/zetta benchmark -x -b -d 10
 target/release/zetta benchmark -x -u -d 10
+target/release/zetta benchmark -x -a -d 10
 ```
 
-The commands run the standard 240 Hz grid, changing checkerboard, and 40 Hz
-sparse-update workloads respectively. External mode requires an explicit
-duration and restores terminal colors and cursor visibility when it exits.
+The commands run the standard 240 Hz grid, changing checkerboard, 40 Hz
+sparse-update, and alternate-screen scroll workloads respectively. The workload
+options select one pattern between them and cannot be combined. External mode
+requires an explicit duration and restores terminal colors, cursor visibility,
+and the normal screen when it exits.
 
 Measure the hosting terminal emulator with the platform profiler or process
 monitor during each run. Zetta cannot collect another application's frame
@@ -242,6 +245,12 @@ the two workloads cannot be compared accidentally. The checkerboard is an
 intentionally adverse case: no adjacent cells share a color, so every visible
 colored cell requires its own paint quad.
 
+Because it emits the most primitives per frame of any workload, it is the one
+that exposes per-primitive costs in the scene. It is worth re-running after any
+change to how the terminal paints: it was the workload that surfaced both the
+bounds-tree insertion behind every unlayered quad and the wasted text run behind
+every background-only cell.
+
 ## Sparse-update workload
 
 Add `--profile-sparse-updates` or `-u` to populate a dense terminal once and
@@ -259,6 +268,29 @@ This models full-screen TUIs with an animated spinner or streaming status line.
 It exposes the cost of rebuilding and painting mostly unchanged terminal
 content without conflating that cost with high PTY throughput. Reports record
 `workload.pattern` as `sparse_updates` and `producer_hz` as `40`.
+
+## Alternate-screen scroll workload
+
+Add `--profile-alt-screen-scroll` or `-a` to scroll a colourised diff through
+the alternate screen, a line at a time, repainting every visible row on every
+producer frame:
+
+```sh
+cargo run --release -- \
+  benchmark \
+  -a \
+  --profile-report artifacts/zetta-alt-screen-scroll.json \
+  --profile-duration 10
+```
+
+This models `git diff` under a pager, which is the everyday case the plain-text
+workloads do not represent: the alternate screen is active, every row's content
+differs from the previous frame, and the rows carry the foreground colours,
+bold spans, and occasional background highlight that a real diff produces. That
+combination exercises the per-cell styling and text-run batching paths that the
+uncoloured standard workload barely touches, without the adverse
+every-cell-is-its-own-quad shape of the checkerboard. Reports record
+`workload.pattern` as `alt_screen_scroll`.
 
 ## Linux and Wayland diagnostics
 

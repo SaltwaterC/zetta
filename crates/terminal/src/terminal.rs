@@ -707,6 +707,11 @@ pub enum Event {
         rows: usize,
         columns: usize,
     },
+    /// The grid's dimensions changed, after a layout-driven resize or a font
+    /// size change. Distinct from [`Event::Wakeup`], which also fires for
+    /// ordinary output: this is for the chrome around the terminal, which
+    /// displays the grid size and must not repaint on every byte written.
+    GridSizeChanged,
     SelectionsChanged,
     NewNavigationTarget(Option<MaybeNavigationTarget>),
     Open(MaybeNavigationTarget),
@@ -2230,6 +2235,8 @@ impl Terminal {
                 }
 
                 if let Some(command) = reported_foreground_command_from_title(&title) {
+                    // Only the Windows startup-timing log below reads this.
+                    #[cfg(windows)]
                     let first_shell_marker = self.reported_shell_command.is_none();
                     self.reported_shell_command
                         .get_or_insert_with(|| command.clone());
@@ -2367,6 +2374,10 @@ impl Terminal {
                 let new_bounds = normalize_terminal_bounds(new_bounds);
                 trace!("Resizing: new_bounds={new_bounds:?}");
 
+                // Compare against the grid rather than `last_content`, which
+                // `set_size` already advanced when it queued this event.
+                let grid_size_changed = term.screen_lines() != new_bounds.num_lines()
+                    || term.columns() != new_bounds.num_columns();
                 self.last_content.terminal_bounds = new_bounds;
 
                 if let TerminalType::Pty { pty_tx, .. } = &self.terminal_type {
@@ -2376,6 +2387,9 @@ impl Terminal {
                 let reflow =
                     reflow && synchronous_reflow_is_bounded(term.history_size(), term.columns());
                 resize(term, new_bounds, reflow);
+                if grid_size_changed {
+                    cx.emit(Event::GridSizeChanged);
+                }
                 // If there are matches we need to emit a wake up event to
                 // invalidate the matches and recalculate their locations
                 // in the new terminal layout
@@ -2603,7 +2617,7 @@ impl Terminal {
         apply_config(&self.term, &self.term_config);
         let content = {
             let terminal = self.term.lock_unfair();
-            make_content(&terminal, &self.last_content)
+            make_content(&terminal, &mut self.last_content)
         };
         self.last_content = content;
         self.content_revision = self.content_revision.wrapping_add(1);
@@ -2977,7 +2991,7 @@ impl Terminal {
     fn clear_for_init_command(&mut self, cx: &mut Context<Self>) {
         let mut term = self.term.lock_unfair();
         clear_saved_screen(&mut term);
-        self.last_content = make_content(&term, &self.last_content);
+        self.last_content = make_content(&term, &mut self.last_content);
         self.content_revision = self.content_revision.wrapping_add(1);
         cx.emit(Event::Wakeup);
     }
@@ -3161,7 +3175,7 @@ impl Terminal {
         }
 
         if self.content_dirty {
-            self.last_content = make_content(&terminal, &self.last_content);
+            self.last_content = make_content(&terminal, &mut self.last_content);
             self.content_dirty = false;
             self.content_revision = self.content_revision.wrapping_add(1);
         }
@@ -5504,7 +5518,7 @@ mod tests {
 
         terminal.update(cx, |terminal, _cx| {
             let term_lock = terminal.term.lock();
-            terminal.last_content = make_content(&term_lock, &terminal.last_content);
+            terminal.last_content = make_content(&term_lock, &mut terminal.last_content);
             drop(term_lock);
 
             let terminal_bounds = TerminalBounds::new(
@@ -6371,6 +6385,86 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn grid_size_changes_are_reported_separately_from_output(cx: &mut TestAppContext) {
+        let builder = cx.update(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::Block,
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+        });
+        let window = cx.add_empty_window();
+        let terminal = window.new(|cx| builder.subscribe(cx));
+
+        let grid_size_changes = std::rc::Rc::new(std::cell::Cell::new(0_usize));
+        window
+            .update({
+                let grid_size_changes = grid_size_changes.clone();
+                let terminal = terminal.clone();
+                move |_, cx| {
+                    cx.subscribe(&terminal, move |_, event: &Event, _| {
+                        if matches!(event, Event::GridSizeChanged) {
+                            grid_size_changes.set(grid_size_changes.get() + 1);
+                        }
+                    })
+                }
+            })
+            .detach();
+
+        let base_bounds = TerminalBounds {
+            cell_width: Pixels::from(10.),
+            line_height: Pixels::from(10.),
+            bounds: bounds(
+                GpuiPoint::default(),
+                size(Pixels::from(100.), Pixels::from(100.)),
+            ),
+        };
+        window.update_window_entity(&terminal, |terminal, window, cx| {
+            terminal.set_size(base_bounds);
+            terminal.sync(window, cx);
+        });
+        grid_size_changes.set(0);
+
+        // Output must not report a size change. The chrome that listens for this
+        // renders inside a cached boundary, and reporting on output would put it
+        // back into every frame the terminal causes — the whole cost this event
+        // exists to avoid.
+        window.update_window_entity(&terminal, |terminal, window, cx| {
+            terminal.write_output(b"output", cx);
+            terminal.sync(window, cx);
+        });
+        assert_eq!(grid_size_changes.get(), 0, "output is not a size change");
+
+        // Neither is a resize too small to add or remove a row or column.
+        let mut pixel_only = base_bounds;
+        pixel_only.bounds.size.height = Pixels::from(101.);
+        window.update_window_entity(&terminal, |terminal, window, cx| {
+            terminal.set_size(pixel_only);
+            terminal.sync(window, cx);
+        });
+        assert_eq!(
+            grid_size_changes.get(),
+            0,
+            "a sub-cell resize leaves the reported grid size unchanged"
+        );
+
+        let mut grid_changed = base_bounds;
+        grid_changed.bounds.size.height = Pixels::from(140.);
+        window.update_window_entity(&terminal, |terminal, window, cx| {
+            terminal.set_size(grid_changed);
+            terminal.sync(window, cx);
+        });
+        assert_eq!(
+            grid_size_changes.get(),
+            1,
+            "a resize that changes the number of rows is reported once"
+        );
+    }
+
+    #[gpui::test]
     async fn test_layout_resize_can_disable_reflow_once(cx: &mut TestAppContext) {
         let builder = cx.update(|cx| {
             TerminalBuilder::new_display_only(
@@ -6644,7 +6738,7 @@ mod tests {
         // Get the content by directly accessing the term
         let content = terminal.update(cx, |terminal, _cx| {
             let term = terminal.term.lock_unfair();
-            make_content(&term, &terminal.last_content)
+            make_content(&term, &mut terminal.last_content)
         });
 
         // If LF is properly converted to CRLF, each line should start at column 0
@@ -6691,7 +6785,7 @@ mod tests {
         // Get the content by directly accessing the term
         let content = terminal.update(cx, |terminal, _cx| {
             let term = terminal.term.lock_unfair();
-            make_content(&term, &terminal.last_content)
+            make_content(&term, &mut terminal.last_content)
         });
 
         let cells = &content.cells;
@@ -6732,7 +6826,7 @@ mod tests {
         // Get the content by directly accessing the term
         let content = terminal.update(cx, |terminal, _cx| {
             let term = terminal.term.lock_unfair();
-            make_content(&term, &terminal.last_content)
+            make_content(&term, &mut terminal.last_content)
         });
 
         let cells = &content.cells;

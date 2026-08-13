@@ -275,7 +275,7 @@ $zettaCompletions = {
         'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'profile', 'splits', 'pane', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', 'wt', '--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme'
     } else {
         switch ($subcommand) {
-            'benchmark' { '--terminal-render-workload', '--terminal-checkerboard-workload', '--terminal-sparse-update-workload', '--profile-report', '--profile-duration', '--profile-pane-stress', '--profile-background-stress', '--profile-sparse-updates', '--profile-external-terminal', '--help' }
+            'benchmark' { '--terminal-render-workload', '--terminal-checkerboard-workload', '--terminal-sparse-update-workload', '--terminal-alt-screen-scroll-workload', '--profile-report', '--profile-duration', '--profile-pane-stress', '--profile-background-stress', '--profile-sparse-updates', '--profile-alt-screen-scroll', '--profile-external-terminal', '--help' }
             'benchmark-output' { '--size', '--output-type', '--help' }
             'terminal-size' { '--json', '--resize', '--columns', '--rows', '--help' }
             'edit' { '--delete-after', '--help' }

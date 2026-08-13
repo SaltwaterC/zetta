@@ -285,6 +285,11 @@ impl Zetta {
                                             cx,
                                         );
                                     }
+                                    // The title bar reports the active pane's grid size, and
+                                    // it renders inside a cached boundary that only a notify
+                                    // on `Zetta` busts. Terminal output must not reach here;
+                                    // only an actual change of the grid's dimensions does.
+                                    TerminalEvent::GridSizeChanged => cx.notify(),
                                     event if terminal_event_requires_worktree_detection(event) => {
                                         // A program can change the terminal's ordinary OSC
                                         // title without changing its process metadata. Treat it

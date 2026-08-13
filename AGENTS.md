@@ -50,7 +50,8 @@ and the process entry point. Put behavior in the module that owns it:
   render tree be cached and be the target of its own scroll/hover
   notifications; see "Render boundaries" below
 - `title_bar_render.rs`: title bar composition, its menus (application,
-  profile, reconnect), and the layout predicates the bar shares with the tab bar
+  profile, reconnect), the layout predicates the bar shares with the tab bar,
+  and `title_bar_chrome_height`, which sizes the cached chrome boundary
 - `tab_bar_render.rs`: the measured tab row, individual tabs, and the bar
   that hosts them
 - `tab_body_render.rs`: tab body composition (maximized-pane bar, minimized
@@ -226,27 +227,60 @@ which does two things: GPUI can cache the subtree with `Entity::cached`, and
 GPUI's interaction handlers notify *that* view rather than the root, because
 they notify `window.current_view()`.
 
-The current boundaries are the window column (title bar, tab bar, tab body —
-cached), the settings dialog and the tab icon picker (boundaries only), and the
-settings page inside the dialog (cached).
+The current boundaries are the title bar chrome (title bar plus, outside compact
+mode, the tab bar row — cached), the settings dialog and the tab icon picker
+(boundaries only), and the settings page inside the dialog (cached).
 
 When adding one:
 
+- **Cache a sibling of what changes, never an ancestor of it.** GPUI re-renders
+  a missing cached view's subtree with `Window::refreshing` set, and reuse
+  requires `!window.refreshing`, so a cache that misses suppresses every cache
+  below it. `Zetta::render` composes the window column directly for this reason:
+  wrapping it in a cache that terminal output always dirties both rebuilt the
+  chrome every frame *and* stopped the per-pane caches from ever hitting.
 - Invalidation is the observer in `ZettaSubview::new`: every `cx.notify()` on
   `Zetta` marks the subview dirty. Keep subviews rendering purely from `Zetta`
   state so that stays a complete contract. Descendants are GPUI's job —
   notifying a view marks its whole ancestor chain dirty, which is why terminal
-  output still repaints through the cached window column.
+  output still repaints through the pane it happened in.
+- State a cached boundary displays but does not own needs a route back to a
+  notify on `Zetta`. The title bar reports the active pane's grid size, which
+  the terminal owns; `Event::GridSizeChanged` exists to carry exactly that and
+  nothing else, because reporting it on ordinary output would put the chrome
+  back into every frame.
 - A cached view is laid out from the style passed to `cached`, not measured from
-  its contents, so that style has to give it a definite size. Position it from
-  the composing side: an `absolute` root inside a cached view has no containing
-  block to resolve against and collapses to its content size.
+  its contents, so that style has to give it a definite size — see
+  `title_bar_chrome_height`. Position it from the composing side: an `absolute`
+  root inside a cached view has no containing block to resolve against and
+  collapses to its content size.
 - Cache a boundary only when it can actually be reused. A cached view that
   misses pays an extra layout pass, which measurably costs more than it saves
   for whichever overlay the pointer is currently scrolling.
 
 The contract is pinned by `src/tests/view_boundary.rs`; extend it when adding a
 boundary whose invalidation or layout differs from the ones there.
+
+## Scene layers
+
+A primitive painted outside a scene layer has to work out its own paint order,
+which GPUI does by inserting its bounds into the frame's bounds tree
+(`Scene::insert_primitive` → `BoundsTree::insert`). That is a tree search
+against everything already inserted, so it is superlinear in the number of
+primitives a frame emits.
+
+Anything that paints many non-overlapping quads in a loop should paint them
+inside one `window.paint_layer(..)`, which gives them a single shared order for
+one insertion — see `paint_grid_layer` in `terminal_element.rs`. Ordering
+against everything else is unaffected as long as the layer's bounds cover the
+primitives, because later primitives that intersect the layer still sort above
+it.
+
+The terminal reached this the hard way: a screen where no two neighbouring cells
+share a background emitted one quad per cell, and `BoundsTree::insert` measured
+59-66% of the process's samples. Note also that `ShapedLine::paint` opens a
+layer per call, so avoid emitting one text run per cell — see
+`paints_only_background`.
 
 ## Performance profiling
 

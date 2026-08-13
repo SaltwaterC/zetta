@@ -885,11 +885,16 @@ pub(super) fn shrink_to_used(term: &mut Term<ZedListener>) {
     term.grid_mut().truncate();
 }
 
-pub(super) fn make_content(term: &Term<ZedListener>, last_content: &Content) -> Content {
+pub(super) fn make_content(term: &Term<ZedListener>, last_content: &mut Content) -> Content {
     let content = term.renderable_content();
 
-    let estimated_size = content.display_iter.size_hint().0;
-    let mut cells = Vec::with_capacity(estimated_size);
+    // Reuse the previous snapshot's buffer. A screenful is on the order of
+    // hundreds of kilobytes of cells and this runs on every frame the terminal
+    // changes, so allocating a fresh one each time is a large, pointless churn
+    // of the allocator.
+    let mut cells = mem::take(&mut last_content.cells);
+    cells.clear();
+    cells.reserve(content.display_iter.size_hint().0);
 
     cells.extend(content.display_iter.map(|ic| IndexedCell {
         point: terminal_point_from_alacritty(ic.point),

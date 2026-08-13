@@ -691,8 +691,7 @@ fn attention_subcommand_defaults_to_a_badge_without_notification() {
         profile_report: None,
         profile_duration: None,
         profile_pane_stress: false,
-        profile_background_stress: false,
-        profile_sparse_updates: false,
+        profile_workload: PerformanceWorkload::Standard,
         profile_external_terminal: false,
         tftp_command: None,
     }));
@@ -1337,8 +1336,7 @@ fn benchmark_subcommand_arguments_are_cross_platform() {
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,
-            profile_background_stress: false,
-            profile_sparse_updates: false,
+            profile_workload: PerformanceWorkload::Standard,
             profile_external_terminal: false,
             tftp_command: None,
         }
@@ -1360,8 +1358,7 @@ fn benchmark_subcommand_arguments_are_cross_platform() {
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,
-            profile_background_stress: false,
-            profile_sparse_updates: false,
+            profile_workload: PerformanceWorkload::Standard,
             profile_external_terminal: false,
             tftp_command: None,
         }
@@ -1577,7 +1574,10 @@ fn background_stress_is_a_benchmark_option() {
         OsString::from("--profile-background-stress"),
     ])
     .unwrap();
-    assert!(args.profile_background_stress);
+    assert_eq!(
+        args.profile_workload,
+        PerformanceWorkload::CheckerboardBackground
+    );
 
     assert!(parse_args_from([OsString::from("--profile-background-stress")]).is_err());
 }
@@ -1589,17 +1589,66 @@ fn sparse_updates_are_a_benchmark_option() {
         OsString::from("--profile-sparse-updates"),
     ])
     .unwrap();
-    assert!(args.profile_sparse_updates);
+    assert_eq!(args.profile_workload, PerformanceWorkload::SparseUpdates);
 
     assert!(parse_args_from([OsString::from("--profile-sparse-updates")]).is_err());
+}
 
-    let error = parse_args_from([
-        OsString::from("benchmark"),
-        OsString::from("--profile-background-stress"),
-        OsString::from("--profile-sparse-updates"),
-    ])
-    .unwrap_err();
-    assert!(error.to_string().contains("cannot be combined"));
+#[test]
+fn alt_screen_scroll_is_a_benchmark_option() {
+    for flag in ["--profile-alt-screen-scroll", "-a"] {
+        let args = parse_args_from([OsString::from("benchmark"), OsString::from(flag)]).unwrap();
+        assert_eq!(args.profile_workload, PerformanceWorkload::AltScreenScroll);
+    }
+
+    assert!(parse_args_from([OsString::from("--profile-alt-screen-scroll")]).is_err());
+
+    assert_eq!(
+        parse_args_from([
+            OsString::from("benchmark"),
+            OsString::from("--terminal-alt-screen-scroll-workload"),
+        ])
+        .unwrap()
+        .mode,
+        StartupMode::TerminalAltScreenScrollWorkload
+    );
+}
+
+#[test]
+fn benchmark_workload_options_are_mutually_exclusive() {
+    // Every pair, so adding a fourth workload cannot quietly go unguarded.
+    let flags = [
+        "--profile-background-stress",
+        "--profile-sparse-updates",
+        "--profile-alt-screen-scroll",
+    ];
+    for (index, first) in flags.iter().enumerate() {
+        for second in flags.iter().skip(index + 1) {
+            let error = parse_args_from([
+                OsString::from("benchmark"),
+                OsString::from(*first),
+                OsString::from(*second),
+            ])
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("cannot be combined"),
+                "{first} with {second}: {error}"
+            );
+        }
+        // The same workload asked for twice is not a conflict.
+        parse_args_from([
+            OsString::from("benchmark"),
+            OsString::from(*first),
+            OsString::from(*first),
+        ])
+        .unwrap();
+    }
+}
+
+#[test]
+fn benchmark_defaults_to_the_standard_workload() {
+    let args = parse_args_from([OsString::from("benchmark")]).unwrap();
+    assert_eq!(args.profile_workload, PerformanceWorkload::Standard);
 }
 
 #[test]

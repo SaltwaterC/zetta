@@ -1152,15 +1152,36 @@ impl Zetta {
 
     /// The chrome and the tab body, in the column they share.
     ///
-    /// Rendered inside its own view so a frame driven by an overlay — a
-    /// settings list scrolling, the icon picker moving — reuses it instead of
-    /// rebuilding the title bar, the tab bar and every pane's chrome. See
-    /// `view_boundary`.
+    /// The title bar and tab bar, the banners, and the tab body, stacked.
+    ///
+    /// The chrome is cached in its own view while the body is not, which is the
+    /// whole point of the arrangement: a frame the terminal caused marks the
+    /// body's ancestors dirty but leaves the chrome — a sibling — untouched, so
+    /// output no longer rebuilds the title bar and tab bar sixty times a second.
+    /// Caching the column as a whole cannot do this, and is in fact worse than
+    /// not caching at all: a cached view that misses re-renders its subtree with
+    /// `Window::refreshing` set, which suppresses every cache nested under it.
     fn render_window_column(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.theme().colors().clone();
-        let handle = cx.entity().downgrade();
         let frame = WindowFrameGeometry::new(window, cx);
-        let chrome = self.render_title_bar_chrome(&frame, &colors, &handle, window, cx);
+        let entity = cx.entity();
+        let chrome_height = title_bar_chrome_height(
+            self.launch_config.compact_mode,
+            frame.title_bar_height,
+            window.rem_size(),
+        );
+        let chrome = ZettaSubview::get_or_insert(
+            &mut self.title_bar_chrome_view,
+            render_title_bar_chrome_boundary,
+            &entity,
+            cx,
+        )
+        .cached(
+            gpui::StyleRefinement::default()
+                .w_full()
+                .flex_none()
+                .h(chrome_height),
+        );
         let body = self.render_tab_body(
             window,
             frame.rounded_bottom_left,
@@ -1168,12 +1189,7 @@ impl Zetta {
             frame.corner_radius,
             cx,
         );
-        let column = div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .child(chrome.title_bar)
-            .when_some(chrome.tab_bar, |column, tab_bar| column.child(tab_bar));
+        let column = div().size_full().flex().flex_col().child(chrome);
         self.render_feedback_banners(column, &colors)
             .child(div().flex_1().min_h_0().child(body))
             .into_any_element()
@@ -1251,12 +1267,25 @@ fn render_settings_page_boundary(
 }
 
 /// Adapters that give `ZettaSubview` a plain function pointer per boundary.
-fn render_window_column_boundary(
+///
+/// The root is `size_full` so the chrome fills exactly the box
+/// `title_bar_chrome_height` reserved for it in `render_window_column`.
+fn render_title_bar_chrome_boundary(
     zetta: &mut Zetta,
     window: &mut Window,
     cx: &mut Context<Zetta>,
 ) -> AnyElement {
-    zetta.render_window_column(window, cx)
+    let colors = cx.theme().colors().clone();
+    let handle = cx.entity().downgrade();
+    let frame = WindowFrameGeometry::new(window, cx);
+    let chrome = zetta.render_title_bar_chrome(&frame, &colors, &handle, window, cx);
+    div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .child(chrome.title_bar)
+        .when_some(chrome.tab_bar, |column, tab_bar| column.child(tab_bar))
+        .into_any_element()
 }
 
 fn render_settings_boundary(
@@ -1305,19 +1334,11 @@ impl Render for Zetta {
         let colors = cx.theme().colors().clone();
         let error_color = cx.theme().status().error;
         let handle = cx.entity().downgrade();
-        let entity = cx.entity();
 
-        // Cached: the column is a pure function of `Zetta` state, and the
-        // subview's observer busts it on every notify, so a frame the column
-        // did not cause reuses the previous prepaint and paint.
-        let column = ZettaSubview::get_or_insert(
-            &mut self.window_column_view,
-            render_window_column_boundary,
-            &entity,
-            cx,
-        )
-        .cached(gpui::StyleRefinement::default().size_full())
-        .into_any_element();
+        // The column itself is composed here rather than behind a boundary of
+        // its own: every frame reaches it anyway, and wrapping it in a cache
+        // that always misses would suppress the caches inside it.
+        let column = self.render_window_column(window, cx);
         let overlays = self.render_overlays(&colors, error_color, &handle, window, cx);
 
         let content = self.compose_window_content(column, overlays, &colors, cx);

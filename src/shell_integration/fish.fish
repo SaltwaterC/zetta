@@ -448,11 +448,13 @@ function __zetta_long_options
                 --terminal-render-workload \
                 --terminal-checkerboard-workload \
                 --terminal-sparse-update-workload \
+                --terminal-alt-screen-scroll-workload \
                 --profile-report \
                 --profile-duration \
                 --profile-pane-stress \
                 --profile-background-stress \
                 --profile-sparse-updates \
+                --profile-alt-screen-scroll \
                 --profile-external-terminal \
                 --help
         case serial-console
@@ -626,11 +628,13 @@ complete -c zetta -s t -r -a 'repeated unique' -n '__fish_seen_subcommand_from b
 complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l terminal-render-workload
 complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l terminal-checkerboard-workload
 complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l terminal-sparse-update-workload
+complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l terminal-alt-screen-scroll-workload
 complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l profile-report -r
 complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l profile-duration -r
 complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l profile-pane-stress
 complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l profile-background-stress
 complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l profile-sparse-updates
+complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l profile-alt-screen-scroll
 complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l profile-external-terminal
 complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from benchmark' -a '(__zetta_long_options benchmark)'

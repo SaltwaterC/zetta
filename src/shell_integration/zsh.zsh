@@ -502,9 +502,10 @@ _zetta() {
     case $words[2] in
         benchmark)
             _zetta_options --terminal-render-workload --terminal-checkerboard-workload \
-                --terminal-sparse-update-workload --profile-report --profile-duration \
+                --terminal-sparse-update-workload --terminal-alt-screen-scroll-workload \
+                --profile-report --profile-duration \
                 --profile-pane-stress --profile-background-stress --profile-sparse-updates \
-                --profile-external-terminal --help
+                --profile-alt-screen-scroll --profile-external-terminal --help
             ;;
         benchmark-output)
             _zetta_options --size --output-type --help

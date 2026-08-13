@@ -45,13 +45,47 @@ pub(crate) fn compact_drag_area_reserve_width(show_compact_drag_area: bool) -> P
     }
 }
 
+/// The tab-bar row's height outside compact mode, where the bar is its own row
+/// beneath the title bar.
+const TAB_BAR_ROW_HEIGHT: gpui::Rems = gpui::Rems(2.);
+
 /// The tab bar's row height: `compact_height` (the platform title bar's own
 /// height) in compact mode, since the tab bar shares that row there, or the
-/// standard `h_8` otherwise. Shared by every element that lines up with the
-/// row — the tabs themselves, the overflow triggers, the new-tab button, and
-/// the bar's own container — so the compact/regular swap is only written once.
+/// standard [`TAB_BAR_ROW_HEIGHT`] otherwise. Shared by every element that
+/// lines up with the row — the tabs themselves, the overflow triggers, the
+/// new-tab button, and the bar's own container — so the compact/regular swap is
+/// only written once.
 pub(crate) fn tab_bar_row_height(compact_mode: bool, compact_height: Pixels) -> gpui::Div {
-    div().h_8().when(compact_mode, |el| el.h(compact_height))
+    div()
+        .h(TAB_BAR_ROW_HEIGHT)
+        .when(compact_mode, |el| el.h(compact_height))
+}
+
+/// The height of the whole top-of-window chrome: the title bar, plus the
+/// tab-bar row beneath it outside compact mode (in compact mode the tab bar
+/// shares the title bar's row, so the title bar's height is the whole of it).
+///
+/// `Zetta::render` needs this as a number rather than letting layout work it
+/// out, because the chrome renders inside a cached view and a cached view is
+/// laid out from the style the composer supplies rather than measured from its
+/// contents. The chrome's own root is `h_full`, so it always fills whatever
+/// this returns; getting it wrong moves the panes rather than silently
+/// corrupting the cache, which is what
+/// `title_bar_chrome_height_matches_the_rows_it_covers` checks.
+///
+/// The tab-bar row's borders are deliberately *not* added: layout is border-box,
+/// so `border_t_1` and `border_b_1` sit inside [`TAB_BAR_ROW_HEIGHT`]. Adding
+/// them pushed every pane down by two pixels.
+pub(crate) fn title_bar_chrome_height(
+    compact_mode: bool,
+    title_bar_height: Pixels,
+    rem_size: Pixels,
+) -> Pixels {
+    if compact_mode {
+        title_bar_height
+    } else {
+        title_bar_height + TAB_BAR_ROW_HEIGHT.to_pixels(rem_size)
+    }
 }
 
 // Keep the responsive sizing on a native flex item. Elements such as

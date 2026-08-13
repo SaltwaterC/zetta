@@ -3,7 +3,7 @@ use gpui::{
     DispatchPhase, Edges, Element, ElementId, Entity, FocusHandle, Font, FontFeatures, FontStyle,
     FontWeight, GlobalElementId, HighlightStyle, Hitbox, Hsla, InputHandler, InteractiveElement,
     Interactivity, IntoElement, LayoutId, Length, ModifiersChangedEvent, MouseButton,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint, ShapedLine,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint, ShapedLine, SharedString,
     StatefulInteractiveElement, StrikethroughStyle, Styled, TextAlign, TextRun, TextStyle,
     UTF16Selection, UnderlineStyle, WhiteSpace, Window, div, fill, outline, point, px, quad,
     relative, size, transparent_black,
@@ -226,7 +226,10 @@ impl BatchedTextRun {
         window
             .text_system()
             .shape_line(
-                self.text.clone().into(),
+                // `SharedString::from(&str)` allocates once; going through a
+                // `String` clone first would allocate and copy twice, for every
+                // run of every pane on every frame.
+                SharedString::from(self.text.as_str()),
                 self.font_size.to_pixels(window.rem_size()),
                 std::slice::from_ref(&self.style),
                 Some(dimensions.cell_width),
@@ -332,45 +335,120 @@ impl LayoutRect {
 /// `ensure_minimum_contrast` linearizes both colors through `powf`, which makes
 /// it one of the more expensive things done per cell. A terminal screen draws
 /// thousands of cells from a handful of distinct foreground/background pairs, so
-/// resolving each pair once per pass removes almost all of that work. The table
-/// stays tiny in practice, and a linear scan over a few `f32` comparisons beats
-/// hashing as well as recomputing.
-#[derive(Default)]
+/// resolving each pair once per pass removes almost all of that work.
+///
+/// The colors reaching this cache come from the same theme conversion for every
+/// cell, so equal pairs are bit-identical. That makes a hash of their bits a
+/// sound key, and a direct-mapped table an O(1) lookup — where a linear scan
+/// grew with the number of distinct pairs on screen, which is exactly what
+/// colorful output such as a diff has a lot of.
+///
+/// The table sits behind a single-entry front check, because hashing eight
+/// `f32`s is more work than one comparison and cells overwhelmingly repeat the
+/// pair used by the cell before them. Plain uncolored output measured ~9% more
+/// process CPU with the table alone than it did with the linear scan the table
+/// replaced; the front check is what makes the table a win in both directions.
 struct ContrastCache {
-    entries: Vec<(Hsla, Hsla, Hsla)>,
+    /// The pair the previous cell resolved.
+    recent: Option<ContrastCacheEntry>,
+    entries: [Option<ContrastCacheEntry>; CONTRAST_CACHE_SLOTS],
+    /// Counts the pairs actually sent to `ensure_minimum_contrast`, so tests can
+    /// assert that memoization happened rather than only that the answers came
+    /// out right.
+    #[cfg(test)]
+    misses: usize,
 }
 
-/// Bounds the linear scan so that content which genuinely uses a new color pair
-/// in almost every cell cannot turn the lookup into more work than the
-/// computation it replaces. Ordinary output stays far below this: a palette
-/// terminal draws from a couple of dozen pairs at most, and the truecolor art
-/// that would exceed it is usually drawn with block glyphs, which skip contrast
-/// adjustment altogether.
-const CONTRAST_CACHE_CAPACITY: usize = 32;
+#[derive(Copy, Clone)]
+struct ContrastCacheEntry {
+    foreground: Hsla,
+    background: Hsla,
+    adjusted: Hsla,
+}
+
+/// A power of two so the index is a mask rather than a division. Sized well
+/// above the number of distinct color pairs ordinary output uses, so collisions
+/// — which cost one recomputation, never a wrong color — stay rare.
+const CONTRAST_CACHE_SLOTS: usize = 128;
+
+impl Default for ContrastCache {
+    fn default() -> Self {
+        Self {
+            recent: None,
+            entries: [None; CONTRAST_CACHE_SLOTS],
+            #[cfg(test)]
+            misses: 0,
+        }
+    }
+}
 
 impl ContrastCache {
-    /// Colors reaching this cache come from the same theme conversion for every
-    /// cell, so equal pairs are bit-identical rather than merely close.
     fn resolve(&mut self, foreground: Hsla, background: Hsla, minimum_contrast: f32) -> Hsla {
         // Matches `ensure_minimum_contrast`'s own early return, and keeps the
-        // cache empty for anyone who has turned contrast adjustment off.
+        // cache untouched for anyone who has turned contrast adjustment off.
         if minimum_contrast <= 0. {
             return foreground;
         }
 
-        if let Some((_, _, adjusted)) = self
-            .entries
-            .iter()
-            .find(|(cached_fg, cached_bg, _)| *cached_fg == foreground && *cached_bg == background)
+        if let Some(recent) = &self.recent
+            && recent.foreground == foreground
+            && recent.background == background
         {
-            return *adjusted;
+            return recent.adjusted;
         }
 
-        let adjusted = ensure_minimum_contrast(foreground, background, minimum_contrast);
-        if self.entries.len() < CONTRAST_CACHE_CAPACITY {
-            self.entries.push((foreground, background, adjusted));
-        }
+        let slot = Self::slot(foreground, background);
+        let adjusted = match &self.entries[slot] {
+            Some(entry) if entry.foreground == foreground && entry.background == background => {
+                entry.adjusted
+            }
+            _ => {
+                #[cfg(test)]
+                {
+                    self.misses += 1;
+                }
+                let adjusted = ensure_minimum_contrast(foreground, background, minimum_contrast);
+                // A collision replaces the occupant. Terminal rows are drawn in
+                // order, so the pair most recently seen is also the one most
+                // likely next.
+                self.entries[slot] = Some(ContrastCacheEntry {
+                    foreground,
+                    background,
+                    adjusted,
+                });
+                adjusted
+            }
+        };
+        self.recent = Some(ContrastCacheEntry {
+            foreground,
+            background,
+            adjusted,
+        });
         adjusted
+    }
+
+    /// Mixes the eight color components' bits into one index. `Hsla` holds
+    /// `f32`s, so this hashes the bit patterns rather than the values; two
+    /// pairs that merely compare equal as floats would land in different slots,
+    /// which costs a recomputation and never a wrong answer.
+    fn slot(foreground: Hsla, background: Hsla) -> usize {
+        let mut hash = 0_u32;
+        for component in [
+            foreground.h,
+            foreground.s,
+            foreground.l,
+            foreground.a,
+            background.h,
+            background.s,
+            background.l,
+            background.a,
+        ] {
+            hash = hash
+                .rotate_left(5)
+                .wrapping_mul(0x9e37_79b9)
+                .wrapping_add(component.to_bits());
+        }
+        (hash as usize) % CONTRAST_CACHE_SLOTS
     }
 }
 
@@ -652,7 +730,9 @@ impl TerminalElement {
 
                 //Layout current cell text
                 {
-                    if !is_blank(cell) {
+                    if !is_blank(cell)
+                        && !paints_only_background(cell, point, hyperlink.map(|(_, range)| range))
+                    {
                         cell_count += 1;
                         let cell_style = TerminalElement::cell_style(
                             point,
@@ -1386,22 +1466,25 @@ impl Element for TerminalElement {
             cx,
             |_, _, hitbox, window, cx| {
                 let hitbox = hitbox.unwrap();
-                let settings = ThemeSettings::get_global(cx).clone();
-
+                // Borrowed, not cloned: this runs for every pane on every frame
+                // and only three fields are read, while `ThemeSettings` carries
+                // a dozen fonts and shared strings.
+                let settings = ThemeSettings::get_global(cx);
+                let buffer_font = settings.buffer_font.clone();
                 let buffer_font_size = settings.buffer_font_size(cx);
 
                 let terminal_settings = TerminalSettings::get_global(cx);
                 let minimum_contrast = terminal_settings.minimum_contrast;
 
                 let font_family = terminal_settings.font_family.as_ref().map_or_else(
-                    || settings.buffer_font.family.clone(),
+                    || buffer_font.family.clone(),
                     |font_family| font_family.0.clone().into(),
                 );
 
                 let font_fallbacks = terminal_settings
                     .font_fallbacks
                     .as_ref()
-                    .or(settings.buffer_font.fallbacks.as_ref())
+                    .or(buffer_font.fallbacks.as_ref())
                     .cloned();
 
                 // `unwrap_or` would build the fallback on every prepaint even
@@ -1806,7 +1889,10 @@ impl Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let paint_start = Instant::now();
+        // Only read the clock when the diagnostic below can be emitted; this
+        // runs for every pane on every frame.
+        let debug_logging = log::log_enabled!(log::Level::Debug);
+        let paint_start = debug_logging.then(Instant::now);
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             let scroll_top = self.terminal_view.read(cx).scroll_top;
 
@@ -1877,9 +1963,9 @@ impl Element for TerminalElement {
                         }
                     });
 
-                    for rect in &layout.rects {
-                        rect.paint(origin, &layout.dimensions, window);
-                    }
+                    paint_grid_layer(&layout.rects, bounds, window, |rect, window| {
+                        rect.paint(origin, &layout.dimensions, window)
+                    });
 
                     for (relative_highlighted_range, color) in &layout.relative_highlighted_ranges {
                         if let Some((start_y, highlighted_range_lines)) =
@@ -1904,14 +1990,16 @@ impl Element for TerminalElement {
                     }
 
                     // Paint batched text runs instead of individual cells
-                    let text_paint_start = Instant::now();
+                    let text_paint_start = debug_logging.then(Instant::now);
                     for batch in &layout.batched_text_runs {
                         batch.paint(origin, &layout.dimensions, window, cx);
                     }
-                    for block_element_rect in &layout.block_element_rects {
-                        block_element_rect.paint(origin, &layout.dimensions, window);
-                    }
-                    let text_paint_time = text_paint_start.elapsed();
+                    paint_grid_layer(
+                        &layout.block_element_rects,
+                        bounds,
+                        window,
+                        |rect, window| rect.paint(origin, &layout.dimensions, window),
+                    );
 
                     if let Some(text_to_mark) = &marked_text_cloned
                         && !text_to_mark.is_empty()
@@ -1972,19 +2060,53 @@ impl Element for TerminalElement {
                         element.paint(window, cx);
                     }
 
-                    log::debug!(
-                        "Terminal paint: {} text runs, {} block element rects, {} rects, \
-                        text paint took {:?}, total paint took {total_paint_time:?}",
-                        layout.batched_text_runs.len(),
-                        layout.block_element_rects.len(),
-                        layout.rects.len(),
-                        text_paint_time,
-                        total_paint_time = paint_start.elapsed()
-                    );
+                    if let Some((paint_start, text_paint_start)) = paint_start.zip(text_paint_start)
+                    {
+                        log::debug!(
+                            "Terminal paint: {} text runs, {} block element rects, {} rects, \
+                            text paint took {:?}, total paint took {:?}",
+                            layout.batched_text_runs.len(),
+                            layout.block_element_rects.len(),
+                            layout.rects.len(),
+                            text_paint_start.elapsed(),
+                            paint_start.elapsed()
+                        );
+                    }
                 },
             );
         });
     }
+}
+
+/// Paints a run of grid-aligned quads inside a single scene layer.
+///
+/// A quad painted outside a layer has to work out its own paint order, which
+/// GPUI does by inserting its bounds into the frame's bounds tree
+/// (`Scene::insert_primitive`). That is a tree search per quad against every
+/// quad already inserted, and a terminal can emit one quad per cell: a screen
+/// where no two neighbouring cells share a background colour produces thousands,
+/// and `BoundsTree::insert` measured 59-66% of the process's samples on exactly
+/// that workload.
+///
+/// Everything painted here is a cell-aligned rectangle in a grid, so no two of
+/// them overlap and any order between them draws the same pixels. One layer
+/// gives them all a single order for one insertion. Ordering against everything
+/// else is unchanged: the layer's bounds cover the grid, so primitives painted
+/// afterwards intersect it and still sort above.
+fn paint_grid_layer<T>(
+    rects: &[T],
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+    mut paint: impl FnMut(&T, &mut Window),
+) {
+    if rects.is_empty() {
+        return;
+    }
+    window.paint_layer(bounds, |window| {
+        for rect in rects {
+            paint(rect, window);
+        }
+    });
 }
 
 fn range_intersects_lines(
@@ -2103,6 +2225,29 @@ impl InputHandler for TerminalInputHandler {
     ) -> Option<usize> {
         None
     }
+}
+
+/// Whether the cell's only contribution to the frame is its background colour,
+/// which the background-region pass already paints.
+///
+/// A run's `TextRun` never carries a background — `cell_style` leaves
+/// `background_color` unset — so a space that differs from its neighbours only
+/// by background paints nothing as text. Including it is far from free:
+/// minimum-contrast adjustment resolves each cell's foreground against its own
+/// background, so neighbouring cells with different backgrounds resolve to
+/// different foregrounds, which breaks run batching. A screen of alternating
+/// cell backgrounds then produces one shaped line and one scene layer per cell,
+/// and the bounds-tree insertion behind those layers dominated the frame.
+///
+/// Anything a space can actually show — an underline, strikethrough, inverse
+/// video, an OSC-8 hyperlink, the hovered link's own styling, or combining
+/// characters sitting on it — keeps the cell.
+fn paints_only_background(cell: &Cell, point: Point, hovered_link: Option<&Range>) -> bool {
+    cell.character() == ' '
+        && cell.hyperlink().is_none()
+        && !cell.has_visible_style_modifier()
+        && !cell.zerowidth().is_some_and(|chars| !chars.is_empty())
+        && !hovered_link.is_some_and(|range| range.contains(point))
 }
 
 pub fn is_blank(cell: &Cell) -> bool {
@@ -2732,6 +2877,38 @@ mod tests {
     /// Memoizing contrast adjustment must be invisible: every cached pair has to
     /// resolve to exactly what `ensure_minimum_contrast` returns, including on
     /// repeat lookups and after unrelated pairs have been inserted.
+    /// A plain space contributes nothing to the painted text, so it must not
+    /// become a run. The cases that depend on a cell's background or flags are
+    /// not constructible from this crate — `terminal::Cell`'s setters are
+    /// crate-private — and are covered by comparing rendered output instead.
+    #[test]
+    fn a_plain_space_paints_only_its_background() {
+        assert!(paints_only_background(
+            &Cell::default(),
+            Point::new(0, 0),
+            None
+        ));
+    }
+
+    /// The subtle clause: the hovered link's styling is applied by `cell_style`
+    /// to every cell in the matched range, including its spaces, so a space
+    /// inside that range still paints an underline and has to keep its run.
+    #[test]
+    fn a_space_inside_the_hovered_link_keeps_its_run() {
+        let hovered = Range::new(Point::new(0, 2), Point::new(0, 8));
+
+        assert!(!paints_only_background(
+            &Cell::default(),
+            Point::new(0, 5),
+            Some(&hovered)
+        ));
+        assert!(paints_only_background(
+            &Cell::default(),
+            Point::new(0, 9),
+            Some(&hovered)
+        ));
+    }
+
     #[test]
     fn contrast_cache_matches_uncached_contrast() {
         let minimum_contrast = 45.;
@@ -2754,7 +2931,7 @@ mod tests {
         }
 
         assert_eq!(
-            cache.entries.len(),
+            cache.misses,
             pairs.len(),
             "each distinct pair should be resolved exactly once"
         );
@@ -2768,21 +2945,49 @@ mod tests {
 
         assert_eq!(cache.resolve(Hsla::red(), Hsla::black(), 0.), Hsla::red());
         assert_eq!(cache.resolve(Hsla::red(), Hsla::black(), -1.), Hsla::red());
-        assert!(cache.entries.is_empty());
+        assert_eq!(cache.misses, 0);
+        assert!(cache.entries.iter().all(Option::is_none));
+        assert!(cache.recent.is_none());
     }
 
-    /// The scan is bounded, so pathological input stops growing the table while
-    /// still returning correct colors for pairs that no longer fit.
+    /// The front check must not shadow a different pair with the previous one.
     #[test]
-    fn contrast_cache_is_bounded_but_stays_correct_when_full() {
+    fn contrast_cache_front_check_distinguishes_pairs() {
+        let minimum_contrast = 45.;
+        let mut cache = ContrastCache::default();
+        let pairs = [
+            (Hsla::red(), Hsla::black()),
+            (Hsla::red(), Hsla::white()),
+            (Hsla::black(), Hsla::red()),
+        ];
+
+        // Alternating pairs defeat the single-entry front check on every cell,
+        // so this also exercises the table behind it.
+        for _ in 0..50 {
+            for (foreground, background) in pairs {
+                assert_eq!(
+                    cache.resolve(foreground, background, minimum_contrast),
+                    ensure_minimum_contrast(foreground, background, minimum_contrast),
+                );
+            }
+        }
+        assert_eq!(cache.misses, pairs.len());
+    }
+
+    /// The table is direct-mapped, so more distinct pairs than it has slots is
+    /// ordinary rather than pathological — a colorful screen reaches that on its
+    /// own. A collision must cost a recomputation and never a wrong color.
+    #[test]
+    fn contrast_cache_stays_correct_past_its_slot_count() {
         let minimum_contrast = 45.;
         let mut cache = ContrastCache::default();
         let background = Hsla::black();
 
-        // More distinct foregrounds than the table can hold.
-        let foregrounds: Vec<Hsla> = (0..CONTRAST_CACHE_CAPACITY + 8)
+        // Several times more distinct foregrounds than there are slots, so
+        // collisions and replacements are guaranteed.
+        let foregrounds: Vec<Hsla> = (0..CONTRAST_CACHE_SLOTS * 4)
             .map(|index| Hsla {
-                h: index as f32 / 128.,
+                h: index as f32 / (CONTRAST_CACHE_SLOTS * 4) as f32,
                 s: 0.9,
                 l: 0.5,
                 a: 1.,
@@ -2795,16 +3000,40 @@ mod tests {
                 ensure_minimum_contrast(*foreground, background, minimum_contrast),
             );
         }
-
-        assert_eq!(cache.entries.len(), CONTRAST_CACHE_CAPACITY);
-
-        // Pairs that were evicted from consideration still resolve correctly.
+        // Pairs whose slot was taken over by another pair still resolve
+        // correctly, by recomputing.
         for foreground in foregrounds.iter().rev() {
             assert_eq!(
                 cache.resolve(*foreground, background, minimum_contrast),
                 ensure_minimum_contrast(*foreground, background, minimum_contrast),
             );
         }
+    }
+
+    /// The point of the table: a screen drawing from a handful of color pairs
+    /// must resolve each of them once no matter how many cells use them.
+    #[test]
+    fn contrast_cache_resolves_each_pair_once_across_a_screenful() {
+        let minimum_contrast = 45.;
+        let mut cache = ContrastCache::default();
+        let pairs = [
+            (Hsla::red(), Hsla::black()),
+            (Hsla::green(), Hsla::black()),
+            (Hsla::white(), Hsla::black()),
+            (Hsla::black(), Hsla::white()),
+        ];
+
+        for _ in 0..2000 {
+            for (foreground, background) in pairs {
+                cache.resolve(foreground, background, minimum_contrast);
+            }
+        }
+
+        assert_eq!(
+            cache.misses,
+            pairs.len(),
+            "repeated pairs must not be recomputed, however many cells use them"
+        );
     }
 
     #[test]

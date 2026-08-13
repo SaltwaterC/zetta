@@ -444,7 +444,7 @@ impl EventedPty for Pty {
                 Some(ChildEvent::ExitStatusUnavailable)
             },
             Ok(None) => None,
-            Ok(exit_status) => Some(ChildEvent::Exited(exit_status)),
+            Ok(Some(exit_status)) => Some(ChildEvent::Exited(exit_status)),
         }
     }
 }

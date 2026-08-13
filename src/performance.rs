@@ -126,12 +126,17 @@ pub(crate) enum PerformanceWorkload {
     Standard,
     CheckerboardBackground,
     SparseUpdates,
+    /// A colourised diff scrolled a line at a time on the alternate screen,
+    /// modelling `git diff` under a pager. Every visible row changes on every
+    /// step, and the foreground/background colours exercise the per-cell
+    /// styling path that the plain-text workloads barely touch.
+    AltScreenScroll,
 }
 
 impl PerformanceWorkload {
     pub(crate) fn producer_hz(self) -> u16 {
         match self {
-            Self::Standard | Self::CheckerboardBackground => 240,
+            Self::Standard | Self::CheckerboardBackground | Self::AltScreenScroll => 240,
             Self::SparseUpdates => 40,
         }
     }

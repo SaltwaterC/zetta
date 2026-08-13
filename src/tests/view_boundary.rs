@@ -12,6 +12,9 @@ use std::rc::Rc;
 struct HarnessRoot {
     column: Option<Entity<Subview<HarnessRoot>>>,
     overlay: Option<Entity<Subview<HarnessRoot>>>,
+    /// A cached boundary rendered *inside* the cached column, standing in for
+    /// the arrangement `Zetta::render` must not use.
+    nested: Option<Entity<Subview<HarnessRoot>>>,
     /// Rendered inside the column boundary, standing in for a terminal view.
     descendant: Entity<HarnessDescendant>,
     show_overlay: bool,
@@ -20,6 +23,7 @@ struct HarnessRoot {
     cache_overlay: bool,
     column_renders: Rc<Cell<usize>>,
     overlay_renders: Rc<Cell<usize>>,
+    nested_renders: Rc<Cell<usize>>,
 }
 
 /// A view nested inside the cached column boundary.
@@ -37,16 +41,29 @@ impl Render for HarnessDescendant {
 fn render_column(
     root: &mut HarnessRoot,
     _window: &mut Window,
-    _cx: &mut Context<HarnessRoot>,
+    cx: &mut Context<HarnessRoot>,
 ) -> gpui::AnyElement {
     root.column_renders.set(root.column_renders.get() + 1);
+    let entity = cx.entity();
+    let nested = Subview::get_or_insert(&mut root.nested, render_nested, &entity, cx)
+        .cached(gpui::StyleRefinement::default().w_full().h(px(10.)));
     div()
         .size_full()
         .flex()
         .flex_col()
         .debug_selector(|| "column".to_owned())
+        .child(nested)
         .child(root.descendant.clone())
         .into_any_element()
+}
+
+fn render_nested(
+    root: &mut HarnessRoot,
+    _window: &mut Window,
+    _cx: &mut Context<HarnessRoot>,
+) -> gpui::AnyElement {
+    root.nested_renders.set(root.nested_renders.get() + 1);
+    div().size_full().into_any_element()
 }
 
 /// Stands in for a settings-style overlay: a backdrop that positions itself
@@ -104,6 +121,7 @@ struct Harness {
     column_renders: Rc<Cell<usize>>,
     overlay_renders: Rc<Cell<usize>>,
     descendant_renders: Rc<Cell<usize>>,
+    nested_renders: Rc<Cell<usize>>,
     descendant: Entity<HarnessDescendant>,
 }
 
@@ -120,10 +138,12 @@ impl Harness {
         let column_renders = Rc::new(Cell::new(0));
         let overlay_renders = Rc::new(Cell::new(0));
         let descendant_renders = Rc::new(Cell::new(0));
+        let nested_renders = Rc::new(Cell::new(0));
         let (root, cx) = cx.add_window_view({
             let column_renders = column_renders.clone();
             let overlay_renders = overlay_renders.clone();
             let descendant_renders = descendant_renders.clone();
+            let nested_renders = nested_renders.clone();
             move |_, cx| {
                 let descendant = cx.new(|_| HarnessDescendant {
                     renders: descendant_renders,
@@ -131,11 +151,13 @@ impl Harness {
                 HarnessRoot {
                     column: None,
                     overlay: None,
+                    nested: None,
                     descendant,
                     show_overlay,
                     cache_overlay,
                     column_renders,
                     overlay_renders,
+                    nested_renders,
                 }
             }
         });
@@ -147,6 +169,7 @@ impl Harness {
                 column_renders,
                 overlay_renders,
                 descendant_renders,
+                nested_renders,
                 descendant,
             },
             cx,
@@ -262,6 +285,53 @@ fn notifying_a_descendant_rebuilds_the_cached_boundary_above_it(cx: &mut TestApp
         column_after,
         column_before + 1,
         "a cached boundary must not swallow a repaint its descendant asked for"
+    );
+}
+
+#[gpui::test]
+fn a_cached_boundary_nested_under_a_missing_cache_is_not_reused(cx: &mut TestAppContext) {
+    let (harness, cx) = Harness::open(false, cx);
+    let nested_before = harness.nested_renders.get();
+    assert_eq!(
+        nested_before, 1,
+        "the nested boundary renders once to start"
+    );
+
+    // Nothing has notified the nested boundary, so on its own terms its cache
+    // should hit. It does not, because GPUI re-renders a missing cached view's
+    // subtree with `Window::refreshing` set, and a cached view is only reused
+    // when `!window.refreshing`.
+    harness.descendant.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+
+    assert_eq!(
+        harness.nested_renders.get(),
+        nested_before + 1,
+        "a cache nested under a cache that missed is suppressed, not reused; \
+         boundaries have to be siblings of what changes, never below it"
+    );
+}
+
+#[gpui::test]
+fn a_sibling_boundary_stays_cached_when_the_other_subtree_changes(cx: &mut TestAppContext) {
+    let (harness, cx) = Harness::open_with(true, true, cx);
+    let (column_before, overlay_before, _) = harness.counts();
+
+    // The arrangement `Zetta::render` relies on: terminal output dirties the
+    // body's ancestors, and the chrome beside it stays out of the frame.
+    harness.descendant.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+
+    let (column_after, overlay_after, _) = harness.counts();
+    assert_eq!(
+        column_after,
+        column_before + 1,
+        "the subtree containing the change is rebuilt"
+    );
+    assert_eq!(
+        overlay_after, overlay_before,
+        "a cached boundary beside it is neither dirty nor suppressed, so it \
+         stays out of the frame entirely"
     );
 }
 
