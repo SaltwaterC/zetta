@@ -18,7 +18,7 @@ pub(crate) use client::{TftpCommand, parse_tftp_args, tftp_help};
 #[cfg(feature = "tftp-client")]
 pub(crate) const DEFAULT_TFTP_PORT: u16 = 69;
 const DEFAULT_BLOCK_SIZE: usize = 512;
-#[cfg(feature = "tftp-client")]
+#[cfg(any(feature = "tftp-client", test))]
 const REQUESTED_BLOCK_SIZE: usize = 1428;
 const MIN_BLOCK_SIZE: usize = 8;
 const MAX_BLOCK_SIZE: usize = 65_464;
@@ -72,7 +72,7 @@ fn read_block(reader: &mut impl Read, buffer: &mut [u8]) -> io::Result<usize> {
     Ok(total)
 }
 
-#[cfg(feature = "tftp-client")]
+#[cfg(any(feature = "tftp-client", test))]
 fn request_packet(opcode: u16, filename: &str, size: Option<u64>) -> Vec<u8> {
     let mut packet = Vec::with_capacity(filename.len() + 48);
     packet.extend_from_slice(&opcode.to_be_bytes());
