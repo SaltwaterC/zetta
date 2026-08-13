@@ -14,10 +14,11 @@ SYNTAX_HIGHLIGHTING ?= 1
 X11 ?= 0
 RELEASE ?= 0
 
-UNAME_S := $(shell uname -s)
 ifneq ($(OS),Windows_NT)
+UNAME_S := $(shell uname -s)
 IS_ROOT := $(shell test "$$(id -u)" -eq 0 && echo 1)
 else
+UNAME_S :=
 IS_ROOT :=
 endif
 ifeq ($(UNAME_S),Darwin)
