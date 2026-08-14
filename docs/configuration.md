@@ -45,12 +45,18 @@ these deliberately scoped fields:
 
 - `theme`, `default_profile`, `profiles`, and `default_tab_icon`
 - `working_directory`, as an existing project-relative directory that cannot
-  escape the project root
+  escape the project root, defaulting to the project root itself
 - `env`, an object of string environment variables; reserved `ZETTA_*` names
   cannot be replaced
 - `inactive_pane_opacity`
 - `pane_split_templates`
 - `initial_split`, naming a built-in or project-defined pane template
+
+A tab opened for a project starts in that project's working directory,
+regardless of `working_directory_scope`: opening a project is a move into it,
+not a continuation of wherever the session happened to be. This covers `zetta`
+launched inside a project, `project open`, and **Open** in the Settings
+**Projects** tab.
 
 The active pane's current directory selects its project. The active tab then
 controls the window theme. Moving outside the project immediately restores the
@@ -261,7 +267,8 @@ is set. Setting it to `"~"` is equivalent to leaving it unset. Later native
 tabs and splits inherit the active pane's current directory by default. Set
 `working_directory_scope` to `"none"` to always use the configured directory,
 or to `"pane"` to inherit only for new shells in the same tab. The default
-`"tab"` scope inherits for both new panes and new tabs.
+`"tab"` scope inherits for both new panes and new tabs. Tabs opened for a
+project are the exception and always start in the project's own directory.
 
 Detected WSL profiles start in the selected distribution's Linux home. Zetta
 tracks the Linux directory for bash, fish, and zsh, with a fallback for other

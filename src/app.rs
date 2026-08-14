@@ -19,6 +19,28 @@ enum TabMoveDirection {
     Right,
 }
 
+/// Whether a new tab continues the current session or enters a project.
+///
+/// A tab opened inside the session inherits the active pane's directory when
+/// `working_directory_scope` asks for it. Entering a project does not: the point
+/// of opening a project is to start in the project's own working directory, so
+/// inheriting would carry whatever directory the interactive session happened to
+/// be sitting in into the new project tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NewTabOrigin {
+    CurrentSession,
+    ProjectEntry,
+}
+
+impl NewTabOrigin {
+    fn inherits_working_directory(self, scope: WorkingDirectoryScope) -> bool {
+        match self {
+            Self::CurrentSession => scope.inherits_for_new_tab(),
+            Self::ProjectEntry => false,
+        }
+    }
+}
+
 fn reorder_items_by_id<T>(
     items: &mut Vec<T>,
     source_id: u64,
@@ -729,7 +751,13 @@ impl Zetta {
         ) else {
             return;
         };
-        self.open_tab_with_profile_context(profile, project, window, cx);
+        self.open_tab_with_profile_context(
+            profile,
+            project,
+            NewTabOrigin::CurrentSession,
+            window,
+            cx,
+        );
     }
 
     pub(crate) fn open_tab_with_profile(
@@ -739,7 +767,13 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         let project = self.active_project_config().cloned();
-        self.open_tab_with_profile_context(profile, project, window, cx);
+        self.open_tab_with_profile_context(
+            profile,
+            project,
+            NewTabOrigin::CurrentSession,
+            window,
+            cx,
+        );
     }
 
     pub(crate) fn open_tab_with_profile_in_project(
@@ -749,13 +783,20 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_tab_with_profile_context(profile, Some(project), window, cx);
+        self.open_tab_with_profile_context(
+            profile,
+            Some(project),
+            NewTabOrigin::ProjectEntry,
+            window,
+            cx,
+        );
     }
 
     fn open_tab_with_profile_context(
         &mut self,
         mut profile: Profile,
         project: Option<Arc<ProjectConfig>>,
+        origin: NewTabOrigin,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -765,7 +806,8 @@ impl Zetta {
             .as_ref()
             .map(|project| &project.effective)
             .unwrap_or(&self.launch_config);
-        let inherit_working_directory = effective.working_directory_scope.inherits_for_new_tab();
+        let inherit_working_directory =
+            origin.inherits_working_directory(effective.working_directory_scope);
         let inherited_working_directory = active_pane
             .filter(|_| inherit_working_directory)
             .filter(|pane| !is_wsl_shell(&pane.profile.command))

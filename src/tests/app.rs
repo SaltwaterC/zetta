@@ -613,3 +613,23 @@ fn overflow_selection_side_distinguishes_left_and_right_entries() {
     assert_eq!(tab_overflow_selection_side(7, 4), Some(true));
     assert_eq!(tab_overflow_selection_side(4, 4), None);
 }
+
+#[test]
+fn opening_a_project_starts_in_the_project_directory_regardless_of_scope() {
+    for scope in [
+        WorkingDirectoryScope::None,
+        WorkingDirectoryScope::Pane,
+        WorkingDirectoryScope::Tab,
+    ] {
+        assert!(
+            !NewTabOrigin::ProjectEntry.inherits_working_directory(scope),
+            "entering a project must not inherit the session directory with scope {scope:?}"
+        );
+    }
+}
+
+#[test]
+fn a_new_tab_in_the_current_session_follows_the_configured_scope() {
+    assert!(!NewTabOrigin::CurrentSession.inherits_working_directory(WorkingDirectoryScope::None));
+    assert!(NewTabOrigin::CurrentSession.inherits_working_directory(WorkingDirectoryScope::Tab));
+}
