@@ -1,0 +1,27 @@
+{
+  "theme": "One Dark",
+  "working_directory": ".",
+  "default_profile": "System",
+  "default_tab_icon": "terminal",
+  "inactive_pane_opacity": 0.8,
+  "env": {
+    "PROJECT_ENV": "development"
+  },
+  "initial_split": "development",
+  "pane_split_templates": {
+    "development": {
+      "env": {
+        "PROJECT_ROLE": "development"
+      },
+      "layout": {
+        "vertical": [
+          { "label": "editor" },
+          { "label": "server" }
+        ]
+      }
+    }
+  },
+  "profiles": [
+    { "name": "System", "theme": "One Dark" }
+  ]
+}
