@@ -214,6 +214,13 @@ pub(crate) fn set_project_dropdown(
     true
 }
 
+/// Where the project picker opens: the directory the active pane reported, so a
+/// shell already sitting in the project root needs no navigation, and Zetta's own
+/// working directory when the pane reported none.
+pub(crate) fn prompt_start_directory(pane_directory: Option<PathBuf>) -> Option<PathBuf> {
+    pane_directory.or_else(|| env::current_dir().ok())
+}
+
 impl Zetta {
     fn refresh_settings_project_roots(&mut self, cx: &mut Context<Self>) {
         if let Some(editor) = self.settings_editor.as_mut() {
@@ -225,17 +232,34 @@ impl Zetta {
         cx.notify();
     }
 
+    /// The directory the project picker opens at, taken from the active pane. A
+    /// WSL pane reports a path inside the distribution, which the host picker
+    /// cannot open, so it counts as having reported nothing.
+    fn project_prompt_directory(&self, cx: &App) -> Option<PathBuf> {
+        prompt_start_directory(
+            self.tabs
+                .get(self.active_tab)
+                .and_then(Tab::active_pane)
+                .filter(|pane| !is_wsl_shell(&pane.profile.command))
+                .and_then(|pane| pane.working_directory(cx)),
+        )
+    }
+
     pub(crate) fn add_project_from_settings(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let selection = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Select a Zetta project root".into()),
-        });
+        let selection = gpui_platform::prompt_for_paths_in(
+            cx,
+            self.project_prompt_directory(cx),
+            PathPromptOptions {
+                files: false,
+                directories: true,
+                multiple: false,
+                prompt: Some("Select a Zetta project root".into()),
+            },
+        );
         let base = self.launch_config.clone();
         let registry_path = self.projects.registry.path().to_path_buf();
         let executor = cx.background_executor().clone();

@@ -273,6 +273,81 @@ pub(crate) struct LinuxPlatform<P> {
     pub(crate) inner: P,
 }
 
+impl<P: LinuxClient + 'static> LinuxPlatform<P> {
+    /// `Platform::prompt_for_paths` with a starting directory, which the upstream
+    /// trait has no way to express.
+    pub(crate) fn prompt_for_paths_in(
+        &self,
+        directory: Option<PathBuf>,
+        options: PathPromptOptions,
+    ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>> {
+        let (done_tx, done_rx) = oneshot::channel();
+
+        #[cfg(not(any(feature = "wayland", feature = "x11")))]
+        let _ = (done_tx.send(Ok(None)), directory, options);
+
+        #[cfg(any(feature = "wayland", feature = "x11"))]
+        let identifier = self.inner.window_identifier();
+
+        #[cfg(any(feature = "wayland", feature = "x11"))]
+        self.foreground_executor()
+            .spawn(async move {
+                let title = if options.directories {
+                    "Open Folder"
+                } else {
+                    "Open File"
+                };
+
+                let request_builder = ashpd::desktop::file_chooser::OpenFileRequest::default()
+                    .identifier(identifier.await)
+                    .modal(true)
+                    .title(title)
+                    .accept_label(options.prompt.as_ref().map(gpui::SharedString::as_str))
+                    .multiple(options.multiple)
+                    .directory(options.directories);
+
+                // Only a path with an interior nul byte fails here, which a
+                // directory that came from the filesystem cannot have.
+                let request_builder =
+                    match request_builder.current_folder::<&Path>(directory.as_deref()) {
+                        Ok(request_builder) => request_builder,
+                        Err(error) => {
+                            let _ = done_tx.send(Err(error.into()));
+                            return;
+                        }
+                    };
+
+                let request = match request_builder.send().await {
+                    Ok(request) => request,
+                    Err(err) => {
+                        let result = match err {
+                            ashpd::Error::PortalNotFound(_) => anyhow!(FILE_PICKER_PORTAL_MISSING),
+                            err => err.into(),
+                        };
+                        let _ = done_tx.send(Err(result));
+                        return;
+                    }
+                };
+
+                let result = match request.response() {
+                    Ok(response) => Ok(Some(
+                        response
+                            .uris()
+                            .iter()
+                            .filter_map(|uri: &ashpd::Uri| url::Url::parse(uri.as_str()).ok())
+                            .filter_map(|uri: url::Url| uri.to_file_path().ok())
+                            .collect::<Vec<_>>(),
+                    )),
+                    Err(ashpd::Error::Response(_)) => Ok(None),
+                    Err(e) => Err(e.into()),
+                };
+                let _ = done_tx.send(result);
+            })
+            .detach();
+        done_rx
+    }
+}
+
 impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
     fn background_executor(&self) -> BackgroundExecutor {
         self.inner
@@ -442,60 +517,7 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
         &self,
         options: PathPromptOptions,
     ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>> {
-        let (done_tx, done_rx) = oneshot::channel();
-
-        #[cfg(not(any(feature = "wayland", feature = "x11")))]
-        let _ = (done_tx.send(Ok(None)), options);
-
-        #[cfg(any(feature = "wayland", feature = "x11"))]
-        let identifier = self.inner.window_identifier();
-
-        #[cfg(any(feature = "wayland", feature = "x11"))]
-        self.foreground_executor()
-            .spawn(async move {
-                let title = if options.directories {
-                    "Open Folder"
-                } else {
-                    "Open File"
-                };
-
-                let request = match ashpd::desktop::file_chooser::OpenFileRequest::default()
-                    .identifier(identifier.await)
-                    .modal(true)
-                    .title(title)
-                    .accept_label(options.prompt.as_ref().map(gpui::SharedString::as_str))
-                    .multiple(options.multiple)
-                    .directory(options.directories)
-                    .send()
-                    .await
-                {
-                    Ok(request) => request,
-                    Err(err) => {
-                        let result = match err {
-                            ashpd::Error::PortalNotFound(_) => anyhow!(FILE_PICKER_PORTAL_MISSING),
-                            err => err.into(),
-                        };
-                        let _ = done_tx.send(Err(result));
-                        return;
-                    }
-                };
-
-                let result = match request.response() {
-                    Ok(response) => Ok(Some(
-                        response
-                            .uris()
-                            .iter()
-                            .filter_map(|uri: &ashpd::Uri| url::Url::parse(uri.as_str()).ok())
-                            .filter_map(|uri: url::Url| uri.to_file_path().ok())
-                            .collect::<Vec<_>>(),
-                    )),
-                    Err(ashpd::Error::Response(_)) => Ok(None),
-                    Err(e) => Err(e.into()),
-                };
-                let _ = done_tx.send(result);
-            })
-            .detach();
-        done_rx
+        self.prompt_for_paths_in(None, options)
     }
 
     fn prompt_for_new_path(

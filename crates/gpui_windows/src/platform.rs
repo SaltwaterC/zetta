@@ -291,6 +291,24 @@ impl WindowsPlatform {
         })
     }
 
+    /// `Platform::prompt_for_paths` with a starting directory, which the upstream
+    /// trait has no way to express.
+    pub fn prompt_for_paths_in(
+        &self,
+        directory: Option<PathBuf>,
+        options: PathPromptOptions,
+    ) -> Receiver<Result<Option<Vec<PathBuf>>>> {
+        let (tx, rx) = oneshot::channel();
+        let window = self.find_current_active_window();
+        self.foreground_executor()
+            .spawn(async move {
+                let _ = tx.send(file_open_dialog(directory, options, window));
+            })
+            .detach();
+
+        rx
+    }
+
     fn find_current_active_window(&self) -> Option<HWND> {
         let active_window_hwnd = unsafe { GetActiveWindow() };
         if active_window_hwnd.is_invalid() {
@@ -556,15 +574,7 @@ impl Platform for WindowsPlatform {
         &self,
         options: PathPromptOptions,
     ) -> Receiver<Result<Option<Vec<PathBuf>>>> {
-        let (tx, rx) = oneshot::channel();
-        let window = self.find_current_active_window();
-        self.foreground_executor()
-            .spawn(async move {
-                let _ = tx.send(file_open_dialog(options, window));
-            })
-            .detach();
-
-        rx
+        self.prompt_for_paths_in(None, options)
     }
 
     fn prompt_for_new_path(
@@ -1225,7 +1235,25 @@ fn open_target_in_explorer(target: &Path) -> Result<()> {
     })
 }
 
+/// The shell item a dialog starts in. A directory that cannot be resolved is
+/// dropped rather than failing the dialog, so the picker still opens at the
+/// location the shell would have chosen.
+fn dialog_folder_item(directory: &Path) -> Option<IShellItem> {
+    if directory.as_os_str().is_empty() {
+        return None;
+    }
+    let full_path = directory
+        .canonicalize()
+        .context("failed to canonicalize directory")
+        .log_err()?;
+    let full_path = dunce::simplified(&full_path).display().to_string();
+    unsafe { SHCreateItemFromParsingName(&HSTRING::from(full_path), None) }
+        .context("failed to create the dialog folder item")
+        .log_err()
+}
+
 fn file_open_dialog(
+    directory: Option<PathBuf>,
     options: PathPromptOptions,
     window: Option<HWND>,
 ) -> Result<Option<Vec<PathBuf>>> {
@@ -1242,6 +1270,13 @@ fn file_open_dialog(
 
     unsafe {
         folder_dialog.SetOptions(dialog_options)?;
+
+        if let Some(path_item) = directory.as_deref().and_then(dialog_folder_item) {
+            folder_dialog
+                .SetFolder(&path_item)
+                .context("failed to set dialog folder")
+                .log_err();
+        }
 
         if let Some(prompt) = options.prompt {
             let prompt: &str = &prompt;
@@ -1276,16 +1311,7 @@ fn file_save_dialog(
     window: Option<HWND>,
 ) -> Result<Option<PathBuf>> {
     let dialog: IFileSaveDialog = unsafe { CoCreateInstance(&FileSaveDialog, None, CLSCTX_ALL)? };
-    if !directory.to_string_lossy().is_empty()
-        && let Some(full_path) = directory
-            .canonicalize()
-            .context("failed to canonicalize directory")
-            .log_err()
-    {
-        let full_path = dunce::simplified(&full_path);
-        let full_path_string = full_path.display().to_string();
-        let path_item: IShellItem =
-            unsafe { SHCreateItemFromParsingName(&HSTRING::from(full_path_string), None)? };
+    if let Some(path_item) = dialog_folder_item(&directory) {
         unsafe {
             dialog
                 .SetFolder(&path_item)

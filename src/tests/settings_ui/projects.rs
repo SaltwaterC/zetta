@@ -95,6 +95,21 @@ fn test_project(config: &Config, source: &str) -> ProjectEditor {
 }
 
 #[test]
+fn the_project_picker_starts_at_the_active_panes_directory() {
+    let pane_directory = PathBuf::from("/projects/demo");
+
+    assert_eq!(
+        prompt_start_directory(Some(pane_directory.clone())),
+        Some(pane_directory)
+    );
+    assert_eq!(
+        prompt_start_directory(None),
+        std::env::current_dir().ok(),
+        "a pane that reported no directory falls back to Zetta's own"
+    );
+}
+
+#[test]
 fn the_project_list_exposes_one_control_group_per_registered_project() {
     let config = base_config();
     let editor = test_editor(&config, None);

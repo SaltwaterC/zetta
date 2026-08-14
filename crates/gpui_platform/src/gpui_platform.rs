@@ -3,7 +3,42 @@
 
 pub use gpui::Platform;
 
-use std::rc::Rc;
+use std::{cell::RefCell, path::PathBuf, rc::Rc};
+
+/// A path picker rooted at a starting directory.
+///
+/// `Platform::prompt_for_paths` takes no starting directory and
+/// `PathPromptOptions` is upstream, so each platform hands one of these out
+/// beside itself and this crate routes [`prompt_for_paths_in`] to it.
+type DirectoryPathPrompt = Rc<
+    dyn Fn(
+        Option<PathBuf>,
+        gpui::PathPromptOptions,
+    ) -> futures::channel::oneshot::Receiver<gpui::Result<Option<Vec<PathBuf>>>>,
+>;
+
+thread_local! {
+    /// The picker belonging to the platform the application was built on. Only
+    /// [`application`] and [`headless`] register one, so a platform built for a
+    /// test or for a bare executor never displaces the running application's.
+    static PATH_PROMPT: RefCell<Option<DirectoryPathPrompt>> = const { RefCell::new(None) };
+}
+
+/// Opens a path picker rooted at `directory`.
+///
+/// Falls back to [`gpui::App::prompt_for_paths`], which opens wherever the
+/// platform's picker last was, when the application was not built through this
+/// crate (GPUI's test platform) or the platform has no rooted picker.
+pub fn prompt_for_paths_in(
+    cx: &gpui::App,
+    directory: Option<PathBuf>,
+    options: gpui::PathPromptOptions,
+) -> futures::channel::oneshot::Receiver<gpui::Result<Option<Vec<PathBuf>>>> {
+    match PATH_PROMPT.with_borrow(Option::clone) {
+        Some(prompt) => prompt(directory, options),
+        None => cx.prompt_for_paths(options),
+    }
+}
 
 /// Returns a background executor for the current platform.
 pub fn background_executor() -> gpui::BackgroundExecutor {
@@ -11,11 +46,51 @@ pub fn background_executor() -> gpui::BackgroundExecutor {
 }
 
 pub fn application() -> gpui::Application {
-    gpui::Application::with_platform(current_platform(false))
+    gpui::Application::with_platform(platform_with_path_prompt(false))
 }
 
 pub fn headless() -> gpui::Application {
-    gpui::Application::with_platform(current_platform(true))
+    gpui::Application::with_platform(platform_with_path_prompt(true))
+}
+
+/// Builds the platform the application runs on and records its rooted picker.
+fn platform_with_path_prompt(headless: bool) -> Rc<dyn Platform> {
+    #[cfg(target_family = "wasm")]
+    return current_platform(headless);
+
+    #[cfg(not(target_family = "wasm"))]
+    {
+        #[cfg(target_os = "macos")]
+        let (platform, prompt) = {
+            let platform = Rc::new(gpui_macos::MacPlatform::new(headless));
+            let picker = platform.clone();
+            (
+                platform as Rc<dyn Platform>,
+                Rc::new(move |directory, options| picker.prompt_for_paths_in(directory, options))
+                    as DirectoryPathPrompt,
+            )
+        };
+
+        #[cfg(target_os = "windows")]
+        let (platform, prompt) = {
+            let platform = Rc::new(
+                gpui_windows::WindowsPlatform::new(headless)
+                    .expect("failed to initialize Windows platform"),
+            );
+            let picker = platform.clone();
+            (
+                platform as Rc<dyn Platform>,
+                Rc::new(move |directory, options| picker.prompt_for_paths_in(directory, options))
+                    as DirectoryPathPrompt,
+            )
+        };
+
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        let (platform, prompt) = gpui_linux::current_platform_with_path_prompt(headless);
+
+        PATH_PROMPT.replace(Some(prompt));
+        platform
+    }
 }
 
 /// Unlike `application`, this function returns a single-threaded web application.

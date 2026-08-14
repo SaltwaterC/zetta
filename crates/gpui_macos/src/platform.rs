@@ -352,6 +352,66 @@ impl MacPlatform {
         }))
     }
 
+    /// `Platform::prompt_for_paths` with a starting directory, which the upstream
+    /// trait has no way to express.
+    pub fn prompt_for_paths_in(
+        &self,
+        directory: Option<PathBuf>,
+        options: PathPromptOptions,
+    ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>> {
+        let (done_tx, done_rx) = oneshot::channel();
+        self.foreground_executor()
+            .spawn(async move {
+                unsafe {
+                    let panel = NSOpenPanel::openPanel(nil);
+                    panel.setCanChooseDirectories_(options.directories.to_objc());
+                    panel.setCanChooseFiles_(options.files.to_objc());
+                    panel.setAllowsMultipleSelection_(options.multiple.to_objc());
+
+                    panel.setCanCreateDirectories(true.to_objc());
+                    panel.setResolvesAliases_(false.to_objc());
+
+                    if let Some(directory) = directory {
+                        let path = ns_string(directory.to_string_lossy().as_ref());
+                        let url = NSURL::fileURLWithPath_isDirectory_(nil, path, true.to_objc());
+                        let _: () = msg_send![panel, setDirectoryURL: url];
+                    }
+
+                    let done_tx = Cell::new(Some(done_tx));
+                    let block = ConcreteBlock::new(move |response: NSModalResponse| {
+                        let result = if response == NSModalResponse::NSModalResponseOk {
+                            let mut result = Vec::new();
+                            let urls = panel.URLs();
+                            for i in 0..urls.count() {
+                                let url = urls.objectAtIndex(i);
+                                if url.isFileURL() == YES
+                                    && let Ok(path) = ns_url_to_path(url)
+                                {
+                                    result.push(path)
+                                }
+                            }
+                            Some(result)
+                        } else {
+                            None
+                        };
+
+                        if let Some(done_tx) = done_tx.take() {
+                            let _ = done_tx.send(Ok(result));
+                        }
+                    });
+                    let block = block.copy();
+
+                    if let Some(prompt) = options.prompt {
+                        let _: () = msg_send![panel, setPrompt: ns_string(&prompt)];
+                    }
+
+                    let _: () = msg_send![panel, beginWithCompletionHandler: block];
+                }
+            })
+            .detach();
+        done_rx
+    }
+
     unsafe fn create_menu_bar(
         menus: &Vec<Menu>,
         delegate: id,
@@ -892,50 +952,7 @@ impl Platform for MacPlatform {
         &self,
         options: PathPromptOptions,
     ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>> {
-        let (done_tx, done_rx) = oneshot::channel();
-        self.foreground_executor()
-            .spawn(async move {
-                unsafe {
-                    let panel = NSOpenPanel::openPanel(nil);
-                    panel.setCanChooseDirectories_(options.directories.to_objc());
-                    panel.setCanChooseFiles_(options.files.to_objc());
-                    panel.setAllowsMultipleSelection_(options.multiple.to_objc());
-
-                    panel.setCanCreateDirectories(true.to_objc());
-                    panel.setResolvesAliases_(false.to_objc());
-                    let done_tx = Cell::new(Some(done_tx));
-                    let block = ConcreteBlock::new(move |response: NSModalResponse| {
-                        let result = if response == NSModalResponse::NSModalResponseOk {
-                            let mut result = Vec::new();
-                            let urls = panel.URLs();
-                            for i in 0..urls.count() {
-                                let url = urls.objectAtIndex(i);
-                                if url.isFileURL() == YES
-                                    && let Ok(path) = ns_url_to_path(url)
-                                {
-                                    result.push(path)
-                                }
-                            }
-                            Some(result)
-                        } else {
-                            None
-                        };
-
-                        if let Some(done_tx) = done_tx.take() {
-                            let _ = done_tx.send(Ok(result));
-                        }
-                    });
-                    let block = block.copy();
-
-                    if let Some(prompt) = options.prompt {
-                        let _: () = msg_send![panel, setPrompt: ns_string(&prompt)];
-                    }
-
-                    let _: () = msg_send![panel, beginWithCompletionHandler: block];
-                }
-            })
-            .detach();
-        done_rx
+        self.prompt_for_paths_in(None, options)
     }
 
     fn prompt_for_new_path(

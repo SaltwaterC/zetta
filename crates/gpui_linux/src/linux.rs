@@ -23,37 +23,67 @@ pub(crate) use wayland::*;
 #[cfg(feature = "x11")]
 pub(crate) use x11::*;
 
-use std::rc::Rc;
+use std::{path::PathBuf, rc::Rc};
+
+/// A path picker rooted at a starting directory.
+///
+/// `Platform::prompt_for_paths` cannot express one and `PathPromptOptions` is
+/// upstream, so the platform hands this out beside itself instead.
+pub type DirectoryPathPrompt = Rc<
+    dyn Fn(
+        Option<PathBuf>,
+        gpui::PathPromptOptions,
+    ) -> futures::channel::oneshot::Receiver<gpui::Result<Option<Vec<PathBuf>>>>,
+>;
 
 /// Returns the default platform implementation for the current OS.
 pub fn current_platform(headless: bool) -> Rc<dyn gpui::Platform> {
+    current_platform_with_path_prompt(headless).0
+}
+
+/// Returns the default platform implementation for the current OS, together with
+/// its [`DirectoryPathPrompt`].
+pub fn current_platform_with_path_prompt(
+    headless: bool,
+) -> (Rc<dyn gpui::Platform>, DirectoryPathPrompt) {
     #[cfg(feature = "x11")]
     use anyhow::Context as _;
 
     if headless {
-        return Rc::new(LinuxPlatform {
+        return with_path_prompt(LinuxPlatform {
             inner: HeadlessClient::new(),
         });
     }
 
     match gpui::guess_compositor() {
         #[cfg(feature = "wayland")]
-        "Wayland" => Rc::new(LinuxPlatform {
+        "Wayland" => with_path_prompt(LinuxPlatform {
             inner: WaylandClient::new(),
         }),
 
         #[cfg(feature = "x11")]
-        "X11" => Rc::new(LinuxPlatform {
+        "X11" => with_path_prompt(LinuxPlatform {
             inner: X11Client::new()
                 .context("Failed to initialize X11 client.")
                 .unwrap(),
         }),
 
-        "Headless" => Rc::new(LinuxPlatform {
+        "Headless" => with_path_prompt(LinuxPlatform {
             inner: HeadlessClient::new(),
         }),
         _ => unreachable!(
             r#"At least one of the "wayland" or "x11" features must be enabled on gpui_linux or gpui_platform."#
         ),
     }
+}
+
+fn with_path_prompt<P: LinuxClient + 'static>(
+    platform: LinuxPlatform<P>,
+) -> (Rc<dyn gpui::Platform>, DirectoryPathPrompt) {
+    let platform = Rc::new(platform);
+    let prompt = platform.clone();
+    (
+        platform,
+        Rc::new(move |directory, options| prompt.prompt_for_paths_in(directory, options)),
+    )
 }
