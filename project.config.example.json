@@ -16,7 +16,12 @@
       "layout": {
         "vertical": [
           { "label": "editor" },
-          { "label": "server" }
+          {
+            "label": "server",
+            "stack": [
+              { "program": "cargo", "args": ["watch", "-x", "test"] }
+            ]
+          }
         ]
       }
     }

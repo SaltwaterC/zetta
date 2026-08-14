@@ -1,5 +1,5 @@
 use super::*;
-use crate::{ToggleTabMoveMode, ToggleTabPinning};
+use crate::{OpenProject, ToggleTabMoveMode, ToggleTabPinning};
 gpui::actions!(command_palette_test, [First, Second]);
 
 #[test]
@@ -52,6 +52,50 @@ fn matches_are_cached_until_the_query_changes() {
         palette.commands[palette.matches()[0]].name,
         "terminal: paste"
     );
+}
+
+#[test]
+fn registered_projects_become_palette_commands_that_carry_their_root() {
+    let roots = [
+        PathBuf::from("/home/user/source/zetta"),
+        PathBuf::from("/home/user/work/zetta"),
+    ];
+    let commands = project_palette_commands(&roots);
+
+    assert_eq!(
+        commands
+            .iter()
+            .map(|command| command.name.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "zetta: open project: zetta (/home/user/source/zetta)",
+            "zetta: open project: zetta (/home/user/work/zetta)",
+        ]
+    );
+    assert!(commands.iter().all(|command| command.shortcut.is_none()));
+    for (command, root) in commands.iter().zip(&roots) {
+        assert!(
+            command
+                .action
+                .partial_eq(&OpenProject { root: root.clone() })
+        );
+    }
+
+    // Two projects can share a directory name, and `CommandPalette::new` drops
+    // duplicate names, so the path in the label is what keeps both reachable.
+    let palette = CommandPalette::new(project_palette_commands(&roots));
+    assert_eq!(palette.matches().len(), 2);
+}
+
+#[test]
+fn project_commands_are_found_by_their_directory_name() {
+    let mut palette = CommandPalette::new(project_palette_commands(&[PathBuf::from(
+        "/home/user/source/zetta",
+    )]));
+    palette.query = "zetta".into();
+    palette.refresh_matches();
+
+    assert_eq!(palette.matches().len(), 1);
 }
 
 #[test]

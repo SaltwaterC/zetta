@@ -12,10 +12,11 @@ use serde_json::{Map, Value, json};
 use ui::IconName;
 
 use crate::config::{
-    Config, NewTabProfile, PaneControlsPosition, PaneSplitAxis, PaneSplitOverlaySize,
-    PaneSplitTemplate, PaneSplitTemplateConfig, WorkingDirectoryScope,
+    Config, NewTabProfile, PaneControlsPosition, PaneSplitAxis, PaneSplitCommand,
+    PaneSplitOverlaySize, PaneSplitTemplate, PaneSplitTemplateConfig, WorkingDirectoryScope,
     built_in_pane_split_templates, is_valid_pane_split_label, profile_is_hidden,
 };
+use crate::pane::MAX_PANES_PER_TAB;
 use crate::profile_icon::ProfileIcon;
 use crate::startup::{keymap_keystroke_display, keymap_keystroke_storage};
 
@@ -189,6 +190,8 @@ pub enum PaneTemplateNodeField {
     OverlayText,
     OverlayOpacity,
     OverlayColor,
+    StackProgram(usize),
+    StackArgument(usize, usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -233,6 +236,8 @@ pub struct PaneTemplatePaneForm {
     pub theme: Option<String>,
     pub environment: Vec<PaneTemplateEnvironmentForm>,
     pub overlay: Option<PaneTemplateOverlayForm>,
+    /// Commands seeded as stacked entries in this pane.
+    pub stack: Vec<PaneTemplateCommandForm>,
 }
 
 // Pane leaves are the common case and are kept inline to avoid one heap
@@ -333,6 +338,7 @@ impl Default for PaneTemplatePaneForm {
             theme: None,
             environment: Vec::new(),
             overlay: None,
+            stack: Vec::new(),
         }
     }
 }
@@ -350,6 +356,17 @@ impl PaneTemplateNodeForm {
         match self {
             Self::Pane(_) => 1,
             Self::Split { first, second, .. } => first.pane_count() + second.pane_count(),
+        }
+    }
+
+    /// The stacked commands the whole tree declares. Each becomes a terminal, so
+    /// they share the pane budget.
+    pub fn stacked_command_count(&self) -> usize {
+        match self {
+            Self::Pane(pane) => pane.stack.len(),
+            Self::Split { first, second, .. } => {
+                first.stacked_command_count() + second.stacked_command_count()
+            }
         }
     }
 
@@ -476,10 +493,7 @@ impl PaneTemplateNodeForm {
                 source: if let Some(profile) = &pane.profile {
                     PaneTemplateSourceForm::Profile(profile.name.clone())
                 } else if let Some(command) = &pane.command {
-                    PaneTemplateSourceForm::Command(PaneTemplateCommandForm {
-                        program: TextField::new(command.program.clone()),
-                        args: command.args.iter().cloned().map(TextField::new).collect(),
-                    })
+                    PaneTemplateSourceForm::Command(pane_template_command_form(command))
                 } else {
                     PaneTemplateSourceForm::Inherit
                 },
@@ -510,6 +524,7 @@ impl PaneTemplateNodeForm {
                         ),
                         color: TextField::new(overlay.color.clone().unwrap_or_default()),
                     }),
+                stack: pane.stack.iter().map(pane_template_command_form).collect(),
             }),
             PaneSplitTemplate::Split {
                 axis,
@@ -551,6 +566,20 @@ impl PaneTemplateNodeForm {
                             path_label(path)
                         );
                     }
+                }
+                anyhow::ensure!(
+                    pane.stack.len() < MAX_PANES_PER_TAB,
+                    "pane {} must not declare more than {} stacked commands",
+                    path_label(path),
+                    MAX_PANES_PER_TAB - 1
+                );
+                for (index, command) in pane.stack.iter().enumerate() {
+                    anyhow::ensure!(
+                        !command.program.text.trim().is_empty(),
+                        "pane {} stacked command {} program is required",
+                        path_label(path),
+                        index + 1
+                    );
                 }
                 validate_pane_template_environment(
                     &pane.environment,
@@ -600,17 +629,7 @@ impl PaneTemplateNodeForm {
                         object.insert("profile".into(), json!(profile));
                     }
                     PaneTemplateSourceForm::Command(command) => {
-                        let mut command_object = Map::new();
-                        command_object.insert("program".into(), json!(command.program.text));
-                        let args = command
-                            .args
-                            .iter()
-                            .map(|argument| json!(argument.text))
-                            .collect::<Vec<_>>();
-                        if !args.is_empty() {
-                            command_object.insert("args".into(), Value::Array(args));
-                        }
-                        object.insert("command".into(), Value::Object(command_object));
+                        object.insert("command".into(), pane_template_command_value(command));
                     }
                 }
                 if let Some(theme) = &pane.theme
@@ -643,6 +662,17 @@ impl PaneTemplateNodeForm {
                         overlay_object.insert("color".into(), json!(overlay.color.text));
                     }
                     object.insert("overlay".into(), Value::Object(overlay_object));
+                }
+                if !pane.stack.is_empty() {
+                    object.insert(
+                        "stack".into(),
+                        Value::Array(
+                            pane.stack
+                                .iter()
+                                .map(pane_template_command_value)
+                                .collect::<Vec<_>>(),
+                        ),
+                    );
                 }
                 Ok(Value::Object(object))
             }
@@ -691,6 +721,29 @@ fn validate_pane_template_environment(
         );
     }
     Ok(())
+}
+
+/// Shared by the leaf's own `command` and by each of its stacked commands,
+/// which use the same `{program, args}` shape.
+fn pane_template_command_form(command: &PaneSplitCommand) -> PaneTemplateCommandForm {
+    PaneTemplateCommandForm {
+        program: TextField::new(command.program.clone()),
+        args: command.args.iter().cloned().map(TextField::new).collect(),
+    }
+}
+
+fn pane_template_command_value(command: &PaneTemplateCommandForm) -> Value {
+    let mut object = Map::new();
+    object.insert("program".into(), json!(command.program.text));
+    let args = command
+        .args
+        .iter()
+        .map(|argument| json!(argument.text))
+        .collect::<Vec<_>>();
+    if !args.is_empty() {
+        object.insert("args".into(), Value::Array(args));
+    }
+    Value::Object(object)
 }
 
 fn pane_template_environment_form(
@@ -1082,8 +1135,14 @@ impl PaneTemplatesForm {
                 &format!("pane template {:?}", template.name.text),
             )?;
             anyhow::ensure!(
-                (2..=64).contains(&template.node.pane_count()),
-                "pane template {:?} must contain between 2 and 64 panes",
+                (2..=MAX_PANES_PER_TAB).contains(&template.node.pane_count()),
+                "pane template {:?} must contain between 2 and {MAX_PANES_PER_TAB} panes",
+                template.name.text
+            );
+            anyhow::ensure!(
+                template.node.pane_count() + template.node.stacked_command_count()
+                    <= MAX_PANES_PER_TAB,
+                "pane template {:?} must not declare more than {MAX_PANES_PER_TAB} panes and stacked commands combined",
                 template.name.text
             );
             template

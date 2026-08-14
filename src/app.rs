@@ -1,4 +1,5 @@
 use super::*;
+use crate::command_panes::quote_pane_command_for_shell;
 use crate::configuration_reload::ConfigurationReloadFeedback;
 use crate::process_control::ReplacePaneRequest;
 use strum::IntoEnumIterator as _;
@@ -278,6 +279,9 @@ struct ResolvedPaneSplitLeaf {
     overlay_font_size: Option<OverlayFontSize>,
     overlay_opacity: Option<f32>,
     overlay_color: Option<Hsla>,
+    /// Stacked commands to seed in this pane, already quoted for the resolved
+    /// profile's shell the way `zetta pane --stack` quotes them.
+    stack: Vec<String>,
 }
 
 fn resolve_pane_split_leaves(
@@ -324,6 +328,19 @@ fn resolve_pane_split_leaves(
                 ),
                 None => (None, None, None, None),
             };
+            // Quoting uses the leaf's resolved shell, which is also the shell
+            // `stacked_task_shell` runs the entry through.
+            let stack = pane
+                .stack
+                .iter()
+                .map(|command| {
+                    let argv = std::iter::once(command.program.clone())
+                        .chain(command.args.iter().cloned())
+                        .collect::<Vec<_>>();
+                    quote_pane_command_for_shell(&profile.command, &argv)
+                        .with_context(|| format!("using stacked command {:?}", command.program))
+                })
+                .collect::<Result<Vec<_>>>()?;
             Ok(ResolvedPaneSplitLeaf {
                 label: pane.label,
                 profile,
@@ -332,6 +349,7 @@ fn resolve_pane_split_leaves(
                 overlay_font_size,
                 overlay_opacity,
                 overlay_color,
+                stack,
             })
         })
         .collect()
@@ -349,6 +367,11 @@ fn pane_split_leaf_requires_restart(pane: &TerminalPane, leaf: &ResolvedPaneSpli
         || pane.environment_overrides != leaf.environment
         || pane.base_exited
         || pane.error.is_some()
+        // A retained pane keeps the stack it already has, so seeding a declared
+        // stack on top of it would append duplicates every time the template is
+        // applied. Rebuilding the pane makes its stack exactly what the template
+        // describes.
+        || !leaf.stack.is_empty()
 }
 
 pub(crate) fn pane_input_enabled(modal_pane_mode_active: bool) -> bool {
@@ -1968,7 +1991,37 @@ impl Zetta {
         tab.activate_pane(active_pane_id);
         self.retain_open_visible_terminals();
 
-        let spawn_count = new_panes.len() + usize::from(replacing_active);
+        // Every declared stacked entry is pushed before any spawn callback can
+        // run, so the base terminal's spawn sees a non-base selection and leaves
+        // focus to the stacked entry the pane ends up selecting.
+        let stacked_leaves = std::iter::once(active_pane_id)
+            .chain(new_panes.iter().map(|(pane_id, _)| *pane_id))
+            .enumerate()
+            .filter(|(leaf_index, _)| !leaves[*leaf_index].stack.is_empty());
+        let mut stacked_launches = Vec::new();
+        for (leaf_index, pane_id) in stacked_leaves {
+            let leaf = &leaves[leaf_index];
+            for command in &leaf.stack {
+                let entry_id = self.next_pane_id;
+                self.next_pane_id += 1;
+                let entry = StackedPane::new(
+                    entry_id,
+                    command.clone(),
+                    leaf.profile.clone(),
+                    working_directories[leaf_index].0.clone(),
+                    working_directories[leaf_index].1.clone(),
+                );
+                let pushed = self.tabs[self.active_tab]
+                    .pane_mut(pane_id)
+                    .is_some_and(|pane| pane.stack.push(entry));
+                if !pushed {
+                    break;
+                }
+                stacked_launches.push((leaf_index, pane_id, entry_id, command.clone()));
+            }
+        }
+
+        let spawn_count = new_panes.len() + usize::from(replacing_active) + stacked_launches.len();
         if replacing_active {
             let path_hyperlink_regexes = terminal_settings.path_hyperlink_regexes(spawn_count == 1);
             self.spawn_terminal_with_theme_and_environment(
@@ -2003,6 +2056,25 @@ impl Zetta {
                 path_hyperlink_regexes,
                 leaves[leaf_index].environment.clone(),
                 false,
+                window,
+                cx,
+            );
+        }
+        let stacked_count = stacked_launches.len();
+        for (index, (leaf_index, pane_id, entry_id, command)) in
+            stacked_launches.into_iter().enumerate()
+        {
+            self.spawn_stacked_terminal(
+                tab_id,
+                pane_id,
+                entry_id,
+                command,
+                leaves[leaf_index].profile.clone(),
+                working_directories[leaf_index].0.clone(),
+                working_directories[leaf_index].1.clone(),
+                terminal_themes[leaf_index].clone(),
+                &mut terminal_settings,
+                index + 1 == stacked_count,
                 window,
                 cx,
             );

@@ -152,6 +152,7 @@ impl Zetta {
                     }
                 }),
         );
+        commands.extend(project_palette_commands(self.projects.registry.roots()));
         self.command_palette = Some(CommandPalette::new(commands));
         self.command_palette_focus.focus(window, cx);
         cx.notify();

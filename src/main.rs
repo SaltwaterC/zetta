@@ -55,7 +55,9 @@ use background_sessions::{
     BackgroundSessionRunner, BackgroundSessionSummary, SessionAuthentication, SessionSecret,
     VerifiedSession, application_from_command_line, print_session_catalogs,
 };
-use command_palette::{CommandPalette, PaletteCommand, humanize_action_name};
+use command_palette::{
+    CommandPalette, PaletteCommand, humanize_action_name, project_palette_commands,
+};
 use config::{
     Config, NewTabProfile, PaneControlsPosition, PaneSplitAxis, PaneSplitOverlaySize,
     PaneSplitPane, PaneSplitTemplate, PaneSplitTemplateConfig, Profile, WorkingDirectoryScope,
@@ -233,6 +235,15 @@ struct ApplyPaneTheme {
 #[action(namespace = zetta, no_json, no_register)]
 struct SelectOverflowTab {
     index: usize,
+}
+
+/// Opens one registered project in a new tab. The root is a machine-specific
+/// filesystem path, so this is dispatched from the command palette rather than
+/// bound in a keymap; `zetta project open` covers the scripted case.
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = zetta, no_json, no_register)]
+struct OpenProject {
+    root: PathBuf,
 }
 
 static PERFORMANCE_OVERLAY_COUNT: AtomicUsize = AtomicUsize::new(0);

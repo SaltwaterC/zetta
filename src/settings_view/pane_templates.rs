@@ -179,6 +179,17 @@ fn render_tree_node(
                         .child(format!("Pane {current_pane}")),
                 )
                 .child(div().mt_1().min_w_0().text_sm().truncate().child(label))
+                .when(!pane.stack.is_empty(), |preview| {
+                    preview.child(
+                        div()
+                            .mt_1()
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(colors.text_muted)
+                            .truncate()
+                            .child(format!("+{} stacked", pane.stack.len())),
+                    )
+                })
                 .when(focused, |pane| pane.child(focus_ring(colors)))
                 .into_any_element()
         }
@@ -634,7 +645,146 @@ fn render_pane_details(
             colors,
         ));
     }
+    rows.extend(render_stack_commands(
+        editor,
+        pane,
+        template_index,
+        path,
+        editable,
+        colors,
+        handle,
+    ));
     div().flex_col().children(rows).into_any_element()
+}
+
+/// The leaf's stacked commands. Each one becomes a stacked entry sharing the
+/// pane's region with its interactive shell, so they are edited as an ordered
+/// list of `{program, args}` commands like the leaf's own command.
+///
+/// The row order here is the page's tab order and has to match
+/// `add_stack_controls`.
+fn render_stack_commands(
+    editor: &SettingsEditor,
+    pane: &PaneTemplatePaneForm,
+    template_index: usize,
+    path: PaneTemplateNodePath,
+    editable: bool,
+    colors: &ThemeColors,
+    handle: &WeakEntity<Zetta>,
+) -> Vec<AnyElement> {
+    let node_control = |field| {
+        SettingsControl::Input(SettingsInput::PaneTemplate(PaneTemplateTextField::Node(
+            template_index,
+            path,
+            field,
+        )))
+    };
+    let node_input = |field| {
+        SettingsInput::PaneTemplate(PaneTemplateTextField::Node(template_index, path, field))
+    };
+    let mut rows = vec![
+        div()
+            .pt_3()
+            .text_xs()
+            .text_color(colors.text_muted)
+            .child("Stacked commands (run beside this pane's shell)")
+            .into_any_element(),
+    ];
+    for (entry, command) in pane.stack.iter().enumerate() {
+        let program = text_field(
+            format!("pane-template-stack-program-{path:?}-{entry}"),
+            command.program.clone(),
+            node_input(PaneTemplateNodeField::StackProgram(entry)),
+            editor,
+            colors,
+            handle,
+        );
+        let remove = action_button(
+            editor,
+            format!("pane-template-stack-remove-{path:?}-{entry}"),
+            "×".to_owned(),
+            SettingsControl::RemovePaneTemplateStackEntry(path, entry),
+            editable,
+            colors,
+            handle,
+        );
+        rows.push(control_row(
+            editor,
+            format!("Stacked command {} · program", entry + 1),
+            &[
+                node_control(PaneTemplateNodeField::StackProgram(entry)),
+                SettingsControl::RemovePaneTemplateStackEntry(path, entry),
+            ],
+            h_flex()
+                .gap_1()
+                .child(program)
+                .child(remove)
+                .into_any_element(),
+            colors,
+        ));
+        for (argument, value) in command.args.iter().enumerate() {
+            let argument_input = text_field(
+                format!("pane-template-stack-arg-{path:?}-{entry}-{argument}"),
+                value.clone(),
+                node_input(PaneTemplateNodeField::StackArgument(entry, argument)),
+                editor,
+                colors,
+                handle,
+            );
+            let remove = action_button(
+                editor,
+                format!("pane-template-stack-arg-remove-{path:?}-{entry}-{argument}"),
+                "×".to_owned(),
+                SettingsControl::RemovePaneTemplateStackArgument(path, entry, argument),
+                editable,
+                colors,
+                handle,
+            );
+            rows.push(control_row(
+                editor,
+                format!("Stacked command {} · argument {}", entry + 1, argument + 1),
+                &[
+                    node_control(PaneTemplateNodeField::StackArgument(entry, argument)),
+                    SettingsControl::RemovePaneTemplateStackArgument(path, entry, argument),
+                ],
+                h_flex()
+                    .gap_1()
+                    .child(argument_input)
+                    .child(remove)
+                    .into_any_element(),
+                colors,
+            ));
+        }
+        rows.push(
+            h_flex()
+                .justify_end()
+                .child(action_button(
+                    editor,
+                    format!("pane-template-stack-arg-add-{path:?}-{entry}"),
+                    "Add argument".to_owned(),
+                    SettingsControl::AddPaneTemplateStackArgument(path, entry),
+                    editable,
+                    colors,
+                    handle,
+                ))
+                .into_any_element(),
+        );
+    }
+    rows.push(
+        h_flex()
+            .justify_end()
+            .child(action_button(
+                editor,
+                format!("pane-template-stack-add-{path:?}"),
+                "Add stacked command".to_owned(),
+                SettingsControl::AddPaneTemplateStackEntry(path),
+                editable,
+                colors,
+                handle,
+            ))
+            .into_any_element(),
+    );
+    rows
 }
 
 fn render_global_environment(

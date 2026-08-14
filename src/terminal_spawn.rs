@@ -571,7 +571,10 @@ impl Zetta {
         working_directory: Option<PathBuf>,
         wsl_directory: Option<String>,
         terminal_theme: Option<Arc<Theme>>,
-        settings: TerminalSpawnSettings,
+        settings: &mut TerminalSpawnSettings,
+        // `final_spawn` lets the last terminal of a batch move the shared
+        // hyperlink regexes instead of cloning them.
+        final_spawn: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -663,7 +666,7 @@ impl Zetta {
             settings.cursor_shape,
             settings.alternate_scroll,
             settings.max_scroll_history_lines,
-            settings.path_hyperlink_regexes,
+            settings.path_hyperlink_regexes(final_spawn),
             settings.path_hyperlink_timeout_ms,
             false,
             cx.entity_id().as_u64(),

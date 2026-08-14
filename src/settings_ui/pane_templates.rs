@@ -2,6 +2,7 @@ use super::projects::{editing_project, mark_project_dirty, project_editor};
 use super::*;
 
 use crate::config::{PaneSplitAxis, PaneSplitOverlaySize};
+use crate::pane::MAX_PANES_PER_TAB;
 use crate::settings_editor::{
     PaneTemplateCommandForm, PaneTemplateEnvironmentForm, PaneTemplateForm, PaneTemplateNodeField,
     PaneTemplateNodeForm, PaneTemplateNodePath, PaneTemplateOverlayForm, PaneTemplatePaneForm,
@@ -150,6 +151,14 @@ pub(crate) fn pane_template_text_mut(
                 PaneTemplateNodeField::OverlayColor => {
                     pane.overlay.as_mut().map(|overlay| &mut overlay.color)
                 }
+                PaneTemplateNodeField::StackProgram(entry) => pane
+                    .stack
+                    .get_mut(entry)
+                    .map(|command| &mut command.program),
+                PaneTemplateNodeField::StackArgument(entry, argument) => pane
+                    .stack
+                    .get_mut(entry)
+                    .and_then(|command| command.args.get_mut(argument)),
             }
         }
     }
@@ -632,8 +641,40 @@ fn add_node_controls_with_template(
                     )),
                 ]);
             }
+            add_stack_controls(controls, pane, path, template_index);
         }
     }
+}
+
+/// The stacked-command rows for one leaf. This order is the page's tab order, so
+/// it has to match `render_pane_details`.
+fn add_stack_controls(
+    controls: &mut Vec<SettingsControl>,
+    pane: &PaneTemplatePaneForm,
+    path: PaneTemplateNodePath,
+    template_index: usize,
+) {
+    let node_input = |field| {
+        SettingsControl::Input(SettingsInput::PaneTemplate(PaneTemplateTextField::Node(
+            template_index,
+            path,
+            field,
+        )))
+    };
+    for (entry, command) in pane.stack.iter().enumerate() {
+        controls.extend([
+            node_input(PaneTemplateNodeField::StackProgram(entry)),
+            SettingsControl::RemovePaneTemplateStackEntry(path, entry),
+        ]);
+        for argument in 0..command.args.len() {
+            controls.extend([
+                node_input(PaneTemplateNodeField::StackArgument(entry, argument)),
+                SettingsControl::RemovePaneTemplateStackArgument(path, entry, argument),
+            ]);
+        }
+        controls.push(SettingsControl::AddPaneTemplateStackArgument(path, entry));
+    }
+    controls.push(SettingsControl::AddPaneTemplateStackEntry(path));
 }
 
 pub(crate) fn activate_pane_template_control(
@@ -707,6 +748,53 @@ pub(crate) fn activate_pane_template_control(
             anyhow::ensure!(
                 argument < command.args.len(),
                 "command argument no longer exists"
+            );
+            command.args.remove(argument);
+            Ok(())
+        }
+        SettingsControl::AddPaneTemplateStackEntry(path) => {
+            let Some(pane) = selected_pane_mut(editor, path) else {
+                return Ok(());
+            };
+            anyhow::ensure!(
+                pane.stack.len() < MAX_PANES_PER_TAB - 1,
+                "a pane cannot hold more than {} stacked commands",
+                MAX_PANES_PER_TAB - 1
+            );
+            pane.stack.push(PaneTemplateCommandForm {
+                program: TextField::default(),
+                args: Vec::new(),
+            });
+            Ok(())
+        }
+        SettingsControl::RemovePaneTemplateStackEntry(path, entry) => {
+            let Some(pane) = selected_pane_mut(editor, path) else {
+                return Ok(());
+            };
+            anyhow::ensure!(entry < pane.stack.len(), "stacked command no longer exists");
+            pane.stack.remove(entry);
+            Ok(())
+        }
+        SettingsControl::AddPaneTemplateStackArgument(path, entry) => {
+            let Some(pane) = selected_pane_mut(editor, path) else {
+                return Ok(());
+            };
+            let Some(command) = pane.stack.get_mut(entry) else {
+                return Ok(());
+            };
+            command.args.push(TextField::default());
+            Ok(())
+        }
+        SettingsControl::RemovePaneTemplateStackArgument(path, entry, argument) => {
+            let Some(pane) = selected_pane_mut(editor, path) else {
+                return Ok(());
+            };
+            let Some(command) = pane.stack.get_mut(entry) else {
+                return Ok(());
+            };
+            anyhow::ensure!(
+                argument < command.args.len(),
+                "stacked command argument no longer exists"
             );
             command.args.remove(argument);
             Ok(())

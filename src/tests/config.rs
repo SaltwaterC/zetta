@@ -627,6 +627,129 @@ fn pane_split_templates_parse_fully_customized_leaves_and_same_file_profiles() {
 }
 
 #[test]
+fn pane_split_template_leaves_parse_stacked_commands_in_order() {
+    let config = Config::parse(
+        r##"{
+            "pane_split_templates": {
+                "custom": {
+                    "layout": {
+                        "vertical": [
+                            {
+                                "label": "server",
+                                "stack": [
+                                    { "program": "cargo", "args": ["watch", "-x", "test"] },
+                                    { "program": "tail", "args": ["-f", "logs/app.log"] }
+                                ]
+                            },
+                            { "label": "client" }
+                        ]
+                    }
+                }
+            }
+        }"##,
+        None,
+        None,
+    )
+    .unwrap();
+
+    let template = &config.pane_split_templates["custom"];
+    assert_eq!(template.pane_count(), 2);
+    assert_eq!(template.layout.stacked_command_count(), 2);
+    let leaves = template.pane_specifications();
+    assert_eq!(
+        leaves[0].stack,
+        vec![
+            PaneSplitCommand {
+                program: "cargo".to_owned(),
+                args: vec!["watch".to_owned(), "-x".to_owned(), "test".to_owned()],
+            },
+            PaneSplitCommand {
+                program: "tail".to_owned(),
+                args: vec!["-f".to_owned(), "logs/app.log".to_owned()],
+            },
+        ]
+    );
+    assert!(leaves[1].stack.is_empty());
+}
+
+#[test]
+fn pane_split_templates_reject_invalid_stacked_commands() {
+    for stack in [
+        serde_json::json!({ "program": "cargo" }),
+        serde_json::json!(["cargo watch"]),
+        serde_json::json!([{ "program": "" }]),
+        serde_json::json!([{ "args": ["watch"] }]),
+        serde_json::json!([{ "program": "cargo", "shell": true }]),
+        serde_json::json!([{ "program": "cargo", "args": [7] }]),
+    ] {
+        let document = serde_json::json!({
+            "pane_split_templates": {
+                "bad": { "layout": { "vertical": [{ "stack": stack }, {}] } }
+            }
+        });
+        assert!(
+            Config::parse(&document.to_string(), None, None).is_err(),
+            "expected an invalid stacked command: {document}"
+        );
+    }
+}
+
+#[test]
+fn pane_split_templates_reject_stacked_commands_beyond_the_tab_budget() {
+    let entry = serde_json::json!({ "program": "true" });
+    let over_pane_limit = serde_json::json!({
+        "pane_split_templates": {
+            "bad": {
+                "layout": {
+                    "vertical": [
+                        { "stack": vec![entry.clone(); 64] },
+                        {}
+                    ]
+                }
+            }
+        }
+    });
+    let error = Config::parse(&over_pane_limit.to_string(), None, None).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("more than 63 commands"),
+        "unexpected per-pane stack error: {error:#}"
+    );
+
+    let over_combined_limit = serde_json::json!({
+        "pane_split_templates": {
+            "bad": {
+                "layout": {
+                    "vertical": [
+                        { "stack": vec![entry.clone(); 63] },
+                        {}
+                    ]
+                }
+            }
+        }
+    });
+    let error = Config::parse(&over_combined_limit.to_string(), None, None).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("panes and stacked commands combined"),
+        "unexpected combined budget error: {error:#}"
+    );
+
+    // 62 stacked commands beside two panes is exactly the 64-terminal budget.
+    let at_limit = serde_json::json!({
+        "pane_split_templates": {
+            "fits": {
+                "layout": {
+                    "vertical": [
+                        { "stack": vec![entry; 62] },
+                        {}
+                    ]
+                }
+            }
+        }
+    });
+    Config::parse(&at_limit.to_string(), None, None).unwrap();
+}
+
+#[test]
 fn pane_split_templates_reject_invalid_leaf_fields() {
     let invalid_documents = [
         serde_json::json!({

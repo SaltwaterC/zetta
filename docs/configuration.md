@@ -55,8 +55,9 @@ these deliberately scoped fields:
 A tab opened for a project starts in that project's working directory,
 regardless of `working_directory_scope`: opening a project is a move into it,
 not a continuation of wherever the session happened to be. This covers `zetta`
-launched inside a project, `project open`, and **Open** in the Settings
-**Projects** tab.
+launched inside a project, `project open`, **Open** in the Settings
+**Projects** tab, and the command palette's `Zetta: Open Project: NAME (PATH)`
+entry, which the palette lists for every registered project.
 
 The active pane's current directory selects its project. The active tab then
 controls the window theme. Moving outside the project immediately restores the
@@ -73,7 +74,8 @@ block startup or terminal input. WSL directories are not scanned; register a
 WSL project explicitly and its reported UNC path is matched lexically.
 
 Registration is a trust boundary. A project pane template can launch commands,
-so add only repositories whose `.zetta/config.json` you trust.
+both as a pane's own program and as stacked commands seeded beside it, so add
+only repositories whose `.zetta/config.json` you trust.
 
 The Settings **Projects** tab can add, open, edit, and unregister projects.
 **Edit config** opens a typed builder for every supported field, including the

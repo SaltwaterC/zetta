@@ -194,7 +194,7 @@ impl Zetta {
         };
         let entry_id = self.next_pane_id;
         self.next_pane_id += 1;
-        let settings = TerminalSpawnSettings::current(cx);
+        let mut settings = TerminalSpawnSettings::current(cx);
         let entry = StackedPane::new(
             entry_id,
             command,
@@ -243,7 +243,8 @@ impl Zetta {
             working_directory,
             wsl_directory,
             terminal_theme,
-            settings,
+            &mut settings,
+            true,
             window,
             cx,
         );

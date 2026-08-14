@@ -880,6 +880,10 @@ impl Zetta {
             | SettingsControl::SwapPaneTemplateChildren(_)
             | SettingsControl::AddPaneTemplateArgument(_)
             | SettingsControl::RemovePaneTemplateArgument(_, _)
+            | SettingsControl::AddPaneTemplateStackEntry(_)
+            | SettingsControl::RemovePaneTemplateStackEntry(_, _)
+            | SettingsControl::AddPaneTemplateStackArgument(_, _)
+            | SettingsControl::RemovePaneTemplateStackArgument(_, _, _)
             | SettingsControl::AddPaneTemplateGlobalEnvironment
             | SettingsControl::RemovePaneTemplateGlobalEnvironment(_)
             | SettingsControl::AddPaneTemplateEnvironment(_)

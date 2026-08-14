@@ -309,7 +309,14 @@ fn pane_template_form_round_trip_covers_nested_leaf_options() {
                             "args": ["-o", "StrictHostKeyChecking=no", "host"]
                         }
                     },
-                    { "label": "client", "env": { "ROLE": "client" } }
+                    {
+                        "label": "client",
+                        "env": { "ROLE": "client" },
+                        "stack": [
+                            { "program": "cargo", "args": ["watch", "-x", "test"] },
+                            { "program": "tail" }
+                        ]
+                    }
                 ]
             }
         ]
@@ -570,6 +577,41 @@ fn pane_template_validation_reports_leaf_field_errors() {
         pane.overlay.as_mut().unwrap().color = TextField::new("not-a-color");
     }
     assert!(form.pane_templates.validate().is_err());
+    {
+        let pane = pane_for_test(&mut form, index, path);
+        pane.overlay = None;
+        pane.stack = vec![PaneTemplateCommandForm {
+            program: TextField::new("  "),
+            args: vec![TextField::new("watch")],
+        }];
+    }
+    let error = form.pane_templates.validate().unwrap_err();
+    assert!(
+        format!("{error:#}").contains("stacked command 1 program is required"),
+        "unexpected stacked command error: {error:#}"
+    );
+    {
+        let pane = pane_for_test(&mut form, index, path);
+        pane.stack[0].program = TextField::new("cargo");
+    }
+    form.pane_templates.validate().unwrap();
+
+    // Two panes plus 63 stacked commands is one terminal past what a tab holds.
+    {
+        let pane = pane_for_test(&mut form, index, path);
+        pane.stack = vec![
+            PaneTemplateCommandForm {
+                program: TextField::new("true"),
+                args: Vec::new(),
+            };
+            63
+        ];
+    }
+    let error = form.pane_templates.validate().unwrap_err();
+    assert!(
+        format!("{error:#}").contains("panes and stacked commands combined"),
+        "unexpected combined budget error: {error:#}"
+    );
 }
 
 #[test]

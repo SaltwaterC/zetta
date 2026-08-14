@@ -1,4 +1,8 @@
+use std::path::{Path, PathBuf};
+
 use gpui::{Action, ScrollStrategy, UniformListScrollHandle};
+
+use crate::{OpenProject, project::project_display_name};
 
 pub struct PaletteCommand {
     pub name: String,
@@ -84,6 +88,31 @@ impl CommandPalette {
         self.matches = matches.into_iter().map(|(index, _)| index).collect();
         self.selected = self.selected.min(self.matches.len().saturating_sub(1));
     }
+}
+
+/// One entry per registered project root, opening it the way the Projects
+/// page's Open button does. The label carries the directory name for searching
+/// and the full path for disambiguation: [`CommandPalette::new`] drops
+/// duplicate names, and two registered projects can share a directory name.
+pub fn project_palette_commands(roots: &[PathBuf]) -> Vec<PaletteCommand> {
+    roots
+        .iter()
+        .map(|root| PaletteCommand {
+            name: project_palette_command_name(root),
+            // No keybinding can name a project: `OpenProject` carries a
+            // machine-specific path and is not keymap-bindable.
+            shortcut: None,
+            action: Box::new(OpenProject { root: root.clone() }),
+        })
+        .collect()
+}
+
+fn project_palette_command_name(root: &Path) -> String {
+    format!(
+        "zetta: open project: {} ({})",
+        project_display_name(root),
+        root.display()
+    )
 }
 
 pub fn humanize_action_name(name: &str) -> String {

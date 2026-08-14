@@ -155,6 +155,14 @@ fn documented_project_configuration_example_stays_valid() {
 
     assert_eq!(project.initial_split.as_deref(), Some("development"));
     assert_eq!(project.environment["PROJECT_ENV"], "development");
+    let leaves = project.effective.pane_split_templates["development"].pane_specifications();
+    assert_eq!(
+        leaves
+            .iter()
+            .map(|leaf| leaf.stack.len())
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
 }
 
 #[test]

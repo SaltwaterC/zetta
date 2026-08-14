@@ -8,7 +8,7 @@
 
 use super::pane_templates::render_pane_templates_page;
 use super::*;
-use crate::project::ProjectConfig;
+use crate::project::{ProjectConfig, project_display_name};
 use crate::project_form::{ProjectTabIcon, ProjectTextField};
 use crate::settings_ui::{ProjectEditor, project_editor};
 
@@ -31,12 +31,7 @@ fn render_project_list(
 ) -> AnyElement {
     let mut rows = Vec::with_capacity(editor.project_roots.len());
     for (index, root) in editor.project_roots.iter().enumerate() {
-        let title = root
-            .file_name()
-            .and_then(|name| name.to_str())
-            .filter(|name| !name.is_empty())
-            .unwrap_or("Project")
-            .to_owned();
+        let title = project_display_name(root).to_owned();
         rows.push(
             div()
                 .id(format!("settings-project-{index}"))

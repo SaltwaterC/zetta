@@ -311,6 +311,15 @@ pub(crate) fn ensure_project_config(root: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// The short label for a project root: its directory name, falling back to
+/// `Project` for a root that has none, such as a filesystem root.
+pub(crate) fn project_display_name(root: &Path) -> &str {
+    root.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("Project")
+}
+
 pub(crate) fn canonical_project_root(root: &Path) -> Result<PathBuf> {
     let root = fs::canonicalize(root)
         .with_context(|| format!("canonicalizing project root {}", root.display()))?;

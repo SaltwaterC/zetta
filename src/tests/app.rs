@@ -241,6 +241,61 @@ fn pane_template_leaf_resolution_applies_profile_command_theme_environment_and_o
 }
 
 #[test]
+fn pane_template_leaf_resolution_quotes_stacked_commands_for_the_resolved_shell() {
+    let config = Config::parse(
+        r##"{
+            "pane_split_templates": {
+                "custom": {
+                    "layout": {
+                        "vertical": [
+                            {
+                                "label": "server",
+                                "stack": [
+                                    { "program": "cargo", "args": ["watch", "-x", "test"] },
+                                    { "program": "tail", "args": ["-f", "logs/my app.log"] }
+                                ]
+                            },
+                            { "label": "client" }
+                        ]
+                    }
+                }
+            }
+        }"##,
+        None,
+        None,
+    )
+    .unwrap();
+    let active = config
+        .profiles
+        .iter()
+        .find(|profile| profile.name == "System")
+        .cloned()
+        .unwrap();
+
+    let leaves =
+        resolve_pane_split_leaves(&config.pane_split_templates["custom"], &active, None).unwrap();
+
+    assert_eq!(leaves[0].stack.len(), 2);
+    assert_eq!(leaves[0].stack[0], "cargo watch -x test");
+    // The argument with a space has to arrive quoted for the host shell, the way
+    // `zetta pane --stack` quotes it.
+    assert_eq!(
+        leaves[0].stack[1],
+        quote_pane_command_for_shell(
+            &active.command,
+            &[
+                "tail".to_owned(),
+                "-f".to_owned(),
+                "logs/my app.log".to_owned(),
+            ],
+        )
+        .unwrap()
+    );
+    assert_ne!(leaves[0].stack[1], "tail -f logs/my app.log");
+    assert!(leaves[1].stack.is_empty());
+}
+
+#[test]
 fn pane_template_labels_and_overlays_do_not_require_a_terminal_restart() {
     let profile = Profile {
         name: "System".to_owned(),
@@ -257,6 +312,7 @@ fn pane_template_labels_and_overlays_do_not_require_a_terminal_restart() {
         overlay_font_size: Some(OverlayFontSize::Large),
         overlay_opacity: Some(0.5),
         overlay_color: overlay_color_from_value("cyan"),
+        stack: Vec::new(),
     };
 
     assert!(!pane_split_leaf_requires_restart(&pane, &leaf));
@@ -265,6 +321,12 @@ fn pane_template_labels_and_overlays_do_not_require_a_terminal_restart() {
         .environment
         .insert("ROLE".to_owned(), "worker".to_owned());
     assert!(pane_split_leaf_requires_restart(&pane, &changed));
+
+    // A declared stack has to be rebuilt from scratch, or re-applying the
+    // template would append its commands to the stack the pane already has.
+    let mut stacked = leaf.clone();
+    stacked.stack = vec!["cargo watch".to_owned()];
+    assert!(pane_split_leaf_requires_restart(&pane, &stacked));
 }
 
 #[test]

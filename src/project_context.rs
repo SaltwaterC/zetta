@@ -1,6 +1,7 @@
 use super::*;
 use crate::project::{
-    ProjectConfig, ProjectRegistry, discover_project_config, path_is_within, paths_equal,
+    ProjectConfig, ProjectRegistry, canonical_project_root, discover_project_config,
+    path_is_within, paths_equal,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -619,6 +620,25 @@ impl Zetta {
                 }
             }
         }
+    }
+
+    /// The command palette's per-project entry, and the same outcome as the
+    /// Projects page's Open button. The palette names a canonical root, so the
+    /// registry lookup normally settles without touching the filesystem; a
+    /// dispatch from elsewhere may name the root the way the user typed it,
+    /// which needs canonicalizing before `open_project_tab` can recognize it.
+    pub(crate) fn open_project(
+        &mut self,
+        action: &OpenProject,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let root = if self.projects.registry.contains(&action.root) {
+            action.root.clone()
+        } else {
+            canonical_project_root(&action.root).unwrap_or_else(|_| action.root.clone())
+        };
+        self.open_project_tab(root, window, cx);
     }
 
     pub(crate) fn open_project_tab(

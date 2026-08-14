@@ -24,7 +24,15 @@
       "layout": {
         "horizontal": [
           { "label": "top" },
-          { "vertical": [{ "label": "bottom-left" }, { "label": "bottom-right" }] }
+          {
+            "vertical": [
+              {
+                "label": "bottom-left",
+                "stack": [{ "program": "tail", "args": ["-f", "logs/app.log"] }]
+              },
+              { "label": "bottom-right" }
+            ]
+          }
         ]
       }
     }

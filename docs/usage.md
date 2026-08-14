@@ -530,10 +530,13 @@ layouts. Use `Cmd/Ctrl-4` to open it, choose New or Duplicate, and select an
 empty two-pane layout or one of the built-in presets. Built-ins are read-only;
 editing a duplicate creates a custom entry, while editing a built-in override
 is saved only when that override has been changed. The editor validates pane
-fields, nested split structure, and the 2–64 pane limit before saving.
+fields, nested split structure, and the 2–64 pane limit before saving. A leaf's
+stacked commands are edited in its **Stacked commands** list, and the layout
+preview shows how many each pane declares.
 
 Leaves can independently select a configured profile or direct command,
-override its theme, add string environment variables, and show an overlay:
+override its theme, add string environment variables, show an overlay, and seed
+stacked commands:
 
 ```json
 {
@@ -564,6 +567,42 @@ override its theme, add string environment variables, and show an overlay:
   }
 }
 ```
+
+A leaf may also declare `stack`, an ordered list of commands seeded as
+[stacked command panes](#stacked-command-panes) beside that pane's interactive
+shell:
+
+```json
+{
+  "pane_split_templates": {
+    "watch-and-tail": {
+      "layout": {
+        "vertical": [
+          { "label": "editor" },
+          {
+            "label": "server",
+            "stack": [
+              { "program": "cargo", "args": ["watch", "-x", "test"] },
+              { "program": "tail", "args": ["-f", "logs/app.log"] }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+Stack entries use the same `{program, args}` shape as `command`, and each is
+quoted for the host pane's shell the way `zetta pane --stack` quotes it. They
+run with that leaf's resolved profile, theme, and working directory; the leaf's
+own `env` applies to its interactive shell. The last entry ends up selected and
+focused, with the shell and the remaining entries as compact status rows.
+Because a pane keeps the stack it already has, applying a template whose leaf
+declares a stack always restarts that pane's shell so the resulting stack is
+exactly what the template describes. Panes and stacked commands share the
+64-terminal tab budget: a template cannot declare more than 64 of them
+combined, nor more than 63 stacked commands in one pane.
 
 `profile` and `command` are mutually exclusive. A command is launched with
 exactly the listed program and arguments, without shell-string splitting.
@@ -668,7 +707,15 @@ filter, use the arrow keys to select a command, and press `Enter` to run it.
 When the active pane is in a registered Zetta project, the palette also lists
 that project's pane split templates. Those entries are rebuilt when the active
 directory changes, so project-only templates disappear as soon as the pane
-leaves the project and return when it re-enters. See
+leaves the project and return when it re-enters.
+
+Every registered project is listed as `Zetta: Open Project: NAME (PATH)`,
+whichever project the active pane is in. Running one opens the project in a new
+tab exactly as the **Open** button on the Settings Projects page does, applying
+the project's profiles, theme, working directory, environment, and initial
+split. The path is part of the entry, so projects that share a directory name
+stay distinguishable and searchable. These entries follow the registry, so they
+appear as soon as a project is registered and disappear when it is removed. See
 [Projects](configuration.md#projects) for project configuration and trust
 details.
 

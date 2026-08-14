@@ -1078,6 +1078,7 @@ impl Zetta {
             .on_action(cx.listener(Self::move_pane_up))
             .on_action(cx.listener(Self::move_pane_down))
             .on_action(cx.listener(Self::apply_pane_split_template))
+            .on_action(cx.listener(Self::open_project))
             .on_action(cx.listener(Self::focus_pane_left))
             .on_action(cx.listener(Self::focus_pane_right))
             .on_action(cx.listener(Self::focus_pane_up))

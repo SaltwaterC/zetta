@@ -27,7 +27,8 @@ for active development.
 - Typed settings and keymap editor, per-profile themes and icons, and
   installable Zed themes
 - Registered projects with repository-local themes, environment, profiles,
-  pane templates, initial layouts, and live command-palette scoping
+  pane templates, initial layouts, live command-palette scoping, and a
+  command-palette entry that opens each registered project
 - Serial consoles plus built-in HTTP and TFTP tools, usable from panes or the
   CLI
 - Git worktree workflow with `zetta wt new`, `zetta wt done`, status, and

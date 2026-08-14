@@ -16,6 +16,7 @@ use task::Shell;
 use terminal::MAX_SCROLL_HISTORY_LINES;
 use ui::IconName;
 
+use crate::pane::MAX_PANES_PER_TAB;
 use crate::profile_icon::ProfileIcon;
 
 pub(crate) const DEFAULT_TERMINAL_FONT_FAMILY: &str = "MesloLGS NF";
@@ -128,6 +129,9 @@ pub struct PaneSplitPane {
     pub theme: Option<String>,
     pub env: HashMap<String, String>,
     pub overlay: Option<PaneSplitOverlay>,
+    /// Commands seeded as stacked entries in this pane, sharing its layout
+    /// region with the interactive shell.
+    pub stack: Vec<PaneSplitCommand>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -227,6 +231,17 @@ impl PaneSplitTemplate {
         match self {
             Self::Pane(_) => 1,
             Self::Split { first, second, .. } => first.pane_count() + second.pane_count(),
+        }
+    }
+
+    /// The stacked commands the whole template seeds. Each one becomes its own
+    /// terminal, so it counts against the same budget as a layout pane.
+    pub fn stacked_command_count(&self) -> usize {
+        match self {
+            Self::Pane(pane) => pane.stack.len(),
+            Self::Split { first, second, .. } => {
+                first.stacked_command_count() + second.stacked_command_count()
+            }
         }
     }
 
@@ -722,10 +737,16 @@ fn parse_pane_split_template_config(
         .map(parse_pane_split_environment)
         .transpose()?
         .unwrap_or_default();
-    Ok(PaneSplitTemplateConfig {
-        layout: parse_pane_split_template(layout, profiles)?,
-        env,
-    })
+    let layout = parse_pane_split_template(layout, profiles)?;
+    // Panes and stacked commands are both terminals, so stacked commands cannot
+    // push a template past what a tab can hold. The pane count on its own is
+    // validated by the caller, which owns the name for that error.
+    let stacked_commands = layout.stacked_command_count();
+    anyhow::ensure!(
+        stacked_commands == 0 || layout.pane_count() + stacked_commands <= MAX_PANES_PER_TAB,
+        "pane split templates must not declare more than {MAX_PANES_PER_TAB} panes and stacked commands combined"
+    );
+    Ok(PaneSplitTemplateConfig { layout, env })
 }
 
 fn parse_pane_split_template(value: &Value, profiles: &[Profile]) -> Result<PaneSplitTemplate> {
@@ -766,7 +787,9 @@ fn parse_pane_split_pane(
     object: &serde_json::Map<String, Value>,
     profiles: &[Profile],
 ) -> Result<PaneSplitPane> {
-    const FIELDS: &[&str] = &["label", "profile", "command", "theme", "env", "overlay"];
+    const FIELDS: &[&str] = &[
+        "label", "profile", "command", "theme", "env", "overlay", "stack",
+    ];
     if let Some(field) = object
         .keys()
         .find(|field| !FIELDS.contains(&field.as_str()))
@@ -833,6 +856,12 @@ fn parse_pane_split_pane(
         .map(parse_pane_split_overlay)
         .transpose()?;
 
+    let stack = object
+        .get("stack")
+        .map(parse_pane_split_stack)
+        .transpose()?
+        .unwrap_or_default();
+
     Ok(PaneSplitPane {
         label,
         profile,
@@ -840,7 +869,29 @@ fn parse_pane_split_pane(
         theme,
         env,
         overlay,
+        stack,
     })
+}
+
+fn parse_pane_split_stack(value: &Value) -> Result<Vec<PaneSplitCommand>> {
+    let entries = value
+        .as_array()
+        .context("pane template stack must be an array of command objects")?;
+    // A pane hosts its interactive shell plus its stacked entries, which is the
+    // same limit `PaneStack::push` enforces at runtime.
+    anyhow::ensure!(
+        entries.len() < MAX_PANES_PER_TAB,
+        "pane template stack must not contain more than {} commands",
+        MAX_PANES_PER_TAB - 1
+    );
+    entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            parse_pane_split_command(entry)
+                .with_context(|| format!("parsing pane template stack entry {}", index + 1))
+        })
+        .collect()
 }
 
 fn parse_pane_split_command(value: &Value) -> Result<PaneSplitCommand> {
