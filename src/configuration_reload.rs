@@ -58,7 +58,7 @@ impl Zetta {
     /// Runs Zetta's editor dispatcher against the active pane's shell, mirroring how a
     /// clicked path or `EditScrollback` opens an editor: reused in place when the pane's
     /// foreground process is the shell, otherwise split into a fresh pane.
-    fn edit_settings_file_in_active_pane(
+    pub(crate) fn edit_settings_file_in_active_pane(
         &mut self,
         path: PathBuf,
         window: &mut Window,
@@ -161,6 +161,26 @@ impl Zetta {
 
     fn apply_loaded_configuration(&mut self, config: Config, cx: &mut Context<Self>) -> Result<()> {
         load_user_themes(cx).log_err();
+        let project_detection_base = Arc::new(config.clone());
+        let project_roots = self
+            .projects
+            .configs
+            .keys()
+            .chain(self.projects.pane_roots.values())
+            .filter(|root| self.projects.registry.contains(root))
+            .cloned()
+            .collect::<HashSet<_>>();
+        let project_configs = project_roots
+            .iter()
+            .map(|root| {
+                ProjectConfig::load(root, &config).with_context(|| {
+                    format!(
+                        "reloading project configuration {}",
+                        ProjectConfig::path_for(root).display()
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         apply_config_settings(&config, cx)?;
         let profile_themes = config
             .profiles
@@ -219,6 +239,34 @@ impl Zetta {
         self.profiles = config.profiles.clone();
         self.working_directory = config.working_directory.clone();
         self.launch_config = config;
+        self.project_detection_base = project_detection_base;
+        self.projects.configs.clear();
+        for project in project_configs {
+            self.projects.insert_config(project);
+        }
+        self.projects.invalidate_active_context();
+        let project_tab_ids = self
+            .tabs
+            .iter()
+            .filter(|tab| self.projects.config_for_pane(tab.active_pane).is_some())
+            .map(|tab| tab.id)
+            .collect::<Vec<_>>();
+        for tab_id in project_tab_ids {
+            self.apply_effective_themes_to_tab(tab_id, cx);
+        }
+        let (effective_profiles, effective_working_directory) = {
+            let effective = self
+                .active_project_config()
+                .map(|project| &project.effective)
+                .unwrap_or(&self.launch_config);
+            (
+                effective.profiles.clone(),
+                effective.working_directory.clone(),
+            )
+        };
+        self.profiles = effective_profiles;
+        self.working_directory = effective_working_directory;
+        self.command_palette = None;
         #[cfg(target_os = "macos")]
         update_native_macos_menus(
             cx,

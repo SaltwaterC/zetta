@@ -18,6 +18,7 @@ use crate::process_control::{
     ReplacePaneRequest, TabAttentionRequest, request_existing_process_pane,
     request_existing_process_pane_labels, request_existing_process_pane_overlay,
     request_existing_process_pane_theme, request_existing_process_pane_theme_list,
+    request_existing_process_project, request_existing_process_projects_reload,
     request_existing_process_replace_pane, request_existing_process_tab_icon,
     request_process_tab_attention,
 };
@@ -60,9 +61,9 @@ pub(crate) use keybindings::{install_native_macos_menus, update_native_macos_men
 pub(crate) use wsl::Msys2Shell;
 use wsl::paths_for_external_editor;
 pub(crate) use wsl::{
-    add_wsl_environment_variables, is_wsl_shell, launch_working_directory,
-    msys2_cwd_tracking_environment, msys2_path_to_windows, msys2_profile, wsl_cwd_tracking_file,
-    wsl_shell_with_tracking, wsl_terminal_environment,
+    add_wsl_environment_variable_names, add_wsl_environment_variables, is_wsl_shell,
+    launch_working_directory, msys2_cwd_tracking_environment, msys2_path_to_windows, msys2_profile,
+    wsl_cwd_tracking_file, wsl_shell_with_tracking, wsl_terminal_environment,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -121,17 +122,40 @@ pub(crate) fn load_user_themes(cx: &mut App) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn with_zetta_theme_overrides(theme: Arc<Theme>) -> Arc<Theme> {
-    let mut theme = theme.as_ref().clone();
+/// Zetta's scrollbar colors, which every theme it ships or installs gets.
+///
+/// Idempotent: each field derives from a `text*` color rather than from itself,
+/// so re-running it over an already-overridden theme is a no-op. That is what
+/// lets [`bake_zetta_theme_overrides`] re-sweep the whole registry after a
+/// reload without having to track which themes it already visited.
+pub(crate) fn apply_zetta_theme_overrides(theme: &mut Theme) {
     let colors = &mut theme.styles.colors;
     colors.scrollbar_thumb_background = colors.text_muted.opacity(0.7);
     colors.scrollbar_thumb_hover_background = colors.text.opacity(0.85);
     colors.scrollbar_thumb_active_background = colors.text_accent.opacity(0.95);
-    Arc::new(theme)
 }
 
-pub(crate) fn apply_zetta_theme_overrides(cx: &mut App) {
-    GlobalTheme::update_theme(cx, with_zetta_theme_overrides(cx.theme().clone()));
+/// Rewrites every registered theme with [`apply_zetta_theme_overrides`] applied.
+///
+/// The overrides used to be applied at each lookup instead, which cloned a whole
+/// `Theme` every time. `window_theme`/`theme_for_tab` resolve a theme per tab per
+/// frame, so that put one full theme clone per tab into every frame. Baking the
+/// overrides into the registry reduces a lookup to a lock read and an `Arc` clone.
+///
+/// Call this after anything that can add themes to the registry; `apply_config_settings`
+/// already does, and every reload path goes through it.
+pub(crate) fn bake_zetta_theme_overrides(registry: &ThemeRegistry) {
+    let overridden = registry
+        .list_names()
+        .into_iter()
+        .filter_map(|name| registry.get(&name).ok())
+        .map(|theme| {
+            let mut theme = theme.as_ref().clone();
+            apply_zetta_theme_overrides(&mut theme);
+            theme
+        })
+        .collect::<Vec<_>>();
+    registry.insert_themes(overridden);
 }
 
 pub(crate) fn resolve_profile_theme(profile: &Profile, cx: &App) -> Result<Option<Arc<Theme>>> {
@@ -141,19 +165,19 @@ pub(crate) fn resolve_profile_theme(profile: &Profile, cx: &App) -> Result<Optio
         .map(|name| {
             ThemeRegistry::global(cx)
                 .get(name)
-                .map(with_zetta_theme_overrides)
                 .with_context(|| format!("using theme {name:?} for profile {:?}", profile.name))
         })
         .transpose()
 }
 
 pub(crate) fn apply_config_settings(config: &Config, cx: &mut App) -> Result<()> {
+    let registry = ThemeRegistry::global(cx);
+    bake_zetta_theme_overrides(&registry);
     let theme_name = selected_theme_name(config.theme.as_deref());
-    let theme = ThemeRegistry::global(cx)
+    let theme = registry
         .get(theme_name)
         .with_context(|| format!("using Zed theme {theme_name:?}"))?;
     GlobalTheme::update_theme(cx, theme);
-    apply_zetta_theme_overrides(cx);
 
     let mut terminal_settings = TerminalSettings::get_global(cx).clone();
     terminal_settings.font_family = Some(theme_settings::FontFamilyName(
@@ -219,6 +243,7 @@ pub(crate) fn open_zetta_window(
     config: Config,
     configuration_error: Option<String>,
     initial_profile: Option<Profile>,
+    initial_project: Option<ProjectConfig>,
     launch_theme_override: Option<(String, String)>,
     launch_split: Option<String>,
     enable_performance_overlay: bool,
@@ -234,6 +259,7 @@ pub(crate) fn open_zetta_window(
                 config,
                 configuration_error,
                 initial_profile,
+                initial_project,
                 launch_theme_override,
                 window,
                 cx,
@@ -326,6 +352,39 @@ pub(crate) fn process_zetta_entities(cx: &App) -> Vec<Entity<Zetta>> {
         .chain(process.dormant.iter())
         .cloned()
         .collect()
+}
+
+pub(crate) fn reload_projects_in_other_windows(current_window: WindowId, cx: &mut App) {
+    if !cx.has_global::<ZettaProcessState>() {
+        return;
+    }
+    let (windows, dormant) = {
+        let process = cx.global::<ZettaProcessState>();
+        (
+            process
+                .windows
+                .keys()
+                .filter(|window_id| **window_id != current_window)
+                .copied()
+                .collect::<Vec<_>>(),
+            process.dormant.clone(),
+        )
+    };
+    for window_id in windows {
+        if let Err(error) = gpui::WindowHandle::<Zetta>::new(window_id)
+            .update(cx, |zetta, window, cx| zetta.reload_projects(window, cx))
+            .and_then(|result| result)
+        {
+            log::error!("could not reload projects in another Zetta window: {error:#}");
+        }
+    }
+    for zetta in dormant {
+        if let Err(error) = zetta.update(cx, |zetta, _| {
+            zetta.reload_project_registry_without_window()
+        }) {
+            log::error!("could not reload projects in a dormant Zetta window: {error:#}");
+        }
+    }
 }
 
 pub(crate) fn zetta_for_runner(runner_id: u64, cx: &App) -> Option<Entity<Zetta>> {
@@ -439,6 +498,7 @@ pub(crate) fn open_dormant_or_new_window(cx: &mut App) -> Result<()> {
         open_zetta_window(
             config,
             configuration_error,
+            None,
             None,
             None,
             None,
@@ -749,7 +809,51 @@ fn focus_visible_tab_by_attention_id(cx: &mut App, attention_id: u64) -> bool {
 
 pub(crate) fn run() -> Result<()> {
     let args = parse_args()?;
-    if args.mode == StartupMode::Application {
+    let mut startup_project_root = None;
+    if let StartupMode::Project(command) = &args.mode {
+        let (base, _) = load_startup_config(None, None);
+        match command {
+            crate::project_cli::ProjectCommand::Open { path } => {
+                let root = crate::project_cli::resolve_open_root(path.as_deref())?;
+                if request_existing_process_project(&root)? {
+                    return Ok(());
+                }
+                startup_project_root = Some(root);
+            }
+            _ => {
+                let changed = crate::project_cli::run_non_open(command, &base)?;
+                if changed {
+                    request_existing_process_projects_reload().log_err();
+                }
+                return Ok(());
+            }
+        }
+    } else if args.mode == StartupMode::Application
+        && args.config_path.is_none()
+        && args.keymap_path.is_none()
+        && !args.replace_pane
+    {
+        startup_project_root = match crate::project_cli::current_registered_project() {
+            Ok(root) => root,
+            Err(error) => {
+                eprintln!("Could not load the Zetta project registry: {error:#}");
+                None
+            }
+        };
+        if let Some(root) = startup_project_root.as_ref()
+            && should_handoff_to_existing_process(&args)
+            && request_existing_process_project(root)?
+        {
+            return Ok(());
+        }
+    }
+
+    if args.mode == StartupMode::Application
+        || matches!(
+            args.mode,
+            StartupMode::Project(crate::project_cli::ProjectCommand::Open { .. })
+        )
+    {
         terminal_view::start_scrollback_cleanup_monitor();
     }
     if let StartupMode::Edit {
@@ -916,8 +1020,13 @@ pub(crate) fn run() -> Result<()> {
         return Ok(());
     }
     if args.mode == StartupMode::ListPaneSplits {
-        let (config, _) = load_startup_config(None, None);
-        for name in configured_split_names(&config) {
+        let (base, _) = load_startup_config(None, None);
+        let project = crate::project_cli::current_project_config(&base)?;
+        let config = project
+            .as_ref()
+            .map(|project| &project.effective)
+            .unwrap_or(&base);
+        for name in configured_split_names(config) {
             println!("{name}");
         }
         return Ok(());
@@ -950,7 +1059,10 @@ pub(crate) fn run() -> Result<()> {
             return Ok(());
         }
     }
-    if should_handoff_to_existing_process(&args) && request_existing_process_window()? {
+    if startup_project_root.is_none()
+        && should_handoff_to_existing_process(&args)
+        && request_existing_process_window()?
+    {
         return Ok(());
     }
     #[cfg(windows)]
@@ -998,8 +1110,21 @@ pub(crate) fn run() -> Result<()> {
     } else {
         load_startup_config(args.config_path.as_deref(), args.keymap_path)
     };
-    validate_launch_split(&config, args.split.as_deref())?;
-    let initial_profile = select_launch_profile(&config, args.profile.as_deref())?;
+    let mut initial_project = startup_project_root
+        .as_deref()
+        .map(|root| ProjectConfig::load(root, &config))
+        .transpose()?;
+    if args.split.is_some()
+        && let Some(project) = initial_project.as_mut()
+    {
+        project.initial_split = None;
+    }
+    let effective_launch_config = initial_project
+        .as_ref()
+        .map(|project| &project.effective)
+        .unwrap_or(&config);
+    validate_launch_split(effective_launch_config, args.split.as_deref())?;
+    let initial_profile = select_launch_profile(effective_launch_config, args.profile.as_deref())?;
     // Keyed by profile name (case-insensitive) rather than baked into
     // `initial_profile.theme`, so every tab opened with this profile for the
     // rest of the process gets the override too, not just the first one.
@@ -1010,7 +1135,10 @@ pub(crate) fn run() -> Result<()> {
         .zip(args.theme_override.as_ref())
         .map(|(profile, theme)| (profile.name.to_lowercase(), theme.clone()));
     let keymap_path = config.keymap_path.clone();
-    let profile_count = visible_profile_count(&config.profiles, &config.hidden_profiles);
+    let profile_count = visible_profile_count(
+        &effective_launch_config.profiles,
+        &effective_launch_config.hidden_profiles,
+    );
     let http_client = Arc::new(
         reqwest_client::ReqwestClient::user_agent(concat!("Zetta/", env!("CARGO_PKG_VERSION")))
             .context("initializing HTTP client")?,
@@ -1193,6 +1321,85 @@ pub(crate) fn run() -> Result<()> {
                                 }
                             });
                             let _ = completion.send(opened);
+                        }
+                        ProcessControlCommand::OpenProject { root, completion } => {
+                            let opened = cx.update(|cx| {
+                                if !cx
+                                    .global::<ZettaProcessState>()
+                                    .control_server
+                                    .is_accepting()
+                                {
+                                    return false;
+                                }
+                                let registry = match ProjectRegistry::load() {
+                                    Ok(registry) => registry,
+                                    Err(error) => {
+                                        eprintln!("Could not load project registry: {error:#}");
+                                        return false;
+                                    }
+                                };
+                                if !registry.contains(&root) {
+                                    return false;
+                                }
+                                if cx.active_window().is_none()
+                                    && let Err(error) = open_dormant_or_new_window(cx)
+                                {
+                                    eprintln!("Could not open a window for project: {error:#}");
+                                    return false;
+                                }
+                                let Some(window_id) =
+                                    cx.active_window().map(|window| window.window_id())
+                                else {
+                                    return false;
+                                };
+                                gpui::WindowHandle::<Zetta>::new(window_id)
+                                    .update(cx, |zetta, window, cx| {
+                                        zetta.projects.registry = registry;
+                                        zetta.open_project_tab(root, window, cx);
+                                        true
+                                    })
+                                    .unwrap_or(false)
+                            });
+                            let _ = completion.send(opened);
+                        }
+                        ProcessControlCommand::ReloadProjects { completion } => {
+                            let reloaded = cx.update(|cx| {
+                                if !cx
+                                    .global::<ZettaProcessState>()
+                                    .control_server
+                                    .is_accepting()
+                                {
+                                    return false;
+                                }
+                                let windows = cx
+                                    .global::<ZettaProcessState>()
+                                    .windows
+                                    .keys()
+                                    .copied()
+                                    .collect::<Vec<_>>();
+                                for window_id in windows {
+                                    let applied = gpui::WindowHandle::<Zetta>::new(window_id)
+                                        .update(cx, |zetta, window, cx| {
+                                            zetta.reload_projects(window, cx)
+                                        });
+                                    if !matches!(applied, Ok(Ok(()))) {
+                                        return false;
+                                    }
+                                }
+                                let dormant = cx.global::<ZettaProcessState>().dormant.clone();
+                                for entity in dormant {
+                                    if entity
+                                        .update(cx, |zetta, _| {
+                                            zetta.reload_project_registry_without_window()
+                                        })
+                                        .is_err()
+                                    {
+                                        return false;
+                                    }
+                                }
+                                true
+                            });
+                            let _ = completion.send(reloaded);
                         }
                         ProcessControlCommand::ReplacePane {
                             request,
@@ -1582,6 +1789,7 @@ pub(crate) fn run() -> Result<()> {
                 config,
                 configuration_error,
                 initial_profile,
+                initial_project,
                 launch_theme_override,
                 args.split,
                 profiling,

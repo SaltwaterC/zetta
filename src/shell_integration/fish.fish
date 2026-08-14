@@ -141,6 +141,17 @@ function __zetta_pane_splits
     zetta splits 2>/dev/null
 end
 
+function __zetta_projects
+    zetta project list 2>/dev/null
+end
+
+function __zetta_project_is
+    set -l words (commandline -opc)
+    test (count $words) -ge 3
+    and test "$words[2]" = project
+    and contains -- "$words[3]" $argv
+end
+
 function __zetta_pane_labels
     zetta pane --list 2>/dev/null
 end
@@ -513,6 +524,7 @@ complete -c zetta -n '__zetta_at_root' -a benchmark-output -d 'Write and time a 
 complete -c zetta -n '__zetta_at_root' -a terminal-size -d 'Print the current terminal size'
 complete -c zetta -n '__zetta_at_root' -a sessions -d 'List detached background sessions'
 complete -c zetta -n '__zetta_at_root' -a profile -d 'List and manage profiles'
+complete -c zetta -n '__zetta_at_root' -a project -d 'List and manage projects'
 complete -c zetta -n '__zetta_at_root' -a edit -d 'Edit files with EDITOR or Zetta vi'
 complete -c zetta -n '__zetta_at_root' -a vi -d "Edit files with Zetta's built-in vi"
 complete -c zetta -n '__zetta_at_root' -a init -d 'Generate shell integration'
@@ -593,6 +605,11 @@ complete -c zetta -n '__fish_seen_subcommand_from sessions; and __fish_seen_subc
 complete -c zetta -n '__fish_seen_subcommand_from sessions; and __fish_seen_subcommand_from reconnect' -l session -r -d 'Session ID to reconnect'
 complete -c zetta -n '__fish_seen_subcommand_from splits' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from splits' -a '(__zetta_long_options splits)'
+complete -c zetta -n '__zetta_at_subcommand project' -a 'add list remove open'
+complete -c zetta -n '__fish_seen_subcommand_from project' -l help -d 'Print help'
+complete -c zetta -n '__zetta_project_is add remove open' -l path -r -d 'Project root'
+complete -c zetta -n '__zetta_project_is add' -a '(__fish_complete_directories)'
+complete -c zetta -n '__zetta_project_is open remove' -a '(__zetta_projects)'
 complete -c zetta -n '__fish_seen_subcommand_from pane' -l direction -r -a 'left right up down' -d 'Direction for a new split'
 complete -c zetta -n '__fish_seen_subcommand_from pane' -l label -r -d 'Label for a new split pane'
 complete -c zetta -n '__fish_seen_subcommand_from pane' -l pane -r -a '(__zetta_pane_labels)' -d 'Target pane label'

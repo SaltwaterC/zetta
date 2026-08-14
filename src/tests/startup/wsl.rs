@@ -168,6 +168,19 @@ fn preserves_existing_wslenv_entries_without_duplicates() {
     );
 }
 
+#[test]
+fn shares_project_environment_names_with_wsl_without_duplicates() {
+    let mut environment =
+        HashMap::from([("WSLENV".to_owned(), "PATH/l:PROJECT_KIND/p".to_owned())]);
+
+    add_wsl_environment_variable_names(&mut environment, ["PROJECT_KIND", "PROJECT_PORT"]);
+
+    assert_eq!(
+        environment.get("WSLENV").map(String::as_str),
+        Some("PATH/l:PROJECT_KIND/p:PROJECT_PORT/u")
+    );
+}
+
 #[cfg(windows)]
 #[test]
 fn wsl_environment_exports_the_exact_host_zetta_without_replacing_linux_path() {

@@ -26,6 +26,8 @@ for active development.
 - Stacked command panes that retain each command's PTY, output, and exit status
 - Typed settings and keymap editor, per-profile themes and icons, and
   installable Zed themes
+- Registered projects with repository-local themes, environment, profiles,
+  pane templates, initial layouts, and live command-palette scoping
 - Serial consoles plus built-in HTTP and TFTP tools, usable from panes or the
   CLI
 - Git worktree workflow with `zetta wt new`, `zetta wt done`, status, and
@@ -117,6 +119,14 @@ commands documented in the [configuration guide](docs/configuration.md).
 Changes are validated before being saved and request a best-effort live reload
 for a Zetta process using the same configuration file.
 
+Register repository-local configuration with `zetta project add`, then place
+project settings in `.zetta/config.json`. `zetta project open`, `list`, and
+`remove` manage the separate project registry; removal preserves the repository
+file. Native repositories with an unregistered `.zetta/config.json` are
+detected asynchronously and offered in the UI. See
+[Projects](docs/configuration.md#projects) for supported fields, WSL behavior,
+and the template-command trust boundary.
+
 Use `zetta wt new NAME`, `zetta wt done`, `zetta wt status`, and
 `zetta wt rerere` for the Git worktree workflow. The direct commands never
 change the caller's directory; generated shell integration provides `zwt new`
@@ -204,8 +214,8 @@ built, how it should behave, and when the result was good enough.
   integration
 - [Using Zetta](docs/usage.md): tabs, panes, search, shortcuts, pane templates,
   and Git worktrees
-- [Configuration](docs/configuration.md): settings, profiles, keymaps, fonts,
-  and themes
+- [Configuration](docs/configuration.md): settings, projects, profiles,
+  keymaps, fonts, and themes
 - [Background sessions](docs/background-sessions.md): detach, protect, inspect,
   and reconnect sessions
 - [Shell integration](docs/shell-integration.md): command completion and the

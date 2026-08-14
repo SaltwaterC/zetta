@@ -228,31 +228,36 @@ fn render_tabs_row(chrome: TabBarChrome) -> impl IntoElement {
                     })
                     .map(|(index, tab)| {
                         let selected = index == this.active_tab;
-                        (index, tab, selected)
+                        // Resolved once per visible tab and carried through: the
+                        // selected tab's neighbour lookups below want the same
+                        // themes, and each `theme_for_tab` is a registry lock read
+                        // plus an `Arc` clone.
+                        let theme = this.theme_for_tab(tab, cx);
+                        (index, tab, selected, theme)
                     })
                     .collect();
                 let first_visible_selected = visible_tabs
                     .first()
-                    .map(|(_, _, sel)| *sel)
+                    .map(|(_, _, sel, _)| *sel)
                     .unwrap_or(false);
                 let visible_tabs_for_neighbors = visible_tabs.clone();
                 let tabs = visible_tabs
                     .into_iter()
                     .enumerate()
-                    .map(|(visible_index, (index, tab, selected))| {
+                    .map(|(visible_index, (index, tab, selected, tab_theme))| {
                         let next_selected = visible_tabs_for_neighbors
                             .get(visible_index + 1)
-                            .map(|(_, _, next_sel)| *next_sel)
+                            .map(|(_, _, next_sel, _)| *next_sel)
                             .unwrap_or(false);
                         let (left_transition_background, right_transition_background) = if selected
                         {
                             let left_background = visible_index
                                 .checked_sub(1)
                                 .and_then(|index| visible_tabs_for_neighbors.get(index))
-                                .map(|(_, tab, _)| tab.theme(cx).colors().tab_inactive_background);
+                                .map(|(_, _, _, theme)| theme.colors().tab_inactive_background);
                             let right_background = visible_tabs_for_neighbors
                                 .get(visible_index + 1)
-                                .map(|(_, tab, _)| tab.theme(cx).colors().tab_inactive_background);
+                                .map(|(_, _, _, theme)| theme.colors().tab_inactive_background);
                             active_tab_transition_backgrounds(
                                 left_background,
                                 right_background,
@@ -284,6 +289,7 @@ fn render_tabs_row(chrome: TabBarChrome) -> impl IntoElement {
                                 handle: &handle,
                             },
                             tab,
+                            tab_theme,
                             cx,
                         )
                     })
@@ -550,7 +556,7 @@ fn render_active_tab_shape(
         })
 }
 
-fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
+fn render_tab(chrome: TabChrome<'_>, tab: &Tab, tab_theme: Arc<Theme>, cx: &App) -> AnyElement {
     let TabChrome {
         index,
         selected,
@@ -572,7 +578,6 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, cx: &App) -> AnyElement {
         right_transition_background,
         handle,
     } = chrome;
-    let tab_theme = tab.theme(cx);
     let tab_colors = tab_theme.colors();
     let tab_background = if selected {
         tab_colors.tab_active_background

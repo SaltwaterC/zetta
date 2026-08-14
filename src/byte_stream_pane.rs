@@ -59,7 +59,8 @@ impl Zetta {
         let tab_id = tab.id;
         let active_pane_id = tab.active_pane;
         let profile = tab.active_profile().cloned()?;
-        let terminal_theme = match resolve_profile_theme(&profile, cx) {
+        let project = self.active_project_config().cloned();
+        let terminal_theme = match resolve_project_profile_theme(&profile, project.as_deref(), cx) {
             Ok(theme) => theme,
             Err(error) => {
                 self.configuration_error =
@@ -70,6 +71,7 @@ impl Zetta {
         };
         let pane_id = self.next_pane_id;
         self.next_pane_id += 1;
+        self.projects.inherit_pane_root(active_pane_id, pane_id);
 
         let tab = &mut self.tabs[self.active_tab];
         tab.maximized_pane = None;

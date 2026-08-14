@@ -11,6 +11,8 @@ mod notification_sounds;
 mod process_control;
 mod profile_cli;
 mod profile_icon;
+mod project;
+mod project_cli;
 #[cfg(feature = "serial-console")]
 mod serial_console;
 #[cfg(servers_enabled)]
@@ -65,18 +67,20 @@ use gpui::{
     Action, Anchor, Animation, AnimationExt, AnyElement, App, AppContext as _, Bounds, Context,
     CursorStyle, Decorations, DismissEvent, Entity, Focusable, FrameTiming, FrameTimingCollector,
     Global, HitboxBehavior, Hsla, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent,
-    KeyUpEvent, KeybindingKeystroke, ListSizingBehavior, MAX_BUTTONS_PER_SIDE, MouseButton, Pixels,
-    PlatformKeyboardMapper, Point, Render, ResizeEdge, ScrollHandle, ScrollStrategy, SharedString,
-    Size, Subscription, Task, Tiling, TitlebarOptions, UniformListScrollHandle, WeakEntity, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowButton, WindowButtonLayout, WindowControlArea,
-    WindowDecorations, WindowId, WindowOptions, actions, anchored, canvas, container_query,
-    deferred, div, point, profiler, px, size, svg, transparent_black, uniform_list,
+    KeyUpEvent, KeybindingKeystroke, ListSizingBehavior, MAX_BUTTONS_PER_SIDE, MouseButton,
+    PathPromptOptions, Pixels, PlatformKeyboardMapper, Point, Render, ResizeEdge, ScrollHandle,
+    ScrollStrategy, SharedString, Size, Subscription, Task, Tiling, TitlebarOptions,
+    UniformListScrollHandle, WeakEntity, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowButton, WindowButtonLayout, WindowControlArea, WindowDecorations, WindowId,
+    WindowOptions, actions, anchored, canvas, container_query, deferred, div, point, profiler, px,
+    size, svg, transparent_black, uniform_list,
 };
 use process_control::{
     ProcessControlCommand, ProcessControlServer, ReconnectSessionResult, TabAttentionRequest,
     request_existing_process_window,
 };
 use profile_icon::ProfileIcon;
+use project::{ProjectConfig, ProjectRegistry};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use session_auth_ui::SessionAuthenticationPrompt;
@@ -313,8 +317,10 @@ mod window_frame;
 use window_frame::*;
 mod view_boundary;
 use view_boundary::{ZettaSubview, overlay_boundary, overlay_boundary_root};
+mod project_context;
 mod startup;
 mod worktree_detection;
+use project_context::*;
 use shell_integration::*;
 #[cfg(windows)]
 mod windows_integration;

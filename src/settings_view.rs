@@ -23,7 +23,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let editor = self.settings_editor.as_ref()?;
-        let colors = cx.theme().colors().clone();
+        let colors = self.window_theme(cx).colors().clone();
         let handle = cx.entity().downgrade();
         let widgets = SettingsFormWidgets::new(editor, colors.clone(), handle.clone());
         let scroll_indicator =
@@ -121,7 +121,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let editor = self.settings_editor.as_ref()?;
-        let colors = cx.theme().colors().clone();
+        let colors = self.window_theme(cx).colors().clone();
         let handle = cx.entity().downgrade();
         if !editor.scroll_geometry_initialized {
             let geometry_handle = handle.clone();
@@ -191,6 +191,7 @@ impl Zetta {
         let themes_handle = handle.clone();
         let keymap_handle = handle.clone();
         let templates_handle = handle.clone();
+        let projects_handle = handle.clone();
         let close_handle = handle.clone();
         let save_handle = handle.clone();
         let settings_save_in_progress = editor.settings_save_in_progress;
@@ -204,6 +205,7 @@ impl Zetta {
             SettingsPage::PaneTemplates => {
                 "pane_split_templates · built-ins are read-only presets".to_owned()
             }
+            SettingsPage::Projects => self.projects.registry.path().display().to_string(),
         };
         Some(
             div()
@@ -355,6 +357,34 @@ impl Zetta {
                                                         .ok();
                                                 })
                                                 .child("Templates"),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("settings-projects-tab")
+                                                .px_3()
+                                                .py_1()
+                                                .rounded(px(4.))
+                                                .cursor_pointer()
+                                                .when(
+                                                    editor.page == SettingsPage::Projects
+                                                        || editor.focused_control
+                                                            == Some(SettingsControl::Tab(
+                                                                SettingsPage::Projects,
+                                                            )),
+                                                    |tab| tab.bg(colors.element_selected),
+                                                )
+                                                .on_click(move |_, window, cx| {
+                                                    projects_handle
+                                                        .update(cx, |this, cx| {
+                                                            this.select_settings_page(
+                                                                SettingsPage::Projects,
+                                                                window,
+                                                                cx,
+                                                            )
+                                                        })
+                                                        .ok();
+                                                })
+                                                .child("Projects"),
                                         ),
                                 )
                                 .child(

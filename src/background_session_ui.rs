@@ -962,6 +962,7 @@ impl Zetta {
                 TerminalViewEvent::Close => this.terminal_closed(tab_id, pane_id, window, cx),
                 TerminalViewEvent::TitleChanged => {
                     this.schedule_worktree_detection_for_pane(tab_id, pane_id, cx);
+                    this.schedule_project_detection_for_pane(tab_id, pane_id, window, cx);
                     cx.notify();
                 }
                 TerminalViewEvent::Input(input)
@@ -989,6 +990,7 @@ impl Zetta {
                 tab.activate_stack_entry(pane_id, PaneStackSelection::Base);
                 cx.notify();
             }
+            this.activate_current_project(window, cx);
             this.clear_active_tab_attention_if_focused(window, cx);
         })
         .detach();
@@ -1012,6 +1014,7 @@ impl Zetta {
             pane.base_exited = false;
         }
         self.schedule_worktree_detection_for_pane(tab_id, pane_id, cx);
+        self.schedule_project_detection_for_pane(tab_id, pane_id, window, cx);
     }
 
     fn connect_stacked_terminal_view(
@@ -1073,6 +1076,7 @@ impl Zetta {
                 tab.activate_stack_entry(pane_id, PaneStackSelection::Stacked(entry_id));
                 cx.notify();
             }
+            this.activate_current_project(window, cx);
             this.clear_active_tab_attention_if_focused(window, cx);
         })
         .detach();

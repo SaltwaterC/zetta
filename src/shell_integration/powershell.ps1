@@ -82,6 +82,7 @@ $zettaOverlayColors = @(ZETTA_OVERLAY_COLORS)
 $zettaTabIcons = { @(& zetta tabicon --list 2>$null) }
 $zettaPaneThemes = { @(& zetta panetheme --list 2>$null) }
 $zettaSplits = { @(& zetta splits 2>$null) }
+$zettaProjects = { @(& zetta project list 2>$null) }
 $zettaPaneLabels = { @(& zetta pane --list 2>$null) }
 
 # zetta-default/zetta-ok/zetta-alarm are bundled tones Zetta plays itself, so
@@ -138,7 +139,7 @@ $zettaCompletions = {
         }
     }
     $subcommand = $words | Where-Object {
-        $_ -in 'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'splits', 'pane', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', 'wt'
+        $_ -in 'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'splits', 'pane', 'profile', 'project', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', 'wt'
     } | Select-Object -First 1
     $worktreeCommand = $false
     $worktreeOperation = ''
@@ -272,7 +273,7 @@ $zettaCompletions = {
             '--help'
         }
     } elseif ($null -eq $subcommand) {
-        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'profile', 'splits', 'pane', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', 'wt', '--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme'
+        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'profile', 'project', 'splits', 'pane', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', 'wt', '--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme'
     } else {
         switch ($subcommand) {
             'benchmark' { '--terminal-render-workload', '--terminal-checkerboard-workload', '--terminal-sparse-update-workload', '--terminal-alt-screen-scroll-workload', '--profile-report', '--profile-duration', '--profile-pane-stress', '--profile-background-stress', '--profile-sparse-updates', '--profile-alt-screen-scroll', '--profile-external-terminal', '--help' }
@@ -307,6 +308,20 @@ $zettaCompletions = {
                 } elseif ($profileOperation -eq 'add') {
                     '--program', '--arg', '--theme', '--icon', '--config', '--help'
                 } else { '--config', '--help' }
+            }
+            'project' {
+                $operation = if ($words.Count -gt 2) { $words[2] } else { '' }
+                if ([string]::IsNullOrEmpty($operation) -or $operation -notin 'add', 'list', 'remove', 'open') {
+                    'add', 'list', 'remove', 'open', '--help'
+                } elseif ($operation -eq 'add' -and $wordToComplete -notlike '-*') {
+                    @(Get-ChildItem -Directory -Name -Path "$wordToComplete*" -ErrorAction SilentlyContinue)
+                } elseif ($operation -in 'open', 'remove' -and $wordToComplete -notlike '-*') {
+                    & $zettaProjects
+                } elseif ($operation -in 'add', 'open', 'remove') {
+                    '--path', '--help'
+                } else {
+                    '--help'
+                }
             }
             'init' { 'bash', 'fish', 'powershell', 'pwsh', 'zsh', '--help' }
             'serial' {

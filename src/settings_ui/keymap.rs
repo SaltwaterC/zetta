@@ -338,10 +338,10 @@ pub(crate) fn render_keymap_sticky_candidate(
     _window: &mut gpui::Window,
     cx: &mut gpui::Context<Zetta>,
 ) -> SmallVec<[gpui::AnyElement; 8]> {
+    let colors = zetta.window_theme(cx).colors().clone();
     let Some(editor) = zetta.settings_editor.as_mut() else {
         return SmallVec::new();
     };
-    let colors = cx.theme().colors().clone();
     let handle = cx.entity().downgrade();
     let mut elements = SmallVec::new();
     match candidate.row {

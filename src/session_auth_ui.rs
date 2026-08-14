@@ -398,7 +398,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let prompt = self.session_authentication.as_ref()?;
-        let colors = cx.theme().colors().clone();
+        let colors = self.window_theme(cx).colors().clone();
         let handle = cx.entity().downgrade();
         let field = |id: &'static str,
                      value: &TextField,
@@ -546,7 +546,7 @@ impl Zetta {
                             panel.child(
                                 div()
                                     .text_sm()
-                                    .text_color(cx.theme().status().error)
+                                    .text_color(self.window_theme(cx).status().error)
                                     .child(error.clone()),
                             )
                         })

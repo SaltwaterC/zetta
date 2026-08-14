@@ -149,6 +149,8 @@ impl Zetta {
             return;
         }
 
+        let project = self.active_project_config().cloned();
+        let working_directory_configured = self.effective_config().working_directory_configured;
         let Some(tab) = self.tabs.get(self.active_tab) else {
             return;
         };
@@ -178,9 +180,9 @@ impl Zetta {
             inherited_working_directory,
             inherited_wsl_directory,
             self.working_directory.clone(),
-            self.launch_config.working_directory_configured,
+            working_directory_configured,
         );
-        let terminal_theme = match resolve_profile_theme(&profile, cx) {
+        let terminal_theme = match resolve_project_profile_theme(&profile, project.as_deref(), cx) {
             Ok(theme) => theme,
             Err(error) => {
                 self.set_multi_command_error(

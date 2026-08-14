@@ -25,6 +25,7 @@ pub enum SettingsPage {
     Themes,
     Keymap,
     PaneTemplates,
+    Projects,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

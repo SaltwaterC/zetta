@@ -252,6 +252,12 @@ impl Zetta {
         let overlay = resolve_pane_overlay(request.overlay)?;
         let (axis, position) = pane_direction_split(direction);
         let tab_index = self.active_tab;
+        let inherit_working_directory = self
+            .effective_config()
+            .working_directory_scope
+            .inherits_for_new_pane();
+        let working_directory_configured = self.effective_config().working_directory_configured;
+        let project = self.active_project_config().cloned();
         let (tab_id, active_pane_id, profile, inherited_working_directory, inherited_wsl_directory) = {
             let tab = self.tabs.get(tab_index).context("there is no active tab")?;
             anyhow::ensure!(
@@ -267,22 +273,18 @@ impl Zetta {
             let active_pane = tab
                 .active_pane()
                 .context("the active tab has no active pane")?;
-            let inherit = self
-                .launch_config
-                .working_directory_scope
-                .inherits_for_new_pane();
             (
                 tab.id,
                 tab.active_pane,
                 active_pane.profile.clone(),
-                inherit
+                inherit_working_directory
                     .then(|| {
                         (!is_wsl_shell(&active_pane.profile.command))
                             .then(|| active_pane.working_directory(cx))
                             .flatten()
                     })
                     .flatten(),
-                inherit
+                inherit_working_directory
                     .then(|| active_pane.wsl_working_directory(cx))
                     .flatten(),
             )
@@ -292,11 +294,11 @@ impl Zetta {
             inherited_working_directory,
             inherited_wsl_directory,
             self.working_directory.clone(),
-            self.launch_config.working_directory_configured,
+            working_directory_configured,
         );
         let shell =
             exact_pane_command_shell(&profile.command, &request.command, wsl_directory.as_deref())?;
-        let terminal_theme = resolve_profile_theme(&profile, cx)
+        let terminal_theme = resolve_project_profile_theme(&profile, project.as_deref(), cx)
             .context("could not resolve the active profile theme")?;
         let mut settings = TerminalSpawnSettings::current(cx);
         let path_hyperlink_regexes = settings.path_hyperlink_regexes(true);
@@ -317,6 +319,7 @@ impl Zetta {
         }
 
         self.next_pane_id += 1;
+        self.projects.inherit_pane_root(active_pane_id, pane_id);
         self.pane_controls_hidden_for
             .extend(default_hidden_pane_controls(
                 self.launch_config.pane_controls_hidden_by_default,
@@ -405,6 +408,8 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<()> {
+        let project = self.active_project_config().cloned();
+        let working_directory_configured = self.effective_config().working_directory_configured;
         let (tab_id, pane_id, profile, inherited_working_directory, inherited_wsl_directory) = {
             let tab = self
                 .tabs
@@ -434,9 +439,9 @@ impl Zetta {
                 .then_some(inherited_wsl_directory)
                 .flatten(),
             self.working_directory.clone(),
-            self.launch_config.working_directory_configured,
+            working_directory_configured,
         );
-        let terminal_theme = resolve_profile_theme(&profile, cx)
+        let terminal_theme = resolve_project_profile_theme(&profile, project.as_deref(), cx)
             .context("could not resolve the target profile theme")?;
         let command = quote_pane_command_for_shell(&profile.command, &request.command)?;
         let entry_id = self.next_pane_id;

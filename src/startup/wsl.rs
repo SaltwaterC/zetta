@@ -65,6 +65,24 @@ where
     environment.insert("WSLENV".to_owned(), wslenv);
 }
 
+pub(crate) fn add_wsl_environment_variable_names<'a, S>(
+    environment: &mut HashMap<String, String, S>,
+    names: impl IntoIterator<Item = &'a str>,
+) where
+    S: std::hash::BuildHasher,
+{
+    let mut wslenv = environment
+        .remove("WSLENV")
+        .or_else(|| env::var("WSLENV").ok())
+        .unwrap_or_default();
+
+    for name in names {
+        add_wslenv_entry(&mut wslenv, &format!("{name}/u"));
+    }
+
+    environment.insert("WSLENV".to_owned(), wslenv);
+}
+
 #[cfg(windows)]
 fn wsl_terminal_environment_values_for(
     executable: &Path,

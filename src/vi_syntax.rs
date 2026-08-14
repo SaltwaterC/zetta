@@ -24,10 +24,7 @@ use serde::Deserialize;
 use theme::{SyntaxTheme, Theme, ThemeRegistry};
 use tree_sitter_highlight::{Highlight, HighlightConfiguration, HighlightEvent, Highlighter};
 
-use crate::{
-    startup::{selected_theme_name, with_zetta_theme_overrides},
-    zetta_assets::ZettaAssets,
-};
+use crate::{startup::selected_theme_name, zetta_assets::ZettaAssets};
 
 #[derive(RustEmbed)]
 #[folder = "zed/crates/grammars/src/"]
@@ -741,7 +738,17 @@ fn style_for_capture(syntax_theme: &SyntaxTheme, capture_name: &str) -> Option<H
 }
 
 pub(crate) fn run(arguments: Vec<String>) -> i32 {
-    let (config, _) = crate::startup::load_startup_config(None, None);
+    let (base, _) = crate::startup::load_startup_config(None, None);
+    // A registered project can select its own theme, and this runs as its own
+    // process, so the project overlay has to be applied here too — otherwise the
+    // editor highlights with the application theme inside a project pane whose
+    // terminal is showing a different one. Failures fall back to `base` rather
+    // than refusing to open the file.
+    let config = crate::project_cli::current_project_config(&base)
+        .ok()
+        .flatten()
+        .map(|project| project.effective)
+        .unwrap_or(base);
     let configured_theme = config.theme.clone();
     // Built on the first editor rather than up front, so `vi --help` and
     // argument errors do not pay for grammars they never use. Every file in one
@@ -1033,9 +1040,10 @@ fn active_syntax_theme_for(configured_theme: Option<&str>) -> Arc<SyntaxTheme> {
         }
     }
 
+    // No `apply_zetta_theme_overrides` here: it only restyles scrollbars, which
+    // a syntax theme has nothing to do with.
     registry
         .get(selected_theme_name(configured_theme))
-        .map(with_zetta_theme_overrides)
         .map(|theme: Arc<Theme>| theme.syntax().clone())
         .unwrap_or_else(|_| Arc::new(SyntaxTheme::new([])))
 }

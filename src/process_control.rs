@@ -31,7 +31,7 @@ use crate::command_panes::{
 };
 use crate::pane::{OverlayFontSize, PaneOverlayRequest, overlay_color_from_value};
 
-const CONTROL_VERSION: u32 = 12;
+const CONTROL_VERSION: u32 = 13;
 // A 64 KiB argv payload can expand substantially when it contains many
 // one-character arguments and each value is represented as JSON. Keep enough
 // framing headroom for that worst case as well as the endpoint token.
@@ -89,6 +89,13 @@ pub(crate) enum ProcessControlCommand {
         completion: Sender<bool>,
     },
     OpenWindow {
+        completion: Sender<bool>,
+    },
+    OpenProject {
+        root: PathBuf,
+        completion: Sender<bool>,
+    },
+    ReloadProjects {
         completion: Sender<bool>,
     },
     ReplacePane {
@@ -154,6 +161,10 @@ enum ControlRequestCommand {
         config_path: String,
     },
     OpenWindow,
+    OpenProject {
+        root: PathBuf,
+    },
+    ReloadProjects,
     ReplacePane {
         split: Option<String>,
         profile: Option<String>,
@@ -434,6 +445,27 @@ impl ProcessControlServer {
                             let (completion, completed) = channel();
                             let accepted = commands
                                 .unbounded_send(ProcessControlCommand::OpenWindow { completion })
+                                .is_ok()
+                                && wait_for_control_completion(&completed, &stopping_for_thread);
+                            if accepted { "ok" } else { "rejected" }
+                        }
+                        Some(ControlRequestCommand::OpenProject { root }) => {
+                            let (completion, completed) = channel();
+                            let accepted = commands
+                                .unbounded_send(ProcessControlCommand::OpenProject {
+                                    root,
+                                    completion,
+                                })
+                                .is_ok()
+                                && wait_for_control_completion(&completed, &stopping_for_thread);
+                            if accepted { "ok" } else { "rejected" }
+                        }
+                        Some(ControlRequestCommand::ReloadProjects) => {
+                            let (completion, completed) = channel();
+                            let accepted = commands
+                                .unbounded_send(ProcessControlCommand::ReloadProjects {
+                                    completion,
+                                })
                                 .is_ok()
                                 && wait_for_control_completion(&completed, &stopping_for_thread);
                             if accepted { "ok" } else { "rejected" }
@@ -853,7 +885,11 @@ fn decode_control_request(
         }
         return None;
     }
-    if request.command != "reload_configuration" && request.config_path.is_some() {
+    if !matches!(
+        request.command.as_str(),
+        "reload_configuration" | "open_project"
+    ) && request.config_path.is_some()
+    {
         if let Some(secret) = request.secret.as_mut() {
             secret.zeroize();
         }
@@ -911,6 +947,56 @@ fn decode_control_request(
                 && request.secret.is_none() =>
         {
             Some(ControlRequestCommand::OpenWindow)
+        }
+        "open_project"
+            if request.runner_id.is_none()
+                && request.session_id.is_none()
+                && request.secret.is_none()
+                && request.icon.is_none()
+                && request.pane_theme.is_none()
+                && request.pane_overlay.is_none()
+                && request.pane_overlay_font_size.is_none()
+                && request.pane_overlay_opacity.is_none()
+                && request.pane_overlay_color.is_none()
+                && request.attention_id.is_none()
+                && request.attention_summary.is_none()
+                && request.attention_body.is_none()
+                && request.tab_name.is_none()
+                && request.worktree_name.is_none()
+                && request.split.is_none()
+                && request.profile.is_none()
+                && request.theme.is_none()
+                && request.pane_request.is_none() =>
+        {
+            request
+                .config_path
+                .take()
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from)
+                .map(|root| ControlRequestCommand::OpenProject { root })
+        }
+        "reload_projects"
+            if request.runner_id.is_none()
+                && request.session_id.is_none()
+                && request.secret.is_none()
+                && request.icon.is_none()
+                && request.pane_theme.is_none()
+                && request.pane_overlay.is_none()
+                && request.pane_overlay_font_size.is_none()
+                && request.pane_overlay_opacity.is_none()
+                && request.pane_overlay_color.is_none()
+                && request.attention_id.is_none()
+                && request.attention_summary.is_none()
+                && request.attention_body.is_none()
+                && request.tab_name.is_none()
+                && request.worktree_name.is_none()
+                && request.config_path.is_none()
+                && request.split.is_none()
+                && request.profile.is_none()
+                && request.theme.is_none()
+                && request.pane_request.is_none() =>
+        {
+            Some(ControlRequestCommand::ReloadProjects)
         }
         "get_silent_mode"
             if request.runner_id.is_none()
@@ -1239,6 +1325,75 @@ pub(crate) fn request_existing_process_window() -> Result<bool> {
         }
     }
     Ok(false)
+}
+
+pub(crate) fn request_existing_process_project(root: &Path) -> Result<bool> {
+    let directory = crate::background_sessions::session_catalog_dir();
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).context("reading Zetta process control endpoints"),
+    };
+    for entry in entries {
+        let path = entry?.path();
+        if !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("control-") && name.ends_with(".json"))
+        {
+            continue;
+        }
+        let endpoint = match fs::read(&path)
+            .ok()
+            .and_then(|contents| serde_json::from_slice::<ControlEndpoint>(&contents).ok())
+        {
+            Some(endpoint) if endpoint.version == CONTROL_VERSION => endpoint,
+            _ => continue,
+        };
+        if !process_is_running(endpoint.process_id) {
+            let _ = fs::remove_file(path);
+            let _ = fs::remove_file(endpoint.socket_path);
+            continue;
+        }
+        if send_open_project_request(&endpoint, root).unwrap_or(false) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+pub(crate) fn request_existing_process_projects_reload() -> Result<bool> {
+    let directory = crate::background_sessions::session_catalog_dir();
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).context("reading Zetta process control endpoints"),
+    };
+    let mut accepted = false;
+    for entry in entries {
+        let path = entry?.path();
+        if !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("control-") && name.ends_with(".json"))
+        {
+            continue;
+        }
+        let endpoint = match fs::read(&path)
+            .ok()
+            .and_then(|contents| serde_json::from_slice::<ControlEndpoint>(&contents).ok())
+        {
+            Some(endpoint) if endpoint.version == CONTROL_VERSION => endpoint,
+            _ => continue,
+        };
+        if !process_is_running(endpoint.process_id) {
+            let _ = fs::remove_file(path);
+            let _ = fs::remove_file(endpoint.socket_path);
+            continue;
+        }
+        accepted |= send_reload_projects_request(&endpoint).unwrap_or(false);
+    }
+    Ok(accepted)
 }
 
 pub(crate) fn request_existing_process_replace_pane(request: ReplacePaneRequest) -> Result<bool> {
@@ -1671,6 +1826,74 @@ fn send_open_window_request(endpoint: &ControlEndpoint) -> Result<bool> {
         &ControlRequest {
             token: endpoint.token.clone(),
             command: "open_window".to_owned(),
+            runner_id: None,
+            session_id: None,
+            secret: None,
+            icon: None,
+            pane_theme: None,
+            pane_overlay: None,
+            pane_overlay_font_size: None,
+            pane_overlay_opacity: None,
+            pane_overlay_color: None,
+            attention_id: None,
+            attention_summary: None,
+            attention_body: None,
+            tab_name: None,
+            worktree_name: None,
+            config_path: None,
+            split: None,
+            profile: None,
+            theme: None,
+            pane_request: None,
+        },
+    )?;
+    let response = read_message::<ControlResponse>(&mut stream)?;
+    Ok(response.status == "ok")
+}
+
+fn send_open_project_request(endpoint: &ControlEndpoint, root: &Path) -> Result<bool> {
+    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
+    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    write_message(
+        &mut stream,
+        &ControlRequest {
+            token: endpoint.token.clone(),
+            command: "open_project".to_owned(),
+            runner_id: None,
+            session_id: None,
+            secret: None,
+            icon: None,
+            pane_theme: None,
+            pane_overlay: None,
+            pane_overlay_font_size: None,
+            pane_overlay_opacity: None,
+            pane_overlay_color: None,
+            attention_id: None,
+            attention_summary: None,
+            attention_body: None,
+            tab_name: None,
+            worktree_name: None,
+            config_path: Some(root.to_string_lossy().into_owned()),
+            split: None,
+            profile: None,
+            theme: None,
+            pane_request: None,
+        },
+    )?;
+    let response = read_message::<ControlResponse>(&mut stream)?;
+    Ok(response.status == "ok")
+}
+
+fn send_reload_projects_request(endpoint: &ControlEndpoint) -> Result<bool> {
+    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
+    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    write_message(
+        &mut stream,
+        &ControlRequest {
+            token: endpoint.token.clone(),
+            command: "reload_projects".to_owned(),
             runner_id: None,
             session_id: None,
             secret: None,

@@ -350,6 +350,8 @@ pub(crate) fn enforce_minimum_window_size(window: &mut Window) {
 
 pub(crate) struct Zetta {
     pub(crate) launch_config: Config,
+    pub(crate) project_detection_base: Arc<Config>,
+    pub(crate) projects: ProjectState,
     /// A `--profile`/`--theme` launch override: (profile name lowercased,
     /// theme name). Applied in `open_tab_with_profile` to every tab opened
     /// with that profile for the rest of this process, never written back to
@@ -537,15 +539,29 @@ impl Zetta {
 
     pub(crate) fn new(
         config: Config,
-        configuration_error: Option<String>,
+        mut configuration_error: Option<String>,
         initial_profile: Option<Profile>,
+        initial_project: Option<ProjectConfig>,
         launch_theme_override: Option<(String, String)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let button_layout = system_window_button_layout(cx);
+        let projects = match ProjectState::load() {
+            Ok(projects) => projects,
+            Err(error) => {
+                let message = format!("Could not load the project registry: {error:#}");
+                configuration_error = Some(match configuration_error {
+                    Some(existing) => format!("{existing}\n{message}"),
+                    None => message,
+                });
+                ProjectState::new(ProjectRegistry::empty())
+            }
+        };
         let mut this = Self {
             launch_config: config.clone(),
+            project_detection_base: Arc::new(config.clone()),
+            projects,
             launch_theme_override,
             configuration_error,
             configuration_reload_feedback: ConfigurationReloadFeedback::default(),
@@ -668,7 +684,21 @@ impl Zetta {
             .detach();
 
         this.load_multi_command_catalog(cx);
-        if let Some(profile) = initial_profile {
+        if let Some(project) = initial_project {
+            let project = this.projects.insert_config(project);
+            let profile = initial_profile.or_else(|| {
+                project
+                    .effective
+                    .profiles
+                    .get(project.effective.default_profile)
+                    .cloned()
+            });
+            if let Some(profile) = profile {
+                this.open_tab_with_profile_in_project(profile, project, window, cx);
+            } else {
+                this.open_tab(window, cx);
+            }
+        } else if let Some(profile) = initial_profile {
             this.open_tab_with_profile(profile, window, cx);
         } else {
             this.open_tab(window, cx);
@@ -678,29 +708,56 @@ impl Zetta {
 
     pub(crate) fn open_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let active_profile = self.tabs.get(self.active_tab).and_then(Tab::active_profile);
+        let project = self.active_project_config().cloned();
+        let effective = project
+            .as_ref()
+            .map(|project| &project.effective)
+            .unwrap_or(&self.launch_config);
         let Some(profile) = new_tab_profile(
             active_profile,
             &self.profiles,
-            self.launch_config.default_profile,
-            self.launch_config.new_tab_profile,
+            effective.default_profile,
+            effective.new_tab_profile,
         ) else {
             return;
         };
-        self.open_tab_with_profile(profile, window, cx);
+        self.open_tab_with_profile_context(profile, project, window, cx);
     }
 
     pub(crate) fn open_tab_with_profile(
         &mut self,
+        profile: Profile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let project = self.active_project_config().cloned();
+        self.open_tab_with_profile_context(profile, project, window, cx);
+    }
+
+    pub(crate) fn open_tab_with_profile_in_project(
+        &mut self,
+        profile: Profile,
+        project: Arc<ProjectConfig>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_tab_with_profile_context(profile, Some(project), window, cx);
+    }
+
+    fn open_tab_with_profile_context(
+        &mut self,
         mut profile: Profile,
+        project: Option<Arc<ProjectConfig>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         apply_launch_theme_override(&mut profile, self.launch_theme_override.as_ref());
         let active_pane = self.tabs.get(self.active_tab).and_then(Tab::active_pane);
-        let inherit_working_directory = self
-            .launch_config
-            .working_directory_scope
-            .inherits_for_new_tab();
+        let effective = project
+            .as_ref()
+            .map(|project| &project.effective)
+            .unwrap_or(&self.launch_config);
+        let inherit_working_directory = effective.working_directory_scope.inherits_for_new_tab();
         let inherited_working_directory = active_pane
             .filter(|_| inherit_working_directory)
             .filter(|pane| !is_wsl_shell(&pane.profile.command))
@@ -713,8 +770,8 @@ impl Zetta {
             &profile,
             inherited_working_directory,
             inherited_wsl_directory,
-            self.working_directory.clone(),
-            self.launch_config.working_directory_configured,
+            effective.working_directory.clone(),
+            effective.working_directory_configured,
         );
         let tab_id = self.next_tab_id;
         self.next_tab_id += 1;
@@ -731,6 +788,11 @@ impl Zetta {
         let pane_id = self.next_pane_id;
         self.next_pane_id += 1;
         let wsl_cwd_file = wsl_cwd_tracking_file(&profile, pane_id);
+        if let Some(project) = &project {
+            self.projects
+                .pane_roots
+                .insert(pane_id, project.root.clone());
+        }
         self.pane_controls_hidden_for
             .extend(default_hidden_pane_controls(
                 self.launch_config.pane_controls_hidden_by_default,
@@ -759,7 +821,7 @@ impl Zetta {
             custom_title: None,
             worktree_seed_title: None,
             process_title: None,
-            icon: self.launch_config.default_tab_icon,
+            icon: effective.default_tab_icon,
             pinned: false,
             renaming_pane: None,
             rename_buffer: None,
@@ -791,6 +853,9 @@ impl Zetta {
             window,
             cx,
         );
+        if project.is_some() {
+            self.activate_current_project(window, cx);
+        }
         self.focus_active(window, cx);
     }
 
@@ -838,6 +903,8 @@ impl Zetta {
             .iter()
             .map(|pane| pane.id)
             .collect::<Vec<_>>();
+        self.projects
+            .forget_tab(tab_id, closed_pane_ids.iter().copied());
         self.forget_pane_controls(closed_pane_ids);
         self.tabs.remove(index);
         self.retain_open_visible_terminals();
@@ -1052,6 +1119,7 @@ impl Zetta {
             tab.remove_pane(pane_id);
             tab.layout.clone().without(pane_id)
         };
+        self.projects.forget_pane(pane_id);
         self.forget_pane_controls([pane_id]);
         self.retain_open_visible_terminals();
         let Some(layout) = layout else {
@@ -1167,10 +1235,12 @@ impl Zetta {
             return false;
         }
         let active_pane = tab.pane(active_pane_id);
-        let inherit_working_directory = self
-            .launch_config
+        let effective_config = self.effective_config();
+        let inherit_working_directory = effective_config
             .working_directory_scope
             .inherits_for_new_pane();
+        let working_directory_configured = effective_config.working_directory_configured;
+        let pane_controls_hidden_by_default = effective_config.pane_controls_hidden_by_default;
         let inherited_working_directory = active_pane
             .filter(|_| inherit_working_directory)
             .filter(|pane| !is_wsl_shell(&pane.profile.command))
@@ -1186,7 +1256,7 @@ impl Zetta {
             inherited_working_directory,
             inherited_wsl_directory,
             self.working_directory.clone(),
-            self.launch_config.working_directory_configured,
+            working_directory_configured,
         );
         let terminals_resized_by_split = matches!(axis, SplitAxis::Vertical)
             .then(|| {
@@ -1202,7 +1272,7 @@ impl Zetta {
         let wsl_cwd_file = wsl_cwd_tracking_file(&profile, pane_id);
         self.pane_controls_hidden_for
             .extend(default_hidden_pane_controls(
-                self.launch_config.pane_controls_hidden_by_default,
+                pane_controls_hidden_by_default,
                 [pane_id],
             ));
 
@@ -1213,6 +1283,7 @@ impl Zetta {
             terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
         }
 
+        self.projects.inherit_pane_root(active_pane_id, pane_id);
         let tab = &mut self.tabs[tab_index];
         tab.maximized_pane = None;
         if !tab.layout.split(active_pane_id, axis, pane_id, position) {
@@ -1267,10 +1338,14 @@ impl Zetta {
     }
 
     pub(crate) fn new_window(&mut self, _: &NewWindow, _: &mut Window, cx: &mut Context<Self>) {
+        let project = self
+            .active_project_config()
+            .map(|project| project.as_ref().clone());
         open_zetta_window(
             self.launch_config.clone(),
             self.configuration_error.clone(),
             None,
+            project,
             None,
             None,
             false,
@@ -1287,11 +1362,9 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(index) = visible_profile_index(
-            &self.profiles,
-            &self.launch_config.hidden_profiles,
-            action.slot,
-        ) else {
+        let hidden_profiles = self.effective_config().hidden_profiles.clone();
+        let Some(index) = visible_profile_index(&self.profiles, &hidden_profiles, action.slot)
+        else {
             return;
         };
         let profile = self.profiles[index].clone();
@@ -1655,14 +1728,20 @@ impl Zetta {
         }
     }
 
-    fn apply_pane_split_template_with_profile(
+    pub(crate) fn apply_pane_split_template_with_profile(
         &mut self,
         name: &str,
         profile_override: Option<Profile>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(template) = self.launch_config.pane_split_templates.get(name) else {
+        let project = self.active_project_config().cloned();
+        let effective = project
+            .as_ref()
+            .map(|project| &project.effective)
+            .unwrap_or(&self.launch_config);
+        let templates = effective.pane_split_templates.clone();
+        let Some(template) = templates.get(name) else {
             self.configuration_error =
                 Some(format!("Pane split template {:?} is not configured", name));
             cx.notify();
@@ -1683,7 +1762,7 @@ impl Zetta {
         let Some(active_profile) = tab.active_profile().cloned() else {
             return false;
         };
-        let leaves =
+        let mut leaves =
             match resolve_pane_split_leaves(template, &active_profile, profile_override.as_ref()) {
                 Ok(leaves) => leaves,
                 Err(error) => {
@@ -1695,9 +1774,16 @@ impl Zetta {
                     return false;
                 }
             };
+        if let Some(project) = &project {
+            for leaf in &mut leaves {
+                let template_environment = std::mem::take(&mut leaf.environment);
+                leaf.environment = project.environment.clone();
+                leaf.environment.extend(template_environment);
+            }
+        }
         let terminal_themes = match leaves
             .iter()
-            .map(|leaf| resolve_profile_theme(&leaf.profile, cx))
+            .map(|leaf| resolve_project_profile_theme(&leaf.profile, project.as_deref(), cx))
             .collect::<Result<Vec<_>>>()
         {
             Ok(themes) => themes,
@@ -1712,10 +1798,7 @@ impl Zetta {
         let active_leaf = &leaves[0];
         let replacing_active =
             active_pane.is_none_or(|pane| pane_split_leaf_requires_restart(pane, active_leaf));
-        let inherit_working_directory = self
-            .launch_config
-            .working_directory_scope
-            .inherits_for_new_pane();
+        let inherit_working_directory = effective.working_directory_scope.inherits_for_new_pane();
         let inherited_working_directory = active_pane
             .filter(|_| inherit_working_directory)
             .filter(|pane| !is_wsl_shell(&pane.profile.command))
@@ -1730,8 +1813,8 @@ impl Zetta {
                     &leaf.profile,
                     inherited_working_directory.clone(),
                     inherited_wsl_directory.clone(),
-                    self.working_directory.clone(),
-                    self.launch_config.working_directory_configured,
+                    effective.working_directory.clone(),
+                    effective.working_directory_configured,
                 )
             })
             .collect::<Vec<_>>();
@@ -1758,6 +1841,9 @@ impl Zetta {
                 )
             })
             .collect::<Vec<_>>();
+        for (pane_id, _) in &new_panes {
+            self.projects.inherit_pane_root(active_pane_id, *pane_id);
+        }
         let active_wsl_cwd_file = if replacing_active {
             wsl_cwd_tracking_file(&active_leaf.profile, active_pane_id)
         } else {
@@ -1770,12 +1856,8 @@ impl Zetta {
             ));
         let mut all_pane_ids =
             std::iter::once(active_pane_id).chain(new_panes.iter().map(|(pane_id, _)| *pane_id));
-        let replacement = pane_layout_from_configured_template(
-            &self.launch_config.pane_split_templates,
-            name,
-            &mut all_pane_ids,
-        )
-        .expect("the configured pane template was resolved before allocating panes");
+        let replacement = pane_layout_from_configured_template(&templates, name, &mut all_pane_ids)
+            .expect("the configured pane template was resolved before allocating panes");
         let generated_labels = std::iter::once(active_pane_id)
             .chain(new_panes.iter().map(|(pane_id, _)| *pane_id))
             .zip(leaves.iter().map(|leaf| leaf.label.clone()))
@@ -1892,10 +1974,11 @@ impl Zetta {
         let tab_id = tab.id;
         let active_pane_id = tab.active_pane;
         let active_pane = tab.active_pane();
-        let inherit_working_directory = self
-            .launch_config
+        let effective_config = self.effective_config();
+        let inherit_working_directory = effective_config
             .working_directory_scope
             .inherits_for_new_pane();
+        let working_directory_configured = effective_config.working_directory_configured;
         let inherited_working_directory = active_pane
             .filter(|_| inherit_working_directory)
             .filter(|pane| !is_wsl_shell(&pane.profile.command))
@@ -1908,9 +1991,13 @@ impl Zetta {
             inherited_working_directory,
             inherited_wsl_directory,
             self.working_directory.clone(),
-            self.launch_config.working_directory_configured,
+            working_directory_configured,
         );
-        let terminal_theme = match resolve_profile_theme(&profile, cx) {
+        let terminal_theme = match resolve_project_profile_theme(
+            &profile,
+            self.active_project_config().map(AsRef::as_ref),
+            cx,
+        ) {
             Ok(theme) => theme,
             Err(error) => {
                 self.configuration_error = Some(format!(
@@ -2348,6 +2435,7 @@ impl Zetta {
     }
 
     pub(crate) fn focus_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.activate_current_project(window, cx);
         if let Some(tab) = self.tabs.get(self.active_tab) {
             let active_is_visible = tab.pane_is_visible(tab.active_pane);
             if active_is_visible {

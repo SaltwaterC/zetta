@@ -297,13 +297,12 @@ pub(crate) fn render_window_controls(
     buttons: [Option<WindowButton>; MAX_BUTTONS_PER_SIDE],
     state: WindowControlState,
     right_aligned: bool,
-    cx: &App,
+    colors: &ThemeColors,
 ) -> AnyElement {
     if !right_aligned || buttons.iter().all(Option::is_none) {
         return div().into_any_element();
     }
 
-    let colors = cx.theme().colors();
     let caption_button = |id, glyph, area, close: bool| {
         let hover_background = if close {
             gpui::rgba(0xe81120ff).into()
@@ -406,13 +405,12 @@ pub(crate) fn render_window_controls(
     buttons: [Option<WindowButton>; MAX_BUTTONS_PER_SIDE],
     state: WindowControlState,
     right_aligned: bool,
-    cx: &App,
+    colors: &ThemeColors,
 ) -> AnyElement {
     if !state.client_decorations {
         return div().into_any_element();
     }
 
-    let colors = cx.theme().colors();
     if !has_enabled_window_button(buttons, state) {
         return div().into_any_element();
     }
@@ -496,7 +494,7 @@ pub(crate) fn render_window_controls(
     _buttons: [Option<WindowButton>; MAX_BUTTONS_PER_SIDE],
     _state: WindowControlState,
     _right_aligned: bool,
-    _cx: &App,
+    _colors: &ThemeColors,
 ) -> AnyElement {
     div().into_any_element()
 }
@@ -504,7 +502,7 @@ pub(crate) fn render_window_controls(
 pub(crate) fn client_window_frame(
     content: impl IntoElement,
     window: &mut Window,
-    cx: &mut App,
+    border_color: Hsla,
 ) -> impl IntoElement {
     let decorations = window.window_decorations();
     let is_resizable = window.is_resizable();
@@ -549,7 +547,7 @@ pub(crate) fn client_window_frame(
                     Decorations::Client { .. } => {
                         content.when(custom_window_border_enabled(), |content| {
                             content
-                                .border_color(cx.theme().colors().border)
+                                .border_color(border_color)
                                 .rounded_client_corners(tiling)
                                 .when(!tiling.top, |content| content.border_t(BORDER_SIZE))
                                 .when(!tiling.bottom, |content| content.border_b(BORDER_SIZE))

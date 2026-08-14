@@ -454,7 +454,10 @@ impl Zetta {
                 let content = with_inactive_pane_opacity(
                     div().size_full().child(content),
                     active,
-                    self.launch_config.inactive_pane_opacity,
+                    self.projects
+                        .config_for_pane(tab.active_pane)
+                        .map(|project| project.effective.inactive_pane_opacity)
+                        .unwrap_or(self.launch_config.inactive_pane_opacity),
                 )
                 .into_any_element();
                 div()

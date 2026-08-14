@@ -665,6 +665,12 @@ and activates the pane containing the current result as you navigate.
 `Ctrl-Shift-P` opens the command palette. It lists actions available in the
 focused terminal and Zetta window, including effective shortcuts. Type to
 filter, use the arrow keys to select a command, and press `Enter` to run it.
+When the active pane is in a registered Zetta project, the palette also lists
+that project's pane split templates. Those entries are rebuilt when the active
+directory changes, so project-only templates disappear as soon as the pane
+leaves the project and return when it re-enters. See
+[Projects](configuration.md#projects) for project configuration and trust
+details.
 
 ## Default shortcuts
 

@@ -14,7 +14,11 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let terminal_theme = match resolve_profile_theme(&profile, cx) {
+        let terminal_theme = match resolve_project_profile_theme(
+            &profile,
+            self.project_config_for_tab(tab_id).map(Arc::as_ref),
+            cx,
+        ) {
             Ok(theme) => theme,
             Err(error) => {
                 if let Some(pane) = self
@@ -177,6 +181,8 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let mut combined_environment = self.project_environment_for_tab(tab_id);
+        combined_environment.extend(environment_overrides);
         let is_wsl = is_wsl_shell(&profile.command);
         let Some(attention_id) = self.attention_id_for_tab(tab_id) else {
             if let Some(pane) = self
@@ -220,11 +226,15 @@ impl Zetta {
         }
         apply_terminal_environment_overrides(
             &mut environment,
-            &environment_overrides,
+            &combined_environment,
             std::process::id(),
             attention_id,
         );
         if is_wsl {
+            add_wsl_environment_variable_names(
+                &mut environment,
+                combined_environment.keys().map(String::as_str),
+            );
             add_wsl_environment_variables(&mut environment);
         }
         let builder = TerminalBuilder::new(
@@ -299,6 +309,9 @@ impl Zetta {
                                         this.schedule_worktree_detection_for_pane(
                                             tab_id, pane_id, cx,
                                         );
+                                        this.schedule_project_detection_for_pane(
+                                            tab_id, pane_id, window, cx,
+                                        );
                                         cx.notify();
                                     }
                                     _ => {}
@@ -315,6 +328,9 @@ impl Zetta {
                                 }
                                 TerminalViewEvent::TitleChanged => {
                                     this.schedule_worktree_detection_for_pane(tab_id, pane_id, cx);
+                                    this.schedule_project_detection_for_pane(
+                                        tab_id, pane_id, window, cx,
+                                    );
                                     cx.notify();
                                 }
                                 TerminalViewEvent::Input(input) => {
@@ -355,6 +371,7 @@ impl Zetta {
                                 tab.activate_stack_entry(pane_id, PaneStackSelection::Base);
                                 cx.notify();
                             }
+                            this.activate_current_project(window, cx);
                             this.clear_active_tab_attention_if_focused(window, cx);
                         })
                         .detach();
@@ -403,6 +420,7 @@ impl Zetta {
                             }
                         }
                         this.schedule_worktree_detection_for_pane(tab_id, pane_id, cx);
+                        this.schedule_project_detection_for_pane(tab_id, pane_id, window, cx);
                         if should_focus {
                             view.focus_handle(cx).focus(window, cx);
                         }
@@ -596,12 +614,18 @@ impl Zetta {
                 .chain(msys2_environment)
                 .collect()
         };
-        environment.insert(
-            "ZETTA_PROCESS_ID".to_owned(),
-            std::process::id().to_string(),
+        let project_environment = self.project_environment_for_tab(tab_id);
+        apply_terminal_environment_overrides(
+            &mut environment,
+            &project_environment,
+            std::process::id(),
+            attention_id,
         );
-        environment.insert("ZETTA_ATTENTION_ID".to_owned(), attention_id.to_string());
         if is_wsl {
+            add_wsl_environment_variable_names(
+                &mut environment,
+                project_environment.keys().map(String::as_str),
+            );
             add_wsl_environment_variables(&mut environment);
         }
 
@@ -719,6 +743,7 @@ impl Zetta {
                                 );
                                 cx.notify();
                             }
+                            this.activate_current_project(window, cx);
                             this.clear_active_tab_attention_if_focused(window, cx);
                         })
                         .detach();

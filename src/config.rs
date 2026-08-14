@@ -395,6 +395,16 @@ impl Config {
         Self::parse_into(content, Self::defaults(config_path, keymap_path))
     }
 
+    /// Parses a configuration fragment on top of an already resolved base.
+    ///
+    /// Project configuration uses this after enforcing its smaller field set.
+    /// Keeping the actual profile and pane-template parsing here means global
+    /// and project configuration cannot drift apart in their validation rules.
+    pub(crate) fn parse_overlay(content: &str, mut base: Self, config_path: &Path) -> Result<Self> {
+        base.config_path = config_path.to_path_buf();
+        Self::parse_into(content, base)
+    }
+
     fn parse_into(content: &str, mut config: Self) -> Result<Self> {
         let root: Value = serde_json::from_str(content)
             .with_context(|| format!("parsing {}", config.config_path.display()))?;

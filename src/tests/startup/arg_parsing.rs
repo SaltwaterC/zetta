@@ -77,6 +77,24 @@ fn worktree_subcommand_is_available_without_cli_services() {
 }
 
 #[test]
+fn project_subcommand_is_available_without_cli_services() {
+    let arguments = parse_args_from([
+        OsString::from("project"),
+        OsString::from("open"),
+        OsString::from("--path"),
+        OsString::from("workspace"),
+    ])
+    .unwrap();
+
+    assert_eq!(
+        arguments.mode,
+        StartupMode::Project(crate::project_cli::ProjectCommand::Open {
+            path: Some(PathBuf::from("workspace")),
+        })
+    );
+}
+
+#[test]
 fn tabicon_subcommand_parses_icons_and_dynamic_listing() {
     assert_eq!(
         parse_args_from([OsString::from("tabicon"), OsString::from("terminal")])

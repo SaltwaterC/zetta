@@ -567,6 +567,33 @@ fn configuration_reload_requests_decode_the_normalized_path() {
 }
 
 #[test]
+fn project_control_requests_decode_and_reject_unexpected_payloads() {
+    let mut open = request("token", "open_project");
+    open.config_path = Some("/tmp/project".to_owned());
+    assert_eq!(
+        decode_control_request(&mut open, "token"),
+        Some(ControlRequestCommand::OpenProject {
+            root: PathBuf::from("/tmp/project"),
+        })
+    );
+
+    assert_eq!(
+        decode_control_request(&mut request("token", "reload_projects"), "token"),
+        Some(ControlRequestCommand::ReloadProjects)
+    );
+    let mut reload_with_payload = request("token", "reload_projects");
+    reload_with_payload.config_path = Some("/tmp/project".to_owned());
+    assert_eq!(
+        decode_control_request(&mut reload_with_payload, "token"),
+        None
+    );
+    assert_eq!(
+        decode_control_request(&mut request("token", "open_project"), "token"),
+        None
+    );
+}
+
+#[test]
 fn config_path_identity_is_absolute_and_lexically_normalized() {
     let relative = config_path_identity(Path::new("./config/../config.json"));
     let absolute = config_path_identity(&std::env::current_dir().unwrap().join("config.json"));

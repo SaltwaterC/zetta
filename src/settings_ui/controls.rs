@@ -90,6 +90,7 @@ impl Zetta {
             SettingsControl::Tab(SettingsPage::Themes),
             SettingsControl::Tab(SettingsPage::Keymap),
             SettingsControl::Tab(SettingsPage::PaneTemplates),
+            SettingsControl::Tab(SettingsPage::Projects),
             SettingsControl::Close,
             SettingsControl::Save,
         ];
@@ -225,6 +226,16 @@ impl Zetta {
             }
             SettingsPage::PaneTemplates => {
                 controls.extend(pane_templates::pane_template_controls(editor));
+            }
+            SettingsPage::Projects => {
+                controls.push(SettingsControl::AddProject);
+                for index in 0..editor.project_roots.len() {
+                    controls.extend([
+                        SettingsControl::OpenProject(index),
+                        SettingsControl::EditProject(index),
+                        SettingsControl::RemoveProject(index),
+                    ]);
+                }
             }
         }
         controls
@@ -840,6 +851,16 @@ impl Zetta {
             | SettingsControl::RemovePaneTemplateEnvironment(_, _)
             | SettingsControl::TogglePaneTemplateOverlay(_) => {
                 let _ = pane_templates::activate_pane_template_control(self, control, window, cx);
+            }
+            SettingsControl::AddProject => self.add_project_from_settings(window, cx),
+            SettingsControl::OpenProject(index) => {
+                self.open_project_from_settings(index, window, cx)
+            }
+            SettingsControl::EditProject(index) => {
+                self.edit_project_from_settings(index, window, cx)
+            }
+            SettingsControl::RemoveProject(index) => {
+                self.remove_project_from_settings(index, window, cx)
             }
         }
     }

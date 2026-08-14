@@ -640,13 +640,13 @@ impl Zetta {
             self.button_layout.left,
             frame.window_control_state,
             false,
-            cx,
+            colors,
         );
         let right_window_controls = render_window_controls(
             self.button_layout.right,
             frame.window_control_state,
             true,
-            cx,
+            colors,
         );
         let title_bar_background = if cfg!(linux_like) && !window.is_window_active() {
             colors.title_bar_inactive_background
@@ -797,8 +797,8 @@ impl Zetta {
         cx: &App,
     ) -> AnyElement {
         let profiles = self.profiles.clone();
-        let hidden_profiles = self.launch_config.hidden_profiles.clone();
-        let default_profile = self.launch_config.default_profile;
+        let hidden_profiles = self.effective_config().hidden_profiles.clone();
+        let default_profile = self.effective_config().default_profile;
         let menu_handle = handle.clone();
         let dismiss_handle = handle.clone();
         let keyboard_mapper = cx.keyboard_mapper().clone();

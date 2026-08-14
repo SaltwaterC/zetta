@@ -126,28 +126,75 @@ impl Zetta {
             shortcut: set_pane_overlay_shortcut,
             action: Box::new(set_pane_overlay),
         });
-        commands.extend(self.launch_config.pane_split_templates.keys().map(|name| {
-            let action = ApplyPaneSplitTemplate { name: name.clone() };
-            let shortcut = terminal_focus
-                .as_ref()
-                .and_then(|focus| window.highest_precedence_binding_for_action_in(&action, focus))
-                .map(|binding| {
-                    binding
-                        .keystrokes()
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                });
-            PaletteCommand {
-                name: format!("zetta: apply pane split template: {name}"),
-                shortcut,
-                action: Box::new(action),
-            }
-        }));
+        commands.extend(
+            self.effective_config()
+                .pane_split_templates
+                .keys()
+                .map(|name| {
+                    let action = ApplyPaneSplitTemplate { name: name.clone() };
+                    let shortcut = terminal_focus
+                        .as_ref()
+                        .and_then(|focus| {
+                            window.highest_precedence_binding_for_action_in(&action, focus)
+                        })
+                        .map(|binding| {
+                            binding
+                                .keystrokes()
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        });
+                    PaletteCommand {
+                        name: format!("zetta: apply pane split template: {name}"),
+                        shortcut,
+                        action: Box::new(action),
+                    }
+                }),
+        );
         self.command_palette = Some(CommandPalette::new(commands));
         self.command_palette_focus.focus(window, cx);
         cx.notify();
+    }
+
+    /// Rebuilds a visible palette after its project context changes. The
+    /// action catalog is context-sensitive, but the user's in-progress search
+    /// is not: retain it and keep the same command selected when it still
+    /// exists.
+    pub(crate) fn refresh_open_command_palette(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(previous) = self.command_palette.take() else {
+            return;
+        };
+        let selected_name = previous
+            .matches()
+            .get(previous.selected)
+            .and_then(|index| previous.commands.get(*index))
+            .map(|command| command.name.clone());
+        let query = previous.query;
+        let cursor = previous.cursor;
+        let select_all = previous.select_all;
+
+        self.toggle_command_palette(&ToggleCommandPalette, window, cx);
+        let Some(palette) = self.command_palette.as_mut() else {
+            return;
+        };
+        palette.query = query;
+        palette.cursor = cursor.min(palette.query.len());
+        palette.select_all = select_all;
+        palette.refresh_matches();
+        if let Some(selected_name) = selected_name
+            && let Some(selected) = palette
+                .matches()
+                .iter()
+                .position(|index| palette.commands[*index].name == selected_name)
+        {
+            palette.selected = selected;
+        }
+        palette.scroll_to_selected();
     }
 
     pub(crate) fn dismiss_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {

@@ -19,7 +19,7 @@ impl Zetta {
             .get(self.active_tab)
             .and_then(Tab::active_view)
             .and_then(|view| view.read(cx).theme().cloned())
-            .or_else(|| Some(cx.theme().clone()))
+            .or_else(|| Some(self.window_theme(cx)))
             .map(|theme| theme.name.to_string());
         let mut theme_names = ThemeRegistry::global(cx)
             .list()
@@ -241,10 +241,16 @@ impl Zetta {
         };
         let theme = match theme_name {
             Some(name) => match ThemeRegistry::global(cx).get(&name) {
-                Ok(theme) => Some(with_zetta_theme_overrides(theme)),
+                Ok(theme) => Some(theme),
                 Err(_) => return false,
             },
-            None => resolve_profile_theme(&profile, cx).ok().flatten(),
+            None => resolve_project_profile_theme(
+                &profile,
+                self.active_project_config().map(Arc::as_ref),
+                cx,
+            )
+            .ok()
+            .flatten(),
         };
         view.update(cx, |view, cx| view.set_theme(theme, cx));
         cx.notify();

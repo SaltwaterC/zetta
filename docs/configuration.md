@@ -1,8 +1,10 @@
 # Configuring Zetta
 
 Use [`config.example.json`](../config.example.json) and
-[`keymap.example.json`](../keymap.example.json) as starting points. They are
-examples and are not loaded automatically.
+[`keymap.example.json`](../keymap.example.json) as starting points. A repository
+can use [`project.config.example.json`](../project.config.example.json) as a
+starting point for `.zetta/config.json`. These examples are not loaded
+automatically.
 
 ## File locations and reloads
 
@@ -13,6 +15,61 @@ Zetta loads configuration from:
 
 The keymap is `keymap.json` in the same platform-specific directory. Use
 `--config PATH` and `--keymap PATH` to override these locations.
+
+## Projects
+
+A Zetta project is a registered directory with a `.zetta/config.json` file.
+The registry is kept separately in `projects.json` beside Zetta's normal
+configuration (`~/.config/zetta/projects.json` on Linux and macOS, or
+`%APPDATA%\Zetta\projects.json` on Windows). Manage it from the **Projects**
+tab in Settings or from the CLI:
+
+```sh
+zetta project add [PATH]
+zetta project list
+zetta project open [PATH]
+zetta project remove [PATH]
+```
+
+`project add` creates `{}` at `.zetta/config.json` when the file is absent,
+validates it, and records the canonical root. With no path it uses the nearest
+native Git repository root, falling back to the current directory. `open` and
+`remove` accept either a project root or a path inside one; `remove` never
+deletes the repository's configuration. Plain `zetta` launched inside a
+registered project opens that project, and `project open` opens a new active
+tab in an existing Zetta process when possible. The deepest registered
+ancestor wins for nested projects.
+
+Project configuration is an overlay on the normal configuration and supports
+these deliberately scoped fields:
+
+- `theme`, `default_profile`, `profiles`, and `default_tab_icon`
+- `working_directory`, as an existing project-relative directory that cannot
+  escape the project root
+- `env`, an object of string environment variables; reserved `ZETTA_*` names
+  cannot be replaced
+- `inactive_pane_opacity`
+- `pane_split_templates`
+- `initial_split`, naming a built-in or project-defined pane template
+
+The active pane's current directory selects its project. The active tab then
+controls the window theme. Moving outside the project immediately restores the
+normal configuration and removes project-only templates from the command
+palette; moving back restores them. Project environment values are inherited
+by spawned terminals, with template and individual-pane values taking
+precedence. `initial_split` replaces the active pane subtree once when a tab
+first enters the project. An explicit `zetta --split NAME` takes precedence at
+startup.
+
+Zetta detects `.zetta/config.json` at native Git repository roots in a
+background task and offers to register the project. This discovery does not
+block startup or terminal input. WSL directories are not scanned; register a
+WSL project explicitly and its reported UNC path is matched lexically.
+
+Registration is a trust boundary. A project pane template can launch commands,
+so add only repositories whose `.zetta/config.json` you trust. The Settings
+Projects tab can add, open, edit, and unregister projects; **Edit config** uses
+Zetta's normal `$EDITOR`/built-in vi flow.
 
 If configuration cannot be parsed, Zetta starts with safe defaults and shows
 the error in the window. Correct the file and press `Ctrl-Cmd-R` on macOS or

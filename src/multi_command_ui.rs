@@ -96,6 +96,12 @@ impl Zetta {
             MultiCommandExecution::Tiled(expansions) => expansions,
         };
 
+        let inherit_working_directory = self
+            .effective_config()
+            .working_directory_scope
+            .inherits_for_new_pane();
+        let working_directory_configured = self.effective_config().working_directory_configured;
+        let project = self.active_project_config().cloned();
         let Some(tab) = self.tabs.get(self.active_tab) else {
             return;
         };
@@ -114,10 +120,6 @@ impl Zetta {
         let tab_id = tab.id;
         let active_pane_id = tab.active_pane;
         let active_pane = tab.active_pane();
-        let inherit_working_directory = self
-            .launch_config
-            .working_directory_scope
-            .inherits_for_new_pane();
         let inherited_working_directory = active_pane
             .filter(|_| inherit_working_directory)
             .filter(|pane| !is_wsl_shell(&pane.profile.command))
@@ -133,9 +135,9 @@ impl Zetta {
             inherited_working_directory,
             inherited_wsl_directory,
             self.working_directory.clone(),
-            self.launch_config.working_directory_configured,
+            working_directory_configured,
         );
-        let terminal_theme = match resolve_profile_theme(&profile, cx) {
+        let terminal_theme = match resolve_project_profile_theme(&profile, project.as_deref(), cx) {
             Ok(theme) => theme,
             Err(error) => {
                 self.set_multi_command_error(
@@ -154,6 +156,9 @@ impl Zetta {
                 pane_id
             })
             .collect::<Vec<_>>();
+        for pane_id in &new_pane_ids {
+            self.projects.inherit_pane_root(active_pane_id, *pane_id);
+        }
         let pane_ids = std::iter::once(active_pane_id)
             .chain(new_pane_ids.iter().copied())
             .collect::<Vec<_>>();

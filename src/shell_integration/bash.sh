@@ -173,6 +173,14 @@ _zetta_complete() {
         done < <(zetta profile themes "${config_args[@]}" 2>/dev/null)
     }
 
+    _zetta_complete_projects() {
+        COMPREPLY=()
+        local project
+        while IFS= read -r project; do
+            [[ $project == "$current"* ]] && COMPREPLY+=("$project")
+        done < <(zetta project list 2>/dev/null)
+    }
+
     _zetta_complete_session_ids() {
         COMPREPLY=()
         local session_id
@@ -442,7 +450,7 @@ _zetta_complete() {
     esac
 
     if (( COMP_CWORD == 1 )); then
-        _zetta_compgen 'benchmark benchmark-output terminal-size sessions pane profile edit vi init serial http tftp notify attention copy paste splits tabicon panetheme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme'
+        _zetta_compgen 'benchmark benchmark-output terminal-size sessions pane profile project edit vi init serial http tftp notify attention copy paste splits tabicon panetheme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme'
         return
     fi
 
@@ -518,6 +526,29 @@ _zetta_complete() {
                     *)
                         _zetta_compgen '--config --help'
                         ;;
+                esac
+            fi
+            ;;
+        project)
+            if (( COMP_CWORD == 2 )); then
+                _zetta_compgen 'add list remove open --help'
+            else
+                case ${COMP_WORDS[2]} in
+                    add)
+                        if [[ $current == -* ]]; then
+                            _zetta_compgen '--path --help'
+                        else
+                            COMPREPLY=( $(compgen -d -- "$current") )
+                        fi
+                        ;;
+                    open|remove)
+                        if [[ $current == -* ]]; then
+                            _zetta_compgen '--path --help'
+                        else
+                            _zetta_complete_projects
+                        fi
+                        ;;
+                    list) _zetta_compgen '--help' ;;
                 esac
             fi
             ;;

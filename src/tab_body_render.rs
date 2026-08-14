@@ -53,7 +53,7 @@ impl Zetta {
     ) -> AnyElement {
         match self.tabs.get(self.active_tab) {
             Some(tab) => {
-                let tab_theme = tab.theme(cx);
+                let tab_theme = self.theme_for_tab(tab, cx);
                 let tab_colors = tab_theme.colors().clone();
                 let tab_error_color = tab_theme.status().error;
                 let layout = tab.visible_layout();

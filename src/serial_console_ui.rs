@@ -6,7 +6,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let prompt = self.serial_console.as_ref()?;
-        let colors = cx.theme().colors().clone();
+        let colors = self.window_theme(cx).colors().clone();
         let handle = cx.entity().downgrade();
 
         let field_row =
@@ -150,7 +150,7 @@ impl Zetta {
                                 div()
                                     .px_2()
                                     .text_sm()
-                                    .text_color(cx.theme().status().error)
+                                    .text_color(self.window_theme(cx).status().error)
                                     .child(error.clone()),
                             )
                         })

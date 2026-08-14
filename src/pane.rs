@@ -2256,10 +2256,15 @@ impl Tab {
     /// banners) always follows the active pane's *configured* profile theme,
     /// never a pane's non-persistent theme override — an ephemeral,
     /// single-pane preview should not repaint the rest of the tab.
-    pub(crate) fn theme(&self, cx: &App) -> Arc<Theme> {
+    ///
+    /// `fallback` supplies the theme for a tab whose active profile selects
+    /// none, and is lazy so the common case never resolves it. It is the
+    /// caller's application theme rather than `cx.theme()`, which
+    /// `Zetta::render` repoints per window (see `Zetta::application_theme`).
+    pub(crate) fn theme(&self, cx: &App, fallback: impl FnOnce() -> Arc<Theme>) -> Arc<Theme> {
         self.active_profile()
             .and_then(|profile| resolve_profile_theme(profile, cx).ok().flatten())
-            .unwrap_or_else(|| cx.theme().clone())
+            .unwrap_or_else(fallback)
     }
 }
 

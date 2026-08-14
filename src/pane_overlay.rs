@@ -97,7 +97,9 @@ impl Zetta {
         let Some(pane) = tab.pane(pane_id) else {
             return;
         };
-        let current_color = pane.overlay_color.unwrap_or(cx.theme().colors().text);
+        let current_color = pane
+            .overlay_color
+            .unwrap_or(self.window_theme(cx).colors().text);
         let mut picker = OverlayStylePicker {
             pane_id,
             section: OverlayPickerSection::FontSize,

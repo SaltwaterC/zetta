@@ -1448,6 +1448,9 @@ fn generated_scripts_include_root_flags_and_configured_profiles() {
         assert!(script.contains("profile-report"));
         assert!(script.contains("split"));
         assert!(script.contains("zetta splits"));
+        assert!(script.contains("project"));
+        assert!(script.contains("zetta project list"));
+        assert!(script.contains("--path"));
         assert!(!script.contains("quarters four-vertical three-left three-right"));
     }
 }
@@ -1486,7 +1489,7 @@ fn generated_scripts_only_offer_long_form_flags() {
         match shell {
             ShellIntegration::Bash => {
                 assert!(script.contains(
-                    "terminal-size sessions pane profile edit vi init serial http tftp notify attention copy paste splits tabicon panetheme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme'"
+                    "terminal-size sessions pane profile project edit vi init serial http tftp notify attention copy paste splits tabicon panetheme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme'"
                 ));
                 assert!(script.contains("auto zetta bash zsh fish"));
             }

@@ -45,7 +45,7 @@ impl Zetta {
         };
 
         let (target, selected_index, scroll_handle, entries) = picker_state;
-        let colors = cx.theme().colors().clone();
+        let colors = self.window_theme(cx).colors().clone();
         let handle = cx.entity().downgrade();
 
         // Get selected icon for highlighting
@@ -328,7 +328,7 @@ impl Zetta {
             .tabs
             .get(self.active_tab)
             .and_then(|tab| tab.overlay_style_picker.as_ref())?;
-        let colors = cx.theme().colors().clone();
+        let colors = self.window_theme(cx).colors().clone();
         let handle = cx.entity().downgrade();
         let section = picker.section;
         let opacity_percent = picker.opacity_percent;
@@ -1110,7 +1110,12 @@ impl Zetta {
     }
 
     /// The feedback banners shown between the tab bar and the tab body.
-    fn render_feedback_banners(&self, content: gpui::Div, colors: &ThemeColors) -> gpui::Div {
+    fn render_feedback_banners(
+        &self,
+        content: gpui::Div,
+        colors: &ThemeColors,
+        handle: &WeakEntity<Zetta>,
+    ) -> gpui::Div {
         let banner = |error: String| {
             Banner::new()
                 .severity(Severity::Error)
@@ -1124,6 +1129,48 @@ impl Zetta {
                 .child(banner)
         };
         content
+            .when_some(self.projects.offer.clone(), |content, offer| {
+                let add_handle = handle.clone();
+                let dismiss_handle = handle.clone();
+                content.child(feedback_row(
+                    Banner::new()
+                        .severity(Severity::Warning)
+                        .child(
+                            Label::new(format!(
+                                "Zetta project configuration found in {}. Add this project? Its pane layouts may run commands.",
+                                offer.root.display()
+                            ))
+                            .size(LabelSize::Small)
+                            .line_clamp(3),
+                        )
+                        .action_slot(
+                            h_flex()
+                                .gap_1()
+                                .child(
+                                    Button::new("dismiss-project-offer", "Dismiss")
+                                        .style(ButtonStyle::Outlined)
+                                        .on_click(move |_, _, cx| {
+                                            dismiss_handle
+                                                .update(cx, |this, cx| {
+                                                    this.dismiss_project_offer(cx)
+                                                })
+                                                .ok();
+                                        }),
+                                )
+                                .child(
+                                    Button::new("accept-project-offer", "Add project")
+                                        .style(ButtonStyle::Filled)
+                                        .on_click(move |_, window, cx| {
+                                            add_handle
+                                                .update(cx, |this, cx| {
+                                                    this.accept_project_offer(window, cx)
+                                                })
+                                                .ok();
+                                        }),
+                                ),
+                        ),
+                ))
+            })
             .when(self.configuration_reload_feedback.is_visible(), |content| {
                 content.child(feedback_row(
                     Banner::new().severity(Severity::Success).child(
@@ -1161,10 +1208,15 @@ impl Zetta {
     /// Caching the column as a whole cannot do this, and is in fact worse than
     /// not caching at all: a cached view that misses re-renders its subtree with
     /// `Window::refreshing` set, which suppresses every cache nested under it.
-    fn render_window_column(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let colors = cx.theme().colors().clone();
+    fn render_window_column(
+        &mut self,
+        colors: &ThemeColors,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let frame = WindowFrameGeometry::new(window, cx);
         let entity = cx.entity();
+        let handle = entity.downgrade();
         let chrome_height = title_bar_chrome_height(
             self.launch_config.compact_mode,
             frame.title_bar_height,
@@ -1190,7 +1242,7 @@ impl Zetta {
             cx,
         );
         let column = div().size_full().flex().flex_col().child(chrome);
-        self.render_feedback_banners(column, &colors)
+        self.render_feedback_banners(column, colors, &handle)
             .child(div().flex_1().min_h_0().child(body))
             .into_any_element()
     }
@@ -1275,7 +1327,7 @@ fn render_title_bar_chrome_boundary(
     window: &mut Window,
     cx: &mut Context<Zetta>,
 ) -> AnyElement {
-    let colors = cx.theme().colors().clone();
+    let colors = zetta.window_theme(cx).colors().clone();
     let handle = cx.entity().downgrade();
     let frame = WindowFrameGeometry::new(window, cx);
     let chrome = zetta.render_title_bar_chrome(&frame, &colors, &handle, window, cx);
@@ -1331,18 +1383,33 @@ impl Render for Zetta {
         crate::app::enforce_minimum_window_size(window);
         self.sync_visible_terminals(cx);
 
-        let colors = cx.theme().colors().clone();
-        let error_color = cx.theme().status().error;
+        let theme = self.window_theme(cx);
+        // Zetta's own elements take `colors` explicitly, but Zed's `ui` components
+        // — every `Button`/`IconButton`, `Label`, `switch`, `Banner`, and, with no
+        // override API at all, every `Tooltip` and `ContextMenu` — resolve their
+        // colors from `cx.theme()`. Without this they keep rendering the launch
+        // configuration's theme inside a project that selects a different one.
+        //
+        // Doing it per frame rather than when the project changes is what keeps
+        // this correct with several windows open: each window installs its own
+        // theme immediately before building the elements that read it, and
+        // tooltips and popovers build during that same frame. `update_theme` is a
+        // plain global mutation, so it cannot re-enter this render.
+        if !Arc::ptr_eq(GlobalTheme::theme(cx), &theme) {
+            GlobalTheme::update_theme(cx, theme.clone());
+        }
+        let colors = theme.colors().clone();
+        let error_color = theme.status().error;
         let handle = cx.entity().downgrade();
 
         // The column itself is composed here rather than behind a boundary of
         // its own: every frame reaches it anyway, and wrapping it in a cache
         // that always misses would suppress the caches inside it.
-        let column = self.render_window_column(window, cx);
+        let column = self.render_window_column(&colors, window, cx);
         let overlays = self.render_overlays(&colors, error_color, &handle, window, cx);
 
         let content = self.compose_window_content(column, overlays, &colors, cx);
-        client_window_frame(content, window, cx)
+        client_window_frame(content, window, colors.border)
     }
 }
 

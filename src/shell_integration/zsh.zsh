@@ -138,6 +138,10 @@ _zetta_split_names() {
     compadd -- "${(@f)$(zetta splits 2>/dev/null)}"
 }
 
+_zetta_projects() {
+    compadd -- "${(@f)$(zetta project list 2>/dev/null)}"
+}
+
 _zetta_pane_labels() {
     compadd -- "${(@f)$(zetta pane --list 2>/dev/null)}"
 }
@@ -241,7 +245,7 @@ _zetta() {
     fi
 
     if (( CURRENT == 2 )); then
-        compadd -S ' ' -- benchmark benchmark-output terminal-size sessions profile edit vi init serial http tftp notify attention copy paste splits pane tabicon panetheme overlay wt
+        compadd -S ' ' -- benchmark benchmark-output terminal-size sessions profile project edit vi init serial http tftp notify attention copy paste splits pane tabicon panetheme overlay wt
         _zetta_options --help --version --config --keymap --profile --split --replace-pane --theme
         return
     fi
@@ -579,6 +583,30 @@ _zetta() {
             ;;
         splits)
             _zetta_options --help
+            ;;
+        project)
+            if (( CURRENT == 3 )); then
+                compadd -S ' ' -- add list remove open
+                _zetta_options --help
+            else
+                case $words[3] in
+                    add)
+                        if [[ $words[CURRENT] == -* ]]; then
+                            _zetta_options --path --help
+                        else
+                            _directories
+                        fi
+                        ;;
+                    open|remove)
+                        if [[ $words[CURRENT] == -* ]]; then
+                            _zetta_options --path --help
+                        else
+                            _zetta_projects
+                        fi
+                        ;;
+                    list) _zetta_options --help ;;
+                esac
+            fi
             ;;
         pane)
             _zetta_options --direction --label --pane --overlay --overlay-size --overlay-opacity --overlay-color --stack --list --help

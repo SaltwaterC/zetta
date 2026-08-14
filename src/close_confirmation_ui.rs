@@ -94,7 +94,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let confirmation = self.close_tab_confirmation.as_ref()?;
-        let colors = cx.theme().colors().clone();
+        let colors = self.window_theme(cx).colors().clone();
         let tab = self.tabs.iter().find(|tab| tab.id == confirmation.tab_id);
         let title = tab
             .map(|tab| tab_overflow_entry_label(tab, cx))

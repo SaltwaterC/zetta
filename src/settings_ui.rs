@@ -7,6 +7,7 @@ use std::sync::Arc;
 mod controls;
 pub(crate) mod keymap;
 mod pane_templates;
+mod projects;
 mod theme_extensions_ui;
 
 pub(crate) use controls::invalidate_controls_cache;
@@ -121,6 +122,10 @@ pub(crate) enum SettingsControl {
     AddPaneTemplateEnvironment(PaneTemplateNodePath),
     RemovePaneTemplateEnvironment(PaneTemplateNodePath, usize),
     TogglePaneTemplateOverlay(PaneTemplateNodePath),
+    AddProject,
+    OpenProject(usize),
+    EditProject(usize),
+    RemoveProject(usize),
 }
 
 #[derive(Clone)]
@@ -138,6 +143,7 @@ pub(crate) struct SettingsEditor {
     pub(crate) theme_extension_downloading: Option<Arc<str>>,
     pub(crate) actions: Arc<[String]>,
     pub(crate) pane_template_names: Arc<[String]>,
+    pub(crate) project_roots: Arc<[PathBuf]>,
     pub(crate) fonts: Arc<[String]>,
     pub(crate) normalized_fonts: Arc<[String]>,
     pub(crate) font_query: Option<TextField>,
@@ -501,6 +507,7 @@ impl Zetta {
             configuration,
             keymap,
             profile_names: self
+                .launch_config
                 .profiles
                 .iter()
                 .map(|profile| profile.name.clone())
@@ -515,6 +522,7 @@ impl Zetta {
             theme_extension_downloading: None,
             actions: actions.into(),
             pane_template_names: pane_template_names.into(),
+            project_roots: self.projects.registry.roots().to_vec().into(),
             fonts: fonts.into(),
             normalized_fonts,
             font_query: None,
@@ -934,6 +942,7 @@ impl Zetta {
             "2" if command => self.select_settings_page(SettingsPage::Themes, window, cx),
             "3" if command => self.select_settings_page(SettingsPage::Keymap, window, cx),
             "4" if command => self.select_settings_page(SettingsPage::PaneTemplates, window, cx),
+            "5" if command => self.select_settings_page(SettingsPage::Projects, window, cx),
             "tab" => {
                 self.focus_adjacent_settings_control(event.keystroke.modifiers.shift, window, cx)
             }
@@ -979,6 +988,7 @@ impl Zetta {
                             SettingsPage::Themes,
                             SettingsPage::Keymap,
                             SettingsPage::PaneTemplates,
+                            SettingsPage::Projects,
                         ];
                         let index = pages
                             .iter()
