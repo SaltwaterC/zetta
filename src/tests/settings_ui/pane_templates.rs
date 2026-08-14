@@ -34,8 +34,8 @@ fn returning_to_the_parent_split_restores_its_editor_controls() {
         templates: vec![PaneTemplateForm {
             name: TextField::new("custom"),
             original_name: "custom".to_owned(),
-            built_in: false,
             overridden: true,
+            inherited_source: None,
             environment: Vec::new(),
             node: node.clone(),
         }],

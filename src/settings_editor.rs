@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs, io,
     path::Path,
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
 };
 
 use anyhow::{Context as _, Result, anyhow};
@@ -13,8 +13,8 @@ use ui::IconName;
 
 use crate::config::{
     Config, NewTabProfile, PaneControlsPosition, PaneSplitAxis, PaneSplitOverlaySize,
-    PaneSplitTemplate, WorkingDirectoryScope, built_in_pane_split_templates,
-    is_valid_pane_split_label, profile_is_hidden,
+    PaneSplitTemplate, PaneSplitTemplateConfig, WorkingDirectoryScope,
+    built_in_pane_split_templates, is_valid_pane_split_label, profile_is_hidden,
 };
 use crate::profile_icon::ProfileIcon;
 use crate::startup::{keymap_keystroke_display, keymap_keystroke_storage};
@@ -134,16 +134,24 @@ impl PaneTemplateNodePath {
     }
 
     pub fn child(self, second: bool) -> Option<Self> {
-        (self.length < 64).then_some(Self {
+        // Lazily, for the same reason as `parent`: the discarded value must not
+        // be computed when the path is already at its depth limit.
+        (self.length < 64).then(|| Self {
             bits: (self.bits << 1) | u64::from(second),
             length: self.length + 1,
         })
     }
 
+    /// The path of this node's containing split, or `None` at the root.
+    ///
+    /// `checked_sub` rather than a `length > 0` guard because `then_some` takes
+    /// its value eagerly: the root's `length - 1` was evaluated even when the
+    /// result was discarded, which panicked in debug builds and wrapped to a
+    /// 255-deep path in release ones.
     pub fn parent(self) -> Option<Self> {
-        (self.length > 0).then_some(Self {
+        self.length.checked_sub(1).map(|length| Self {
             bits: self.bits >> 1,
-            length: self.length - 1,
+            length,
         })
     }
 
@@ -241,23 +249,39 @@ pub enum PaneTemplateNodeForm {
     },
 }
 
+/// The layout and environment a template has in the layer the form overlays:
+/// the built-in presets for the user configuration, or the resolved user
+/// configuration for a project. Held beside the editable copy so discarding an
+/// override restores it without re-reading that layer, and shared behind an
+/// `Arc` because the whole form is cloned to validate it off the UI thread.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaneTemplateInheritedSource {
+    pub(crate) environment: Vec<PaneTemplateEnvironmentForm>,
+    pub(crate) node: PaneTemplateNodeForm,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaneTemplateForm {
     pub name: TextField,
     pub(crate) original_name: String,
-    pub(crate) built_in: bool,
     pub(crate) overridden: bool,
+    /// `Some` when the layer below the form already provides this template.
+    pub(crate) inherited_source: Option<Arc<PaneTemplateInheritedSource>>,
     pub environment: Vec<PaneTemplateEnvironmentForm>,
     pub node: PaneTemplateNodeForm,
 }
 
 impl PaneTemplateForm {
-    pub fn editable(&self) -> bool {
-        !self.built_in || self.overridden
+    pub fn inherited(&self) -> bool {
+        self.inherited_source.is_some()
     }
 
-    pub fn is_pristine_built_in(&self) -> bool {
-        self.built_in && !self.overridden
+    pub fn editable(&self) -> bool {
+        !self.inherited() || self.overridden
+    }
+
+    pub fn is_pristine_inherited(&self) -> bool {
+        self.inherited() && !self.overridden
     }
 }
 
@@ -271,6 +295,35 @@ pub struct PaneTemplatesForm {
 
 const BUILT_IN_PANE_TEMPLATE_NAMES: [&str; 4] =
     ["three-right", "three-left", "quarters", "four-vertical"];
+
+fn configured_templates(value: Option<&Value>) -> Result<Option<&Map<String, Value>>> {
+    value
+        .map(|value| {
+            value
+                .as_object()
+                .context("pane_split_templates must be an object")
+        })
+        .transpose()
+}
+
+/// The inherited layer's template names, with the built-in presets first in
+/// their canonical order so the template list stays stable, then everything the
+/// layer adds in name order.
+fn inherited_template_names(inherited: &HashMap<String, PaneSplitTemplateConfig>) -> Vec<String> {
+    let mut names = BUILT_IN_PANE_TEMPLATE_NAMES
+        .iter()
+        .filter(|name| inherited.contains_key(**name))
+        .map(|name| (*name).to_owned())
+        .collect::<Vec<_>>();
+    let mut added = inherited
+        .keys()
+        .filter(|name| !BUILT_IN_PANE_TEMPLATE_NAMES.contains(&name.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    added.sort();
+    names.extend(added);
+    names
+}
 
 impl Default for PaneTemplatePaneForm {
     fn default() -> Self {
@@ -664,37 +717,57 @@ fn pane_template_environment_value(environment: &[PaneTemplateEnvironmentForm]) 
 }
 
 impl PaneTemplatesForm {
+    /// The user configuration's templates, which overlay the built-in presets.
     pub fn load(value: Option<&Value>, config: &Config) -> Result<Self> {
-        let configured = match value {
-            Some(value) => value
-                .as_object()
-                .context("pane_split_templates must be an object")?,
-            None => return Self::from_configured(None, config),
-        };
-        Self::from_configured(Some(configured), config)
+        Ok(Self::from_layers(
+            configured_templates(value)?,
+            config,
+            &built_in_pane_split_templates(),
+        ))
     }
 
-    fn from_configured(
-        configured: Option<&serde_json::Map<String, Value>>,
-        config: &Config,
-    ) -> Result<Self> {
-        let built_ins = built_in_pane_split_templates();
+    /// A project overlay's templates. The resolved user configuration is the
+    /// inherited layer, so a project sees the user's own templates as read-only
+    /// presets alongside the built-ins and can override either.
+    pub fn load_overlay(value: Option<&Value>, base: &Config, effective: &Config) -> Result<Self> {
+        Ok(Self::from_layers(
+            configured_templates(value)?,
+            effective,
+            &base.pane_split_templates,
+        ))
+    }
+
+    /// Builds the form from `configured` (the overlay file's own
+    /// `pane_split_templates`, which decides what is editable) and `effective`
+    /// (the same file resolved against everything below it, which supplies the
+    /// values), with `inherited` as the layer being overlaid.
+    fn from_layers(
+        configured: Option<&Map<String, Value>>,
+        effective: &Config,
+        inherited: &HashMap<String, PaneSplitTemplateConfig>,
+    ) -> Self {
         let mut templates = Vec::new();
-        for name in BUILT_IN_PANE_TEMPLATE_NAMES {
-            let Some(template) = built_ins.get(name) else {
+        for name in inherited_template_names(inherited) {
+            let Some(template) = inherited.get(&name) else {
                 continue;
             };
-            let overridden = configured.is_some_and(|values| values.contains_key(name));
+            let overridden = configured.is_some_and(|values| values.contains_key(&name));
             let source = if overridden {
-                config.pane_split_templates.get(name).unwrap_or(template)
+                effective
+                    .pane_split_templates
+                    .get(&name)
+                    .unwrap_or(template)
             } else {
                 template
             };
             templates.push(PaneTemplateForm {
-                name: TextField::new(name),
-                original_name: name.to_owned(),
-                built_in: true,
+                name: TextField::new(name.clone()),
+                original_name: name,
                 overridden,
+                inherited_source: Some(Arc::new(PaneTemplateInheritedSource {
+                    environment: pane_template_environment_form(&template.env),
+                    node: PaneTemplateNodeForm::from_template(&template.layout),
+                })),
                 environment: pane_template_environment_form(&source.env),
                 node: PaneTemplateNodeForm::from_template(&source.layout),
             });
@@ -703,34 +776,34 @@ impl PaneTemplatesForm {
         let mut custom_names = configured
             .into_iter()
             .flat_map(|values| values.keys())
-            .filter(|name| !BUILT_IN_PANE_TEMPLATE_NAMES.contains(&name.as_str()))
+            .filter(|name| !inherited.contains_key(name.as_str()))
             .cloned()
             .collect::<Vec<_>>();
         custom_names.sort();
         for name in custom_names {
-            let Some(template) = config.pane_split_templates.get(&name) else {
+            let Some(template) = effective.pane_split_templates.get(&name) else {
                 continue;
             };
             templates.push(PaneTemplateForm {
                 name: TextField::new(name.clone()),
                 original_name: name,
-                built_in: false,
                 overridden: true,
+                inherited_source: None,
                 environment: pane_template_environment_form(&template.env),
                 node: PaneTemplateNodeForm::from_template(&template.layout),
             });
         }
 
-        Ok(Self {
+        Self {
             templates,
             selected_template: 0,
             selected_node: Some(PaneTemplateNodePath::ROOT),
-            available_profiles: config
+            available_profiles: effective
                 .profiles
                 .iter()
                 .map(|profile| profile.name.clone())
                 .collect(),
-        })
+        }
     }
 
     pub fn names(&self) -> Vec<String> {
@@ -738,6 +811,23 @@ impl PaneTemplatesForm {
             .iter()
             .map(|template| template.name.text.clone())
             .collect()
+    }
+
+    /// Resolves a stored template name against the form, following a rename
+    /// made in this editing session. Returns `None` when nothing in the form
+    /// answers to the name any more.
+    pub fn current_name_for<'form>(&'form self, name: &str) -> Option<&'form str> {
+        if let Some(template) = self
+            .templates
+            .iter()
+            .find(|template| template.name.text == name)
+        {
+            return Some(template.name.text.as_str());
+        }
+        self.templates
+            .iter()
+            .find(|template| template.original_name == name)
+            .map(|template| template.name.text.as_str())
     }
 
     pub fn selected(&self) -> Option<&PaneTemplateForm> {
@@ -795,7 +885,7 @@ impl PaneTemplatesForm {
     pub fn split_selected_leaf(&mut self, axis: PaneSplitAxis) -> Result<()> {
         anyhow::ensure!(
             self.selected_is_editable(),
-            "built-in pane templates are read-only"
+            "read-only pane templates cannot be edited"
         );
         let path = self
             .selected_node
@@ -817,7 +907,7 @@ impl PaneTemplatesForm {
     pub fn remove_selected_node(&mut self) -> Result<()> {
         anyhow::ensure!(
             self.selected_is_editable(),
-            "built-in pane templates are read-only"
+            "read-only pane templates cannot be edited"
         );
         anyhow::ensure!(
             !self
@@ -851,7 +941,7 @@ impl PaneTemplatesForm {
     pub fn swap_selected_children(&mut self) -> Result<()> {
         anyhow::ensure!(
             self.selected_is_editable(),
-            "built-in pane templates are read-only"
+            "read-only pane templates cannot be edited"
         );
         let path = self
             .selected_node
@@ -869,7 +959,7 @@ impl PaneTemplatesForm {
     pub fn set_selected_axis(&mut self, axis: PaneSplitAxis) -> Result<()> {
         anyhow::ensure!(
             self.selected_is_editable(),
-            "built-in pane templates are read-only"
+            "read-only pane templates cannot be edited"
         );
         let path = self
             .selected_node
@@ -911,8 +1001,8 @@ impl PaneTemplatesForm {
         self.templates.push(PaneTemplateForm {
             name: TextField::new(name.clone()),
             original_name: name,
-            built_in: false,
             overridden: true,
+            inherited_source: None,
             environment,
             node,
         });
@@ -939,29 +1029,23 @@ impl PaneTemplatesForm {
         unreachable!("a finite template list always has an available name")
     }
 
-    pub fn delete_selected(&mut self, referenced_by_keymap: bool) -> Result<()> {
+    pub fn delete_selected(&mut self, referenced: bool) -> Result<()> {
         let index = self.selected_template;
         let template = self
             .templates
             .get(index)
             .context("no pane template is selected")?;
-        if template.is_pristine_built_in() {
-            anyhow::bail!("built-in pane templates cannot be deleted");
+        if template.is_pristine_inherited() {
+            anyhow::bail!("read-only pane templates cannot be deleted");
         }
-        if referenced_by_keymap
-            && (!template.built_in || template.name.text != template.original_name)
-        {
-            anyhow::bail!("the pane template is referenced by a keybinding");
+        if referenced && (!template.inherited() || template.name.text != template.original_name) {
+            anyhow::bail!("the pane template is still referenced");
         }
-        if template.built_in {
-            let built_ins = built_in_pane_split_templates();
-            let Some(built_in) = built_ins.get(template.original_name.as_str()) else {
-                anyhow::bail!("could not restore the built-in pane template");
-            };
+        if let Some(inherited) = template.inherited_source.clone() {
             let template = self.templates.get_mut(index).unwrap();
             template.name = TextField::new(template.original_name.clone());
-            template.environment = pane_template_environment_form(&built_in.env);
-            template.node = PaneTemplateNodeForm::from_template(&built_in.layout);
+            template.environment = inherited.environment.clone();
+            template.node = inherited.node.clone();
             template.overridden = false;
         } else {
             self.templates.remove(index);
@@ -990,7 +1074,7 @@ impl PaneTemplatesForm {
                 names.insert(template.name.text.to_ascii_lowercase()),
                 "pane template names must be unique"
             );
-            if template.is_pristine_built_in() {
+            if template.is_pristine_inherited() {
                 continue;
             }
             validate_pane_template_environment(
@@ -1014,7 +1098,7 @@ impl PaneTemplatesForm {
         self.validate()?;
         let mut templates = Map::new();
         for template in &self.templates {
-            if template.is_pristine_built_in() {
+            if template.is_pristine_inherited() {
                 continue;
             }
             let mut value = Map::new();
@@ -1034,7 +1118,7 @@ impl PaneTemplatesForm {
     pub fn has_custom_values(&self) -> bool {
         self.templates
             .iter()
-            .any(|template| !template.is_pristine_built_in())
+            .any(|template| !template.is_pristine_inherited())
     }
 }
 

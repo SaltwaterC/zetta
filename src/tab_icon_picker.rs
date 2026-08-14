@@ -3,6 +3,8 @@ use std::sync::{Arc, OnceLock};
 use strum::IntoEnumIterator as _;
 
 use crate::TextField;
+use crate::project_form::ProjectTabIcon;
+use crate::settings_ui::projects::mark_project_dirty;
 use gpui::{ScrollStrategy, SharedString, UniformListScrollHandle};
 use ui::IconName;
 
@@ -26,6 +28,8 @@ pub(crate) const fn tab_icon_row(index: usize) -> usize {
 pub(crate) enum TabIconPickerTarget {
     Tab(usize),
     Default,
+    /// The `default_tab_icon` of the project the Projects tab is building.
+    ProjectDefault,
 }
 
 pub(crate) struct TabIconPicker {
@@ -256,9 +260,44 @@ impl Zetta {
         cx.notify();
     }
 
+    pub(crate) fn open_project_tab_icon_picker(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(current_icon) = self
+            .settings_editor
+            .as_ref()
+            .and_then(crate::settings_ui::project_editor)
+            .map(|project| project.form.default_tab_icon.icon())
+        else {
+            return;
+        };
+        if let Some(editor) = self.settings_editor.as_mut() {
+            editor.focused_control = Some(SettingsControl::ProjectTabIconPicker);
+            editor.focused_input = None;
+        }
+        let entries = self.tab_icon_entries();
+        self.tab_icon_picker = Some(TabIconPicker::new(
+            TabIconPickerTarget::ProjectDefault,
+            current_icon,
+            entries,
+        ));
+        if let Some(picker) = self.tab_icon_picker.as_ref() {
+            picker
+                .scroll
+                .scroll_to_item(tab_icon_row(picker.selected), ScrollStrategy::Nearest);
+        }
+        self.tab_icon_picker_focus.focus(window, cx);
+        cx.notify();
+    }
+
     pub(crate) fn dismiss_tab_icon_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let target = self.tab_icon_picker.take().map(|picker| picker.target);
-        if target == Some(TabIconPickerTarget::Default) {
+        if matches!(
+            target,
+            Some(TabIconPickerTarget::Default | TabIconPickerTarget::ProjectDefault)
+        ) {
             self.settings_focus.focus(window, cx);
         } else {
             self.focus_active(window, cx);
@@ -286,6 +325,21 @@ impl Zetta {
                     editor.configuration.default_tab_icon = icon;
                     editor.configuration_dirty = true;
                     editor.message = None;
+                }
+            }
+            TabIconPickerTarget::ProjectDefault => {
+                if let Some(editor) = self.settings_editor.as_mut() {
+                    if let Some(project) = editor.project.as_mut() {
+                        // The picker's "None" option is an explicit `null` in a
+                        // project file, which is how a project turns off an icon
+                        // the user configuration sets; clearing the override back
+                        // to inherited is a separate control.
+                        project.form.default_tab_icon = match icon {
+                            Some(icon) => ProjectTabIcon::Icon(icon),
+                            None => ProjectTabIcon::None,
+                        };
+                    }
+                    mark_project_dirty(editor);
                 }
             }
         }

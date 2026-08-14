@@ -1,10 +1,12 @@
+use super::projects::{editing_project, mark_project_dirty, project_editor};
 use super::*;
 
 use crate::config::{PaneSplitAxis, PaneSplitOverlaySize};
 use crate::settings_editor::{
     PaneTemplateCommandForm, PaneTemplateEnvironmentForm, PaneTemplateForm, PaneTemplateNodeField,
     PaneTemplateNodeForm, PaneTemplateNodePath, PaneTemplateOverlayForm, PaneTemplatePaneForm,
-    PaneTemplateSourceForm, PaneTemplateTextField, rename_pane_template_bindings,
+    PaneTemplateSourceForm, PaneTemplateTextField, PaneTemplatesForm,
+    rename_pane_template_bindings,
 };
 use anyhow::Result;
 use serde_json::Value;
@@ -12,6 +14,37 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const VALIDATION_DEBOUNCE: Duration = Duration::from_millis(75);
+
+/// The pane-template form the editor is currently editing.
+///
+/// The same editor serves the Templates page, which edits the user
+/// configuration, and the Projects page's builder, which edits one project's
+/// overlay. Every state and render path goes through these two accessors so the
+/// controls, dropdowns, and text fields do not have to carry a target.
+pub(crate) fn templates(editor: &SettingsEditor) -> &PaneTemplatesForm {
+    match project_editor(editor) {
+        Some(project) => &project.form.pane_templates,
+        None => &editor.configuration.pane_templates,
+    }
+}
+
+pub(crate) fn templates_mut(editor: &mut SettingsEditor) -> &mut PaneTemplatesForm {
+    if editor.page == SettingsPage::Projects
+        && let Some(project) = editor.project.as_mut()
+    {
+        return &mut project.form.pane_templates;
+    }
+    &mut editor.configuration.pane_templates
+}
+
+fn mark_templates_dirty(editor: &mut SettingsEditor) {
+    if editing_project(editor) {
+        mark_project_dirty(editor);
+    } else {
+        editor.configuration_dirty = true;
+        editor.message = None;
+    }
+}
 
 pub(crate) fn schedule_pane_template_validation(zetta: &mut Zetta, cx: &mut Context<Zetta>) {
     let Some(editor) = zetta.settings_editor.as_mut() else {
@@ -29,7 +62,7 @@ pub(crate) fn schedule_pane_template_validation(zetta: &mut Zetta, cx: &mut Cont
             .update(cx, |this, _| {
                 let editor = this.settings_editor.as_ref()?;
                 (editor.pane_template_validation_generation == generation)
-                    .then(|| editor.configuration.pane_templates.clone())
+                    .then(|| templates(editor).clone())
             })
             .ok()
             .flatten();
@@ -59,35 +92,31 @@ pub(crate) fn pane_template_text_mut(
     field: PaneTemplateTextField,
 ) -> Option<&mut TextField> {
     match field {
-        PaneTemplateTextField::Name(template) => editor
-            .configuration
-            .pane_templates
+        PaneTemplateTextField::Name(template) => templates_mut(editor)
             .templates
             .get_mut(template)
             .filter(|template| template.editable())
             .map(|template| &mut template.name),
-        PaneTemplateTextField::GlobalEnvironmentName(template, environment) => editor
-            .configuration
-            .pane_templates
-            .templates
-            .get_mut(template)
-            .filter(|template| template.editable())?
-            .environment
-            .get_mut(environment)
-            .map(|entry| &mut entry.name),
-        PaneTemplateTextField::GlobalEnvironmentValue(template, environment) => editor
-            .configuration
-            .pane_templates
-            .templates
-            .get_mut(template)
-            .filter(|template| template.editable())?
-            .environment
-            .get_mut(environment)
-            .map(|entry| &mut entry.value),
+        PaneTemplateTextField::GlobalEnvironmentName(template, environment) => {
+            templates_mut(editor)
+                .templates
+                .get_mut(template)
+                .filter(|template| template.editable())?
+                .environment
+                .get_mut(environment)
+                .map(|entry| &mut entry.name)
+        }
+        PaneTemplateTextField::GlobalEnvironmentValue(template, environment) => {
+            templates_mut(editor)
+                .templates
+                .get_mut(template)
+                .filter(|template| template.editable())?
+                .environment
+                .get_mut(environment)
+                .map(|entry| &mut entry.value)
+        }
         PaneTemplateTextField::Node(template, path, field) => {
-            let template = editor
-                .configuration
-                .pane_templates
+            let template = templates_mut(editor)
                 .templates
                 .get_mut(template)
                 .filter(|template| template.editable())?;
@@ -130,12 +159,7 @@ fn selected_node(
     editor: &SettingsEditor,
     path: PaneTemplateNodePath,
 ) -> Option<&PaneTemplateNodeForm> {
-    editor
-        .configuration
-        .pane_templates
-        .selected()?
-        .node
-        .node_at(path)
+    templates(editor).selected()?.node.node_at(path)
 }
 
 fn selected_pane(
@@ -152,9 +176,7 @@ fn selected_pane_mut(
     editor: &mut SettingsEditor,
     path: PaneTemplateNodePath,
 ) -> Option<&mut PaneTemplatePaneForm> {
-    match editor
-        .configuration
-        .pane_templates
+    match templates_mut(editor)
         .selected_mut()?
         .node
         .node_at_mut(path)?
@@ -225,7 +247,7 @@ pub(crate) fn pane_template_dropdown_options(
                 Some(PaneTemplateSourceForm::Command(_)) => "Direct command".to_owned(),
             };
             let mut options = vec!["Inherited".to_owned()];
-            options.extend(editor.profile_names.iter().cloned());
+            options.extend(templates(editor).available_profiles.iter().cloned());
             options.push("Direct command".to_owned());
             options.sort_by_key(|option| option.to_ascii_lowercase());
             options.dedup();
@@ -264,13 +286,11 @@ pub(crate) fn set_pane_template_dropdown(
         | SettingsDropdown::PaneTemplateOverlaySize(path) => path,
         _ => return false,
     };
-    if !editor.configuration.pane_templates.selected_is_editable() {
+    if !templates(editor).selected_is_editable() {
         return false;
     }
     let changed = match dropdown {
-        SettingsDropdown::PaneTemplateAxis(_) => editor
-            .configuration
-            .pane_templates
+        SettingsDropdown::PaneTemplateAxis(_) => templates_mut(editor)
             .set_selected_axis(if value == "Horizontal" {
                 PaneSplitAxis::Horizontal
             } else {
@@ -315,8 +335,7 @@ pub(crate) fn set_pane_template_dropdown(
         _ => unreachable!(),
     };
     if changed {
-        editor.configuration_dirty = true;
-        editor.message = None;
+        mark_templates_dirty(editor);
         invalidate_controls_cache(editor);
     }
     changed
@@ -339,8 +358,16 @@ fn template_is_referenced(editor: &SettingsEditor, name: &str) -> bool {
     })
 }
 
+/// Whether deleting `template` would leave a reference dangling: a keybinding
+/// for the user configuration's templates, or `initial_split` for a project's.
 fn template_has_pending_reference(editor: &SettingsEditor, template: &PaneTemplateForm) -> bool {
-    if template.built_in {
+    if let Some(project) = project_editor(editor) {
+        let initial_split = project.form.initial_split.as_deref();
+        return initial_split == Some(template.name.text.as_str())
+            || (template.name.text != template.original_name
+                && initial_split == Some(template.original_name.as_str()));
+    }
+    if template.inherited() {
         template.name.text != template.original_name
             && template_is_referenced(editor, &template.name.text)
     } else {
@@ -351,6 +378,14 @@ fn template_has_pending_reference(editor: &SettingsEditor, template: &PaneTempla
 }
 
 pub(crate) fn refresh_template_names(editor: &mut SettingsEditor) {
+    if editing_project(editor) {
+        // `pane_template_names` feeds the keymap's template dropdown, which only
+        // ever binds the user configuration's templates. A project's own
+        // templates reach the UI through its `initial_split` options, which are
+        // derived from the form on demand.
+        invalidate_controls_cache(editor);
+        return;
+    }
     let mut names = editor.configuration.pane_templates.names();
     names.sort();
     names.dedup();
@@ -391,7 +426,7 @@ pub(crate) fn synchronize_pane_template_keybindings(editor: &mut SettingsEditor)
 }
 
 fn add_pane_template_environment(editor: &mut SettingsEditor, path: PaneTemplateNodePath) -> bool {
-    if !editor.configuration.pane_templates.selected_is_editable() {
+    if !templates(editor).selected_is_editable() {
         return false;
     }
     let Some(pane) = selected_pane_mut(editor, path) else {
@@ -406,7 +441,7 @@ fn add_pane_template_environment(editor: &mut SettingsEditor, path: PaneTemplate
 
 pub(crate) fn pane_template_controls(editor: &SettingsEditor) -> Vec<SettingsControl> {
     let mut controls = Vec::new();
-    let pane_templates = &editor.configuration.pane_templates;
+    let pane_templates = templates(editor);
     controls.extend(
         pane_templates
             .templates
@@ -612,16 +647,12 @@ pub(crate) fn activate_pane_template_control(
     };
     let result = match control {
         SettingsControl::SelectPaneTemplate(index) => {
-            editor.configuration.pane_templates.select_template(index);
+            templates_mut(editor).select_template(index);
             editor.focused_control = Some(SettingsControl::SelectPaneTemplate(index));
             Ok(())
         }
         SettingsControl::SelectPaneTemplateNode(path) => {
-            if editor
-                .configuration
-                .pane_templates
-                .toggle_node_selection(path)
-            {
+            if templates_mut(editor).toggle_node_selection(path) {
                 editor.focused_control = Some(SettingsControl::SelectPaneTemplateNode(path));
                 Ok(())
             } else {
@@ -629,39 +660,32 @@ pub(crate) fn activate_pane_template_control(
             }
         }
         SettingsControl::NewPaneTemplate => {
-            editor.configuration.pane_templates.create_empty();
+            templates_mut(editor).create_empty();
             Ok(())
         }
-        SettingsControl::DuplicatePaneTemplate => editor
-            .configuration
-            .pane_templates
-            .duplicate_selected()
-            .map(|_| ()),
+        SettingsControl::DuplicatePaneTemplate => {
+            templates_mut(editor).duplicate_selected().map(|_| ())
+        }
         SettingsControl::DeletePaneTemplate => {
-            let referenced = editor
-                .configuration
-                .pane_templates
+            let referenced = templates(editor)
                 .selected()
                 .is_some_and(|template| template_has_pending_reference(editor, template));
-            editor
-                .configuration
-                .pane_templates
-                .delete_selected(referenced)
+            templates_mut(editor).delete_selected(referenced)
         }
         SettingsControl::SplitPaneTemplate(path, axis) => {
-            editor.configuration.pane_templates.select_node(path);
-            editor
-                .configuration
-                .pane_templates
-                .split_selected_leaf(axis)
+            let templates = templates_mut(editor);
+            templates.select_node(path);
+            templates.split_selected_leaf(axis)
         }
         SettingsControl::RemovePaneTemplateNode(path) => {
-            editor.configuration.pane_templates.select_node(path);
-            editor.configuration.pane_templates.remove_selected_node()
+            let templates = templates_mut(editor);
+            templates.select_node(path);
+            templates.remove_selected_node()
         }
         SettingsControl::SwapPaneTemplateChildren(path) => {
-            editor.configuration.pane_templates.select_node(path);
-            editor.configuration.pane_templates.swap_selected_children()
+            let templates = templates_mut(editor);
+            templates.select_node(path);
+            templates.swap_selected_children()
         }
         SettingsControl::AddPaneTemplateArgument(path) => {
             let Some(pane) = selected_pane_mut(editor, path) else {
@@ -688,9 +712,7 @@ pub(crate) fn activate_pane_template_control(
             Ok(())
         }
         SettingsControl::AddPaneTemplateGlobalEnvironment => {
-            let Some(template) = editor
-                .configuration
-                .pane_templates
+            let Some(template) = templates_mut(editor)
                 .selected_mut()
                 .filter(|template| template.editable())
             else {
@@ -703,9 +725,7 @@ pub(crate) fn activate_pane_template_control(
             Ok(())
         }
         SettingsControl::RemovePaneTemplateGlobalEnvironment(environment) => {
-            let Some(template) = editor
-                .configuration
-                .pane_templates
+            let Some(template) = templates_mut(editor)
                 .selected_mut()
                 .filter(|template| template.editable())
             else {
@@ -761,8 +781,7 @@ pub(crate) fn activate_pane_template_control(
                 control,
                 SettingsControl::SelectPaneTemplate(_) | SettingsControl::SelectPaneTemplateNode(_)
             ) {
-                editor.configuration_dirty = true;
-                editor.message = None;
+                mark_templates_dirty(editor);
                 refresh_template_names(editor);
                 schedule_validation = true;
             }

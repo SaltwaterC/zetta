@@ -1369,3 +1369,44 @@ fn bundled_keymap_defaults_are_parsed_once_and_shared() {
         );
     }
 }
+
+#[test]
+fn the_root_pane_template_path_has_no_parent() {
+    let root = PaneTemplateNodePath::ROOT;
+    // Selecting the root split toggles its selection off, which asks the root
+    // for its parent: computing `length - 1` there panicked in debug builds and
+    // wrapped to a 255-deep path in release ones.
+    assert_eq!(root.parent(), None);
+
+    let left = root.child(false).unwrap();
+    let left_right = left.child(true).unwrap();
+    assert_eq!(left_right.parent(), Some(left));
+    assert_eq!(left.parent(), Some(root));
+    assert_eq!(left_right.depth(), 2);
+}
+
+#[test]
+fn toggling_the_selected_root_node_clears_the_selection_without_panicking() {
+    let (mut form, index) = configuration_form_with_empty_custom_template();
+    form.pane_templates.select_template(index);
+    assert_eq!(
+        form.pane_templates.selected_node,
+        Some(PaneTemplateNodePath::ROOT)
+    );
+
+    assert!(
+        form.pane_templates
+            .toggle_node_selection(PaneTemplateNodePath::ROOT)
+    );
+    assert_eq!(form.pane_templates.selected_node, None);
+
+    // And selecting it again brings the split details back.
+    assert!(
+        form.pane_templates
+            .toggle_node_selection(PaneTemplateNodePath::ROOT)
+    );
+    assert_eq!(
+        form.pane_templates.selected_node,
+        Some(PaneTemplateNodePath::ROOT)
+    );
+}

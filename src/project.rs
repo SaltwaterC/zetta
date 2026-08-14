@@ -89,7 +89,7 @@ impl ProjectConfig {
     }
 }
 
-fn validate_project_fields(object: &Map<String, Value>) -> Result<()> {
+pub(crate) fn validate_project_fields(object: &Map<String, Value>) -> Result<()> {
     const FIELDS: &[&str] = &[
         "theme",
         "working_directory",

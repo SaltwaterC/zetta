@@ -1,5 +1,6 @@
 use super::keymap::{KeymapRow, keymap_filtered_indices, keymap_rows, refresh_keymap_cache};
 use super::pane_templates;
+use super::projects;
 use super::*;
 
 pub(crate) fn adjacent_settings_control_index(
@@ -40,6 +41,24 @@ pub(crate) fn dropdown_snapshot_rows(
         .max_by_key(|(_, index)| options[**index].chars().count())
         .map(|(row, _)| row);
     (rows, widest_row)
+}
+
+/// How many controls at the front of the tab order live in the dialog's fixed
+/// header — the page tabs, Close, and Save.
+///
+/// Scrolling maps a control's position within the *form* to a scroll offset, so
+/// counting the header controls as form controls skews every page's mapping.
+/// Deriving the count keeps that mapping right when a page tab is added.
+pub(crate) fn leading_header_controls(controls: &[SettingsControl]) -> usize {
+    controls
+        .iter()
+        .position(|control| {
+            !matches!(
+                control,
+                SettingsControl::Tab(_) | SettingsControl::Close | SettingsControl::Save
+            )
+        })
+        .unwrap_or(controls.len())
 }
 
 pub(crate) fn invalidate_controls_cache(editor: &mut SettingsEditor) {
@@ -227,16 +246,7 @@ impl Zetta {
             SettingsPage::PaneTemplates => {
                 controls.extend(pane_templates::pane_template_controls(editor));
             }
-            SettingsPage::Projects => {
-                controls.push(SettingsControl::AddProject);
-                for index in 0..editor.project_roots.len() {
-                    controls.extend([
-                        SettingsControl::OpenProject(index),
-                        SettingsControl::EditProject(index),
-                        SettingsControl::RemoveProject(index),
-                    ]);
-                }
-            }
+            SettingsPage::Projects => controls.extend(projects::project_controls(editor)),
         }
         controls
     }
@@ -294,18 +304,22 @@ impl Zetta {
         let Some(index) = controls.iter().position(|candidate| candidate == control) else {
             return;
         };
-        const FORM_START: usize = 5;
-        if index < FORM_START {
+        let form_start = leading_header_controls(&controls);
+        if index < form_start {
             return;
         }
-        let form_index = index - FORM_START;
-        let form_count = controls.len().saturating_sub(FORM_START);
+        let form_index = index - form_start;
+        let form_count = controls.len().saturating_sub(form_start);
+        // A control's position in the tab order only approximates where its row
+        // ends up, so this gets close and the row itself corrects the rest once
+        // it has been laid out (`widgets::track_focus_scroll`).
         let progress = form_index as f32 / form_count.saturating_sub(1).max(1) as f32;
         let maximum = editor.settings_scroll.max_offset().y;
         let offset = editor.settings_scroll.offset();
         editor
             .settings_scroll
             .set_offset(point(offset.x, -(maximum * progress)));
+        editor.focus_scroll_request = Some((control.clone(), editor.settings_scroll.offset().y));
     }
 
     pub(crate) fn focus_settings_control(
@@ -340,6 +354,11 @@ impl Zetta {
         if let Some(editor) = self.settings_editor.as_mut() {
             editor.focused_input = None;
             editor.focused_control = Some(control.clone());
+            if !scroll {
+                // A click already put the control under the pointer; scrolling
+                // to it now would move it out from under the click.
+                editor.focus_scroll_request = None;
+            }
         }
         if scroll {
             self.scroll_settings_control_into_view(&control);
@@ -508,6 +527,13 @@ impl Zetta {
             | SettingsDropdown::PaneTemplateOverlaySize(_) => {
                 pane_templates::pane_template_dropdown_options(editor, dropdown)
             }
+            SettingsDropdown::ProjectTheme
+            | SettingsDropdown::ProjectDefaultProfile
+            | SettingsDropdown::ProjectInitialSplit
+            | SettingsDropdown::ProjectProfileTheme(_)
+            | SettingsDropdown::ProjectProfileIcon(_) => {
+                projects::project_dropdown_options(editor, dropdown)
+            }
         }
     }
 
@@ -665,7 +691,7 @@ impl Zetta {
         if self
             .settings_editor
             .as_ref()
-            .is_some_and(|editor| editor.settings_save_in_progress)
+            .is_some_and(settings_save_in_flight)
         {
             return;
         }
@@ -691,6 +717,15 @@ impl Zetta {
                         .is_some_and(|profile| !profile.hidden),
                     #[cfg(target_os = "macos")]
                     SettingsToggle::TitleBarMenus => editor.configuration.hide_title_bar_menus,
+                    SettingsToggle::ProjectOpacityOverride => editor
+                        .project
+                        .as_ref()
+                        .is_some_and(|project| project.form.inactive_pane_opacity.is_some()),
+                    SettingsToggle::ProjectProfileVisibility(index) => editor
+                        .project
+                        .as_ref()
+                        .and_then(|project| project.form.profiles.get(index))
+                        .is_some_and(|profile| !profile.hidden),
                 });
                 if let Some(value) = value {
                     self.set_settings_toggle(toggle, !value, window, cx);
@@ -852,6 +887,18 @@ impl Zetta {
             | SettingsControl::TogglePaneTemplateOverlay(_) => {
                 let _ = pane_templates::activate_pane_template_control(self, control, window, cx);
             }
+            SettingsControl::CloseProjectConfig
+            | SettingsControl::SaveProjectConfig
+            | SettingsControl::OpenProjectConfigFile
+            | SettingsControl::ProjectTabIconPicker
+            | SettingsControl::ClearProjectTabIcon
+            | SettingsControl::AddProjectEnvironment
+            | SettingsControl::RemoveProjectEnvironment(_)
+            | SettingsControl::AddProjectProfile
+            | SettingsControl::RemoveProjectProfile(_) => {
+                self.activate_project_config_control(control, window, cx)
+            }
+            SettingsControl::ProjectOpacity => {}
             SettingsControl::AddProject => self.add_project_from_settings(window, cx),
             SettingsControl::OpenProject(index) => {
                 self.open_project_from_settings(index, window, cx)
@@ -874,7 +921,7 @@ impl Zetta {
         let Some(editor) = self.settings_editor.as_mut() else {
             return;
         };
-        if editor.settings_save_in_progress {
+        if settings_save_in_flight(editor) {
             return;
         }
         editor.open_dropdown = None;
@@ -888,6 +935,10 @@ impl Zetta {
             SettingsInput::PaneTemplate(field) => {
                 pane_templates::pane_template_text_mut(editor, field)
             }
+            SettingsInput::Project(field) => editor
+                .project
+                .as_mut()
+                .and_then(|project| project.form.text_mut(field)),
             SettingsInput::ThemeSearch => Some(&mut editor.theme_extension_query),
             SettingsInput::FontSearch => editor.font_query.as_mut(),
             SettingsInput::KeymapSearch => Some(&mut editor.keymap_search),
@@ -956,6 +1007,10 @@ impl Zetta {
                 }
                 invalidate_controls_cache(editor);
             }
+            SettingsInput::Project(_) => {
+                projects::mark_project_dirty(editor);
+                invalidate_controls_cache(editor);
+            }
             SettingsInput::ProfileDraft(_) => {}
         }
         editor.message = None;
@@ -982,7 +1037,7 @@ impl Zetta {
         let Some(editor) = self.settings_editor.as_mut() else {
             return;
         };
-        if editor.settings_save_in_progress {
+        if settings_save_in_flight(editor) {
             return;
         }
         editor.open_dropdown = None;
@@ -1115,6 +1170,15 @@ impl Zetta {
                     return;
                 }
             }
+            SettingsDropdown::ProjectTheme
+            | SettingsDropdown::ProjectDefaultProfile
+            | SettingsDropdown::ProjectInitialSplit
+            | SettingsDropdown::ProjectProfileTheme(_)
+            | SettingsDropdown::ProjectProfileIcon(_) => {
+                if !projects::set_project_dropdown(editor, dropdown, &value) {
+                    return;
+                }
+            }
         }
         match dropdown {
             SettingsDropdown::BindingAction(_, _) | SettingsDropdown::BindingTemplate(_, _) => {
@@ -1122,7 +1186,13 @@ impl Zetta {
                 refresh_keymap_cache(editor);
                 invalidate_controls_cache(editor);
             }
-            SettingsDropdown::ProfileDraftTheme | SettingsDropdown::ProfileDraftIcon => {}
+            SettingsDropdown::ProfileDraftTheme
+            | SettingsDropdown::ProfileDraftIcon
+            | SettingsDropdown::ProjectTheme
+            | SettingsDropdown::ProjectDefaultProfile
+            | SettingsDropdown::ProjectInitialSplit
+            | SettingsDropdown::ProjectProfileTheme(_)
+            | SettingsDropdown::ProjectProfileIcon(_) => {}
             _ => editor.configuration_dirty = true,
         }
         editor.message = None;
@@ -1140,6 +1210,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let inherited_opacity = self.launch_config.inactive_pane_opacity;
         let Some(editor) = self.settings_editor.as_mut() else {
             return;
         };
@@ -1155,11 +1226,95 @@ impl Zetta {
             }
             #[cfg(target_os = "macos")]
             SettingsToggle::TitleBarMenus => editor.configuration.hide_title_bar_menus = value,
+            SettingsToggle::ProjectOpacityOverride => {
+                if let Some(project) = editor.project.as_mut() {
+                    // Turning the override on starts from whatever the user
+                    // configuration resolves to, so the slider does not jump.
+                    project.form.inactive_pane_opacity = value.then_some(inherited_opacity);
+                }
+            }
+            SettingsToggle::ProjectProfileVisibility(index) => {
+                if let Some(profile) = editor
+                    .project
+                    .as_mut()
+                    .and_then(|project| project.form.profiles.get_mut(index))
+                {
+                    profile.hidden = !value;
+                }
+            }
         }
-        editor.configuration_dirty = true;
+        if matches!(
+            toggle,
+            SettingsToggle::ProjectOpacityOverride | SettingsToggle::ProjectProfileVisibility(_)
+        ) {
+            projects::mark_project_dirty(editor);
+            invalidate_controls_cache(editor);
+        } else {
+            editor.configuration_dirty = true;
+        }
         editor.message = None;
         self.focus_settings_control(SettingsControl::Toggle(toggle), window, cx);
         cx.notify();
+    }
+
+    /// The inactive-pane opacity a target currently shows. A project that does
+    /// not override it has no slider, so the fallback only matters for the
+    /// frame in which the override is being switched on.
+    pub(crate) fn settings_opacity(editor: &SettingsEditor, target: OpacityTarget) -> Option<f32> {
+        match target {
+            OpacityTarget::Configuration => Some(editor.configuration.inactive_pane_opacity),
+            OpacityTarget::Project => editor
+                .project
+                .as_ref()
+                .and_then(|project| project.form.inactive_pane_opacity),
+        }
+    }
+
+    pub(crate) fn set_settings_opacity(
+        &mut self,
+        target: OpacityTarget,
+        opacity: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self.settings_editor.as_mut() else {
+            return;
+        };
+        let opacity = opacity.clamp(0., 1.);
+        match target {
+            OpacityTarget::Configuration => {
+                editor.configuration.inactive_pane_opacity = opacity;
+                editor.configuration_dirty = true;
+                editor.message = None;
+            }
+            OpacityTarget::Project => {
+                let Some(project) = editor
+                    .project
+                    .as_mut()
+                    .filter(|project| project.form.inactive_pane_opacity.is_some())
+                else {
+                    return;
+                };
+                project.form.inactive_pane_opacity = Some(opacity);
+                projects::mark_project_dirty(editor);
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn adjust_settings_opacity(
+        &mut self,
+        target: OpacityTarget,
+        direction: i32,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(current) = self
+            .settings_editor
+            .as_ref()
+            .and_then(|editor| Self::settings_opacity(editor, target))
+        else {
+            return;
+        };
+        self.set_settings_opacity(target, current + direction as f32 / 20., cx);
     }
 
     pub(crate) fn adjust_numeric_setting(

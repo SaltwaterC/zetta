@@ -50,3 +50,25 @@ fn dropdown_snapshot_is_empty_when_nothing_matches() {
     assert!(rows.is_empty());
     assert_eq!(widest_row, None);
 }
+
+#[test]
+fn the_form_scroll_mapping_skips_the_controls_that_live_in_the_dialog_header() {
+    let controls = vec![
+        SettingsControl::Tab(SettingsPage::Configuration),
+        SettingsControl::Tab(SettingsPage::Themes),
+        SettingsControl::Tab(SettingsPage::Keymap),
+        SettingsControl::Tab(SettingsPage::PaneTemplates),
+        SettingsControl::Tab(SettingsPage::Projects),
+        SettingsControl::Close,
+        SettingsControl::Save,
+        SettingsControl::SelectPaneTemplate(0),
+        SettingsControl::NewPaneTemplate,
+    ];
+
+    // The tab strip, Close, and Save are painted in the fixed header, so the
+    // first form control has to map to the top of the scroll range: counting
+    // them as form controls scrolls every page too far.
+    assert_eq!(leading_header_controls(&controls), 7);
+    assert_eq!(leading_header_controls(&controls[..7]), 7);
+    assert_eq!(leading_header_controls(&[]), 0);
+}

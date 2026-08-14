@@ -123,7 +123,9 @@ Register repository-local configuration with `zetta project add`, then place
 project settings in `.zetta/config.json`. `zetta project open`, `list`, and
 `remove` manage the separate project registry; removal preserves the repository
 file. Native repositories with an unregistered `.zetta/config.json` are
-detected asynchronously and offered in the UI. See
+detected asynchronously and offered in the UI. The Settings **Projects** tab
+builds a project's configuration with typed controls, pane-template editor
+included, and leaves anything set to *Inherit* out of the file. See
 [Projects](docs/configuration.md#projects) for supported fields, WSL behavior,
 and the template-command trust boundary.
 

@@ -1,13 +1,14 @@
 use super::*;
 
+use crate::project_form::ProjectTextField;
 use crate::startup::keymap_keystroke_display;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 mod controls;
 pub(crate) mod keymap;
-mod pane_templates;
-mod projects;
+pub(crate) mod pane_templates;
+pub(crate) mod projects;
 mod theme_extensions_ui;
 
 pub(crate) use controls::invalidate_controls_cache;
@@ -17,12 +18,14 @@ use keymap::{
 pub(crate) use keymap::{
     KeymapRow, KeymapRowData, refresh_keymap_cache, render_keymap_sticky_candidate,
 };
+pub(crate) use projects::{ProjectEditor, project_editor};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SettingsInput {
     Configuration(ConfigTextField),
     Keymap(KeymapTextField),
     PaneTemplate(PaneTemplateTextField),
+    Project(ProjectTextField),
     ThemeSearch,
     FontSearch,
     KeymapSearch,
@@ -55,6 +58,11 @@ pub(crate) enum SettingsDropdown {
     PaneTemplateSource(PaneTemplateNodePath),
     PaneTemplateTheme(PaneTemplateNodePath),
     PaneTemplateOverlaySize(PaneTemplateNodePath),
+    ProjectTheme,
+    ProjectDefaultProfile,
+    ProjectInitialSplit,
+    ProjectProfileTheme(usize),
+    ProjectProfileIcon(usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,6 +74,16 @@ pub(crate) enum SettingsToggle {
     ProfileVisibility(usize),
     #[cfg(target_os = "macos")]
     TitleBarMenus,
+    ProjectOpacityOverride,
+    ProjectProfileVisibility(usize),
+}
+
+/// Which form's inactive-pane opacity a slider edits. The projects builder
+/// shows the same control for a project's override.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OpacityTarget {
+    Configuration,
+    Project,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,6 +144,16 @@ pub(crate) enum SettingsControl {
     OpenProject(usize),
     EditProject(usize),
     RemoveProject(usize),
+    CloseProjectConfig,
+    SaveProjectConfig,
+    OpenProjectConfigFile,
+    ProjectTabIconPicker,
+    ClearProjectTabIcon,
+    ProjectOpacity,
+    AddProjectEnvironment,
+    RemoveProjectEnvironment(usize),
+    AddProjectProfile,
+    RemoveProjectProfile(usize),
 }
 
 #[derive(Clone)]
@@ -144,6 +172,12 @@ pub(crate) struct SettingsEditor {
     pub(crate) actions: Arc<[String]>,
     pub(crate) pane_template_names: Arc<[String]>,
     pub(crate) project_roots: Arc<[PathBuf]>,
+    /// The project whose `.zetta/config.json` the Projects page is building, if
+    /// any. Kept across page switches so browsing another tab never discards
+    /// unsaved project edits; `project_editor` is what decides whether the
+    /// builder (and the pane-template editor it hosts) is the active surface.
+    pub(crate) project: Option<ProjectEditor>,
+    pub(crate) project_loading: bool,
     pub(crate) fonts: Arc<[String]>,
     pub(crate) normalized_fonts: Arc<[String]>,
     pub(crate) font_query: Option<TextField>,
@@ -157,6 +191,11 @@ pub(crate) struct SettingsEditor {
     pub(crate) scroll_geometry_initialized: bool,
     pub(crate) focused_input: Option<SettingsInput>,
     pub(crate) focused_control: Option<SettingsControl>,
+    /// The control the keyboard just moved to, paired with the scroll offset the
+    /// request was made at. Rows that can measure themselves finish the scroll
+    /// precisely during prepaint; the recorded offset is how a later wheel scroll
+    /// is left alone. See `widgets::track_focus_scroll`.
+    pub(crate) focus_scroll_request: Option<(SettingsControl, Pixels)>,
     pub(crate) keymap_capture: Option<KeymapCapture>,
     pub(crate) open_dropdown: Option<SettingsDropdown>,
     pub(crate) dropdown_index: usize,
@@ -252,6 +291,17 @@ impl SettingsEditor {
         }
         false
     }
+}
+
+/// Whether a save is in flight, for either the user configuration or the open
+/// project. Editing during one would be lost: the form has already been cloned
+/// for the background write.
+pub(crate) fn settings_save_in_flight(editor: &SettingsEditor) -> bool {
+    editor.settings_save_in_progress
+        || editor
+            .project
+            .as_ref()
+            .is_some_and(|project| project.save_in_progress)
 }
 
 pub(crate) fn previous_char_boundary(text: &str, cursor: usize) -> usize {
@@ -523,6 +573,8 @@ impl Zetta {
             actions: actions.into(),
             pane_template_names: pane_template_names.into(),
             project_roots: self.projects.registry.roots().to_vec().into(),
+            project: None,
+            project_loading: false,
             fonts: fonts.into(),
             normalized_fonts,
             font_query: None,
@@ -536,6 +588,7 @@ impl Zetta {
             scroll_geometry_initialized: false,
             focused_input: None,
             focused_control: Some(SettingsControl::Tab(initial_page)),
+            focus_scroll_request: None,
             keymap_capture: None,
             open_dropdown: None,
             dropdown_index: 0,
@@ -673,6 +726,10 @@ impl Zetta {
             SettingsInput::PaneTemplate(field) => {
                 pane_templates::pane_template_text_mut(editor, field)
             }
+            SettingsInput::Project(field) => editor
+                .project
+                .as_mut()
+                .and_then(|project| project.form.text_mut(field)),
             SettingsInput::ThemeSearch => Some(&mut editor.theme_extension_query),
             SettingsInput::FontSearch => editor.font_query.as_mut(),
             SettingsInput::KeymapSearch => Some(&mut editor.keymap_search),
@@ -695,6 +752,19 @@ impl Zetta {
     }
 
     pub(crate) fn save_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The dialog's Save button is scoped to the visible page, so it writes
+        // the open project's file. With nothing to write there it falls through,
+        // which is what saves configuration edits made before the builder was
+        // opened.
+        if self
+            .settings_editor
+            .as_ref()
+            .and_then(project_editor)
+            .is_some_and(|project| project.dirty)
+        {
+            self.save_project_config(window, cx);
+            return;
+        }
         let Some(editor) = self.settings_editor.as_mut() else {
             return;
         };
@@ -828,7 +898,7 @@ impl Zetta {
         if self
             .settings_editor
             .as_ref()
-            .is_some_and(|editor| editor.settings_save_in_progress)
+            .is_some_and(settings_save_in_flight)
         {
             cx.stop_propagation();
             return;
@@ -934,6 +1004,12 @@ impl Zetta {
                         editor.message = None;
                     }
                     cx.notify();
+                } else if self
+                    .settings_editor
+                    .as_ref()
+                    .is_some_and(|editor| project_editor(editor).is_some())
+                {
+                    self.close_project_config(window, cx);
                 } else {
                     self.dismiss_settings(window, cx);
                 }
@@ -961,15 +1037,10 @@ impl Zetta {
                         self.adjust_numeric_setting(setting, direction, cx)
                     }
                     Some(SettingsControl::Opacity) => {
-                        if let Some(editor) = self.settings_editor.as_mut() {
-                            editor.configuration.inactive_pane_opacity =
-                                (editor.configuration.inactive_pane_opacity
-                                    + direction as f32 / 20.)
-                                    .clamp(0., 1.);
-                            editor.configuration_dirty = true;
-                            editor.message = None;
-                            cx.notify();
-                        }
+                        self.adjust_settings_opacity(OpacityTarget::Configuration, direction, cx);
+                    }
+                    Some(SettingsControl::ProjectOpacity) => {
+                        self.adjust_settings_opacity(OpacityTarget::Project, direction, cx);
                     }
                     Some(SettingsControl::Input(_)) => self.edit_settings_input(event, command, cx),
                     _ => self.focus_adjacent_settings_control(direction < 0, window, cx),

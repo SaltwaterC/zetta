@@ -393,6 +393,10 @@ pub(crate) struct Zetta {
     pub(crate) terminal_placeholder_focus: gpui::FocusHandle,
     pub(crate) visible_terminals: Vec<Entity<Terminal>>,
     pub(crate) profiles: Vec<Profile>,
+    /// How many `ctrl-shift-{number}` profile shortcuts are currently bound.
+    /// A project can add, hide, or unhide profiles, so the effective slot count
+    /// changes while the window runs; see `refresh_profile_shortcuts`.
+    pub(crate) profile_shortcut_slots: usize,
     pub(crate) working_directory: Option<PathBuf>,
     pub(crate) next_tab_id: u64,
     pub(crate) next_attention_id: u64,
@@ -588,6 +592,10 @@ impl Zetta {
             active_tab: 0,
             terminal_placeholder_focus: cx.focus_handle(),
             visible_terminals: Vec::new(),
+            profile_shortcut_slots: visible_profile_count(
+                &config.profiles,
+                &config.hidden_profiles,
+            ),
             profiles: config.profiles,
             working_directory: config.working_directory,
             next_tab_id: 1,

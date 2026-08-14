@@ -73,17 +73,42 @@ and the process entry point. Put behavior in the module that owns it:
 - `tab_search.rs`: cross-pane scrollback search and its overlay
 - `tab_icon_picker.rs`: tab icon picker model, rendering, and the
   `Zetta` methods that drive it
-- `settings_editor.rs`: typed configuration/keymap forms and persistence
+- `settings_editor.rs`: typed configuration/keymap forms and persistence,
+  including `PaneTemplatesForm`, which overlays either the built-in presets (the
+  user configuration) or the resolved user configuration (a project)
+- `project_form.rs`: the typed form for a project's `.zetta/config.json` and its
+  serialization; every field is optional because the file is an overlay
 - `settings_ui.rs`: settings state and event handling; a module directory —
   `settings_ui/keymap.rs` (capture, search cache), `settings_ui/controls.rs`
-  (control list, focus/scroll navigation, dropdowns), and
-  `settings_ui/theme_extensions_ui.rs` (fetch/download/remove)
+  (control list, focus/scroll navigation, dropdowns),
+  `settings_ui/pane_templates.rs` (pane-template state, and the `templates`
+  accessors that decide which form the editor edits),
+  `settings_ui/projects.rs` (project registry actions and the project
+  configuration builder's state), and `settings_ui/theme_extensions_ui.rs`
+  (fetch/download/remove)
 - `settings_view.rs`: settings rendering; a module directory —
   `settings_view/pages.rs` (per-`SettingsPage` content),
   `settings_view/modals.rs` (font/profile/keymap-capture modals),
+  `settings_view/pane_templates.rs` (template list, layout preview, and node
+  details), `settings_view/projects.rs` (project list and configuration
+  builder),
   `settings_view/form_widgets.rs` (the form's shared controls, held in a struct
   so the page and the modals can be built in separate passes), and
-  `settings_view/widgets.rs` (shared widget building blocks)
+  `settings_view/widgets.rs` (shared widget building blocks, including the
+  `action_button`/`control_row`/`text_field`/`dropdown_field` helpers the denser
+  forms share)
+
+Every keyboard-reachable settings control has to *show* focus and has to be
+scrolled into view, or the page is unusable from the keyboard even though its
+tab order is complete. Rows carry that: `control_row` (and `setting_row` on the
+Configuration page) highlight while any control they host is focused, because a
+text field's or dropdown's own ring is a one-pixel border and a switch has none.
+Anything focusable that is not in a row — a list row, a preview node, a bare
+button — needs its own focus treatment. `scroll_settings_control_into_view` only
+estimates the offset from a control's position in the tab order;
+`widgets::track_focus_scroll` finishes it from the element's laid-out bounds, so
+new focusable elements should be wrapped in it (a plain `overflow_y_scroll` div
+honours neither `Window::request_autoscroll` nor `ScrollHandle::scroll_to_item`).
 - `command_palette.rs`: palette model and matching
 - `command_palette_ui.rs`: palette interaction, rendering, and its overlay
 - `window_frame.rs`: window decorations (`WindowFrameGeometry`), window

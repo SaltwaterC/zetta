@@ -67,9 +67,19 @@ block startup or terminal input. WSL directories are not scanned; register a
 WSL project explicitly and its reported UNC path is matched lexically.
 
 Registration is a trust boundary. A project pane template can launch commands,
-so add only repositories whose `.zetta/config.json` you trust. The Settings
-Projects tab can add, open, edit, and unregister projects; **Edit config** uses
-Zetta's normal `$EDITOR`/built-in vi flow.
+so add only repositories whose `.zetta/config.json` you trust.
+
+The Settings **Projects** tab can add, open, edit, and unregister projects.
+**Edit config** opens a typed builder for every supported field, including the
+same pane-template editor as the **Templates** tab: the application's templates
+appear there as read-only presets, and overriding one or adding a new one
+applies only inside the project. Controls left as *Inherit* stay absent from the
+file, so the project keeps following the application configuration. **Save
+project** validates the result the way loading it would — including that
+`working_directory` still exists inside the project — and replaces the file
+atomically, so a rejected edit never damages a working configuration. **Open in
+editor** is still available for hand-editing through Zetta's normal
+`$EDITOR`/built-in vi flow.
 
 If configuration cannot be parsed, Zetta starts with safe defaults and shows
 the error in the window. Correct the file and press `Ctrl-Cmd-R` on macOS or
@@ -305,6 +315,12 @@ These aliases refer to the number-row key position, not the character printed
 by the active layout. For example, on a British layout `Ctrl+Shift+3` may type
 `£`, while the alias remains `Ctrl+Shift+3` and the shortcut still opens profile
 3.
+
+One shortcut exists per *visible* profile, numbered in menu order, and the set
+follows the active [project](#projects): a project that adds a profile gets the
+next free number, and one that hides an inherited profile releases a number.
+Entering or leaving the project rebinds them, so the accelerator shown in the
+Profile menu is always the one that works.
 
 Zetta normalizes these physical keys on Linux so the shortcuts work with
 layouts whose shifted characters differ. On Windows and macOS, shortcuts

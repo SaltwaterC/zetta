@@ -220,6 +220,7 @@ impl Zetta {
         }
         let profile_count = visible_profile_count(&config.profiles, &config.hidden_profiles);
         load_keybindings(&config.keymap_path, profile_count, cx);
+        self.profile_shortcut_slots = profile_count;
 
         #[cfg(windows)]
         windows_integration::update_profile_jump_list(config.profiles.clone());
@@ -267,13 +268,10 @@ impl Zetta {
         self.profiles = effective_profiles;
         self.working_directory = effective_working_directory;
         self.command_palette = None;
-        #[cfg(target_os = "macos")]
-        update_native_macos_menus(
-            cx,
-            &self.profiles,
-            &self.launch_config.hidden_profiles,
-            self.launch_config.default_profile,
-        );
+        // The reload above bound one shortcut per visible profile of the user
+        // configuration; an active project can resolve to a different set, and
+        // this also rebuilds the native macOS menus for it.
+        self.refresh_profile_shortcuts(cx);
         cx.notify();
         Ok(())
     }

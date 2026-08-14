@@ -1,4 +1,5 @@
 use super::pane_templates::render_pane_templates_page;
+use super::projects::render_projects_page;
 use super::widgets::{KEYMAP_ROW_HEIGHT, KeymapRowRenderContext, SETTINGS_SCROLLBAR_WIDTH};
 use super::*;
 use crate::settings_ui::keymap::{compute_keymap_sticky_candidates, keymap_row_data};
@@ -17,7 +18,7 @@ pub(crate) fn render_settings_pages(
     setting_row: &impl Fn(&'static str, &'static str, bool, AnyElement) -> AnyElement,
     setting_toggle: &impl Fn(&'static str, bool, SettingsToggle) -> AnyElement,
     numeric: &impl Fn(&'static str, TextField, NumericSetting, ConfigTextField) -> AnyElement,
-    opacity_slider: &impl Fn(f32) -> AnyElement,
+    opacity_slider: &impl Fn(f32, OpacityTarget) -> AnyElement,
 ) -> AnyElement {
     #[cfg(not(target_os = "macos"))]
     let _ = focus_status_access;
@@ -238,7 +239,10 @@ pub(crate) fn render_settings_pages(
                     "Inactive pane opacity",
                     "Dimming level as a percentage",
                     editor.focused_control == Some(SettingsControl::Opacity),
-                    opacity_slider(configuration.inactive_pane_opacity),
+                    opacity_slider(
+                        configuration.inactive_pane_opacity,
+                        OpacityTarget::Configuration,
+                    ),
                 ),
                 setting_row(
                     "Compact mode",
@@ -1096,183 +1100,6 @@ pub(crate) fn render_settings_pages(
                     .into_any_element()
         }
         SettingsPage::PaneTemplates => render_pane_templates_page(editor, colors, handle),
-        SettingsPage::Projects => render_projects_page(editor, colors, handle),
+        SettingsPage::Projects => render_projects_page(editor, colors, handle, opacity_slider),
     }
-}
-
-fn render_projects_page(
-    editor: &SettingsEditor,
-    colors: &ThemeColors,
-    handle: &WeakEntity<Zetta>,
-) -> AnyElement {
-    let add_handle = handle.clone();
-    let add_focused = editor.focused_control == Some(SettingsControl::AddProject);
-    let add_button = div()
-        .id("settings-add-project")
-        .px_3()
-        .py_2()
-        .rounded(px(4.))
-        .border_1()
-        .border_color(if add_focused {
-            colors.border_focused
-        } else {
-            colors.border
-        })
-        .bg(colors.element_selected)
-        .cursor_pointer()
-        .hover(|style| style.bg(colors.element_hover))
-        .on_click(move |_, window, cx| {
-            add_handle
-                .update(cx, |this, cx| this.add_project_from_settings(window, cx))
-                .ok();
-        })
-        .child("Add project");
-
-    let mut rows = Vec::with_capacity(editor.project_roots.len());
-    for (index, root) in editor.project_roots.iter().enumerate() {
-        let title = root
-            .file_name()
-            .and_then(|name| name.to_str())
-            .filter(|name| !name.is_empty())
-            .unwrap_or("Project")
-            .to_owned();
-        let path = root.display().to_string();
-        let config_path = ProjectConfig::path_for(root).display().to_string();
-
-        let open_handle = handle.clone();
-        let open = div()
-            .id(format!("settings-open-project-{index}"))
-            .px_3()
-            .py_1()
-            .rounded(px(4.))
-            .border_1()
-            .border_color(
-                if editor.focused_control == Some(SettingsControl::OpenProject(index)) {
-                    colors.border_focused
-                } else {
-                    colors.border
-                },
-            )
-            .cursor_pointer()
-            .hover(|style| style.bg(colors.element_hover))
-            .on_click(move |_, window, cx| {
-                open_handle
-                    .update(cx, |this, cx| {
-                        this.open_project_from_settings(index, window, cx)
-                    })
-                    .ok();
-            })
-            .child("Open");
-
-        let edit_handle = handle.clone();
-        let edit = div()
-            .id(format!("settings-edit-project-{index}"))
-            .px_3()
-            .py_1()
-            .rounded(px(4.))
-            .border_1()
-            .border_color(
-                if editor.focused_control == Some(SettingsControl::EditProject(index)) {
-                    colors.border_focused
-                } else {
-                    colors.border
-                },
-            )
-            .cursor_pointer()
-            .hover(|style| style.bg(colors.element_hover))
-            .on_click(move |_, window, cx| {
-                edit_handle
-                    .update(cx, |this, cx| {
-                        this.edit_project_from_settings(index, window, cx)
-                    })
-                    .ok();
-            })
-            .child("Edit config");
-
-        let remove_handle = handle.clone();
-        let remove = div()
-            .id(format!("settings-remove-project-{index}"))
-            .px_3()
-            .py_1()
-            .rounded(px(4.))
-            .border_1()
-            .border_color(
-                if editor.focused_control == Some(SettingsControl::RemoveProject(index)) {
-                    colors.border_focused
-                } else {
-                    colors.border
-                },
-            )
-            .cursor_pointer()
-            .hover(|style| style.bg(colors.element_hover))
-            .on_click(move |_, window, cx| {
-                remove_handle
-                    .update(cx, |this, cx| {
-                        this.remove_project_from_settings(index, window, cx)
-                    })
-                    .ok();
-            })
-            .child("Remove");
-
-        rows.push(
-            div()
-                .id(format!("settings-project-{index}"))
-                .p_3()
-                .rounded(px(6.))
-                .border_1()
-                .border_color(colors.border)
-                .bg(colors.editor_background)
-                .child(div().text_sm().child(title))
-                .child(
-                    div()
-                        .mt_1()
-                        .text_xs()
-                        .text_color(colors.text_muted)
-                        .child(path),
-                )
-                .child(
-                    div()
-                        .mt_1()
-                        .text_xs()
-                        .text_color(colors.text_muted)
-                        .child(config_path),
-                )
-                .child(
-                    h_flex()
-                        .mt_3()
-                        .gap_2()
-                        .child(open)
-                        .child(edit)
-                        .child(remove),
-                ),
-        );
-    }
-
-    div()
-        .flex()
-        .flex_col()
-        .gap_3()
-        .child(
-            div()
-                .text_sm()
-                .child("Projects apply .zetta/config.json while an active pane is inside their registered root."),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(colors.text_muted)
-                .child("Project configuration can set the theme, working directory, profiles, tab icon, environment, inactive-pane opacity, pane templates, and initial_split. Register only trusted projects: templates may start commands."),
-        )
-        .child(add_button)
-        .when(editor.project_roots.is_empty(), |page| {
-            page.child(
-                div()
-                    .py_4()
-                    .text_sm()
-                    .text_color(colors.text_muted)
-                    .child("No projects are registered."),
-            )
-        })
-        .children(rows)
-        .into_any_element()
 }

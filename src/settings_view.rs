@@ -7,10 +7,14 @@ mod form_widgets;
 mod modals;
 mod pages;
 mod pane_templates;
+mod projects;
 mod widgets;
 
 pub(crate) use form_widgets::SettingsFormWidgets;
-pub(crate) use widgets::{DropdownRenderState, KEYMAP_ROW_HEIGHT, SETTINGS_SCROLLBAR_WIDTH};
+pub(crate) use widgets::{
+    DropdownRenderState, KEYMAP_ROW_HEIGHT, SETTINGS_SCROLLBAR_WIDTH, action_button, control_row,
+    dropdown_field, text_field, track_focus_scroll,
+};
 
 impl Zetta {
     /// The settings page and the scroll region it lives in.
@@ -48,7 +52,8 @@ impl Zetta {
              field: TextField,
              setting: NumericSetting,
              input: ConfigTextField| widgets.numeric(id, field, setting, input);
-        let opacity_slider = |opacity: f32| widgets.opacity_slider(opacity);
+        let opacity_slider =
+            |opacity: f32, target: OpacityTarget| widgets.opacity_slider(opacity, target);
         let focus_status_access = if cx.has_global::<ZettaProcessState>() {
             cx.global::<ZettaProcessState>()
                 .silent_mode
@@ -194,7 +199,16 @@ impl Zetta {
         let projects_handle = handle.clone();
         let close_handle = handle.clone();
         let save_handle = handle.clone();
-        let settings_save_in_progress = editor.settings_save_in_progress;
+        // The header Save button is scoped to whatever the visible page edits,
+        // which is the open project's file rather than the user configuration
+        // while the projects builder is up.
+        let project = crate::settings_ui::project_editor(editor);
+        let settings_save_in_progress = editor.settings_save_in_progress
+            || project.is_some_and(|project| project.save_in_progress);
+        let unsaved_changes = match project {
+            Some(project) => project.dirty,
+            None => editor.configuration_dirty || editor.keymap_dirty,
+        };
         let path = match editor.page {
             SettingsPage::Configuration => self.launch_config.config_path.display().to_string(),
             SettingsPage::Themes => format!(
@@ -205,7 +219,12 @@ impl Zetta {
             SettingsPage::PaneTemplates => {
                 "pane_split_templates · built-ins are read-only presets".to_owned()
             }
-            SettingsPage::Projects => self.projects.registry.path().display().to_string(),
+            SettingsPage::Projects => match project {
+                Some(project) => crate::project::ProjectConfig::path_for(&project.root)
+                    .display()
+                    .to_string(),
+                None => self.projects.registry.path().display().to_string(),
+            },
         };
         Some(
             div()
@@ -460,9 +479,7 @@ impl Zetta {
                                                 })
                                                 .child(if settings_save_in_progress {
                                                     "Saving…"
-                                                } else if editor.configuration_dirty
-                                                    || editor.keymap_dirty
-                                                {
+                                                } else if unsaved_changes {
                                                     "Save *"
                                                 } else {
                                                     "Save"

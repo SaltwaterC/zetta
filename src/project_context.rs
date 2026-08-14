@@ -277,6 +277,41 @@ impl Zetta {
             .unwrap_or(&self.launch_config)
     }
 
+    /// Re-binds the built-in `ctrl-shift-{number}` profile shortcuts, and on
+    /// macOS rebuilds the native Profile menu, for the profiles that are
+    /// currently effective.
+    ///
+    /// One shortcut is bound per visible profile, so a project that adds, hides,
+    /// or unhides a profile changes how many slots exist: without this, a
+    /// project profile appears in the menus with no accelerator and its chord
+    /// does nothing. Rebinding rebuilds the whole keymap, including re-reading
+    /// the user's keymap file, so it is gated on the slot count actually
+    /// changing rather than run on every project activation.
+    pub(crate) fn refresh_profile_shortcuts(&mut self, cx: &mut App) {
+        let slots = {
+            let effective = self.effective_config();
+            visible_profile_count(&self.profiles, &effective.hidden_profiles)
+        };
+        #[cfg(target_os = "macos")]
+        {
+            let (hidden_profiles, default_profile) = {
+                let effective = self.effective_config();
+                (effective.hidden_profiles.clone(), effective.default_profile)
+            };
+            crate::startup::update_native_macos_menus(
+                cx,
+                &self.profiles,
+                &hidden_profiles,
+                default_profile,
+            );
+        }
+        if slots == self.profile_shortcut_slots {
+            return;
+        }
+        self.profile_shortcut_slots = slots;
+        load_keybindings(&self.launch_config.keymap_path, slots, cx);
+    }
+
     /// The theme this window's *launch* configuration selects, i.e. what
     /// `apply_config_settings` installed globally at startup.
     ///
@@ -495,6 +530,9 @@ impl Zetta {
             .unwrap_or(&self.launch_config);
         self.profiles = config.profiles.clone();
         self.working_directory = config.working_directory.clone();
+        // The project may add, hide, or unhide profiles, which changes which
+        // `ctrl-shift-{number}` slots exist.
+        self.refresh_profile_shortcuts(cx);
 
         if let Some(project) = &project
             && let Some(theme) = project.effective.theme.as_deref()

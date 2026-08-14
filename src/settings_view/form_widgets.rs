@@ -274,9 +274,13 @@ impl SettingsFormWidgets {
             .into_any_element()
     }
 
-    pub(crate) fn opacity_slider(&self, opacity: f32) -> gpui::AnyElement {
+    pub(crate) fn opacity_slider(&self, opacity: f32, target: OpacityTarget) -> gpui::AnyElement {
         let selected = (opacity.clamp(0., 1.) * 20.).round() as usize;
-        let focused = self.focused_control == Some(SettingsControl::Opacity);
+        let control = match target {
+            OpacityTarget::Configuration => SettingsControl::Opacity,
+            OpacityTarget::Project => SettingsControl::ProjectOpacity,
+        };
+        let focused = self.focused_control == Some(control);
         let colors = &self.colors;
         let stops = (0usize..=20)
             .map(|step| {
@@ -289,12 +293,7 @@ impl SettingsFormWidgets {
                     .on_click(move |_, _, cx| {
                         slider_handle
                             .update(cx, |this, cx| {
-                                if let Some(editor) = this.settings_editor.as_mut() {
-                                    editor.configuration.inactive_pane_opacity = step as f32 / 20.;
-                                    editor.configuration_dirty = true;
-                                    editor.message = None;
-                                    cx.notify();
-                                }
+                                this.set_settings_opacity(target, step as f32 / 20., cx);
                             })
                             .ok();
                     })

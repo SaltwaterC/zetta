@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::visible_profile_count;
 
 fn base_config() -> Config {
     Config::defaults(None, None)
@@ -154,4 +155,50 @@ fn documented_project_configuration_example_stays_valid() {
 
     assert_eq!(project.initial_split.as_deref(), Some("development"));
     assert_eq!(project.environment["PROJECT_ENV"], "development");
+}
+
+#[test]
+fn project_profiles_extend_the_visible_profile_shortcut_slots() {
+    let temporary = tempfile::tempdir().unwrap();
+    let base = base_config();
+    let base_slots = visible_profile_count(&base.profiles, &base.hidden_profiles);
+
+    // One `ctrl-shift-{number}` shortcut is bound per visible profile, so a
+    // project that adds one needs a slot the user configuration never had; see
+    // `Zetta::refresh_profile_shortcuts`.
+    let added = ProjectConfig::parse(
+        r#"{ "profiles": [{ "name": "Project Runner", "program": "/bin/sh" }] }"#,
+        temporary.path(),
+        &base,
+    )
+    .unwrap();
+    assert_eq!(
+        visible_profile_count(&added.effective.profiles, &added.effective.hidden_profiles),
+        base_slots + 1
+    );
+    assert_eq!(
+        added
+            .effective
+            .profiles
+            .last()
+            .map(|profile| profile.name.as_str()),
+        Some("Project Runner")
+    );
+
+    // Hiding an inherited profile shifts the slots the other way, which is the
+    // same reason the shortcuts cannot be bound once at startup.
+    let hidden_name = base.profiles[0].name.clone();
+    let hidden = ProjectConfig::parse(
+        &format!(r#"{{ "profiles": [{{ "name": "{hidden_name}", "hidden": true }}] }}"#),
+        temporary.path(),
+        &base,
+    )
+    .unwrap();
+    assert_eq!(
+        visible_profile_count(
+            &hidden.effective.profiles,
+            &hidden.effective.hidden_profiles
+        ),
+        base_slots - 1
+    );
 }

@@ -57,6 +57,11 @@ impl Zetta {
                 .settings_editor
                 .as_ref()
                 .and_then(|editor| editor.configuration.default_tab_icon),
+            TabIconPickerTarget::ProjectDefault => self
+                .settings_editor
+                .as_ref()
+                .and_then(crate::settings_ui::project_editor)
+                .and_then(|project| project.form.default_tab_icon.icon()),
         };
 
         let picker = self.tab_icon_picker.as_ref()?;

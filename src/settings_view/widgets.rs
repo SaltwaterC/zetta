@@ -40,6 +40,191 @@ pub(crate) struct KeymapRowRenderContext {
     pub(crate) focused_input: Option<SettingsInput>,
 }
 
+/// How much of the form stays visible past a control the keyboard just moved to,
+/// so it never sits flush against the edge of the scroll region.
+const FOCUS_SCROLL_MARGIN: Pixels = px(10.);
+
+/// Finishes the scroll to the control the keyboard just moved to, from the
+/// bounds that control actually laid out at.
+///
+/// `scroll_settings_control_into_view` can only estimate: it maps a control's
+/// position in the tab order onto the scroll range, which is off wherever rows
+/// differ in height or sit in a side column. GPUI offers nothing better for a
+/// plain `overflow_y_scroll` div — `Window::request_autoscroll` is honoured only
+/// by `List`, and `ScrollHandle::scroll_to_item` addresses direct children — so
+/// the element reports itself once it has been laid out and corrects the
+/// remainder. The correction is skipped unless the offset is still the one the
+/// request was made at, which is what keeps it from fighting a wheel scroll.
+pub(crate) fn track_focus_scroll(
+    element: Div,
+    editor: &SettingsEditor,
+    controls: &[SettingsControl],
+) -> Div {
+    let Some((target, requested_offset)) = editor.focus_scroll_request.as_ref() else {
+        return element;
+    };
+    if !controls.iter().any(|candidate| candidate == target) {
+        return element;
+    }
+    let scroll = editor.settings_scroll.clone();
+    let requested_offset = *requested_offset;
+    element.on_children_prepainted(move |bounds, window, _| {
+        let Some(control) = bounds
+            .iter()
+            .copied()
+            .reduce(|left, right| left.union(&right))
+        else {
+            return;
+        };
+        let offset = scroll.offset();
+        if (offset.y - requested_offset).abs() > px(1.) {
+            return;
+        }
+        let viewport = scroll.bounds();
+        let mut target = offset.y;
+        if control.top() - FOCUS_SCROLL_MARGIN < viewport.top() {
+            target += viewport.top() - control.top() + FOCUS_SCROLL_MARGIN;
+        } else if control.bottom() + FOCUS_SCROLL_MARGIN > viewport.bottom() {
+            target -= control.bottom() - viewport.bottom() + FOCUS_SCROLL_MARGIN;
+        }
+        let target = target.clamp(-scroll.max_offset().y, px(0.));
+        if (target - offset.y).abs() > px(1.) {
+            scroll.set_offset(point(offset.x, target));
+            // The scroll region has already been prepainted with the old offset,
+            // so the corrected position lands on the next frame.
+            window.request_animation_frame();
+        }
+    })
+}
+
+/// A compact, keyboard-reachable button for a [`SettingsControl`]. Clicking it
+/// focuses the control first so the dialog's focus ring and its keyboard path
+/// stay in agreement.
+pub(crate) fn action_button(
+    editor: &SettingsEditor,
+    id: String,
+    label: String,
+    control: SettingsControl,
+    enabled: bool,
+    colors: &ThemeColors,
+    handle: &WeakEntity<Zetta>,
+) -> AnyElement {
+    let focused = editor.focused_control.as_ref() == Some(&control);
+    let click_handle = handle.clone();
+    let click_control = control.clone();
+    track_focus_scroll(div(), editor, std::slice::from_ref(&control))
+        .id(id)
+        .h_8()
+        .px_2()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.))
+        .border_1()
+        .border_color(if focused {
+            colors.border_focused
+        } else {
+            colors.border
+        })
+        .text_xs()
+        .when(enabled, |button| {
+            button
+                .cursor_pointer()
+                .hover(|style| style.bg(colors.element_hover))
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    click_handle
+                        .update(cx, |this, cx| {
+                            this.focus_settings_control_without_scroll(
+                                click_control.clone(),
+                                window,
+                                cx,
+                            );
+                            this.activate_settings_control(click_control.clone(), window, cx);
+                        })
+                        .ok();
+                })
+        })
+        .when(!enabled, |button| button.opacity(0.5))
+        .when(focused, |button| button.bg(colors.element_selected))
+        .child(label)
+        .into_any_element()
+}
+
+/// A label-and-control row for the denser forms (pane templates, the project
+/// builder), where `SettingsFormWidgets::setting_row`'s two-line description
+/// layout would be too tall.
+///
+/// The row highlights while any of the controls it hosts holds keyboard focus.
+/// That is what `setting_row` does for the Configuration page, and it is why
+/// tabbing through that page is easy to follow: a dropdown's or text field's own
+/// focus ring is a one-pixel border change, and a switch has none at all, so the
+/// row is what actually tracks the keyboard. Rows take the controls they host
+/// rather than a precomputed flag, because most of them hold two (a field and
+/// the button that removes its row).
+pub(crate) fn control_row(
+    editor: &SettingsEditor,
+    label: impl Into<String>,
+    controls: &[SettingsControl],
+    control: AnyElement,
+    colors: &ThemeColors,
+) -> AnyElement {
+    let focused = controls
+        .iter()
+        .any(|candidate| editor.focused_control.as_ref() == Some(candidate));
+    track_focus_scroll(h_flex(), editor, controls)
+        .w_full()
+        .min_h(px(42.))
+        .gap_3()
+        .justify_between()
+        .border_b_1()
+        .border_color(if focused {
+            colors.border_focused
+        } else {
+            colors.border_variant
+        })
+        .when(focused, |row| row.bg(colors.element_selected))
+        .child(div().min_w_0().flex_1().text_xs().child(label.into()))
+        .child(div().w(px(300.)).flex_none().child(control))
+        .into_any_element()
+}
+
+pub(crate) fn text_field(
+    id: String,
+    field: TextField,
+    input: SettingsInput,
+    editor: &SettingsEditor,
+    colors: &ThemeColors,
+    handle: &WeakEntity<Zetta>,
+) -> AnyElement {
+    Zetta::text_input_widget(
+        id,
+        field,
+        input,
+        editor.focused_input,
+        colors.clone(),
+        handle.clone(),
+    )
+}
+
+pub(crate) fn dropdown_field(
+    id: String,
+    label: String,
+    selection: SettingsDropdown,
+    editor: &SettingsEditor,
+    colors: &ThemeColors,
+    handle: &WeakEntity<Zetta>,
+) -> AnyElement {
+    Zetta::dropdown_trigger_widget(
+        id,
+        label,
+        selection,
+        editor.focused_control == Some(SettingsControl::Dropdown(selection)),
+        colors.clone(),
+        handle.clone(),
+    )
+}
+
 impl Zetta {
     /// Just the trigger button; the option popover is rendered separately by
     /// `dropdown_popup_widget`, once per render, as a sibling of the whole settings

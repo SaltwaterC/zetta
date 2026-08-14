@@ -4,6 +4,22 @@ use crate::settings_editor::{
     PaneTemplateForm, PaneTemplateNodeField, PaneTemplateNodeForm, PaneTemplateNodePath,
     PaneTemplatePaneForm, PaneTemplateSourceForm, PaneTemplateTextField,
 };
+use crate::settings_ui::pane_templates::templates;
+use crate::settings_ui::project_editor;
+
+/// The focus ring for the template list and the layout preview.
+///
+/// Both surfaces already use their background to show what is *selected*, which
+/// is a different thing from what the keyboard is on, so focus is drawn as an
+/// overlay border instead: it reads clearly over either background and, being
+/// absolutely positioned, never reflows the row or the pane it highlights.
+fn focus_ring(colors: &ThemeColors) -> Div {
+    div()
+        .absolute()
+        .inset_0()
+        .border_2()
+        .border_color(colors.border_focused)
+}
 
 // The preview represents the physical terminal viewport, not a grid of square
 // cells. The reference viewport is 198 by 51 cells, with the observed cell
@@ -11,105 +27,6 @@ use crate::settings_editor::{
 const TERMINAL_PREVIEW_ASPECT_RATIO: f32 = (198. / 51.) * 0.4;
 const TERMINAL_PREVIEW_MAX_WIDTH: Pixels = px(540.);
 const TERMINAL_PREVIEW_MAX_HEIGHT: Pixels = px(348.);
-
-fn action_button(
-    id: String,
-    label: String,
-    control: SettingsControl,
-    focused: bool,
-    enabled: bool,
-    colors: &ThemeColors,
-    handle: &WeakEntity<Zetta>,
-) -> AnyElement {
-    let click_handle = handle.clone();
-    let click_control = control.clone();
-    div()
-        .id(id)
-        .h_8()
-        .px_2()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(4.))
-        .border_1()
-        .border_color(if focused {
-            colors.border_focused
-        } else {
-            colors.border
-        })
-        .text_xs()
-        .when(enabled, |button| {
-            button
-                .cursor_pointer()
-                .hover(|style| style.bg(colors.element_hover))
-                .on_click(move |_, window, cx| {
-                    cx.stop_propagation();
-                    click_handle
-                        .update(cx, |this, cx| {
-                            this.focus_settings_control_without_scroll(
-                                click_control.clone(),
-                                window,
-                                cx,
-                            );
-                            this.activate_settings_control(click_control.clone(), window, cx);
-                        })
-                        .ok();
-                })
-        })
-        .when(!enabled, |button| button.opacity(0.5))
-        .when(focused, |button| button.bg(colors.element_selected))
-        .child(label)
-        .into_any_element()
-}
-
-fn field_row(label: impl Into<String>, control: AnyElement, colors: &ThemeColors) -> AnyElement {
-    h_flex()
-        .w_full()
-        .min_h(px(42.))
-        .gap_3()
-        .justify_between()
-        .border_b_1()
-        .border_color(colors.border_variant)
-        .child(div().min_w_0().flex_1().text_xs().child(label.into()))
-        .child(div().w(px(300.)).flex_none().child(control))
-        .into_any_element()
-}
-
-fn text_field(
-    id: String,
-    field: TextField,
-    input: SettingsInput,
-    editor: &SettingsEditor,
-    colors: &ThemeColors,
-    handle: &WeakEntity<Zetta>,
-) -> AnyElement {
-    Zetta::text_input_widget(
-        id,
-        field,
-        input,
-        editor.focused_input,
-        colors.clone(),
-        handle.clone(),
-    )
-}
-
-fn dropdown_field(
-    id: String,
-    label: String,
-    selection: SettingsDropdown,
-    editor: &SettingsEditor,
-    colors: &ThemeColors,
-    handle: &WeakEntity<Zetta>,
-) -> AnyElement {
-    Zetta::dropdown_trigger_widget(
-        id,
-        label,
-        selection,
-        editor.focused_control == Some(SettingsControl::Dropdown(selection)),
-        colors.clone(),
-        handle.clone(),
-    )
-}
 
 fn render_tree_node(
     editor: &SettingsEditor,
@@ -119,9 +36,11 @@ fn render_tree_node(
     colors: &ThemeColors,
     handle: &WeakEntity<Zetta>,
 ) -> AnyElement {
-    let selected = editor.configuration.pane_templates.selected_node == Some(path);
+    let selected = templates(editor).selected_node == Some(path);
+    let node_control = SettingsControl::SelectPaneTemplateNode(path);
+    let focused = editor.focused_control.as_ref() == Some(&node_control);
     let click_handle = handle.clone();
-    let click_control = SettingsControl::SelectPaneTemplateNode(path);
+    let click_control = node_control.clone();
     match node {
         PaneTemplateNodeForm::Split {
             axis,
@@ -191,7 +110,7 @@ fn render_tree_node(
                         })
                         .ok();
                 });
-            div()
+            track_focus_scroll(div(), editor, std::slice::from_ref(&node_control))
                 .id(format!("pane-template-node-{path:?}"))
                 .relative()
                 .size_full()
@@ -211,6 +130,7 @@ fn render_tree_node(
                 .child(first_child)
                 .child(second_child)
                 .child(divider)
+                .when(focused, |split| split.child(focus_ring(colors)))
                 .into_any_element()
         }
         PaneTemplateNodeForm::Pane(pane) => {
@@ -221,8 +141,9 @@ fn render_tree_node(
             } else {
                 pane.label.text.clone()
             };
-            div()
+            track_focus_scroll(div(), editor, std::slice::from_ref(&node_control))
                 .id(format!("pane-template-node-{path:?}"))
+                .relative()
                 .size_full()
                 .min_w_0()
                 .min_h_0()
@@ -258,6 +179,7 @@ fn render_tree_node(
                         .child(format!("Pane {current_pane}")),
                 )
                 .child(div().mt_1().min_w_0().text_sm().truncate().child(label))
+                .when(focused, |pane| pane.child(focus_ring(colors)))
                 .into_any_element()
         }
     }
@@ -293,20 +215,20 @@ fn render_split_details(
     let mut actions = Vec::new();
     if editable {
         actions.push(action_button(
+            editor,
             format!("pane-template-swap-{path:?}"),
             "Swap children".to_owned(),
             SettingsControl::SwapPaneTemplateChildren(path),
-            editor.focused_control == Some(SettingsControl::SwapPaneTemplateChildren(path)),
             true,
             colors,
             handle,
         ));
         if !path.is_root() {
             actions.push(action_button(
+                editor,
                 format!("pane-template-remove-{path:?}"),
                 "Remove split".to_owned(),
                 SettingsControl::RemovePaneTemplateNode(path),
-                editor.focused_control == Some(SettingsControl::RemovePaneTemplateNode(path)),
                 true,
                 colors,
                 handle,
@@ -328,7 +250,15 @@ fn render_split_details(
                         .child(format!("{pane_count} panes")),
                 ),
         )
-        .child(field_row("Orientation", orientation, colors))
+        .child(control_row(
+            editor,
+            "Orientation",
+            &[SettingsControl::Dropdown(
+                SettingsDropdown::PaneTemplateAxis(path),
+            )],
+            orientation,
+            colors,
+        ))
         .when(!actions.is_empty(), |details| {
             details.child(h_flex().mt_2().gap_2().flex_wrap().children(actions))
         })
@@ -345,6 +275,15 @@ fn render_pane_details(
     handle: &WeakEntity<Zetta>,
 ) -> AnyElement {
     let mut rows = Vec::new();
+    // Every text field in this section addresses the same node, so its control
+    // identity differs only by which field it edits.
+    let node_input = |field| {
+        SettingsControl::Input(SettingsInput::PaneTemplate(PaneTemplateTextField::Node(
+            template_index,
+            path,
+            field,
+        )))
+    };
     let label = text_field(
         format!("pane-template-label-{path:?}"),
         pane.label.clone(),
@@ -359,27 +298,19 @@ fn render_pane_details(
     );
     let mut tree_actions = vec![
         action_button(
+            editor,
             format!("pane-template-split-horizontal-{path:?}"),
             "Split horizontally".to_owned(),
             SettingsControl::SplitPaneTemplate(path, PaneSplitAxis::Horizontal),
-            editor.focused_control
-                == Some(SettingsControl::SplitPaneTemplate(
-                    path,
-                    PaneSplitAxis::Horizontal,
-                )),
             editable,
             colors,
             handle,
         ),
         action_button(
+            editor,
             format!("pane-template-split-vertical-{path:?}"),
             "Split vertically".to_owned(),
             SettingsControl::SplitPaneTemplate(path, PaneSplitAxis::Vertical),
-            editor.focused_control
-                == Some(SettingsControl::SplitPaneTemplate(
-                    path,
-                    PaneSplitAxis::Vertical,
-                )),
             editable,
             colors,
             handle,
@@ -387,10 +318,10 @@ fn render_pane_details(
     ];
     if !path.is_root() {
         tree_actions.push(action_button(
+            editor,
             format!("pane-template-remove-leaf-{path:?}"),
             "Remove pane".to_owned(),
             SettingsControl::RemovePaneTemplateNode(path),
-            editor.focused_control == Some(SettingsControl::RemovePaneTemplateNode(path)),
             editable,
             colors,
             handle,
@@ -403,8 +334,10 @@ fn render_pane_details(
             .children(tree_actions)
             .into_any_element(),
     );
-    rows.push(field_row(
+    rows.push(control_row(
+        editor,
         "Label (lowercase kebab-case; empty means none)",
+        &[node_input(PaneTemplateNodeField::Label)],
         label,
         colors,
     ));
@@ -413,8 +346,12 @@ fn render_pane_details(
         PaneTemplateSourceForm::Profile(profile) => profile.clone(),
         PaneTemplateSourceForm::Command(_) => "Direct command".to_owned(),
     };
-    rows.push(field_row(
+    rows.push(control_row(
+        editor,
         "Profile or command",
+        &[SettingsControl::Dropdown(
+            SettingsDropdown::PaneTemplateSource(path),
+        )],
         dropdown_field(
             format!("pane-template-source-{path:?}"),
             source_label,
@@ -429,8 +366,12 @@ fn render_pane_details(
         .theme
         .clone()
         .unwrap_or_else(|| "Use profile/application theme".to_owned());
-    rows.push(field_row(
+    rows.push(control_row(
+        editor,
         "Theme override",
+        &[SettingsControl::Dropdown(
+            SettingsDropdown::PaneTemplateTheme(path),
+        )],
         dropdown_field(
             format!("pane-template-theme-{path:?}"),
             theme_label,
@@ -455,7 +396,13 @@ fn render_pane_details(
             colors,
             handle,
         );
-        rows.push(field_row("Command program", program, colors));
+        rows.push(control_row(
+            editor,
+            "Command program",
+            &[node_input(PaneTemplateNodeField::CommandProgram)],
+            program,
+            colors,
+        ));
         for (argument, value) in command.args.iter().enumerate() {
             let argument_input = text_field(
                 format!("pane-template-command-arg-{path:?}-{argument}"),
@@ -470,17 +417,21 @@ fn render_pane_details(
                 handle,
             );
             let remove = action_button(
+                editor,
                 format!("pane-template-command-arg-remove-{path:?}-{argument}"),
                 "×".to_owned(),
                 SettingsControl::RemovePaneTemplateArgument(path, argument),
-                editor.focused_control
-                    == Some(SettingsControl::RemovePaneTemplateArgument(path, argument)),
                 editable,
                 colors,
                 handle,
             );
-            rows.push(field_row(
+            rows.push(control_row(
+                editor,
                 format!("Argument {}", argument + 1),
+                &[
+                    node_input(PaneTemplateNodeField::CommandArgument(argument)),
+                    SettingsControl::RemovePaneTemplateArgument(path, argument),
+                ],
                 h_flex()
                     .gap_1()
                     .child(argument_input)
@@ -493,10 +444,10 @@ fn render_pane_details(
             h_flex()
                 .justify_end()
                 .child(action_button(
+                    editor,
                     format!("pane-template-command-arg-add-{path:?}"),
                     "Add argument".to_owned(),
                     SettingsControl::AddPaneTemplateArgument(path),
-                    editor.focused_control == Some(SettingsControl::AddPaneTemplateArgument(path)),
                     editable,
                     colors,
                     handle,
@@ -539,20 +490,21 @@ fn render_pane_details(
             handle,
         );
         let remove = action_button(
+            editor,
             format!("pane-template-env-remove-{path:?}-{environment}"),
             "×".to_owned(),
             SettingsControl::RemovePaneTemplateEnvironment(path, environment),
-            editor.focused_control
-                == Some(SettingsControl::RemovePaneTemplateEnvironment(
-                    path,
-                    environment,
-                )),
             editable,
             colors,
             handle,
         );
-        rows.push(field_row(
+        rows.push(control_row(
+            editor,
             format!("Environment {} · name", environment + 1),
+            &[
+                node_input(PaneTemplateNodeField::EnvironmentName(environment)),
+                SettingsControl::RemovePaneTemplateEnvironment(path, environment),
+            ],
             h_flex()
                 .gap_1()
                 .child(name)
@@ -560,8 +512,12 @@ fn render_pane_details(
                 .into_any_element(),
             colors,
         ));
-        rows.push(field_row(
+        rows.push(control_row(
+            editor,
             format!("Environment {} · value", environment + 1),
+            &[node_input(PaneTemplateNodeField::EnvironmentValue(
+                environment,
+            ))],
             value,
             colors,
         ));
@@ -570,10 +526,10 @@ fn render_pane_details(
         h_flex()
             .justify_end()
             .child(action_button(
+                editor,
                 format!("pane-template-env-add-{path:?}"),
                 "Add environment variable".to_owned(),
                 SettingsControl::AddPaneTemplateEnvironment(path),
-                editor.focused_control == Some(SettingsControl::AddPaneTemplateEnvironment(path)),
                 editable,
                 colors,
                 handle,
@@ -582,6 +538,7 @@ fn render_pane_details(
     );
 
     let overlay_toggle = action_button(
+        editor,
         format!("pane-template-overlay-toggle-{path:?}"),
         if pane.overlay.is_some() {
             "Remove overlay".to_owned()
@@ -589,7 +546,6 @@ fn render_pane_details(
             "Add overlay".to_owned()
         },
         SettingsControl::TogglePaneTemplateOverlay(path),
-        editor.focused_control == Some(SettingsControl::TogglePaneTemplateOverlay(path)),
         editable,
         colors,
         handle,
@@ -603,8 +559,10 @@ fn render_pane_details(
             .into_any_element(),
     );
     if let Some(overlay) = &pane.overlay {
-        rows.push(field_row(
+        rows.push(control_row(
+            editor,
             "Overlay text",
+            &[node_input(PaneTemplateNodeField::OverlayText)],
             text_field(
                 format!("pane-template-overlay-text-{path:?}"),
                 overlay.text.clone(),
@@ -623,8 +581,12 @@ fn render_pane_details(
             .size
             .map(|size| size.label().to_owned())
             .unwrap_or_else(|| "Default".to_owned());
-        rows.push(field_row(
+        rows.push(control_row(
+            editor,
             "Overlay size",
+            &[SettingsControl::Dropdown(
+                SettingsDropdown::PaneTemplateOverlaySize(path),
+            )],
             dropdown_field(
                 format!("pane-template-overlay-size-{path:?}"),
                 size_label,
@@ -635,8 +597,10 @@ fn render_pane_details(
             ),
             colors,
         ));
-        rows.push(field_row(
+        rows.push(control_row(
+            editor,
             "Overlay opacity (0–100)",
+            &[node_input(PaneTemplateNodeField::OverlayOpacity)],
             text_field(
                 format!("pane-template-overlay-opacity-{path:?}"),
                 overlay.opacity.clone(),
@@ -651,8 +615,10 @@ fn render_pane_details(
             ),
             colors,
         ));
-        rows.push(field_row(
+        rows.push(control_row(
+            editor,
             "Overlay color (name or hex)",
+            &[node_input(PaneTemplateNodeField::OverlayColor)],
             text_field(
                 format!("pane-template-overlay-color-{path:?}"),
                 overlay.color.clone(),
@@ -717,19 +683,23 @@ fn render_global_environment(
             handle,
         );
         let remove = action_button(
+            editor,
             format!("pane-template-global-env-remove-{environment}"),
             "×".to_owned(),
             SettingsControl::RemovePaneTemplateGlobalEnvironment(environment),
-            editor.focused_control
-                == Some(SettingsControl::RemovePaneTemplateGlobalEnvironment(
-                    environment,
-                )),
             editable,
             colors,
             handle,
         );
-        rows.push(field_row(
+        rows.push(control_row(
+            editor,
             format!("Variable {} · name", environment + 1),
+            &[
+                SettingsControl::Input(SettingsInput::PaneTemplate(
+                    PaneTemplateTextField::GlobalEnvironmentName(template_index, environment),
+                )),
+                SettingsControl::RemovePaneTemplateGlobalEnvironment(environment),
+            ],
             h_flex()
                 .gap_1()
                 .child(name)
@@ -737,8 +707,12 @@ fn render_global_environment(
                 .into_any_element(),
             colors,
         ));
-        rows.push(field_row(
+        rows.push(control_row(
+            editor,
             format!("Variable {} · value", environment + 1),
+            &[SettingsControl::Input(SettingsInput::PaneTemplate(
+                PaneTemplateTextField::GlobalEnvironmentValue(template_index, environment),
+            ))],
             value,
             colors,
         ));
@@ -747,10 +721,10 @@ fn render_global_environment(
         h_flex()
             .justify_end()
             .child(action_button(
+                editor,
                 "pane-template-global-env-add".to_owned(),
                 "Add environment variable".to_owned(),
                 SettingsControl::AddPaneTemplateGlobalEnvironment,
-                editor.focused_control == Some(SettingsControl::AddPaneTemplateGlobalEnvironment),
                 editable,
                 colors,
                 handle,
@@ -765,26 +739,38 @@ pub(crate) fn render_pane_templates_page(
     colors: &ThemeColors,
     handle: &WeakEntity<Zetta>,
 ) -> AnyElement {
-    let pane_templates = &editor.configuration.pane_templates;
+    // Whichever form the editor is pointed at: the user configuration on the
+    // Templates page, or the open project's overlay in the Projects builder.
+    let pane_templates = templates(editor);
     let selected_index = pane_templates.selected_template;
     let selected = pane_templates.selected();
     let editable = selected.is_some_and(|template| template.editable());
 
+    // A project's inherited layer is the whole user configuration, not just the
+    // four built-in presets, so the read-only rows are labelled for the layer
+    // the form actually overlays.
+    let inherited_label = if project_editor(editor).is_some() {
+        "inherited"
+    } else {
+        "built-in"
+    };
     let mut list: Vec<AnyElement> = Vec::new();
     for (index, template) in pane_templates.templates.iter().enumerate() {
         let selected_row = index == selected_index;
+        let focused_row =
+            editor.focused_control == Some(SettingsControl::SelectPaneTemplate(index));
         let select_handle = handle.clone();
         let control = SettingsControl::SelectPaneTemplate(index);
         let name = template.name.text.clone();
-        let label = if template.is_pristine_built_in() {
-            format!("{name} · built-in")
-        } else if template.built_in {
+        let label = if template.is_pristine_inherited() {
+            format!("{name} · {inherited_label}")
+        } else if template.inherited() {
             format!("{name} · override")
         } else {
             name.clone()
         };
         list.push(
-            div()
+            track_focus_scroll(div(), editor, std::slice::from_ref(&control))
                 .id(format!("pane-template-list-{index}"))
                 .w_full()
                 .px_2()
@@ -792,12 +778,16 @@ pub(crate) fn render_pane_templates_page(
                 .rounded(px(4.))
                 .cursor_pointer()
                 .border_1()
-                .border_color(if selected_row {
+                .border_color(if focused_row {
                     colors.border_focused
+                } else if selected_row {
+                    colors.border_selected
                 } else {
                     colors.border_variant
                 })
-                .when(selected_row, |row| row.bg(colors.element_selected))
+                .when(selected_row || focused_row, |row| {
+                    row.bg(colors.element_selected)
+                })
                 .on_click(move |_, window, cx| {
                     select_handle
                         .update(cx, |this, cx| {
@@ -820,19 +810,19 @@ pub(crate) fn render_pane_templates_page(
         h_flex()
             .gap_2()
             .child(action_button(
+                editor,
                 "pane-template-new".to_owned(),
                 "New".to_owned(),
                 SettingsControl::NewPaneTemplate,
-                editor.focused_control == Some(SettingsControl::NewPaneTemplate),
                 true,
                 colors,
                 handle,
             ))
             .child(action_button(
+                editor,
                 "pane-template-duplicate".to_owned(),
                 "Duplicate".to_owned(),
                 SettingsControl::DuplicatePaneTemplate,
-                editor.focused_control == Some(SettingsControl::DuplicatePaneTemplate),
                 selected.is_some(),
                 colors,
                 handle,
@@ -860,21 +850,28 @@ pub(crate) fn render_pane_templates_page(
                 .into_any_element()
         };
         let delete = action_button(
+            editor,
             "pane-template-delete".to_owned(),
-            if template.built_in {
+            if template.inherited() {
                 "Reset override"
             } else {
                 "Delete"
             }
             .to_owned(),
             SettingsControl::DeletePaneTemplate,
-            editor.focused_control == Some(SettingsControl::DeletePaneTemplate),
             editable,
             colors,
             handle,
         );
-        let mut content = vec![field_row(
+        let mut content = vec![control_row(
+            editor,
             "Template name",
+            &[
+                SettingsControl::Input(SettingsInput::PaneTemplate(PaneTemplateTextField::Name(
+                    selected_index,
+                ))),
+                SettingsControl::DeletePaneTemplate,
+            ],
             h_flex()
                 .gap_2()
                 .child(name)
@@ -882,15 +879,15 @@ pub(crate) fn render_pane_templates_page(
                 .into_any_element(),
             colors,
         )];
-        if template.is_pristine_built_in() {
+        if template.is_pristine_inherited() {
             content.push(
                 div()
                     .py_3()
                     .text_xs()
                     .text_color(colors.text_muted)
-                    .child(
-                        "This built-in layout is a read-only preset. Duplicate it to edit a copy.",
-                    )
+                    .child(format!(
+                        "This {inherited_label} layout is read-only here. Duplicate it to edit a copy."
+                    ))
                     .into_any_element(),
             );
         }
