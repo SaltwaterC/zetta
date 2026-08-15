@@ -192,23 +192,10 @@ fn detect_project_for_directory(
     registry: &ProjectRegistry,
     base: &Config,
     loaded_roots: &[PathBuf],
-    allow_discovery: bool,
 ) -> ProjectDetectionResult {
-    let directory = if allow_discovery {
-        match fs::canonicalize(directory) {
-            Ok(directory) => directory,
-            Err(_) => {
-                return ProjectDetectionResult {
-                    registered_root: None,
-                    config: None,
-                    offer_root: None,
-                };
-            }
-        }
-    } else {
-        directory.to_path_buf()
-    };
-    if let Some(root) = registry.matching_root(&directory).cloned() {
+    let canonical = fs::canonicalize(directory).ok();
+    let directory = canonical.as_deref().unwrap_or(directory);
+    if let Some(root) = registry.matching_root(directory).cloned() {
         let config = (!loaded_roots.iter().any(|loaded| paths_equal(loaded, &root)))
             .then(|| ProjectConfig::load(&root, base));
         return ProjectDetectionResult {
@@ -217,9 +204,7 @@ fn detect_project_for_directory(
             offer_root: None,
         };
     }
-    let offer_root = allow_discovery
-        .then(|| discover_project_config(&directory).ok().flatten())
-        .flatten();
+    let offer_root = discover_project_config(directory).ok().flatten();
     ProjectDetectionResult {
         registered_root: None,
         config: None,
@@ -417,7 +402,6 @@ impl Zetta {
                             &registry,
                             &base,
                             &loaded_roots,
-                            !is_wsl,
                         )
                     })
                     .await;
