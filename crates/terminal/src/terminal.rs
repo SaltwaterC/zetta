@@ -760,6 +760,12 @@ pub struct TerminalExited {
 
 impl TerminalExited {
     pub fn unexpected_reason(&self) -> Option<TerminalExitReason> {
+        // A clean exit status means the process itself terminated normally.
+        // Whatever the foreground metadata shows, there is nothing unexpected
+        // about the session ending.
+        if self.exit_code == Some(0) {
+            return None;
+        }
         let source_reason = match self.source {
             TerminalExitSource::Child if self.exit_code.is_none() => {
                 Some(TerminalExitReason::StatusUnavailable)
@@ -4772,6 +4778,25 @@ mod tests {
         assert_eq!(
             foreground_failure.unexpected_reason(),
             Some(TerminalExitReason::ForegroundCommand)
+        );
+
+        let clean_exit_with_stale_foreground = TerminalExited {
+            exit_code: Some(0),
+            ..foreground_failure.clone()
+        };
+        assert!(
+            !clean_exit_with_stale_foreground.is_unexpected(),
+            "a clean exit is never unexpected, even with stale foreground metadata"
+        );
+
+        let clean_exit_before_input = TerminalExited {
+            exit_code: Some(0),
+            input_sent: false,
+            ..foreground_failure
+        };
+        assert!(
+            !clean_exit_before_input.is_unexpected(),
+            "a clean exit is never unexpected, even before any input was sent"
         );
 
         let unavailable = exit_observation(TerminalExitSource::StatusUnavailable, true, Some(true));

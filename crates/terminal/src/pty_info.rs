@@ -262,8 +262,8 @@ impl PtyProcessInfo {
 
     /// Returns the shell ownership decision when the platform can make one.
     /// `None` is different from `Some(false)`: the former means that process
-    /// metadata was unavailable, while the latter means a foreground command
-    /// was observed.
+    /// metadata was unavailable or the observed foreground process no longer
+    /// exists, while the latter means a live foreground command was observed.
     pub(crate) fn foreground_process_is_shell_context(&self) -> Option<bool> {
         let foreground =
             (*self.last_foreground_pid.lock()).or_else(|| self.resolve_foreground_pid())?;
@@ -276,15 +276,37 @@ impl PtyProcessInfo {
             return Some(true);
         }
 
+        // The cached foreground pid can be up to one refresh interval stale,
+        // and at exit time it often names a process that has already
+        // terminated. A dead foreground is not a running command: report
+        // unknown so the exit is not mislabeled as a foreground-command
+        // failure (a normal `exit`/Ctrl-D close).
         #[cfg(target_os = "macos")]
-        return Some(self.foreground_process_is_macos_login_shell(foreground, shell));
+        return self.foreground_process_is_macos_login_shell(foreground, shell);
 
         #[cfg(not(target_os = "macos"))]
-        Some(false)
+        self.foreground_process_alive(foreground).then_some(false)
+    }
+
+    /// Whether the given process currently exists on the system. Refreshing
+    /// just this pid evicts a stale entry for a process that has already
+    /// exited (sysinfo keeps entries absent from the refreshed set — see the
+    /// accumulation note in `refresh`), so this both answers the question and
+    /// keeps the process map bounded. macOS covers this with the two-pid
+    /// refresh in `foreground_process_is_macos_login_shell`.
+    #[cfg(not(target_os = "macos"))]
+    fn foreground_process_alive(&self, pid: Pid) -> bool {
+        let mut system = self.system.write();
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        system.process(pid).is_some()
     }
 
     #[cfg(target_os = "macos")]
-    fn foreground_process_is_macos_login_shell(&self, foreground: Pid, shell: Pid) -> bool {
+    fn foreground_process_is_macos_login_shell(&self, foreground: Pid, shell: Pid) -> Option<bool> {
         // The default macOS shell is started as `/usr/bin/login ... /bin/zsh`.
         // `login` can remain as the PTY child while the shell it starts owns
         // the foreground process group, so the two PIDs are not always equal.
@@ -297,18 +319,18 @@ impl PtyProcessInfo {
         );
 
         let Some(login) = system.process(shell) else {
-            return false;
+            return None;
         };
         let Some(foreground_process) = system.process(foreground) else {
-            return false;
+            return None;
         };
 
-        is_macos_login_shell(
+        Some(is_macos_login_shell(
             login.name().to_str(),
             shell,
             foreground,
             foreground_process.parent(),
-        )
+        ))
     }
 
     fn refresh(&self) -> Option<MappedRwLockReadGuard<'_, Process>> {
@@ -567,6 +589,35 @@ mod tests {
         assert!(
             churned_len <= 2,
             "foreground process churn retained {churned_len} process entries"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the test needs real short-lived child processes and may block"
+    )]
+    fn a_dead_foreground_process_is_unknown_not_a_running_command() {
+        let mut info = PtyProcessInfo::new(ProcessIdGetter::new(-1, std::process::id()));
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("failed to spawn child process");
+
+        *info.last_foreground_pid.lock() = Some(Pid::from_u32(child.id()));
+        assert_eq!(
+            info.foreground_process_is_shell_context(),
+            Some(false),
+            "a live foreground process is a running command"
+        );
+
+        child.kill().expect("failed to kill child process");
+        child.wait().expect("failed to wait for child process");
+        assert_eq!(
+            info.foreground_process_is_shell_context(),
+            None,
+            "a foreground pid that no longer exists is unknown, not a failure"
         );
     }
 }

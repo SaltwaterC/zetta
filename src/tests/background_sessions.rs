@@ -273,6 +273,31 @@ fn unexpected_exit_metadata_is_sanitized_and_actionable() {
 }
 
 #[test]
+fn a_clean_exit_is_never_an_unexpected_exit() {
+    let event = TerminalExited {
+        exit_code: Some(0),
+        source: TerminalExitSource::Child,
+        child_pid: Some(77),
+        input_sent: true,
+        foreground_is_shell: Some(false),
+        foreground_command: Some("htop".to_owned()),
+    };
+    assert!(
+        BackgroundPaneExit::from_terminal(&event).is_none(),
+        "a process exiting with status 0 closed the pane itself; nothing to retain"
+    );
+
+    let clean_exit_before_input = TerminalExited {
+        input_sent: false,
+        ..event
+    };
+    assert!(
+        BackgroundPaneExit::from_terminal(&clean_exit_before_input).is_none(),
+        "a clean exit is an ordinary close even before any input was sent"
+    );
+}
+
+#[test]
 fn protected_catalog_entries_do_not_publish_session_details_or_verifiers() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory

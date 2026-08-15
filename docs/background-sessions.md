@@ -62,10 +62,13 @@ in shell history or exposed in the process list.
 ## Unexpected terminal exits
 
 Zetta closes an interactive pane automatically when its shell reports an
-ordinary user-initiated exit. If the exit status cannot be obtained, the child
-watcher or terminal backend disconnects, the shell exits before receiving user
-input, or process metadata shows a command such as `htop` still in the
-foreground, Zetta treats the exit as unexpected.
+ordinary user-initiated exit. A clean exit status of zero is always treated
+as an ordinary close, even when process metadata is stale or missing: the
+foreground check only flags a command that is still running, and a pid that
+no longer exists counts as unknown rather than a failure. If the exit status
+cannot be obtained, the child watcher or terminal backend disconnects, the
+shell exits before receiving user input, or process metadata shows a command
+such as `htop` still in the foreground, Zetta treats the exit as unexpected.
 
 Unexpected exits are retained instead of silently removing the pane. The pane
 shows a **Terminal exited unexpectedly** message and keeps its tab and split
