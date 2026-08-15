@@ -150,9 +150,10 @@ fn resolve_project_working_directory(root: &Path, value: &Value) -> Result<PathB
     let relative = Path::new(relative);
     anyhow::ensure!(
         !relative.is_absolute()
-            && relative
-                .components()
-                .all(|component| !matches!(component, Component::ParentDir | Component::Prefix(_))),
+            && relative.components().all(|component| !matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )),
         "working_directory must stay inside the project"
     );
     let directory = fs::canonicalize(root.join(relative)).with_context(|| {
@@ -387,7 +388,22 @@ pub(crate) fn paths_equal(left: &Path, right: &Path) -> bool {
 }
 
 fn path_identity(path: &Path) -> String {
-    let value = path.to_string_lossy().replace('\\', "/");
+    let value = path.to_string_lossy();
+    // `fs::canonicalize` returns verbatim `\\?\`-prefixed paths on Windows,
+    // while tempdir-style paths and CLI arguments do not; both spell the same
+    // directory, so normalize the prefix away before comparing.
+    let value = if cfg!(windows) {
+        match value.strip_prefix(r"\\?\UNC\") {
+            Some(rest) => format!(r"\\{rest}"),
+            None => value
+                .strip_prefix(r"\\?\")
+                .map(str::to_owned)
+                .unwrap_or_else(|| value.into_owned()),
+        }
+    } else {
+        value.into_owned()
+    };
+    let value = value.replace('\\', "/");
     let value = value.trim_end_matches('/');
     if cfg!(windows) {
         value.to_lowercase()

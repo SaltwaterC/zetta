@@ -293,7 +293,7 @@ impl ProjectForm {
                 !relative.is_absolute()
                     && relative.components().all(|component| !matches!(
                         component,
-                        Component::ParentDir | Component::Prefix(_)
+                        Component::ParentDir | Component::RootDir | Component::Prefix(_)
                     )),
                 "the working directory must be a project-relative path inside the project"
             );
