@@ -1,3 +1,4 @@
 {
-  "theme": "One Light"
+  "theme": "One Light",
+  "default_tab_icon": "tool_terminal"
 }
