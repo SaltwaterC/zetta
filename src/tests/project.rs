@@ -28,7 +28,7 @@ fn project_config_overlays_curated_fields_and_defaults_to_project_root() {
     assert_eq!(project.effective.theme.as_deref(), Some("One Dark"));
     assert_eq!(
         project.effective.working_directory.as_deref(),
-        Some(work.as_path())
+        Some(fs::canonicalize(&work).unwrap().as_path())
     );
     assert!(project.effective.working_directory_configured);
     assert_eq!(project.environment["RUST_LOG"], "debug");
@@ -110,6 +110,28 @@ fn registry_round_trips_and_uses_the_deepest_ancestor() {
         loaded.matching_root(&child),
         Some(&fs::canonicalize(&outer).unwrap())
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn registry_matching_resolves_symlinked_query_paths() {
+    let temporary = tempfile::tempdir().unwrap();
+    let real = temporary.path().join("real");
+    let link = temporary.path().join("link");
+    fs::create_dir_all(real.join("src")).unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    let mut registry = ProjectRegistry::empty();
+    registry.add(&real).unwrap();
+    assert_eq!(
+        registry.matching_root(&link.join("src")),
+        Some(&fs::canonicalize(&real).unwrap())
+    );
+    assert_eq!(
+        registry.remove(&link.join("src")),
+        Some(fs::canonicalize(&real).unwrap())
+    );
+    assert_eq!(registry.matching_root(&link.join("src")), None);
 }
 
 #[test]

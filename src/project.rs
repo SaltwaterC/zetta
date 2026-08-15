@@ -368,7 +368,13 @@ pub(crate) fn path_is_within(path: &Path, root: &Path) -> bool {
                 .strip_prefix(&root)
                 .is_some_and(|suffix| suffix.starts_with(['/', '\\']))
     } else {
-        path.starts_with(root)
+        // Registry roots are canonical, so a query path that did not come
+        // from the app (a CLI argument, or a pane whose working directory was
+        // resolved through a symlink like macOS `/var` -> `/private/var`)
+        // needs canonicalizing before a lexical prefix match means anything.
+        // Paths that cannot be canonicalized (deleted directories, WSL UNC
+        // paths) stay lexical.
+        path.starts_with(root) || fs::canonicalize(path).is_ok_and(|path| path.starts_with(root))
     }
 }
 
