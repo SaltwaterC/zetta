@@ -751,7 +751,11 @@ impl PaneStack {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Serialized so a detached session can carry its stacked commands: the name
+/// lives with the variants rather than in a separate mapping, so the two cannot
+/// drift apart.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum StackedPaneState {
     #[default]
     Starting,
@@ -1872,6 +1876,13 @@ pub(crate) struct Tab {
     pub(crate) broadcast_input: bool,
     pub(crate) silent_mode: bool,
     pub(crate) close_policy: TabClosePolicy,
+    /// Whether this tab's session is offered to other Zetta windows, so one of
+    /// them can join it and both then drive the same panes.
+    ///
+    /// Separate from `close_policy`: sharing says who may see the session now,
+    /// keep-running says whether it outlives this window. Either one makes the
+    /// session attachable, but only the second changes what happens on close.
+    pub(crate) shared: bool,
     /// A title entered through the tab rename UI. This is the highest-priority
     /// title source and is intentionally separate from process/worktree state.
     pub(crate) custom_title: Option<String>,
@@ -1902,7 +1913,18 @@ pub(crate) struct Tab {
 }
 
 impl Tab {
-    pub(crate) fn reassign_ids(&mut self, tab_id: u64, next_pane_id: &mut u64) {
+    /// Renumbers a tab that is entering this window, and reports how.
+    ///
+    /// Every window-scoped registry is keyed by pane id alone — the multiplexer
+    /// pane map, the shared-pane registry, pane controls, the project registry —
+    /// so a tab arriving with another window's pane ids shares those entries with
+    /// whatever tab already holds them. The returned map is old id to new id, for
+    /// callers holding anything else addressed by the old ones.
+    pub(crate) fn reassign_ids(
+        &mut self,
+        tab_id: u64,
+        next_pane_id: &mut u64,
+    ) -> HashMap<u64, u64> {
         self.id = tab_id;
         let pane_ids = self
             .panes
@@ -1956,6 +1978,7 @@ impl Tab {
         self.editing_overlay_pane = None;
         self.overlay_buffer = None;
         self.overlay_style_picker = None;
+        pane_ids
     }
 
     pub(crate) fn displayed_pane_label(&self, id: u64) -> Option<String> {

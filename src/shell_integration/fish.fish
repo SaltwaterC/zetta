@@ -449,6 +449,8 @@ function __zetta_long_options
             printf '%s\t%s\n' --help 'Print help'
         case sessions
             printf '%s\t%s\n' --json 'Print machine-readable JSON' --help 'Print help'
+        case mux
+            printf '%s\t%s\n' --json 'Print machine-readable JSON' --force 'Stop even while sessions are running' --upgrade 'Replace the multiplexer, keeping its sessions' --help 'Print help' --version 'Print version'
         case benchmark-output
             printf '%s\t%s\n' \
                 --size 'Set the output size in MiB' \
@@ -456,10 +458,6 @@ function __zetta_long_options
                 --help 'Print help'
         case benchmark
             printf '%s\n' \
-                --terminal-render-workload \
-                --terminal-checkerboard-workload \
-                --terminal-sparse-update-workload \
-                --terminal-alt-screen-scroll-workload \
                 --profile-report \
                 --profile-duration \
                 --profile-pane-stress \
@@ -523,6 +521,7 @@ complete -c zetta -n '__zetta_at_root' -a benchmark -d 'Profile terminal renderi
 complete -c zetta -n '__zetta_at_root' -a benchmark-output -d 'Write and time a text payload'
 complete -c zetta -n '__zetta_at_root' -a terminal-size -d 'Print the current terminal size'
 complete -c zetta -n '__zetta_at_root' -a sessions -d 'List detached background sessions'
+complete -c zetta -n '__zetta_at_root' -a mux -d 'Control the session multiplexer'
 complete -c zetta -n '__zetta_at_root' -a profile -d 'List and manage profiles'
 complete -c zetta -n '__zetta_at_root' -a project -d 'List and manage projects'
 complete -c zetta -n '__zetta_at_root' -a edit -d 'Edit files with EDITOR or Zetta vi'
@@ -590,6 +589,15 @@ complete -c zetta -n '__zetta_at_subcommand http' -a server
 complete -c zetta -n '__fish_seen_subcommand_from http' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from http' -a '(__zetta_long_options http)'
 complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l json -d 'Print machine-readable JSON'
+complete -c zetta -n '__zetta_at_subcommand mux' -a list -d 'List the sessions the multiplexer is holding'
+complete -c zetta -n '__zetta_at_subcommand mux' -a stop -d 'Stop the multiplexer'
+complete -c zetta -n '__zetta_at_subcommand mux' -a share -d 'Let every Zetta process attach a backgrounded session'
+complete -c zetta -n '__zetta_at_subcommand mux' -a unshare -d 'Scope a session back to the window that held it'
+complete -c zetta -n '__fish_seen_subcommand_from mux' -l force -d 'Stop even while sessions are running'
+complete -c zetta -n '__fish_seen_subcommand_from mux' -l upgrade -d 'Replace the multiplexer, keeping its sessions'
+complete -c zetta -n '__fish_seen_subcommand_from mux' -l json -d 'Print machine-readable JSON'
+complete -c zetta -n '__fish_seen_subcommand_from mux' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from mux' -a '(__zetta_long_options mux)'
 complete -c zetta -n '__fish_seen_subcommand_from sessions' -l json -d 'Print machine-readable JSON'
 complete -c zetta -n '__zetta_at_subcommand sessions' -a reconnect -d 'Reconnect a detached session'
 complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l resize -d 'Resize the current pane'
@@ -642,10 +650,6 @@ complete -c zetta -n '__fish_seen_subcommand_from benchmark-output' -l help -d '
 complete -c zetta -n '__fish_seen_subcommand_from benchmark-output' -a '(__zetta_long_options benchmark-output)'
 complete -c zetta -s s -r -n '__fish_seen_subcommand_from benchmark-output; and __zetta_short_option -s'
 complete -c zetta -s t -r -a 'repeated unique' -n '__fish_seen_subcommand_from benchmark-output; and __zetta_short_option -t'
-complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l terminal-render-workload
-complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l terminal-checkerboard-workload
-complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l terminal-sparse-update-workload
-complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l terminal-alt-screen-scroll-workload
 complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l profile-report -r
 complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l profile-duration -r
 complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l profile-pane-stress

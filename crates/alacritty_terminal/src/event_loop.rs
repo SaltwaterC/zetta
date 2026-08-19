@@ -26,6 +26,50 @@ pub(crate) const READ_BUFFER_SIZE: usize = 0x10_0000;
 /// Max bytes to read from the PTY while the terminal is locked.
 const MAX_LOCKED_READ: usize = u16::MAX as usize;
 
+/// How long a foreign child's PTY may stay hung up before the loop stops
+/// waiting for an exit report that is not coming.
+///
+/// A hung-up master means the program on the far side is gone. For a child this
+/// process spawned, the matching exit notification is already on its way and the
+/// loop can simply wait. For a child that belongs to the multiplexer, the only
+/// route is a report over the control channel, so if that channel is broken the
+/// wait is forever: the pane accepts no input, shows no exit, and cannot be
+/// closed. Long enough that an ordinary report always wins the race, short
+/// enough that a user pressing Ctrl-D does not sit in front of a dead pane.
+const FOREIGN_CHILD_HANGUP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How long to wait between polls of a hung-up PTY.
+///
+/// The poller is level-triggered, so a persistent hangup makes `wait` return
+/// immediately every time. Without this the loop would burn a core for as long
+/// as it waited — which, before the grace period above existed, was forever.
+const HANGUP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// Records a hangup and says whether waiting for a child event should stop.
+///
+/// Returns `true` only for a foreign child whose grace period has run out. A
+/// child this process spawned is always waited for, exactly as upstream does,
+/// because its exit notification cannot fail to arrive — and nothing is recorded
+/// for it either, so a pty that somehow changed answer could not inherit a stale
+/// deadline. While a foreign child is still within its grace, this paces the
+/// level-triggered poller so the wait costs a short sleep per iteration rather
+/// than a spinning core.
+fn hungup_too_long<T: tty::EventedPty + ?Sized>(
+    pty: &T,
+    hangup_since: &mut Option<Instant>,
+) -> bool {
+    if !pty.child_is_foreign() {
+        return false;
+    }
+    let since = *hangup_since.get_or_insert_with(Instant::now);
+    if since.elapsed() >= FOREIGN_CHILD_HANGUP_GRACE {
+        error!("the multiplexer never reported the exit of a terminal that has hung up");
+        return true;
+    }
+    std::thread::sleep(HANGUP_POLL_INTERVAL);
+    false
+}
+
 /// Messages that may be sent to the `EventLoop`.
 #[derive(Debug)]
 pub enum Msg {
@@ -244,6 +288,10 @@ where
             // loop intentionally. Any other exit is an infrastructure
             // failure and must be visible to the owning terminal.
             let mut backend_shutdown = true;
+            // When the master first reported a hangup that produced no child
+            // event, so a foreign child's missing exit report can time out
+            // instead of being waited on forever.
+            let mut hangup_since: Option<Instant> = None;
 
             let poll_opts = PollMode::Level;
             let mut interest = PollingEvent::readable(0);
@@ -297,6 +345,14 @@ where
                     match event.key {
                         tty::PTY_CHILD_EVENT_TOKEN => {
                             if let Some(child_event) = self.pty.next_child_event() {
+                                // `Term::exit` sends `Event::Exit`, which the owning
+                                // terminal reads as "the child ended with no usable
+                                // status". That is true of the two exit events and
+                                // false of a watcher disconnect, where the child's
+                                // fate is simply unknown — so a disconnect must not
+                                // send it, or it would overrule whatever the
+                                // consumer decided a disconnect means.
+                                let mut child_ended = true;
                                 match child_event {
                                     tty::ChildEvent::Exited(status) => {
                                         self.event_proxy.send_event(Event::ChildExit(status));
@@ -306,6 +362,7 @@ where
                                             .send_event(Event::ChildExitStatusUnavailable);
                                     },
                                     tty::ChildEvent::WatcherDisconnected => {
+                                        child_ended = false;
                                         self.event_proxy
                                             .send_event(Event::ChildWatcherDisconnected);
                                     },
@@ -313,7 +370,9 @@ where
                                 if self.drain_on_exit {
                                     let _ = self.pty_read(&mut state, &mut buf, pipe.as_mut());
                                 }
-                                self.terminal.lock().exit();
+                                if child_ended {
+                                    self.terminal.lock().exit();
+                                }
                                 self.event_proxy.send_event(Event::Wakeup);
                                 backend_shutdown = false;
                                 break 'event_loop;
@@ -323,6 +382,13 @@ where
                         tty::PTY_READ_WRITE_TOKEN => {
                             if event.is_interrupt() {
                                 // Don't try to do I/O on a dead PTY.
+                                if hungup_too_long(&self.pty, &mut hangup_since) {
+                                    self.event_proxy.send_event(Event::ChildExitStatusUnavailable);
+                                    self.terminal.lock().exit();
+                                    self.event_proxy.send_event(Event::Wakeup);
+                                    backend_shutdown = false;
+                                    break 'event_loop;
+                                }
                                 continue;
                             }
 
@@ -336,12 +402,24 @@ where
                                     // blocking.
                                     #[cfg(target_os = "linux")]
                                     if err.raw_os_error() == Some(libc::EIO) {
+                                        if hungup_too_long(&self.pty, &mut hangup_since) {
+                                            self.event_proxy
+                                                .send_event(Event::ChildExitStatusUnavailable);
+                                            self.terminal.lock().exit();
+                                            self.event_proxy.send_event(Event::Wakeup);
+                                            backend_shutdown = false;
+                                            break 'event_loop;
+                                        }
                                         continue;
                                     }
 
                                     error!("Error reading from PTY in event loop: {err}");
                                     break 'event_loop;
                                 }
+                                // The master produced bytes, so it is not hung up after
+                                // all and any earlier hangup must not count towards the
+                                // grace period.
+                                hangup_since = None;
 
                                 // Adaptors backed by an in-memory pipe must explicitly register
                                 // the next wake after this deliberately bounded read batch.
@@ -706,5 +784,71 @@ mod tests {
         });
 
         assert!(requests.is_empty());
+    }
+    /// A stand-in that only has to answer whether its child is somebody else's.
+    struct StubPty(bool);
+
+    impl crate::tty::EventedReadWrite for StubPty {
+        type Reader = std::io::Empty;
+        type Writer = std::io::Sink;
+
+        unsafe fn register(
+            &mut self,
+            _: &Arc<Poller>,
+            _: PollingEvent,
+            _: PollMode,
+        ) -> io::Result<()> {
+            Ok(())
+        }
+        fn reregister(&mut self, _: &Arc<Poller>, _: PollingEvent, _: PollMode) -> io::Result<()> {
+            Ok(())
+        }
+        fn deregister(&mut self, _: &Arc<Poller>) -> io::Result<()> {
+            Ok(())
+        }
+        fn reader(&mut self) -> &mut Self::Reader {
+            unimplemented!("the hangup decision reads nothing")
+        }
+        fn writer(&mut self) -> &mut Self::Writer {
+            unimplemented!("the hangup decision writes nothing")
+        }
+    }
+
+    impl tty::EventedPty for StubPty {
+        fn child_is_foreign(&self) -> bool {
+            self.0
+        }
+        fn next_child_event(&mut self) -> Option<tty::ChildEvent> {
+            None
+        }
+    }
+
+    #[test]
+    fn an_owned_childs_hangup_is_always_waited_out() {
+        // Upstream's behaviour, unchanged: the exit notification for a child
+        // this process spawned is already on its way, so a hung-up master is a
+        // reason to loop back round rather than to give up. Nothing is even
+        // recorded, so a later change of mind cannot inherit a stale deadline.
+        let mut since = None;
+        assert!(!hungup_too_long(&StubPty(false), &mut since));
+        assert!(since.is_none());
+
+        let mut long_ago = Some(Instant::now() - FOREIGN_CHILD_HANGUP_GRACE * 10);
+        assert!(!hungup_too_long(&StubPty(false), &mut long_ago));
+    }
+
+    #[test]
+    fn a_foreign_childs_hangup_is_given_a_bounded_grace_period() {
+        // The first hangup starts the clock and waits: an exit report that is
+        // merely slow must still win.
+        let mut since = None;
+        assert!(!hungup_too_long(&StubPty(true), &mut since));
+        assert!(since.is_some(), "the grace period never started");
+
+        // Once it has run out there is nothing left to wait for. Waiting anyway
+        // is what left a pane accepting no input, showing no exit, and
+        // impossible to close after its multiplexer stopped reporting.
+        let mut elapsed = Some(Instant::now() - FOREIGN_CHILD_HANGUP_GRACE);
+        assert!(hungup_too_long(&StubPty(true), &mut elapsed));
     }
 }

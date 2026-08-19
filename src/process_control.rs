@@ -31,7 +31,14 @@ use crate::command_panes::{
 };
 use crate::pane::{OverlayFontSize, PaneOverlayRequest, overlay_color_from_value};
 
-const CONTROL_VERSION: u32 = 13;
+/// Bumped when a control command's meaning changes, so a Zetta that cannot
+/// serve a request is not sent one.
+///
+/// 14 added multiplexer-held sessions: reconnecting one has to reach a window
+/// that knows to ask the multiplexer for it. An older window accepts the
+/// request and reports that the session does not exist, which is exactly the
+/// confusing failure this guards against.
+const CONTROL_VERSION: u32 = 14;
 // A 64 KiB argv payload can expand substantially when it contains many
 // one-character arguments and each value is represented as JSON. Keep enough
 // framing headroom for that worst case as well as the endpoint token.
@@ -2593,3 +2600,68 @@ fn write_endpoint(path: &Path, endpoint: &ControlEndpoint) -> Result<()> {
 #[cfg(test)]
 #[path = "tests/process_control.rs"]
 mod tests;
+
+/// Asks any running Zetta window to attach a session the multiplexer holds.
+///
+/// A session's published process is the multiplexer's, not a Zetta's, so there
+/// is no control endpoint at that identifier to send to — which is exactly
+/// what `zetta sessions reconnect` used to try. Any live window will do: the
+/// session belongs to the multiplexer, not to a particular one.
+pub(crate) fn request_multiplexer_reconnect(
+    session_id: u64,
+    scoped_to: Option<u32>,
+    secret: Option<SessionSecret>,
+) -> Result<ReconnectSessionResult> {
+    let directory = crate::background_sessions::session_catalog_dir();
+    let entries = fs::read_dir(&directory)
+        .with_context(|| format!("looking for a Zetta window in {}", directory.display()))?;
+
+    let mut endpoints = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_control = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("control-") && name.ends_with(".json"));
+        if !is_control {
+            continue;
+        }
+        let Ok(contents) = fs::read(&path) else {
+            continue;
+        };
+        let Ok(endpoint) = serde_json::from_slice::<ControlEndpoint>(&contents) else {
+            continue;
+        };
+        if endpoint.version == CONTROL_VERSION && process_is_running(endpoint.process_id) {
+            endpoints.push(endpoint);
+        }
+    }
+    anyhow::ensure!(
+        !endpoints.is_empty(),
+        "no running Zetta window can attach a multiplexer session. Any window still running an \
+         older Zetta cannot: restart Zetta, or install the current build, and try again."
+    );
+    // A backgrounded session belongs to the window that put it away, and the
+    // multiplexer refuses every other window's attach. Asking them anyway would
+    // report the refusal as though the session were missing.
+    if let Some(owner) = scoped_to {
+        endpoints.retain(|endpoint| endpoint.process_id == owner);
+        anyhow::ensure!(
+            !endpoints.is_empty(),
+            "session {session_id} is scoped to Zetta process {owner}, which is not running. Share \
+             it with `zmux share {session_id}` to attach it from another window."
+        );
+    }
+
+    // Any window can take it, but one that answers is better than the first
+    // one found: an endpoint file can outlive the process that wrote it by a
+    // moment, and refusing on that would be needless.
+    let mut last_error = None;
+    for endpoint in &endpoints {
+        match send_reconnect_session_request(endpoint, 0, session_id, secret.clone()) {
+            Ok(result) => return Ok(result),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no Zetta window accepted the session")))
+}

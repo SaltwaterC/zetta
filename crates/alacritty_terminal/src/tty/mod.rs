@@ -112,6 +112,19 @@ pub trait EventedPty: EventedReadWrite {
     ///
     /// Returns `Some(event)` on success, or `None` if there are no events to retrieve.
     fn next_child_event(&mut self) -> Option<ChildEvent>;
+
+    /// Whether the child belongs to another process, so its exit can only ever
+    /// arrive as a report rather than be observed here.
+    ///
+    /// The event loop treats a hung-up master as a reason to keep waiting,
+    /// because for a child it spawned itself the exit notification really is
+    /// inevitable. For a foreign child it is not: only the process that forked
+    /// it may reap it, so if that report never comes the wait never ends.
+    /// Implementations that own their child leave this `false` and keep the
+    /// original behaviour exactly.
+    fn child_is_foreign(&self) -> bool {
+        false
+    }
 }
 
 /// Setup environment variables.

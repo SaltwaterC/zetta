@@ -762,3 +762,18 @@ fn native_macos_menus_duplicate_the_title_bar_menus() {
         .collect::<Vec<_>>();
     assert_eq!(action_names, [MinimizeWindow.name(), ZoomWindow.name()]);
 }
+
+#[test]
+fn sharing_a_tab_has_its_own_shortcut() {
+    // Sharing is a workflow of its own, not a step inside detaching, so it has
+    // to be reachable without going through the detach shortcut.
+    let shortcut = gpui::Keystroke::parse(TOGGLE_TAB_SHARING_KEYBINDING).unwrap();
+    assert_eq!(
+        toggle_tab_sharing_keybinding().match_keystrokes(&[shortcut]),
+        Some(false)
+    );
+    assert_ne!(
+        TOGGLE_TAB_SHARING_KEYBINDING, DETACH_TAB_KEYBINDING,
+        "sharing and detaching are different requests"
+    );
+}

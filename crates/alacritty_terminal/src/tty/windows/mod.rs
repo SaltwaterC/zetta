@@ -13,6 +13,9 @@ mod blocking;
 mod child;
 mod conpty;
 
+use std::num::NonZeroU32;
+use std::os::windows::io::FromRawHandle as _;
+
 use blocking::{UnblockedReader, UnblockedWriter};
 use conpty::Conpty as Backend;
 use miow::pipe::{AnonRead, AnonWrite};
@@ -27,11 +30,99 @@ type WritePipe = UnblockedWriter<AnonWrite>;
 pub struct Pty {
     // XXX: Backend is required to be the first field, to ensure correct drop order. Dropping
     // `conout` before `backend` will cause a deadlock (with Conpty).
-    backend: Backend,
+    backend: PtyBackend,
     conout: ReadPipe,
     conin: WritePipe,
     child_watcher: ChildExitWatcher,
+    /// Duplicates of the console's pipes, retained only by a PTY this process
+    /// created, which is the only one that has anything to hand over.
+    handover: Option<(std::os::windows::io::OwnedHandle, std::os::windows::io::OwnedHandle)>,
 }
+
+/// Who owns the pseudoconsole behind this PTY.
+enum PtyBackend {
+    /// Created here, so resizing and teardown happen here.
+    Owned(Backend),
+    /// Created by the multiplexer, which passed this process the console's
+    /// pipes. A pseudoconsole handle cannot cross a process boundary — it is
+    /// only meaningful to its creator — so resizing has to be asked of the
+    /// owner over the control channel, and dropping this must leave the
+    /// console alone so the session survives being detached.
+    Attached,
+}
+
+/// The reporting end of an attached PTY's child events.
+///
+/// Named and shaped to match the Unix implementation, so everything above the
+/// platform layer treats an attached terminal the same way on either.
+pub struct AttachedChildEvents(child::ChildExitReporter);
+
+impl AttachedChildEvents {
+    /// Reports the exit code the multiplexer observed.
+    pub fn report_exit(&mut self, exit_code: i32) -> io::Result<()> {
+        self.report(ChildEvent::Exited(exit_status_from_code(exit_code)))
+    }
+
+    pub fn report_status_unavailable(&mut self) -> io::Result<()> {
+        self.report(ChildEvent::ExitStatusUnavailable)
+    }
+
+    pub fn report_watcher_disconnected(&mut self) -> io::Result<()> {
+        self.report(ChildEvent::WatcherDisconnected)
+    }
+
+    fn report(&mut self, event: ChildEvent) -> io::Result<()> {
+        self.0
+            .report(event)
+            .map_err(|()| io::Error::other("the terminal is no longer listening for its exit"))
+    }
+}
+
+/// Builds an `ExitStatus` from a raw Windows exit code.
+///
+/// Unix carries a wait status and Windows an exit code; both arrive here as an
+/// `i32` from the multiplexer, and each platform interprets it as its own.
+fn exit_status_from_code(exit_code: i32) -> std::process::ExitStatus {
+    use std::os::windows::process::ExitStatusExt as _;
+    std::process::ExitStatus::from_raw(exit_code as u32)
+}
+
+/// Builds a PTY around a pseudoconsole another process owns.
+///
+/// `conout` and `conin` are that console's pipes, duplicated into this process.
+/// Resizing is not possible from here, so the caller forwards it to the owner;
+/// the exit status arrives through the returned reporter, because only the
+/// owner can wait on the process.
+pub fn attach(
+    conout: std::os::windows::io::OwnedHandle,
+    conin: std::os::windows::io::OwnedHandle,
+    child_pid: u32,
+) -> io::Result<(Pty, AttachedChildEvents)> {
+    use std::os::windows::io::IntoRawHandle as _;
+
+    // SAFETY: both handles are owned by this process and are given up here
+    // exactly once, so each pipe becomes the sole owner of its handle.
+    let conout_pipe = unsafe { AnonRead::from_raw_handle(conout.into_raw_handle()) };
+    let conin_pipe = unsafe { AnonWrite::from_raw_handle(conin.into_raw_handle()) };
+    let (child_watcher, reporter) = ChildExitWatcher::external(NonZeroU32::new(child_pid));
+    let pty = Pty {
+        backend: PtyBackend::Attached,
+        conout: UnblockedReader::new(conout_pipe, PIPE_CAPACITY),
+        conin: UnblockedWriter::new(conin_pipe, PIPE_CAPACITY),
+        child_watcher,
+        // An attached terminal is not this process's to hand on.
+        handover: None,
+    };
+    Ok((pty, AttachedChildEvents(reporter)))
+}
+
+/// The buffer each direction of an attached console is unblocked through,
+/// matching what `conpty::new` uses for a console it creates.
+///
+/// It has to be the same constant, not merely a similar one: `piper::pipe`
+/// asserts a positive capacity, so a zero here panicked every attached pane
+/// before it could be built.
+const PIPE_CAPACITY: usize = conpty::PIPE_CAPACITY;
 
 pub fn new(config: &Options, window_size: WindowSize, _window_id: u64) -> Result<Pty> {
     conpty::new(config, window_size)
@@ -43,8 +134,32 @@ impl Pty {
         conout: impl Into<ReadPipe>,
         conin: impl Into<WritePipe>,
         child_watcher: ChildExitWatcher,
+        handover: Option<(std::os::windows::io::OwnedHandle, std::os::windows::io::OwnedHandle)>,
     ) -> Self {
-        Self { backend: backend.into(), conout: conout.into(), conin: conin.into(), child_watcher }
+        Self {
+            backend: PtyBackend::Owned(backend.into()),
+            conout: conout.into(),
+            conin: conin.into(),
+            child_watcher,
+            handover,
+        }
+    }
+
+    /// The console's pipes, kept so this terminal can be handed to another
+    /// process.
+    ///
+    /// The unblocking wrappers take ownership of the pipes and read them on
+    /// their own threads, so duplicates are retained at construction: there is
+    /// otherwise nothing left to duplicate into a client when it attaches.
+    pub fn handover_handles(
+        &self,
+    ) -> Option<(&std::os::windows::io::OwnedHandle, &std::os::windows::io::OwnedHandle)> {
+        self.handover.as_ref().map(|(conout, conin)| (conout, conin))
+    }
+
+    /// The PTY child's process ID, whether this process spawned it or not.
+    pub fn child_pid(&self) -> u32 {
+        self.child_watcher.pid().map(|pid| pid.get()).unwrap_or_default()
     }
 
     pub fn child_watcher(&self) -> &ChildExitWatcher {
@@ -116,6 +231,10 @@ impl EventedReadWrite for Pty {
 }
 
 impl EventedPty for Pty {
+    fn child_is_foreign(&self) -> bool {
+        matches!(self.backend, PtyBackend::Attached)
+    }
+
     fn next_child_event(&mut self) -> Option<ChildEvent> {
         child_event_from_recv(self.child_watcher.event_rx().try_recv())
     }
@@ -133,7 +252,13 @@ fn child_event_from_recv(
 
 impl OnResize for Pty {
     fn on_resize(&mut self, window_size: WindowSize) {
-        self.backend.on_resize(window_size)
+        match &mut self.backend {
+            PtyBackend::Owned(backend) => backend.on_resize(window_size),
+            // Only the pseudoconsole's creator can resize it. The caller sends
+            // the new size to the multiplexer instead; doing nothing here is
+            // what keeps that from silently appearing to have worked.
+            PtyBackend::Attached => {},
+        }
     }
 }
 

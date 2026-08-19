@@ -37,6 +37,9 @@ pub(crate) enum StartupMode {
     ListBackgroundSessions {
         json: bool,
     },
+    /// `zetta mux ...`, forwarded verbatim to the multiplexer so the subcommand
+    /// and the `zmux` binary cannot accept different arguments.
+    Mux(Vec<OsString>),
     ReconnectBackgroundSession {
         identifier: String,
     },
@@ -756,6 +759,23 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             tftp_command: None,
         });
     }
+    if arguments.first().is_some_and(|argument| argument == "mux") {
+        return Ok(StartupArgs {
+            config_path: None,
+            keymap_path: None,
+            profile: None,
+            split: None,
+            replace_pane: false,
+            theme_override: None,
+            mode: StartupMode::Mux(arguments[1..].to_vec()),
+            profile_report: None,
+            profile_duration: None,
+            profile_pane_stress: false,
+            profile_workload: PerformanceWorkload::Standard,
+            profile_external_terminal: false,
+            tftp_command: None,
+        });
+    }
     if arguments
         .first()
         .is_some_and(|argument| argument == "sessions")
@@ -1257,6 +1277,8 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 )
             }
             #[cfg(windows)]
+            // Hidden: written into the Start menu shortcut by the installer,
+            // not something a user types.
             "--register-windows-shell" => {
                 mode = StartupMode::RegisterWindowsShell(
                     args.next()
@@ -1350,6 +1372,11 @@ fn parse_benchmark_args(arguments: &[OsString]) -> Result<StartupArgs> {
                 PerformanceWorkload::AltScreenScroll,
             )?,
             "--profile-external-terminal" | "-x" => profile_external_terminal = true,
+            // Hidden, and long-only for that reason: these are the child half of
+            // `--profile-external-terminal`, which `startup.rs` spells out when
+            // it launches the producer in the user's own terminal. The
+            // documented way to choose a workload is `--profile-background-
+            // stress` and its siblings, which select the same producers.
             "--terminal-render-workload" => mode = StartupMode::TerminalRenderingWorkload,
             "--terminal-checkerboard-workload" => mode = StartupMode::TerminalCheckerboardWorkload,
             "--terminal-sparse-update-workload" => mode = StartupMode::TerminalSparseUpdateWorkload,

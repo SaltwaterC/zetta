@@ -9,6 +9,9 @@ pub mod event_loop;
 pub mod grid;
 pub mod index;
 pub mod selection;
+// Zetta-authored: serializing a grid back into escape sequences, which both the
+// terminal and the session multiplexer need. See `crates/alacritty_terminal/UPSTREAM.md`.
+pub mod snapshot;
 pub mod sync;
 pub mod term;
 pub mod thread;

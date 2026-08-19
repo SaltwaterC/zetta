@@ -2,6 +2,7 @@ mod mappings;
 
 mod alacritty;
 mod pty_info;
+mod snapshot;
 pub mod terminal_settings;
 
 #[cfg(not(windows))]
@@ -36,6 +37,20 @@ use util::{ResultExt as _, paths::PathStyle, truncate_and_trailoff};
 use alacritty_terminal::grid::Dimensions as _;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
+
+/// A successful exit, built the way each platform spells one: Unix carries a
+/// wait status and Windows an exit code, and the same number does not mean the
+/// same thing to both.
+#[cfg(test)]
+fn successful_exit() -> ExitStatus {
+    #[cfg(unix)]
+    return ExitStatus::from_raw(0);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::ExitStatusExt as _;
+        ExitStatus::from_raw(0)
+    }
+}
 use std::{
     borrow::Cow,
     cmp::{self, min},
@@ -68,9 +83,9 @@ use gpui::{
 #[cfg(not(windows))]
 use crate::alacritty::current_child_signal_mask;
 use crate::alacritty::{
-    AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittySearch, AlacrittyTerm,
-    AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, PtySender, RegexSearches,
-    ScrollbackSearch, WakeupGate, ZedListener, append_text_to_term, apply_config,
+    AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittyPty, AlacrittySearch,
+    AlacrittyTerm, AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, PtyIo, PtySender,
+    RegexSearches, ScrollbackSearch, WakeupGate, ZedListener, append_text_to_term, apply_config,
     clear_saved_screen, content_text, display_offset, display_only_term_config,
     find_from_terminal_point, full_content_range, last_non_empty_lines, make_content, new_term,
     open_pty, pty_options, pty_term_config, resize, screen_lines, scroll_display, scroll_to_point,
@@ -1460,6 +1475,183 @@ pub struct TerminalBuilder {
     terminal: Terminal,
     events_tx: futures::channel::mpsc::UnboundedSender<PtyEvent>,
     events_rx: UnboundedReceiver<PtyEvent>,
+    /// Present when the PTY came from a provider. The caller has to route the
+    /// provider's exit reports into this, or the terminal will never learn that
+    /// its process ended.
+    child_events: Option<alacritty_terminal::tty::AttachedChildEvents>,
+    /// Set when the multiplexer was meant to open this terminal and could not,
+    /// so it was opened locally instead.
+    multiplexer_error: Option<String>,
+}
+
+impl TerminalBuilder {
+    /// Takes the reporting end of an attached PTY's child events, if this
+    /// terminal has one.
+    pub fn take_child_events(&mut self) -> Option<alacritty_terminal::tty::AttachedChildEvents> {
+        self.child_events.take()
+    }
+
+    /// Why this terminal was opened locally despite a multiplexer being asked
+    /// for. `None` when the multiplexer opened it, or was never asked.
+    pub fn multiplexer_error(&self) -> Option<&str> {
+        self.multiplexer_error.as_deref()
+    }
+}
+
+/// Asks `provider` for a PTY and turns it into one this process can drive.
+///
+/// The replay is processed into the grid here, before the event loop starts, so
+/// the first frame already shows what the provider had retained rather than
+/// painting a blank terminal and filling it in a frame later.
+#[cfg(unix)]
+fn open_provided_pty(
+    provider: &dyn PtyProvider,
+    pty_options: &alacritty_terminal::tty::Options,
+    shell: Option<(String, Vec<String>)>,
+    working_directory: Option<PathBuf>,
+    env: HashMap<String, String>,
+    term: &Arc<AlacrittyTermLock>,
+    output_processor: &mut Processor<StdSyncHandler>,
+) -> Result<(
+    AlacrittyPty,
+    Option<alacritty_terminal::tty::AttachedChildEvents>,
+    Vec<u8>,
+)> {
+    let _ = pty_options;
+    let (program, args) = match shell {
+        Some((program, args)) => (Some(program), args),
+        None => (None, Vec::new()),
+    };
+    let handover = provider.open(PtySpawnRequest {
+        program,
+        args,
+        env,
+        working_directory,
+    })?;
+    let (pty, child_events) =
+        alacritty_terminal::tty::attach(handover.descriptor, handover.child_pid)?;
+    let _ = (term, output_processor);
+    Ok((pty, Some(child_events), handover.replay))
+}
+
+#[cfg(windows)]
+fn open_provided_pty(
+    provider: &dyn PtyProvider,
+    pty_options: &alacritty_terminal::tty::Options,
+    shell: Option<(String, Vec<String>)>,
+    working_directory: Option<PathBuf>,
+    env: HashMap<String, String>,
+    term: &Arc<AlacrittyTermLock>,
+    output_processor: &mut Processor<StdSyncHandler>,
+) -> Result<(
+    AlacrittyPty,
+    Option<alacritty_terminal::tty::AttachedChildEvents>,
+)> {
+    let _ = pty_options;
+    let (program, args) = match shell {
+        Some((program, args)) => (Some(program), args),
+        None => (None, Vec::new()),
+    };
+    let handover = provider.open(PtySpawnRequest {
+        program,
+        args,
+        env,
+        working_directory,
+    })?;
+    let (pty, child_events) =
+        alacritty_terminal::tty::attach(handover.conout, handover.conin, handover.child_pid)?;
+    if !handover.replay.is_empty() {
+        output_processor.advance(&mut *term.lock(), &handover.replay);
+    }
+    Ok((pty, Some(child_events)))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_provided_pty(
+    _provider: &dyn PtyProvider,
+    _pty_options: &alacritty_terminal::tty::Options,
+    _shell: Option<(String, Vec<String>)>,
+    _working_directory: Option<PathBuf>,
+    _env: HashMap<String, String>,
+    _term: &Arc<AlacrittyTermLock>,
+    _output_processor: &mut Processor<StdSyncHandler>,
+) -> Result<(
+    AlacrittyPty,
+    Option<alacritty_terminal::tty::AttachedChildEvents>,
+)> {
+    anyhow::bail!("the multiplexer cannot hand over a console on this platform")
+}
+
+/// Opens the PTY a terminal runs on.
+///
+/// Exists so that spawning through the multiplexer changes exactly one step.
+/// Everything around it — resolving the shell, the environment, WSL and MSYS2
+/// handling, the activation script — is identical either way and stays in one
+/// place; duplicating it for a second spawn path is how the two would drift.
+///
+/// The application implements this over its multiplexer client, which is also
+/// why it is a trait: this crate has no business knowing how that client talks
+/// to anything.
+pub trait PtyProvider: Send + Sync {
+    fn open(&self, request: PtySpawnRequest) -> Result<PtyHandover>;
+
+    /// Tells the owner that the terminal was resized.
+    ///
+    /// On Unix this is unnecessary — `TIOCSWINSZ` works from any holder of the
+    /// descriptor, so the resize has already happened by the time this is
+    /// called. On Windows only the pseudoconsole's creator can resize it, so
+    /// this is the resize.
+    fn resize(&self, columns: u16, lines: u16) {
+        let _ = (columns, lines);
+    }
+}
+
+pub struct PtySpawnRequest {
+    pub program: Option<String>,
+    pub args: Vec<String>,
+    pub env: HashMap<String, String>,
+    pub working_directory: Option<PathBuf>,
+}
+
+/// A PTY opened elsewhere, handed to this process to read and write.
+///
+/// What crosses the boundary differs by platform: a single descriptor for the
+/// terminal on Unix, and the pseudoconsole's two pipes on Windows, where the
+/// console handle itself cannot be shared and stays with its creator.
+pub struct PtyHandover {
+    #[cfg(unix)]
+    pub descriptor: std::os::fd::OwnedFd,
+    #[cfg(windows)]
+    pub conout: std::os::windows::io::OwnedHandle,
+    #[cfg(windows)]
+    pub conin: std::os::windows::io::OwnedHandle,
+    pub child_pid: u32,
+    /// Anything the provider retained before handing over, replayed into the
+    /// grid before the terminal is shown.
+    pub replay: Vec<u8>,
+}
+
+/// What a terminal needs to know about a session the multiplexer resolved on
+/// its behalf. The shell and environment are carried through rather than
+/// re-resolved, so a reattached pane reports the same command it was started
+/// with and duplicating it produces the same terminal.
+pub struct AttachedOptions {
+    pub shell: Shell,
+    pub env: HashMap<String, String>,
+    pub cursor_shape: SettingsCursorShape,
+    pub alternate_scroll: AlternateScroll,
+    pub max_scroll_history_lines: Option<usize>,
+    pub path_hyperlink_regexes: Vec<String>,
+    pub path_hyperlink_timeout_ms: u64,
+    pub window_id: u64,
+}
+
+pub struct AttachedTerminal {
+    pub builder: TerminalBuilder,
+    /// How the multiplexer's report of the process's exit reaches this
+    /// terminal. Dropping it without reporting makes the terminal treat the
+    /// session's watcher as lost, which is the honest outcome.
+    pub child_events: alacritty_terminal::tty::AttachedChildEvents,
 }
 
 impl TerminalBuilder {
@@ -1508,6 +1700,7 @@ impl TerminalBuilder {
             terminal_type: TerminalType::DisplayOnly,
             subprocess: None,
             byte_stream: None,
+            events_tx: events_tx.clone(),
             completion_tx: None,
             term,
             wakeup_gate,
@@ -1544,6 +1737,7 @@ impl TerminalBuilder {
             wsl_startup_timing: None,
             activation_script: Vec::new(),
             template: CopyTemplate {
+                pty_provider: None,
                 shell: Shell::System,
                 env: HashMap::default(),
                 cursor_shape,
@@ -1553,6 +1747,8 @@ impl TerminalBuilder {
                 path_hyperlink_timeout_ms: 0,
                 window_id,
             },
+            child_is_the_multiplexers: false,
+            pending_replay: None,
             child_exited: None,
             terminal_exit_reported: false,
             task_exit_code: None,
@@ -1576,7 +1772,109 @@ impl TerminalBuilder {
             terminal,
             events_tx,
             events_rx,
+            child_events: None,
+            multiplexer_error: None,
         }
+    }
+
+    /// Creates a terminal around a PTY the multiplexer already owns.
+    ///
+    /// Everything past this point is identical to a terminal this process
+    /// spawned: the same event loop reads the same kind of descriptor, so
+    /// output, input, resize and foreground-process tracking are unchanged and
+    /// cost the same. Only two things differ, and both are in [`tty::attach`]:
+    /// dropping this terminal leaves the process running, and its exit status
+    /// arrives over [`AttachedTerminal::child_events`] rather than `waitpid`.
+    ///
+    /// `replay` is processed into the grid *before* the event loop starts, so
+    /// the first frame already shows the restored screen rather than painting
+    /// a blank terminal and filling it in afterwards.
+    pub fn new_attached(
+        handover: PtyHandover,
+        options: AttachedOptions,
+        background_executor: &BackgroundExecutor,
+        path_style: PathStyle,
+    ) -> Result<AttachedTerminal> {
+        let AttachedOptions {
+            shell,
+            env,
+            cursor_shape,
+            alternate_scroll,
+            max_scroll_history_lines,
+            path_hyperlink_regexes,
+            path_hyperlink_timeout_ms,
+            window_id,
+        } = options;
+
+        let mut builder = Self::new_display_only(
+            cursor_shape,
+            alternate_scroll,
+            max_scroll_history_lines,
+            window_id,
+            background_executor,
+            path_style,
+        );
+
+        // A real terminal, not a display-only one: it must answer the
+        // sequences a program expects a PTY-backed terminal to answer.
+        let scrolling_history = max_scroll_history_lines
+            .unwrap_or(DEFAULT_SCROLL_HISTORY_LINES)
+            .min(MAX_SCROLL_HISTORY_LINES);
+        builder.terminal.term_config = pty_term_config(scrolling_history, cursor_shape);
+        apply_config(&builder.terminal.term, &builder.terminal.term_config);
+
+        // Held rather than replayed now. The grid is still the placeholder
+        // size at this point, so writing the restored screen into it would
+        // wrap every line at the wrong width and then reflow again once the
+        // pane is laid out — which is what turns a restored screen into a
+        // mangled one.
+        builder.terminal.pending_replay = (!handover.replay.is_empty()).then_some(handover.replay);
+
+        #[cfg(unix)]
+        let (pty, child_events) =
+            alacritty_terminal::tty::attach(handover.descriptor, handover.child_pid)
+                .context("adopting the multiplexer's terminal")?;
+        #[cfg(windows)]
+        let (pty, child_events) = {
+            use anyhow::Context as _;
+            alacritty_terminal::tty::attach(handover.conout, handover.conin, handover.child_pid)
+                .context("adopting the multiplexer's terminal")?
+        };
+        let info = PtyProcessInfo::new(ProcessIdGetter::from(&pty));
+        let listener = ZedListener::new(
+            builder.events_tx.clone(),
+            builder.terminal.wakeup_gate.clone(),
+        );
+        let (pty_tx, io) = spawn_event_loop(builder.terminal.term.clone(), listener, pty, true)?;
+
+        builder.terminal.terminal_type = TerminalType::Pty {
+            pty_tx,
+            io: Some(io),
+            info: Arc::new(info),
+        };
+        builder.terminal.hyperlink_regex_searches =
+            RegexSearches::new(&path_hyperlink_regexes, path_hyperlink_timeout_ms);
+        // The daemon forked this child and is still its parent: this window is
+        // borrowing the descriptor, and detaching the pane again — or quitting
+        // — has to leave the session running.
+        builder.terminal.child_is_the_multiplexers = true;
+        builder.terminal.template = CopyTemplate {
+            pty_provider: None,
+            shell,
+            env,
+            cursor_shape,
+            alternate_scroll,
+            max_scroll_history_lines,
+            path_hyperlink_regexes,
+            path_hyperlink_timeout_ms,
+            window_id,
+        };
+        builder.terminal.content_dirty = true;
+
+        Ok(AttachedTerminal {
+            builder,
+            child_events,
+        })
     }
 
     /// Creates a terminal backed by an arbitrary blocking byte stream.
@@ -1613,6 +1911,16 @@ impl TerminalBuilder {
         builder
     }
 
+    /// Replays `bytes` into the grid once it has been sized, like
+    /// [`TerminalBuilder::new_attached`] replays a handover's retained output.
+    ///
+    /// The byte-stream constructor carries no handover, so a terminal built
+    /// for a shared pane replays through this instead.
+    pub fn with_replay(mut self, bytes: Vec<u8>) -> Self {
+        self.terminal.pending_replay = (!bytes.is_empty()).then_some(bytes);
+        self
+    }
+
     pub fn new(
         working_directory: Option<PathBuf>,
         task: Option<TaskState>,
@@ -1629,6 +1937,7 @@ impl TerminalBuilder {
         cx: &App,
         activation_script: Vec<String>,
         path_style: PathStyle,
+        pty_provider: Option<Arc<dyn PtyProvider>>,
     ) -> Task<Result<TerminalBuilder>> {
         let version = release_channel::AppVersion::global(cx);
         let background_executor = cx.background_executor().clone();
@@ -1751,6 +2060,16 @@ impl TerminalBuilder {
             let builder_events_tx = events_tx.clone();
             let wakeup_gate = WakeupGate::new();
             let listener = ZedListener::new(events_tx.clone(), wakeup_gate.clone());
+            let mut output_processor = Processor::<StdSyncHandler>::new();
+            // Set by the multiplexer-backed branch below: an attached child's
+            // exit status can only come from the process that owns it.
+            let mut child_events = None;
+            // Written into the grid only once the pane has been laid out; see
+            // `pending_replay` on `Terminal`.
+            let mut pending_replay = None;
+            // Why the multiplexer was not used, when it was meant to be. The
+            // terminal still opens; the caller decides how loudly to say so.
+            let mut multiplexer_error = None;
             //Set up the terminal...
             let term = new_term(
                 &config,
@@ -1778,7 +2097,7 @@ impl TerminalBuilder {
                     env.clone(),
                     working_directory.clone(),
                     term.clone(),
-                    events_tx,
+                    events_tx.clone(),
                     wakeup_gate.clone(),
                     &background_executor,
                 ) {
@@ -1816,7 +2135,7 @@ impl TerminalBuilder {
                     )
                 });
                 let pty_options = pty_options(
-                    alacritty_shell,
+                    alacritty_shell.clone(),
                     working_directory.clone(),
                     env.clone(),
                     // We pass in the foreground thread's signal mask to the child process via pty_options,
@@ -1830,18 +2149,51 @@ impl TerminalBuilder {
                 );
 
                 //Setup the pty...
-                let pty = match open_pty(&pty_options, TerminalBounds::default(), window_id) {
-                    Ok(pty) => pty,
+                let mut opened = match &pty_provider {
+                    // The multiplexer opens it and owns the child, so this
+                    // process gets a descriptor rather than a process. What
+                    // comes back is otherwise an ordinary PTY.
+                    Some(provider) => open_provided_pty(
+                        provider.as_ref(),
+                        &pty_options,
+                        alacritty_shell.clone(),
+                        working_directory.clone(),
+                        env.clone(),
+                        &term,
+                        &mut output_processor,
+                    ),
+                    None => open_pty(&pty_options, TerminalBounds::default(), window_id)
+                        .map(|pty| (pty, None, Vec::new()))
+                        .map_err(anyhow::Error::from),
+                };
+                // A multiplexer that cannot open the terminal must not stop it
+                // from opening. Falling back to a local process costs the
+                // session its ability to outlive this window, which is a far
+                // smaller loss than a terminal that refuses to start.
+                if let (Err(error), Some(_)) = (&opened, &pty_provider) {
+                    log::warn!(
+                        "the multiplexer could not open this terminal, starting it locally \
+                         instead: {error:#}"
+                    );
+                    multiplexer_error = Some(format!("{error:#}"));
+                    opened = open_pty(&pty_options, TerminalBounds::default(), window_id)
+                        .map(|pty| (pty, None, Vec::new()))
+                        .map_err(anyhow::Error::from);
+                }
+                let (pty, attached_child_events, replay) = match opened {
+                    Ok(opened) => opened,
                     Err(error) => {
                         bail!(TerminalError {
                             directory: working_directory,
                             program: shell_params.as_ref().map(|params| params.program.clone()),
                             args: shell_params.as_ref().and_then(|params| params.args.clone()),
                             title_override: terminal_title_override,
-                            source: error,
+                            source: std::io::Error::other(format!("{error:#}")),
                         });
                     }
                 };
+                child_events = attached_child_events;
+                pending_replay = (!replay.is_empty()).then_some(replay);
 
                 #[cfg(windows)]
                 if is_wsl_startup {
@@ -1861,12 +2213,13 @@ impl TerminalBuilder {
                 let pty_info = PtyProcessInfo::new(ProcessIdGetter::from(&pty));
 
                 //And connect them together
-                let pty_tx =
+                let (pty_tx, io) =
                     spawn_event_loop(term.clone(), listener, pty, pty_options.drain_on_exit)?;
 
                 (
                     TerminalType::Pty {
                         pty_tx,
+                        io: Some(io),
                         info: Arc::new(pty_info),
                     },
                     None,
@@ -1879,11 +2232,12 @@ impl TerminalBuilder {
                 terminal_type,
                 subprocess,
                 byte_stream: None,
+                events_tx: events_tx.clone(),
                 completion_tx,
                 term,
                 wakeup_gate,
                 term_config: config,
-                output_processor: Processor::<StdSyncHandler>::new(),
+                output_processor,
                 title_override: terminal_title_override,
                 events: VecDeque::with_capacity(10), //Should never get this high.
                 last_content: Default::default(),
@@ -1915,6 +2269,7 @@ impl TerminalBuilder {
                 wsl_startup_timing,
                 activation_script: activation_script.clone(),
                 template: CopyTemplate {
+                    pty_provider: pty_provider.clone(),
                     shell,
                     env,
                     cursor_shape,
@@ -1924,6 +2279,10 @@ impl TerminalBuilder {
                     path_hyperlink_timeout_ms,
                     window_id,
                 },
+                // The pty was opened here (or by the provider, which
+                // `owns_child` reads from the template).
+                child_is_the_multiplexers: false,
+                pending_replay,
                 child_exited: None,
                 terminal_exit_reported: false,
                 task_exit_code: None,
@@ -1968,6 +2327,8 @@ impl TerminalBuilder {
                 terminal,
                 events_tx: builder_events_tx,
                 events_rx,
+                child_events,
+                multiplexer_error,
             })
         };
         cx.background_spawn(fut)
@@ -1978,11 +2339,17 @@ impl TerminalBuilder {
         // task from `Drop` may not run once GPUI begins terminating executors.
         let app_quit_subscription = cx.on_app_quit(|terminal, cx| {
             let kill_processes = match &terminal.terminal_type {
-                TerminalType::Pty { info, .. } => Some(terminate_processes_with_grace_period(
-                    info.clone(),
-                    cx.background_executor().clone(),
-                )),
-                TerminalType::DisplayOnly => None,
+                // A session the multiplexer owns must survive Zetta quitting —
+                // outliving the window is the entire point of backgrounding
+                // it, and killing it here would empty every held session the
+                // moment the application closed.
+                TerminalType::Pty { info, .. } if terminal.owns_child() => {
+                    Some(terminate_processes_with_grace_period(
+                        info.clone(),
+                        cx.background_executor().clone(),
+                    ))
+                }
+                TerminalType::Pty { .. } | TerminalType::DisplayOnly => None,
             };
             async move {
                 if let Some(kill_processes) = kill_processes {
@@ -2077,6 +2444,10 @@ impl TerminalBuilder {
 enum TerminalType {
     Pty {
         pty_tx: PtySender,
+        /// The thread reading this pty, kept so converting the terminal to
+        /// another backend can stop it synchronously. Taken by
+        /// [`Terminal::stop_pty_loop`].
+        io: Option<PtyIo>,
         info: Arc<PtyProcessInfo>,
     },
     DisplayOnly,
@@ -2089,6 +2460,10 @@ pub struct Terminal {
     subprocess: Option<SubprocessHandle>,
     /// Set for terminals connected to a blocking bidirectional byte stream.
     byte_stream: Option<ByteStreamHandle>,
+    /// Where this terminal's events go. Carried past construction so a
+    /// terminal that is converted to a byte stream after it started (the
+    /// multiplexer handover) can keep feeding the same channel.
+    events_tx: futures::channel::mpsc::UnboundedSender<PtyEvent>,
     completion_tx: Option<Sender<Option<ExitStatus>>>,
     term: Arc<AlacrittyTermLock>,
     wakeup_gate: WakeupGate,
@@ -2125,7 +2500,21 @@ pub struct Terminal {
     #[cfg(windows)]
     wsl_startup_timing: Option<WslStartupTiming>,
     template: CopyTemplate,
+    /// Whether the child this terminal's pty runs belongs to the multiplexer.
+    ///
+    /// Set when a pane is attached, or handed back, from the multiplexer: the
+    /// daemon forked that child and is still its parent, so this window must
+    /// leave it running when the pane goes away. Nothing else can be inferred
+    /// from the terminal itself — an attached pty looks exactly like one this
+    /// process opened.
+    child_is_the_multiplexers: bool,
     activation_script: Vec<String>,
+    /// A restored screen waiting for the grid to be the right size.
+    ///
+    /// Replaying it before the pane is laid out wraps it at the placeholder
+    /// width and then reflows it again, which is how a restored session ends
+    /// up looking corrupted rather than resumed.
+    pending_replay: Option<Vec<u8>>,
     child_exited: Option<ExitStatus>,
     terminal_exit_reported: bool,
     task_exit_code: Option<i32>,
@@ -2149,6 +2538,11 @@ pub struct Terminal {
 }
 
 struct CopyTemplate {
+    /// How the original's PTY was opened. Carried so that duplicating a pane
+    /// produces a terminal owned by the same thing the original was, rather
+    /// than silently spawning a local process the multiplexer knows nothing
+    /// about.
+    pty_provider: Option<Arc<dyn PtyProvider>>,
     shell: Shell,
     env: HashMap<String, String>,
     cursor_shape: SettingsCursorShape,
@@ -2191,6 +2585,12 @@ impl TaskStatus {
         };
     }
 }
+
+/// How long to wait for a retired byte stream to finish delivering what it had
+/// already read. Bounded so a multiplexer that failed to close its end of the
+/// relay cannot hang the window; exceeded, the tail of that output is lost, which
+/// is only worse than a stall if the stall would have ended.
+const BYTE_STREAM_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 const FIND_HYPERLINK_THROTTLE_PX: Pixels = px(5.0);
 
@@ -2352,6 +2752,13 @@ impl Terminal {
                 self.register_terminal_exit(None, TerminalExitSource::StatusUnavailable, cx);
             }
             TerminalBackendEvent::ChildWatcherDisconnected => {
+                // The child's fate is genuinely unknown here: the multiplexer
+                // owns the process, so losing contact with it says nothing about
+                // whether the process ended. What *is* known is that this
+                // terminal can no longer be driven — the event loop stops on a
+                // child event — so the exit is registered rather than
+                // suppressed, but under its own source, so the pane can say it
+                // lost contact instead of claiming the shell died.
                 self.register_terminal_exit(None, TerminalExitSource::WatcherDisconnected, cx);
             }
             TerminalBackendEvent::BackendShutdown => {
@@ -2388,11 +2795,26 @@ impl Terminal {
 
                 if let TerminalType::Pty { pty_tx, .. } = &self.terminal_type {
                     pty_tx.resize(new_bounds);
+                    // A pseudoconsole this process did not create cannot be
+                    // resized from here, so the owner is told as well. On Unix
+                    // the resize above already took effect and this is a no-op.
+                    if let Some(provider) = &self.template.pty_provider {
+                        provider.resize(
+                            new_bounds.num_columns() as u16,
+                            new_bounds.num_lines() as u16,
+                        );
+                    }
                 }
 
                 let reflow =
                     reflow && synchronous_reflow_is_bounded(term.history_size(), term.columns());
                 resize(term, new_bounds, reflow);
+                // The grid is now the size the pane actually has, which is the
+                // first moment a restored screen can be written without being
+                // wrapped at the wrong width.
+                if let Some(replay) = self.pending_replay.take() {
+                    self.output_processor.advance(term, &replay);
+                }
                 if grid_size_changed {
                     cx.emit(Event::GridSizeChanged);
                 }
@@ -2643,6 +3065,33 @@ impl Terminal {
         cx.emit(Event::Wakeup);
     }
 
+    /// Whether this terminal's processes are its own to end.
+    ///
+    /// A terminal whose PTY came from the multiplexer is a *view* of a session
+    /// the multiplexer owns. Dropping it is exactly what detaching does, so
+    /// ending its processes there would kill the session the user asked to
+    /// keep — and leave the multiplexer holding a terminal whose shell is
+    /// already dead, which is what a reattached session that cannot be typed
+    /// into actually is.
+    /// A pane *attached* from the multiplexer is the same view arrived at from
+    /// the other direction, and has no provider to say so: its descriptor was
+    /// handed over rather than opened here. Detaching such a pane again — or
+    /// simply quitting the window — killed the session it was handing back.
+    fn owns_child(&self) -> bool {
+        self.template.pty_provider.is_none() && !self.child_is_the_multiplexers
+    }
+
+    /// Serializes the scrollback and screen as the escape sequences that would
+    /// reproduce them, most recent `max_lines` lines.
+    ///
+    /// Taken when a session is handed to the multiplexer, which has not been
+    /// reading this pane while this window was showing it: the screen is here,
+    /// and this is what carries it across so the multiplexer's own grid starts
+    /// from what the user was looking at.
+    pub fn ansi_snapshot(&self, max_lines: usize) -> Vec<u8> {
+        snapshot::ansi_snapshot(&self.term.lock_unfair(), max_lines)
+    }
+
     pub fn total_lines(&self) -> usize {
         total_lines(&self.term.lock_unfair())
     }
@@ -2794,7 +3243,16 @@ impl Terminal {
         let input = input.into();
         #[cfg(any(test, feature = "test-support"))]
         self.pty_write_log.borrow_mut().push(input.to_vec());
-        if let TerminalType::Pty { pty_tx, .. } = &self.terminal_type {
+        // The byte stream comes first, and has to. A pane handed over to the
+        // multiplexer in shared mode keeps its `TerminalType::Pty` — only the
+        // loop behind it is shut down, by `stop_pty_loop` — so testing the
+        // terminal type first sent every keystroke into a channel nothing was
+        // reading any more. The window that was revoked into shared mode went
+        // silently mute, which showed up as only the client that joined *last*
+        // being able to type.
+        if let Some(byte_stream) = &self.byte_stream {
+            byte_stream.write(input.into_owned());
+        } else if let TerminalType::Pty { pty_tx, .. } = &self.terminal_type {
             if log::log_enabled!(log::Level::Debug) {
                 if let Ok(str) = str::from_utf8(&input) {
                     log::debug!("Writing to PTY: {:?}", str);
@@ -2803,8 +3261,6 @@ impl Terminal {
                 }
             }
             pty_tx.notify(input);
-        } else if let Some(byte_stream) = &self.byte_stream {
-            byte_stream.write(input.into_owned());
         }
     }
 
@@ -3987,6 +4443,13 @@ impl Terminal {
             return;
         }
         self.terminal_exit_reported = true;
+        // A caller that asked to be told when the child finished is told,
+        // whether or not this terminal is running a task. The completion
+        // channel is the only way it learns; the interactive classification
+        // below decides what the *pane* does, which is a separate question.
+        if let Some(tx) = &self.completion_tx {
+            tx.try_send(exit_status).ok();
+        }
         #[cfg(windows)]
         if let Some(timing) = self.wsl_startup_timing.take() {
             let observed_at = Instant::now();
@@ -4018,6 +4481,151 @@ impl Terminal {
         if !exited.is_unexpected() {
             cx.emit(Event::CloseTerminal);
         }
+    }
+
+    /// Stops this terminal's pty event loop, synchronously.
+    ///
+    /// Used when a pane is handed back to the multiplexer: the loop thread is
+    /// the only other reader of the pty, and the next reader has to be able to
+    /// wait for it to actually end, or the two would consume the pty's output
+    /// between them. The grid stays intact; the terminal just stops being
+    /// fed until [`Terminal::attach_byte_stream`] reconnects it.
+    pub fn stop_pty_loop(&mut self) -> Result<()> {
+        let TerminalType::Pty { pty_tx, io, .. } = &mut self.terminal_type else {
+            return Ok(());
+        };
+        pty_tx.shutdown();
+        match io.take() {
+            Some(io) => io.join(),
+            None => Ok(()),
+        }
+    }
+
+    /// Connects this terminal to a blocking bidirectional byte stream,
+    /// replacing its pty event loop.
+    ///
+    /// Used when a pane is handed over to the multiplexer in shared mode: the
+    /// terminal keeps its grid, and the stream relays what the multiplexer
+    /// broadcast to the pane. The pty loop is stopped first if it is still
+    /// running.
+    pub fn attach_byte_stream(
+        &mut self,
+        reader: Box<dyn Read + Send>,
+        writer: Box<dyn Write + Send>,
+    ) -> Result<()> {
+        self.stop_pty_loop()?;
+        self.byte_stream = Some(spawn_byte_stream(
+            reader,
+            writer,
+            self.term.clone(),
+            self.events_tx.clone(),
+            self.wakeup_gate.clone(),
+        ));
+        Ok(())
+    }
+
+    /// Replaces this terminal's byte stream with a pty it now owns.
+    ///
+    /// The other half of [`Terminal::attach_byte_stream`], for a shared pane the
+    /// multiplexer has handed back: the grid, its scrollback and everything on
+    /// screen stay exactly as they are, and only what feeds them changes.
+    ///
+    /// Two orderings matter. The retired stream is drained first, because the
+    /// bytes it still holds are *older* than anything the pty will produce and
+    /// arriving after them would interleave the pane's output. And the pty event
+    /// loop is only started once that is done, so the two never write to the grid
+    /// at the same time.
+    ///
+    /// Works from either shape a shared pane can be in — a terminal that was
+    /// revoked into sharing and kept its pty type, and one that was built as a
+    /// byte stream and never had one — because it installs the pty backend
+    /// wholesale rather than repairing what is there.
+    pub fn attach_pty(
+        &mut self,
+        handover: PtyHandover,
+        options: AttachedOptions,
+        cx: &mut Context<Terminal>,
+    ) -> Result<alacritty_terminal::tty::AttachedChildEvents> {
+        anyhow::ensure!(
+            handover.replay.is_empty(),
+            "a pty handed back to its viewer must carry no replay: the viewer already has it"
+        );
+        // Everything the relay had already read, into the grid, before the pty can
+        // add to it.
+        if let Some(mut stream) = self.byte_stream.take() {
+            stream.drain_and_stop(BYTE_STREAM_DRAIN_TIMEOUT);
+        }
+        // A pty-backed terminal has to answer the sequences a program expects of
+        // one; a byte-stream terminal was configured as display-only.
+        let scrolling_history = options
+            .max_scroll_history_lines
+            .unwrap_or(DEFAULT_SCROLL_HISTORY_LINES)
+            .min(MAX_SCROLL_HISTORY_LINES);
+        self.term_config = pty_term_config(scrolling_history, options.cursor_shape);
+        apply_config(&self.term, &self.term_config);
+
+        #[cfg(unix)]
+        let (pty, child_events) =
+            alacritty_terminal::tty::attach(handover.descriptor, handover.child_pid)
+                .context("adopting the multiplexer's terminal")?;
+        #[cfg(windows)]
+        let (pty, child_events) =
+            alacritty_terminal::tty::attach(handover.conout, handover.conin, handover.child_pid)
+                .context("adopting the multiplexer's terminal")?;
+        let info = PtyProcessInfo::new(ProcessIdGetter::from(&pty));
+        let listener = ZedListener::new(self.events_tx.clone(), self.wakeup_gate.clone());
+        let (pty_tx, io) = spawn_event_loop(self.term.clone(), listener, pty, true)?;
+        // Whatever was there before is replaced, including a stopped pty loop left
+        // behind by the revoke that made this pane shared in the first place.
+        self.terminal_type = TerminalType::Pty {
+            pty_tx,
+            io: Some(io),
+            info: Arc::new(info),
+        };
+        // Handed back rather than opened here: the daemon is still this child's
+        // parent, so this window must not end it. A pane that joined a shared
+        // session has no provider to say so, and closing its tab killed the
+        // session it had just been given.
+        self.child_is_the_multiplexers = true;
+        self.template.shell = options.shell;
+        self.template.env = options.env;
+        self.content_dirty = true;
+        cx.notify();
+        Ok(child_events)
+    }
+
+    /// Reports that the child ended without the multiplexer being able to say
+    /// how.
+    ///
+    /// Rare but real: the multiplexer observed the process end without a status
+    /// — or a client asked what it missed and was told only that the pane is
+    /// gone. Either way the pane has to be told *something*. Saying nothing
+    /// leaves a shared pane waiting for a report that has already been and gone,
+    /// which is a terminal that can never be closed, with nothing on screen to
+    /// explain why.
+    pub fn report_child_exit_status_unavailable(
+        &mut self,
+        input_sent: bool,
+        cx: &mut Context<Terminal>,
+    ) {
+        self.keyboard_input_sent = input_sent;
+        self.register_terminal_exit(None, TerminalExitSource::StatusUnavailable, cx);
+    }
+
+    /// Reports the child's exit status as the multiplexer observed it.
+    ///
+    /// A shared pane's terminal no longer reads the pty itself, so it never
+    /// learns of an exit from the event loop; the multiplexer is the child's
+    /// parent and reports what it reaped. The daemon's attribution of input
+    /// replaces this terminal's own, which only counted keys typed at it.
+    pub fn report_child_exit(
+        &mut self,
+        exit_status: ExitStatus,
+        input_sent: bool,
+        cx: &mut Context<Terminal>,
+    ) {
+        self.keyboard_input_sent = input_sent;
+        self.register_terminal_exit(Some(exit_status), TerminalExitSource::Child, cx);
     }
 
     fn register_task_finished(
@@ -4120,6 +4728,7 @@ impl Terminal {
             cx,
             self.activation_script.clone(),
             self.path_style,
+            self.template.pty_provider.clone(),
         )
     }
 }
@@ -4194,6 +4803,10 @@ struct SubprocessHandle {
 struct ByteStreamHandle {
     input_tx: Option<mpsc::Sender<Vec<u8>>>,
     stopped: Arc<std::sync::atomic::AtomicBool>,
+    /// Signalled by the reader thread as it returns, so a caller can tell
+    /// "everything the stream held is in the grid" from "the thread is still
+    /// working through it".
+    finished: mpsc::Receiver<()>,
     _reader: thread::JoinHandle<()>,
     _writer: thread::JoinHandle<()>,
 }
@@ -4209,6 +4822,29 @@ impl ByteStreamHandle {
         self.stopped.store(true, Ordering::Release);
         self.input_tx.take();
     }
+
+    /// Stops the stream once it has read everything still in flight.
+    ///
+    /// Order matters, and it is the whole reason this exists. When a shared pane
+    /// is handed back, the multiplexer flushes what it had queued and closes its
+    /// end; those bytes are *older* than anything the terminal will read from the
+    /// pty next, so they have to reach the grid first. Setting the stop flag
+    /// straight away would abandon whatever was still buffered and lose it.
+    ///
+    /// Waits for the reader's own end-of-stream, then falls back to the flag so a
+    /// multiplexer that failed to close its end cannot hang the caller.
+    fn drain_and_stop(&mut self, patience: Duration) {
+        self.input_tx.take();
+        // `Disconnected` is the success case: the sender is dropped as the reader
+        // thread returns, which is precisely "it read everything there was".
+        match self.finished.recv_timeout(patience) {
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                log::warn!("a byte stream did not end within {patience:?}; abandoning it");
+                self.stopped.store(true, Ordering::Release);
+            }
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {}
+        }
+    }
 }
 
 fn spawn_byte_stream(
@@ -4221,9 +4857,13 @@ fn spawn_byte_stream(
     let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let reader_stopped = stopped.clone();
     let reader_events = events_tx.clone();
+    let (finished_tx, finished) = mpsc::channel::<()>();
     let reader_thread = thread::Builder::new()
         .name("terminal-byte-stream-reader".to_owned())
         .spawn(move || {
+            // Dropped as the thread returns, whichever way it returns, which is
+            // what `drain_and_stop` waits on.
+            let _finished = finished_tx;
             let mut processor = Processor::<StdSyncHandler>::new();
             let mut buffer = [0u8; 8192];
             let mut previous_byte_was_cr = false;
@@ -4283,6 +4923,7 @@ fn spawn_byte_stream(
     ByteStreamHandle {
         input_tx: Some(input_tx),
         stopped,
+        finished,
         _reader: reader_thread,
         _writer: writer_thread,
     }
@@ -4412,13 +5053,17 @@ impl Drop for Terminal {
         if let Some(subprocess) = self.subprocess.take() {
             subprocess.kill();
         }
-        if let TerminalType::Pty { pty_tx, info } =
+        let owns_child = self.owns_child();
+        if let TerminalType::Pty { pty_tx, info, .. } =
             std::mem::replace(&mut self.terminal_type, TerminalType::DisplayOnly)
         {
-            let kill_processes =
-                terminate_processes_with_grace_period(info, self.background_executor.clone());
+            // Stop reading either way: this terminal is going away.
             pty_tx.shutdown();
-            self.background_executor.spawn(kill_processes).detach();
+            if owns_child {
+                let kill_processes =
+                    terminate_processes_with_grace_period(info, self.background_executor.clone());
+                self.background_executor.spawn(kill_processes).detach();
+            }
         }
     }
 }
@@ -4845,7 +5490,7 @@ mod tests {
 
         terminal.update(cx, |terminal, cx| {
             terminal.keyboard_input_sent = true;
-            terminal.process_event(TerminalBackendEvent::ChildExit(ExitStatus::from_raw(0)), cx);
+            terminal.process_event(TerminalBackendEvent::ChildExit(successful_exit()), cx);
             // The event loop emits a final Exit notification after ChildExit.
             terminal.process_event(TerminalBackendEvent::Exit, cx);
         });
@@ -4865,6 +5510,766 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    /// The pane a multiplexer-backed terminal shows when contact with the
+    /// multiplexer is lost, rather than when its process ends.
+    ///
+    /// This has to be a *pty* terminal, which is the case the bug was in:
+    /// suppressing the disconnect for a pty left the event loop's final `Exit`
+    /// to classify the pane instead, as `StatusUnavailable` — "the shell exited
+    /// but its status was unavailable" — for a shell that was running fine.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn losing_the_multiplexer_is_reported_as_that_and_not_as_a_missing_status(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        cx.executor().allow_parking();
+
+        let shell = (
+            "/bin/sh".to_owned(),
+            vec!["-c".to_owned(), "printf 'ready\n'; sleep 300".to_owned()],
+        );
+        let options = pty_options(
+            Some(shell),
+            None,
+            std::iter::empty::<(String, String)>(),
+            None,
+        );
+        let pty = alacritty_terminal::tty::new(
+            &options,
+            alacritty_terminal::event::WindowSize {
+                num_lines: 24,
+                num_cols: 80,
+                cell_width: 1,
+                cell_height: 1,
+            },
+            0,
+        )
+        .unwrap();
+        let child_pid = pty.child_pid();
+        let attached = TerminalBuilder::new_attached(
+            PtyHandover {
+                descriptor: pty.file().try_clone().unwrap().into(),
+                child_pid,
+                replay: Vec::new(),
+            },
+            AttachedOptions {
+                shell: Shell::System,
+                env: HashMap::default(),
+                cursor_shape: SettingsCursorShape::default(),
+                alternate_scroll: AlternateScroll::On,
+                max_scroll_history_lines: None,
+                path_hyperlink_regexes: Vec::new(),
+                path_hyperlink_timeout_ms: 0,
+                window_id: 0,
+            },
+            &cx.background_executor,
+            PathStyle::local(),
+        )
+        .unwrap();
+        let terminal = cx.new(|cx| attached.builder.subscribe(cx));
+        assert_content_eventually(&terminal, "ready", cx).await;
+
+        let (events_tx, events_rx) = async_channel::unbounded();
+        cx.update(|cx| {
+            cx.subscribe(&terminal, move |_, event: &Event, _| {
+                events_tx.send_blocking(event.clone()).unwrap();
+            })
+        })
+        .detach();
+
+        terminal.update(cx, |terminal, cx| {
+            assert!(
+                matches!(terminal.terminal_type, TerminalType::Pty { .. }),
+                "this has to be the pty case, which is where the bug was"
+            );
+            terminal.keyboard_input_sent = true;
+            terminal.process_event(TerminalBackendEvent::ChildWatcherDisconnected, cx);
+            // The event loop stops on a child event, so its final notification
+            // arrives right behind this one.
+            terminal.process_event(TerminalBackendEvent::Exit, cx);
+        });
+
+        let events = std::iter::from_fn(|| events_rx.try_recv().ok()).collect::<Vec<_>>();
+        let exits = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::TerminalExited(exit) => Some(exit),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(exits.len(), 1, "one exit observation, whichever came first");
+        assert_eq!(
+            exits[0].source,
+            TerminalExitSource::WatcherDisconnected,
+            "losing contact with the multiplexer must not be reported as the process ending"
+        );
+        assert_eq!(
+            exits[0].unexpected_reason(),
+            Some(TerminalExitReason::WatcherDisconnected)
+        );
+        // Retained rather than closed, so the pane can say what happened.
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::CloseTerminal))
+        );
+
+        // The process is untouched by any of this, which is the point.
+        assert!(unsafe { libc::kill(child_pid as libc::pid_t, 0) } == 0);
+        unsafe { libc::kill(-(child_pid as libc::pid_t), libc::SIGKILL) };
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn a_pty_terminal_converts_to_a_byte_stream_keeping_its_grid(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.executor().allow_parking();
+
+        // Spawn a pty and adopt it the way the multiplexer handover does: an
+        // attached terminal's process outlives the terminal by design, which
+        // is exactly the property the conversion must preserve.
+        let shell = (
+            "/bin/sh".to_owned(),
+            vec!["-c".to_owned(), "printf 'before\n'; sleep 300".to_owned()],
+        );
+        let options = pty_options(
+            Some(shell),
+            None,
+            std::iter::empty::<(String, String)>(),
+            None,
+        );
+        let pty = alacritty_terminal::tty::new(
+            &options,
+            alacritty_terminal::event::WindowSize {
+                num_lines: 24,
+                num_cols: 80,
+                cell_width: 1,
+                cell_height: 1,
+            },
+            0,
+        )
+        .unwrap();
+        let child_pid = pty.child_pid();
+        let descriptor = pty.file().try_clone().unwrap().into();
+        let handover = PtyHandover {
+            descriptor,
+            child_pid,
+            replay: Vec::new(),
+        };
+        let attached = TerminalBuilder::new_attached(
+            handover,
+            AttachedOptions {
+                shell: Shell::System,
+                env: HashMap::default(),
+                cursor_shape: SettingsCursorShape::default(),
+                alternate_scroll: AlternateScroll::On,
+                max_scroll_history_lines: None,
+                path_hyperlink_regexes: Vec::new(),
+                path_hyperlink_timeout_ms: 0,
+                window_id: 0,
+            },
+            &cx.background_executor,
+            PathStyle::local(),
+        )
+        .unwrap();
+        let terminal = cx.new(|cx| attached.builder.subscribe(cx));
+        assert_content_eventually(&terminal, "before", cx).await;
+
+        // Stop the pty loop and reconnect the terminal to a canned stream, the
+        // way the multiplexer handover does. The loop must actually end, not
+        // just be asked to.
+        let reader: Box<dyn Read + Send> = Box::new(CannedReader {
+            bytes: b"after\n".to_vec(),
+        });
+        let writer: Box<dyn Write + Send> = Box::new(std::io::sink());
+        terminal.update(cx, |terminal, _| {
+            terminal.stop_pty_loop().unwrap();
+            terminal.attach_byte_stream(reader, writer).unwrap();
+        });
+
+        assert_content_eventually(&terminal, "after", cx).await;
+        let content = terminal.update(cx, |terminal, _| terminal.get_content());
+        assert!(
+            content.contains("before"),
+            "the grid must survive the conversion: {content}"
+        );
+
+        // Stopping the loop must not have killed the process the pty served.
+        let alive = unsafe { libc::kill(child_pid as libc::pid_t, 0) } == 0;
+        assert!(
+            alive,
+            "the pty's child died when its event loop was stopped"
+        );
+        // The shell was spawned as a session leader, so its group covers the
+        // `sleep` it forked. Reap it so the test does not leave processes
+        // behind; the attached pty in the test is deliberately not dropped.
+        unsafe { libc::killpg(child_pid as libc::pid_t, libc::SIGKILL) };
+        unsafe { libc::waitpid(child_pid as libc::pid_t, std::ptr::null_mut(), 0) };
+    }
+
+    /// A writer that records what a terminal sends, so a test can tell whether
+    /// input reached the byte stream or vanished into a stopped pty loop.
+    struct RecordingWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for RecordingWriter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A pane revoked into shared mode keeps typing into the multiplexer.
+    ///
+    /// The conversion leaves `TerminalType::Pty` in place and only shuts the
+    /// loop down, so a write path that checks the terminal type before the byte
+    /// stream posts every keystroke to a channel nobody reads. The window that
+    /// was revoked went mute while the one that joined afterwards worked, which
+    /// is what "only the last client can type" was.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn a_converted_terminals_input_reaches_the_byte_stream(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.executor().allow_parking();
+
+        let shell = (
+            "/bin/sh".to_owned(),
+            vec!["-c".to_owned(), "printf 'before\n'; sleep 300".to_owned()],
+        );
+        let options = pty_options(
+            Some(shell),
+            None,
+            std::iter::empty::<(String, String)>(),
+            None,
+        );
+        let pty = alacritty_terminal::tty::new(
+            &options,
+            alacritty_terminal::event::WindowSize {
+                num_lines: 24,
+                num_cols: 80,
+                cell_width: 1,
+                cell_height: 1,
+            },
+            0,
+        )
+        .unwrap();
+        let child_pid = pty.child_pid();
+        let descriptor = pty.file().try_clone().unwrap().into();
+        let attached = TerminalBuilder::new_attached(
+            PtyHandover {
+                descriptor,
+                child_pid,
+                replay: Vec::new(),
+            },
+            AttachedOptions {
+                shell: Shell::System,
+                env: HashMap::default(),
+                cursor_shape: SettingsCursorShape::default(),
+                alternate_scroll: AlternateScroll::On,
+                max_scroll_history_lines: None,
+                path_hyperlink_regexes: Vec::new(),
+                path_hyperlink_timeout_ms: 0,
+                window_id: 0,
+            },
+            &cx.background_executor,
+            PathStyle::local(),
+        )
+        .unwrap();
+        let terminal = cx.new(|cx| attached.builder.subscribe(cx));
+        assert_content_eventually(&terminal, "before", cx).await;
+
+        let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        terminal.update(cx, |terminal, _| {
+            terminal
+                .attach_byte_stream(
+                    Box::new(CannedReader { bytes: Vec::new() }),
+                    Box::new(RecordingWriter(written.clone())),
+                )
+                .unwrap();
+        });
+        terminal.update(cx, |terminal, _| terminal.input(b"typed\n".to_vec()));
+
+        // The byte stream's writer is its own thread, so the write lands
+        // shortly after `input` returns rather than during it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while written.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            written.lock().unwrap().as_slice(),
+            b"typed\n",
+            "a converted terminal's input must reach the multiplexer, not the stopped pty loop"
+        );
+
+        unsafe { libc::kill(-(child_pid as libc::pid_t), libc::SIGKILL) };
+    }
+
+    /// A restored screen is written once, and not until the pane has a real size.
+    ///
+    /// A grid starts at its placeholder size, so writing the screen into it wraps
+    /// every line at the wrong width and loses all but the last few rows. That is
+    /// what `with_replay` defers for — and it is why a caller must not *also* feed
+    /// the replay through the stream: doing both drew the screen twice, the first
+    /// time into the placeholder, leaving stray rows at the top that a full-screen
+    /// program never repaints because it does not believe they changed.
+    #[gpui::test]
+    async fn a_restored_screen_is_replayed_once_and_only_after_layout(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.executor().allow_parking();
+
+        // A line long enough to wrap at the placeholder's 100 columns but not at
+        // the 200 the pane is laid out at, so a replay written too early is
+        // visible as two lines rather than one.
+        let restored = format!("restored-screen{}\r\n", "-".repeat(140));
+        let builder = cx.update(|cx| {
+            TerminalBuilder::new_byte_stream(
+                Box::new(CannedReader { bytes: Vec::new() }),
+                Box::new(std::io::sink()),
+                String::new(),
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .with_replay(restored.as_bytes().to_vec())
+        });
+        let window = cx.add_empty_window();
+        let terminal = window.new(|cx| builder.subscribe(cx));
+        window.run_until_parked();
+        assert!(
+            !terminal
+                .update(window, |terminal, _| terminal.get_content())
+                .contains("restored-screen"),
+            "the screen must wait for a real size rather than be wrapped at the placeholder's"
+        );
+
+        window.update_window_entity(&terminal, |terminal, window, cx| {
+            terminal.set_size(TerminalBounds::new(
+                Pixels::from(10.),
+                Pixels::from(8.),
+                bounds(
+                    GpuiPoint::default(),
+                    size(Pixels::from(200. * 8.), Pixels::from(24. * 10.)),
+                ),
+            ));
+            terminal.sync(window, cx);
+        });
+        window.run_until_parked();
+        let content = terminal.update(window, |terminal, _| terminal.get_content());
+        assert!(
+            content.contains(restored.trim_end()),
+            "the screen must be replayed at the laid-out width, unwrapped: {content:?}"
+        );
+        assert_eq!(
+            content.matches("restored-screen").count(),
+            1,
+            "the screen must be written exactly once: {content:?}"
+        );
+        assert_eq!(
+            content.matches("restored-screen").count(),
+            1,
+            "the screen must be replayed exactly once: {content:?}"
+        );
+    }
+
+    /// A pane the multiplexer handed over outlives the terminal showing it.
+    ///
+    /// Dropping a terminal ends the processes it started, which is right for a
+    /// pane this window opened and wrong for one it merely attached: the daemon
+    /// forked that child and is still its parent. Backgrounding a session from
+    /// the window that attached it is a drop, so getting this wrong killed the
+    /// session instead of handing it back — as did quitting that window.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn an_attached_pane_leaves_its_child_running(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.executor().allow_parking();
+
+        // Stands in for the multiplexer's pty: a child this process forked and
+        // is still the parent of, whose descriptor is handed over.
+        let options = pty_options(
+            Some((
+                "/bin/sh".to_owned(),
+                vec!["-c".to_owned(), "exec sleep 120".to_owned()],
+            )),
+            None,
+            std::iter::empty::<(String, String)>(),
+            None,
+        );
+        let pty = alacritty_terminal::tty::new(
+            &options,
+            alacritty_terminal::event::WindowSize {
+                num_lines: 24,
+                num_cols: 80,
+                cell_width: 1,
+                cell_height: 1,
+            },
+            0,
+        )
+        .unwrap();
+        let child_pid = pty.child_pid();
+        let handover = PtyHandover {
+            descriptor: pty.file().try_clone().unwrap().into(),
+            child_pid,
+            replay: Vec::new(),
+        };
+        let attached = TerminalBuilder::new_attached(
+            handover,
+            AttachedOptions {
+                shell: Shell::System,
+                env: HashMap::default(),
+                cursor_shape: SettingsCursorShape::default(),
+                alternate_scroll: AlternateScroll::On,
+                max_scroll_history_lines: None,
+                path_hyperlink_regexes: Vec::new(),
+                path_hyperlink_timeout_ms: 0,
+                window_id: 0,
+            },
+            &cx.executor(),
+            PathStyle::local(),
+        )
+        .expect("attaching the multiplexer's terminal");
+        let _child_events = attached.child_events;
+        let terminal = cx.new(|cx| attached.builder.subscribe(cx));
+
+        // Detaching the session is exactly this: the tab goes away and its
+        // terminals go with it.
+        let weak = terminal.downgrade();
+        drop(terminal);
+        // The value itself is dropped by GPUI's release pass, which runs when
+        // effects are flushed — not merely when the last handle goes.
+        cx.update(|_| {});
+        cx.run_until_parked();
+        assert!(weak.upgrade().is_none(), "the terminal must be released");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut status = 0;
+        let reaped = unsafe {
+            libc::waitpid(
+                child_pid as libc::pid_t,
+                &mut status,
+                libc::WNOHANG | libc::WUNTRACED,
+            )
+        };
+        assert_eq!(
+            reaped, 0,
+            "the multiplexer's child must still be running: waitpid reported {reaped} \
+             (status {status})"
+        );
+
+        unsafe { libc::kill(-(child_pid as libc::pid_t), libc::SIGKILL) };
+    }
+
+    /// A pane handed back by the multiplexer reads its own terminal again.
+    ///
+    /// The reverse of `attach_byte_stream`, and it has to work from either shape a
+    /// shared pane can be in: one that was revoked into sharing and kept its pty
+    /// type, and one that was built as a byte stream and never had one. Both end up
+    /// here, so the conversion installs the pty backend wholesale rather than
+    /// repairing whatever was there.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn a_pane_handed_back_reads_its_own_terminal(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.executor().allow_parking();
+
+        // A byte-stream terminal, as a window that *joined* a shared session has.
+        let relayed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_byte_stream(
+                Box::new(CannedReader {
+                    bytes: b"before-the-handover\r\n".to_vec(),
+                }),
+                Box::new(RecordingWriter(relayed.clone())),
+                String::new(),
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                &cx.background_executor().clone(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+        assert_content_eventually(&terminal, "before-the-handover", cx).await;
+        assert!(
+            terminal.read_with(cx, |terminal, _| matches!(
+                terminal.terminal_type,
+                TerminalType::DisplayOnly
+            )),
+            "the joined shape is display-only, which is what makes this the hard direction"
+        );
+
+        // What the multiplexer hands back: a live pty running a real program.
+        let shell = (
+            "/bin/sh".to_owned(),
+            vec!["-c".to_owned(), "exec cat".to_owned()],
+        );
+        let options = pty_options(
+            Some(shell),
+            None,
+            std::iter::empty::<(String, String)>(),
+            None,
+        );
+        let pty = alacritty_terminal::tty::new(
+            &options,
+            alacritty_terminal::event::WindowSize {
+                num_lines: 24,
+                num_cols: 80,
+                cell_width: 1,
+                cell_height: 1,
+            },
+            0,
+        )
+        .unwrap();
+        let child_pid = pty.child_pid();
+        let handover = PtyHandover {
+            descriptor: pty.file().try_clone().unwrap().into(),
+            child_pid,
+            replay: Vec::new(),
+        };
+        // Held for as long as the pane is: it is the channel the multiplexer's
+        // exit report arrives on, and dropping it tells the event loop its watcher
+        // has gone — which stops the loop dead, so the pane reads nothing at all.
+        let _child_events = terminal.update(cx, |terminal, cx| {
+            terminal
+                .attach_pty(
+                    handover,
+                    AttachedOptions {
+                        shell: Shell::System,
+                        env: HashMap::default(),
+                        cursor_shape: SettingsCursorShape::default(),
+                        alternate_scroll: AlternateScroll::On,
+                        max_scroll_history_lines: None,
+                        path_hyperlink_regexes: Vec::new(),
+                        path_hyperlink_timeout_ms: 0,
+                        window_id: 0,
+                    },
+                    cx,
+                )
+                .expect("taking the pane back")
+        });
+
+        // The grid survives: this is the same pane, not a fresh one, and nothing
+        // was written into it on the way. A retired stream that reported itself as
+        // a failure printed a connection error here, which shifted a full-screen
+        // program's display by the lines it took.
+        let content = terminal.update(cx, |terminal, _| terminal.get_content());
+        assert!(
+            content.contains("before-the-handover"),
+            "the grid must survive the conversion: {content}"
+        );
+        assert!(
+            !content.contains("Connection error"),
+            "retiring the stream must write nothing into the grid: {content}"
+        );
+        // And input now goes to the pty rather than the retired relay, which `cat`
+        // echoing it proves from the far side.
+        terminal.update(cx, |terminal, _| {
+            terminal.input(b"after-the-handover\n".to_vec())
+        });
+        assert_content_eventually(&terminal, "after-the-handover", cx).await;
+        assert!(
+            relayed.lock().unwrap().is_empty(),
+            "input must go to the terminal, not to the relay that was retired"
+        );
+
+        // And the pane handed back is still the multiplexer's: closing the tab
+        // it is in has to leave the session running, exactly as it would have
+        // before the hand-back.
+        drop(terminal);
+        cx.update(|_| {});
+        cx.run_until_parked();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let mut status = 0;
+        let reaped = unsafe { libc::waitpid(child_pid as libc::pid_t, &mut status, libc::WNOHANG) };
+        assert_eq!(
+            reaped, 0,
+            "a handed-back child belongs to the multiplexer: waitpid reported {reaped}"
+        );
+
+        unsafe { libc::kill(-(child_pid as libc::pid_t), libc::SIGKILL) };
+    }
+
+    /// A shared pane closes when its shell exits, like any other.
+    ///
+    /// Only the multiplexer is the child's parent, so a shared pane learns of
+    /// the exit from a report rather than from its own event loop. If that
+    /// report does not end in `CloseTerminal` the pane simply stays there, with
+    /// no shell behind it and nothing to say so.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn a_shared_panes_reported_exit_closes_it(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.executor().allow_parking();
+
+        let shell = (
+            "/bin/sh".to_owned(),
+            vec!["-c".to_owned(), "printf 'ready\n'; sleep 300".to_owned()],
+        );
+        let options = pty_options(
+            Some(shell),
+            None,
+            std::iter::empty::<(String, String)>(),
+            None,
+        );
+        let pty = alacritty_terminal::tty::new(
+            &options,
+            alacritty_terminal::event::WindowSize {
+                num_lines: 24,
+                num_cols: 80,
+                cell_width: 1,
+                cell_height: 1,
+            },
+            0,
+        )
+        .unwrap();
+        let child_pid = pty.child_pid();
+        let attached = TerminalBuilder::new_attached(
+            PtyHandover {
+                descriptor: pty.file().try_clone().unwrap().into(),
+                child_pid,
+                replay: Vec::new(),
+            },
+            AttachedOptions {
+                shell: Shell::System,
+                env: HashMap::default(),
+                cursor_shape: SettingsCursorShape::default(),
+                alternate_scroll: AlternateScroll::On,
+                max_scroll_history_lines: None,
+                path_hyperlink_regexes: Vec::new(),
+                path_hyperlink_timeout_ms: 0,
+                window_id: 0,
+            },
+            &cx.background_executor,
+            PathStyle::local(),
+        )
+        .unwrap();
+        let terminal = cx.new(|cx| attached.builder.subscribe(cx));
+        assert_content_eventually(&terminal, "ready", cx).await;
+
+        // Converted the way the revoke handover converts it.
+        terminal.update(cx, |terminal, _| {
+            terminal
+                .attach_byte_stream(
+                    Box::new(CannedReader { bytes: Vec::new() }),
+                    Box::new(std::io::sink()),
+                )
+                .unwrap();
+        });
+
+        let (events_tx, events_rx) = async_channel::unbounded();
+        cx.update(|cx| {
+            cx.subscribe(&terminal, move |_, event: &Event, _| {
+                events_tx.send_blocking(event.clone()).unwrap();
+            })
+        })
+        .detach();
+
+        // What the multiplexer reports for a shell the user typed `exit` into.
+        terminal.update(cx, |terminal, cx| {
+            terminal.report_child_exit(std::process::ExitStatus::from_raw(0), true, cx)
+        });
+        cx.run_until_parked();
+
+        let events = std::iter::from_fn(|| events_rx.try_recv().ok()).collect::<Vec<_>>();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::TerminalExited(_))),
+            "the exit must be observed: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::CloseTerminal)),
+            "a clean exit must close the pane rather than leaving it hanging: {events:?}"
+        );
+
+        unsafe { libc::kill(-(child_pid as libc::pid_t), libc::SIGKILL) };
+    }
+
+    /// A shared pane whose exit the multiplexer could not put a status to is
+    /// still told that it ended.
+    ///
+    /// Only the multiplexer can observe the status, and it observes it once. A
+    /// client that is handed "it ended, I cannot say how" has no other route
+    /// back to that fact, so dropping the report — as the shared path did — left
+    /// the terminal waiting for something that had already happened. Retained
+    /// with a reason rather than closed, because an exit nobody can describe is
+    /// exactly what the unexpected-exit pane exists to show.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn a_shared_pane_told_only_that_its_child_ended_stops_waiting(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.executor().allow_parking();
+
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_byte_stream(
+                Box::new(CannedReader { bytes: Vec::new() }),
+                Box::new(std::io::sink()),
+                String::new(),
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                &cx.background_executor().clone(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+
+        let (events_tx, events_rx) = async_channel::unbounded();
+        cx.update(|cx| {
+            cx.subscribe(&terminal, move |_, event: &Event, _| {
+                events_tx.send_blocking(event.clone()).unwrap();
+            })
+        })
+        .detach();
+
+        terminal.update(cx, |terminal, cx| {
+            terminal.report_child_exit_status_unavailable(true, cx)
+        });
+        cx.run_until_parked();
+
+        let events = std::iter::from_fn(|| events_rx.try_recv().ok()).collect::<Vec<_>>();
+        let exit = events
+            .iter()
+            .find_map(|event| match event {
+                Event::TerminalExited(exit) => Some(exit),
+                _ => None,
+            })
+            .expect("the pane must be told its process ended");
+        assert_eq!(
+            exit.unexpected_reason(),
+            Some(TerminalExitReason::StatusUnavailable),
+            "an exit nobody could describe has to say so, not close silently"
+        );
+    }
+
+    /// A reader that yields its payload once and then ends the stream.
+    struct CannedReader {
+        bytes: Vec<u8>,
+    }
+
+    impl std::io::Read for CannedReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if self.bytes.is_empty() {
+                return Ok(0);
+            }
+            let n = self.bytes.len().min(buffer.len());
+            buffer[..n].copy_from_slice(&self.bytes[..n]);
+            self.bytes.drain(..n);
+            Ok(n)
+        }
     }
 
     #[cfg(windows)]
@@ -5299,6 +6704,7 @@ mod tests {
                     cx,
                     vec![],
                     PathStyle::local(),
+                    None,
                 )
             })
             .await
@@ -5345,6 +6751,7 @@ mod tests {
                     cx,
                     vec![],
                     PathStyle::local(),
+                    None,
                 )
             })
             .await
@@ -5421,6 +6828,7 @@ mod tests {
                     cx,
                     vec![],
                     PathStyle::local(),
+                    None,
                 )
             })
             .await
@@ -6097,6 +7505,7 @@ mod tests {
                     cx,
                     Vec::new(),
                     PathStyle::local(),
+                    None,
                 )
             })
             .await
@@ -6165,6 +7574,7 @@ mod tests {
                     cx,
                     Vec::new(),
                     PathStyle::local(),
+                    None,
                 )
             })
             .await
@@ -6231,6 +7641,7 @@ mod tests {
                     cx,
                     Vec::new(),
                     PathStyle::local(),
+                    None,
                 )
             })
             .await
@@ -7423,6 +8834,7 @@ mod tests {
                         cx,
                         vec![],
                         PathStyle::local(),
+                        None,
                     )
                 })
                 .await

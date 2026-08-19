@@ -10910,6 +10910,7 @@ dependencies = [
  "zbus",
  "zed_actions",
  "zeroize",
+ "zmux",
 ]
 
 [[package]]
@@ -10927,6 +10928,27 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+
+[[package]]
+name = "zmux"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "anyhow",
+ "argon2",
+ "async-channel 2.5.0",
+ "getrandom 0.3.4",
+ "libc",
+ "log",
+ "serde",
+ "serde_json",
+ "signal-hook 0.4.4",
+ "subtle",
+ "sysinfo 0.37.2",
+ "uds_windows",
+ "windows 0.61.3",
+ "zeroize",
+]
 
 [[package]]
 name = "ztracing"

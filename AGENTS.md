@@ -64,7 +64,9 @@ and the process entry point. Put behavior in the module that owns it:
 - `pane_controls.rs`: per-pane control visibility and its idle timer
 - `pane_theme_picker.rs`: per-pane theme picker model and overlay
 - `background_session_ui.rs`: background-session detach/store/reconnect and
-  the reconnect picker
+  the reconnect picker; shared-mode panes (the `SharedPaneEntry` registry,
+  arbitrated-size application, shared exit routing, and the revoke handover
+  that converts an exclusive pane to shared)
 - `byte_stream_pane.rs`: shared pane opener for byte-stream-backed panes
   (HTTP/TFTP server log panes, the serial console)
 - `cli_service_stubs.rs`: disabled-build fallbacks for CLI-service actions
@@ -213,6 +215,33 @@ for example:
 ```sh
 cargo test pane_controls
 ```
+
+The crates under `crates/` are their own Cargo workspaces, so a root
+`cargo test` does **not** run their tests and `cargo test -p <crate>` refuses.
+Anything touching them has to be validated from the crate's own directory, and
+`crates/zmux`'s integration tests drive a separately built binary:
+
+```sh
+(cd crates/alacritty_terminal && cargo test)
+(cd crates/terminal && cargo test)
+(cd crates/zmux && cargo build --bin zmux && cargo test)
+```
+
+`cargo build --bin zmux` first is not optional there: those tests start the
+binary rather than linking it, so a stale one silently tests the previous
+implementation — which is how an assertion becomes vacuous without anyone
+noticing.
+
+Note also that `crates/zmux` builds a `zmux` binary of its own, while the root
+package builds one from `src/bin/zmux.rs`. The one that actually runs is the
+root's, because a client resolves the multiplexer beside its own executable —
+so `crates/zmux`'s tests passing says nothing about the binary a user runs.
+
+Cargo serialises on the target-directory lock, so `make build` run alongside
+`make test` blocks until the tests finish rather than building immediately.
+Before trusting a manual run of `target/debug/zetta` or `target/debug/zmux`,
+check the binary is newer than the sources — `cargo check` and `cargo test` do
+not refresh either one.
 
 Run Clippy for broader Rust changes when practical:
 

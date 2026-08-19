@@ -1,0 +1,53 @@
+[package]
+name = "zmux"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "GPL-3.0-or-later"
+description = "Session multiplexer for Zetta: owns background terminal sessions"
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[[bin]]
+name = "zmux"
+path = "src/main.rs"
+
+[features]
+default = ["scrollback-buffer"]
+# Retains a bounded in-memory ring buffer of a detached pane's output, and the
+# snapshot exchange that makes a reattach look like the screen never went away.
+# Compiled out for memory-constrained targets that only need the session to stay
+# alive.
+scrollback-buffer = []
+# Exposes the hooks integration tests need to drive situations a real client
+# cannot easily produce, such as a window dying mid-attach.
+test-support = []
+
+[dependencies]
+alacritty_terminal = { path = "../alacritty_terminal", default-features = false }
+anyhow = "1"
+argon2 = "0.5"
+async-channel = "2.5.0"
+getrandom = { version = "0.3", features = ["std"] }
+libc = "0.2"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+signal-hook = "0.4.3"
+subtle = "2"
+sysinfo = "0.37"
+zeroize = "1"
+
+[target.'cfg(windows)'.dependencies]
+uds_windows = "1.2"
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tempfile = "3"
+zmux = { path = ".", features = ["test-support"] }

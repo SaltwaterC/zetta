@@ -450,7 +450,7 @@ _zetta_complete() {
     esac
 
     if (( COMP_CWORD == 1 )); then
-        _zetta_compgen 'benchmark benchmark-output terminal-size sessions pane profile project edit vi init serial http tftp notify attention copy paste splits tabicon panetheme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme'
+        _zetta_compgen 'benchmark benchmark-output terminal-size sessions mux pane profile project edit vi init serial http tftp notify attention copy paste splits tabicon panetheme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme'
         return
     fi
 
@@ -553,7 +553,7 @@ _zetta_complete() {
             fi
             ;;
         benchmark)
-            _zetta_compgen '--terminal-render-workload --terminal-checkerboard-workload --terminal-sparse-update-workload --terminal-alt-screen-scroll-workload --profile-report --profile-duration --profile-pane-stress --profile-background-stress --profile-sparse-updates --profile-alt-screen-scroll --profile-external-terminal --help'
+            _zetta_compgen '--profile-report --profile-duration --profile-pane-stress --profile-background-stress --profile-sparse-updates --profile-alt-screen-scroll --profile-external-terminal --help'
             ;;
         benchmark-output)
             _zetta_compgen '--size --output-type --help'
@@ -586,6 +586,15 @@ _zetta_complete() {
                 else
                     _zetta_compgen '--session --help'
                 fi
+            else
+                _zetta_compgen '--json --help'
+            fi
+            ;;
+        mux)
+            if (( COMP_CWORD == 2 )); then
+                _zetta_compgen 'list stop share unshare --json --upgrade --help --version'
+            elif [[ ${COMP_WORDS[2]} == stop ]]; then
+                _zetta_compgen '--force --help'
             else
                 _zetta_compgen '--json --help'
             fi

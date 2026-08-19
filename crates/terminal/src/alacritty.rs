@@ -101,7 +101,7 @@ pub(super) struct AlacrittySearch {
 #[cfg(unix)]
 impl From<&AlacrittyPty> for ProcessIdGetter {
     fn from(pty: &AlacrittyPty) -> Self {
-        Self::new(pty.file().as_raw_fd(), pty.child().id())
+        Self::new(pty.file().as_raw_fd(), pty.child_pid())
     }
 }
 
@@ -137,6 +137,33 @@ impl PtySender {
         if let Err(error) = self.notifier.0.send(Msg::Shutdown) {
             log::debug!("failed to shut down alacritty pty loop: {error}");
         }
+    }
+}
+
+/// The event loop thread reading a pty, kept so its shutdown can be made
+/// synchronous.
+///
+/// [`PtySender::shutdown`] only posts the request; the thread itself stops a
+/// moment later, and until it does the pty is still being read by a loop this
+/// process will not be using again. A reader taking over the terminal has to
+/// wait for the thread to actually end, or the two would consume the pty's
+/// output between them.
+pub(super) struct PtyIo {
+    join: std::thread::JoinHandle<(
+        EventLoop<AlacrittyPty, ZedListener>,
+        alacritty_terminal::event_loop::State,
+    )>,
+}
+
+impl PtyIo {
+    /// Blocks until the pty event loop has fully stopped. The caller must have
+    /// sent [`Msg::Shutdown`] first, which the terminal does on drop and
+    /// before converting the terminal to another backend.
+    pub(super) fn join(self) -> Result<()> {
+        self.join
+            .join()
+            .map(|_| ())
+            .map_err(|_| anyhow::anyhow!("the pty event loop panicked"))
     }
 }
 
@@ -235,15 +262,18 @@ pub(super) fn spawn_event_loop(
     listener: ZedListener,
     pty: AlacrittyPty,
     drain_on_exit: bool,
-) -> Result<PtySender> {
+) -> Result<(PtySender, PtyIo)> {
     let event_loop = EventLoop::new(term, listener, pty, drain_on_exit, false)
         .context("failed to create event loop")?;
     let pty_tx = event_loop.channel();
-    let _io_thread = event_loop.spawn();
+    let join = event_loop.spawn();
 
-    Ok(PtySender {
-        notifier: Notifier(pty_tx),
-    })
+    Ok((
+        PtySender {
+            notifier: Notifier(pty_tx),
+        },
+        PtyIo { join },
+    ))
 }
 
 pub(super) fn resize(term: &mut AlacrittyTerm, bounds: TerminalBounds, reflow: bool) {

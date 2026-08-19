@@ -9,6 +9,7 @@
       "ctrl-shift-q": "zetta::CloseWindow",
       "ctrl-shift-x": "zetta::CloseAllWindows",
       "ctrl-shift-d": "zetta::DetachTab",
+      "ctrl-shift-k": "zetta::ToggleTabSharing",
       "ctrl-shift-a": "zetta::ReconnectSession",
       "ctrl-shift-b": "zetta::ToggleAutoBackgroundTab",
       "alt-shift-x": "zetta::ClosePane",

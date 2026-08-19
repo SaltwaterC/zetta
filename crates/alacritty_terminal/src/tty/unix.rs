@@ -3,16 +3,16 @@
 use std::ffi::{CStr, CString};
 use std::fmt;
 use std::fs::File;
-use std::io::{Error, ErrorKind, Read, Result};
+use std::io::{Error, ErrorKind, Read, Result, Write};
 use std::mem::MaybeUninit;
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixStream;
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 #[cfg(target_os = "macos")]
 use std::path::Path;
-use std::process::{Child, Command};
+use std::process::{Child, Command, ExitStatus};
 use std::sync::Arc;
 use std::{env, ptr};
 
@@ -142,20 +142,148 @@ fn get_pw_entry(buf: &mut [i8; 1024]) -> Result<Passwd<'_>> {
 }
 
 pub struct Pty {
-    child: Child,
+    child: PtyChild,
     file: File,
     signals: UnixStream,
-    sig_id: SigId,
+    sig_id: Option<SigId>,
+}
+
+/// Who owns the process on the far side of the PTY.
+enum PtyChild {
+    /// Spawned by this process, so `SIGCHLD` plus `waitpid` reports its exit
+    /// and dropping the PTY must hang it up.
+    Owned(Child),
+    /// Spawned by the multiplexer, which passed this process the master file
+    /// descriptor. The exit status cannot be reaped here — only the parent may
+    /// do that — so it arrives over [`AttachedChildEvents`] instead, and
+    /// dropping the PTY must leave the process running for the next client.
+    Attached { pid: u32, pending: Vec<u8> },
+    /// Spawned by an earlier image of *this* process, which replaced itself
+    /// with `execv`. The process ID is still a child of this one — an exec does
+    /// not change that — so it is reaped here, but there is no `Child` to do it
+    /// through because that was a value in the previous image.
+    Reclaimed { pid: u32 },
+}
+
+/// One child event, as written into an attached PTY's event socket.
+const ATTACHED_EVENT_LEN: usize = 5;
+const ATTACHED_EXITED: u8 = 0;
+const ATTACHED_STATUS_UNAVAILABLE: u8 = 1;
+const ATTACHED_WATCHER_DISCONNECTED: u8 = 2;
+
+/// The reporting end of an attached PTY's child events.
+///
+/// The event loop only stops on a child event — a read error on the master is
+/// deliberately retried, because it cannot distinguish a hangup from a
+/// transient failure. An attached PTY therefore has to be told, and whoever
+/// holds this is responsible for saying so: either the real exit status, or
+/// [`Self::report_watcher_disconnected`] if the connection to the multiplexer
+/// is lost before the status arrives.
+pub struct AttachedChildEvents(UnixStream);
+
+impl AttachedChildEvents {
+    /// Reports the raw `waitpid` status the multiplexer observed.
+    pub fn report_exit(&mut self, raw_status: i32) -> Result<()> {
+        self.report(ATTACHED_EXITED, raw_status)
+    }
+
+    pub fn report_status_unavailable(&mut self) -> Result<()> {
+        self.report(ATTACHED_STATUS_UNAVAILABLE, 0)
+    }
+
+    pub fn report_watcher_disconnected(&mut self) -> Result<()> {
+        self.report(ATTACHED_WATCHER_DISCONNECTED, 0)
+    }
+
+    fn report(&mut self, tag: u8, raw_status: i32) -> Result<()> {
+        let mut frame = [0; ATTACHED_EVENT_LEN];
+        frame[0] = tag;
+        frame[1..].copy_from_slice(&raw_status.to_le_bytes());
+        self.0.write_all(&frame)
+    }
 }
 
 impl Pty {
-    pub fn child(&self) -> &Child {
-        &self.child
+    /// The PTY child's process ID, whether this process spawned it or not.
+    pub fn child_pid(&self) -> u32 {
+        match &self.child {
+            PtyChild::Owned(child) => child.id(),
+            PtyChild::Attached { pid, .. } => *pid,
+            PtyChild::Reclaimed { pid } => *pid,
+        }
     }
 
     pub fn file(&self) -> &File {
         &self.file
     }
+
+    /// Polls an owned child. An attached one belongs to the multiplexer, which
+    /// reports its exit over [`AttachedChildEvents`] instead.
+    #[cfg(test)]
+    fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
+        match &mut self.child {
+            PtyChild::Owned(child) => child.try_wait(),
+            PtyChild::Attached { .. } => Ok(None),
+            PtyChild::Reclaimed { pid } => {
+                let mut status = 0;
+                // SAFETY: a reclaimed child is still this process's own, and
+                // `status` is writable for the duration of the call.
+                match unsafe { libc::waitpid(*pid as i32, &mut status, libc::WNOHANG) } {
+                    0 => Ok(None),
+                    result if result < 0 => Err(Error::last_os_error()),
+                    _ => Ok(Some(ExitStatus::from_raw(status))),
+                }
+            },
+        }
+    }
+}
+
+/// Rebuilds a PTY this process already owns, after replacing its own image.
+///
+/// `execv` keeps both the descriptor and the parent/child relationship, so the
+/// exit status is still reapable here — unlike [`attach`], where the child
+/// belongs to a different process entirely.
+pub fn reclaim(master: OwnedFd, child_pid: u32) -> Result<Pty> {
+    let master_fd = master.as_raw_fd();
+    unsafe {
+        set_nonblocking(master_fd)?;
+    }
+    let (sender, signals) = UnixStream::pair()?;
+    let sig_id = signal_pipe::register(sigconsts::SIGCHLD, sender)?;
+    signals.set_nonblocking(true)?;
+    Ok(Pty {
+        child: PtyChild::Reclaimed { pid: child_pid },
+        file: File::from(master),
+        signals,
+        sig_id: Some(sig_id),
+    })
+}
+
+/// Builds a PTY around a master file descriptor whose child belongs to another
+/// process, as the multiplexer hands over on attach.
+///
+/// Resizing still works from here — `TIOCSWINSZ` applies to any holder of the
+/// master — but reaping does not, so the returned [`AttachedChildEvents`] is
+/// how the exit status gets in.
+pub fn attach(master: OwnedFd, child_pid: u32) -> Result<(Pty, AttachedChildEvents)> {
+    let master_fd = master.as_raw_fd();
+    unsafe {
+        set_nonblocking(master_fd)?;
+    }
+    let (reporter, events) = UnixStream::pair()?;
+    events.set_nonblocking(true)?;
+    Ok((
+        Pty {
+            child: PtyChild::Attached {
+                pid: child_pid,
+                pending: Vec::with_capacity(ATTACHED_EVENT_LEN),
+            },
+            file: File::from(master),
+            signals: events,
+            sig_id: None,
+        },
+        AttachedChildEvents(reporter),
+    ))
 }
 
 /// User information that is required for a new shell session.
@@ -339,7 +467,12 @@ pub fn from_fd(config: &Options, window_id: u64, master: OwnedFd, slave: OwnedFd
                 set_nonblocking(master_fd)?;
             }
 
-            Ok(Pty { child, file: File::from(master), signals, sig_id })
+            Ok(Pty {
+                child: PtyChild::Owned(child),
+                file: File::from(master),
+                signals,
+                sig_id: Some(sig_id),
+            })
         },
         Err(err) => Err(Error::new(
             err.kind(),
@@ -354,15 +487,34 @@ pub fn from_fd(config: &Options, window_id: u64, master: OwnedFd, slave: OwnedFd
 
 impl Drop for Pty {
     fn drop(&mut self) {
-        // Make sure the PTY is terminated properly.
-        unsafe {
-            libc::kill(self.child.id() as i32, libc::SIGHUP);
+        // Clear signal-hook handler.
+        if let Some(sig_id) = self.sig_id {
+            unregister_signal(sig_id);
         }
 
-        // Clear signal-hook handler.
-        unregister_signal(self.sig_id);
+        match &mut self.child {
+            PtyChild::Owned(child) => {
+                // Make sure the PTY is terminated properly.
+                unsafe {
+                    libc::kill(child.id() as i32, libc::SIGHUP);
+                }
 
-        let _ = self.child.wait();
+                let _ = child.wait();
+            },
+            // An attached child outlives this process by design: detaching a
+            // session is exactly dropping the PTY here. Hanging it up would
+            // kill the session the multiplexer is holding, and waiting on it
+            // would reap a process this one did not spawn.
+            PtyChild::Attached { .. } => {},
+            PtyChild::Reclaimed { pid } => {
+                let pid = *pid as i32;
+                unsafe {
+                    libc::kill(pid, libc::SIGHUP);
+                    let mut status = 0;
+                    libc::waitpid(pid, &mut status, 0);
+                }
+            },
+        }
     }
 }
 
@@ -427,24 +579,101 @@ impl EventedReadWrite for Pty {
 
 impl EventedPty for Pty {
     #[inline]
+    fn child_is_foreign(&self) -> bool {
+        // A reclaimed child is still this process's own — `execv` does not
+        // change parentage — so only an attached one is foreign.
+        matches!(self.child, PtyChild::Attached { .. })
+    }
+
+    #[inline]
     fn next_child_event(&mut self) -> Option<ChildEvent> {
-        // See if there has been a SIGCHLD.
-        let mut buf = [0u8; 1];
-        if let Err(err) = self.signals.read(&mut buf) {
-            if err.kind() != ErrorKind::WouldBlock {
-                error!("Error reading from signal pipe: {err}");
-            }
+        match &mut self.child {
+            PtyChild::Owned(_) => {
+                // See if there has been a SIGCHLD.
+                let mut buf = [0u8; 1];
+                if let Err(err) = self.signals.read(&mut buf) {
+                    if err.kind() != ErrorKind::WouldBlock {
+                        error!("Error reading from signal pipe: {err}");
+                    }
+                    return None;
+                }
+
+                let PtyChild::Owned(child) = &mut self.child else { return None };
+
+                // Match on the child process.
+                match child.try_wait() {
+                    Err(err) => {
+                        error!("Error checking child process termination: {err}");
+                        Some(ChildEvent::ExitStatusUnavailable)
+                    },
+                    Ok(None) => None,
+                    Ok(Some(exit_status)) => Some(ChildEvent::Exited(exit_status)),
+                }
+            },
+            PtyChild::Attached { .. } => self.next_attached_child_event(),
+            PtyChild::Reclaimed { .. } => {
+                // Same SIGCHLD pipe as an owned child; only the reaping differs.
+                let mut buf = [0u8; 1];
+                if let Err(err) = self.signals.read(&mut buf) {
+                    if err.kind() != ErrorKind::WouldBlock {
+                        error!("Error reading from signal pipe: {err}");
+                    }
+                    return None;
+                }
+                let pid = self.child_pid() as i32;
+                let mut status = 0;
+                // SAFETY: `pid` is a child of this process and `status` is
+                // writable for the duration of the call.
+                let reaped = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+                match reaped {
+                    0 => None,
+                    result if result < 0 => Some(ChildEvent::ExitStatusUnavailable),
+                    _ => Some(ChildEvent::Exited(ExitStatus::from_raw(status))),
+                }
+            },
+        }
+    }
+}
+
+impl Pty {
+    /// Decodes one child event reported by the multiplexer.
+    ///
+    /// A stream socket may split a write, so a partial frame is buffered rather
+    /// than misread: acting on half an exit status would report a wrong code
+    /// for a session the user still cares about.
+    fn next_attached_child_event(&mut self) -> Option<ChildEvent> {
+        let mut buf = [0u8; ATTACHED_EVENT_LEN];
+        let read = match self.signals.read(&mut buf) {
+            Ok(0) => {
+                // The reporting end was dropped without saying anything, so no
+                // status is ever coming.
+                return Some(ChildEvent::WatcherDisconnected);
+            },
+            Ok(read) => read,
+            Err(err) => {
+                if err.kind() != ErrorKind::WouldBlock {
+                    error!("Error reading from the multiplexer's child event socket: {err}");
+                }
+                return None;
+            },
+        };
+
+        let PtyChild::Attached { pending, .. } = &mut self.child else { return None };
+        pending.extend_from_slice(&buf[..read]);
+        if pending.len() < ATTACHED_EVENT_LEN {
             return None;
         }
 
-        // Match on the child process.
-        match self.child.try_wait() {
-            Err(err) => {
-                error!("Error checking child process termination: {err}");
+        let frame = pending.drain(..ATTACHED_EVENT_LEN).collect::<Vec<_>>();
+        let raw_status = i32::from_le_bytes([frame[1], frame[2], frame[3], frame[4]]);
+        match frame[0] {
+            ATTACHED_EXITED => Some(ChildEvent::Exited(ExitStatus::from_raw(raw_status))),
+            ATTACHED_STATUS_UNAVAILABLE => Some(ChildEvent::ExitStatusUnavailable),
+            ATTACHED_WATCHER_DISCONNECTED => Some(ChildEvent::WatcherDisconnected),
+            unknown => {
+                error!("Unknown child event {unknown} from the multiplexer");
                 Some(ChildEvent::ExitStatusUnavailable)
             },
-            Ok(None) => None,
-            Ok(Some(exit_status)) => Some(ChildEvent::Exited(exit_status)),
         }
     }
 }
@@ -530,7 +759,7 @@ mod tests {
     ) -> Option<std::process::ExitStatus> {
         let deadline = Instant::now() + timeout;
         loop {
-            if let Some(status) = pty.child.try_wait().expect("failed to poll PTY child") {
+            if let Some(status) = pty.try_wait().expect("failed to poll PTY child") {
                 return Some(status);
             }
 
@@ -606,7 +835,7 @@ mod tests {
     /// being correct, so this is where forwarding the foreground mask actually matters.
     fn assert_signal_reaches_child_spawned_on_background_thread(signal: libc::c_int) {
         let mut pty = spawn_sleep_child_with_foreground_signal_mask(signal);
-        let pid = pty.child.id() as libc::pid_t;
+        let pid = pty.child_pid() as libc::pid_t;
 
         assert_eq!(
             unsafe { libc::kill(pid, signal) },
@@ -656,7 +885,7 @@ mod tests {
         .join()
         .expect("spawn thread panicked");
 
-        let pid = pty.child.id() as libc::pid_t;
+        let pid = pty.child_pid() as libc::pid_t;
         assert_eq!(
             unsafe { libc::kill(pid, signal) },
             0,
@@ -703,4 +932,123 @@ unsafe fn set_nonblocking(fd: c_int) -> Result<()> {
 fn test_get_pw_entry() {
     let mut buf: [i8; 1024] = [0; 1024];
     let _pw = get_pw_entry(&mut buf).unwrap();
+}
+
+#[cfg(test)]
+mod attached_tests {
+    use super::*;
+    use crate::tty::Shell;
+    use std::time::Duration;
+
+    fn attached_pty(child_pid: u32) -> (Pty, AttachedChildEvents) {
+        let pty = openpty(None, None).unwrap();
+        attach(pty.controller, child_pid).unwrap()
+    }
+
+    #[test]
+    fn an_attached_child_reports_its_exit_status_through_the_multiplexer() {
+        let (mut pty, mut events) = attached_pty(1234);
+
+        // Nothing reported yet: the event loop must keep running.
+        assert!(pty.next_child_event().is_none());
+
+        events.report_exit(ExitStatus::from_raw(3 << 8).into_raw()).unwrap();
+        match pty.next_child_event() {
+            Some(ChildEvent::Exited(status)) => assert_eq!(status.code(), Some(3)),
+            other => panic!("expected an exit status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_split_child_event_is_buffered_rather_than_misread() {
+        let (mut pty, events) = attached_pty(1234);
+
+        // A stream socket may deliver a write in pieces. Acting on a partial
+        // frame would report an exit code assembled from whatever arrived.
+        let frame = [ATTACHED_EXITED, 0, 1, 0, 0];
+        (&events.0).write_all(&frame[..2]).unwrap();
+        assert!(pty.next_child_event().is_none());
+
+        (&events.0).write_all(&frame[2..]).unwrap();
+        match pty.next_child_event() {
+            Some(ChildEvent::Exited(status)) => {
+                assert_eq!(status.into_raw(), i32::from_le_bytes([0, 1, 0, 0]))
+            },
+            other => panic!("expected the reassembled exit status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn losing_the_multiplexer_reports_a_disconnected_watcher() {
+        let (mut pty, events) = attached_pty(1234);
+
+        // Otherwise a pane whose daemon died would spin: the event loop retries
+        // a failing read on the master and only stops on a child event.
+        drop(events);
+        assert_eq!(pty.next_child_event(), Some(ChildEvent::WatcherDisconnected));
+    }
+
+    #[test]
+    fn dropping_an_attached_pty_leaves_the_session_running() {
+        // Detaching a session is exactly this drop. Hanging the child up here
+        // would kill the session the multiplexer is holding.
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id();
+        let (pty, _events) = attached_pty(pid);
+
+        drop(pty);
+
+        // `kill(pid, 0)` is not the check to make here: a child killed by the
+        // drop stays a zombie until it is reaped, and signal 0 succeeds on a
+        // zombie. Reaping it is what distinguishes the two.
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "the attached child was killed by dropping the PTY"
+        );
+        let _ = pid;
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn only_a_multiplexer_owned_child_is_foreign() {
+        // What the event loop uses to decide whether a hung-up master is worth
+        // waiting on. For a child this process spawned the exit notification is
+        // already on its way, so waiting is right and the loop keeps upstream's
+        // behaviour. For the multiplexer's child the notification can only
+        // arrive as a report, so waiting forever is what a broken control
+        // channel used to mean.
+        let (attached, _events) = attached_pty(1234);
+        assert!(attached.child_is_foreign());
+
+        let options = Options {
+            shell: Some(Shell::new(
+                "/bin/sh".to_owned(),
+                vec!["-c".to_owned(), "sleep 30".to_owned()],
+            )),
+            ..Options::default()
+        };
+        let owned = crate::tty::new(
+            &options,
+            WindowSize { num_lines: 24, num_cols: 80, cell_width: 1, cell_height: 1 },
+            0,
+        )
+        .unwrap();
+        assert!(!owned.child_is_foreign());
+        drop(owned);
+
+        // A pane reclaimed across the multiplexer's own re-exec is still this
+        // process's child — an exec does not change parentage — so it must not
+        // be treated as foreign either, or nothing would ever reap it.
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let terminal = openpty(None, None).unwrap();
+        let reclaimed = reclaim(terminal.controller, child.id()).unwrap();
+        assert!(!reclaimed.child_is_foreign());
+        // Its drop hangs the child up and reaps it, which is what `Reclaimed`
+        // means; the `Child` is then already gone, hence the ignored result.
+        drop(reclaimed);
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }

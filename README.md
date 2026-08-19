@@ -16,8 +16,11 @@ for active development.
 - Automatically detected shells, including Homebrew-installed shells on
   macOS and Linux, plus first-class WSL/MSYS2 profiles with working directory
   tracking
-- Detachable background sessions that can survive after the last window closes,
+- Detachable background sessions, held by the `zmux` multiplexer so they
+  outlive Zetta itself,
   with retained diagnostics for unexpected terminal exits
+- Shareable tabs: offer a tab that is still on screen and join it from another
+  Zetta window, with both driving the same panes
 - Optional compact mode moves tabs into the title bar, keeps Menu, Profile,
   Broadcast, and Silent available, and preserves responsive tab sizing
 - Open paths or the complete pane scrollback in `$EDITOR`, with built-in vi as
@@ -219,8 +222,8 @@ built, how it should behave, and when the result was good enough.
   and Git worktrees
 - [Configuration](docs/configuration.md): settings, projects, profiles,
   keymaps, fonts, and themes
-- [Background sessions](docs/background-sessions.md): detach, protect, inspect,
-  and reconnect sessions
+- [Background sessions](docs/background-sessions.md): detach, share, protect,
+  inspect, and reconnect sessions
 - [Shell integration](docs/shell-integration.md): command completion and the
   `zvi`/`zwt`/`ztftp`/`zntfy`/`vi` shortcuts
 - [Serial and network tools](docs/tools.md): serial consoles, HTTP and TFTP

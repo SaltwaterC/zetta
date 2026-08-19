@@ -290,3 +290,92 @@ fn rendering_leaves_the_global_theme_alone_when_it_already_matches(cx: &mut Test
     assert_eq!(inline.as_deref(), Some("Solarized Light"));
     assert_eq!(cached.as_deref(), Some("Solarized Light"));
 }
+
+/// Where a transient notice is rendered, in the two arrangements that matter.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NoticePlacement {
+    Absent,
+    /// Floating over the content, as an overlay sibling of the window column.
+    Floating,
+    /// Sharing the column with the content, as the feedback banners do.
+    InColumn,
+}
+
+/// Stands in for `Zetta::render`'s composition: a full-size relative root with
+/// the window column as a child and overlays as absolutely-positioned siblings.
+/// A stand-in rather than a real `Zetta`, whose `new` opens a tab and spawns a
+/// shell.
+struct NoticeHarness {
+    placement: NoticePlacement,
+}
+
+const NOTICE_HEIGHT: Pixels = px(40.);
+
+impl Render for NoticeHarness {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let column = div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .when(self.placement == NoticePlacement::InColumn, |column| {
+                column.child(div().flex_none().w_full().h(NOTICE_HEIGHT))
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .w_full()
+                    .debug_selector(|| "tab-body".to_owned()),
+            );
+        div()
+            .size_full()
+            .relative()
+            .flex()
+            .flex_col()
+            .child(column)
+            .children((self.placement == NoticePlacement::Floating).then(|| {
+                div()
+                    .absolute()
+                    .bottom(px(12.))
+                    .right(px(12.))
+                    .w(px(200.))
+                    .h(NOTICE_HEIGHT)
+                    .debug_selector(|| "notice".to_owned())
+            }))
+    }
+}
+
+/// A transient notice must not take layout space away from the terminals.
+///
+/// A banner in the feedback column does, and for a *shared* pane that reflow is
+/// published: the pane reports its smaller grid, the multiplexer arbitrates every
+/// viewer down to the smallest of them, and the other window is resized to match.
+/// So telling the user their tab could now be joined resized their windows — and
+/// the resize was not undone when the message took itself away again.
+#[gpui::test]
+fn a_transient_notice_does_not_take_layout_space(cx: &mut TestAppContext) {
+    let body_height = |placement: NoticePlacement, cx: &mut TestAppContext| {
+        let (_root, cx) = cx.add_window_view(move |_, _| NoticeHarness { placement });
+        cx.run_until_parked();
+        let notice = cx.debug_bounds("notice").is_some();
+        let body = cx
+            .debug_bounds("tab-body")
+            .expect("the tab body is always laid out")
+            .size
+            .height;
+        (body, notice)
+    };
+
+    let (without, no_notice) = body_height(NoticePlacement::Absent, cx);
+    assert!(!no_notice);
+    let (floating, shown) = body_height(NoticePlacement::Floating, cx);
+    assert!(shown, "the notice has to actually be on screen");
+    assert_eq!(
+        floating, without,
+        "a floating notice must leave the terminals exactly as they were"
+    );
+
+    // The arrangement this replaced, so the property is pinned rather than
+    // assumed: a notice in the column shortens the body by its own height.
+    let (in_column, _) = body_height(NoticePlacement::InColumn, cx);
+    assert_eq!(in_column, without - NOTICE_HEIGHT);
+}

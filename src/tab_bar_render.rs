@@ -800,6 +800,7 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, tab_theme: Arc<Theme>, cx: &App)
         });
     let menu_handle = handle.clone();
     let tab_silent_mode = tab.silent_mode;
+    let tab_shared = tab.shared;
     // The context menu activates this tab before it is rendered. Use
     // the clicked tab's focus so its key context remains valid after
     // that switch, including when the tab was previously inactive.
@@ -831,6 +832,7 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, tab_theme: Arc<Theme>, cx: &App)
                             Box::new(ToggleAutoBackgroundTab),
                             tab_auto_background,
                         )
+                        .action_checked("Share Tab", Box::new(ToggleTabSharing), tab_shared)
                         .action("Detach", Box::new(DetachTab))
                         .when(tab_move_menu_entry_available(tab_count), |menu| {
                             menu.separator().action_checked(

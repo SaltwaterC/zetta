@@ -850,6 +850,33 @@ fn tftp_server_subcommand_bypasses_application_startup() {
 }
 
 #[test]
+fn mux_subcommand_forwards_its_arguments_verbatim() {
+    // The multiplexer's own argument parsing lives in `zmux`, so `zetta mux`
+    // must hand everything after the subcommand over untouched rather than
+    // interpreting it — otherwise `zmux X` and `zetta mux X` could diverge.
+    let bare = parse_args_from([OsString::from("mux")]).unwrap();
+    assert_eq!(bare.mode, StartupMode::Mux(Vec::new()));
+
+    let forwarded = parse_args_from([
+        OsString::from("mux"),
+        OsString::from("list"),
+        OsString::from("--json"),
+    ])
+    .unwrap();
+    assert_eq!(
+        forwarded.mode,
+        StartupMode::Mux(vec![OsString::from("list"), OsString::from("--json")])
+    );
+
+    // Including arguments Zetta itself would otherwise claim.
+    let shadowing = parse_args_from([OsString::from("mux"), OsString::from("--profile")]).unwrap();
+    assert_eq!(
+        shadowing.mode,
+        StartupMode::Mux(vec![OsString::from("--profile")])
+    );
+}
+
+#[test]
 fn sessions_subcommand_supports_human_and_json_output() {
     let human = parse_args_from([OsString::from("sessions")]).unwrap();
     assert_eq!(

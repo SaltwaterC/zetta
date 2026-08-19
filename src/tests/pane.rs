@@ -557,6 +557,7 @@ fn tab_pane_index_resolves_panes_without_scanning() {
         broadcast_input: false,
         silent_mode: false,
         close_policy: TabClosePolicy::Close,
+        shared: false,
         custom_title: None,
         worktree_seed_title: None,
         process_title: None,
@@ -750,6 +751,7 @@ fn split_profile_comes_from_the_active_pane() {
         broadcast_input: false,
         silent_mode: false,
         close_policy: TabClosePolicy::Close,
+        shared: false,
         custom_title: None,
         worktree_seed_title: None,
         process_title: None,
@@ -819,6 +821,7 @@ fn closing_active_pane_restores_previous_focus() {
         broadcast_input: false,
         silent_mode: false,
         close_policy: TabClosePolicy::Close,
+        shared: false,
         custom_title: None,
         worktree_seed_title: None,
         process_title: None,
@@ -890,6 +893,7 @@ fn closing_inactive_pane_preserves_focus() {
         broadcast_input: false,
         silent_mode: false,
         close_policy: TabClosePolicy::Close,
+        shared: false,
         custom_title: None,
         worktree_seed_title: None,
         process_title: None,
@@ -1255,6 +1259,7 @@ fn pane_management_tab() -> Tab {
         broadcast_input: false,
         silent_mode: false,
         close_policy: TabClosePolicy::Close,
+        shared: false,
         custom_title: None,
         worktree_seed_title: None,
         process_title: None,
@@ -1301,8 +1306,15 @@ fn transferred_tabs_receive_target_window_ids_consistently() {
     tab.selected_minimized_pane = Some(3);
     let mut next_pane_id = 20;
 
-    tab.reassign_ids(10, &mut next_pane_id);
+    let pane_ids = tab.reassign_ids(10, &mut next_pane_id);
 
+    // The map is what lets a caller re-key anything it holds under the old ids.
+    // A tab attached from the multiplexer arrives with the *publishing* window's
+    // pane ids, and this window's registries — the multiplexer pane map, the
+    // shared-pane registry, pane controls — are keyed by pane id alone, so two
+    // tabs sharing an id share those entries and closing either one takes the
+    // other's bookkeeping with it.
+    assert_eq!(pane_ids, HashMap::from([(1, 20), (2, 21), (3, 22)]));
     assert_eq!(tab.id, 10);
     assert_eq!(tab.attention_id, 99);
     assert_eq!(

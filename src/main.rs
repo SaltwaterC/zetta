@@ -6,6 +6,7 @@ mod command_palette;
 mod config;
 #[cfg(feature = "http-server")]
 mod http_server;
+mod mux;
 #[cfg(feature = "notifications")]
 mod notification_sounds;
 mod process_control;
@@ -20,6 +21,7 @@ mod serial_console;
 mod server_ui;
 mod session_auth_ui;
 mod session_cli;
+mod session_state;
 mod settings_editor;
 mod shell_integration;
 mod silent_mode;
@@ -53,7 +55,8 @@ use anyhow::{Context as _, Result};
 use background_sessions::{
     BackgroundPaneExit, BackgroundPaneLayout, BackgroundPaneState, BackgroundPaneSummary,
     BackgroundSessionRunner, BackgroundSessionSummary, SessionAuthentication, SessionSecret,
-    VerifiedSession, application_from_command_line, print_session_catalogs,
+    VerifiedSession, application_from_command_line, background_pane_exit_from_terminal,
+    print_session_catalogs,
 };
 use command_palette::{
     CommandPalette, PaletteCommand, humanize_action_name, project_palette_commands,
@@ -78,6 +81,7 @@ use gpui::{
     WindowOptions, actions, anchored, canvas, container_query, deferred, div, point, profiler, px,
     size, svg, transparent_black, uniform_list,
 };
+use mux::{MuxPanes, MuxRuntime};
 use process_control::{
     ProcessControlCommand, ProcessControlServer, ReconnectSessionResult, TabAttentionRequest,
     request_existing_process_window,
@@ -138,6 +142,7 @@ actions!(
         EditConfigFile,
         EditKeymapFile,
         DetachTab,
+        ToggleTabSharing,
         ToggleAutoBackgroundTab,
         ReconnectSession,
         NextTab,

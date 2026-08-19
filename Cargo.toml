@@ -48,6 +48,14 @@ name = "zetta-gui"
 path = "src/bin/zetta_gui.rs"
 required-features = ["windows-gui"]
 
+# The multiplexer ships as its own executable so a session outlives every Zetta
+# process. This target exists here so the normal build produces it alongside
+# `zetta`; `crates/zmux` also builds standalone, which is how a stripped-down
+# daemon is produced for a constrained host.
+[[bin]]
+name = "zmux"
+path = "src/bin/zmux.rs"
+
 [dependencies]
 anyhow = "1"
 async-channel = "2.5.0"
@@ -115,6 +123,7 @@ ui = { path = "zed/crates/ui" }
 util = { path = "zed/crates/util" }
 zeroize = "1"
 zed_actions = { path = "zed/crates/zed_actions" }
+zmux = { path = "crates/zmux" }
 
 [target.'cfg(windows)'.dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }

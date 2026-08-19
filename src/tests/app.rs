@@ -24,6 +24,7 @@ fn pin_test_tab(id: u64, pinned: bool) -> Tab {
         broadcast_input: false,
         silent_mode: false,
         close_policy: TabClosePolicy::Close,
+        shared: false,
         custom_title: None,
         worktree_seed_title: None,
         process_title: None,
@@ -694,4 +695,25 @@ fn opening_a_project_starts_in_the_project_directory_regardless_of_scope() {
 fn a_new_tab_in_the_current_session_follows_the_configured_scope() {
     assert!(!NewTabOrigin::CurrentSession.inherits_working_directory(WorkingDirectoryScope::None));
     assert!(NewTabOrigin::CurrentSession.inherits_working_directory(WorkingDirectoryScope::Tab));
+}
+
+#[test]
+fn a_transient_notice_is_taken_away_by_its_own_timer_only() {
+    // The banner it replaces stayed on screen until something else overwrote
+    // it, which made a sentence of advice read as an unresolved error with no
+    // way to clear it.
+    let mut notice = TransientNotice::default();
+    let first = notice.show("attach it from another window".to_owned());
+    assert_eq!(notice.message(), Some("attach it from another window"));
+
+    // A later notice takes over, and the earlier one's timer must not then
+    // remove it: the generation is what keeps the two apart.
+    let second = notice.show("this tab can now be joined".to_owned());
+    assert!(!notice.dismiss_if_current(first));
+    assert_eq!(notice.message(), Some("this tab can now be joined"));
+
+    assert!(notice.dismiss_if_current(second));
+    assert_eq!(notice.message(), None);
+    // Dismissing twice is not an error, and does not report a second change.
+    assert!(!notice.dismiss_if_current(second));
 }

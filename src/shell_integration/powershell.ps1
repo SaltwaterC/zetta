@@ -139,7 +139,7 @@ $zettaCompletions = {
         }
     }
     $subcommand = $words | Where-Object {
-        $_ -in 'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'splits', 'pane', 'profile', 'project', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', 'wt'
+        $_ -in 'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'mux', 'splits', 'pane', 'profile', 'project', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', 'wt'
     } | Select-Object -First 1
     $worktreeCommand = $false
     $worktreeOperation = ''
@@ -273,14 +273,19 @@ $zettaCompletions = {
             '--help'
         }
     } elseif ($null -eq $subcommand) {
-        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'profile', 'project', 'splits', 'pane', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', 'wt', '--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme'
+        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'mux', 'profile', 'project', 'splits', 'pane', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', 'wt', '--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme'
     } else {
         switch ($subcommand) {
-            'benchmark' { '--terminal-render-workload', '--terminal-checkerboard-workload', '--terminal-sparse-update-workload', '--terminal-alt-screen-scroll-workload', '--profile-report', '--profile-duration', '--profile-pane-stress', '--profile-background-stress', '--profile-sparse-updates', '--profile-alt-screen-scroll', '--profile-external-terminal', '--help' }
+            'benchmark' { '--profile-report', '--profile-duration', '--profile-pane-stress', '--profile-background-stress', '--profile-sparse-updates', '--profile-alt-screen-scroll', '--profile-external-terminal', '--help' }
             'benchmark-output' { '--size', '--output-type', '--help' }
             'terminal-size' { '--json', '--resize', '--columns', '--rows', '--help' }
             'edit' { '--delete-after', '--help' }
             'vi' { '--help' }
+            'mux' {
+                if ($words.Count -le 2) { 'list', 'stop', 'share', 'unshare', '--json', '--upgrade', '--help', '--version' }
+                elseif ($words[2] -eq 'stop') { '--force', '--help' }
+                else { '--json', '--help' }
+            }
             'sessions' {
                 if ($words.Count -le 2 -or ($words.Count -eq 3 -and $words[2] -ne 'reconnect')) {
                     'reconnect', '--json', '--help'

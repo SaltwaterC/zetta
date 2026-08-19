@@ -26,7 +26,10 @@ use crate::tty::windows::blocking::{UnblockedReader, UnblockedWriter};
 use crate::tty::windows::child::ChildExitWatcher;
 use crate::tty::windows::{Pty, cmdline, win32_string};
 
-const PIPE_CAPACITY: usize = crate::event_loop::READ_BUFFER_SIZE;
+/// Visible to the parent module so an *attached* console is unblocked through
+/// the same buffer as one created here, by construction rather than by a
+/// second constant that can drift from this one.
+pub(super) const PIPE_CAPACITY: usize = crate::event_loop::READ_BUFFER_SIZE;
 
 /// Load the pseudoconsole API from conpty.dll if possible, otherwise use the
 /// standard Windows API.
@@ -234,6 +237,10 @@ pub fn new(config: &Options, window_size: WindowSize) -> Result<Pty> {
         }
     }
 
+    // Duplicated before the unblocking wrappers take ownership of the pipes:
+    // the multiplexer hands these to a client when it attaches, and there is
+    // nothing left to duplicate once the reader thread owns the original.
+    let handover = duplicate_console_pipes(&conout, &conin);
     let conin = UnblockedWriter::new(conin, PIPE_CAPACITY);
     let conout = UnblockedReader::new(conout, PIPE_CAPACITY);
 
@@ -247,7 +254,7 @@ pub fn new(config: &Options, window_size: WindowSize) -> Result<Pty> {
     let child_watcher = child_watcher?;
     let conpty = Conpty { handle: pty_handle as HPCON, api };
 
-    Ok(Pty::new(conpty, conout, conin, child_watcher))
+    Ok(Pty::new(conpty, conout, conin, child_watcher, handover))
 }
 
 // Windows environment variables are case-insensitive, and the caller is responsible for
@@ -320,4 +327,26 @@ impl From<WindowSize> for COORD {
         let columns = window_size.num_cols;
         COORD { X: columns as i16, Y: lines as i16 }
     }
+}
+
+/// Duplicates a console's pipes so they can be handed to another process later.
+///
+/// Returns `None` when either duplicate fails; a partial pair is useless, and
+/// a terminal that simply cannot be handed over is better than one that hands
+/// over half of itself.
+fn duplicate_console_pipes(
+    conout: &impl std::os::windows::io::AsRawHandle,
+    conin: &impl std::os::windows::io::AsRawHandle,
+) -> Option<(std::os::windows::io::OwnedHandle, std::os::windows::io::OwnedHandle)> {
+    Some((duplicate_handle(conout)?, duplicate_handle(conin)?))
+}
+
+fn duplicate_handle(
+    handle: &impl std::os::windows::io::AsRawHandle,
+) -> Option<std::os::windows::io::OwnedHandle> {
+    use std::os::windows::io::BorrowedHandle;
+    // SAFETY: the borrow lives only for this call, and the caller owns the
+    // handle for at least that long.
+    let borrowed = unsafe { BorrowedHandle::borrow_raw(handle.as_raw_handle()) };
+    borrowed.try_clone_to_owned().ok()
 }

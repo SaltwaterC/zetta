@@ -397,6 +397,44 @@ pub(crate) fn zetta_for_runner(runner_id: u64, cx: &App) -> Option<Entity<Zetta>
         .cloned()
 }
 
+/// How often the multiplexer's published catalog is checked for changes.
+const MULTIPLEXER_CATALOG_POLL: Duration = Duration::from_secs(1);
+
+/// Notices sessions the multiplexer is holding.
+///
+/// The reconnect list used to be refreshed only when *this* process published
+/// its own catalog. Once the multiplexer owns the sessions that stopped
+/// happening, so a window that had not detached anything itself never learned
+/// that anything was there — no reconnect button, and the action finding
+/// nothing to offer.
+///
+/// The catalog is a file the multiplexer replaces atomically, so this watches
+/// the directory's modification time and only re-reads when it changes. That
+/// keeps an idle process from parsing the catalog and scanning the process
+/// table once a second for no reason.
+fn start_multiplexer_session_watcher(cx: &mut App) {
+    let directory = crate::background_sessions::session_catalog_dir();
+    let mut last_seen: Option<SystemTime> = None;
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor()
+                .timer(MULTIPLEXER_CATALOG_POLL)
+                .await;
+            let changed = std::fs::metadata(&directory)
+                .and_then(|metadata| metadata.modified())
+                .ok();
+            // A first look always refreshes: the catalog may already describe
+            // sessions from before this process started.
+            if changed == last_seen && last_seen.is_some() {
+                continue;
+            }
+            last_seen = changed;
+            cx.update(refresh_process_background_sessions);
+        }
+    })
+    .detach();
+}
+
 pub(crate) fn refresh_process_background_sessions(cx: &mut App) {
     let entities = process_zetta_entities(cx);
     let mut entries = Vec::new();
@@ -407,6 +445,7 @@ pub(crate) fn refresh_process_background_sessions(cx: &mut App) {
             |(session_id, title, details)| (runner_id, *session_id, title.clone(), details.clone()),
         ));
     }
+    entries.extend(multiplexer_session_entries());
     if cx.has_global::<ZettaProcessState>() {
         cx.global_mut::<ZettaProcessState>()
             .background_session_entries = entries.into();
@@ -1043,6 +1082,7 @@ pub(crate) fn run() -> Result<()> {
         StartupMode::ReconnectBackgroundSession { identifier } => {
             return crate::session_cli::run_reconnect_session(identifier);
         }
+        StartupMode::Mux(arguments) => return zmux::run(arguments),
         _ => {}
     }
     #[cfg(cli_services)]
@@ -1194,6 +1234,7 @@ pub(crate) fn run() -> Result<()> {
                 _quit_subscription: quit_subscription,
             });
             silent_mode::start_observer(cx);
+            start_multiplexer_session_watcher(cx);
             #[cfg(all(target_os = "macos", feature = "notifications"))]
             cx.on_system_notification_response(|response, cx| {
                 let target = macos_notification_target_for_response(
@@ -1828,3 +1869,56 @@ fn shell_integration_configuration_message(
 #[cfg(test)]
 #[path = "tests/startup.rs"]
 mod tests;
+
+/// The sessions the multiplexer is holding, as reconnect entries.
+///
+/// Read from the published catalog rather than by asking the multiplexer,
+/// because this runs whenever the session list might have changed and must not
+/// cost a round trip. Catalogs published by *this* process are skipped: those
+/// describe sessions kept in memory here because the multiplexer was
+/// unreachable, and they are already in the list.
+fn multiplexer_session_entries() -> Vec<ProcessBackgroundSessionEntry> {
+    let catalogs = match crate::background_sessions::read_session_catalogs(
+        &crate::background_sessions::session_catalog_dir(),
+    ) {
+        Ok(catalogs) => catalogs,
+        Err(error) => {
+            log::debug!("could not read the session catalog: {error:#}");
+            return Vec::new();
+        }
+    };
+    // Only the multiplexer's own catalog counts: a Zetta process that kept a
+    // session in memory because the multiplexer was unreachable publishes one
+    // too, and those sessions are this process's to transfer, not the daemon's
+    // to attach.
+    crate::background_sessions::multiplexer_held_catalog_sessions(
+        &catalogs,
+        crate::background_sessions::process_is_zetta,
+        std::process::id(),
+    )
+    .map(|(catalog, session)| {
+        let runner_id = catalog.runner_id;
+        let details = if session.authentication_required {
+            format!("Session {} · protected", session.id)
+        } else {
+            let applications = session
+                .panes
+                .iter()
+                .map(|pane| pane.application.as_str())
+                .collect::<Vec<_>>();
+            let panes = session.panes.len();
+            let mut details = format!(
+                "Session {} · {panes} pane{}",
+                session.id,
+                if panes == 1 { "" } else { "s" }
+            );
+            if !applications.is_empty() {
+                details.push_str(" · ");
+                details.push_str(&applications.join(", "));
+            }
+            details
+        };
+        (runner_id, session.id, session.title.clone(), details)
+    })
+    .collect()
+}

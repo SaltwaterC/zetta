@@ -60,6 +60,26 @@ extern "system" fn child_exit_callback(ctx: *mut c_void, timed_out: BOOLEAN) {
     }
 }
 
+/// Reports the exit of a child watched by another process.
+///
+/// Posting to the poller is what makes the event loop notice: it is waiting on
+/// the poller, not on the channel, so a send alone would sit unread until some
+/// other event happened to wake it.
+pub struct ChildExitReporter {
+    sender: mpsc::Sender<ChildEvent>,
+    interest: Arc<Mutex<Option<Interest>>>,
+}
+
+impl ChildExitReporter {
+    pub fn report(&self, event: ChildEvent) -> std::result::Result<(), ()> {
+        self.sender.send(event).map_err(|_| ())?;
+        if let Some(interest) = self.interest.lock().unwrap().as_ref() {
+            interest.poller.post(CompletionPacket::new(interest.event)).ok();
+        }
+        Ok(())
+    }
+}
+
 pub struct ChildExitWatcher {
     wait_handle: AtomicPtr<c_void>,
     callback_context: AtomicPtr<c_void>,
@@ -122,6 +142,28 @@ impl ChildExitWatcher {
                 wait_handle: AtomicPtr::from(wait_handle),
             })
         }
+    }
+
+    /// A watcher for a child this process did not spawn.
+    ///
+    /// The multiplexer owns the process, so there is nothing here to wait on:
+    /// its exit is reported through the returned sender instead. Every handle
+    /// field stays null, which is what keeps `Drop` from unregistering a wait
+    /// that was never registered or closing a handle this never held.
+    pub fn external(pid: Option<NonZeroU32>) -> (ChildExitWatcher, ChildExitReporter) {
+        let (event_tx, event_rx) = mpsc::channel();
+        let interest = Arc::new(Mutex::new(None));
+        let watcher = ChildExitWatcher {
+            event_rx,
+            callback_context: AtomicPtr::new(ptr::null_mut()),
+            callback_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            event_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            interest: interest.clone(),
+            pid,
+            child_handle: AtomicPtr::new(ptr::null_mut()),
+            wait_handle: AtomicPtr::new(ptr::null_mut()),
+        };
+        (watcher, ChildExitReporter { sender: event_tx, interest })
     }
 
     pub fn event_rx(&self) -> &mpsc::Receiver<ChildEvent> {

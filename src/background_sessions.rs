@@ -1,323 +1,65 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::{Duration, Instant},
-};
+//! The application's half of background sessions.
+//!
+//! The session catalog schema, the Argon2id verifier, the secret type and the
+//! catalog publisher live in the `zmux` crate, which has no GPUI or terminal
+//! dependency and is shared with the multiplexer binary. What remains here is
+//! the part that only makes sense inside the application: the runner holding
+//! detached tabs, and the conversion from a terminal's exit event into the
+//! sanitized metadata the catalog publishes.
 
-use anyhow::{Context as _, Result};
-use argon2::{
-    Argon2, PasswordHash, PasswordHasher as _, PasswordVerifier as _, password_hash::SaltString,
-};
-use serde::{Deserialize, Serialize};
-use subtle::ConstantTimeEq as _;
-use sysinfo::{Pid, ProcessesToUpdate, System};
+use std::{path::PathBuf, time::Instant};
+
+use anyhow::Result;
 use terminal::{TerminalExitReason, TerminalExitSource, TerminalExited};
-use zeroize::Zeroizing;
 
-static NEXT_RUNNER_ID: AtomicU64 = AtomicU64::new(1);
-const CATALOG_VERSION: u32 = 4;
+pub(crate) use zmux::auth::{SessionAuthentication, SessionSecret, VerifiedSession};
+pub(crate) use zmux::catalog::{
+    application_from_command_line, create_private_dir, read_session_catalogs,
+};
+pub(crate) use zmux::protocol::{
+    BackgroundPaneExit, BackgroundPaneExitReason, BackgroundPaneExitSource, BackgroundPaneLayout,
+    BackgroundPaneState, BackgroundPaneSummary, BackgroundSessionCatalog, BackgroundSessionSummary,
+};
 
-/// How long a session refuses reconnect attempts after one wrong secret, and
-/// the ceiling that doubling reaches.
+use zmux::catalog::SessionCatalogPublisher;
+
+/// Sanitized exit metadata for a pane the application decided to retain.
 ///
-/// The window is enforced by *rejecting* early attempts rather than sleeping on
-/// them. Sleeping would hold the process control thread, which answers one
-/// request at a time, so a wrong secret could be used deliberately to stall
-/// every other control command for the length of the backoff. Rejecting costs
-/// an attacker exactly the same waiting time and costs everyone else nothing.
-const FAILED_AUTHENTICATION_DELAY: Duration = Duration::from_secs(1);
-const MAX_FAILED_AUTHENTICATION_DELAY: Duration = Duration::from_secs(30);
-
-/// The refusal window after `failures` consecutive wrong secrets: doubling from
-/// [`FAILED_AUTHENTICATION_DELAY`] up to [`MAX_FAILED_AUTHENTICATION_DELAY`].
-///
-/// Attempts serialize through the control socket, so this is a global bound on
-/// the guessing rate for a session, not a per-connection one.
-pub(crate) fn failed_authentication_delay(failures: u32) -> Duration {
-    let doublings = failures.saturating_sub(1).min(u32::BITS - 1);
-    FAILED_AUTHENTICATION_DELAY
-        .saturating_mul(1_u32.checked_shl(doublings).unwrap_or(u32::MAX))
-        .min(MAX_FAILED_AUTHENTICATION_DELAY)
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct BackgroundSessionCatalog {
-    pub(crate) version: u32,
-    pub(crate) process_id: u32,
-    pub(crate) runner_id: u64,
-    pub(crate) sessions: Vec<BackgroundSessionSummary>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct BackgroundSessionSummary {
-    pub(crate) id: u64,
-    pub(crate) title: String,
-    pub(crate) authentication_required: bool,
-    pub(crate) active_pane: u64,
-    pub(crate) layout: BackgroundPaneLayout,
-    pub(crate) panes: Vec<BackgroundPaneSummary>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum BackgroundPaneLayout {
-    Pane {
-        pane_id: u64,
-    },
-    Split {
-        axis: String,
-        first: Box<BackgroundPaneLayout>,
-        second: Box<BackgroundPaneLayout>,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct BackgroundPaneSummary {
-    pub(crate) id: u64,
-    pub(crate) label: String,
-    pub(crate) profile: String,
-    pub(crate) configured_command: String,
-    pub(crate) application: String,
-    pub(crate) foreground_command: Option<Vec<String>>,
-    pub(crate) terminal_title: Option<String>,
-    pub(crate) working_directory: Option<PathBuf>,
-    pub(crate) state: BackgroundPaneState,
-    #[serde(default)]
-    pub(crate) exit: Option<BackgroundPaneExit>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum BackgroundPaneState {
-    Starting,
-    Running,
-    Exited,
-    Failed,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum BackgroundPaneExitSource {
-    Child,
-    StatusUnavailable,
-    WatcherDisconnected,
-    BackendShutdown,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum BackgroundPaneExitReason {
-    StatusUnavailable,
-    WatcherDisconnected,
-    BackendShutdown,
-    ExitedBeforeInput,
-    ForegroundCommand,
-}
-
-/// Sanitized exit metadata retained with a failed pane. It intentionally
-/// contains no terminal output, environment values, working directory, or
-/// full command line.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct BackgroundPaneExit {
-    pub(crate) source: BackgroundPaneExitSource,
-    pub(crate) reason: BackgroundPaneExitReason,
-    pub(crate) exit_code: Option<i32>,
-    pub(crate) child_pid: Option<u32>,
-    pub(crate) input_sent: bool,
-    pub(crate) foreground_is_shell: Option<bool>,
-    pub(crate) foreground_command: Option<String>,
-}
-
-impl BackgroundPaneExit {
-    pub(crate) fn from_terminal(exit: &TerminalExited) -> Option<Self> {
-        let reason = exit.unexpected_reason()?;
-        Some(Self {
-            source: match exit.source {
-                TerminalExitSource::Child => BackgroundPaneExitSource::Child,
-                TerminalExitSource::StatusUnavailable => {
-                    BackgroundPaneExitSource::StatusUnavailable
-                }
-                TerminalExitSource::WatcherDisconnected => {
-                    BackgroundPaneExitSource::WatcherDisconnected
-                }
-                TerminalExitSource::BackendShutdown => BackgroundPaneExitSource::BackendShutdown,
-            },
-            reason: match reason {
-                TerminalExitReason::StatusUnavailable => {
-                    BackgroundPaneExitReason::StatusUnavailable
-                }
-                TerminalExitReason::WatcherDisconnected => {
-                    BackgroundPaneExitReason::WatcherDisconnected
-                }
-                TerminalExitReason::BackendShutdown => BackgroundPaneExitReason::BackendShutdown,
-                TerminalExitReason::ExitedBeforeInput => {
-                    BackgroundPaneExitReason::ExitedBeforeInput
-                }
-                TerminalExitReason::ForegroundCommand => {
-                    BackgroundPaneExitReason::ForegroundCommand
-                }
-            },
-            exit_code: exit.exit_code,
-            child_pid: exit.child_pid,
-            input_sent: exit.input_sent,
-            foreground_is_shell: exit.foreground_is_shell,
-            foreground_command: exit
-                .foreground_command
-                .as_deref()
-                .filter(|command| {
-                    !command.is_empty()
-                        && command.len() <= 64
-                        && command.chars().all(|character| {
-                            character.is_ascii_alphanumeric()
-                                || matches!(character, '-' | '_' | '.')
-                        })
-                })
-                .map(ToOwned::to_owned),
-        })
-    }
-
-    pub(crate) fn reason_text(&self) -> String {
-        let mut text = match self.reason {
-            BackgroundPaneExitReason::StatusUnavailable => {
-                "the child exited but its exit status was unavailable".to_owned()
+/// The predicate on the foreground command lives in `zmux` so the daemon
+/// applies the same rule; the mapping from the terminal's own exit types lives
+/// here because those types belong to the terminal crate.
+pub(crate) fn background_pane_exit_from_terminal(
+    exit: &TerminalExited,
+) -> Option<BackgroundPaneExit> {
+    let reason = exit.unexpected_reason()?;
+    Some(BackgroundPaneExit {
+        source: match exit.source {
+            TerminalExitSource::Child => BackgroundPaneExitSource::Child,
+            TerminalExitSource::StatusUnavailable => BackgroundPaneExitSource::StatusUnavailable,
+            TerminalExitSource::WatcherDisconnected => {
+                BackgroundPaneExitSource::WatcherDisconnected
             }
-            BackgroundPaneExitReason::WatcherDisconnected => {
-                "the child watcher disconnected before reporting an exit status".to_owned()
+            TerminalExitSource::BackendShutdown => BackgroundPaneExitSource::BackendShutdown,
+        },
+        reason: match reason {
+            TerminalExitReason::StatusUnavailable => BackgroundPaneExitReason::StatusUnavailable,
+            TerminalExitReason::WatcherDisconnected => {
+                BackgroundPaneExitReason::WatcherDisconnected
             }
-            BackgroundPaneExitReason::BackendShutdown => {
-                "the terminal backend shut down unexpectedly".to_owned()
-            }
-            BackgroundPaneExitReason::ExitedBeforeInput => {
-                "the shell exited before receiving user input".to_owned()
-            }
-            BackgroundPaneExitReason::ForegroundCommand => self
-                .foreground_command
-                .as_deref()
-                .map(|command| format!("the shell exited while {command:?} was foreground"))
-                .unwrap_or_else(|| "the shell exited while a command was foreground".to_owned()),
-        };
-        if let Some(code) = self.exit_code {
-            text.push_str(&format!(" (exit code {code})"));
-        }
-        if let Some(pid) = self.child_pid {
-            text.push_str(&format!(" [child PID {pid}]"));
-        }
-        text
-    }
-}
-
-impl std::fmt::Display for BackgroundPaneState {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let state = match self {
-            Self::Starting => "starting",
-            Self::Running => "running",
-            Self::Exited => "exited",
-            Self::Failed => "failed",
-        };
-        formatter.write_str(state)
-    }
-}
-
-struct SessionCatalogPublisher {
-    path: PathBuf,
-    last_contents: Option<Vec<u8>>,
-}
-
-impl SessionCatalogPublisher {
-    fn new() -> Self {
-        let runner_id = NEXT_RUNNER_ID.fetch_add(1, Ordering::Relaxed);
-        Self::at_path(
-            session_catalog_dir().join(format!("zetta-{}-{runner_id}.json", std::process::id())),
-        )
-    }
-
-    fn at_path(path: PathBuf) -> Self {
-        Self {
-            path,
-            last_contents: None,
-        }
-    }
-
-    fn publish(&mut self, catalog: &BackgroundSessionCatalog) -> Result<()> {
-        if catalog.sessions.is_empty() {
-            self.clear()?;
-            return Ok(());
-        }
-        let contents = serde_json::to_vec_pretty(catalog).context("serializing session catalog")?;
-        if self.last_contents.as_deref() == Some(contents.as_slice()) {
-            return Ok(());
-        }
-        let parent = self
-            .path
-            .parent()
-            .context("session catalog has no parent")?;
-        create_private_dir(parent)?;
-        let temporary = self.path.with_extension("json.tmp");
-        write_private_file(&temporary, &contents)
-            .with_context(|| format!("writing session catalog {}", temporary.display()))?;
-        #[cfg(windows)]
-        if self.path.exists() {
-            fs::remove_file(&self.path)
-                .with_context(|| format!("replacing session catalog {}", self.path.display()))?;
-        }
-        fs::rename(&temporary, &self.path)
-            .with_context(|| format!("publishing session catalog {}", self.path.display()))?;
-        self.last_contents = Some(contents);
-        Ok(())
-    }
-
-    fn clear(&mut self) -> Result<()> {
-        self.last_contents = None;
-        match fs::remove_file(&self.path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error)
-                .with_context(|| format!("removing session catalog {}", self.path.display())),
-        }
-    }
-}
-
-/// Creates a directory that only the current user may traverse. The session
-/// directory holds the process control token and the session catalogs, so the
-/// umask must not be allowed to widen it.
-pub(crate) fn create_private_dir(path: &Path) -> Result<()> {
-    fs::create_dir_all(path)
-        .with_context(|| format!("creating session directory {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("restricting session directory {}", path.display()))?;
-    }
-    Ok(())
-}
-
-fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .mode(0o600)
-            .open(path)?;
-        use std::io::Write as _;
-        file.write_all(contents)?;
-        file.set_permissions(fs::Permissions::from_mode(0o600))
-    }
-    #[cfg(not(unix))]
-    fs::write(path, contents)
-}
-
-impl Drop for SessionCatalogPublisher {
-    fn drop(&mut self) {
-        let _ = self.clear();
-    }
+            TerminalExitReason::BackendShutdown => BackgroundPaneExitReason::BackendShutdown,
+            TerminalExitReason::ExitedBeforeInput => BackgroundPaneExitReason::ExitedBeforeInput,
+            TerminalExitReason::ForegroundCommand => BackgroundPaneExitReason::ForegroundCommand,
+        },
+        exit_code: exit.exit_code,
+        child_pid: exit.child_pid,
+        input_sent: exit.input_sent,
+        foreground_is_shell: exit.foreground_is_shell,
+        foreground_command: exit
+            .foreground_command
+            .as_deref()
+            .filter(|command| BackgroundPaneExit::foreground_command_is_publishable(command))
+            .map(ToOwned::to_owned),
+    })
 }
 
 /// Owns sessions that are not currently attached to a terminal view.
@@ -336,114 +78,18 @@ struct DetachedSession<T> {
     refuse_until: Option<Instant>,
 }
 
-/// A session secret in transit between the CLI and the process that owns the
-/// session. The inner value is zeroized on drop and never rendered by `Debug`,
-/// so it cannot leak through a derived `Debug` on a containing message type.
-#[derive(Clone, Default, Eq)]
-pub(crate) struct SessionSecret(Zeroizing<String>);
-
-impl SessionSecret {
-    pub(crate) fn new(secret: String) -> Self {
-        Self(Zeroizing::new(secret))
-    }
-
-    /// Takes ownership of an already-protected buffer. Used by the CLI prompt,
-    /// which accumulates the typed secret in place: copying it out to call
-    /// [`Self::new`] would leave the plaintext behind in freed memory.
-    pub(crate) fn from_zeroizing(secret: Zeroizing<String>) -> Self {
-        Self(secret)
-    }
-
-    pub(crate) fn expose(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Debug for SessionSecret {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("SessionSecret(<redacted>)")
-    }
-}
-
-impl PartialEq for SessionSecret {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.as_bytes().ct_eq(other.0.as_bytes()).into()
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct SessionAuthentication {
-    verifier: Arc<str>,
-}
-
-/// Proof that a secret was checked against a session's verifier. It can only be
-/// produced by [`SessionAuthentication::verify`], so a caller holding one has
-/// necessarily authenticated rather than merely obtained a verifier clone.
-#[derive(Clone)]
-pub(crate) struct VerifiedSession {
-    verifier: Arc<str>,
-}
-
-impl SessionAuthentication {
-    pub(crate) fn create(secret: &str) -> Result<Self> {
-        anyhow::ensure!(
-            !secret.is_empty(),
-            "session authentication must not be empty"
-        );
-        let mut salt = [0; 16];
-        getrandom::fill(&mut salt).context("generating session authentication salt")?;
-        let salt = SaltString::encode_b64(&salt)
-            .map_err(|error| anyhow::anyhow!("encoding session authentication salt: {error}"))?;
-        let verifier = Argon2::default()
-            .hash_password(secret.as_bytes(), &salt)
-            .map_err(|error| anyhow::anyhow!("hashing session authentication: {error}"))?
-            .to_string()
-            .into();
-        Ok(Self { verifier })
-    }
-
-    /// Checks `secret` against this verifier, returning proof of the check on
-    /// success. Returning [`VerifiedSession`] rather than `bool` is what keeps
-    /// authorization and authentication from drifting apart: the only way to
-    /// obtain the value `take_background_session_by_id` demands is to pass a
-    /// correct secret through here.
-    pub(crate) fn verify(&self, secret: &str) -> Option<VerifiedSession> {
-        PasswordHash::new(&self.verifier)
-            .ok()
-            .filter(|verifier| {
-                Argon2::default()
-                    .verify_password(secret.as_bytes(), verifier)
-                    .is_ok()
-            })
-            .map(|_| VerifiedSession {
-                verifier: self.verifier.clone(),
-            })
-    }
-
-    /// Whether `authorization` was produced by verifying a secret against *this*
-    /// session's verifier, rather than some other session's.
-    pub(crate) fn authorizes(&self, authorization: &VerifiedSession) -> bool {
-        Arc::ptr_eq(&self.verifier, &authorization.verifier)
-    }
-
-    #[cfg(test)]
-    fn encoded(&self) -> &str {
-        &self.verifier
-    }
-}
-
 impl<T> Default for BackgroundSessionRunner<T> {
     fn default() -> Self {
         Self {
             sessions: Vec::new(),
-            catalog: SessionCatalogPublisher::new(),
+            catalog: SessionCatalogPublisher::new(&session_catalog_dir()),
         }
     }
 }
 
 impl<T> BackgroundSessionRunner<T> {
     pub(crate) fn runner_id(&self) -> u64 {
-        runner_id_from_path(&self.catalog.path).unwrap_or_default()
+        self.catalog.runner_id()
     }
 
     pub(crate) fn detach(&mut self, session: T, authentication: Option<SessionAuthentication>) {
@@ -472,8 +118,9 @@ impl<T> BackgroundSessionRunner<T> {
     pub(crate) fn record_failed_authentication_at(&mut self, index: usize) {
         if let Some(session) = self.sessions.get_mut(index) {
             session.failed_authentications = session.failed_authentications.saturating_add(1);
-            session.refuse_until = Instant::now()
-                .checked_add(failed_authentication_delay(session.failed_authentications));
+            session.refuse_until = Instant::now().checked_add(
+                zmux::auth::failed_authentication_delay(session.failed_authentications),
+            );
         }
     }
 
@@ -533,228 +180,69 @@ impl<T> BackgroundSessionRunner<T> {
     }
 
     pub(crate) fn publish(&mut self, sessions: Vec<BackgroundSessionSummary>) -> Result<()> {
-        let catalog = BackgroundSessionCatalog {
-            version: CATALOG_VERSION,
-            process_id: std::process::id(),
-            runner_id: runner_id_from_path(&self.catalog.path).unwrap_or_default(),
-            sessions: sessions
-                .into_iter()
-                .map(BackgroundSessionSummary::for_public_catalog)
-                .collect(),
-        };
-        self.catalog.publish(&catalog)
+        self.catalog.publish_sessions(sessions)
     }
-}
-
-impl BackgroundSessionSummary {
-    fn for_public_catalog(mut self) -> Self {
-        if self.authentication_required {
-            self.title = "Protected session".to_owned();
-            self.active_pane = 0;
-            self.layout = BackgroundPaneLayout::Pane { pane_id: 0 };
-            self.panes.clear();
-        }
-        self
-    }
-}
-
-fn runner_id_from_path(path: &Path) -> Option<u64> {
-    path.file_stem()?.to_str()?.rsplit('-').next()?.parse().ok()
 }
 
 pub(crate) fn session_catalog_dir() -> PathBuf {
-    crate::config::platform_config_dir().join("sessions")
+    zmux::paths::session_catalog_dir()
 }
 
-pub(crate) fn read_session_catalogs(directory: &Path) -> Result<Vec<BackgroundSessionCatalog>> {
-    let entries = match fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("reading session catalogs in {}", directory.display()));
-        }
-    };
-    let mut catalogs = Vec::new();
-    for entry in entries {
-        let entry = entry.context("reading session catalog entry")?;
-        let path = entry.path();
-        if path.extension().and_then(|extension| extension.to_str()) != Some("json")
-            || !path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("zetta-"))
-        {
-            continue;
-        }
-        let contents = fs::read(&path)
-            .with_context(|| format!("reading session catalog {}", path.display()))?;
-        let catalog: BackgroundSessionCatalog = serde_json::from_slice(&contents)
-            .with_context(|| format!("parsing session catalog {}", path.display()))?;
-        if catalog.version == CATALOG_VERSION {
-            catalogs.push((path, catalog));
-        }
-    }
-    let process_ids = catalogs
+/// Whether a published session's process is a Zetta window rather than the
+/// multiplexer, told apart by whether it has a Zetta control endpoint.
+///
+/// The multiplexer daemon holds sessions too, and its catalog is published
+/// under *its* process. Only Zetta processes write a `control-{process_id}.json`
+/// endpoint, so its presence is what separates in-process fallback sessions from
+/// sessions the multiplexer is holding — the reconnect paths must not conflate
+/// the two, or a session another window kept because the multiplexer was
+/// unreachable gets routed to the daemon, which does not have it.
+pub(crate) fn process_is_zetta(process_id: u32) -> bool {
+    session_catalog_dir()
+        .join(format!("control-{process_id}.json"))
+        .is_file()
+}
+
+/// The sessions a set of published catalogs attributes to the multiplexer.
+///
+/// The multiplexer is not a Zetta process, so a catalog counts only when its
+/// process has no Zetta control endpoint. A Zetta process that kept a session
+/// in memory because the multiplexer was unreachable publishes a catalog under
+/// its own process too, and those sessions are not the multiplexer's to attach —
+/// routing them there is how a reconnect that used to transfer the tab in
+/// process turned into "could not attach that session".
+///
+/// Sessions scoped to another Zetta process are left out. Backgrounding a tab
+/// keeps its session to the window that did it, so another process must not be
+/// offered it: the multiplexer refuses that attach, and listing it anyway would
+/// put an entry in the picker whose only outcome is an error. A session with no
+/// scope is shared, and one scoped to this process is this window's own.
+///
+/// The predicate and the process id are parameters so the discrimination is
+/// testable without touching the real session directory.
+pub(crate) fn multiplexer_held_catalog_sessions(
+    catalogs: &[BackgroundSessionCatalog],
+    is_zetta: impl Fn(u32) -> bool,
+    this_process: u32,
+) -> impl Iterator<Item = (&BackgroundSessionCatalog, &BackgroundSessionSummary)> {
+    catalogs
         .iter()
-        .map(|(_, catalog)| Pid::from_u32(catalog.process_id))
-        .collect::<Vec<_>>();
-    let mut system = System::new();
-    system.refresh_processes(ProcessesToUpdate::Some(&process_ids), true);
-    catalogs.retain(|(path, catalog)| {
-        if system.process(Pid::from_u32(catalog.process_id)).is_some() {
-            true
-        } else {
-            let _ = fs::remove_file(path);
-            false
-        }
-    });
-    let mut catalogs = catalogs
-        .into_iter()
-        .map(|(_, catalog)| catalog)
-        .collect::<Vec<_>>();
-    catalogs.sort_by_key(|catalog| (catalog.process_id, catalog.runner_id));
-    Ok(catalogs)
+        .filter(move |catalog| !is_zetta(catalog.process_id))
+        .flat_map(|catalog| {
+            catalog
+                .sessions
+                .iter()
+                .map(move |session| (catalog, session))
+        })
+        .filter(move |(_, session)| {
+            session
+                .scoped_to
+                .is_none_or(|process_id| process_id == this_process)
+        })
 }
 
 pub(crate) fn print_session_catalogs(json: bool) -> Result<()> {
-    let catalogs = read_session_catalogs(&session_catalog_dir())?;
-    if json {
-        println!("{}", serde_json::to_string_pretty(&catalogs)?);
-        return Ok(());
-    }
-    let session_count = catalogs
-        .iter()
-        .map(|catalog| catalog.sessions.len())
-        .sum::<usize>();
-    if session_count == 0 {
-        println!("No background sessions.");
-        return Ok(());
-    }
-    println!(
-        "{session_count} background session{}:",
-        if session_count == 1 { "" } else { "s" }
-    );
-    for catalog in catalogs {
-        for session in catalog.sessions {
-            println!(
-                "\n{}:{}:{}  {}  ({} pane{}{})",
-                catalog.process_id,
-                catalog.runner_id,
-                session.id,
-                display_text(&session.title),
-                session.panes.len(),
-                if session.panes.len() == 1 { "" } else { "s" },
-                if session.authentication_required {
-                    ", protected"
-                } else {
-                    ""
-                }
-            );
-            if session.authentication_required {
-                continue;
-            }
-            println!("  layout: {}", display_layout(&session.layout));
-            for pane in session.panes {
-                let active = if pane.id == session.active_pane {
-                    " active"
-                } else {
-                    ""
-                };
-                println!(
-                    "  pane {}{}  {}  [{}]",
-                    pane.id,
-                    active,
-                    display_text(&pane.label),
-                    pane.state
-                );
-                println!("    profile: {}", display_text(&pane.profile));
-                println!("    configured: {}", display_text(&pane.configured_command));
-                println!("    application: {}", display_text(&pane.application));
-                if let Some(command) = pane.foreground_command {
-                    println!("    command line: {}", display_command(&command));
-                }
-                if let Some(title) = pane.terminal_title {
-                    println!("    title: {}", display_text(&title));
-                }
-                if let Some(directory) = pane.working_directory {
-                    println!(
-                        "    directory: {}",
-                        display_text(&directory.to_string_lossy())
-                    );
-                }
-                if let Some(exit) = pane.exit {
-                    println!("    exit: {}", display_text(&exit.reason_text()));
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn display_text(text: &str) -> String {
-    let mut display = String::with_capacity(text.len());
-    for character in text.chars() {
-        match character {
-            '\n' => display.push_str("\\n"),
-            '\r' => display.push_str("\\r"),
-            '\t' => display.push_str("\\t"),
-            character if character.is_control() => {
-                use std::fmt::Write as _;
-                let _ = write!(display, "\\u{{{:x}}}", character as u32);
-            }
-            character => display.push(character),
-        }
-    }
-    display
-}
-
-fn display_command(arguments: &[String]) -> String {
-    arguments
-        .iter()
-        .map(|argument| {
-            let argument = display_text(argument);
-            if argument.is_empty()
-                || argument
-                    .chars()
-                    .any(|character| character.is_whitespace() || matches!(character, '"' | '\''))
-            {
-                format!("{:?}", argument)
-            } else {
-                argument
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-pub(crate) fn application_from_command_line(command: Option<&[String]>) -> Option<String> {
-    command.and_then(|arguments| {
-        let executable = arguments.first()?;
-        Some(
-            executable
-                .rsplit(['/', '\\'])
-                .next()
-                .filter(|name| !name.is_empty())
-                .unwrap_or(executable)
-                .to_owned(),
-        )
-    })
-}
-
-fn display_layout(layout: &BackgroundPaneLayout) -> String {
-    match layout {
-        BackgroundPaneLayout::Pane { pane_id } => format!("pane:{pane_id}"),
-        BackgroundPaneLayout::Split {
-            axis,
-            first,
-            second,
-        } => format!(
-            "{axis}({}, {})",
-            display_layout(first),
-            display_layout(second)
-        ),
-    }
+    zmux::catalog::print_session_catalogs(&session_catalog_dir(), json)
 }
 
 #[cfg(test)]

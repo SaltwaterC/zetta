@@ -245,7 +245,7 @@ _zetta() {
     fi
 
     if (( CURRENT == 2 )); then
-        compadd -S ' ' -- benchmark benchmark-output terminal-size sessions profile project edit vi init serial http tftp notify attention copy paste splits pane tabicon panetheme overlay wt
+        compadd -S ' ' -- benchmark benchmark-output terminal-size sessions mux profile project edit vi init serial http tftp notify attention copy paste splits pane tabicon panetheme overlay wt
         _zetta_options --help --version --config --keymap --profile --split --replace-pane --theme
         return
     fi
@@ -505,9 +505,7 @@ _zetta() {
 
     case $words[2] in
         benchmark)
-            _zetta_options --terminal-render-workload --terminal-checkerboard-workload \
-                --terminal-sparse-update-workload --terminal-alt-screen-scroll-workload \
-                --profile-report --profile-duration \
+            _zetta_options --profile-report --profile-duration \
                 --profile-pane-stress --profile-background-stress --profile-sparse-updates \
                 --profile-alt-screen-scroll --profile-external-terminal --help
             ;;
@@ -529,6 +527,16 @@ _zetta() {
                 _zetta_options --help
             else
                 _files
+            fi
+            ;;
+        mux)
+            if (( CURRENT == 3 )); then
+                compadd -S ' ' -- list stop share unshare
+                _zetta_options --json --upgrade --help --version
+            elif [[ ${words[3]} == stop ]]; then
+                _zetta_options --force --help
+            else
+                _zetta_options --json --help
             fi
             ;;
         sessions)

@@ -267,6 +267,8 @@ pub(crate) const RECONNECT_SESSION_KEYBINDING: &str = "ctrl-shift-a";
 
 pub(crate) const DETACH_TAB_KEYBINDING: &str = "ctrl-shift-d";
 
+pub(crate) const TOGGLE_TAB_SHARING_KEYBINDING: &str = "ctrl-shift-k";
+
 pub(crate) const CLOSE_WINDOW_KEYBINDING: &str = "ctrl-shift-q";
 
 pub(crate) const CLOSE_ALL_WINDOWS_KEYBINDING: &str = "ctrl-shift-x";
@@ -363,6 +365,14 @@ pub(crate) fn tab_menu_navigation_keybindings() -> [KeyBinding; 6] {
 
 pub(crate) fn detach_tab_keybinding() -> KeyBinding {
     KeyBinding::new(DETACH_TAB_KEYBINDING, DetachTab, Some("Zetta > Terminal"))
+}
+
+pub(crate) fn toggle_tab_sharing_keybinding() -> KeyBinding {
+    KeyBinding::new(
+        TOGGLE_TAB_SHARING_KEYBINDING,
+        ToggleTabSharing,
+        Some("Zetta > Terminal"),
+    )
 }
 
 pub(crate) fn close_window_keybinding() -> KeyBinding {
@@ -548,6 +558,7 @@ fn default_keybindings(
         close_window_keybinding(),
         close_all_windows_keybinding(),
         detach_tab_keybinding(),
+        toggle_tab_sharing_keybinding(),
         reconnect_session_keybinding(),
         auto_background_tab_keybinding(),
         close_pane_keybinding(),

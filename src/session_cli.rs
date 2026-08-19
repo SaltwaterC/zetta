@@ -11,9 +11,12 @@ use std::io::{self, IsTerminal as _};
 
 use crate::{
     background_sessions::{
-        BackgroundSessionCatalog, SessionSecret, read_session_catalogs, session_catalog_dir,
+        BackgroundSessionCatalog, SessionSecret, process_is_zetta, read_session_catalogs,
+        session_catalog_dir,
     },
-    process_control::{ReconnectSessionResult, request_reconnect_session},
+    process_control::{
+        ReconnectSessionResult, request_multiplexer_reconnect, request_reconnect_session,
+    },
 };
 
 #[derive(Debug)]
@@ -22,6 +25,14 @@ struct SessionTarget {
     runner_id: u64,
     session_id: u64,
     authentication_required: bool,
+    /// Whether the multiplexer holds this session, rather than a Zetta
+    /// process. The published process is then the multiplexer's, which has no
+    /// Zetta control endpoint to send a reconnect to.
+    multiplexer_held: bool,
+    /// The Zetta process a backgrounded session is scoped to, if it is not
+    /// shared. Only that window may attach it, so it is the only one worth
+    /// asking.
+    scoped_to: Option<u32>,
 }
 
 pub(crate) fn run_reconnect_session(identifier: &str) -> Result<()> {
@@ -31,12 +42,21 @@ pub(crate) fn run_reconnect_session(identifier: &str) -> Result<()> {
         .authentication_required
         .then(read_private_secret)
         .transpose()?;
-    match request_reconnect_session(
-        target.process_id,
-        target.runner_id,
-        target.session_id,
-        secret,
-    )? {
+    // A session the multiplexer holds is published under *its* process, which
+    // has no Zetta control endpoint. Asking any running window to take it is
+    // the only thing that makes sense; asking the multiplexer's own identifier
+    // is what used to fail with a missing endpoint file.
+    let result = if target.multiplexer_held {
+        request_multiplexer_reconnect(target.session_id, target.scoped_to, secret)?
+    } else {
+        request_reconnect_session(
+            target.process_id,
+            target.runner_id,
+            target.session_id,
+            secret,
+        )?
+    };
+    match result {
         ReconnectSessionResult::Reconnected => {
             println!("Reconnected session {identifier}.");
             Ok(())
@@ -100,6 +120,8 @@ fn find_session(catalogs: &[BackgroundSessionCatalog], identifier: &str) -> Resu
                     runner_id,
                     session_id,
                     authentication_required: session.authentication_required,
+                    multiplexer_held: !process_is_zetta(process_id),
+                    scoped_to: session.scoped_to,
                 })
         })
     } else {
@@ -113,6 +135,8 @@ fn find_session(catalogs: &[BackgroundSessionCatalog], identifier: &str) -> Resu
                     runner_id: catalog.runner_id,
                     session_id,
                     authentication_required: session.authentication_required,
+                    multiplexer_held: !process_is_zetta(catalog.process_id),
+                    scoped_to: session.scoped_to,
                 })
             })
         });

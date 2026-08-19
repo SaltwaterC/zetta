@@ -237,6 +237,7 @@ impl Zetta {
             );
             add_wsl_environment_variables(&mut environment);
         }
+        let mux_provider = self.mux_provider_for_tab(tab_id, cx);
         let builder = TerminalBuilder::new(
             working_directory,
             None,
@@ -253,13 +254,24 @@ impl Zetta {
             cx,
             Vec::new(),
             PathStyle::local(),
+            mux_provider
+                .clone()
+                .map(|provider| provider as Arc<dyn terminal::PtyProvider>),
         );
 
         let this = cx.entity().downgrade();
         window
             .spawn(cx, async move |cx| match builder.await {
-                Ok(builder) => {
+                Ok(mut builder) => {
                     this.update_in(cx, |this, window, cx| {
+                        this.adopt_mux_pane(
+                            tab_id,
+                            pane_id,
+                            mux_provider.as_deref(),
+                            &mut builder,
+                            window,
+                            cx,
+                        );
                         let terminal = cx.new(|cx| builder.subscribe(cx));
                         let view = cx.new(|cx| {
                             TerminalView::new_with_theme(
@@ -658,6 +670,7 @@ impl Zetta {
             completion_rx,
             spawned_task: task,
         };
+        let mux_provider = self.mux_provider_for_tab(tab_id, cx);
         let builder = TerminalBuilder::new(
             working_directory,
             Some(task_state),
@@ -674,13 +687,24 @@ impl Zetta {
             cx,
             Vec::new(),
             PathStyle::local(),
+            mux_provider
+                .clone()
+                .map(|provider| provider as Arc<dyn terminal::PtyProvider>),
         );
 
         let this = cx.entity().downgrade();
         window
             .spawn(cx, async move |cx| match builder.await {
-                Ok(builder) => {
+                Ok(mut builder) => {
                     this.update_in(cx, |this, window, cx| {
+                        this.adopt_mux_pane(
+                            tab_id,
+                            entry_id,
+                            mux_provider.as_deref(),
+                            &mut builder,
+                            window,
+                            cx,
+                        );
                         let terminal = cx.new(|cx| builder.subscribe(cx));
                         let view = cx.new(|cx| {
                             TerminalView::new_with_theme(

@@ -1726,53 +1726,10 @@ fn command_exists(program: &str) -> bool {
     command_path(program).is_some()
 }
 
+/// Resolved by `zmux`, which needs the same directory without depending on
+/// this module: it holds the session catalogs and the control endpoint.
 pub(crate) fn platform_config_dir() -> PathBuf {
-    #[cfg(windows)]
-    return windows_config_dir(
-        env::var_os("APPDATA").map(PathBuf::from),
-        &private_fallback_dir(),
-    );
-    #[cfg(not(windows))]
-    unix_config_dir(
-        env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
-        env::var_os("HOME").map(PathBuf::from),
-        &private_fallback_dir(),
-    )
-}
-
-#[cfg(any(not(windows), test))]
-fn unix_config_dir(xdg: Option<PathBuf>, home: Option<PathBuf>, fallback: &Path) -> PathBuf {
-    if let Some(xdg) = xdg.filter(|path| !path.as_os_str().is_empty()) {
-        return xdg.join("zetta");
-    }
-    home.filter(|path| !path.as_os_str().is_empty())
-        .map_or_else(|| fallback.join("zetta"), |home| home.join(".config/zetta"))
-}
-
-#[cfg(any(windows, test))]
-fn windows_config_dir(app_data: Option<PathBuf>, fallback: &Path) -> PathBuf {
-    app_data
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or_else(|| fallback.to_path_buf())
-        .join("Zetta")
-}
-
-/// Where configuration lives when the platform's per-user location is unknown.
-///
-/// The current directory is not an acceptable substitute: this directory holds
-/// the process control token and the session catalogs, and a working directory
-/// can be one another user may write to. A per-user path under the system
-/// temporary directory keeps that ownership, and `create_private_dir` restricts
-/// it once it is created.
-fn private_fallback_dir() -> PathBuf {
-    #[cfg(unix)]
-    {
-        // SAFETY: geteuid only reads the calling process's effective user ID
-        // and cannot fail.
-        env::temp_dir().join(format!("zetta-{}", unsafe { libc::geteuid() }))
-    }
-    #[cfg(not(unix))]
-    env::temp_dir().join("zetta")
+    zmux::paths::platform_config_dir()
 }
 
 pub fn themes_dir() -> PathBuf {

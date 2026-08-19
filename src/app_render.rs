@@ -952,6 +952,7 @@ impl Zetta {
 /// Built in one pass before the window content is composed, because each entry
 /// borrows the entity while it reads the state that drives it.
 struct ZettaOverlays {
+    notice: Option<AnyElement>,
     performance: Option<AnyElement>,
     palette: Option<AnyElement>,
     multi_command: Option<AnyElement>,
@@ -981,6 +982,7 @@ impl Zetta {
         let serial_console: Option<AnyElement> = None;
 
         ZettaOverlays {
+            notice: self.render_transient_notice_overlay(colors),
             performance: self.render_performance_overlay(colors, window),
             palette: modal_overlay(self.render_command_palette_overlay(colors, handle, cx)),
             multi_command: modal_overlay(self.render_multi_command_overlay(
@@ -1021,6 +1023,45 @@ impl Zetta {
         }
     }
 
+    /// A short-lived message, floating over the content rather than sharing the
+    /// column with it.
+    ///
+    /// Deliberately not a banner in the feedback column. A banner there takes
+    /// vertical space, so showing one reflows every terminal in the window — and
+    /// for a *shared* pane that reflow is published: the pane reports its smaller
+    /// grid, the multiplexer arbitrates every viewer down to the smallest of them,
+    /// and the other window is resized to match. Telling the user their tab can now
+    /// be joined moved their windows, which is a remarkable amount of damage for a
+    /// message that takes itself away again after a few seconds.
+    fn render_transient_notice_overlay(&self, colors: &ThemeColors) -> Option<AnyElement> {
+        let notice = self.transient_notice.message()?;
+        // Styled like the resize- and move-mode labels rather than as a `Banner`.
+        // A `Banner` is built to sit on the feedback column's own background and
+        // carries a translucent one of its own; floating it over a terminal left
+        // the text competing with whatever the shell had drawn underneath. The
+        // mode labels solve exactly this problem — an opaque status-bar
+        // background and the theme's plain text colour — so this borrows their
+        // answer.
+        Some(
+            div()
+                .absolute()
+                .bottom(px(12.))
+                .right(px(12.))
+                .max_w(px(420.))
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .border_1()
+                .border_color(colors.border)
+                .bg(colors.status_bar_background)
+                .text_sm()
+                .text_color(colors.text)
+                .shadow_sm()
+                .child(notice.to_owned())
+                .into_any_element(),
+        )
+    }
+
     /// Registers every window-level action handler on the root element.
     fn register_actions(content: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
         content
@@ -1042,6 +1083,7 @@ impl Zetta {
             .on_action(cx.listener(Self::edit_config_file))
             .on_action(cx.listener(Self::edit_keymap_file))
             .on_action(cx.listener(Self::detach_tab))
+            .on_action(cx.listener(Self::toggle_tab_sharing))
             .on_action(cx.listener(Self::toggle_auto_background_tab))
             .on_action(cx.listener(Self::reconnect_session))
             .on_action(cx.listener(Self::close_active_pane))
@@ -1294,6 +1336,7 @@ impl Zetta {
         // Child order preserves the existing relative order within each paint
         // priority; later overlays on the same rung sit above earlier ones.
         [
+            overlays.notice,
             overlays.performance,
             overlays.palette,
             overlays.multi_command,

@@ -10,7 +10,7 @@ is still upstream `master`.
 
 | Local fork | Upstream/base | Current retained change |
 | --- | --- | --- |
-| `crates/alacritty_terminal` | `zed-industries/alacritty@4c129667` | Hybrid bounded-memory scrollback, allocator/performance fixes, Windows ConPTY read and hangup handling, shell integration, and resize behavior. |
+| `crates/alacritty_terminal` | `zed-industries/alacritty@4c129667` | Hybrid bounded-memory scrollback, allocator/performance fixes, Windows ConPTY read and hangup handling, shell integration, resize behavior, and attached PTYs whose child belongs to the multiplexer. |
 | `crates/terminal` | `zed/crates/terminal@849ec589` | Standalone terminal engine with Zetta identity, PTY/process-group/CWD tracking, shell integration, unbounded scrollback coordinates, input mapping, export/serial support, diagnostics, and performance work. |
 | `crates/terminal_view` | `zed/crates/terminal_view@849ec589` | Standalone renderer and interaction model, independent cursor/text layout, pixel-snapped subcell block/sextant painting, themes and font overrides, pane controls, path targets, literal/asynchronous search, inline sizing, alternate-screen anchoring, and scrollback editing. |
 | `crates/gpui_platform` | `zed/crates/gpui_platform@849ec589` | Local routing manifest selecting Zetta's Linux, macOS, and Windows platform forks. |

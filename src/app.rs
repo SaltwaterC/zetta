@@ -202,6 +202,70 @@ fn adjacent_application_menu_index(
     }
 }
 
+/// How long a transient notice stays on screen. Longer than the configuration
+/// reload's confirmation, because a notice is usually a sentence of guidance
+/// rather than a word of acknowledgement, and has to be readable in one pass.
+pub(crate) const TRANSIENT_NOTICE_DURATION: Duration = Duration::from_secs(8);
+
+/// A short-lived informational banner, shown and then taken away again.
+///
+/// Separate from `configuration_error` and `pane_output_error`, which stay until
+/// something replaces them: those report a state the user has to act on, whereas
+/// this reports something that has just happened, or advice about what to do
+/// instead. Leaving that kind of message on screen makes it read as an unresolved
+/// error and gives the user no way to clear it.
+///
+/// The generation is what stops an earlier notice's timer from taking a later
+/// notice away with it.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct TransientNotice {
+    message: Option<String>,
+    generation: u64,
+}
+
+impl TransientNotice {
+    fn show(&mut self, message: String) -> u64 {
+        self.message = Some(message);
+        self.generation = self.generation.wrapping_add(1);
+        self.generation
+    }
+
+    fn dismiss_if_current(&mut self, generation: u64) -> bool {
+        if self.generation != generation || self.message.is_none() {
+            return false;
+        }
+        self.message = None;
+        true
+    }
+
+    pub(crate) fn message(&self) -> Option<&str> {
+        self.message.as_deref()
+    }
+}
+
+impl Zetta {
+    /// Says something once, and takes it back down again.
+    ///
+    /// For anything the user does not have to act on: a confirmation that a
+    /// toggle took effect, or a note that the thing they asked for has to be
+    /// done somewhere else.
+    pub(crate) fn show_notice(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
+        let generation = self.transient_notice.show(message.into());
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            executor.timer(TRANSIENT_NOTICE_DURATION).await;
+            this.update(cx, |this, cx| {
+                if this.transient_notice.dismiss_if_current(generation) {
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+}
+
 fn background_authentication_for_close(
     policy: &TabClosePolicy,
     background_if_pinned: bool,
@@ -406,8 +470,19 @@ pub(crate) struct Zetta {
     pub(crate) configuration_reload_feedback: ConfigurationReloadFeedback,
     pub(crate) pane_output_error: Option<String>,
     pub(crate) pane_output_save_in_progress: bool,
+    pub(crate) transient_notice: TransientNotice,
     pub(crate) tabs: Vec<Tab>,
     pub(crate) background_sessions: BackgroundSessionRunner<Tab>,
+    /// The multiplexer that owns every pane's process, connected on first use.
+    /// `None` until then, and after a failure to reach it — a terminal falls
+    /// back to a local process rather than refusing to open, because a broken
+    /// multiplexer must not make the application unusable.
+    pub(crate) mux: Option<MuxRuntime>,
+    pub(crate) mux_panes: MuxPanes,
+    /// The panes this window shows in shared mode, keyed by pane id. A shared
+    /// pane's terminal reads a relayed byte stream rather than the pty, so the
+    /// shared connection and the sizes that arrive on it live here.
+    pub(crate) shared_panes: HashMap<u64, crate::mux::SharedPaneEntry>,
     pub(crate) background_observed_panes: HashSet<u64>,
     pub(crate) background_process_refresh_running: bool,
     pub(crate) background_session_picker_entries: Vec<(u64, String, String)>,
@@ -616,8 +691,12 @@ impl Zetta {
             configuration_reload_feedback: ConfigurationReloadFeedback::default(),
             pane_output_error: None,
             pane_output_save_in_progress: false,
+            transient_notice: TransientNotice::default(),
             tabs: Vec::new(),
             background_sessions: BackgroundSessionRunner::default(),
+            mux: None,
+            mux_panes: MuxPanes::default(),
+            shared_panes: HashMap::new(),
             background_observed_panes: HashSet::new(),
             background_process_refresh_running: false,
             background_session_picker_entries: Vec::new(),
@@ -891,6 +970,7 @@ impl Zetta {
             broadcast_input: false,
             silent_mode: false,
             close_policy: TabClosePolicy::Close,
+            shared: false,
             custom_title: None,
             worktree_seed_title: None,
             process_title: None,
@@ -978,6 +1058,11 @@ impl Zetta {
             .collect::<Vec<_>>();
         self.projects
             .forget_tab(tab_id, closed_pane_ids.iter().copied());
+        for pane_id in &closed_pane_ids {
+            self.drop_shared_pane(*pane_id);
+            self.release_mux_pane(tab_id, *pane_id, cx);
+        }
+        self.mux_panes.forget_tab(tab_id);
         self.forget_pane_controls(closed_pane_ids);
         self.tabs.remove(index);
         self.retain_open_visible_terminals();
@@ -1036,7 +1121,7 @@ impl Zetta {
         exit: &TerminalExited,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(exit_info) = BackgroundPaneExit::from_terminal(exit) else {
+        let Some(exit_info) = background_pane_exit_from_terminal(exit) else {
             return false;
         };
         let mut profile_name = None;
@@ -1194,6 +1279,8 @@ impl Zetta {
         };
         self.projects.forget_pane(pane_id);
         self.forget_pane_controls([pane_id]);
+        self.drop_shared_pane(pane_id);
+        self.release_mux_pane(tab_id, pane_id, cx);
         self.retain_open_visible_terminals();
         let Some(layout) = layout else {
             self.close_tab_at_with_policy(tab_index, background_if_last_pane, window, cx);

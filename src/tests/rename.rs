@@ -49,6 +49,7 @@ fn tab(attention_id: u64, custom_title: Option<&str>) -> Tab {
         broadcast_input: false,
         silent_mode: false,
         close_policy: TabClosePolicy::Close,
+        shared: false,
         custom_title: custom_title.map(str::to_owned),
         worktree_seed_title: None,
         process_title: None,

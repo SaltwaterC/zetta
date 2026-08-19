@@ -1489,7 +1489,7 @@ fn generated_scripts_only_offer_long_form_flags() {
         match shell {
             ShellIntegration::Bash => {
                 assert!(script.contains(
-                    "terminal-size sessions pane profile project edit vi init serial http tftp notify attention copy paste splits tabicon panetheme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme'"
+                    "terminal-size sessions mux pane profile project edit vi init serial http tftp notify attention copy paste splits tabicon panetheme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme'"
                 ));
                 assert!(script.contains("auto zetta bash zsh fish"));
             }
@@ -1627,9 +1627,6 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
         (
             "zetta benchmark ",
             &[
-                "--terminal-render-workload",
-                "--terminal-checkerboard-workload",
-                "--terminal-sparse-update-workload",
                 "--profile-report",
                 "--profile-duration",
                 "--profile-pane-stress",
@@ -1648,6 +1645,19 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
             &["--json", "--resize", "--columns", "--rows", "--help"][..],
         ),
         ("zetta sessions ", &["--json", "--help"][..]),
+        (
+            "zetta mux ",
+            &[
+                "list",
+                "stop",
+                "share",
+                "unshare",
+                "--json",
+                "--upgrade",
+                "--help",
+                "--version",
+            ][..],
+        ),
         ("zetta splits ", &["--help"][..]),
         (
             "zetta pane ",

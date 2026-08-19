@@ -178,6 +178,7 @@ install:
 install-binary:
 	mkdir -p "$(MAC_BUNDLE)/Contents/MacOS" "$(BINDIR)"
 	$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/zetta" "$(MAC_BUNDLE)/Contents/MacOS/zetta"
+	$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/zmux" "$(MAC_BUNDLE)/Contents/MacOS/zmux"
 	$(RM) "$(MAC_CLI_PATH)"
 	sed 's|@MAC_RUNTIME_BUNDLE@|$(MAC_RUNTIME_BUNDLE)|g' resources/macos/zetta-cli.in > "$(MAC_CLI_PATH)"
 	chmod 755 "$(MAC_CLI_PATH)"
@@ -212,6 +213,7 @@ uninstall:
 uninstall-binary:
 	$(RM) "$(MAC_CLI_PATH)"
 	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zetta"
+	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zmux"
 	$(MAKE) uninstall-user-path
 
 uninstall-assets:
@@ -238,10 +240,16 @@ install:
 
 install-binary:
 	$(INSTALL) -Dm755 "$(BUILD_TARGET_DIR)/zetta" $(BINDIR)/zetta
+	# The multiplexer holds background sessions, so it has to be installed
+	# beside Zetta: a client starts it from its own directory rather than
+	# through PATH, where an unrelated zmux could be picked up instead.
+	$(INSTALL) -Dm755 "$(BUILD_TARGET_DIR)/zmux" $(BINDIR)/zmux
 ifneq ($(LINUX_USER_INSTALL),)
 	mkdir -p "$(LINUX_USER_BIN_DIR)"
 	$(RM) "$(LINUX_USER_CLI_PATH)"
 	ln -s "$(BINDIR)/zetta" "$(LINUX_USER_CLI_PATH)"
+	$(RM) "$(LINUX_USER_BIN_DIR)/zmux"
+	ln -s "$(BINDIR)/zmux" "$(LINUX_USER_BIN_DIR)/zmux"
 endif
 
 install-capabilities:
@@ -304,8 +312,10 @@ uninstall:
 
 uninstall-binary:
 	$(RM) $(BINDIR)/zetta
+	$(RM) $(BINDIR)/zmux
 ifneq ($(LINUX_USER_INSTALL),)
 	$(RM) "$(LINUX_USER_CLI_PATH)"
+	$(RM) "$(LINUX_USER_BIN_DIR)/zmux"
 endif
 	$(MAKE) uninstall-user-path
 

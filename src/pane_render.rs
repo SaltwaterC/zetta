@@ -388,7 +388,7 @@ impl Zetta {
                         let heading = pane
                             .exit
                             .as_ref()
-                            .map(|_| "Terminal exited unexpectedly")
+                            .map(|exit| exit.heading())
                             .unwrap_or("Unable to start command");
                         div()
                             .size_full()
