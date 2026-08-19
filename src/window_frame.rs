@@ -89,6 +89,8 @@ pub(crate) struct WindowControlState {
     pub(crate) is_resizable: bool,
     #[cfg(any(target_os = "windows", linux_like))]
     pub(crate) is_minimizable: bool,
+    #[cfg(any(target_os = "windows", linux_like))]
+    pub(crate) is_fullscreen: bool,
     #[cfg(linux_like)]
     pub(crate) client_decorations: bool,
 }
@@ -122,6 +124,8 @@ impl WindowFrameGeometry {
         let is_resizable = window.is_resizable();
         #[cfg(any(target_os = "windows", linux_like))]
         let is_minimizable = window.is_minimizable();
+        #[cfg(any(target_os = "windows", linux_like))]
+        let is_fullscreen = window.is_fullscreen();
         let (client_decorations, tiling) = match window.window_decorations() {
             Decorations::Client { tiling } => (true, tiling),
             Decorations::Server => (false, Tiling::default()),
@@ -139,6 +143,8 @@ impl WindowFrameGeometry {
                 is_resizable,
                 #[cfg(any(target_os = "windows", linux_like))]
                 is_minimizable,
+                #[cfg(any(target_os = "windows", linux_like))]
+                is_fullscreen,
                 #[cfg(linux_like)]
                 client_decorations,
             },
@@ -292,6 +298,15 @@ fn has_enabled_window_button(
     })
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn windows_window_controls_visible(
+    right_aligned: bool,
+    buttons: [Option<WindowButton>; MAX_BUTTONS_PER_SIDE],
+    is_fullscreen: bool,
+) -> bool {
+    right_aligned && buttons.iter().any(Option::is_some) && !is_fullscreen
+}
+
 #[cfg(target_os = "windows")]
 pub(crate) fn render_window_controls(
     buttons: [Option<WindowButton>; MAX_BUTTONS_PER_SIDE],
@@ -299,7 +314,7 @@ pub(crate) fn render_window_controls(
     right_aligned: bool,
     colors: &ThemeColors,
 ) -> AnyElement {
-    if !right_aligned || buttons.iter().all(Option::is_none) {
+    if !windows_window_controls_visible(right_aligned, buttons, state.is_fullscreen) {
         return div().into_any_element();
     }
 
@@ -400,6 +415,11 @@ pub(crate) fn render_window_controls(
         .into_any_element()
 }
 
+#[cfg(any(linux_like, test))]
+fn linux_window_controls_visible(client_decorations: bool, is_fullscreen: bool) -> bool {
+    client_decorations && !is_fullscreen
+}
+
 #[cfg(linux_like)]
 pub(crate) fn render_window_controls(
     buttons: [Option<WindowButton>; MAX_BUTTONS_PER_SIDE],
@@ -407,7 +427,7 @@ pub(crate) fn render_window_controls(
     right_aligned: bool,
     colors: &ThemeColors,
 ) -> AnyElement {
-    if !state.client_decorations {
+    if !linux_window_controls_visible(state.client_decorations, state.is_fullscreen) {
         return div().into_any_element();
     }
 

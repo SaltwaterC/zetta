@@ -63,6 +63,7 @@
       "ctrl-0": "zetta::ResetTerminalFontSize",
       "ctrl-alt-r": "zetta::ReloadConfiguration",
       "ctrl-shift-f12": "zetta::TogglePerformanceOverlay",
+      "shift-f11": "zetta::ToggleFullscreen",
       "alt-left": "zetta::FocusPaneLeft",
       "alt-right": "zetta::FocusPaneRight",
       "alt-up": "zetta::FocusPaneUp",

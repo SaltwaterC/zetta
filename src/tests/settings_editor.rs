@@ -985,6 +985,7 @@ fn keymap_template_exposes_all_builtin_shortcuts() {
         ("alt-shift-+", "zetta::IncreasePaneFontSize"),
         ("alt-shift--", "zetta::DecreasePaneFontSize"),
         ("alt-shift-0", "zetta::ResetPaneFontSize"),
+        ("shift-f11", "zetta::ToggleFullscreen"),
     ] {
         assert_binding("Zetta > Terminal", keystroke, action);
     }

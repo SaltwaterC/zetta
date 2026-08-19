@@ -139,6 +139,22 @@ fn hide_window_uses_the_platform_shortcuts() {
 }
 
 #[test]
+fn toggle_fullscreen_uses_the_documented_shortcut() {
+    let bindings = default_keybindings(0, &gpui::DummyKeyboardMapper);
+    let matching = bindings
+        .iter()
+        .filter(|binding| binding.action().name() == ToggleFullscreen.name())
+        .collect::<Vec<_>>();
+
+    assert_eq!(matching.len(), 1);
+    let shortcut = gpui::Keystroke::parse("shift-f11").unwrap();
+    assert_eq!(
+        matching[0].match_keystrokes(std::slice::from_ref(&shortcut)),
+        Some(false)
+    );
+}
+
+#[test]
 fn default_binding_index_keeps_all_shortcuts_for_an_action() {
     let bindings = default_keybindings(0, &gpui::DummyKeyboardMapper);
     let indexed = index_default_bindings(&bindings);

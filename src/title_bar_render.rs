@@ -917,6 +917,7 @@ impl Zetta {
             .menu(move |window, cx| {
                 let dismiss_handle = dismiss_handle.clone();
                 let action_context = action_context.clone();
+                let is_fullscreen = window.is_fullscreen();
                 let menu = ui::ContextMenu::build(window, cx, move |menu, _, _| {
                     let menu =
                         menu.when_some(action_context.clone(), |menu, focus| menu.context(focus));
@@ -930,6 +931,11 @@ impl Zetta {
                         .action("Open Templates", Box::new(OpenTemplates))
                         .action("Open Projects", Box::new(OpenProjects))
                         .separator()
+                        .action_checked(
+                            "Toggle Fullscreen",
+                            Box::new(ToggleFullscreen),
+                            is_fullscreen,
+                        )
                         .action("Close Tab", Box::new(CloseTab))
                         .action("Close Window", Box::new(CloseWindow))
                         .action("Close All Windows", Box::new(CloseAllWindows))

@@ -719,6 +719,20 @@ appear as soon as a project is registered and disappear when it is removed. See
 [Projects](configuration.md#projects) for project configuration and trust
 details.
 
+## Fullscreen
+
+`Shift-F11` toggles fullscreen. It is also available from the hamburger menu
+(**Toggle Fullscreen**, checked while active) and the command palette on every
+platform.
+
+On Windows and Linux, entering fullscreen hides the minimize, maximize, and
+close buttons in the title bar, matching how macOS already hides its traffic
+lights in fullscreen. Leaving fullscreen restores them.
+
+macOS already supports fullscreen natively, via the Window menu or
+`Cmd-Ctrl-F`; `Shift-F11` and the hamburger menu's entry there toggle that
+same native state rather than a separate Zetta-only mode.
+
 ## Default shortcuts
 
 On macOS, `Cmd` replaces `Alt` in the shortcuts below, except for `Alt-Space`,
@@ -786,6 +800,7 @@ become `Ctrl-Cmd`; for example, paste-trim is `Ctrl-Cmd-V` on macOS and
 | `Cmd-Shift-0` (macOS) / `Alt-Shift-0` (Windows/Linux) | Reset active pane font size |
 | `Ctrl-Cmd-R` (macOS) / `Ctrl-Alt-R` (Windows/Linux) | Reload configuration, keymap, and themes |
 | `Ctrl-Shift-F12` | Toggle the performance overlay |
+| `Shift-F11` | Toggle fullscreen |
 
 Unmodified function keys remain available to terminal applications.
 

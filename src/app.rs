@@ -1604,6 +1604,17 @@ impl Zetta {
         }
     }
 
+    pub(crate) fn toggle_fullscreen(
+        &mut self,
+        _: &ToggleFullscreen,
+        window: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        if window.window_controls().fullscreen {
+            window.toggle_fullscreen();
+        }
+    }
+
     pub(crate) fn close_all_windows(
         &mut self,
         _: &CloseAllWindows,

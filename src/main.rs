@@ -137,6 +137,7 @@ actions!(
         MinimizeWindow,
         HideWindow,
         ZoomWindow,
+        ToggleFullscreen,
         OpenThemes,
         OpenKeymap,
         OpenTemplates,

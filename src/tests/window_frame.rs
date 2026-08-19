@@ -91,6 +91,7 @@ fn empty_client_window_button_sides_do_not_reserve_space() {
         is_maximized: false,
         is_resizable: true,
         is_minimizable: true,
+        is_fullscreen: false,
         client_decorations: true,
     };
 
@@ -101,6 +102,27 @@ fn empty_client_window_button_sides_do_not_reserve_space() {
     assert!(has_enabled_window_button(
         [Some(WindowButton::Close), None, None],
         state
+    ));
+}
+
+#[test]
+fn linux_window_controls_hide_in_fullscreen() {
+    assert!(linux_window_controls_visible(true, false));
+    assert!(!linux_window_controls_visible(true, true));
+    assert!(!linux_window_controls_visible(false, false));
+}
+
+#[test]
+fn windows_window_controls_hide_in_fullscreen() {
+    let buttons = [Some(WindowButton::Close), None, None];
+
+    assert!(windows_window_controls_visible(true, buttons, false));
+    assert!(!windows_window_controls_visible(true, buttons, true));
+    assert!(!windows_window_controls_visible(false, buttons, false));
+    assert!(!windows_window_controls_visible(
+        true,
+        [None; MAX_BUTTONS_PER_SIDE],
+        false
     ));
 }
 
