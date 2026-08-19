@@ -846,6 +846,8 @@ fn native_macos_menus(
             MenuItem::action("Open Settings", ToggleSettings),
             MenuItem::action("Open Themes", OpenThemes),
             MenuItem::action("Open Keymap", OpenKeymap),
+            MenuItem::action("Open Templates", OpenTemplates),
+            MenuItem::action("Open Projects", OpenProjects),
             MenuItem::separator(),
             MenuItem::action("Close Tab", CloseTab),
             MenuItem::action("Close Window", CloseWindow),

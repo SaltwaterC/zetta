@@ -725,6 +725,8 @@ fn native_macos_menus_duplicate_the_title_bar_menus() {
             ToggleSettings.name(),
             OpenThemes.name(),
             OpenKeymap.name(),
+            OpenTemplates.name(),
+            OpenProjects.name(),
             CloseTab.name(),
             CloseWindow.name(),
             CloseAllWindows.name(),

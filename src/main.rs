@@ -139,6 +139,8 @@ actions!(
         ZoomWindow,
         OpenThemes,
         OpenKeymap,
+        OpenTemplates,
+        OpenProjects,
         EditConfigFile,
         EditKeymapFile,
         DetachTab,

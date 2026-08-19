@@ -711,6 +711,24 @@ impl Zetta {
         self.open_settings_page(SettingsPage::Keymap, window, cx);
     }
 
+    pub(crate) fn open_templates(
+        &mut self,
+        _: &OpenTemplates,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_settings_page(SettingsPage::PaneTemplates, window, cx);
+    }
+
+    pub(crate) fn open_projects(
+        &mut self,
+        _: &OpenProjects,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_settings_page(SettingsPage::Projects, window, cx);
+    }
+
     pub(crate) fn focus_settings_input(
         &mut self,
         input: SettingsInput,

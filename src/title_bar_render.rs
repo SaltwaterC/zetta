@@ -927,6 +927,8 @@ impl Zetta {
                         .action("Open Settings", Box::new(ToggleSettings))
                         .action("Open Themes", Box::new(OpenThemes))
                         .action("Open Keymap", Box::new(OpenKeymap))
+                        .action("Open Templates", Box::new(OpenTemplates))
+                        .action("Open Projects", Box::new(OpenProjects))
                         .separator()
                         .action("Close Tab", Box::new(CloseTab))
                         .action("Close Window", Box::new(CloseWindow))
