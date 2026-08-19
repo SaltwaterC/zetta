@@ -607,6 +607,10 @@ fn default_keybindings(
         terminal_clear_keybinding(),
         KeyBinding::new("ctrl-v", Paste, Some("Zetta > Terminal")),
         KeyBinding::new("shift-insert", Paste, Some("Zetta > Terminal")),
+        // Registered last so it wins precedence over the ctrl-v/shift-insert
+        // compatibility aliases above and is the one resolved for display
+        // (e.g. the terminal context menu), matching ctrl-shift-c for Copy.
+        KeyBinding::new("ctrl-shift-v", Paste, Some("Zetta > Terminal")),
         platform_keybinding("alt-shift-f", SearchScrollback, Some("Zetta > Terminal")),
         KeyBinding::new(
             "ctrl-shift-f",

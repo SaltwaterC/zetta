@@ -457,6 +457,33 @@ fn insert_clipboard_shortcuts_use_the_terminal_contexts() {
     }
 }
 
+// GPUI resolves the accelerator it displays (e.g. in the terminal context
+// menu) as the *last* registered binding for an action that matches the
+// active context, not the first: `Keymap::bindings_for_action`'s doc comment
+// states "For display, the last binding should take precedence." ctrl-v and
+// shift-insert are compatibility aliases for Paste, so ctrl-shift-v must be
+// registered after them or the context menu shows an alias instead.
+#[test]
+#[cfg(not(target_os = "macos"))]
+fn ctrl_shift_v_is_the_highest_precedence_paste_binding() {
+    let bindings = default_keybindings(0, &gpui::DummyKeyboardMapper);
+    let last_paste_binding = bindings
+        .iter()
+        .rfind(|binding| binding.action().name() == Paste.name())
+        .expect("Paste should have at least one default binding");
+    assert_eq!(
+        last_paste_binding
+            .keystrokes()
+            .first()
+            .map(|keystroke| keystroke.to_string()),
+        Some("ctrl-shift-V".to_string())
+    );
+    assert_eq!(
+        last_paste_binding.predicate().map(|p| p.to_string()),
+        Some("Zetta > Terminal".to_string())
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_shortcuts_are_additional_application_bindings() {

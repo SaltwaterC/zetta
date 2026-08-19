@@ -42,6 +42,7 @@
       "ctrl-shift-l": "terminal::Clear",
       "ctrl-v": "terminal::Paste",
       "shift-insert": "terminal::Paste",
+      "ctrl-shift-v": "terminal::Paste",
       "cmd-l": "terminal::Clear",
       "cmd-v": "terminal::Paste",
       "alt-shift-f": "terminal_view::SearchScrollback",
