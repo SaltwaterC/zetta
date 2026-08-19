@@ -924,12 +924,51 @@ fn directional_focus_moves_between_quarter_panes() {
     assert!(layout.split(1, SplitAxis::Vertical, 3, SplitPosition::After));
     assert!(layout.split(2, SplitAxis::Vertical, 4, SplitPosition::After));
 
-    assert_eq!(layout.adjacent_pane(1, PaneDirection::Right), Some(3));
-    assert_eq!(layout.adjacent_pane(1, PaneDirection::Down), Some(2));
-    assert_eq!(layout.adjacent_pane(3, PaneDirection::Down), Some(4));
-    assert_eq!(layout.adjacent_pane(4, PaneDirection::Left), Some(2));
-    assert_eq!(layout.adjacent_pane(4, PaneDirection::Up), Some(3));
+    assert_eq!(layout.adjacent_pane(1, PaneDirection::Right, &[]), Some(3));
+    assert_eq!(layout.adjacent_pane(1, PaneDirection::Down, &[]), Some(2));
+    assert_eq!(layout.adjacent_pane(3, PaneDirection::Down, &[]), Some(4));
+    assert_eq!(layout.adjacent_pane(4, PaneDirection::Left, &[]), Some(2));
+    assert_eq!(layout.adjacent_pane(4, PaneDirection::Up, &[]), Some(3));
     assert_eq!(layout.regions().len(), 4);
+}
+
+#[test]
+fn directional_focus_defaults_to_topmost_candidate_when_tied() {
+    // left | top-right
+    //      | bottom-right
+    let mut layout = PaneLayout::Pane(1);
+    assert!(layout.split(1, SplitAxis::Vertical, 2, SplitPosition::After));
+    assert!(layout.split(2, SplitAxis::Horizontal, 3, SplitPosition::After));
+
+    // Moving right out of the full-height left pane ties between top-right
+    // (2) and bottom-right (3); with no history, the first one in tree order
+    // wins.
+    assert_eq!(layout.adjacent_pane(1, PaneDirection::Right, &[]), Some(2));
+}
+
+#[test]
+fn directional_focus_retains_last_focused_pane_in_a_column() {
+    // left | top-right
+    //      | bottom-right
+    let mut layout = PaneLayout::Pane(1);
+    assert!(layout.split(1, SplitAxis::Vertical, 2, SplitPosition::After));
+    assert!(layout.split(2, SplitAxis::Horizontal, 3, SplitPosition::After));
+
+    // Having previously focused bottom-right (3) more recently than
+    // top-right (2), moving right out of the left pane should return to
+    // bottom-right rather than resetting to the topmost candidate.
+    let recent = [2, 3];
+    assert_eq!(
+        layout.adjacent_pane(1, PaneDirection::Right, &recent),
+        Some(3)
+    );
+
+    // The reverse history should restore top-right instead.
+    let recent = [3, 2];
+    assert_eq!(
+        layout.adjacent_pane(1, PaneDirection::Right, &recent),
+        Some(2)
+    );
 }
 
 #[test]

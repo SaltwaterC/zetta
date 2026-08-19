@@ -2330,10 +2330,9 @@ impl Zetta {
         if tab.maximized_pane.is_some() {
             return;
         }
-        let Some(pane_id) = tab
-            .visible_layout()
-            .and_then(|layout| layout.adjacent_pane(tab.active_pane, direction))
-        else {
+        let Some(pane_id) = tab.visible_layout().and_then(|layout| {
+            layout.adjacent_pane(tab.active_pane, direction, &tab.focus_history)
+        }) else {
             return;
         };
         tab.activate_pane(pane_id);

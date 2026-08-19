@@ -7,6 +7,9 @@ pub(crate) const PANE_OUTPUT_DEFAULT_FILENAME: &str = "terminal-output.txt";
 pub(crate) const PANE_SPLIT_RATIO_SCALE: u16 = 1_000;
 pub(crate) const DEFAULT_PANE_SPLIT_RATIO: u16 = PANE_SPLIT_RATIO_SCALE / 2;
 const PANE_ROTATION_AREA_EPSILON: f64 = 1e-9;
+/// Below this score gap, two directional-navigation candidates are treated
+/// as equally close and disambiguated by recency instead of tree order.
+const ADJACENT_PANE_TIE_EPSILON: f32 = 1e-4;
 
 pub(crate) fn terminal_size_label(columns: usize, rows: usize) -> String {
     format!("{columns} × {rows}")
@@ -1793,13 +1796,27 @@ impl PaneLayout {
         }
     }
 
-    pub(crate) fn adjacent_pane(&self, active: u64, direction: PaneDirection) -> Option<u64> {
+    /// Finds the pane to focus when moving `direction` from `active`.
+    ///
+    /// `recent` is the tab's focus history (oldest first, most recently
+    /// focused last, matching [`Tab::focus_history`]). When several
+    /// candidates are equally close — e.g. moving right out of a full-height
+    /// pane into a column split evenly into top/bottom panes — the one
+    /// focused most recently wins, so leaving a column and returning to it
+    /// restores the pane last focused there instead of always landing on the
+    /// first one in tree order.
+    pub(crate) fn adjacent_pane(
+        &self,
+        active: u64,
+        direction: PaneDirection,
+        recent: &[u64],
+    ) -> Option<u64> {
         let regions = self.regions();
         let source = regions.iter().find(|region| region.id == active)?;
         let source_x = (source.left + source.right) / 2.;
         let source_y = (source.top + source.bottom) / 2.;
 
-        regions
+        let candidates: Vec<(f32, u64)> = regions
             .iter()
             .filter(|candidate| candidate.id != active)
             .filter_map(|candidate| {
@@ -1822,8 +1839,27 @@ impl PaneLayout {
                 };
                 Some((primary + perpendicular * 2., candidate.id))
             })
-            .min_by(|(left_score, _), (right_score, _)| left_score.total_cmp(right_score))
-            .map(|(_, id)| id)
+            .collect();
+
+        let best_score = candidates
+            .iter()
+            .map(|(score, _)| *score)
+            .min_by(f32::total_cmp)?;
+
+        let mut best: Option<(isize, u64)> = None;
+        for (score, id) in &candidates {
+            if (*score - best_score).abs() > ADJACENT_PANE_TIE_EPSILON {
+                continue;
+            }
+            let recency = recent
+                .iter()
+                .rposition(|recent_id| *recent_id == *id)
+                .map_or(-1, |position| position as isize);
+            if best.is_none_or(|(best_recency, _)| recency > best_recency) {
+                best = Some((recency, *id));
+            }
+        }
+        best.map(|(_, id)| id)
     }
 }
 
