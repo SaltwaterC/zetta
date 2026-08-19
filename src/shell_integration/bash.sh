@@ -683,6 +683,16 @@ _zetta_complete_zwt() {
     COMP_CWORD=$saved_cword
 }
 
+_zetta_complete_zmux() {
+    local saved_words=("${COMP_WORDS[@]}")
+    local saved_cword=$COMP_CWORD
+    COMP_WORDS=(zetta mux "${COMP_WORDS[@]:1}")
+    (( COMP_CWORD++ ))
+    _zetta_complete
+    COMP_WORDS=("${saved_words[@]}")
+    COMP_CWORD=$saved_cword
+}
+
 _zetta_tftp_complete() {
     local operation_index=$1 current previous operation argument
     local index positional=0 skip_port=0
@@ -815,6 +825,7 @@ zcopy() { zetta copy "$@"; }
 zpaste() { zetta paste "$@"; }
 complete -F _zetta_complete zetta
 complete -F _zetta_complete_zwt zwt
+complete -F _zetta_complete_zmux zmux
 complete -F _zetta_complete zvi
 complete -F _ztftp_complete ztftp
 complete -F _zntfy_complete zntfy

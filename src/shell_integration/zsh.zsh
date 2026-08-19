@@ -770,6 +770,16 @@ _zwt() {
     CURRENT=$saved_current
 }
 compdef _zwt zwt
+_zmux() {
+    local -a saved_words=("${words[@]}")
+    local saved_current=$CURRENT
+    words=(zetta mux "${words[@]:1}")
+    (( CURRENT++ ))
+    _zetta
+    words=("${saved_words[@]}")
+    CURRENT=$saved_current
+}
+compdef _zmux zmux
 compdef _ztftp ztftp
 compdef _zntfy zntfy
 compdef _zcopy zcopy

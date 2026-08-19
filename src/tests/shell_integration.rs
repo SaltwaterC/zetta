@@ -69,6 +69,7 @@ fn supported_shells_generate_completion_and_tftp_shortcut() {
         assert!(script.contains("replace-pane"));
         assert!(script.contains("zwt"));
         assert!(script.contains("wt"));
+        assert!(script.contains("zmux"));
         for operation in ["new", "done", "status", "rerere"] {
             assert!(script.contains(operation));
         }
@@ -300,6 +301,79 @@ fn bash_worktree_completion_offers_operations_and_long_worktree_options() {
             .lines()
             .any(|line| line == "short-copy-path:Cargo.toml")
     );
+}
+
+#[test]
+fn bash_zmux_completes_the_same_as_zetta_mux() {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let _bash_test_lock = lock_bash_tests();
+    if !bash_command()
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return;
+    }
+
+    let script = ShellIntegration::Bash.script(&profiles());
+    let driver = "\
+COMP_WORDS=(zetta mux '')\nCOMP_CWORD=2\n_zetta_complete\nprintf 'mux:%s\\n' \"${COMPREPLY[@]}\"\n\
+COMP_WORDS=(zmux '')\nCOMP_CWORD=1\n_zetta_complete_zmux\nprintf 'zmux:%s\\n' \"${COMPREPLY[@]}\"\n\
+COMP_WORDS=(zetta mux stop --)\nCOMP_CWORD=3\n_zetta_complete\nprintf 'mux-stop:%s\\n' \"${COMPREPLY[@]}\"\n\
+COMP_WORDS=(zmux stop --)\nCOMP_CWORD=2\n_zetta_complete_zmux\nprintf 'zmux-stop:%s\\n' \"${COMPREPLY[@]}\"\n";
+    let mut child = bash_command()
+        .args(["--noprofile", "--norc"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{script}\n{driver}").as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "Bash completion script failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let completions = String::from_utf8_lossy(&output.stdout);
+    let candidates = |prefix: &str| -> Vec<&str> {
+        completions
+            .lines()
+            .filter_map(|line| line.strip_prefix(prefix))
+            .collect()
+    };
+    let mux = candidates("mux:");
+    let zmux = candidates("zmux:");
+    assert!(!mux.is_empty());
+    assert_eq!(mux, zmux, "zmux should complete the same as zetta mux");
+    let mux_stop = candidates("mux-stop:");
+    let zmux_stop = candidates("zmux-stop:");
+    assert!(mux_stop.contains(&"--force"));
+    assert_eq!(
+        mux_stop, zmux_stop,
+        "zmux stop should complete the same as zetta mux stop"
+    );
+}
+
+#[test]
+fn zsh_and_powershell_wire_up_zmux_completion() {
+    let profiles = profiles();
+
+    let zsh = ShellIntegration::Zsh.script(&profiles);
+    assert!(zsh.contains("_zmux()"));
+    assert!(zsh.contains("words=(zetta mux \"${words[@]:1}\")"));
+    assert!(zsh.contains("compdef _zmux zmux"));
+
+    let powershell = ShellIntegration::PowerShell.script(&profiles);
+    assert!(powershell.contains("Register-ArgumentCompleter -Native -CommandName zmux"));
+    assert!(powershell.contains("if ($commandName -eq 'zmux')"));
 }
 
 #[cfg(unix)]
@@ -1667,6 +1741,19 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
         ("zetta sessions ", &["--json", "--help"][..]),
         (
             "zetta mux ",
+            &[
+                "list",
+                "stop",
+                "share",
+                "unshare",
+                "--json",
+                "--upgrade",
+                "--help",
+                "--version",
+            ][..],
+        ),
+        (
+            "zmux ",
             &[
                 "list",
                 "stop",

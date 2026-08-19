@@ -116,6 +116,11 @@ $zettaCompletions = {
 
     $commandName = $commandAst.CommandElements[0].Value
     $words = @($commandAst.CommandElements | ForEach-Object { $_.Value })
+    if ($commandName -eq 'zmux') {
+        # `zmux` takes the same arguments as `zetta mux`, so completing it
+        # reuses that logic by inserting the subcommand it stands in for.
+        $words = @($words[0], 'mux') + @($words | Select-Object -Skip 1)
+    }
     $previous = if ($words.Count -gt 1) { $words[$words.Count - 2] } else { '' }
     $last = if ($words.Count -gt 1) { $words[$words.Count - 1] } else { '' }
 
@@ -378,6 +383,7 @@ $zettaCompletions = {
 }
 
 Register-ArgumentCompleter -Native -CommandName zetta -ScriptBlock $zettaCompletions
+Register-ArgumentCompleter -Native -CommandName zmux -ScriptBlock $zettaCompletions
 Register-ArgumentCompleter -CommandName ztftp -ScriptBlock $zettaCompletions
 Register-ArgumentCompleter -CommandName zntfy -ScriptBlock $zettaCompletions
 Register-ArgumentCompleter -CommandName zcopy -ScriptBlock $zettaCompletions

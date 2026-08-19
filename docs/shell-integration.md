@@ -15,6 +15,9 @@ shortcuts for the clipboard; each has the same completion as its corresponding
 `zetta` command. The top-level `attention` command also completes its long
 notification options while retaining all short aliases.
 
+`zmux`, the standalone multiplexer binary, gets the same completion as
+`zetta mux`, since the two take identical arguments.
+
 It also provides `zwt`, a wrapper for the Git worktree workflow. `zwt new NAME`
 captures `zetta wt new --path-only NAME` and changes into the created worktree;
 `zwt done` similarly changes into the integrated source worktree. Other `zwt`
