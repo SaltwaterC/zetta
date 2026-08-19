@@ -165,7 +165,7 @@ pub(crate) fn render_settings_pages(
                 ),
                 setting_row(
                     "New Tab profile",
-                    "Profile selected when opening a new tab",
+                    "Default uses the Default profile above; Inherit reuses the active tab's profile",
                     editor.focused_control
                         == Some(SettingsControl::Dropdown(SettingsDropdown::NewTabProfile)),
                     new_tab_profile,
