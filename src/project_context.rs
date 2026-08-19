@@ -829,22 +829,26 @@ impl Zetta {
     }
 }
 
+/// The theme a terminal pane should render with. Mirrors the precedence
+/// [`Zetta::window_theme`]/[`Zetta::theme_for_tab`] use for the tab/window
+/// chrome: an active project's own `theme` wins outright, because that is the
+/// project asserting a theme for everything inside it, including profiles it
+/// never mentions and that therefore still carry whatever `theme` they
+/// inherited from the global configuration. Only when no project is active,
+/// or the active project sets no `theme` of its own, does the profile's theme
+/// apply.
 pub(crate) fn resolve_project_profile_theme(
     profile: &Profile,
     project: Option<&ProjectConfig>,
     cx: &App,
 ) -> Result<Option<Arc<Theme>>> {
-    if profile.theme.is_some() {
-        return resolve_profile_theme(profile, cx);
+    if let Some(name) = project.and_then(|project| project.effective.theme.as_deref()) {
+        return ThemeRegistry::global(cx)
+            .get(name)
+            .with_context(|| format!("using project theme {name:?}"))
+            .map(Some);
     }
-    project
-        .and_then(|project| project.effective.theme.as_deref())
-        .map(|name| {
-            ThemeRegistry::global(cx)
-                .get(name)
-                .with_context(|| format!("using project theme {name:?}"))
-        })
-        .transpose()
+    resolve_profile_theme(profile, cx)
 }
 
 #[cfg(test)]

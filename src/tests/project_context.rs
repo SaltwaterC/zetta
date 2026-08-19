@@ -109,3 +109,57 @@ fn wsl_project_directories_are_lexical_but_cannot_escape_the_distribution() {
     );
     assert_eq!(wsl_reported_directory(&profile, "/home/me/../../etc"), None);
 }
+
+#[gpui::test]
+fn active_project_theme_overrides_a_profile_theme_it_never_mentioned(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(|cx| {
+        theme::init(theme::LoadThemes::All(Box::new(ZettaAssets)), cx);
+        let registry = ThemeRegistry::global(cx);
+        theme_settings::load_bundled_themes(&registry);
+
+        // A profile whose theme came from the global configuration, not from
+        // this project's own `profiles` overlay (see `merge_profiles`):
+        // opening the project must not let that inherited theme keep
+        // outranking the project's own `theme`.
+        let profile = Profile {
+            name: "bash".to_owned(),
+            command: Shell::Program("bash".to_owned()),
+            theme: Some("Solarized Light".to_owned()),
+            icon: ProfileIcon::default(),
+        };
+
+        let mut effective = Config::defaults(None, None);
+        effective.theme = Some("Solarized Dark".to_owned());
+        let project = ProjectConfig {
+            root: PathBuf::from("/project"),
+            effective,
+            environment: HashMap::new(),
+            initial_split: None,
+        };
+
+        let theme = resolve_project_profile_theme(&profile, Some(&project), cx)
+            .unwrap()
+            .unwrap();
+        assert_eq!(theme.name.as_ref(), "Solarized Dark");
+
+        // With no project active, the profile's own theme still applies.
+        let theme = resolve_project_profile_theme(&profile, None, cx)
+            .unwrap()
+            .unwrap();
+        assert_eq!(theme.name.as_ref(), "Solarized Light");
+
+        // A project that sets no theme of its own falls back to the profile.
+        let project_without_theme = ProjectConfig {
+            root: PathBuf::from("/project"),
+            effective: Config::defaults(None, None),
+            environment: HashMap::new(),
+            initial_split: None,
+        };
+        let theme = resolve_project_profile_theme(&profile, Some(&project_without_theme), cx)
+            .unwrap()
+            .unwrap();
+        assert_eq!(theme.name.as_ref(), "Solarized Light");
+    });
+}
