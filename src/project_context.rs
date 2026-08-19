@@ -530,20 +530,12 @@ impl Zetta {
         }
 
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-            match &project {
-                Some(project) => {
-                    self.projects
-                        .inherited_tab_icons
-                        .entry(tab.id)
-                        .or_insert(tab.icon);
-                    tab.icon = project.effective.default_tab_icon;
-                }
-                None => {
-                    if let Some(icon) = self.projects.inherited_tab_icons.remove(&tab.id) {
-                        tab.icon = icon;
-                    }
-                }
-            }
+            apply_project_tab_icon(
+                tab.id,
+                &mut tab.icon,
+                project.as_deref(),
+                &mut self.projects.inherited_tab_icons,
+            );
         }
 
         self.apply_effective_themes_to_tab(tab_id, cx);
@@ -826,6 +818,33 @@ impl Zetta {
                 .ok();
             })
             .detach();
+    }
+}
+
+/// The tab icon change when a tab's active project becomes `project`
+/// (entering, leaving, or switching projects). The first time a project
+/// applies, the tab's current icon is snapshotted into `inherited_tab_icons`
+/// so leaving the project can restore it. Callers must never seed a new tab's
+/// icon from the project it is opened directly into (see
+/// `Zetta::open_tab_with_profile_context`) — doing so snapshots the
+/// project's own icon instead of the tab's true default, so leaving the
+/// project later "restores" the project's icon rather than resetting it.
+pub(crate) fn apply_project_tab_icon(
+    tab_id: u64,
+    tab_icon: &mut Option<IconName>,
+    project: Option<&ProjectConfig>,
+    inherited_tab_icons: &mut HashMap<u64, Option<IconName>>,
+) {
+    match project {
+        Some(project) => {
+            inherited_tab_icons.entry(tab_id).or_insert(*tab_icon);
+            *tab_icon = project.effective.default_tab_icon;
+        }
+        None => {
+            if let Some(icon) = inherited_tab_icons.remove(&tab_id) {
+                *tab_icon = icon;
+            }
+        }
     }
 }
 

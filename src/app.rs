@@ -974,7 +974,10 @@ impl Zetta {
             custom_title: None,
             worktree_seed_title: None,
             process_title: None,
-            icon: effective.default_tab_icon,
+            // Never seed from `effective`: see `apply_project_tab_icon`'s doc comment
+            // for why a new tab must start from the non-project default even when
+            // opening directly into a project.
+            icon: self.launch_config.default_tab_icon,
             pinned: false,
             renaming_pane: None,
             rename_buffer: None,

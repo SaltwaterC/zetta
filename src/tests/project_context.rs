@@ -110,6 +110,51 @@ fn wsl_project_directories_are_lexical_but_cannot_escape_the_distribution() {
     assert_eq!(wsl_reported_directory(&profile, "/home/me/../../etc"), None);
 }
 
+fn icon_test_project(icon: Option<IconName>) -> ProjectConfig {
+    let mut effective = Config::defaults(None, None);
+    effective.default_tab_icon = icon;
+    ProjectConfig {
+        root: PathBuf::from("/project"),
+        effective,
+        environment: HashMap::new(),
+        initial_split: None,
+    }
+}
+
+#[test]
+fn leaving_a_project_restores_the_tab_icon_it_had_before_entering() {
+    let project = icon_test_project(Some(IconName::Folder));
+    let mut inherited = HashMap::new();
+    let mut icon = Some(IconName::Terminal);
+
+    apply_project_tab_icon(1, &mut icon, Some(&project), &mut inherited);
+    assert_eq!(icon, Some(IconName::Folder));
+    assert_eq!(inherited.get(&1), Some(&Some(IconName::Terminal)));
+
+    apply_project_tab_icon(1, &mut icon, None, &mut inherited);
+    assert_eq!(icon, Some(IconName::Terminal));
+    assert!(inherited.is_empty());
+}
+
+#[test]
+fn a_tab_opened_directly_into_a_project_must_not_be_seeded_with_the_projects_own_icon() {
+    // A tab created while a project is already active must start from the
+    // non-project default (see `Zetta::open_tab_with_profile_context`), not
+    // from `project.effective.default_tab_icon`. Seeding it with the
+    // project's own icon here, as a regression would, snapshots that same
+    // icon as the "original" — so leaving the project never changes it.
+    let project = icon_test_project(Some(IconName::Folder));
+    let mut inherited = HashMap::new();
+    let mut icon = project.effective.default_tab_icon;
+
+    apply_project_tab_icon(1, &mut icon, Some(&project), &mut inherited);
+    apply_project_tab_icon(1, &mut icon, None, &mut inherited);
+
+    // Demonstrates the bug this test guards against: the icon is stuck on
+    // the project's icon instead of resetting to a real default.
+    assert_eq!(icon, Some(IconName::Folder));
+}
+
 #[gpui::test]
 fn active_project_theme_overrides_a_profile_theme_it_never_mentioned(
     cx: &mut gpui::TestAppContext,
