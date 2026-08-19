@@ -75,6 +75,11 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
     } else {
         ""
     };
+    let notify_cleanup_usage = if cfg!(notify_cleanup_enabled) {
+        "\n       zetta notify-cleanup [OPTIONS]"
+    } else {
+        ""
+    };
     let clipboard_usage = if cfg!(feature = "clipboard") {
         "\n       zetta copy [OPTIONS]\n       zetta paste [OPTIONS]"
     } else {
@@ -100,6 +105,11 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
     } else {
         ""
     };
+    let notify_cleanup_command = if cfg!(notify_cleanup_enabled) {
+        "\n  notify-cleanup                      Reap stale desktop notification worker processes"
+    } else {
+        ""
+    };
     let clipboard_command = if cfg!(feature = "clipboard") {
         "\n  copy                                Copy standard input to the clipboard\n  paste                               Print the clipboard's contents"
     } else {
@@ -111,7 +121,7 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         .collect::<Vec<_>>()
         .join("\n  ");
     let help = format!(
-        "Zetta Terminal\n\nUsage: zetta [OPTIONS]\n       zetta benchmark [OPTIONS]\n       zetta benchmark-output [OPTIONS]\n       zetta terminal-size [--json | --resize [--columns COLUMNS] [--rows ROWS]]\n       zetta sessions [--json]\n       zetta profile <COMMAND>\n       zetta project <COMMAND>\n       zetta init [SHELL]{serial_usage}{http_usage}{tftp_usage}{notify_usage}{clipboard_usage}\n\nCommands:\n  benchmark                           Profile terminal rendering\n  benchmark-output                    Write and time a text payload (default: 10 MiB)\n  terminal-size                       Print or resize the current terminal pane\n  sessions                            List detached background sessions\n  profile                             List and manage profiles\n  project                             List, add, remove, or open projects\n  init                                Configure or generate shell integration{serial_command}{http_command}{tftp_command}{notify_command}{clipboard_command}\n\nBuilt-in features:\n  {}\n\nProfiles accepted by --profile NAME (case-insensitive):\n  {profiles}\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Select one of the profiles listed above\n  -s, --split NAME                    Apply a configured pane split template; run `zetta splits` to list available names\n  -t, --theme NAME                    Non-persistently override --profile's theme for this launch",
+        "Zetta Terminal\n\nUsage: zetta [OPTIONS]\n       zetta benchmark [OPTIONS]\n       zetta benchmark-output [OPTIONS]\n       zetta terminal-size [--json | --resize [--columns COLUMNS] [--rows ROWS]]\n       zetta sessions [--json]\n       zetta profile <COMMAND>\n       zetta project <COMMAND>\n       zetta init [SHELL]{serial_usage}{http_usage}{tftp_usage}{notify_usage}{notify_cleanup_usage}{clipboard_usage}\n\nCommands:\n  benchmark                           Profile terminal rendering\n  benchmark-output                    Write and time a text payload (default: 10 MiB)\n  terminal-size                       Print or resize the current terminal pane\n  sessions                            List detached background sessions\n  profile                             List and manage profiles\n  project                             List, add, remove, or open projects\n  init                                Configure or generate shell integration{serial_command}{http_command}{tftp_command}{notify_command}{notify_cleanup_command}{clipboard_command}\n\nBuilt-in features:\n  {}\n\nProfiles accepted by --profile NAME (case-insensitive):\n  {profiles}\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Select one of the profiles listed above\n  -s, --split NAME                    Apply a configured pane split template; run `zetta splits` to list available names\n  -t, --theme NAME                    Non-persistently override --profile's theme for this launch",
         features.join("\n  "),
     );
     help

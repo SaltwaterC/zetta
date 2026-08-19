@@ -8,6 +8,8 @@ use crate::cli_services::macos_notification_target_for_response;
 use crate::cli_services::{copy_help, parse_copy_args, parse_paste_args, paste_help};
 #[cfg(feature = "http-server")]
 use crate::cli_services::{http_server_help, parse_http_args};
+#[cfg(notify_cleanup_enabled)]
+use crate::cli_services::{notify_cleanup_help, parse_notify_cleanup_args};
 #[cfg(feature = "notifications")]
 use crate::cli_services::{notify_help, parse_notify_args, run_notification};
 #[cfg(feature = "serial-console")]

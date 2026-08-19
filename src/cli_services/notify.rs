@@ -371,35 +371,189 @@ fn spawn_notification_daemon(notification: &NotificationRequest) -> Result<()> {
     Ok(())
 }
 
+/// How long a Linux notification stays alive before the desktop expires it,
+/// or `None` for a notification with no expiry (`Never`/a zero-millisecond
+/// timeout).
+#[cfg(linux_like)]
+fn notification_expiry_duration(
+    timeout: Option<NotificationTimeout>,
+) -> Option<std::time::Duration> {
+    match timeout.unwrap_or_default() {
+        // GNOME's default is commonly five seconds. Add a margin so the
+        // server has time to expire and archive the notification instead of
+        // treating the worker's exit as a dismissal.
+        NotificationTimeout::Default => Some(std::time::Duration::from_secs(10)),
+        NotificationTimeout::Milliseconds(0) | NotificationTimeout::Never => None,
+        NotificationTimeout::Milliseconds(milliseconds) => Some(
+            std::time::Duration::from_millis(u64::from(milliseconds))
+                + std::time::Duration::from_secs(1),
+        ),
+    }
+}
+
 #[cfg(linux_like)]
 fn keep_notification_worker_alive(timeout: Option<NotificationTimeout>) {
-    let timeout = timeout.unwrap_or_default();
-    match timeout {
-        // GNOME's default is commonly five seconds. Keep the sender alive a
-        // little longer so the server can expire and archive the notification
-        // instead of treating the worker's exit as a dismissal.
-        NotificationTimeout::Default => std::thread::sleep(std::time::Duration::from_secs(10)),
-        NotificationTimeout::Milliseconds(milliseconds) => {
-            if milliseconds == 0 {
-                // A never-expiring notification needs a live sender. This is
-                // intentionally indefinite, matching the notification's
-                // lifetime.
-                loop {
-                    std::thread::sleep(std::time::Duration::from_secs(60));
-                }
-            } else {
-                std::thread::sleep(
-                    std::time::Duration::from_millis(u64::from(milliseconds))
-                        + std::time::Duration::from_secs(1),
-                );
-            }
-        }
+    match notification_expiry_duration(timeout) {
+        Some(duration) => std::thread::sleep(duration),
         // A never-expiring notification needs a live sender. This is
         // intentionally indefinite, matching the notification's lifetime.
-        NotificationTimeout::Never => loop {
+        None => loop {
             std::thread::sleep(std::time::Duration::from_secs(60));
         },
     }
+}
+
+/// `wait_for_response` blocks on the `NotificationClosed`/`ActionInvoked`
+/// D-Bus signals, but notification servers do not reliably emit
+/// `NotificationClosed` once a notification expires — GNOME Shell in
+/// particular moves it into the message tray without ever closing it. Left
+/// unbounded, the targeted worker below then waits forever for a click that
+/// can no longer happen, which is why these workers were observed to leak
+/// indefinitely. Force the worker to give up once the notification itself
+/// would have expired; a notification with no expiry keeps waiting, since it
+/// can still be clicked at any time.
+#[cfg(linux_like)]
+fn spawn_notification_response_watchdog(timeout: Option<NotificationTimeout>) {
+    if let Some(duration) = notification_expiry_duration(timeout) {
+        std::thread::spawn(move || {
+            std::thread::sleep(duration);
+            std::process::exit(0);
+        });
+    }
+}
+
+/// `zetta notify-cleanup` reaps workers left over from before
+/// [`spawn_notification_response_watchdog`] existed (or from a build that
+/// predates it). It is a plain CLI maintenance command, not a background
+/// service: it scans, reports, and exits.
+#[cfg(notify_cleanup_enabled)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct NotifyCleanupCommand {
+    pub(crate) dry_run: bool,
+}
+
+#[cfg(notify_cleanup_enabled)]
+pub(crate) fn notify_cleanup_help() -> &'static str {
+    "Reap stale desktop notification worker processes\n\nUsage: zetta notify-cleanup [OPTIONS]\n\nA `zetta notify` invocation that targets a pane spawns a detached worker that waits for the notification to be clicked or dismissed, so it can focus the originating tab. Some notification servers (GNOME Shell in particular) do not reliably signal when a notification expires, which can leave a worker running indefinitely with nothing left to click. This command finds Zetta notification workers that have outlived their notification's own timeout and terminates them.\n\nOptions:\n  -n, --dry-run  List stale workers without terminating them\n  -h, --help     Print help"
+}
+
+#[cfg(notify_cleanup_enabled)]
+pub(crate) fn parse_notify_cleanup_args(
+    args: impl IntoIterator<Item = OsString>,
+) -> Result<CliServiceCommand> {
+    let mut dry_run = false;
+    for argument in args {
+        match argument.to_string_lossy().as_ref() {
+            "--dry-run" | "-n" => {
+                anyhow::ensure!(!dry_run, "--dry-run may only be specified once");
+                dry_run = true;
+            }
+            "--help" | "-h" => anyhow::bail!("{}", notify_cleanup_help()),
+            option => anyhow::bail!("unknown notify-cleanup option {option:?}"),
+        }
+    }
+    Ok(CliServiceCommand::NotifyCleanup(NotifyCleanupCommand {
+        dry_run,
+    }))
+}
+
+#[cfg(notify_cleanup_enabled)]
+struct StaleNotificationWorker {
+    process_id: sysinfo::Pid,
+    age: std::time::Duration,
+    expiry: std::time::Duration,
+}
+
+/// Recovers the `--timeout` a notification worker was launched with by
+/// reparsing its own argv the same way it parsed it at startup. `cmd[0]` is
+/// the worker's executable and `cmd[1]` is the literal `"notify"` pushed by
+/// [`notification_reexec_args`]; a process only reaches here because it
+/// already matched [`NOTIFICATION_WORKER_ENV`], so a mismatch here means the
+/// argv could not be read (for example, a permission error on `/proc`) rather
+/// than a process that isn't really a notification worker.
+#[cfg(notify_cleanup_enabled)]
+fn worker_notification_timeout(cmd: &[OsString]) -> Option<Option<NotificationTimeout>> {
+    if cmd.get(1)?.to_str()? != "notify" {
+        return None;
+    }
+    let CliServiceCommand::Notify(command) = parse_notify_args(cmd[2..].iter().cloned()).ok()?
+    else {
+        unreachable!("parse_notify_args only ever returns CliServiceCommand::Notify")
+    };
+    Some(command.timeout)
+}
+
+#[cfg(notify_cleanup_enabled)]
+fn stale_notification_workers(system: &sysinfo::System) -> Vec<StaleNotificationWorker> {
+    let worker_marker = OsString::from(format!("{NOTIFICATION_WORKER_ENV}=1"));
+    system
+        .processes()
+        .values()
+        .filter(|process| process.environ().contains(&worker_marker))
+        .filter_map(|process| {
+            let timeout = worker_notification_timeout(process.cmd())?;
+            let expiry = notification_expiry_duration(timeout)?;
+            let age = std::time::Duration::from_secs(process.run_time());
+            (age > expiry).then_some(StaleNotificationWorker {
+                process_id: process.pid(),
+                age,
+                expiry,
+            })
+        })
+        .collect()
+}
+
+#[cfg(notify_cleanup_enabled)]
+pub(crate) fn run_notify_cleanup(command: &NotifyCleanupCommand) -> Result<()> {
+    let mut system = sysinfo::System::new();
+    system.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::All,
+        true,
+        sysinfo::ProcessRefreshKind::nothing()
+            .with_environ(sysinfo::UpdateKind::Always)
+            .with_cmd(sysinfo::UpdateKind::Always),
+    );
+
+    let stale = stale_notification_workers(&system);
+    if stale.is_empty() {
+        println!("No stale desktop notification workers found.");
+        return Ok(());
+    }
+
+    for worker in &stale {
+        let verb = if command.dry_run {
+            "would reap"
+        } else {
+            "reaping"
+        };
+        println!(
+            "{verb} pid {} (running {}s, past its {}s notification timeout)",
+            worker.process_id,
+            worker.age.as_secs(),
+            worker.expiry.as_secs(),
+        );
+    }
+    if command.dry_run {
+        return Ok(());
+    }
+
+    let mut reaped = 0;
+    for worker in &stale {
+        match system.process(worker.process_id) {
+            Some(process) if process.kill_with(sysinfo::Signal::Term) == Some(true) => {
+                reaped += 1;
+            }
+            _ => eprintln!(
+                "zetta: failed to terminate notification worker pid {}",
+                worker.process_id
+            ),
+        }
+    }
+    println!(
+        "Reaped {reaped} of {} stale desktop notification worker(s).",
+        stale.len()
+    );
+    Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -809,6 +963,8 @@ impl NotificationRequest {
             bundled_sound.play()?;
         }
         if let Some(target) = target {
+            #[cfg(linux_like)]
+            spawn_notification_response_watchdog(self.timeout);
             let mut response = None;
             notification_handle
                 .wait_for_response(|received: &notify_rust::NotificationResponse| {

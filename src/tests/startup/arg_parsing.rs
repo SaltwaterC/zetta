@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(notify_cleanup_enabled)]
+use crate::cli_services::NotifyCleanupCommand;
 #[cfg(feature = "serial-console")]
 use crate::cli_services::SerialCommand;
 use crate::worktree_cli::WorktreeCommand;
@@ -686,6 +688,38 @@ fn notify_subcommand_bypasses_application_startup() {
     assert!(!should_handoff_to_existing_process(&args));
 
     assert!(parse_args_from([OsString::from("notify")]).is_err());
+}
+
+#[cfg(notify_cleanup_enabled)]
+#[test]
+fn notify_cleanup_subcommand_bypasses_application_startup() {
+    let args = parse_args_from([OsString::from("notify-cleanup")]).unwrap();
+
+    assert!(matches!(
+        args.mode,
+        StartupMode::CliService(CliServiceCommand::NotifyCleanup(_))
+    ));
+    assert!(!should_handoff_to_existing_process(&args));
+
+    let args = parse_args_from([
+        OsString::from("notify-cleanup"),
+        OsString::from("--dry-run"),
+    ])
+    .unwrap();
+    assert!(matches!(
+        args.mode,
+        StartupMode::CliService(CliServiceCommand::NotifyCleanup(NotifyCleanupCommand {
+            dry_run: true
+        }))
+    ));
+
+    assert!(
+        parse_args_from([
+            OsString::from("notify-cleanup"),
+            OsString::from("--unknown")
+        ])
+        .is_err()
+    );
 }
 
 #[test]

@@ -16,8 +16,12 @@ pub(crate) use servers::{parse_tftp_server_args, tftp_server_help};
 
 #[cfg(feature = "notifications")]
 mod notify;
+#[cfg(all(test, notify_cleanup_enabled))]
+pub(crate) use notify::NotifyCleanupCommand;
 #[cfg(all(target_os = "macos", feature = "notifications"))]
 pub(crate) use notify::macos_notification_target_for_response;
+#[cfg(notify_cleanup_enabled)]
+pub(crate) use notify::{notify_cleanup_help, parse_notify_cleanup_args};
 #[cfg(feature = "notifications")]
 pub(crate) use notify::{notify_help, parse_notify_args, run_notification};
 
@@ -81,6 +85,8 @@ pub(crate) enum CliServiceCommand {
     Tftp(servers::TftpServerCommand),
     #[cfg(feature = "notifications")]
     Notify(notify::NotifyCommand),
+    #[cfg(notify_cleanup_enabled)]
+    NotifyCleanup(notify::NotifyCleanupCommand),
     #[cfg(feature = "clipboard")]
     Copy(clipboard::CopyCommand),
     #[cfg(feature = "clipboard")]
@@ -103,6 +109,8 @@ impl CliServiceCommand {
             Self::Notify(command) => {
                 notify::run_notification(command, notify::notification_target_from_environment())
             }
+            #[cfg(notify_cleanup_enabled)]
+            Self::NotifyCleanup(command) => notify::run_notify_cleanup(command),
             #[cfg(feature = "clipboard")]
             Self::Copy(command) => command.run(),
             #[cfg(feature = "clipboard")]

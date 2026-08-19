@@ -1141,6 +1141,43 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
         #[cfg(not(feature = "notifications"))]
         anyhow::bail!("Desktop notification support is disabled in this build");
     }
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "notify-cleanup")
+    {
+        #[cfg(notify_cleanup_enabled)]
+        {
+            let cleanup_arguments = &arguments[1..];
+            if cleanup_arguments
+                .iter()
+                .any(|argument| matches!(argument.to_string_lossy().as_ref(), "--help" | "-h"))
+            {
+                println!("{}", notify_cleanup_help());
+                std::process::exit(0);
+            }
+            return Ok(StartupArgs {
+                config_path: None,
+                keymap_path: None,
+                profile: None,
+                split: None,
+                replace_pane: false,
+                theme_override: None,
+                mode: StartupMode::CliService(parse_notify_cleanup_args(
+                    cleanup_arguments.iter().cloned(),
+                )?),
+                profile_report: None,
+                profile_duration: None,
+                profile_pane_stress: false,
+                profile_workload: PerformanceWorkload::Standard,
+                profile_external_terminal: false,
+                tftp_command: None,
+            });
+        }
+        #[cfg(not(notify_cleanup_enabled))]
+        anyhow::bail!(
+            "zetta notify-cleanup requires desktop notifications and is only needed on Linux and BSD"
+        );
+    }
     if arguments.first().is_some_and(|argument| argument == "copy") {
         #[cfg(feature = "clipboard")]
         {

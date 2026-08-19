@@ -139,7 +139,7 @@ $zettaCompletions = {
         }
     }
     $subcommand = $words | Where-Object {
-        $_ -in 'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'mux', 'splits', 'pane', 'profile', 'project', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', 'wt'
+        $_ -in 'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'mux', 'splits', 'pane', 'profile', 'project', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'notify-cleanup', 'attention', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', 'wt'
     } | Select-Object -First 1
     $worktreeCommand = $false
     $worktreeOperation = ''
@@ -273,7 +273,7 @@ $zettaCompletions = {
             '--help'
         }
     } elseif ($null -eq $subcommand) {
-        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'mux', 'profile', 'project', 'splits', 'pane', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', 'wt', '--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme'
+        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'mux', 'profile', 'project', 'splits', 'pane', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'notify-cleanup', 'attention', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', 'wt', '--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme'
     } else {
         switch ($subcommand) {
             'benchmark' { '--profile-report', '--profile-duration', '--profile-pane-stress', '--profile-background-stress', '--profile-sparse-updates', '--profile-alt-screen-scroll', '--profile-external-terminal', '--help' }
@@ -342,6 +342,7 @@ $zettaCompletions = {
                 else { '--port', '--help' }
             }
             'notify' { '--app-name', '--icon', '--sound', '--timeout', '--help' }
+            'notify-cleanup' { '--dry-run', '--help' }
             'attention' { '--notify', '--app-name', '--icon', '--sound', '--timeout', '--help' }
             'copy' { '--pboard', '--help' }
             'paste' { '--pboard', '--prefer', '--help' }

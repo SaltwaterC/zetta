@@ -245,7 +245,7 @@ _zetta() {
     fi
 
     if (( CURRENT == 2 )); then
-        compadd -S ' ' -- benchmark benchmark-output terminal-size sessions mux profile project edit vi init serial http tftp notify attention copy paste splits pane tabicon panetheme overlay wt
+        compadd -S ' ' -- benchmark benchmark-output terminal-size sessions mux profile project edit vi init serial http tftp notify notify-cleanup attention copy paste splits pane tabicon panetheme overlay wt
         _zetta_options --help --version --config --keymap --profile --split --replace-pane --theme
         return
     fi
@@ -579,6 +579,9 @@ _zetta() {
             ;;
         notify)
             _zetta_options --app-name --icon --sound --timeout --help
+            ;;
+        notify-cleanup)
+            _zetta_options --dry-run --help
             ;;
         attention)
             _zetta_options --notify --app-name --icon --sound --timeout --help

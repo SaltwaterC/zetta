@@ -118,6 +118,110 @@ fn notification_responses_only_focus_on_default_activation() {
     }
 }
 
+#[cfg(notify_cleanup_enabled)]
+#[test]
+fn notify_cleanup_parser_accepts_dry_run_and_rejects_duplicates_and_unknowns() {
+    assert_eq!(
+        parse_notify_cleanup_args([]).unwrap(),
+        CliServiceCommand::NotifyCleanup(NotifyCleanupCommand { dry_run: false })
+    );
+    assert_eq!(
+        parse_notify_cleanup_args([OsString::from("--dry-run")]).unwrap(),
+        CliServiceCommand::NotifyCleanup(NotifyCleanupCommand { dry_run: true })
+    );
+    assert_eq!(
+        parse_notify_cleanup_args([OsString::from("-n")]).unwrap(),
+        CliServiceCommand::NotifyCleanup(NotifyCleanupCommand { dry_run: true })
+    );
+    assert!(
+        parse_notify_cleanup_args([OsString::from("-n"), OsString::from("--dry-run")]).is_err()
+    );
+    assert!(parse_notify_cleanup_args([OsString::from("--unknown")]).is_err());
+}
+
+#[cfg(notify_cleanup_enabled)]
+#[test]
+fn worker_notification_timeout_reparses_the_workers_own_argv() {
+    let cmd =
+        |arguments: &[&str]| -> Vec<OsString> { arguments.iter().map(OsString::from).collect() };
+
+    // A worker relaunched with no explicit --timeout defaults like `notify` itself.
+    assert_eq!(
+        worker_notification_timeout(&cmd(&[
+            "/path/to/zetta",
+            "notify",
+            "--sound",
+            "zetta-ok",
+            "Build finished",
+        ])),
+        Some(None)
+    );
+
+    // An explicit --timeout survives the round trip through its own argv.
+    assert_eq!(
+        worker_notification_timeout(&cmd(&[
+            "/path/to/zetta",
+            "notify",
+            "--timeout",
+            "5000",
+            "Build finished",
+        ])),
+        Some(Some(NotificationTimeout::Milliseconds(5000)))
+    );
+    assert_eq!(
+        worker_notification_timeout(&cmd(&[
+            "/path/to/zetta",
+            "notify",
+            "--timeout",
+            "never",
+            "Build finished",
+            "All tests passed",
+        ])),
+        Some(Some(NotificationTimeout::Never))
+    );
+
+    // Anything that isn't recognizably a `notify` worker's own argv is left
+    // alone rather than guessed at.
+    assert_eq!(worker_notification_timeout(&cmd(&["/path/to/zetta"])), None);
+    assert_eq!(
+        worker_notification_timeout(&cmd(&["/path/to/zetta", "attention", "Build finished"])),
+        None
+    );
+    assert_eq!(
+        worker_notification_timeout(&cmd(&["/path/to/zetta", "notify"])),
+        None
+    );
+}
+
+#[cfg(linux_like)]
+#[test]
+fn notification_expiry_duration_is_bounded_except_for_persistent_notifications() {
+    use std::time::Duration;
+
+    assert_eq!(
+        notification_expiry_duration(None),
+        Some(Duration::from_secs(10))
+    );
+    assert_eq!(
+        notification_expiry_duration(Some(NotificationTimeout::Default)),
+        Some(Duration::from_secs(10))
+    );
+    assert_eq!(
+        notification_expiry_duration(Some(NotificationTimeout::Milliseconds(5000))),
+        Some(Duration::from_secs(6))
+    );
+    // A zero-millisecond timeout and `Never` both mean the notification does
+    // not expire on its own, so nothing should bound the wait for a response.
+    assert_eq!(
+        notification_expiry_duration(Some(NotificationTimeout::Milliseconds(0))),
+        None
+    );
+    assert_eq!(
+        notification_expiry_duration(Some(NotificationTimeout::Never)),
+        None
+    );
+}
+
 #[cfg(linux_like)]
 #[test]
 fn targeted_linux_notifications_add_only_the_xdg_default_action() {

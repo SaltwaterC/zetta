@@ -55,12 +55,20 @@ fn emit_cfg_aliases() {
     println!("cargo::rustc-check-cfg=cfg(tftp_enabled)");
     println!("cargo::rustc-check-cfg=cfg(byte_stream_panes)");
     println!("cargo::rustc-check-cfg=cfg(cli_services)");
+    println!("cargo::rustc-check-cfg=cfg(notify_cleanup_enabled)");
 
-    if matches!(
+    let linux_like = matches!(
         env::var("CARGO_CFG_TARGET_OS").as_deref(),
         Ok("linux") | Ok("freebsd")
-    ) {
+    );
+    if linux_like {
         println!("cargo::rustc-cfg=linux_like");
+    }
+    if linux_like && feature_enabled("NOTIFICATIONS") {
+        // The leaked-worker bug `notify-cleanup` reaps only reproduces on the
+        // D-Bus-backed Linux/BSD notification path; other platforms tear
+        // their workers down as soon as the notification is submitted.
+        println!("cargo::rustc-cfg=notify_cleanup_enabled");
     }
     if feature_enabled("HTTP_SERVER") || feature_enabled("TFTP_SERVER") {
         println!("cargo::rustc-cfg=servers_enabled");

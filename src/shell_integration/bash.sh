@@ -450,7 +450,7 @@ _zetta_complete() {
     esac
 
     if (( COMP_CWORD == 1 )); then
-        _zetta_compgen 'benchmark benchmark-output terminal-size sessions mux pane profile project edit vi init serial http tftp notify attention copy paste splits tabicon panetheme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme'
+        _zetta_compgen 'benchmark benchmark-output terminal-size sessions mux pane profile project edit vi init serial http tftp notify notify-cleanup attention copy paste splits tabicon panetheme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme'
         return
     fi
 
@@ -621,6 +621,9 @@ _zetta_complete() {
             ;;
         notify)
             _zetta_compgen '--app-name --icon --sound --timeout --help'
+            ;;
+        notify-cleanup)
+            _zetta_compgen '--dry-run --help'
             ;;
         attention)
             _zetta_compgen '--notify --app-name --icon --sound --timeout --help'

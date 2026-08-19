@@ -515,6 +515,25 @@ fn supported_shells_generate_notify_completion_and_zntfy_shortcut() {
 }
 
 #[test]
+fn supported_shells_generate_notify_cleanup_completion() {
+    let profiles = profiles();
+    for shell in [
+        ShellIntegration::Bash,
+        ShellIntegration::Fish,
+        ShellIntegration::PowerShell,
+        ShellIntegration::Zsh,
+    ] {
+        let script = shell.script(&profiles);
+        assert!(script.contains("notify-cleanup"));
+        if shell == ShellIntegration::Fish {
+            assert!(script.contains("-l dry-run"));
+        } else {
+            assert!(script.contains("--dry-run"));
+        }
+    }
+}
+
+#[test]
 fn supported_shells_generate_attention_completion() {
     let profiles = profiles();
     for shell in [
@@ -1489,7 +1508,7 @@ fn generated_scripts_only_offer_long_form_flags() {
         match shell {
             ShellIntegration::Bash => {
                 assert!(script.contains(
-                    "terminal-size sessions mux pane profile project edit vi init serial http tftp notify attention copy paste splits tabicon panetheme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme'"
+                    "terminal-size sessions mux pane profile project edit vi init serial http tftp notify notify-cleanup attention copy paste splits tabicon panetheme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme'"
                 ));
                 assert!(script.contains("auto zetta bash zsh fish"));
             }
@@ -1538,6 +1557,7 @@ fn fish_script_emits_long_option_candidates_for_every_command_context() {
         "tftp-client",
         "tftp-server",
         "notify",
+        "notify-cleanup",
         "attention",
         "copy",
         "paste",

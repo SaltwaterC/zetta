@@ -234,6 +234,18 @@ notification without routing its click.
 With [shell integration](shell-integration.md) enabled, `zntfy` is an
 equivalent shortcut and retains notification command completion.
 
+A notification targeting a tab spawns a short-lived background process that
+waits for the click so it can focus the originating tab, then exits once the
+notification's own timeout has passed. On Linux and BSD, `zetta notify-cleanup`
+finds and terminates any of these processes that have outlived their
+notification's timeout; `--dry-run` lists them without terminating anything.
+This is normally unnecessary, since each process bounds its own lifetime to
+the notification's timeout, but some notification servers (GNOME Shell in
+particular) do not always signal a notification's expiry, which can leave one
+of these processes running indefinitely with nothing left to click; run
+`zetta notify-cleanup` if you notice one. Run `zetta notify-cleanup --help`
+for complete syntax.
+
 ## Tab attention
 
 `zetta attention` marks the tab that launched the command with a small,
