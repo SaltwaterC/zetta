@@ -498,7 +498,28 @@ pub(crate) fn quit_zetta_process(cx: &mut App) {
     cx.global::<ZettaProcessState>()
         .control_server
         .begin_shutdown();
+    shutdown_multiplexer_if_idle();
     cx.quit();
+}
+
+/// Stops the multiplexer if this was the last Zetta process relying on it.
+///
+/// Safe to call unconditionally on every quit: the daemon is the one that
+/// knows whether it is idle, and it refuses `Request::Shutdown` while it
+/// still holds any session — a background one, or a live pane belonging to
+/// another Zetta process that has not quit yet. So this is a no-op whenever
+/// anything still depends on the daemon, and only actually stops it once
+/// nothing does.
+fn shutdown_multiplexer_if_idle() {
+    match zmux::client::Client::connect_existing() {
+        Ok(Some(client)) => {
+            if let Err(error) = client.shutdown() {
+                log::debug!("multiplexer still needed, not stopped: {error:#}");
+            }
+        }
+        Ok(None) => {}
+        Err(error) => log::debug!("checking for a running multiplexer to stop: {error:#}"),
+    }
 }
 
 pub(crate) fn open_dormant_or_new_window(cx: &mut App) -> Result<()> {
@@ -1219,6 +1240,7 @@ pub(crate) fn run() -> Result<()> {
                         .control_server
                         .begin_shutdown();
                 }
+                shutdown_multiplexer_if_idle();
                 async {}
             });
             cx.set_global(ZettaProcessState {
