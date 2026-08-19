@@ -668,6 +668,11 @@ impl Zetta {
                     compact_tab_bottom_right: frame.compact_tab_bottom_right,
                     corner_radius: frame.corner_radius,
                     tab_bar_background: colors.tab_bar_background,
+                    compact_leading_background: if self.tab_move_mode {
+                        colors.status_bar_background
+                    } else {
+                        title_bar_background
+                    },
                     tab_close_button_on_left: window_close_button_on_left(self.button_layout),
                     is_renaming_tab: self.is_renaming(),
                     tab_count: self.tabs.len(),

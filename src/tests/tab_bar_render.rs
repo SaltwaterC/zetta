@@ -52,16 +52,56 @@ fn active_tab_transitions_inherit_each_neighbor_background() {
     let right = gpui::blue();
 
     assert_eq!(
-        active_tab_transition_backgrounds(Some(left), Some(right), fallback),
+        active_tab_transition_backgrounds(Some(left), Some(right), None, fallback),
         (left, right)
     );
     assert_eq!(
-        active_tab_transition_backgrounds(None, Some(right), fallback),
+        active_tab_transition_backgrounds(None, Some(right), None, fallback),
         (fallback, right)
     );
     assert_eq!(
-        active_tab_transition_backgrounds(Some(left), None, fallback),
+        active_tab_transition_backgrounds(Some(left), None, None, fallback),
         (left, fallback)
+    );
+}
+
+#[test]
+fn first_active_tab_inherits_the_leading_title_bar_background() {
+    let title_bar = gpui::green();
+    let tab_bar = gpui::black();
+    let neighboring_tab = gpui::red();
+
+    assert_eq!(
+        active_tab_transition_backgrounds(None, None, Some(title_bar), tab_bar),
+        (title_bar, tab_bar)
+    );
+    assert_eq!(
+        active_tab_transition_backgrounds(Some(neighboring_tab), None, Some(title_bar), tab_bar,),
+        (neighboring_tab, tab_bar)
+    );
+}
+
+#[test]
+fn leading_background_only_applies_to_a_tab_touching_the_title_bar_controls() {
+    let title_bar = gpui::green();
+
+    assert_eq!(
+        active_tab_left_edge_background(0, 0, 0, title_bar),
+        Some(title_bar)
+    );
+    assert_eq!(
+        active_tab_left_edge_background(0, 1, 2, title_bar),
+        Some(title_bar)
+    );
+    assert_eq!(
+        active_tab_left_edge_background(0, 0, 1, title_bar),
+        None,
+        "an overflow trigger is the leading neighbor"
+    );
+    assert_eq!(
+        active_tab_left_edge_background(1, 1, 0, title_bar),
+        None,
+        "a preceding pinned tab is the leading neighbor"
     );
 }
 

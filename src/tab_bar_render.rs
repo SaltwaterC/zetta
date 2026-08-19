@@ -15,6 +15,9 @@ pub(crate) struct TabBarChrome {
     pub(crate) compact_tab_bottom_right: bool,
     pub(crate) corner_radius: Pixels,
     pub(crate) tab_bar_background: Hsla,
+    /// Background immediately before the compact tab row. The first tab's
+    /// rounded left edge reveals this through its transparent corners.
+    pub(crate) compact_leading_background: Hsla,
     pub(crate) tab_close_button_on_left: bool,
     pub(crate) is_renaming_tab: bool,
     pub(crate) tab_count: usize,
@@ -156,6 +159,7 @@ fn render_tabs_row(chrome: TabBarChrome) -> impl IntoElement {
         compact_tab_bottom_right,
         corner_radius,
         tab_bar_background,
+        compact_leading_background,
         tab_close_button_on_left,
         is_renaming_tab,
         tab_count,
@@ -258,9 +262,21 @@ fn render_tabs_row(chrome: TabBarChrome) -> impl IntoElement {
                             let right_background = visible_tabs_for_neighbors
                                 .get(visible_index + 1)
                                 .map(|(_, _, _, theme)| theme.colors().tab_inactive_background);
+                            // With no pinned tab or overflow trigger before it,
+                            // the first visible tab sits directly beside the
+                            // title-bar controls. Its rounded corner must reveal
+                            // that background, not the tab bar's, or differing
+                            // theme colors leave a square seam at the boundary.
+                            let left_edge_background = active_tab_left_edge_background(
+                                visible_index,
+                                pinned_count,
+                                visible_range.start,
+                                compact_leading_background,
+                            );
                             active_tab_transition_backgrounds(
                                 left_background,
                                 right_background,
+                                left_edge_background,
                                 tab_bar_background,
                             )
                         } else {
@@ -396,12 +412,25 @@ fn active_tab_shape_visible(compact_mode: bool, selected: bool) -> bool {
 fn active_tab_transition_backgrounds(
     left_background: Option<Hsla>,
     right_background: Option<Hsla>,
+    left_edge_background: Option<Hsla>,
     tab_bar_background: Hsla,
 ) -> (Hsla, Hsla) {
     (
-        left_background.unwrap_or(tab_bar_background),
+        left_background
+            .or(left_edge_background)
+            .unwrap_or(tab_bar_background),
         right_background.unwrap_or(tab_bar_background),
     )
+}
+
+fn active_tab_left_edge_background(
+    visible_index: usize,
+    pinned_count: usize,
+    unpinned_visible_start: usize,
+    compact_leading_background: Hsla,
+) -> Option<Hsla> {
+    (visible_index == 0 && (pinned_count > 0 || unpinned_visible_start == 0))
+        .then_some(compact_leading_background)
 }
 
 fn render_active_tab_bottom_transition(
