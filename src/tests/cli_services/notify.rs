@@ -200,11 +200,11 @@ fn notification_expiry_duration_is_bounded_except_for_persistent_notifications()
 
     assert_eq!(
         notification_expiry_duration(None),
-        Some(Duration::from_secs(10))
+        Some(Duration::from_secs(5 * 60))
     );
     assert_eq!(
         notification_expiry_duration(Some(NotificationTimeout::Default)),
-        Some(Duration::from_secs(10))
+        Some(Duration::from_secs(5 * 60))
     );
     assert_eq!(
         notification_expiry_duration(Some(NotificationTimeout::Milliseconds(5000))),

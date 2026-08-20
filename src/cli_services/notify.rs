@@ -379,10 +379,9 @@ fn notification_expiry_duration(
     timeout: Option<NotificationTimeout>,
 ) -> Option<std::time::Duration> {
     match timeout.unwrap_or_default() {
-        // GNOME's default is commonly five seconds. Add a margin so the
-        // server has time to expire and archive the notification instead of
-        // treating the worker's exit as a dismissal.
-        NotificationTimeout::Default => Some(std::time::Duration::from_secs(10)),
+        // Keep the default notification worker alive long enough for a
+        // background process to remain useful to the user.
+        NotificationTimeout::Default => Some(std::time::Duration::from_secs(5 * 60)),
         NotificationTimeout::Milliseconds(0) | NotificationTimeout::Never => None,
         NotificationTimeout::Milliseconds(milliseconds) => Some(
             std::time::Duration::from_millis(u64::from(milliseconds))
