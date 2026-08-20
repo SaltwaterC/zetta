@@ -831,6 +831,29 @@ fn reconnect_requests_carry_a_session_target_and_optional_secret() {
 }
 
 #[test]
+fn disk_resume_requests_decode_identity_paths_from_the_private_payload() {
+    let mut resume_request = request("token", "resume_disk_session");
+    resume_request.session_id = Some(42);
+    resume_request.secret = Some("session-secret".to_owned());
+    resume_request.config_path =
+        Some(serde_json::to_string(&vec!["/tmp/identity", "/tmp/second"]).unwrap());
+    assert_eq!(
+        decode_control_request(&mut resume_request, "token"),
+        Some(ControlRequestCommand::ResumeDiskSession {
+            session_id: 42,
+            identity_paths: vec![PathBuf::from("/tmp/identity"), PathBuf::from("/tmp/second")],
+            secret: Some(SessionSecret::new("session-secret".to_owned())),
+        })
+    );
+    assert!(resume_request.secret.is_none());
+
+    let mut malformed = request("token", "resume_disk_session");
+    malformed.session_id = Some(42);
+    malformed.config_path = Some("not-json".to_owned());
+    assert_eq!(decode_control_request(&mut malformed, "token"), None);
+}
+
+#[test]
 fn reconnect_requests_can_target_the_originating_tab() {
     let mut reconnect_request = request("token", "reconnect_session");
     reconnect_request.runner_id = Some(7);

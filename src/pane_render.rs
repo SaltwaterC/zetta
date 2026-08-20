@@ -385,11 +385,14 @@ impl Zetta {
                             .into_any_element()
                     }
                     (_, Some(error)) => {
-                        let heading = pane
-                            .exit
-                            .as_ref()
-                            .map(|exit| exit.heading())
-                            .unwrap_or("Unable to start command");
+                        let heading = if error.starts_with("Run:") {
+                            "Run"
+                        } else {
+                            pane.exit
+                                .as_ref()
+                                .map(|exit| exit.heading())
+                                .unwrap_or("Unable to start command")
+                        };
                         div()
                             .size_full()
                             .p_4()

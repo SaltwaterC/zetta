@@ -58,6 +58,9 @@ pub enum Retention {
     None,
     /// Keep the pane's screen, and a bounded scrollback above it.
     Memory { bytes: usize },
+    /// Keep the screen in memory and make detached state durable when the
+    /// daemon has been given age recipients.
+    Disk,
 }
 
 impl Default for Retention {
@@ -81,12 +84,24 @@ impl Retention {
                      multiplexer was built without"
                 )
             }
-            "persist" => anyhow::bail!(
-                "retention \"persist\" needs the session-persistence feature, which this \
-                 multiplexer was built without"
-            ),
+            "disk" => {
+                #[cfg(feature = "session-persistence")]
+                {
+                    Ok(Self::Disk)
+                }
+                #[cfg(not(feature = "session-persistence"))]
+                {
+                    anyhow::bail!(
+                        "retention \"disk\" needs the session-persistence feature, which this \
+                         multiplexer was built without"
+                    )
+                }
+            }
+            "persist" => {
+                anyhow::bail!("retention \"persist\" is no longer supported; use \"disk\"")
+            }
             unknown => anyhow::bail!(
-                "unknown retention {unknown:?}; expected \"none\", \"memory\" or \"persist\""
+                "unknown retention {unknown:?}; expected \"none\", \"memory\" or \"disk\""
             ),
         }
     }
@@ -105,6 +120,13 @@ impl Retention {
                 "memory retention must be between 4096 and {MAX_RING_BYTES} bytes"
             );
         }
+        #[cfg(not(feature = "session-persistence"))]
+        if matches!(self, Self::Disk) {
+            anyhow::bail!(
+                "retention \"disk\" needs the session-persistence feature, which this \
+                 multiplexer was built without"
+            );
+        }
         #[cfg(not(feature = "scrollback-buffer"))]
         if matches!(self, Self::Memory { .. }) {
             anyhow::bail!(
@@ -120,6 +142,7 @@ impl Retention {
         match self {
             Self::None => "none",
             Self::Memory { .. } => "memory",
+            Self::Disk => "disk",
         }
     }
 
@@ -128,7 +151,7 @@ impl Retention {
     /// but `none` must not make the application perform snapshot work that it
     /// immediately discards.
     pub const fn keeps_snapshot(self) -> bool {
-        matches!(self, Self::Memory { .. })
+        matches!(self, Self::Memory { .. } | Self::Disk)
     }
 
     /// A pane's retained screen, at the size that pane is running at.
@@ -145,6 +168,16 @@ impl Retention {
             // Without the buffer compiled in there is nothing to keep it in.
             #[cfg(not(feature = "scrollback-buffer"))]
             Self::Memory { .. } => Retained::Discarded,
+            Self::Disk => {
+                #[cfg(feature = "scrollback-buffer")]
+                return Retained::Screen(Box::new(Screen::new(
+                    columns,
+                    lines,
+                    DEFAULT_RING_BYTES / ASSUMED_LINE_BYTES,
+                )));
+                #[cfg(not(feature = "scrollback-buffer"))]
+                return Retained::Discarded;
+            }
         }
     }
 }

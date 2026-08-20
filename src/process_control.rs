@@ -43,6 +43,11 @@ use crate::pane::{OverlayFontSize, PaneOverlayRequest, overlay_color_from_value}
 /// shared session was sent to whichever process-control endpoint happened to
 /// answer first, and that process then chose its first window.
 /// The shared value is also used by the standalone `zmux reconnect` client.
+///
+/// 16 adds the disk-session resume request. Its private identity-path payload
+/// is carried in `config_path` so older request construction stays unchanged;
+/// the command is version-gated and the decoder accepts that field only for
+/// this request.
 pub(crate) const CONTROL_VERSION: u32 = zmux::protocol::CONTROL_VERSION;
 // A 64 KiB argv payload can expand substantially when it contains many
 // one-character arguments and each value is represented as JSON. Keep enough
@@ -131,6 +136,12 @@ pub(crate) enum ProcessControlCommand {
         secret: Option<SessionSecret>,
         completion: Sender<ReconnectSessionResult>,
     },
+    ResumeDiskSession {
+        session_id: u64,
+        identity_paths: Vec<PathBuf>,
+        secret: Option<SessionSecret>,
+        completion: Sender<ReconnectSessionResult>,
+    },
     SetTabIcon {
         icon: Option<IconName>,
         completion: Sender<bool>,
@@ -194,6 +205,11 @@ enum ControlRequestCommand {
         runner_id: u64,
         session_id: u64,
         attention_id: Option<u64>,
+        secret: Option<SessionSecret>,
+    },
+    ResumeDiskSession {
+        session_id: u64,
+        identity_paths: Vec<PathBuf>,
         secret: Option<SessionSecret>,
     },
     SetTabIcon {
@@ -579,6 +595,27 @@ impl ProcessControlServer {
                             };
                             reconnect_session_status(result)
                         }
+                        Some(ControlRequestCommand::ResumeDiskSession {
+                            session_id,
+                            identity_paths,
+                            secret,
+                        }) => {
+                            let (completion, completed) = channel();
+                            let result = if commands
+                                .unbounded_send(ProcessControlCommand::ResumeDiskSession {
+                                    session_id,
+                                    identity_paths,
+                                    secret,
+                                    completion,
+                                })
+                                .is_ok()
+                            {
+                                wait_for_reconnect_completion(&completed, &stopping_for_thread)
+                            } else {
+                                ReconnectSessionResult::Rejected
+                            };
+                            reconnect_session_status(result)
+                        }
                         Some(ControlRequestCommand::SetTabIcon { icon }) => {
                             let (completion, completed) = channel();
                             let accepted = commands
@@ -906,7 +943,7 @@ fn decode_control_request(
     }
     if !matches!(
         request.command.as_str(),
-        "reload_configuration" | "open_project"
+        "reload_configuration" | "open_project" | "resume_disk_session"
     ) && request.config_path.is_some()
     {
         if let Some(secret) = request.secret.as_mut() {
@@ -1144,6 +1181,44 @@ fn decode_control_request(
                         secret: request.secret.take().map(SessionSecret::new),
                     },
                 )
+        }
+        "resume_disk_session"
+            if request.runner_id.is_none()
+                && request.session_id.is_some()
+                && request.icon.is_none()
+                && request.pane_theme.is_none()
+                && request.pane_overlay.is_none()
+                && request.pane_overlay_font_size.is_none()
+                && request.pane_overlay_opacity.is_none()
+                && request.pane_overlay_color.is_none()
+                && request.attention_id.is_none()
+                && request.attention_summary.is_none()
+                && request.attention_body.is_none()
+                && request.tab_name.is_none()
+                && request.worktree_name.is_none()
+                && request.split.is_none()
+                && request.profile.is_none()
+                && request.theme.is_none()
+                && request.pane_request.is_none() =>
+        {
+            let session_id = request.session_id.take()?;
+            // The standalone client sends a JSON array here. Keep the paths
+            // private to the authenticated local socket and reject malformed
+            // or empty entries before they reach the GUI.
+            let identity_paths =
+                serde_json::from_str::<Vec<String>>(request.config_path.take()?.as_str())
+                    .ok()?
+                    .into_iter()
+                    .map(PathBuf::from)
+                    .collect::<Vec<_>>();
+            identity_paths
+                .iter()
+                .all(|path| !path.as_os_str().is_empty())
+                .then_some(ControlRequestCommand::ResumeDiskSession {
+                    session_id,
+                    identity_paths,
+                    secret: request.secret.take().map(SessionSecret::new),
+                })
         }
         "set_tab_icon"
             if request.runner_id.is_none()

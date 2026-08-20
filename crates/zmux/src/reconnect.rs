@@ -285,6 +285,157 @@ fn request_multiplexer_reconnect(
     Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no Zetta window accepted the session")))
 }
 
+/// Gives a running Zetta process the decrypted disk-resume job. The GUI owns
+/// rebuilding the inert tab; a standalone invocation falls back to restoring
+/// only in the daemon when no Zetta process is available.
+#[cfg(feature = "session-persistence")]
+pub fn try_run_resume_disk_session(identifier: &str, identity_paths: &[PathBuf]) -> Result<bool> {
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (identifier, identity_paths);
+        return Ok(false);
+    }
+    #[cfg(any(unix, windows))]
+    {
+        let session_id = identifier
+            .parse::<u64>()
+            .context("disk session ID must be a positive whole number")?;
+        anyhow::ensure!(
+            session_id > 0,
+            "disk session ID must be a positive whole number"
+        );
+
+        let directory = paths::session_catalog_dir();
+        let records = crate::persistence::read_opaque_records(&directory)?;
+        let protected = records
+            .iter()
+            .find(|record| record.id == session_id)
+            .is_some_and(|record| record.protected);
+        let secret = protected
+            .then(crate::secret_prompt::prompt_for_reconnect_secret)
+            .transpose()?;
+        let encoded_paths = serde_json::to_string(
+            &identity_paths
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+        )?;
+
+        let endpoint_entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("looking for a Zetta window in {}", directory.display())
+                });
+            }
+        };
+        let mut endpoints = endpoint_entries
+            .flatten()
+            .filter_map(|entry| {
+                let path = entry.path();
+                let name = path.file_name()?.to_str()?;
+                (name.starts_with("control-") && name.ends_with(".json"))
+                    .then(|| fs::read(path).ok())
+                    .flatten()
+                    .and_then(|contents| serde_json::from_slice::<ControlEndpoint>(&contents).ok())
+            })
+            .filter(|endpoint| {
+                endpoint.version == CONTROL_VERSION && process_is_running(endpoint.process_id)
+            })
+            .collect::<Vec<_>>();
+        if endpoints.is_empty() {
+            return Ok(false);
+        }
+        if let Some(origin) = reconnect_origin() {
+            endpoints.retain(|endpoint| endpoint.process_id == origin.process_id);
+            anyhow::ensure!(
+                !endpoints.is_empty(),
+                "the Zetta process that ran `zmux resume` is no longer running"
+            );
+        }
+
+        let mut last_error = None;
+        for endpoint in endpoints {
+            match send_resume_disk_session_request(
+                &endpoint,
+                session_id,
+                encoded_paths.clone(),
+                secret.clone(),
+            ) {
+                Ok(ReconnectSessionResult::Reconnected) => return Ok(true),
+                Ok(ReconnectSessionResult::AuthenticationFailed) => {
+                    anyhow::bail!(
+                        "could not resume disk session {session_id}: authentication failed"
+                    )
+                }
+                Ok(ReconnectSessionResult::SessionNotFound) => {
+                    anyhow::bail!("disk session {session_id} was not found")
+                }
+                Ok(ReconnectSessionResult::StillStarting) => {
+                    anyhow::bail!("disk session {session_id} is still starting")
+                }
+                Ok(ReconnectSessionResult::Rejected) => {
+                    anyhow::bail!("the Zetta process rejected disk session {session_id}")
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no Zetta window accepted the session")))
+    }
+}
+
+#[cfg(feature = "session-persistence")]
+#[cfg(any(unix, windows))]
+fn send_resume_disk_session_request(
+    endpoint: &ControlEndpoint,
+    session_id: u64,
+    identity_paths: String,
+    secret: Option<SessionSecret>,
+) -> Result<ReconnectSessionResult> {
+    let mut stream = ControlStream::connect(&endpoint.socket_path)?;
+    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    let mut request = ControlRequest {
+        token: endpoint.token.clone(),
+        command: "resume_disk_session".to_owned(),
+        runner_id: None,
+        session_id: Some(session_id),
+        secret: secret.as_ref().map(|secret| secret.expose().to_owned()),
+        icon: None,
+        pane_theme: None,
+        pane_overlay: None,
+        pane_overlay_font_size: None,
+        pane_overlay_opacity: None,
+        pane_overlay_color: None,
+        attention_id: None,
+        attention_summary: None,
+        attention_body: None,
+        tab_name: None,
+        worktree_name: None,
+        config_path: Some(identity_paths),
+        split: None,
+        profile: None,
+        theme: None,
+        pane_request: None,
+    };
+    let result = write_message(&mut stream, &request).and_then(|()| {
+        let response = read_message::<ControlResponse>(&mut stream)?;
+        Ok(match response.status.as_str() {
+            "ok" => ReconnectSessionResult::Reconnected,
+            "authentication_failed" => ReconnectSessionResult::AuthenticationFailed,
+            "session_not_found" => ReconnectSessionResult::SessionNotFound,
+            "session_starting" => ReconnectSessionResult::StillStarting,
+            _ => ReconnectSessionResult::Rejected,
+        })
+    });
+    if let Some(secret) = request.secret.as_mut() {
+        use zeroize::Zeroize as _;
+        secret.zeroize();
+    }
+    result
+}
+
 #[cfg(any(unix, windows))]
 fn send_reconnect_session_request(
     endpoint: &ControlEndpoint,

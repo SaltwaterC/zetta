@@ -40,6 +40,11 @@ pub fn prompt_for_reconnect_secret() -> Result<SessionSecret> {
     Ok(SessionSecret::from_zeroizing(secret))
 }
 
+/// Reads a masked passphrase for an encrypted age or SSH identity.
+pub fn prompt_for_passphrase(prompt: &str) -> Result<Zeroizing<String>> {
+    read_secret(prompt)
+}
+
 /// What a typed pair has to satisfy to become a session's secret.
 ///
 /// Separate from the reading so the rule is testable without a terminal: a

@@ -141,19 +141,37 @@ screen retained while a pane is detached or shared with:
 ```json
 {
   "sessions": {
-    "retention": "memory",
-    "ring_bytes": 262144
+    "retention": "disk",
+    "ring_bytes": 262144,
+    "persistence": {
+      "recipients": [
+        "age1example...",
+        "github:example-user"
+      ],
+      "identity": "~/.config/age/zetta-identity.txt"
+    }
   }
 }
 ```
 
-`sessions.retention` accepts `"memory"` (the default) or `"none"`.
+`sessions.retention` accepts `"memory"` (the default), `"none"`, or `"disk"`.
 `memory` keeps a bounded terminal grid and scrollback; `ring_bytes` is the
 budget used to derive that bound and must be between 4096 and 67108864 bytes.
 `none` keeps the processes alive but does not request or retain a detach
-snapshot. The setting is global to a daemon start: restart `zmux` after
-changing it if an existing daemon is still running. `"persist"` is reserved
-for the later session-persistence feature and is rejected by this build.
+snapshot. `disk` keeps the same in-memory screen while detached and
+additionally writes encrypted age v1 metadata and scrollback when
+`persistence.recipients` is non-empty. Recipients may be native age X25519,
+ML-KEM-768/X25519, SSH Ed25519, SSH RSA, or `github:USER`; post-quantum
+recipients cannot be mixed with classical or SSH recipients. `identity` is
+the default client-side identity file for resuming a disk record; it is never
+sent to the daemon. With disk selected and no recipients, no persistence files
+are written.
+
+The setting is global to a daemon start: restart `zmux` after changing it if
+an existing daemon is still running. Use `zmux list` to see opaque restorable
+records and `zmux resume SESSION -i PATH` to decrypt one;
+`-i/--identity` may be repeated. `"persist"` is rejected with a migration
+hint to `"disk"`.
 
 ## Git worktree root
 

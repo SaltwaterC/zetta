@@ -278,6 +278,32 @@ pub(crate) fn render_settings_pages(
                     ),
                 ),
                 setting_row(
+                    "Disk recipients",
+                    "Comma-separated age recipients or github:USER entries used for encrypted session retention",
+                    editor.focused_control
+                        == Some(SettingsControl::Input(SettingsInput::Configuration(
+                            ConfigTextField::SessionPersistenceRecipients,
+                        ))),
+                    text_input(
+                        "settings-session-persistence-recipients".to_owned(),
+                        configuration.session_persistence_recipients.clone(),
+                        SettingsInput::Configuration(ConfigTextField::SessionPersistenceRecipients),
+                    ),
+                ),
+                setting_row(
+                    "Identity file",
+                    "Optional default age identity path used when resuming encrypted sessions",
+                    editor.focused_control
+                        == Some(SettingsControl::Input(SettingsInput::Configuration(
+                            ConfigTextField::SessionPersistenceIdentity,
+                        ))),
+                    text_input(
+                        "settings-session-persistence-identity".to_owned(),
+                        configuration.session_persistence_identity.clone(),
+                        SettingsInput::Configuration(ConfigTextField::SessionPersistenceIdentity),
+                    ),
+                ),
+                setting_row(
                     "Inactive pane opacity",
                     "Dimming level as a percentage",
                     editor.focused_control == Some(SettingsControl::Opacity),

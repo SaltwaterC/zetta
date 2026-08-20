@@ -140,6 +140,12 @@ impl Zetta {
                     SettingsControl::Dropdown(SettingsDropdown::PaneControlsDefaultVisibility),
                     SettingsControl::Dropdown(SettingsDropdown::SessionRetention),
                     SettingsControl::Numeric(NumericSetting::SessionRingBytes),
+                    SettingsControl::Input(SettingsInput::Configuration(
+                        ConfigTextField::SessionPersistenceRecipients,
+                    )),
+                    SettingsControl::Input(SettingsInput::Configuration(
+                        ConfigTextField::SessionPersistenceIdentity,
+                    )),
                 ]);
                 #[cfg(feature = "http-server")]
                 controls.push(SettingsControl::Numeric(NumericSetting::HttpServerPort));
@@ -418,10 +424,20 @@ impl Zetta {
                 },
                 Arc::from([String::from("Visible"), String::from("Hidden")]),
             ),
-            SettingsDropdown::SessionRetention => (
-                editor.configuration.session_retention.label().to_owned(),
-                Arc::from([String::from("None"), String::from("Memory")]),
-            ),
+            SettingsDropdown::SessionRetention => {
+                #[cfg(feature = "session-persistence")]
+                let options = Arc::from([
+                    String::from("None"),
+                    String::from("Memory"),
+                    String::from("Disk"),
+                ]);
+                #[cfg(not(feature = "session-persistence"))]
+                let options = Arc::from([String::from("None"), String::from("Memory")]);
+                (
+                    editor.configuration.session_retention.label().to_owned(),
+                    options,
+                )
+            }
             SettingsDropdown::ProfileTheme(index) => (
                 editor
                     .configuration
@@ -1059,10 +1075,10 @@ impl Zetta {
                 editor.configuration.pane_controls_hidden_by_default = value == "Hidden";
             }
             SettingsDropdown::SessionRetention => {
-                editor.configuration.session_retention = if value == "None" {
-                    crate::config::SessionRetention::None
-                } else {
-                    crate::config::SessionRetention::Memory
+                editor.configuration.session_retention = match value.as_str() {
+                    "None" => crate::config::SessionRetention::None,
+                    "Disk" => crate::config::SessionRetention::Disk,
+                    _ => crate::config::SessionRetention::Memory,
                 };
             }
             SettingsDropdown::ProfileTheme(index) => {

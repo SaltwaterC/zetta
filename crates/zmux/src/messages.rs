@@ -9,12 +9,12 @@ use std::{collections::HashMap, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::BackgroundSessionSummary;
+use crate::protocol::{BackgroundSessionSummary, RestorableSessionRecord};
 
 /// The wire format, and what a client and a multiplexer compare before they
 /// trust each other to understand one another.
 ///
-/// Pinned at 1 while Zetta is under development: the protocol is not stabilised,
+/// Pinned at 2 while Zetta is under development: the protocol is not stabilised,
 /// so its shape changes freely and a numbered history of every change would be
 /// bookkeeping about versions nobody is running. What that costs is the guard —
 /// while the number stays put, two builds whose messages disagree both believe
@@ -26,7 +26,7 @@ use crate::protocol::BackgroundSessionSummary;
 /// When the protocol does stabilise, this becomes what it says: bumped whenever a
 /// message's shape changes, so a client and a daemon that cannot parse each other
 /// say so instead of failing obscurely.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Every request carries the endpoint token, which authenticates the *channel*
 /// only. It says nothing about whether a protected session may be attached —
@@ -102,6 +102,10 @@ pub enum Request {
     /// Gives a session back to the multiplexer to hold. The client has already
     /// stopped reading the panes' terminals by the time this is sent.
     Detach(DetachRequest),
+    /// Restores an encrypted disk record after the client has decrypted it.
+    /// The daemon receives state and authentication metadata, never an age
+    /// identity or a private key.
+    Resume(ResumeRequest),
     /// Takes a shared pane's terminal back, in answer to [`Event::Grant`].
     ///
     /// The reverse of the revoke handover. Only the pane's single remaining
@@ -231,6 +235,31 @@ pub struct DetachRequest {
     pub snapshots: Vec<PaneSnapshot>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResumeRequest {
+    pub record_id: u64,
+    pub summary: BackgroundSessionSummary,
+    pub state: serde_json::Value,
+    pub verifier: Option<String>,
+    pub failed_authentications: u32,
+    pub backoff_seconds: u64,
+    pub created_at: u64,
+    pub updated_at: u64,
+    /// The session secret is sent only after the client has decrypted the
+    /// record. It is checked by the daemon and then discarded before the
+    /// restored record is kept in memory.
+    pub secret: Option<String>,
+    pub snapshots: Vec<ResumeSnapshot>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResumeSnapshot {
+    pub pane_id: u64,
+    pub bytes: Vec<u8>,
+}
+
 /// Publishes a session the client is still showing, so other clients can find
 /// and attach to it.
 ///
@@ -328,8 +357,13 @@ pub enum Response {
         lines: u16,
     },
     Detached,
+    Resumed {
+        session_id: u64,
+    },
     Sessions {
         sessions: Vec<BackgroundSessionSummary>,
+        #[serde(default)]
+        restorable: Vec<RestorableSessionRecord>,
     },
     /// Answers [`Request::PaneStates`], in the order asked.
     PaneStates {

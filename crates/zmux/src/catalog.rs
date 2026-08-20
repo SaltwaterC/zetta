@@ -257,7 +257,28 @@ pub fn read_session_catalogs(directory: &Path) -> Result<Vec<BackgroundSessionCa
 
 pub fn print_session_catalogs(directory: &Path, json: bool) -> Result<()> {
     let catalogs = read_session_catalogs(directory)?;
+    #[cfg(feature = "session-persistence")]
+    let restorable = crate::persistence::read_opaque_records(directory)?
+        .into_iter()
+        .filter(|record| record.restorable)
+        .collect::<Vec<_>>();
     if json {
+        #[cfg(feature = "session-persistence")]
+        {
+            #[derive(serde::Serialize)]
+            struct CatalogOutput<'a> {
+                catalogs: &'a [BackgroundSessionCatalog],
+                restorable: &'a [crate::persistence::RestorableRecord],
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&CatalogOutput {
+                    catalogs: &catalogs,
+                    restorable: &restorable,
+                })?
+            );
+        }
+        #[cfg(not(feature = "session-persistence"))]
         println!("{}", serde_json::to_string_pretty(&catalogs)?);
         return Ok(());
     }
@@ -265,14 +286,20 @@ pub fn print_session_catalogs(directory: &Path, json: bool) -> Result<()> {
         .iter()
         .map(|catalog| catalog.sessions.len())
         .sum::<usize>();
-    if session_count == 0 {
+    #[cfg(feature = "session-persistence")]
+    let has_restorable = !restorable.is_empty();
+    #[cfg(not(feature = "session-persistence"))]
+    let has_restorable = false;
+    if session_count == 0 && !has_restorable {
         println!("No background sessions.");
         return Ok(());
     }
-    println!(
-        "{session_count} background session{}:",
-        if session_count == 1 { "" } else { "s" }
-    );
+    if session_count > 0 {
+        println!(
+            "{session_count} background session{}:",
+            if session_count == 1 { "" } else { "s" }
+        );
+    }
     let unambiguous_session_ids = unambiguous_session_ids(&catalogs);
     for catalog in catalogs {
         for session in catalog.sessions {
@@ -352,6 +379,31 @@ pub fn print_session_catalogs(directory: &Path, json: bool) -> Result<()> {
                 if let Some(exit) = pane.exit {
                     println!("    exit: {}", display_text(&exit.reason_text()));
                 }
+            }
+        }
+    }
+    #[cfg(feature = "session-persistence")]
+    if !restorable.is_empty() {
+        println!(
+            "\n{} restorable disk session{}:",
+            restorable.len(),
+            if restorable.len() == 1 { "" } else { "s" }
+        );
+        for record in restorable {
+            println!(
+                "\nsession {}  (opaque, {} bytes, updated {})",
+                record.id,
+                record
+                    .metadata_bytes
+                    .saturating_add(record.scrollback_bytes),
+                record.updated_at
+            );
+            println!("  resume id: {}", record.id);
+            if record.protected {
+                println!("  protected: yes");
+            }
+            if !record.restorable {
+                println!("  status: unavailable until the daemon is restarted");
             }
         }
     }

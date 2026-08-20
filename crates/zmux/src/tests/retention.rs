@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn retention_modes_parse_and_persist_names_the_missing_feature() {
+fn retention_modes_parse_and_disk_is_canonical() {
     assert_eq!(Retention::parse("none").unwrap(), Retention::None);
     #[cfg(feature = "scrollback-buffer")]
     assert_eq!(
@@ -19,10 +19,17 @@ fn retention_modes_parse_and_persist_names_the_missing_feature() {
     );
     assert!(Retention::parse("everything").is_err());
 
-    // Rejected by name rather than silently downgraded, so a host configured
-    // for persistence does not quietly stop persisting.
+    #[cfg(feature = "session-persistence")]
+    assert_eq!(Retention::parse("disk").unwrap(), Retention::Disk);
+    #[cfg(not(feature = "session-persistence"))]
+    assert!(
+        Retention::parse("disk")
+            .unwrap_err()
+            .to_string()
+            .contains("session-persistence")
+    );
     let error = Retention::parse("persist").unwrap_err().to_string();
-    assert!(error.contains("session-persistence"), "{error}");
+    assert!(error.contains("use \"disk\""), "{error}");
 }
 
 #[test]

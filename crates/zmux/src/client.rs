@@ -26,11 +26,20 @@ use crate::{
         Response, SpawnRequest,
     },
     paths::session_catalog_dir,
-    protocol::BackgroundSessionSummary,
+    protocol::{BackgroundSessionSummary, RestorableSessionRecord},
     retention::Retention,
     server::endpoint_path,
     transport::{Connection, Endpoint, Stream},
 };
+
+#[cfg(feature = "session-persistence")]
+use crate::messages::{ResumeRequest, ResumeSnapshot};
+
+#[cfg(feature = "session-persistence")]
+use crate::persistence::{DaemonOptionsFile, PersistenceOptions};
+
+#[cfg(feature = "session-persistence")]
+use crate::{auth::SessionSecret, secret_prompt};
 
 /// How long to wait for a daemon this process just started to publish its
 /// endpoint. Generous, because the first start also creates the directory.
@@ -275,8 +284,36 @@ impl Client {
     /// spawned, so a constrained build cannot silently start a daemon with a
     /// different retention policy.
     pub fn connect_with_retention(retention: Retention) -> Result<Self> {
+        #[cfg(feature = "session-persistence")]
+        {
+            return Self::connect_with_retention_and_persistence(
+                retention,
+                PersistenceOptions::default(),
+            );
+        }
+        #[cfg(not(feature = "session-persistence"))]
+        {
+            retention.validate()?;
+            Self::connect_at_with_retention(&session_catalog_dir(), retention)
+        }
+    }
+
+    #[cfg(feature = "session-persistence")]
+    pub fn connect_with_retention_and_persistence(
+        retention: Retention,
+        persistence: PersistenceOptions,
+    ) -> Result<Self> {
         retention.validate()?;
-        Self::connect_at_with_retention(&session_catalog_dir(), retention)
+        Self::connect_at_with_retention_and_persistence(
+            &session_catalog_dir(),
+            retention,
+            persistence,
+        )
+    }
+
+    #[cfg(feature = "session-persistence")]
+    pub fn connect_with_retention_for_resume(retention: Retention) -> Result<Self> {
+        Self::connect_at_with_retention_for_resume(&session_catalog_dir(), retention)
     }
 
     /// Connects only if a multiplexer is already running.
@@ -315,11 +352,70 @@ impl Client {
         directory: &std::path::Path,
         retention: Retention,
     ) -> Result<Self> {
+        #[cfg(feature = "session-persistence")]
+        return Self::connect_at_with_retention_and_persistence(
+            directory,
+            retention,
+            PersistenceOptions::default(),
+        );
+        #[cfg(not(feature = "session-persistence"))]
+        {
+            retention.validate()?;
+            if let Some(client) = Self::connect_existing_at(directory)? {
+                return Ok(client);
+            }
+            start_daemon(directory, retention)?;
+            let deadline = Instant::now() + STARTUP_TIMEOUT;
+            loop {
+                if let Some(client) = Self::connect_existing_at(directory)? {
+                    return Ok(client);
+                }
+                anyhow::ensure!(
+                    Instant::now() < deadline,
+                    "the multiplexer did not start within {STARTUP_TIMEOUT:?}"
+                );
+                thread::sleep(STARTUP_POLL);
+            }
+        }
+    }
+
+    #[cfg(feature = "session-persistence")]
+    pub fn connect_at_with_retention_and_persistence(
+        directory: &std::path::Path,
+        retention: Retention,
+        persistence: PersistenceOptions,
+    ) -> Result<Self> {
         retention.validate()?;
         if let Some(client) = Self::connect_existing_at(directory)? {
             return Ok(client);
         }
-        start_daemon(directory, retention)?;
+        start_daemon(directory, retention, Some(persistence))?;
+        let deadline = Instant::now() + STARTUP_TIMEOUT;
+        loop {
+            if let Some(client) = Self::connect_existing_at(directory)? {
+                return Ok(client);
+            }
+            anyhow::ensure!(
+                Instant::now() < deadline,
+                "the multiplexer did not start within {STARTUP_TIMEOUT:?}"
+            );
+            thread::sleep(STARTUP_POLL);
+        }
+    }
+
+    /// Starts a disk daemon in recovery mode, allowing it to reuse the saved
+    /// public recipient set for a `resume` command that has no Zetta config in
+    /// the client process.
+    #[cfg(feature = "session-persistence")]
+    pub fn connect_at_with_retention_for_resume(
+        directory: &std::path::Path,
+        retention: Retention,
+    ) -> Result<Self> {
+        retention.validate()?;
+        if let Some(client) = Self::connect_existing_at(directory)? {
+            return Ok(client);
+        }
+        start_daemon(directory, retention, None)?;
         let deadline = Instant::now() + STARTUP_TIMEOUT;
         loop {
             if let Some(client) = Self::connect_existing_at(directory)? {
@@ -733,9 +829,99 @@ impl Client {
     pub fn list(&self) -> Result<Vec<BackgroundSessionSummary>> {
         let mut connection = self.open(Request::List)?;
         match connection.receive::<Response>()?.0 {
-            Response::Sessions { sessions } => Ok(sessions),
+            Response::Sessions { sessions, .. } => Ok(sessions),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to list: {other:?}"),
+        }
+    }
+
+    pub fn list_with_restorable(
+        &self,
+    ) -> Result<(Vec<BackgroundSessionSummary>, Vec<RestorableSessionRecord>)> {
+        let mut connection = self.open(Request::List)?;
+        match connection.receive::<Response>()?.0 {
+            Response::Sessions {
+                sessions,
+                restorable,
+            } => Ok((sessions, restorable)),
+            Response::Error { message } => anyhow::bail!("{message}"),
+            other => anyhow::bail!("unexpected response to list: {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "session-persistence")]
+    pub fn resume(
+        &self,
+        record_id: u64,
+        identity_paths: &[PathBuf],
+    ) -> Result<crate::persistence::PersistedSession> {
+        let identities = crate::persistence::IdentitySet::from_paths(identity_paths)?;
+        let persisted = crate::persistence::load_session_from_directory(
+            &self.directory,
+            record_id,
+            &identities,
+        )?;
+        let secret = persisted
+            .verifier
+            .as_ref()
+            .map(|_| secret_prompt::prompt_for_reconnect_secret())
+            .transpose()?;
+        self.resume_loaded(persisted, secret.as_ref())
+    }
+
+    /// Resumes a record after the caller has handled any UI-specific secret
+    /// prompt. The age identity is still loaded and the record is still
+    /// decrypted here, so the daemon receives neither of them.
+    #[cfg(feature = "session-persistence")]
+    pub fn resume_with_secret(
+        &self,
+        record_id: u64,
+        identity_paths: &[PathBuf],
+        secret: Option<&SessionSecret>,
+    ) -> Result<crate::persistence::PersistedSession> {
+        let identities = crate::persistence::IdentitySet::from_paths(identity_paths)?;
+        let persisted = crate::persistence::load_session_from_directory(
+            &self.directory,
+            record_id,
+            &identities,
+        )?;
+        self.resume_loaded(persisted, secret)
+    }
+
+    #[cfg(feature = "session-persistence")]
+    fn resume_loaded(
+        &self,
+        persisted: crate::persistence::PersistedSession,
+        secret: Option<&SessionSecret>,
+    ) -> Result<crate::persistence::PersistedSession> {
+        let request = Request::Resume(ResumeRequest {
+            record_id: persisted.id,
+            summary: persisted.summary.clone(),
+            state: persisted.state.clone(),
+            verifier: persisted.verifier.clone(),
+            failed_authentications: persisted.failed_authentications,
+            backoff_seconds: persisted.backoff_seconds,
+            created_at: persisted.created_at,
+            updated_at: persisted.updated_at,
+            secret: secret.map(|secret| secret.expose().to_owned()),
+            snapshots: persisted
+                .snapshots
+                .iter()
+                .map(|snapshot| ResumeSnapshot {
+                    pane_id: snapshot.pane_id,
+                    bytes: snapshot.bytes.clone(),
+                })
+                .collect(),
+        });
+        let mut connection = self.open(request)?;
+        match connection.receive::<Response>()?.0 {
+            Response::Resumed { .. } => Ok(persisted),
+            Response::AuthenticationRequired => {
+                anyhow::bail!("the encrypted session is protected and needs its session secret")
+            }
+            Response::AuthenticationFailed => anyhow::bail!("session authentication failed"),
+            Response::Error { message } => anyhow::bail!("{message}"),
+            other => anyhow::bail!("unexpected response to resume: {other:?}"),
         }
     }
 
@@ -1291,12 +1477,28 @@ impl PaneSignals {
 }
 
 /// Starts a detached daemon that outlives this process.
-fn start_daemon(directory: &std::path::Path, retention: Retention) -> Result<()> {
+fn start_daemon(
+    directory: &std::path::Path,
+    retention: Retention,
+    #[cfg(feature = "session-persistence")] persistence: Option<PersistenceOptions>,
+) -> Result<()> {
     let (executable, mut arguments) = multiplexer_command()?;
     arguments.extend(["--retention".to_owned(), retention.name().to_owned()]);
     if let Retention::Memory { bytes } = retention {
         arguments.extend(["--retention-bytes".to_owned(), bytes.to_string()]);
     }
+    #[cfg(feature = "session-persistence")]
+    if matches!(retention, Retention::Disk)
+        && let Some(persistence) = persistence
+    {
+        let recipients = crate::persistence::resolve_recipient_strings(&persistence.recipients)?;
+        crate::catalog::create_private_dir(directory)?;
+        let options_path = directory.join(format!("daemon-options-{}.json", std::process::id()));
+        let options = serde_json::to_vec(&DaemonOptionsFile { recipients })?;
+        crate::catalog::write_private_file(&options_path, &options)?;
+        arguments.push(format!("--daemon-options={}", options_path.display()));
+    }
+    #[cfg(not(feature = "session-persistence"))]
     let _ = directory;
     Command::new(&executable)
         .args(&arguments)

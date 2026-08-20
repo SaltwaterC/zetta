@@ -274,24 +274,24 @@ struct Note {
 
 const GONG_DURATION_MS: u32 = 4_200;
 const GONG_PEAK_AMPLITUDE: f32 = 0.3;
-const GONG_MULAW_SAMPLE_RATE: u32 = 22_050;
-const GONG_MULAW: &[u8] = include_bytes!("notification_sounds/gong.mulaw");
+const GONG_PCM_SAMPLE_RATE: u32 = 22_050;
+const GONG_PCM: &[u8] = include_bytes!("notification_sounds/gong.pcm");
 
 // This is a real CC0 gong recording, not a synthesized approximation. The
-// compact G.711 mu-law source retains the strike and long tail while avoiding
-// a large uncompressed asset; linear interpolation adapts it to the output
-// device's native rate. See notification_sounds/README.md for provenance.
+// source is lossless signed 16-bit PCM: companded 8-bit audio produces audible
+// quantization steps as a metallic sound decays. Linear interpolation adapts
+// it to the output device's native rate. See notification_sounds/README.md for
+// provenance.
 fn render_gong(sample_rate: u32) -> Vec<f32> {
-    if sample_rate == 0 || GONG_MULAW.is_empty() {
+    if sample_rate == 0 || GONG_PCM.is_empty() {
         return Vec::new();
     }
-    let decoded = GONG_MULAW
-        .iter()
-        .copied()
-        .map(decode_mulaw)
+    let decoded = GONG_PCM
+        .chunks_exact(2)
+        .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]) as f32 / 32_768.0)
         .collect::<Vec<_>>();
     let sample_count = (sample_rate as u64 * GONG_DURATION_MS as u64 / 1_000) as usize;
-    let source_samples_per_output = GONG_MULAW_SAMPLE_RATE as f64 / sample_rate as f64;
+    let source_samples_per_output = GONG_PCM_SAMPLE_RATE as f64 / sample_rate as f64;
     let mut samples = Vec::with_capacity(sample_count);
     for index in 0..sample_count {
         let source_position = index as f64 * source_samples_per_output;
@@ -307,19 +307,6 @@ fn render_gong(sample_rate: u32) -> Vec<f32> {
         samples.iter_mut().for_each(|sample| *sample *= gain);
     }
     samples
-}
-
-fn decode_mulaw(encoded: u8) -> f32 {
-    let value = !encoded;
-    let exponent = ((value >> 4) & 0x07) as i32;
-    let mantissa = (value & 0x0f) as i32;
-    let magnitude = (((mantissa << 3) + 0x84) << exponent) - 0x84;
-    let signed = if value & 0x80 == 0 {
-        magnitude
-    } else {
-        -magnitude
-    };
-    signed as f32 / 32_768.0
 }
 
 impl Note {

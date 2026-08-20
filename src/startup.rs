@@ -1129,6 +1129,31 @@ pub(crate) fn run() -> Result<()> {
         return Ok(());
     }
     if let StartupMode::Mux(arguments) = &args.mode {
+        #[cfg(feature = "session-persistence")]
+        if arguments
+            .first()
+            .is_some_and(|argument| argument == "resume")
+            && !arguments.iter().any(|argument| {
+                argument == "-i"
+                    || argument == "--identity"
+                    || argument.to_string_lossy().starts_with("--identity=")
+            })
+        {
+            let (config, _) =
+                load_startup_config(args.config_path.as_deref(), args.keymap_path.clone());
+            if let Some(identity) = config.sessions.persistence.identity {
+                let identity = if let Some(relative) =
+                    identity.to_str().and_then(|path| path.strip_prefix("~/"))
+                {
+                    util::paths::home_dir().join(relative)
+                } else {
+                    identity
+                };
+                let mut arguments = arguments.clone();
+                arguments.extend([OsString::from("--identity"), identity.into_os_string()]);
+                return zmux::run(&arguments);
+            }
+        }
         return zmux::run(arguments);
     }
     #[cfg(cli_services)]
@@ -1874,6 +1899,52 @@ pub(crate) fn run() -> Result<()> {
                                 let _ = completion.send(ReconnectSessionResult::Rejected);
                             }
                         }
+                        ProcessControlCommand::ResumeDiskSession {
+                            session_id,
+                            identity_paths,
+                            secret,
+                            completion,
+                        } => {
+                            let mut completion = Some(completion);
+                            let dispatched = cx.update(|cx| {
+                                if !cx
+                                    .global::<ZettaProcessState>()
+                                    .control_server
+                                    .is_accepting()
+                                {
+                                    return false;
+                                }
+                                if cx.global::<ZettaProcessState>().windows.is_empty()
+                                    && open_dormant_or_new_window(cx).is_err()
+                                {
+                                    return false;
+                                }
+                                let Some(window_id) = cx
+                                    .global::<ZettaProcessState>()
+                                    .windows
+                                    .keys()
+                                    .next()
+                                    .copied()
+                                else {
+                                    return false;
+                                };
+                                gpui::WindowHandle::<Zetta>::new(window_id)
+                                    .update(cx, |zetta, window, cx| {
+                                        zetta.resume_disk_session_from_cli(
+                                            session_id,
+                                            secret,
+                                            identity_paths,
+                                            completion.take().expect("completion sender"),
+                                            window,
+                                            cx,
+                                        );
+                                    })
+                                    .is_ok()
+                            });
+                            if !dispatched && let Some(completion) = completion {
+                                let _ = completion.send(ReconnectSessionResult::Rejected);
+                            }
+                        }
                     }
                 }
             })
@@ -1954,7 +2025,7 @@ fn multiplexer_session_entries() -> Vec<ProcessBackgroundSessionEntry> {
     // session in memory because the multiplexer was unreachable publishes one
     // too, and those sessions are this process's to transfer, not the daemon's
     // to attach.
-    crate::background_sessions::multiplexer_held_catalog_sessions(
+    let entries = crate::background_sessions::multiplexer_held_catalog_sessions(
         &catalogs,
         crate::background_sessions::process_is_zetta,
         std::process::id(),
@@ -1983,5 +2054,36 @@ fn multiplexer_session_entries() -> Vec<ProcessBackgroundSessionEntry> {
         };
         (runner_id, session.id, session.title.clone(), details)
     })
-    .collect()
+    .collect::<Vec<_>>();
+    #[cfg(feature = "session-persistence")]
+    let mut entries = entries;
+    #[cfg(feature = "session-persistence")]
+    if let Ok(records) =
+        zmux::persistence::read_opaque_records(&crate::background_sessions::session_catalog_dir())
+    {
+        let live_ids = entries.iter().map(|(_, session_id, _, _)| *session_id);
+        let live_ids = live_ids.collect::<std::collections::HashSet<_>>();
+        entries.extend(
+            records
+                .into_iter()
+                .filter(|record| record.restorable && !live_ids.contains(&record.id))
+                .map(|record| {
+                    (
+                        crate::background_sessions::RESTORABLE_RUNNER_ID,
+                        record.id,
+                        "Restorable session".to_owned(),
+                        format!(
+                            "Session {} · encrypted disk record{}",
+                            record.id,
+                            if record.protected {
+                                " · protected"
+                            } else {
+                                ""
+                            }
+                        ),
+                    )
+                }),
+        );
+    }
+    entries
 }

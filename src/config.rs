@@ -32,9 +32,8 @@ pub enum SessionRetention {
     None,
     #[default]
     Memory,
-    /// Reserved for the Phase 3 encrypted store. Keeping the value in the
-    /// typed configuration lets an unsupported build reject it explicitly.
-    Persist,
+    /// Encrypt detached-session state on disk when recipients are configured.
+    Disk,
 }
 
 impl SessionRetention {
@@ -42,7 +41,7 @@ impl SessionRetention {
         match self {
             Self::None => "none",
             Self::Memory => "memory",
-            Self::Persist => "persist",
+            Self::Disk => "disk",
         }
     }
 
@@ -50,7 +49,7 @@ impl SessionRetention {
         match self {
             Self::None => "None",
             Self::Memory => "Memory",
-            Self::Persist => "Persist",
+            Self::Disk => "Disk",
         }
     }
 
@@ -58,16 +57,26 @@ impl SessionRetention {
         match value {
             "none" => Ok(Self::None),
             "memory" => Ok(Self::Memory),
-            "persist" => Ok(Self::Persist),
-            _ => anyhow::bail!("sessions.retention must be \"none\", \"memory\", or \"persist\""),
+            "disk" => Ok(Self::Disk),
+            "persist" => {
+                anyhow::bail!("sessions.retention=\"persist\" is no longer supported; use \"disk\"")
+            }
+            _ => anyhow::bail!("sessions.retention must be \"none\", \"memory\", or \"disk\""),
         }
     }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SessionPersistenceConfig {
+    pub recipients: Vec<String>,
+    pub identity: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionsConfig {
     pub retention: SessionRetention,
     pub ring_bytes: usize,
+    pub persistence: SessionPersistenceConfig,
 }
 
 impl Default for SessionsConfig {
@@ -75,6 +84,7 @@ impl Default for SessionsConfig {
         Self {
             retention: SessionRetention::default(),
             ring_bytes: DEFAULT_SESSION_RING_BYTES,
+            persistence: SessionPersistenceConfig::default(),
         }
     }
 }
@@ -86,13 +96,18 @@ impl SessionsConfig {
             SessionRetention::Memory => zmux::retention::Retention::Memory {
                 bytes: self.ring_bytes,
             },
-            SessionRetention::Persist => anyhow::bail!(
-                "sessions.retention=\"persist\" needs the session-persistence feature, which \
-                 this build does not provide"
-            ),
+            SessionRetention::Disk => zmux::retention::Retention::Disk,
         };
         retention.validate()?;
         Ok(retention)
+    }
+
+    #[cfg(feature = "session-persistence")]
+    pub(crate) fn to_zmux_persistence(&self) -> zmux::persistence::PersistenceOptions {
+        zmux::persistence::PersistenceOptions {
+            recipients: self.persistence.recipients.clone(),
+            identity: self.persistence.identity.clone(),
+        }
     }
 }
 
@@ -623,7 +638,7 @@ impl Config {
             let sessions = sessions.as_object().context("sessions must be an object")?;
             if let Some(field) = sessions
                 .keys()
-                .find(|field| !matches!(field.as_str(), "retention" | "ring_bytes"))
+                .find(|field| !matches!(field.as_str(), "retention" | "ring_bytes" | "persistence"))
             {
                 anyhow::bail!("unrecognized sessions configuration field {field:?}");
             }
@@ -646,6 +661,41 @@ impl Config {
                             "sessions.ring_bytes must be between 4096 and {MAX_SESSION_RING_BYTES} bytes"
                         )
                     })?;
+            }
+            if let Some(persistence) = sessions.get("persistence") {
+                let persistence = persistence
+                    .as_object()
+                    .context("sessions.persistence must be an object")?;
+                if let Some(field) = persistence
+                    .keys()
+                    .find(|field| !matches!(field.as_str(), "recipients" | "identity"))
+                {
+                    anyhow::bail!("unrecognized sessions.persistence field {field:?}");
+                }
+                if let Some(recipients) = persistence.get("recipients") {
+                    config.sessions.persistence.recipients = recipients
+                        .as_array()
+                        .context("sessions.persistence.recipients must be an array")?
+                        .iter()
+                        .map(|recipient| {
+                            recipient
+                                .as_str()
+                                .map(str::trim)
+                                .filter(|recipient| !recipient.is_empty())
+                                .map(str::to_owned)
+                                .context("sessions.persistence.recipients must contain strings")
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                }
+                if let Some(identity) = persistence.get("identity") {
+                    config.sessions.persistence.identity = match identity {
+                        Value::Null => None,
+                        Value::String(path) if !path.trim().is_empty() => Some(PathBuf::from(path)),
+                        _ => anyhow::bail!(
+                            "sessions.persistence.identity must be a path string or null"
+                        ),
+                    };
+                }
             }
             config.sessions.to_zmux_retention()?;
         }

@@ -11,9 +11,25 @@ use serde::{Deserialize, Serialize};
 
 pub const CATALOG_VERSION: u32 = 1;
 
+/// A disk-retained session record before its encrypted payload has been
+/// opened. These fields are deliberately opaque: titles, commands, working
+/// directories, layout, and protected-session details stay inside the age
+/// ciphertext.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestorableSessionRecord {
+    pub id: u64,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub metadata_bytes: u64,
+    pub scrollback_bytes: u64,
+    pub protected: bool,
+    pub restorable: bool,
+}
+
 /// Version of the local Zetta process-control protocol used to open a
 /// multiplexer-held session in a window.
-pub const CONTROL_VERSION: u32 = 1;
+pub const CONTROL_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackgroundSessionCatalog {

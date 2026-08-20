@@ -193,6 +193,18 @@ _zetta_complete() {
         done < <("${mux_list_command[@]}" 2>/dev/null | awk '$1 == "reconnect" && $2 == "id:" && $3 ~ /^[0-9]+:[0-9]+:[0-9]+$/ { print $3 }')
     }
 
+    _zetta_complete_mux_restorable_ids() {
+        COMPREPLY=()
+        local session_id
+        local -a mux_list_command=(zetta mux list)
+        if [[ ${_zetta_mux_completion_command:-} == zmux ]]; then
+            mux_list_command=(zmux list)
+        fi
+        while IFS= read -r session_id; do
+            [[ $session_id == "$current"* ]] && COMPREPLY+=("$session_id")
+        done < <("${mux_list_command[@]}" 2>/dev/null | awk '$1 == "resume" && $2 == "id:" && $3 ~ /^[0-9]+$/ { print $3 }')
+    }
+
     _zetta_complete_tab_icons() {
         local icons
         icons=$(zetta tabicon --list 2>/dev/null)
@@ -579,7 +591,7 @@ _zetta_complete() {
                 if [[ ${ZETTA_NO_MUX:-0} == 1 ]]; then
                     _zetta_compgen 'list reconnect --json --help --version'
                 else
-                    _zetta_compgen 'list stop reconnect share unshare kill forget --json --upgrade --help --version'
+                    _zetta_compgen 'list stop reconnect resume share unshare kill forget --json --upgrade --help --version'
                 fi
             elif [[ ${ZETTA_NO_MUX:-0} == 1 && ${COMP_WORDS[2]} != reconnect && ${COMP_WORDS[2]} != list ]]; then
                 COMPREPLY=()
@@ -587,10 +599,16 @@ _zetta_complete() {
                 _zetta_compgen '--force --help'
             elif [[ ${COMP_WORDS[2]} == reconnect ]] && (( COMP_CWORD == 3 )); then
                 _zetta_complete_mux_session_ids
+            elif [[ ${COMP_WORDS[2]} == resume && $current != -* ]] && (( COMP_CWORD == 3 )); then
+                _zetta_complete_mux_restorable_ids
             elif [[ ${ZETTA_NO_MUX:-0} != 1 && ( ${COMP_WORDS[2]} == share || ${COMP_WORDS[2]} == unshare || ${COMP_WORDS[2]} == kill || ${COMP_WORDS[2]} == forget ) ]] && (( COMP_CWORD == 3 )); then
                 _zetta_complete_mux_session_ids
+            elif [[ ${COMP_WORDS[2]} == resume && ${COMP_WORDS[COMP_CWORD-1]} == --identity ]]; then
+                COMPREPLY=( $(compgen -f -- "$current") )
+            elif [[ ${COMP_WORDS[2]} == resume ]]; then
+                _zetta_compgen '--identity --help'
             else
-                _zetta_compgen '--json --help'
+                _zetta_compgen '--json --identity --help'
             fi
             ;;
         init)

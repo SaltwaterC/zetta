@@ -23,6 +23,11 @@ pub(crate) use zmux::protocol::{
 
 use zmux::catalog::SessionCatalogPublisher;
 
+/// Sentinel runner ID used for encrypted disk records, which have no live
+/// process catalog until the client resumes them.
+#[cfg(feature = "session-persistence")]
+pub(crate) const RESTORABLE_RUNNER_ID: u64 = u64::MAX;
+
 /// Sanitized exit metadata for a pane the application decided to retain.
 ///
 /// The predicate on the foreground command lives in `zmux` so the daemon

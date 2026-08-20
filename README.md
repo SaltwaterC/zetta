@@ -252,11 +252,12 @@ one step. TFTP uploads are refused unless you pass `zetta tftp server
 --writable`, and the GUI action is always read only. Restrict access with a
 firewall on untrusted networks; see [Serial and network tools](docs/tools.md).
 
-Background-session protection stores a salted Argon2id verifier in memory only,
-keeps a protected session's commands, titles, and directories out of the on-disk
-catalog, and makes protected sessions unreachable over the process control
-socket — the endpoint token cannot reattach one, modify one, or confirm one
-exists.
+Background-session protection stores a salted Argon2id verifier in memory while
+the session is live. Disk-retained sessions keep that verifier, their commands,
+titles, and directories only inside age-encrypted records; the cleartext
+catalog contains no protected session details. Protected sessions remain
+unreachable over the process control socket — the endpoint token cannot
+reattach one, modify one, or confirm one exists.
 
 It rests on one assumption: that other processes running as your user cannot
 read Zetta's memory. On Linux that means `kernel.yama.ptrace_scope` must be `1`

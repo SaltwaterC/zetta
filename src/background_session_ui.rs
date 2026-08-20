@@ -691,6 +691,20 @@ impl Zetta {
                 }
             };
         }
+        #[cfg(feature = "session-persistence")]
+        if runner_id == crate::background_sessions::RESTORABLE_RUNNER_ID {
+            let protected = zmux::persistence::read_opaque_records(
+                &crate::background_sessions::session_catalog_dir(),
+            )
+            .ok()
+            .and_then(|records| records.into_iter().find(|record| record.id == session_id))
+            .is_some_and(|record| record.protected);
+            if protected {
+                self.prompt_to_resume_disk_session(session_id, window, cx);
+                return ReconnectSessionResult::AuthenticationFailed;
+            }
+            return self.resume_disk_session(session_id, None, None, window, cx);
+        }
         if runner_id != self.background_sessions.runner_id() {
             let Some(source) = zetta_for_runner(runner_id, cx) else {
                 return ReconnectSessionResult::SessionNotFound;
@@ -743,6 +757,158 @@ impl Zetta {
             return ReconnectSessionResult::Reconnected;
         }
         ReconnectSessionResult::SessionNotFound
+    }
+
+    #[cfg(feature = "session-persistence")]
+    pub(crate) fn resume_disk_session(
+        &mut self,
+        session_id: u64,
+        secret: Option<SessionSecret>,
+        identity_paths: Option<Vec<PathBuf>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> ReconnectSessionResult {
+        let runtime = if self
+            .mux
+            .as_ref()
+            .is_some_and(|runtime| runtime.retention() == zmux::retention::Retention::Disk)
+        {
+            self.mux.clone().expect("disk runtime was present")
+        } else {
+            let runtime = match MuxRuntime::connect_for_disk_resume() {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    self.pane_output_error = Some(format!(
+                        "Could not reach the session multiplexer: {error:#}"
+                    ));
+                    cx.notify();
+                    return ReconnectSessionResult::Rejected;
+                }
+            };
+            self.mux = Some(runtime.clone());
+            runtime
+        };
+        let identity_paths = identity_paths.unwrap_or_else(|| {
+            self.launch_config
+                .sessions
+                .persistence
+                .identity
+                .clone()
+                .map(|path| {
+                    if let Some(relative) = path.to_str().and_then(|path| path.strip_prefix("~/")) {
+                        util::paths::home_dir().join(relative)
+                    } else {
+                        path
+                    }
+                })
+                .into_iter()
+                .collect()
+        });
+        let persisted =
+            match runtime
+                .client()
+                .resume_with_secret(session_id, &identity_paths, secret.as_ref())
+            {
+                Ok(persisted) => persisted,
+                Err(error) => {
+                    self.pane_output_error = Some(format!(
+                        "Could not resume encrypted session {session_id}: {error:#}"
+                    ));
+                    cx.notify();
+                    return ReconnectSessionResult::Rejected;
+                }
+            };
+        let mut state: crate::session_state::TabState =
+            match serde_json::from_value(persisted.state).context("reading restored tab state") {
+                Ok(state) => state,
+                Err(error) => {
+                    self.pane_output_error = Some(format!(
+                        "Could not restore disk session {session_id}: {error:#}"
+                    ));
+                    cx.notify();
+                    return ReconnectSessionResult::Rejected;
+                }
+            };
+        // A disk record may have been written by a daemon that was alive when
+        // the tab detached. Its pane IDs and exit details describe that old
+        // process tree, not a process this restore is allowed to revive.
+        // Resume deliberately starts with empty, inert panes; the user chooses
+        // when to run the profile again.
+        state.keep_running = false;
+        state.shared = false;
+        for pane in &mut state.panes {
+            pane.mux_pane_id = None;
+            pane.exit = None;
+            pane.base_exited = false;
+            pane.pending_command = None;
+            pane.stack.clear();
+            pane.selected_stacked = None;
+        }
+        let tab_id = self.next_tab_id;
+        self.next_tab_id += 1;
+        let profiles = self.profiles.clone();
+        let mut tab = match state.into_tab(tab_id, |name| {
+            profiles
+                .iter()
+                .find(|profile| profile.name == name)
+                .cloned()
+                .unwrap_or_else(|| Profile {
+                    name: name.to_owned(),
+                    command: task::Shell::System,
+                    theme: None,
+                    icon: ProfileIcon::default(),
+                })
+        }) {
+            Ok(tab) => tab,
+            Err(error) => {
+                self.pane_output_error = Some(format!(
+                    "Could not restore disk session {session_id}: {error:#}"
+                ));
+                cx.notify();
+                return ReconnectSessionResult::Rejected;
+            }
+        };
+        tab.close_policy = TabClosePolicy::Close;
+        tab.shared = false;
+        for pane in &mut tab.panes {
+            pane.error = Some(format!("Run: profile {}", pane.profile.name));
+            pane.pending_command = None;
+            pane.base_exited = false;
+        }
+        self.attach_reconnected_tab(tab, true, window, cx);
+        ReconnectSessionResult::Reconnected
+    }
+
+    #[cfg(not(feature = "session-persistence"))]
+    pub(crate) fn resume_disk_session(
+        &mut self,
+        session_id: u64,
+        secret: Option<SessionSecret>,
+        identity_paths: Option<Vec<PathBuf>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> ReconnectSessionResult {
+        let _ = (session_id, secret, identity_paths, window, cx);
+        ReconnectSessionResult::Rejected
+    }
+
+    pub(crate) fn resume_disk_session_from_cli(
+        &mut self,
+        session_id: u64,
+        secret: Option<SessionSecret>,
+        identity_paths: Vec<PathBuf>,
+        completion: std::sync::mpsc::Sender<ReconnectSessionResult>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let result = self.resume_disk_session(
+            session_id,
+            secret,
+            (!identity_paths.is_empty()).then_some(identity_paths),
+            window,
+            cx,
+        );
+        let _ = completion.send(result);
     }
 
     pub(crate) fn reconnect_session_from_cli(
@@ -1823,7 +1989,14 @@ impl Zetta {
                 .sessions
                 .to_zmux_retention()
                 .context("configuring session retention")?;
-            self.mux = Some(MuxRuntime::connect_with_retention(retention)?);
+            #[cfg(feature = "session-persistence")]
+            let runtime = MuxRuntime::connect_with_retention_and_persistence(
+                retention,
+                self.launch_config.sessions.to_zmux_persistence(),
+            )?;
+            #[cfg(not(feature = "session-persistence"))]
+            let runtime = MuxRuntime::connect_with_retention(retention)?;
+            self.mux = Some(runtime);
         }
         let Some(runtime) = self.mux.clone() else {
             anyhow::bail!("no multiplexer is running");

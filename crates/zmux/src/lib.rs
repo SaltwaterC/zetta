@@ -12,6 +12,8 @@
 pub mod auth;
 pub mod catalog;
 pub mod paths;
+#[cfg(feature = "session-persistence")]
+pub mod persistence;
 pub mod protocol;
 pub mod reconnect;
 pub mod retention;
@@ -28,6 +30,8 @@ pub mod upgrade;
 
 use std::ffi::OsString;
 
+#[cfg(feature = "session-persistence")]
+use anyhow::Context as _;
 use anyhow::Result;
 
 /// Set to `1` in shells launched by a Zetta process that keeps sessions local
@@ -42,6 +46,7 @@ Usage: zmux [COMMAND]
 
 Commands:
   list          List the sessions this multiplexer is holding
+  resume SESSION Resume an encrypted disk record; panes are restored inert
   stop          Stop the multiplexer. It refuses while it is holding a
                 session, because stopping it ends everything running in one;
                 --force stops it anyway, ending them. Stopping a multiplexer
@@ -60,7 +65,8 @@ Options:
   -f, --force           Stop even while sessions are running (with stop)
   -j, --json            Print machine-readable JSON (with list)
   -r, --retention MODE  What to keep of a detached pane's output:
-                        none or memory (default)
+                        none, memory (default), or disk
+  -i, --identity PATH  Identity file for resume; may be repeated
   -h, --help            Print help
   -v, --version         Print the version, and the protocol it speaks";
 
@@ -88,7 +94,7 @@ fn usage(no_mux: bool) -> &'static str {
     if no_mux { NO_MUX_USAGE } else { USAGE }
 }
 
-const SESSION_ID_HELP: &str = "SESSION_ID is either the bare numeric session ID or the stable PROCESS:RUNNER:SESSION catalog identifier printed by `zmux list`. The bare form is accepted only when the numeric ID is unambiguous; use the full form when more than one catalog contains it. `share` changes a scoped session to shared mode; `reconnect` is the command that opens it in a Zetta window.";
+const SESSION_ID_HELP: &str = "SESSION_ID is either the bare numeric session ID or the stable PROCESS:RUNNER:SESSION catalog identifier printed by `zmux list`. The bare form is accepted only when the numeric ID is unambiguous; use the full form when more than one catalog contains it. `share` changes a scoped session to shared mode; `reconnect` is the command that opens it in a Zetta window. `resume` accepts the opaque numeric record ID from disk retention.";
 const NO_MUX_SESSION_ID_HELP: &str = "SESSION_ID is either the bare numeric session ID or the stable PROCESS:RUNNER:SESSION catalog identifier printed by `zmux list`. The bare form is accepted only when the numeric ID is unambiguous; use the full form when more than one catalog contains it. `reconnect` is the command that opens it in a Zetta window.";
 
 enum SessionArgument {
@@ -147,6 +153,66 @@ fn resolve_session_id(
     }
 }
 
+#[cfg(feature = "session-persistence")]
+fn resolve_restorable_id(client: &client::Client, argument: SessionArgument) -> Result<u64> {
+    let (_, records) = client.list_with_restorable()?;
+    let id = match argument {
+        SessionArgument::Bare(id) => id,
+        SessionArgument::Full(identifier) => {
+            anyhow::bail!(
+                "disk session records use their opaque numeric ID; use `resume {}`",
+                identifier.session_id
+            )
+        }
+    };
+    anyhow::ensure!(
+        records
+            .iter()
+            .any(|record| record.id == id && record.restorable),
+        "disk session record {id} is not restorable"
+    );
+    Ok(id)
+}
+
+#[cfg(feature = "session-persistence")]
+fn resolve_forget_id(argument: SessionArgument, directory: &std::path::Path) -> Result<u64> {
+    match argument {
+        SessionArgument::Bare(id) => {
+            let catalogs = catalog::read_session_catalogs(directory)?;
+            if catalogs
+                .iter()
+                .flat_map(|catalog| catalog.sessions.iter())
+                .any(|session| session.id == id)
+            {
+                ensure_unambiguous_session_id(&catalogs, id)?;
+                return Ok(id);
+            }
+            anyhow::ensure!(
+                persistence::read_opaque_records(directory)?
+                    .iter()
+                    .any(|record| record.id == id),
+                "session {id} does not exist"
+            );
+            Ok(id)
+        }
+        SessionArgument::Full(identifier) => {
+            let catalogs = catalog::read_session_catalogs(directory)?;
+            anyhow::ensure!(
+                catalogs.iter().any(|catalog| {
+                    catalog.process_id == identifier.process_id
+                        && catalog.runner_id == identifier.runner_id
+                        && catalog
+                            .sessions
+                            .iter()
+                            .any(|session| session.id == identifier.session_id)
+                }),
+                "background session {identifier} is not held by a live catalog"
+            );
+            Ok(identifier.session_id)
+        }
+    }
+}
+
 fn ensure_unambiguous_session_id(
     catalogs: &[protocol::BackgroundSessionCatalog],
     session_id: u64,
@@ -179,6 +245,12 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
     let mut expect_retention_bytes = false;
     let mut retention_bytes = None;
     let mut resume_from = None;
+    #[cfg(feature = "session-persistence")]
+    let mut daemon_options = None;
+    let mut identity_paths = Vec::new();
+    let mut expect_identity = false;
+    #[cfg(not(feature = "session-persistence"))]
+    let daemon_options = None;
     #[cfg(unix)]
     let mut resume_listener = None;
     let mut upgrade = false;
@@ -205,10 +277,24 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
             expect_retention_bytes = false;
             continue;
         }
+        if expect_identity {
+            identity_paths.push(std::path::PathBuf::from(argument.as_ref()));
+            expect_identity = false;
+            continue;
+        }
         match argument.as_ref() {
             "--json" | "-j" => json = true,
             "--force" | "-f" => force = true,
             "--retention" | "-r" => expect_retention = true,
+            "--identity" | "-i" => expect_identity = true,
+            value if value.starts_with("--identity=") => {
+                let path = value
+                    .split_once('=')
+                    .map(|(_, path)| path)
+                    .unwrap_or_default();
+                anyhow::ensure!(!path.is_empty(), "--identity requires a path");
+                identity_paths.push(std::path::PathBuf::from(path));
+            }
             // Hidden: Zetta passes its configured byte budget when it starts
             // the daemon. The public mode remains deliberately small; this
             // keeps a global daemon-start setting from being silently reset
@@ -216,6 +302,36 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
             "--retention-bytes" => expect_retention_bytes = true,
             // Hidden: how a client starts the daemon it could not find.
             "--daemon" => daemon = true,
+            value if value.starts_with("--daemon-options=") => {
+                anyhow::ensure!(
+                    daemon_options.is_none(),
+                    "--daemon-options may only be specified once"
+                );
+                let path = std::path::PathBuf::from(
+                    value
+                        .split_once('=')
+                        .map(|(_, path)| path)
+                        .unwrap_or_default(),
+                );
+                #[cfg(feature = "session-persistence")]
+                {
+                    let bytes = std::fs::read(&path).with_context(|| {
+                        format!("reading private daemon options {}", path.display())
+                    })?;
+                    let options: persistence::DaemonOptionsFile =
+                        serde_json::from_slice(&bytes).context("parsing private daemon options")?;
+                    let _ = std::fs::remove_file(&path);
+                    daemon_options = Some(options.recipients);
+                }
+                #[cfg(not(feature = "session-persistence"))]
+                {
+                    let _ = path;
+                    anyhow::bail!(
+                        "--daemon-options needs the session-persistence feature, which this \
+                         multiplexer was built without"
+                    );
+                }
+            }
             // Hidden: the Windows pseudoconsole host, which outlives the
             // daemon so that replacing it does not end every session.
             "--pty-host" => pty_host = true,
@@ -281,7 +397,8 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
                 );
                 return Ok(());
             }
-            value @ ("list" | "stop" | "reconnect" | "share" | "unshare" | "kill" | "forget")
+            value @ ("list" | "stop" | "reconnect" | "resume" | "share" | "unshare" | "kill"
+            | "forget")
                 if command.is_none() =>
             {
                 command = Some(value.to_owned());
@@ -290,7 +407,7 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
                 if !value.starts_with('-')
                     && matches!(
                         command.as_deref(),
-                        Some("reconnect" | "kill" | "forget" | "share" | "unshare")
+                        Some("reconnect" | "resume" | "kill" | "forget" | "share" | "unshare")
                     ) =>
             {
                 anyhow::ensure!(session.is_none(), "only one session may be given");
@@ -300,6 +417,11 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
         }
     }
     anyhow::ensure!(!expect_retention, "--retention requires a mode");
+    anyhow::ensure!(!expect_identity, "--identity requires a path");
+    anyhow::ensure!(
+        identity_paths.is_empty() || command.as_deref() == Some("resume"),
+        "--identity is only valid with the resume command"
+    );
     anyhow::ensure!(
         !expect_retention_bytes,
         "--retention-bytes requires a value"
@@ -342,7 +464,7 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
 
     if daemon {
         #[cfg(unix)]
-        return server::run(retention, resume_from, resume_listener);
+        return server::run(retention, daemon_options, resume_from, resume_listener);
         #[cfg(not(unix))]
         {
             let _ = resume_from;
@@ -350,9 +472,9 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
         }
     }
     #[cfg(unix)]
-    let _ = (retention, resume_from, resume_listener);
+    let _ = (retention, daemon_options, resume_from, resume_listener);
     #[cfg(not(unix))]
-    let _ = (retention, resume_from);
+    let _ = (retention, daemon_options, resume_from);
 
     match command.as_deref() {
         Some("reconnect") => {
@@ -376,6 +498,35 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
             {
                 let _ = force;
                 anyhow::bail!("the multiplexer is not yet supported on this platform")
+            }
+        }
+        Some("resume") => {
+            let session = session.context_missing()?;
+            #[cfg(feature = "session-persistence")]
+            {
+                if reconnect::try_run_resume_disk_session(&session.to_string(), &identity_paths)? {
+                    println!(
+                        "Resumed disk session {}; its panes are inert until run.",
+                        session
+                    );
+                    return Ok(());
+                }
+                let client = client::Client::connect_at_with_retention_for_resume(
+                    &paths::session_catalog_dir(),
+                    retention::Retention::Disk,
+                )?;
+                let record_id = resolve_restorable_id(&client, session)?;
+                client.resume(record_id, &identity_paths)?;
+                println!("Resumed disk session {record_id}; its panes are inert until run.");
+                Ok(())
+            }
+            #[cfg(not(feature = "session-persistence"))]
+            {
+                let _ = (session, identity_paths);
+                anyhow::bail!(
+                    "resume needs the session-persistence feature, which this multiplexer \
+                     was built without"
+                )
             }
         }
         Some("kill") => {
@@ -437,12 +588,33 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
             let session = session.context_missing()?;
             #[cfg(unix)]
             {
-                let Some(client) = client::Client::connect_existing()? else {
-                    anyhow::bail!("no multiplexer is running");
+                let session_id = {
+                    #[cfg(feature = "session-persistence")]
+                    {
+                        let directory = paths::session_catalog_dir();
+                        let session_id = resolve_forget_id(session, &directory)?;
+                        if let Some(client) = client::Client::connect_existing()? {
+                            client.forget(session_id)?;
+                        } else {
+                            anyhow::ensure!(
+                                persistence::forget_opaque_record(&directory, session_id)?,
+                                "session {session_id} does not exist"
+                            );
+                        }
+                        session_id
+                    }
+                    #[cfg(not(feature = "session-persistence"))]
+                    {
+                        let Some(client) = client::Client::connect_existing()? else {
+                            anyhow::bail!("no multiplexer is running");
+                        };
+                        let session_id =
+                            resolve_session_id(&client, session, &paths::session_catalog_dir())?;
+                        client.forget(session_id)?;
+                        session_id
+                    }
                 };
-                let session = resolve_session_id(&client, session, &paths::session_catalog_dir())?;
-                client.forget(session)?;
-                println!("Forgot session {session}.");
+                println!("Forgot session {session_id}.");
                 Ok(())
             }
             #[cfg(not(unix))]

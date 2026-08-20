@@ -20,7 +20,11 @@
   "tftp_server_port": 69,
   "sessions": {
     "retention": "memory",
-    "ring_bytes": 262144
+    "ring_bytes": 262144,
+    "persistence": {
+      "recipients": [],
+      "identity": null
+    }
   },
   "pane_split_templates": {
     "three-bottom": {

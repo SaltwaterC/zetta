@@ -109,6 +109,15 @@ $zmuxSessionIds = {
     } catch {}
 }
 
+$zmuxRestorableIds = {
+    try {
+        $lines = if ($commandName -eq 'zmux') { @(zmux list 2>$null) } else { @(zetta mux list 2>$null) }
+        foreach ($line in $lines) {
+            if ($line -match '^\s*resume\s+id:\s+(\d+)\s*$') { $matches[1] }
+        }
+    } catch {}
+}
+
 $zettaCompletions = {
     param($wordToComplete, $commandAst, $cursorPosition)
 
@@ -266,9 +275,10 @@ $zettaCompletions = {
         else { & $zettaProfiles $configArguments }
     } elseif ($subcommand -eq 'mux' -and $words.Count -ge 3 -and (
         $words[2] -eq 'reconnect' -or
+        $words[2] -eq 'resume' -or
         (-not $noMux -and $words[2] -in 'share', 'unshare', 'kill', 'forget')
     ) -and $wordToComplete -notlike '-*') {
-        & $zmuxSessionIds
+        if ($words[2] -eq 'resume') { & $zmuxRestorableIds } else { & $zmuxSessionIds }
     } elseif ($worktreeCommand) {
         if ([string]::IsNullOrEmpty($worktreeOperation)) {
             'new', 'done', 'status', 'rerere', '--help'
@@ -291,10 +301,11 @@ $zettaCompletions = {
             'mux' {
                 if ($words.Count -le 2) {
                     if ($noMux) { 'list', 'reconnect', '--json', '--help', '--version' }
-                    else { 'list', 'stop', 'reconnect', 'share', 'unshare', 'kill', 'forget', '--json', '--upgrade', '--help', '--version' }
+                    else { 'list', 'stop', 'reconnect', 'resume', 'share', 'unshare', 'kill', 'forget', '--json', '--upgrade', '--identity', '--help', '--version' }
                 }
                 elseif ($noMux -and $words[2] -notin 'list', 'reconnect') { @() }
                 elseif ($words[2] -eq 'stop') { '--force', '--help' }
+                elseif ($words[2] -eq 'resume') { '--identity', '--help' }
                 else { '--json', '--help' }
             }
             'splits' { '--help' }

@@ -25,6 +25,7 @@ way:
 
 ```sh
 zmux list             # the sessions being held
+zmux resume SESSION -i PATH # decrypt and restore an opaque disk record
 zmux share SESSION_ID    # make a scoped session shared/joinable
 zmux reconnect SESSION_ID # open it in a Zetta window
 zmux unshare SESSION_ID  # scope it back to the window that held it
@@ -38,6 +39,12 @@ the stable `PROCESS:RUNNER:SESSION` identifier printed by `zmux list` in every
 case. The human-readable list shows both forms for an unambiguous session and
 only the full form when numeric IDs conflict. Shell completion offers the
 stable form for `share`, `reconnect`, `unshare`, `kill`, and `forget`.
+
+With disk retention, zmux list also shows opaque restorable records. They
+contain only an ID, timestamps, byte sizes, and protection state until an age
+identity decrypts the record. zmux resume SESSION -i PATH accepts repeatable
+identity files; the configured identity path is used by the Zetta picker when
+one is set.
 
 `share` and `reconnect` are deliberately separate actions. `share` changes a
 session's scope so any Zetta process may attach it; it does not open a window.
@@ -133,9 +140,15 @@ terminal's buffer filled — but how much is *kept* is configurable:
 | --- | --- |
 | `memory` (default) | the screen as it was, plus output since, up to `sessions.ring_bytes` |
 | `none` | a cleared screen and whatever the program redraws |
+| `disk` | the in-memory screen plus encrypted detached state and scrollback when recipients are configured |
 
 `none` is for hosts where memory matters more than scrollback. The
-`scrollback-buffer` feature compiles the buffer out altogether.
+`scrollback-buffer` feature compiles the buffer out altogether. Disk mode
+keeps the normal in-memory grid for immediate detach/reattach and writes
+age-v1 metadata and 64-KiB-stream scrollback segments only while the pane is
+detached or shared. Attached panes stay on the direct descriptor path. If disk
+has no recipients, it behaves like the in-memory screen and creates no
+persistence files.
 
 What is kept is a bounded *terminal grid*, rather than raw bytes: the multiplexer runs an off-screen
 terminal for every pane it reads, feeds it the same output the pane produces, and
@@ -464,7 +477,10 @@ before this window attached.
 Only a uniquely salted Argon2id verifier is stored, in the multiplexer holding
 the session. Zetta hashes the secret and sends only the result, so the secret
 itself never crosses the socket. Neither the secret nor the verifier is written
-to `config.json`, control JSON, or the session catalog. Protected catalog entries expose only a stable ID
+to `config.json`, control JSON, or the session catalog. In disk mode the
+verifier, tab state, catalog details, and scrollback are inside age-encrypted
+files; the cleartext manifest contains only opaque identifiers, timestamps,
+sizes, and protection state. Protected catalog entries expose only a stable ID
 and protection flag, so commands, titles, and working directories remain
 private. Editing catalog or configuration files cannot replace the live
 verifier. Hashing and verification run away from the UI thread, and a failed

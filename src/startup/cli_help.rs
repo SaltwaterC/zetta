@@ -161,11 +161,11 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
     )
     .replace(
         "       zetta mux [COMMAND]",
-        "       zetta mux [COMMAND]\n       zetta mux reconnect SESSION_ID\n       zetta splits\n       zetta tabicon [OPTIONS] ICON\n       zetta tabicon --list\n       zetta panetheme [OPTIONS] THEME\n       zetta panetheme --reset\n       zetta panetheme --list\n       zetta overlay [OPTIONS] TEXT\n       zetta overlay --reset\n       zetta edit [OPTIONS] [--] FILE ...\n       zetta vi [OPTIONS] [FILE ...]",
+        "       zetta mux [COMMAND]\n       zetta mux reconnect SESSION_ID\n       zetta mux resume SESSION [-i PATH]\n       zetta splits\n       zetta tabicon [OPTIONS] ICON\n       zetta tabicon --list\n       zetta panetheme [OPTIONS] THEME\n       zetta panetheme --reset\n       zetta panetheme --list\n       zetta overlay [OPTIONS] TEXT\n       zetta overlay --reset\n       zetta edit [OPTIONS] [--] FILE ...\n       zetta vi [OPTIONS] [FILE ...]",
     )
     .replace(
         "mux                                 Control, list, and reconnect background sessions",
-        "mux                                 Control, list, and reconnect background sessions\n  wt                                  Create and integrate Git worktrees\n  splits                              List configured pane split templates\n  tabicon                             Set the active tab's icon override\n  panetheme                           Non-persistently change the active pane's theme\n  overlay                             Non-persistently show text over the active pane\n  edit                                Edit files with $EDITOR, falling back to Zetta vi\n  vi                                  Edit files with Zetta's built-in vi",
+        "mux                                 Control, list, reconnect, and resume background sessions\n  wt                                  Create and integrate Git worktrees\n  splits                              List configured pane split templates\n  tabicon                             Set the active tab's icon override\n  panetheme                           Non-persistently change the active pane's theme\n  overlay                             Non-persistently show text over the active pane\n  edit                                Edit files with $EDITOR, falling back to Zetta vi\n  vi                                  Edit files with Zetta's built-in vi",
     )
     .replace(
         "  -v, --version                       Print version",

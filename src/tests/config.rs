@@ -376,14 +376,52 @@ fn session_retention_is_typed_and_bounded() {
     .unwrap();
     assert_eq!(none.sessions.retention, SessionRetention::None);
 
+    let migration =
+        Config::parse(r#"{"sessions":{"retention":"persist"}}"#, None, None).unwrap_err();
+    assert!(migration.to_string().contains("use \"disk\""));
+
     for document in [
-        r#"{"sessions":{"retention":"persist"}}"#,
         r#"{"sessions":{"ring_bytes":4095}}"#,
         r#"{"sessions":{"ring_bytes":67108865}}"#,
     ] {
         let error = Config::parse(document, None, None).unwrap_err();
         assert!(!error.to_string().is_empty());
     }
+}
+
+#[cfg(feature = "session-persistence")]
+#[test]
+fn disk_session_persistence_round_trips_as_an_overlay() {
+    let config = Config::parse(
+        r#"{
+            "sessions": {
+                "retention": "disk",
+                "persistence": {
+                    "recipients": ["age1example", "github:zetta"],
+                    "identity": "~/.config/age/identity.txt"
+                }
+            }
+        }"#,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(config.sessions.retention, SessionRetention::Disk);
+    assert_eq!(
+        config.sessions.persistence.recipients,
+        vec!["age1example", "github:zetta"]
+    );
+    assert_eq!(
+        config.sessions.persistence.identity,
+        Some(PathBuf::from("~/.config/age/identity.txt"))
+    );
+}
+
+#[cfg(not(feature = "session-persistence"))]
+#[test]
+fn disk_retention_reports_a_feature_error_in_constrained_builds() {
+    let error = Config::parse(r#"{"sessions":{"retention":"disk"}}"#, None, None).unwrap_err();
+    assert!(error.to_string().contains("session-persistence"));
 }
 
 #[test]

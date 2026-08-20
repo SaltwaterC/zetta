@@ -21,20 +21,33 @@ default = ["scrollback-buffer"]
 # Compiled out for memory-constrained targets that only need the session to stay
 # alive.
 scrollback-buffer = []
+# Encrypts detached-session state with age v1 files.
+session-persistence = [
+    "dep:age",
+    "dep:age-core",
+    "dep:base64",
+    "dep:hpke",
+    "dep:reqwest",
+]
 # Exposes the hooks integration tests need to drive situations a real client
 # cannot easily produce, such as a window dying mid-attach.
 test-support = []
 
 [dependencies]
+age = { version = "0.11.1", default-features = false, features = ["armor", "ssh"], optional = true }
+age-core = { version = "0.11.0", optional = true }
 alacritty_terminal = { path = "../alacritty_terminal", default-features = false }
 anyhow = "1"
 argon2 = "0.5"
 async-channel = "2.5.0"
+base64 = { version = "0.21", optional = true }
 getrandom = { version = "0.3", features = ["std"] }
+hpke = { version = "0.14", default-features = false, features = ["alloc", "chacha", "getrandom", "hkdfsha2", "mlkem", "x25519"], optional = true }
 libc = "0.2"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"], optional = true }
 signal-hook = "0.4.3"
 subtle = "2"
 sysinfo = "0.37"

@@ -126,12 +126,33 @@ fn mean_square(samples: &[f32]) -> f32 {
 }
 
 #[test]
-fn gong_mulaw_asset_has_the_expected_duration_and_polarity() {
-    assert_eq!(GONG_MULAW.len(), 92_610);
-    assert_eq!(decode_mulaw(0xff), 0.0);
-    assert_eq!(decode_mulaw(0x7f), 0.0);
-    assert!(decode_mulaw(0x80) > 0.9);
-    assert!(decode_mulaw(0x00) < -0.9);
+fn gong_pcm_asset_has_the_expected_duration_and_boundaries() {
+    let expected_samples = (GONG_PCM_SAMPLE_RATE as u64 * GONG_DURATION_MS as u64 / 1_000) as usize;
+
+    assert_eq!(GONG_PCM.len(), expected_samples * size_of::<i16>());
+    assert_eq!(&GONG_PCM[..2], &[0, 0]);
+    assert_eq!(&GONG_PCM[GONG_PCM.len() - 2..], &[0, 0]);
+}
+
+// Regression test for the crackle that was especially obvious on 48 kHz
+// Windows output. Isolated discontinuities have a large second difference;
+// the real strike is excluded, while the resonant body and tail must remain
+// continuous after resampling to common device rates.
+#[test]
+fn gong_has_no_isolated_discontinuities_at_common_output_rates() {
+    for sample_rate in [44_100, 48_000] {
+        let samples = BuiltinSound::Gong.samples(sample_rate);
+        let after_strike = &samples[(sample_rate / 20) as usize..];
+        let largest_second_difference = after_strike
+            .windows(3)
+            .map(|window| (window[2] - 2.0 * window[1] + window[0]).abs())
+            .fold(0.0, f32::max);
+
+        assert!(
+            largest_second_difference < 0.01,
+            "{sample_rate} Hz output contains a discontinuity of {largest_second_difference}"
+        );
+    }
 }
 
 #[test]

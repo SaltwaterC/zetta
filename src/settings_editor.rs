@@ -1188,6 +1188,8 @@ pub enum ConfigTextField {
     FontSize,
     ScrollHistory,
     SessionRingBytes,
+    SessionPersistenceRecipients,
+    SessionPersistenceIdentity,
     #[cfg(feature = "http-server")]
     HttpServerPort,
     #[cfg(feature = "tftp-server")]
@@ -1233,6 +1235,8 @@ pub struct ConfigurationForm {
     pub pane_controls_hidden_by_default: bool,
     pub session_retention: SessionRetention,
     pub session_ring_bytes: TextField,
+    pub session_persistence_recipients: TextField,
+    pub session_persistence_identity: TextField,
     #[cfg(feature = "http-server")]
     pub http_server_port: TextField,
     #[cfg(feature = "tftp-server")]
@@ -1317,6 +1321,37 @@ impl ConfigurationForm {
             .and_then(Value::as_u64)
             .and_then(|bytes| usize::try_from(bytes).ok())
             .unwrap_or(config.sessions.ring_bytes);
+        let session_persistence_recipients = root
+            .get("sessions")
+            .and_then(Value::as_object)
+            .and_then(|sessions| sessions.get("persistence"))
+            .and_then(Value::as_object)
+            .and_then(|persistence| persistence.get("recipients"))
+            .and_then(Value::as_array)
+            .map(|recipients| {
+                recipients
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_else(|| config.sessions.persistence.recipients.join(", "));
+        let session_persistence_identity = root
+            .get("sessions")
+            .and_then(Value::as_object)
+            .and_then(|sessions| sessions.get("persistence"))
+            .and_then(Value::as_object)
+            .and_then(|persistence| persistence.get("identity"))
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| {
+                config
+                    .sessions
+                    .persistence
+                    .identity
+                    .as_deref()
+                    .and_then(Path::to_str)
+                    .unwrap_or_default()
+            });
         Ok(Self {
             default_profile: config.profiles[config.default_profile].name.clone(),
             new_tab_profile: config.new_tab_profile,
@@ -1351,6 +1386,8 @@ impl ConfigurationForm {
             pane_controls_hidden_by_default: config.pane_controls_hidden_by_default,
             session_retention: config.sessions.retention,
             session_ring_bytes: TextField::new(session_ring_bytes.to_string()),
+            session_persistence_recipients: TextField::new(session_persistence_recipients),
+            session_persistence_identity: TextField::new(session_persistence_identity),
             #[cfg(feature = "http-server")]
             http_server_port: TextField::new(config.http_server_port.to_string()),
             #[cfg(feature = "tftp-server")]
@@ -1367,6 +1404,12 @@ impl ConfigurationForm {
             ConfigTextField::FontSize => Some(&mut self.terminal_font_size),
             ConfigTextField::ScrollHistory => Some(&mut self.max_scroll_history_lines),
             ConfigTextField::SessionRingBytes => Some(&mut self.session_ring_bytes),
+            ConfigTextField::SessionPersistenceRecipients => {
+                Some(&mut self.session_persistence_recipients)
+            }
+            ConfigTextField::SessionPersistenceIdentity => {
+                Some(&mut self.session_persistence_identity)
+            }
             #[cfg(feature = "http-server")]
             ConfigTextField::HttpServerPort => Some(&mut self.http_server_port),
             #[cfg(feature = "tftp-server")]
@@ -1471,15 +1514,24 @@ impl ConfigurationForm {
             "session ring bytes must be between 4096 and {}",
             crate::config::MAX_SESSION_RING_BYTES
         );
-        anyhow::ensure!(
-            !matches!(self.session_retention, SessionRetention::Persist),
-            "sessions.retention=\"persist\" needs the session-persistence feature, which this build does not provide"
-        );
+        let recipients = self
+            .session_persistence_recipients
+            .text
+            .split(',')
+            .map(str::trim)
+            .filter(|recipient| !recipient.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let identity = self.session_persistence_identity.text.trim();
         root.insert(
             "sessions".into(),
             json!({
                 "retention": self.session_retention.as_str(),
                 "ring_bytes": session_ring_bytes,
+                "persistence": {
+                    "recipients": recipients,
+                    "identity": (!identity.is_empty()).then_some(identity),
+                },
             }),
         );
         #[cfg(feature = "http-server")]
@@ -1623,6 +1675,10 @@ fn strip_default_configuration_values(
             json!({
                 "retention": SessionRetention::default().as_str(),
                 "ring_bytes": crate::config::DEFAULT_SESSION_RING_BYTES,
+                "persistence": {
+                    "recipients": [],
+                    "identity": null,
+                },
             }),
         ),
     ];

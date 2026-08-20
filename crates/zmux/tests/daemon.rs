@@ -13,6 +13,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(feature = "session-persistence")]
+use age::secrecy::ExposeSecret as _;
+
 use zmux::{
     client::{AttachOutcome, Client},
     messages::{SpawnRequest, TerminalSize},
@@ -76,7 +79,12 @@ impl TestDaemon {
         let endpoint = self.sessions_dir().join("zmux.json");
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
-            if endpoint.is_file() {
+            if endpoint.is_file()
+                && Client::connect_existing_at(&self.sessions_dir())
+                    .ok()
+                    .flatten()
+                    .is_some()
+            {
                 return;
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -98,6 +106,54 @@ impl TestDaemon {
         Client::connect_existing_at(&self.sessions_dir())
             .expect("looking for the daemon")
             .expect("the daemon should be running")
+    }
+
+    #[cfg(feature = "session-persistence")]
+    fn start_with_recipient(recipient: &str) -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().to_path_buf();
+        let sessions = daemon_sessions_dir(&config);
+        std::fs::create_dir_all(&sessions).unwrap();
+        let options_path = sessions.join("daemon-options-test.json");
+        let options = zmux::persistence::DaemonOptionsFile {
+            recipients: vec![recipient.to_owned()],
+        };
+        std::fs::write(&options_path, serde_json::to_vec(&options).unwrap()).unwrap();
+        let process = Command::new(daemon_binary())
+            .args([
+                "--daemon",
+                "--retention",
+                "disk",
+                &format!("--daemon-options={}", options_path.display()),
+            ])
+            .env("XDG_CONFIG_HOME", &config)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("starting disk-retention zmux");
+        let daemon = Self {
+            process,
+            _directory: directory,
+            config,
+        };
+        daemon.wait_for_endpoint();
+        daemon
+    }
+
+    #[cfg(feature = "session-persistence")]
+    fn restart_with_recovery(&mut self) {
+        let _ = self.process.kill();
+        let _ = self.process.wait();
+        self.process = Command::new(daemon_binary())
+            .args(["--daemon", "--retention", "disk"])
+            .env("XDG_CONFIG_HOME", &self.config)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("restarting disk-retention zmux");
+        self.wait_for_endpoint();
     }
 }
 
@@ -275,6 +331,254 @@ fn process_is_alive(pid: u32) -> bool {
     // Signal 0 checks for existence. The child belongs to the daemon, not to
     // this process, so it cannot become a zombie we would misread as alive.
     unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+#[cfg(feature = "session-persistence")]
+#[test]
+fn disk_retention_without_recipients_writes_no_persistence_files() {
+    let daemon = TestDaemon::start_with(&["--retention", "disk"]);
+    assert!(!daemon.sessions_dir().join("persistence").exists());
+}
+
+#[cfg(feature = "session-persistence")]
+#[test]
+fn disk_detach_encrypts_metadata_and_keeps_it_opaque_to_listing() {
+    let identity = age::x25519::Identity::generate();
+    let daemon = TestDaemon::start_with_recipient(&identity.to_public().to_string());
+    let client = daemon.client();
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; sleep 60"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+    drop(descriptor);
+
+    let state = serde_json::json!({
+        "secret_title": "metadata must stay encrypted",
+        "cwd": "/private/worktree"
+    });
+    client
+        .detach(
+            pane.session_id,
+            summary(pane.session_id, pane.pane_id),
+            state.clone(),
+            None,
+            vec![(pane.pane_id, b"private screen".to_vec())],
+        )
+        .unwrap();
+
+    let persistence = daemon.sessions_dir().join("persistence");
+    let manifest = std::fs::read_to_string(persistence.join("manifest.json")).unwrap();
+    assert!(!manifest.contains("metadata must stay encrypted"));
+    assert!(!manifest.contains("private/worktree"));
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&manifest)
+            .unwrap()
+            .get("records")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|records| records.len() == 1),
+        "manifest was {manifest}"
+    );
+
+    let ciphertext =
+        std::fs::read(persistence.join(format!("session-{}.age", pane.session_id))).unwrap();
+    assert!(
+        !ciphertext
+            .windows(b"metadata must stay encrypted".len())
+            .any(|window| window == b"metadata must stay encrypted")
+    );
+    let plaintext = age::decrypt(&identity, &ciphertext).unwrap();
+    let persisted: zmux::persistence::PersistedSession =
+        serde_json::from_slice(&plaintext).unwrap();
+    assert_eq!(persisted.state, state);
+    assert_eq!(persisted.snapshots[0].bytes, b"private screen");
+
+    assert!(client.list_with_restorable().unwrap().1.is_empty());
+    client.kill(pane.session_id).unwrap();
+}
+
+#[cfg(feature = "session-persistence")]
+#[test]
+fn attaching_a_disk_session_removes_its_stale_persistence_record() {
+    let identity = age::x25519::Identity::generate();
+    let daemon = TestDaemon::start_with_recipient(&identity.to_public().to_string());
+    let client = daemon.client();
+    let pane = client.spawn(spawn_request(None, "sleep 60")).unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    drop(descriptor);
+    client
+        .detach(
+            pane.session_id,
+            summary(pane.session_id, pane.pane_id),
+            serde_json::Value::Null,
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+
+    let record_path = daemon
+        .sessions_dir()
+        .join(format!("persistence/session-{}.age", pane.session_id));
+    assert!(record_path.is_file());
+    let attached = client.attach(pane.session_id, None, None).unwrap();
+    match attached {
+        AttachOutcome::Attached { pane, .. } => drop(pane),
+        _ => panic!("expected an exclusive attach"),
+    }
+    assert!(!record_path.exists());
+    client.kill(pane.session_id).unwrap();
+}
+
+#[cfg(feature = "session-persistence")]
+#[test]
+fn daemon_loss_makes_disk_records_restorable_and_resume_consumes_them() {
+    let identity = age::x25519::Identity::generate();
+    let daemon = TestDaemon::start_with_recipient(&identity.to_public().to_string());
+    let client = daemon.client();
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; sleep 60"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+    drop(descriptor);
+    client
+        .detach(
+            pane.session_id,
+            summary(pane.session_id, pane.pane_id),
+            serde_json::json!({"restored": true}),
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+    drop(client);
+
+    let mut daemon = daemon;
+    daemon.restart_with_recovery();
+    let client = daemon.client();
+    let (_, records) = client.list_with_restorable().unwrap();
+    let record = records
+        .iter()
+        .find(|record| record.id == pane.session_id && record.restorable)
+        .expect("daemon loss should make the record restorable");
+    assert!(!record.protected);
+
+    let identity_path = daemon.config.join("identity.txt");
+    let encoded = identity.to_string();
+    std::fs::write(&identity_path, format!("{}\n", encoded.expose_secret())).unwrap();
+    let restored = client
+        .resume(pane.session_id, std::slice::from_ref(&identity_path))
+        .unwrap();
+    assert_eq!(restored.state, serde_json::json!({"restored": true}));
+    let (_, records) = client.list_with_restorable().unwrap();
+    assert!(
+        records
+            .iter()
+            .any(|record| record.id == pane.session_id && !record.restorable)
+    );
+    client.forget(pane.session_id).unwrap();
+    assert!(client.list_with_restorable().unwrap().1.is_empty());
+}
+
+#[cfg(feature = "session-persistence")]
+#[test]
+fn protected_disk_resume_preserves_failed_authentication_backoff() {
+    let identity = age::x25519::Identity::generate();
+    let mut daemon = TestDaemon::start_with_recipient(&identity.to_public().to_string());
+    let client = daemon.client();
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; sleep 60"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+    drop(descriptor);
+    let verifier = zmux::auth::SessionAuthentication::create("correct secret")
+        .unwrap()
+        .verifier()
+        .to_owned();
+    client
+        .detach(
+            pane.session_id,
+            summary(pane.session_id, pane.pane_id),
+            serde_json::json!({"protected": true}),
+            Some(verifier),
+            Vec::new(),
+        )
+        .unwrap();
+    drop(client);
+    daemon.restart_with_recovery();
+
+    let identity_path = daemon.config.join("identity.txt");
+    let encoded = identity.to_string();
+    std::fs::write(&identity_path, format!("{}\n", encoded.expose_secret())).unwrap();
+    let client = daemon.client();
+    let (_, records) = client.list_with_restorable().unwrap();
+    assert!(
+        records
+            .iter()
+            .any(|record| record.id == pane.session_id && record.protected)
+    );
+
+    let wrong = client.resume_with_secret(
+        pane.session_id,
+        std::slice::from_ref(&identity_path),
+        Some(&zmux::auth::SessionSecret::new("wrong secret".to_owned())),
+    );
+    assert!(
+        wrong
+            .unwrap_err()
+            .to_string()
+            .contains("authentication failed")
+    );
+
+    // Establish a two-second window so a busy test machine cannot let the
+    // daemon restart consume the entire one-second first-failure window before
+    // the post-restart assertion below runs.
+    std::thread::sleep(Duration::from_millis(1_100));
+    let wrong = client.resume_with_secret(
+        pane.session_id,
+        std::slice::from_ref(&identity_path),
+        Some(&zmux::auth::SessionSecret::new("wrong secret".to_owned())),
+    );
+    assert!(
+        wrong
+            .unwrap_err()
+            .to_string()
+            .contains("authentication failed")
+    );
+
+    let ciphertext = std::fs::read(
+        daemon
+            .sessions_dir()
+            .join(format!("persistence/session-{}.age", pane.session_id)),
+    )
+    .unwrap();
+    let persisted: zmux::persistence::PersistedSession =
+        serde_json::from_slice(&age::decrypt(&identity, &ciphertext).unwrap()).unwrap();
+    assert_eq!(persisted.failed_authentications, 2);
+    assert!(persisted.backoff_seconds >= 2);
+
+    daemon.restart_with_recovery();
+    let client = daemon.client();
+    let immediate = client.resume_with_secret(
+        pane.session_id,
+        std::slice::from_ref(&identity_path),
+        Some(&zmux::auth::SessionSecret::new("correct secret".to_owned())),
+    );
+    assert!(
+        immediate
+            .unwrap_err()
+            .to_string()
+            .contains("authentication failed")
+    );
+    std::thread::sleep(Duration::from_secs(3));
+    client
+        .resume_with_secret(
+            pane.session_id,
+            std::slice::from_ref(&identity_path),
+            Some(&zmux::auth::SessionSecret::new("correct secret".to_owned())),
+        )
+        .unwrap();
+    client.forget(pane.session_id).unwrap();
 }
 
 #[test]

@@ -2,6 +2,7 @@ use super::*;
 use crate::background_session_ui::{AttachOutcomeSummary, ProtectedSessionAction};
 use zeroize::{Zeroize as _, Zeroizing};
 
+#[cfg_attr(not(feature = "session-persistence"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SessionAuthenticationPromptMode {
     /// Choosing the secret for an action that widens a session's reach.
@@ -16,6 +17,9 @@ pub(crate) enum SessionAuthenticationPromptMode {
     },
     Reconnect {
         runner_id: u64,
+        session_id: u64,
+    },
+    ResumeDisk {
         session_id: u64,
     },
 }
@@ -129,6 +133,20 @@ impl Zetta {
         );
     }
 
+    #[cfg_attr(not(feature = "session-persistence"), allow(dead_code))]
+    pub(crate) fn prompt_to_resume_disk_session(
+        &mut self,
+        session_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_session_authentication_prompt(
+            SessionAuthenticationPromptMode::ResumeDisk { session_id },
+            window,
+            cx,
+        );
+    }
+
     fn open_session_authentication_prompt(
         &mut self,
         mode: SessionAuthenticationPromptMode,
@@ -162,7 +180,8 @@ impl Zetta {
             SessionAuthenticationPromptMode::Protect { tab_id, action } => {
                 self.apply_protected_session_action(tab_id, action, None, window, cx)
             }
-            SessionAuthenticationPromptMode::Reconnect { .. } => {}
+            SessionAuthenticationPromptMode::Reconnect { .. }
+            | SessionAuthenticationPromptMode::ResumeDisk { .. } => {}
         }
     }
 
@@ -225,12 +244,42 @@ impl Zetta {
                 cx.notify();
                 return;
             }
+            SessionAuthenticationPromptMode::ResumeDisk { .. } if secret.is_empty() => {
+                prompt.error = Some("Enter the session secret.".into());
+                cx.notify();
+                return;
+            }
             SessionAuthenticationPromptMode::Reconnect { .. } => {}
+            SessionAuthenticationPromptMode::ResumeDisk { .. } => {}
         }
         prompt.secret.text.zeroize();
         prompt.confirmation.text.zeroize();
         prompt.working = true;
         prompt.error = None;
+        if let SessionAuthenticationPromptMode::ResumeDisk { session_id } = mode {
+            let result = self.resume_disk_session(
+                session_id,
+                Some(SessionSecret::from_zeroizing(secret)),
+                None,
+                window,
+                cx,
+            );
+            if result == ReconnectSessionResult::Reconnected {
+                self.session_authentication = None;
+            } else {
+                let error = self
+                    .pane_output_error
+                    .take()
+                    .unwrap_or_else(|| "Authentication failed.".to_owned());
+                if let Some(prompt) = self.session_authentication.as_mut() {
+                    prompt.working = false;
+                    prompt.secret = TextField::default();
+                    prompt.error = Some(error);
+                }
+            }
+            cx.notify();
+            return;
+        }
         // A session the multiplexer is holding keeps its verifier in the
         // multiplexer, not in any Zetta process, so there is nothing to check
         // here: the secret is handed to the daemon as part of the attach, and
@@ -276,6 +325,7 @@ impl Zetta {
                 runner_id,
                 session_id,
             } => self.process_background_session_authentication(runner_id, session_id, cx),
+            SessionAuthenticationPromptMode::ResumeDisk { .. } => None,
         };
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
@@ -287,6 +337,9 @@ impl Zetta {
                         SessionAuthenticationPromptMode::Reconnect { .. } => verifier
                             .context("the protected session is no longer available")
                             .map(|verifier| Outcome::Verified(verifier.verify(&secret))),
+                        SessionAuthenticationPromptMode::ResumeDisk { .. } => {
+                            unreachable!("disk resume is handled before the background verifier")
+                        }
                     }
                 })
                 .await;
@@ -340,6 +393,7 @@ impl Zetta {
                         }
                         cx.notify();
                     }
+                    (SessionAuthenticationPromptMode::ResumeDisk { .. }, _) => {}
                     (_, Err(error)) => {
                         if let Some(prompt) = this.session_authentication.as_mut() {
                             prompt.working = false;
@@ -378,6 +432,7 @@ impl Zetta {
                 if !matches!(
                     prompt.mode,
                     SessionAuthenticationPromptMode::Reconnect { .. }
+                        | SessionAuthenticationPromptMode::ResumeDisk { .. }
                 ) =>
             {
                 prompt.field = match prompt.field {
@@ -493,7 +548,8 @@ impl Zetta {
         };
         let action = match prompt.mode {
             SessionAuthenticationPromptMode::Protect { action, .. } => Some(action),
-            SessionAuthenticationPromptMode::Reconnect { .. } => None,
+            SessionAuthenticationPromptMode::Reconnect { .. }
+            | SessionAuthenticationPromptMode::ResumeDisk { .. } => None,
         };
         let submit_handle = handle.clone();
         let without_authentication_handle = handle.clone();
@@ -526,6 +582,13 @@ impl Zetta {
                         .child(
                             Label::new(match action {
                                 Some(action) => action.title(self.no_mux),
+                                None if matches!(
+                                    prompt.mode,
+                                    SessionAuthenticationPromptMode::ResumeDisk { .. }
+                                ) =>
+                                {
+                                    "Resume encrypted disk session"
+                                }
                                 None => "Authenticate protected session",
                             })
                             .size(LabelSize::Large),
@@ -536,6 +599,13 @@ impl Zetta {
                                 .text_color(colors.text_muted)
                                 .child(match action {
                                     Some(action) => action.description(self.no_mux),
+                                    None if matches!(
+                                        prompt.mode,
+                                        SessionAuthenticationPromptMode::ResumeDisk { .. }
+                                    ) =>
+                                    {
+                                        "Enter the session secret after decrypting the disk record."
+                                    }
                                     None => {
                                         "Enter the secret chosen when this session was detached."
                                     }

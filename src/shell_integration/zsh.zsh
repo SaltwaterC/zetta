@@ -152,6 +152,12 @@ _zmux_session_ids() {
     compadd -- "${(@f)$(${mux_list_command[@]} 2>/dev/null | awk '$1 == "reconnect" && $2 == "id:" && $3 ~ /^[0-9]+:[0-9]+:[0-9]+$/ { print $3 }')}"
 }
 
+_zmux_restorable_ids() {
+    local -a mux_list_command=(zetta mux list)
+    [[ ${_zetta_mux_completion_command:-} == zmux ]] && mux_list_command=(zmux list)
+    compadd -- "${(@f)$(${mux_list_command[@]} 2>/dev/null | awk '$1 == "resume" && $2 == "id:" && $3 ~ /^[0-9]+$/ { print $3 }')}"
+}
+
 _zetta_tab_icons() {
     compadd -- "${(@f)$(zetta tabicon --list 2>/dev/null)}"
 }
@@ -532,8 +538,8 @@ _zetta() {
                     compadd -S ' ' -- list reconnect
                     _zetta_options --json --help --version
                 else
-                    compadd -S ' ' -- list stop reconnect share unshare kill forget
-                    _zetta_options --json --upgrade --help --version
+                    compadd -S ' ' -- list stop reconnect resume share unshare kill forget
+                    _zetta_options --json --upgrade --identity --help --version
                 fi
             elif [[ ${ZETTA_NO_MUX:-0} == 1 && ${words[3]} != reconnect && ${words[3]} != list ]]; then
                 return
@@ -541,10 +547,18 @@ _zetta() {
                 _zetta_options --force --help
             elif [[ ${words[3]} == reconnect ]]; then
                 _zmux_session_ids
+            elif [[ ${words[3]} == resume && $words[CURRENT] != -* ]]; then
+                if [[ $words[CURRENT-1] == --identity ]]; then
+                    _files
+                else
+                    _zmux_restorable_ids
+                fi
+            elif [[ ${words[3]} == resume ]]; then
+                _zetta_options --identity --help
             elif [[ ${ZETTA_NO_MUX:-0} != 1 && ( ${words[3]} == share || ${words[3]} == unshare || ${words[3]} == kill || ${words[3]} == forget ) ]]; then
                 _zmux_session_ids
             else
-                _zetta_options --json --help
+                _zetta_options --json --identity --help
             fi
             ;;
         init)

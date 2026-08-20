@@ -20,6 +20,8 @@ use std::{
 use anyhow::{Context as _, Result};
 use gpui::AppContext as _;
 use terminal::{PtyHandover, PtyProvider, PtySpawnRequest};
+#[cfg(feature = "session-persistence")]
+use zmux::persistence::PersistenceOptions;
 use zmux::{
     client::{Client, ExitReporters, PaneSignals},
     messages::{SpawnRequest, TerminalSize},
@@ -38,6 +40,7 @@ pub(crate) struct MuxRuntime {
 
 impl MuxRuntime {
     /// Connects to the multiplexer, starting one if there is none.
+    #[cfg(not(feature = "session-persistence"))]
     pub(crate) fn connect_with_retention(retention: Retention) -> Result<Self> {
         let client = Arc::new(
             Client::connect_with_retention(retention).context("connecting to the multiplexer")?,
@@ -48,6 +51,45 @@ impl MuxRuntime {
         Ok(Self {
             client,
             retention,
+            reporters: subscription.exits,
+            revoke_reporters: subscription.revokes,
+            grant_reporters: subscription.grants,
+        })
+    }
+
+    #[cfg(feature = "session-persistence")]
+    pub(crate) fn connect_with_retention_and_persistence(
+        retention: Retention,
+        persistence: PersistenceOptions,
+    ) -> Result<Self> {
+        let client = Arc::new(
+            Client::connect_with_retention_and_persistence(retention, persistence)
+                .context("connecting to the multiplexer")?,
+        );
+        let subscription = client
+            .subscribe()
+            .context("subscribing to multiplexer events")?;
+        Ok(Self {
+            client,
+            retention,
+            reporters: subscription.exits,
+            revoke_reporters: subscription.revokes,
+            grant_reporters: subscription.grants,
+        })
+    }
+
+    #[cfg(feature = "session-persistence")]
+    pub(crate) fn connect_for_disk_resume() -> Result<Self> {
+        let client = Arc::new(
+            Client::connect_with_retention_for_resume(Retention::Disk)
+                .context("connecting to the multiplexer for disk resume")?,
+        );
+        let subscription = client
+            .subscribe()
+            .context("subscribing to multiplexer events")?;
+        Ok(Self {
+            client,
+            retention: Retention::Disk,
             reporters: subscription.exits,
             revoke_reporters: subscription.revokes,
             grant_reporters: subscription.grants,
@@ -292,8 +334,19 @@ impl crate::Zetta {
                 .launch_config
                 .sessions
                 .to_zmux_retention()
-                .and_then(MuxRuntime::connect_with_retention)
-            {
+                .and_then(|retention| {
+                    #[cfg(feature = "session-persistence")]
+                    {
+                        MuxRuntime::connect_with_retention_and_persistence(
+                            retention,
+                            self.launch_config.sessions.to_zmux_persistence(),
+                        )
+                    }
+                    #[cfg(not(feature = "session-persistence"))]
+                    {
+                        MuxRuntime::connect_with_retention(retention)
+                    }
+                }) {
                 Ok(runtime) => self.mux = Some(runtime),
                 Err(error) => {
                     self.configuration_error = Some(format!(

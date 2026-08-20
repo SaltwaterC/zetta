@@ -6,9 +6,9 @@ installation:
 
 ```text
 Zetta 0.1.0
-CONTROL_VERSION=1
+CONTROL_VERSION=2
 CATALOG_VERSION=1
-ZMUX_PROTOCOL_VERSION=1
+ZMUX_PROTOCOL_VERSION=2
 ```
 
 The package version identifies the executable. The three following values
@@ -22,9 +22,9 @@ current source tree.
 | Marker | Current value | Owned by | What it versions | Compatibility effect |
 | --- | ---: | --- | --- | --- |
 | `CARGO_PKG_VERSION` | package version | Zetta and `zmux` | User-facing executable release | Identifies the build; it is not a wire-protocol negotiation value. |
-| `CONTROL_VERSION` | `1` | `crates/zmux/src/protocol.rs` | The Zetta-to-Zetta process-control endpoint and request meanings | Endpoints with another version are skipped. This remains the initial under-development contract. |
+| `CONTROL_VERSION` | `2` | `crates/zmux/src/protocol.rs` | The Zetta-to-Zetta process-control endpoint and request meanings, including disk-session resume | Endpoints with another version are skipped. |
 | `zmux::protocol::CATALOG_VERSION` | `1` | `crates/zmux/src/protocol.rs` | The public background-session catalog JSON | A catalog with another version is ignored until its owner publishes the current schema. |
-| `zmux::messages::PROTOCOL_VERSION` | `1` | `crates/zmux/src/messages.rs` | The client/daemon message protocol, including its length-prefixed transport framing | Normal requests require an exact match. `zmux --upgrade` is the compatibility path for replacing an older daemon. Debug session directories are namespaced by this value. |
+| `zmux::messages::PROTOCOL_VERSION` | `2` | `crates/zmux/src/messages.rs` | The client/daemon message protocol, including disk-session resume and its length-prefixed transport framing | Normal requests require an exact match. `zmux --upgrade` is the compatibility path for replacing an older daemon. Debug session directories are namespaced by this value. |
 | `zmux::transport::ENDPOINT_VERSION` | `1` | `crates/zmux/src/transport.rs` | The `zmux.json` endpoint descriptor (`socket_path`, token, process ID, and protocol advertisement) | An endpoint with an unknown shape is rejected, causing the client to recover by starting or finding a usable daemon. |
 | `zmux::upgrade::HANDOVER_VERSION` | `5` on Unix | `crates/zmux/src/upgrade.rs` | The private state handed from one Unix daemon image to the next during `--upgrade` | The replacement is preflighted and refuses an unknown handover shape before the old daemon execs. |
 | `zmux::pty_host::HOST_PROTOCOL_VERSION` | `1` on Windows | `crates/zmux/src/pty_host.rs` | The additive protocol between the Windows pseudoconsole host and a daemon | The host outlives a daemon replacement, so a new daemon must still speak the host's protocol. Windows daemon lifecycle is currently gated, but this remains a future compatibility boundary. |
