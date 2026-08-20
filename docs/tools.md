@@ -209,10 +209,10 @@ milliseconds) behave the same everywhere except that some macOS notification
 centers ignore the timeout and always show the application name as Zetta.
 Run `zetta notify --help` for complete syntax.
 
-`--sound` accepts `zetta-default`, `zetta-ok`, or `zetta-alarm`: short tones
-that Zetta synthesizes and plays itself, so they sound the same regardless of
-the host's sound theme, volume mixer routing quirks, or whether one is
-configured at all. Any other value is passed through as a platform-specific
+`--sound` accepts `zetta-default`, `zetta-ok`, `zetta-alarm`, or `zetta-gong`:
+tones that Zetta bundles and plays directly, so they sound the same
+regardless of the host's sound theme, volume mixer routing quirks, or whether
+one is configured at all. Any other value is passed through as a platform-specific
 system sound name instead (for example a freedesktop sound-theme name such as
 `message-new-instant` on Linux, a system sound name such as `Glass` on macOS,
 or a toast sound identifier such as `IM` on Windows) and only plays if the

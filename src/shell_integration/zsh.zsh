@@ -160,21 +160,21 @@ _zetta_pane_themes() {
     compadd -- "${(@f)$(zetta panetheme --list 2>/dev/null)}"
 }
 
-# zetta-default/zetta-ok/zetta-alarm are bundled tones Zetta plays itself, so
+# zetta-default/zetta-ok/zetta-alarm/zetta-gong are bundled tones Zetta plays itself, so
 # they always work; the rest are the current platform's own system sound
 # names, which only work on that platform, so only that platform's names are
 # offered.
 _zetta_sound_names() {
     case "$OSTYPE" in
         darwin*)
-            compadd -- zetta-default zetta-ok zetta-alarm \
+            compadd -- zetta-default zetta-ok zetta-alarm zetta-gong \
                 Basso Blow Bottle Frog Funk Glass Hero Morse Ping Pop Purr Sosumi Submarine Tink
             ;;
         msys*|cygwin*|win32*)
-            compadd -- zetta-default zetta-ok zetta-alarm Default IM Mail Reminder SMS
+            compadd -- zetta-default zetta-ok zetta-alarm zetta-gong Default IM Mail Reminder SMS
             ;;
         *)
-            compadd -- zetta-default zetta-ok zetta-alarm bell complete message \
+            compadd -- zetta-default zetta-ok zetta-alarm zetta-gong bell complete message \
                 message-new-instant dialog-information dialog-warning dialog-error trash-empty
             ;;
     esac

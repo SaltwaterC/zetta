@@ -11,6 +11,7 @@ fn parse_recognizes_exact_names_and_rejects_unknown_values() {
         BuiltinSound::parse("zetta-alarm"),
         Some(BuiltinSound::Alarm)
     );
+    assert_eq!(BuiltinSound::parse("zetta-gong"), Some(BuiltinSound::Gong));
     assert_eq!(BuiltinSound::parse("Zetta-Default"), None);
     assert_eq!(BuiltinSound::parse("bell"), None);
     assert_eq!(BuiltinSound::parse(""), None);
@@ -52,6 +53,85 @@ fn rendered_sample_count_matches_the_notes_total_duration() {
         BuiltinSound::Alarm.samples(SAMPLE_RATE).len(),
         expected_samples
     );
+}
+
+#[test]
+fn gong_has_a_long_resonant_tail() {
+    const SAMPLE_RATE: u32 = 44_100;
+    let samples = BuiltinSound::Gong.samples(SAMPLE_RATE);
+    let expected_samples = (SAMPLE_RATE as u64 * GONG_DURATION_MS as u64 / 1000) as usize;
+    let early_energy = samples[..SAMPLE_RATE as usize / 10]
+        .iter()
+        .map(|sample| sample * sample)
+        .sum::<f32>()
+        / (SAMPLE_RATE as f32 / 10.0);
+    let tail_energy = samples[SAMPLE_RATE as usize * 3 / 4..]
+        .iter()
+        .map(|sample| sample * sample)
+        .sum::<f32>()
+        / (samples.len() - SAMPLE_RATE as usize * 3 / 4) as f32;
+
+    assert_eq!(samples.len(), expected_samples);
+    assert!(early_energy > 0.0001);
+    assert!(tail_energy > 0.00001);
+    assert!(tail_energy < early_energy);
+}
+
+#[test]
+fn gong_uses_the_available_headroom_without_clipping() {
+    let samples = BuiltinSound::Gong.samples(44_100);
+    let peak = samples.iter().copied().map(f32::abs).fold(0.0, f32::max);
+
+    assert!((peak - GONG_PEAK_AMPLITUDE).abs() < 0.000_001);
+}
+
+#[test]
+fn gong_low_body_blooms_after_the_strike() {
+    const SAMPLE_RATE: usize = 44_100;
+    let samples = BuiltinSound::Gong.samples(SAMPLE_RATE as u32);
+    let mut low_passed = Vec::with_capacity(samples.len());
+    let coefficient = (-std::f32::consts::TAU * 250.0 / SAMPLE_RATE as f32).exp();
+    let mut low = 0.0;
+    for sample in &samples {
+        low = low * coefficient + sample * (1.0 - coefficient);
+        low_passed.push(low);
+    }
+
+    let initial_low_energy = mean_square(&low_passed[SAMPLE_RATE / 200..SAMPLE_RATE / 25]);
+    let bloomed_low_energy = mean_square(&low_passed[SAMPLE_RATE / 6..SAMPLE_RATE / 3]);
+
+    assert!(bloomed_low_energy > initial_low_energy);
+}
+
+#[test]
+fn gong_does_not_carry_a_broadband_hiss() {
+    const SAMPLE_RATE: usize = 44_100;
+    let samples = BuiltinSound::Gong.samples(SAMPLE_RATE as u32);
+    let coefficient = (-std::f32::consts::TAU * 4_000.0 / SAMPLE_RATE as f32).exp();
+    let mut low_passed = 0.0;
+    let mut total_energy = 0.0;
+    let mut high_frequency_energy = 0.0;
+
+    for sample in &samples[..SAMPLE_RATE] {
+        low_passed = low_passed * coefficient + sample * (1.0 - coefficient);
+        total_energy += sample * sample;
+        high_frequency_energy += (sample - low_passed).powi(2);
+    }
+
+    assert!(high_frequency_energy / total_energy < 0.04);
+}
+
+fn mean_square(samples: &[f32]) -> f32 {
+    samples.iter().map(|sample| sample * sample).sum::<f32>() / samples.len() as f32
+}
+
+#[test]
+fn gong_mulaw_asset_has_the_expected_duration_and_polarity() {
+    assert_eq!(GONG_MULAW.len(), 92_610);
+    assert_eq!(decode_mulaw(0xff), 0.0);
+    assert_eq!(decode_mulaw(0x7f), 0.0);
+    assert!(decode_mulaw(0x80) > 0.9);
+    assert!(decode_mulaw(0x00) < -0.9);
 }
 
 #[test]
@@ -101,13 +181,13 @@ fn macos_wav_output_is_pcm_with_the_rendered_sample_count() {
 #[test]
 fn macos_builtin_sound_is_cached_with_trailing_silence() {
     let directory = tempfile::tempdir().unwrap();
-    let path = prepare_macos_builtin_sound(BuiltinSound::Alarm, directory.path()).unwrap();
+    let path = prepare_macos_builtin_sound(BuiltinSound::Gong, directory.path()).unwrap();
     let wav = std::fs::read(&path).unwrap();
     let data_size = u32::from_le_bytes(wav[40..44].try_into().unwrap()) as usize;
-    let rendered_samples = BuiltinSound::Alarm.samples(44_100).len();
+    let rendered_samples = BuiltinSound::Gong.samples(44_100).len();
     let trailing_samples = 44_100 * 200 / 1000;
 
-    assert_eq!(path.file_name().unwrap(), "zetta-alarm-v1.wav",);
+    assert_eq!(path.file_name().unwrap(), "zetta-gong-v1.wav",);
     assert_eq!(data_size, (rendered_samples + trailing_samples) * 2);
     assert!(
         wav[wav.len() - trailing_samples * 2..]
@@ -115,7 +195,7 @@ fn macos_builtin_sound_is_cached_with_trailing_silence() {
             .all(|byte| *byte == 0)
     );
     assert_eq!(
-        prepare_macos_builtin_sound(BuiltinSound::Alarm, directory.path()).unwrap(),
+        prepare_macos_builtin_sound(BuiltinSound::Gong, directory.path()).unwrap(),
         path
     );
 }

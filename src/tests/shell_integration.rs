@@ -803,7 +803,7 @@ fn sound_completion_calls_a_shared_helper_from_every_call_site() {
 #[test]
 fn sound_completion_is_scoped_to_the_detected_platform() {
     let profiles = profiles();
-    let bundled = ["zetta-default", "zetta-ok", "zetta-alarm"];
+    let bundled = ["zetta-default", "zetta-ok", "zetta-alarm", "zetta-gong"];
     let linux_only = ["bell", "message-new-instant", "trash-empty"];
     let macos_only = ["Basso", "Glass", "Sosumi"];
     let windows_only = ["IM", "Reminder", "SMS"];

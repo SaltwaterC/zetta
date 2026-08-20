@@ -156,17 +156,17 @@ function __zetta_pane_labels
     zetta pane --list 2>/dev/null
 end
 
-# zetta-default/zetta-ok/zetta-alarm are bundled tones Zetta plays itself, so
+# zetta-default/zetta-ok/zetta-alarm/zetta-gong are bundled tones Zetta plays itself, so
 # they always work; the rest are the current platform's own system sound
 # names, which only work on that platform, so only that platform's names are
 # offered.
 function __zetta_sound_names
     switch (uname)
         case Darwin
-            printf '%s\n' zetta-default zetta-ok zetta-alarm \
+            printf '%s\n' zetta-default zetta-ok zetta-alarm zetta-gong \
                 Basso Blow Bottle Frog Funk Glass Hero Morse Ping Pop Purr Sosumi Submarine Tink
         case '*'
-            printf '%s\n' zetta-default zetta-ok zetta-alarm bell complete message \
+            printf '%s\n' zetta-default zetta-ok zetta-alarm zetta-gong bell complete message \
                 message-new-instant dialog-information dialog-warning dialog-error trash-empty
     end
 end

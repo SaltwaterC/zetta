@@ -19,17 +19,18 @@ use std::process::{Command, Stdio};
 
 /// The built-in notification tones bundled with Zetta. Unlike a system sound
 /// name (which the OS notification server resolves against its own sound
-/// theme and may not play at all), these are synthesized and played directly
-/// by Zetta, so they work identically regardless of the host's audio setup.
+/// theme and may not play at all), these are rendered and played directly by
+/// Zetta, so they work identically regardless of the host's audio setup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BuiltinSound {
     Default,
     Ok,
     Alarm,
+    Gong,
 }
 
 impl BuiltinSound {
-    pub(crate) const ALL: [Self; 3] = [Self::Default, Self::Ok, Self::Alarm];
+    pub(crate) const ALL: [Self; 4] = [Self::Default, Self::Ok, Self::Alarm, Self::Gong];
 
     pub(crate) fn parse(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|sound| sound.name() == name)
@@ -40,6 +41,7 @@ impl BuiltinSound {
             Self::Default => "zetta-default",
             Self::Ok => "zetta-ok",
             Self::Alarm => "zetta-alarm",
+            Self::Gong => "zetta-gong",
         }
     }
 
@@ -61,11 +63,16 @@ impl BuiltinSound {
             Self::Default => &DEFAULT_NOTES,
             Self::Ok => &OK_NOTES,
             Self::Alarm => &ALARM_NOTES,
+            // Gong has a dense modal renderer instead of a sequence of notes.
+            Self::Gong => &[],
         }
     }
 
     fn samples(self, sample_rate: u32) -> Vec<f32> {
-        render(self.notes(), sample_rate)
+        match self {
+            Self::Gong => render_gong(sample_rate),
+            _ => render(self.notes(), sample_rate),
+        }
     }
 
     pub(crate) fn play(self) -> Result<()> {
@@ -263,6 +270,56 @@ where
 struct Note {
     frequency_hz: f32,
     duration_ms: u32,
+}
+
+const GONG_DURATION_MS: u32 = 4_200;
+const GONG_PEAK_AMPLITUDE: f32 = 0.3;
+const GONG_MULAW_SAMPLE_RATE: u32 = 22_050;
+const GONG_MULAW: &[u8] = include_bytes!("notification_sounds/gong.mulaw");
+
+// This is a real CC0 gong recording, not a synthesized approximation. The
+// compact G.711 mu-law source retains the strike and long tail while avoiding
+// a large uncompressed asset; linear interpolation adapts it to the output
+// device's native rate. See notification_sounds/README.md for provenance.
+fn render_gong(sample_rate: u32) -> Vec<f32> {
+    if sample_rate == 0 || GONG_MULAW.is_empty() {
+        return Vec::new();
+    }
+    let decoded = GONG_MULAW
+        .iter()
+        .copied()
+        .map(decode_mulaw)
+        .collect::<Vec<_>>();
+    let sample_count = (sample_rate as u64 * GONG_DURATION_MS as u64 / 1_000) as usize;
+    let source_samples_per_output = GONG_MULAW_SAMPLE_RATE as f64 / sample_rate as f64;
+    let mut samples = Vec::with_capacity(sample_count);
+    for index in 0..sample_count {
+        let source_position = index as f64 * source_samples_per_output;
+        let left_index = source_position as usize;
+        let right_index = (left_index + 1).min(decoded.len() - 1);
+        let fraction = (source_position - left_index as f64) as f32;
+        samples.push(decoded[left_index] * (1.0 - fraction) + decoded[right_index] * fraction);
+    }
+
+    let peak = samples.iter().copied().map(f32::abs).fold(0.0, f32::max);
+    if peak > 0.0 {
+        let gain = GONG_PEAK_AMPLITUDE / peak;
+        samples.iter_mut().for_each(|sample| *sample *= gain);
+    }
+    samples
+}
+
+fn decode_mulaw(encoded: u8) -> f32 {
+    let value = !encoded;
+    let exponent = ((value >> 4) & 0x07) as i32;
+    let mantissa = (value & 0x0f) as i32;
+    let magnitude = (((mantissa << 3) + 0x84) << exponent) - 0x84;
+    let signed = if value & 0x80 == 0 {
+        magnitude
+    } else {
+        -magnitude
+    };
+    signed as f32 / 32_768.0
 }
 
 impl Note {

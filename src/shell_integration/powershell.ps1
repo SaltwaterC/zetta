@@ -85,12 +85,12 @@ $zettaSplits = { @(& zetta splits 2>$null) }
 $zettaProjects = { @(& zetta project list 2>$null) }
 $zettaPaneLabels = { @(& zetta pane --list 2>$null) }
 
-# zetta-default/zetta-ok/zetta-alarm are bundled tones Zetta plays itself, so
+# zetta-default/zetta-ok/zetta-alarm/zetta-gong are bundled tones Zetta plays itself, so
 # they always work; the rest are the current platform's own system sound
 # names, which only work on that platform, so only that platform's names are
 # offered. $IsMacOS/$IsLinux are unset on Windows PowerShell 5.1, which only
 # runs on Windows, so the Windows branch is also the correct fallback there.
-$zettaSoundNames = @('zetta-default', 'zetta-ok', 'zetta-alarm') + $(
+$zettaSoundNames = @('zetta-default', 'zetta-ok', 'zetta-alarm', 'zetta-gong') + $(
     if ($IsMacOS) {
         'Basso', 'Blow', 'Bottle', 'Frog', 'Funk', 'Glass', 'Hero', 'Morse', 'Ping', 'Pop', 'Purr', 'Sosumi', 'Submarine', 'Tink'
     } elseif ($IsLinux) {

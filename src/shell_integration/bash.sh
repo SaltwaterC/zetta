@@ -738,7 +738,7 @@ _zetta_complete_serial_devices() {
     COMPREPLY=( $(compgen -W "$devices" -- "$current") )
 }
 
-# zetta-default/zetta-ok/zetta-alarm are bundled tones Zetta plays itself, so
+# zetta-default/zetta-ok/zetta-alarm/zetta-gong are bundled tones Zetta plays itself, so
 # they always work; the rest are the current platform's own system sound
 # names, which only work on that platform, so only that platform's names are
 # offered.
@@ -755,7 +755,7 @@ _zetta_complete_sound_names() {
             platform_sounds='bell complete message message-new-instant dialog-information dialog-warning dialog-error trash-empty'
             ;;
     esac
-    COMPREPLY=( $(compgen -W "zetta-default zetta-ok zetta-alarm $platform_sounds" -- "$current") )
+    COMPREPLY=( $(compgen -W "zetta-default zetta-ok zetta-alarm zetta-gong $platform_sounds" -- "$current") )
 }
 
 _ztftp_complete() {
