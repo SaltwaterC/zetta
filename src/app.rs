@@ -990,6 +990,7 @@ impl Zetta {
             // for why a new tab must start from the non-project default even when
             // opening directly into a project.
             icon: self.launch_config.default_tab_icon,
+            icon_override: TabIconOverride::None,
             pinned: false,
             renaming_pane: None,
             rename_buffer: None,

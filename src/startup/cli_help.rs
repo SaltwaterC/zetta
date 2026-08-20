@@ -165,7 +165,7 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
     )
     .replace(
         "mux                                 Control, list, and reconnect background sessions",
-        "mux                                 Control, list, and reconnect background sessions\n  wt                                  Create and integrate Git worktrees\n  splits                              List configured pane split templates\n  tabicon                             Set the active tab icon\n  panetheme                           Non-persistently change the active pane's theme\n  overlay                             Non-persistently show text over the active pane\n  edit                                Edit files with $EDITOR, falling back to Zetta vi\n  vi                                  Edit files with Zetta's built-in vi",
+        "mux                                 Control, list, and reconnect background sessions\n  wt                                  Create and integrate Git worktrees\n  splits                              List configured pane split templates\n  tabicon                             Set the active tab's icon override\n  panetheme                           Non-persistently change the active pane's theme\n  overlay                             Non-persistently show text over the active pane\n  edit                                Edit files with $EDITOR, falling back to Zetta vi\n  vi                                  Edit files with Zetta's built-in vi",
     )
     .replace(
         "  -v, --version                       Print version",
@@ -196,7 +196,7 @@ pub(crate) fn parse_terminal_resize_dimension(argument: &OsString, option: &str)
 }
 
 pub(crate) fn tab_icon_help() -> &'static str {
-    "Set the active tab icon through the running Zetta process\n\nUsage: zetta tabicon [OPTIONS] ICON\n       zetta tabicon --list\n\nICON is a built-in icon name. Use none to hide the icon. The icon list is fetched dynamically with --list.\n\nOptions:\n  -i, --icon NAME  Set the icon by option instead of as a positional argument\n  -l, --list       Print built-in icon names, including none\n  -h, --help       Print help"
+    "Set the active tab's per-tab icon override through the running Zetta process\n\nUsage: zetta tabicon [OPTIONS] ICON\n       zetta tabicon --list\n\nICON is a built-in icon name. Use none to explicitly hide the icon. The choice remains with the logical tab across project changes and background/shared-session handoffs, and is never written to user or project configuration. The icon list is fetched dynamically with --list.\n\nOptions:\n  -i, --icon NAME  Set the icon by option instead of as a positional argument\n  -l, --list       Print built-in icon names, including none\n  -h, --help       Print help"
 }
 
 pub(crate) fn parse_tab_icon_args(args: &[OsString]) -> Result<StartupMode> {

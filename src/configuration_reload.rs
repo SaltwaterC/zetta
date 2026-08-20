@@ -246,6 +246,8 @@ impl Zetta {
             self.projects.insert_config(project);
         }
         self.projects.invalidate_active_context();
+        let active_project = self.active_project_config().cloned();
+        self.refresh_active_project_tab_icon(active_project.as_deref());
         let project_tab_ids = self
             .tabs
             .iter()

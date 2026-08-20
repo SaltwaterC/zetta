@@ -1894,6 +1894,30 @@ impl TabAttention {
     }
 }
 
+/// The user-selected tab icon, kept separate from `Tab::icon`, which is the
+/// currently effective icon after project/default resolution.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum TabIconOverride {
+    /// No user choice: the active project or the configured default may supply
+    /// the effective icon.
+    #[default]
+    None,
+    /// A user-selected icon that takes precedence over project/default values.
+    Icon(IconName),
+    /// A user-selected absence of an icon, which must not be confused with no
+    /// override at all.
+    Hidden,
+}
+
+impl TabIconOverride {
+    pub(crate) const fn from_icon(icon: Option<IconName>) -> Self {
+        match icon {
+            Some(icon) => Self::Icon(icon),
+            None => Self::Hidden,
+        }
+    }
+}
+
 pub(crate) struct Tab {
     pub(crate) id: u64,
     /// Stable within this Zetta process. Unlike `id`, this survives moving a
@@ -1932,6 +1956,10 @@ pub(crate) struct Tab {
     /// title.
     pub(crate) process_title: Option<String>,
     pub(crate) icon: Option<IconName>,
+    /// Explicit per-tab icon choice. `icon` remains the effective value so
+    /// rendering does not need to know whether it came from this override or
+    /// from project/default resolution.
+    pub(crate) icon_override: TabIconOverride,
     /// Session-only visual pinning. Pinned tabs stay in the leading tab-bar
     /// prefix and are independent from the keep-running close policy.
     pub(crate) pinned: bool,
@@ -1950,6 +1978,13 @@ pub(crate) struct Tab {
 }
 
 impl Tab {
+    /// Applies a user choice to both the effective icon and its precedence
+    /// marker. Project resolution must never be able to replace this choice.
+    pub(crate) fn set_icon_override(&mut self, icon: Option<IconName>) {
+        self.icon = icon;
+        self.icon_override = TabIconOverride::from_icon(icon);
+    }
+
     /// Renumbers a tab that is entering this window, and reports how.
     ///
     /// Every window-scoped registry is keyed by pane id alone — the multiplexer

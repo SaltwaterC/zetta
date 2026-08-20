@@ -19,12 +19,20 @@
 
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::TabIconOverride;
 use crate::{
     BackgroundPaneExit, PaneLayout, PaneStack, PaneStackSelection, Profile, SplitAxis, StackedPane,
     Tab, TabClosePolicy, TerminalPane,
 };
+
+fn deserialize_icon_override<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -57,6 +65,15 @@ pub(crate) struct TabState {
     pub(crate) worktree_seed_title: Option<String>,
     pub(crate) process_title: Option<String>,
     pub(crate) icon: Option<String>,
+    /// Absent means no per-tab override. A string selects an icon and an
+    /// explicit JSON null hides it; the distinction is needed because the
+    /// effective `icon` field alone cannot represent both states.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_icon_override",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) icon_override: Option<Option<String>>,
     pub(crate) pinned: bool,
     pub(crate) panes: Vec<PaneState>,
 }
@@ -303,6 +320,14 @@ impl TabState {
                 let name: &'static str = icon.into();
                 name.to_owned()
             }),
+            icon_override: match tab.icon_override {
+                TabIconOverride::None => None,
+                TabIconOverride::Icon(icon) => {
+                    let name: &'static str = icon.into();
+                    Some(Some(name.to_owned()))
+                }
+                TabIconOverride::Hidden => Some(None),
+            },
             pinned: tab.pinned,
             panes: tab
                 .panes
@@ -386,6 +411,23 @@ impl TabState {
             self.active_pane
         );
 
+        let icon = self
+            .icon
+            .as_deref()
+            .and_then(crate::tab_icon_picker::parse_tab_icon_name);
+        let icon_override = match self.icon_override {
+            None => TabIconOverride::None,
+            Some(None) => TabIconOverride::Hidden,
+            Some(Some(name)) => crate::tab_icon_picker::parse_tab_icon_name(&name)
+                .map(TabIconOverride::Icon)
+                .unwrap_or_default(),
+        };
+        let icon = match icon_override {
+            TabIconOverride::None => icon,
+            TabIconOverride::Icon(icon) => Some(icon),
+            TabIconOverride::Hidden => None,
+        };
+
         let panes = self
             .panes
             .into_iter()
@@ -447,10 +489,8 @@ impl TabState {
             custom_title: self.custom_title,
             worktree_seed_title: self.worktree_seed_title,
             process_title: self.process_title,
-            icon: self
-                .icon
-                .as_deref()
-                .and_then(crate::tab_icon_picker::parse_tab_icon_name),
+            icon,
+            icon_override,
             pinned: self.pinned,
             renaming_pane: None,
             rename_buffer: None,

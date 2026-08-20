@@ -562,6 +562,7 @@ fn tab_pane_index_resolves_panes_without_scanning() {
         worktree_seed_title: None,
         process_title: None,
         icon: Some(IconName::Terminal),
+        icon_override: TabIconOverride::None,
         pinned: false,
         renaming_pane: None,
         rename_buffer: None,
@@ -756,6 +757,7 @@ fn split_profile_comes_from_the_active_pane() {
         worktree_seed_title: None,
         process_title: None,
         icon: Some(IconName::Terminal),
+        icon_override: TabIconOverride::None,
         pinned: false,
         renaming_pane: None,
         rename_buffer: None,
@@ -826,6 +828,7 @@ fn closing_active_pane_restores_previous_focus() {
         worktree_seed_title: None,
         process_title: None,
         icon: Some(IconName::Terminal),
+        icon_override: TabIconOverride::None,
         pinned: false,
         renaming_pane: None,
         rename_buffer: None,
@@ -898,6 +901,7 @@ fn closing_inactive_pane_preserves_focus() {
         worktree_seed_title: None,
         process_title: None,
         icon: Some(IconName::Terminal),
+        icon_override: TabIconOverride::None,
         pinned: false,
         renaming_pane: None,
         rename_buffer: None,
@@ -1303,6 +1307,7 @@ fn pane_management_tab() -> Tab {
         worktree_seed_title: None,
         process_title: None,
         icon: Some(IconName::Terminal),
+        icon_override: TabIconOverride::None,
         pinned: false,
         renaming_pane: None,
         rename_buffer: None,
@@ -2065,6 +2070,19 @@ fn at_least_one_pane_must_remain_visible() {
     assert_eq!(tab.visible_layout(), Some(PaneLayout::Pane(1)));
     assert!(tab.restore_last_minimized());
     assert_eq!(tab.active_pane, 3);
+}
+
+#[test]
+fn setting_a_tab_icon_updates_the_effective_value_and_override_marker() {
+    let mut tab = pane_management_tab();
+
+    tab.set_icon_override(Some(IconName::Folder));
+    assert_eq!(tab.icon, Some(IconName::Folder));
+    assert_eq!(tab.icon_override, TabIconOverride::Icon(IconName::Folder));
+
+    tab.set_icon_override(None);
+    assert_eq!(tab.icon, None);
+    assert_eq!(tab.icon_override, TabIconOverride::Hidden);
 }
 
 #[test]

@@ -127,11 +127,53 @@ fn leaving_a_project_restores_the_tab_icon_it_had_before_entering() {
     let mut inherited = HashMap::new();
     let mut icon = Some(IconName::Terminal);
 
-    apply_project_tab_icon(1, &mut icon, Some(&project), &mut inherited);
+    apply_project_tab_icon(
+        1,
+        &mut icon,
+        TabIconOverride::None,
+        Some(&project),
+        &mut inherited,
+    );
     assert_eq!(icon, Some(IconName::Folder));
     assert_eq!(inherited.get(&1), Some(&Some(IconName::Terminal)));
 
-    apply_project_tab_icon(1, &mut icon, None, &mut inherited);
+    apply_project_tab_icon(1, &mut icon, TabIconOverride::None, None, &mut inherited);
+    assert_eq!(icon, Some(IconName::Terminal));
+    assert!(inherited.is_empty());
+}
+
+#[test]
+fn repeated_project_application_and_transitions_keep_the_original_fallback() {
+    let first = icon_test_project(Some(IconName::Folder));
+    let second = icon_test_project(Some(IconName::Star));
+    let mut inherited = HashMap::new();
+    let mut icon = Some(IconName::Terminal);
+
+    apply_project_tab_icon(
+        1,
+        &mut icon,
+        TabIconOverride::None,
+        Some(&first),
+        &mut inherited,
+    );
+    apply_project_tab_icon(
+        1,
+        &mut icon,
+        TabIconOverride::None,
+        Some(&first),
+        &mut inherited,
+    );
+    apply_project_tab_icon(
+        1,
+        &mut icon,
+        TabIconOverride::None,
+        Some(&second),
+        &mut inherited,
+    );
+    assert_eq!(icon, Some(IconName::Star));
+    assert_eq!(inherited.get(&1), Some(&Some(IconName::Terminal)));
+
+    apply_project_tab_icon(1, &mut icon, TabIconOverride::None, None, &mut inherited);
     assert_eq!(icon, Some(IconName::Terminal));
     assert!(inherited.is_empty());
 }
@@ -147,12 +189,77 @@ fn a_tab_opened_directly_into_a_project_must_not_be_seeded_with_the_projects_own
     let mut inherited = HashMap::new();
     let mut icon = project.effective.default_tab_icon;
 
-    apply_project_tab_icon(1, &mut icon, Some(&project), &mut inherited);
-    apply_project_tab_icon(1, &mut icon, None, &mut inherited);
+    apply_project_tab_icon(
+        1,
+        &mut icon,
+        TabIconOverride::None,
+        Some(&project),
+        &mut inherited,
+    );
+    apply_project_tab_icon(1, &mut icon, TabIconOverride::None, None, &mut inherited);
 
     // Demonstrates the bug this test guards against: the icon is stuck on
     // the project's icon instead of resetting to a real default.
     assert_eq!(icon, Some(IconName::Folder));
+}
+
+#[test]
+fn an_explicit_tab_icon_wins_over_project_changes_and_reapplication() {
+    let first = icon_test_project(Some(IconName::Folder));
+    let second = icon_test_project(Some(IconName::Star));
+    let mut inherited = HashMap::new();
+    let mut icon = Some(IconName::Terminal);
+
+    apply_project_tab_icon(
+        1,
+        &mut icon,
+        TabIconOverride::Icon(IconName::Terminal),
+        Some(&first),
+        &mut inherited,
+    );
+    apply_project_tab_icon(
+        1,
+        &mut icon,
+        TabIconOverride::Icon(IconName::Terminal),
+        Some(&first),
+        &mut inherited,
+    );
+    apply_project_tab_icon(
+        1,
+        &mut icon,
+        TabIconOverride::Icon(IconName::Terminal),
+        Some(&second),
+        &mut inherited,
+    );
+    apply_project_tab_icon(
+        1,
+        &mut icon,
+        TabIconOverride::Icon(IconName::Terminal),
+        None,
+        &mut inherited,
+    );
+
+    assert_eq!(icon, Some(IconName::Terminal));
+    assert!(inherited.is_empty());
+}
+
+#[test]
+fn an_explicit_hidden_tab_icon_wins_over_project_changes_and_leaving() {
+    let project = icon_test_project(Some(IconName::Folder));
+    let mut inherited = HashMap::new();
+    let mut icon = None;
+
+    apply_project_tab_icon(
+        1,
+        &mut icon,
+        TabIconOverride::Hidden,
+        Some(&project),
+        &mut inherited,
+    );
+    apply_project_tab_icon(1, &mut icon, TabIconOverride::Hidden, None, &mut inherited);
+
+    assert_eq!(icon, None);
+    assert!(inherited.is_empty());
 }
 
 #[gpui::test]

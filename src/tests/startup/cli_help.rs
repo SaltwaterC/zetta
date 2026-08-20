@@ -74,7 +74,11 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
         help.contains("wt                                  Create and integrate Git worktrees")
     );
     assert!(help.contains("zetta tabicon [OPTIONS] ICON"));
-    assert!(help.contains("tabicon                             Set the active tab icon"));
+    assert!(
+        help.contains("tabicon                             Set the active tab's icon override")
+    );
+    assert!(tab_icon_help().contains("per-tab icon override"));
+    assert!(tab_icon_help().contains("never written to user or project configuration"));
     assert!(help.contains("zetta attention [OPTIONS] [SUMMARY] [BODY]"));
     assert!(help.contains(
         "attention                           Mark the originating tab as needing attention"

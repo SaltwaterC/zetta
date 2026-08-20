@@ -188,7 +188,7 @@ impl Zetta {
         let Some(tab) = self.tabs.get_mut(self.active_tab) else {
             return false;
         };
-        tab.icon = icon;
+        tab.set_icon_override(icon);
         cx.notify();
         true
     }
@@ -317,7 +317,7 @@ impl Zetta {
         match picker.target {
             TabIconPickerTarget::Tab(tab_index) => {
                 if let Some(tab) = self.tabs.get_mut(tab_index) {
-                    tab.icon = icon;
+                    tab.set_icon_override(icon);
                 }
             }
             TabIconPickerTarget::Default => {

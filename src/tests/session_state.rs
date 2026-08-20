@@ -1,5 +1,6 @@
 use super::*;
 use crate::{OverlayFontSize, PaneStackSelection, SplitPosition};
+use ui::IconName;
 
 fn profile(name: &str) -> Profile {
     Profile {
@@ -39,6 +40,7 @@ fn populated_tab() -> Tab {
         worktree_seed_title: Some("feature".to_owned()),
         process_title: Some("cargo".to_owned()),
         icon: crate::tab_icon_picker::parse_tab_icon_name("Terminal"),
+        icon_override: TabIconOverride::Icon(IconName::Terminal),
         pinned: true,
         renaming_pane: None,
         rename_buffer: None,
@@ -103,6 +105,7 @@ fn a_tab_survives_the_round_trip_to_the_multiplexer_and_back() {
     assert_eq!(restored.process_title, original.process_title);
     assert_eq!(restored.icon, original.icon);
     assert!(restored.icon.is_some(), "the icon must not be lost");
+    assert_eq!(restored.icon_override, original.icon_override);
     assert_eq!(restored.pinned, original.pinned);
     assert_eq!(restored.next_pane_label, original.next_pane_label);
     assert!(matches!(
@@ -115,6 +118,32 @@ fn a_tab_survives_the_round_trip_to_the_multiplexer_and_back() {
     assert_eq!(restored.shared, original.shared);
     assert!(restored.shared, "the sharing must not be lost");
     assert_eq!(restored.pane_indices, original.pane_indices);
+}
+
+#[test]
+fn an_explicit_hidden_icon_round_trips_and_is_distinct_from_no_override() {
+    let mut hidden = populated_tab();
+    hidden.icon = None;
+    hidden.icon_override = TabIconOverride::Hidden;
+
+    let state = TabState::from_tab(&hidden, &HashMap::new());
+    let encoded = serde_json::to_value(&state).unwrap();
+    assert_eq!(encoded["icon_override"], serde_json::Value::Null);
+
+    let restored = serde_json::from_value::<TabState>(encoded)
+        .unwrap()
+        .into_tab(hidden.id, profile)
+        .unwrap();
+    assert_eq!(restored.icon, None);
+    assert_eq!(restored.icon_override, TabIconOverride::Hidden);
+
+    let mut no_override =
+        serde_json::to_value(TabState::from_tab(&hidden, &HashMap::new())).unwrap();
+    no_override.as_object_mut().unwrap().remove("icon_override");
+    let decoded = serde_json::from_value::<TabState>(no_override).unwrap();
+    assert_eq!(decoded.icon_override, None);
+    let restored = decoded.into_tab(hidden.id, profile).unwrap();
+    assert_eq!(restored.icon_override, TabIconOverride::None);
 }
 
 #[test]

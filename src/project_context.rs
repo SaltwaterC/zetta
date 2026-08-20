@@ -529,14 +529,7 @@ impl Zetta {
             ));
         }
 
-        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-            apply_project_tab_icon(
-                tab.id,
-                &mut tab.icon,
-                project.as_deref(),
-                &mut self.projects.inherited_tab_icons,
-            );
-        }
+        self.refresh_active_project_tab_icon(project.as_deref());
 
         self.apply_effective_themes_to_tab(tab_id, cx);
         self.refresh_open_command_palette(window, cx);
@@ -548,6 +541,21 @@ impl Zetta {
             self.apply_pane_split_template_with_profile(&name, None, window, cx);
         }
         cx.notify();
+    }
+
+    /// Reapplies the active project's effective icon without changing project
+    /// context bookkeeping. Configuration reloads use this path because they
+    /// do not have a window with which to call `activate_current_project`.
+    pub(crate) fn refresh_active_project_tab_icon(&mut self, project: Option<&ProjectConfig>) {
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            apply_project_tab_icon(
+                tab.id,
+                &mut tab.icon,
+                tab.icon_override,
+                project,
+                &mut self.projects.inherited_tab_icons,
+            );
+        }
     }
 
     pub(crate) fn apply_effective_themes_to_tab(&mut self, tab_id: u64, cx: &mut Context<Self>) {
@@ -821,20 +829,26 @@ impl Zetta {
     }
 }
 
-/// The tab icon change when a tab's active project becomes `project`
-/// (entering, leaving, or switching projects). The first time a project
-/// applies, the tab's current icon is snapshotted into `inherited_tab_icons`
-/// so leaving the project can restore it. Callers must never seed a new tab's
-/// icon from the project it is opened directly into (see
-/// `Zetta::open_tab_with_profile_context`) — doing so snapshots the
-/// project's own icon instead of the tab's true default, so leaving the
-/// project later "restores" the project's icon rather than resetting it.
+/// Applies the active project's icon when a tab has no explicit user choice.
+/// The first time a project applies, the tab's current icon is snapshotted
+/// into `inherited_tab_icons` so leaving the project can restore it. Explicit
+/// icon choices, including an explicit hidden icon, stay effective across
+/// entering, leaving, and switching projects. Callers must never seed a new
+/// tab's icon from the project it is opened directly into (see
+/// `Zetta::open_tab_with_profile_context`) — doing so snapshots the project's
+/// own icon instead of the tab's true default, so leaving the project later
+/// restores the wrong value.
 pub(crate) fn apply_project_tab_icon(
     tab_id: u64,
     tab_icon: &mut Option<IconName>,
+    tab_icon_override: TabIconOverride,
     project: Option<&ProjectConfig>,
     inherited_tab_icons: &mut HashMap<u64, Option<IconName>>,
 ) {
+    if !matches!(tab_icon_override, TabIconOverride::None) {
+        return;
+    }
+
     match project {
         Some(project) => {
             inherited_tab_icons.entry(tab_id).or_insert(*tab_icon);

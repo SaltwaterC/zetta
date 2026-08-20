@@ -29,6 +29,7 @@ fn pin_test_tab(id: u64, pinned: bool) -> Tab {
         worktree_seed_title: None,
         process_title: None,
         icon: Some(IconName::Terminal),
+        icon_override: TabIconOverride::None,
         pinned,
         renaming_pane: None,
         rename_buffer: None,

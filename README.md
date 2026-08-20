@@ -81,8 +81,10 @@ issuing window and visible tab; closed, dormant, or background-only tabs are
 left alone. Plain `zetta notify` outside Zetta remains fire-and-forget.
 Packaged macOS app builds support click routing; unbundled development builds
 still display notifications but do not route clicks.
-From a Zetta pane, `zetta tabicon ICON` changes the active tab icon, and
-`zetta panetheme THEME` non-persistently changes the active pane's theme
+From a Zetta pane, `zetta tabicon ICON` sets a per-tab icon override on the
+active tab (`none` explicitly hides its icon); it is kept with the logical tab
+but is not written to user or project configuration. `zetta panetheme THEME`
+non-persistently changes the active pane's theme
 (`zetta panetheme --reset` restores the profile's configured theme).
 `zetta overlay TEXT` non-persistently shows text over the active pane's
 terminal content, with `--size`, `--opacity`, and `--color` options
