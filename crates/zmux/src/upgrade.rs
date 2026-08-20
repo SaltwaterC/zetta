@@ -9,7 +9,8 @@
 //! decides how the replacement rebuilds each pane: it reaps its own children, so
 //! it must never treat one as though it belonged to somebody else.
 //!
-//! The listening socket does *not* survive; it is rebound. See [`Handover`].
+//! The listening socket survives as an inherited descriptor, so clients never
+//! see a rebind window while the daemon is replaced.
 //!
 //! Two rules follow from `execv` being irreversible, and both are enforced
 //! here. The replacement is checked before it is run, so a daemon that cannot
@@ -34,17 +35,14 @@ pub const HANDOVER_VERSION: u32 = 5;
 
 /// Everything the next image needs to carry on.
 ///
-/// The listening socket is deliberately absent. It is not carried: `std` opens
-/// sockets close-on-exec, so the replacement unlinks the path and binds it
-/// again, which leaves a brief window in which a connection is refused. Clients
-/// retry, and the endpoint token is preserved so the retry is accepted. Carrying
-/// the socket instead would remove the window, but the descriptors that matter
-/// are the terminals — losing the listener costs a reconnect, losing a terminal
-/// costs the session.
+/// The listening socket is passed separately as an inherited descriptor. It is
+/// not serialized in this blob because it is already an operating-system
+/// object; the replacement receives its number in `--resume-listener`.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Handover {
     pub version: u32,
+    pub generation: u64,
     pub next_session_id: u64,
     pub next_pane_id: u64,
     pub sessions: Vec<SessionHandover>,
@@ -250,15 +248,18 @@ pub fn replacement_accepts_handover(executable: &std::path::Path) -> Result<bool
 pub fn exec_replacement(
     executable: &std::path::Path,
     handover: RawFd,
+    listener: RawFd,
 ) -> Result<std::convert::Infallible> {
     let program = CString::new(executable.as_os_str().as_encoded_bytes())
         .context("the multiplexer's own path is not a valid C string")?;
     let resume = CString::new(format!("--resume-from={handover}"))?;
+    let resume_listener = CString::new(format!("--resume-listener={listener}"))?;
     let daemon = CString::new("--daemon")?;
     let arguments = [
         program.as_ptr(),
         daemon.as_ptr(),
         resume.as_ptr(),
+        resume_listener.as_ptr(),
         std::ptr::null(),
     ];
     // SAFETY: both pointers outlive the call, and the argument vector is

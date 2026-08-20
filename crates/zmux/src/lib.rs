@@ -13,13 +13,13 @@ pub mod auth;
 pub mod catalog;
 pub mod paths;
 pub mod protocol;
+pub mod reconnect;
 pub mod retention;
 
 pub mod client;
 pub mod messages;
 #[cfg(windows)]
 pub mod pty_host;
-#[cfg(unix)]
 pub mod secret_prompt;
 pub mod server;
 pub mod transport;
@@ -29,6 +29,10 @@ pub mod upgrade;
 use std::ffi::OsString;
 
 use anyhow::Result;
+
+/// Set to `1` in shells launched by a Zetta process that keeps sessions local
+/// instead of using the multiplexer daemon.
+pub const NO_MUX_ENVIRONMENT_VARIABLE: &str = "ZETTA_NO_MUX";
 
 const USAGE: &str = "\
 Zetta session multiplexer
@@ -42,31 +46,141 @@ Commands:
                 session, because stopping it ends everything running in one;
                 --force stops it anyway, ending them. Stopping a multiplexer
                 that is not running is not an error.
-  share SESSION   Let every Zetta process see and attach a backgrounded
-                  session. Backgrounding one keeps it to the window that did
-                  it; this is how it is opened up without that window.
-  unshare SESSION Scope a shared session back to the window that last held it
-  kill SESSION    End a session and everything running in it
-  forget SESSION  Remove a session from the catalog without killing it
+  reconnect SESSION_ID
+                Open a backgrounded session in a Zetta window. A scoped
+                session must be shared first.
+  share SESSION_ID   Make a backgrounded session joinable by every Zetta
+                     process. This changes its scope; it does not open it.
+  unshare SESSION_ID Scope a shared session back to the window that last held it
+  kill SESSION_ID    End a session and everything running in it
+  forget SESSION_ID  Remove a session from the catalog without killing it
 
 Options:
   -u, --upgrade         Replace the running multiplexer, keeping its sessions
   -f, --force           Stop even while sessions are running (with stop)
   -j, --json            Print machine-readable JSON (with list)
   -r, --retention MODE  What to keep of a detached pane's output:
-                        none, memory (default), or persist
+                        none or memory (default)
   -h, --help            Print help
   -v, --version         Print the version, and the protocol it speaks";
 
+const NO_MUX_USAGE: &str = "\
+Zetta background sessions (without a multiplexer daemon)
+
+Usage: zmux [COMMAND]
+       zetta mux [COMMAND]
+
+Commands:
+  list          List the available background session catalogs
+  reconnect SESSION_ID
+                Open a backgrounded session in a Zetta window
+
+Options:
+  -j, --json            Print machine-readable JSON (with list)
+  -h, --help            Print help
+  -v, --version         Print the version, and the protocol it speaks";
+
+fn no_mux_environment() -> bool {
+    std::env::var(NO_MUX_ENVIRONMENT_VARIABLE).is_ok_and(|value| value == "1")
+}
+
+fn usage(no_mux: bool) -> &'static str {
+    if no_mux { NO_MUX_USAGE } else { USAGE }
+}
+
+const SESSION_ID_HELP: &str = "SESSION_ID is either the bare numeric session ID or the stable PROCESS:RUNNER:SESSION catalog identifier printed by `zmux list`. The bare form is accepted only when the numeric ID is unambiguous; use the full form when more than one catalog contains it. `share` changes a scoped session to shared mode; `reconnect` is the command that opens it in a Zetta window.";
+const NO_MUX_SESSION_ID_HELP: &str = "SESSION_ID is either the bare numeric session ID or the stable PROCESS:RUNNER:SESSION catalog identifier printed by `zmux list`. The bare form is accepted only when the numeric ID is unambiguous; use the full form when more than one catalog contains it. `reconnect` is the command that opens it in a Zetta window.";
+
+enum SessionArgument {
+    Bare(u64),
+    Full(catalog::SessionIdentifier),
+}
+
+impl SessionArgument {
+    fn parse(value: &str) -> Result<Self> {
+        if value.contains(':') {
+            return Ok(Self::Full(catalog::parse_session_identifier(value)?));
+        }
+        Ok(Self::Bare(value.parse::<u64>().map_err(|_| {
+            anyhow::anyhow!("session ID must be a positive whole number, not {value:?}")
+        })?))
+    }
+}
+
+impl std::fmt::Display for SessionArgument {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bare(session_id) => session_id.fmt(formatter),
+            Self::Full(identifier) => identifier.fmt(formatter),
+        }
+    }
+}
+
+fn resolve_session_id(
+    client: &client::Client,
+    argument: SessionArgument,
+    directory: &std::path::Path,
+) -> Result<u64> {
+    match argument {
+        SessionArgument::Bare(session_id) => {
+            let catalogs = catalog::read_session_catalogs(directory)?;
+            ensure_unambiguous_session_id(&catalogs, session_id)?;
+            Ok(session_id)
+        }
+        SessionArgument::Full(identifier) => {
+            let catalogs = catalog::read_session_catalogs(directory)?;
+            let found = catalogs.iter().any(|catalog| {
+                catalog.process_id == identifier.process_id
+                    && catalog.process_id == client.process_id()
+                    && catalog.runner_id == identifier.runner_id
+                    && catalog
+                        .sessions
+                        .iter()
+                        .any(|session| session.id == identifier.session_id)
+            });
+            anyhow::ensure!(
+                found,
+                "background session {identifier} is not held by the running multiplexer"
+            );
+            Ok(identifier.session_id)
+        }
+    }
+}
+
+fn ensure_unambiguous_session_id(
+    catalogs: &[protocol::BackgroundSessionCatalog],
+    session_id: u64,
+) -> Result<()> {
+    let matches = catalogs
+        .iter()
+        .flat_map(|catalog| {
+            catalog
+                .sessions
+                .iter()
+                .filter(move |session| session.id == session_id)
+        })
+        .count();
+    anyhow::ensure!(
+        matches <= 1,
+        "session ID {session_id} is ambiguous; use the full PROCESS:RUNNER:SESSION ID"
+    );
+    Ok(())
+}
+
 /// The entry point shared by the `zmux` binary and `zetta mux`.
 pub fn run(arguments: &[OsString]) -> Result<()> {
+    let no_mux = no_mux_environment();
     let mut json = false;
     let mut daemon = false;
     let mut retention = retention::Retention::default();
     let mut command: Option<String> = None;
-    let mut session = None;
+    let mut session: Option<SessionArgument> = None;
     let mut expect_retention = false;
+    let mut expect_retention_bytes = false;
+    let mut retention_bytes = None;
     let mut resume_from = None;
+    #[cfg(unix)]
+    let mut resume_listener = None;
     let mut upgrade = false;
     let mut pty_host = false;
     let mut force = false;
@@ -78,10 +192,28 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
             expect_retention = false;
             continue;
         }
+        if expect_retention_bytes {
+            anyhow::ensure!(
+                retention_bytes.is_none(),
+                "--retention-bytes may only be specified once"
+            );
+            retention_bytes = Some(
+                argument
+                    .parse::<usize>()
+                    .map_err(|_| anyhow::anyhow!("--retention-bytes must be a whole number"))?,
+            );
+            expect_retention_bytes = false;
+            continue;
+        }
         match argument.as_ref() {
             "--json" | "-j" => json = true,
             "--force" | "-f" => force = true,
             "--retention" | "-r" => expect_retention = true,
+            // Hidden: Zetta passes its configured byte budget when it starts
+            // the daemon. The public mode remains deliberately small; this
+            // keeps a global daemon-start setting from being silently reset
+            // to the built-in default.
+            "--retention-bytes" => expect_retention_bytes = true,
             // Hidden: how a client starts the daemon it could not find.
             "--daemon" => daemon = true,
             // Hidden: the Windows pseudoconsole host, which outlives the
@@ -112,8 +244,25 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
                     .and_then(|(_, descriptor)| descriptor.parse::<i32>().ok());
                 anyhow::ensure!(resume_from.is_some(), "unusable --resume-from descriptor");
             }
+            // Hidden: inherited by the replacement so the listening socket is
+            // not rebound during an upgrade.
+            #[cfg(unix)]
+            value if value.starts_with("--resume-listener=") => {
+                resume_listener = value
+                    .split_once('=')
+                    .and_then(|(_, descriptor)| descriptor.parse::<i32>().ok());
+                anyhow::ensure!(
+                    resume_listener.is_some(),
+                    "unusable --resume-listener descriptor"
+                );
+            }
             "--help" | "-h" => {
-                println!("{USAGE}");
+                let session_id_help = if no_mux {
+                    NO_MUX_SESSION_ID_HELP
+                } else {
+                    SESSION_ID_HELP
+                };
+                println!("{}\n\n{session_id_help}", usage(no_mux));
                 return Ok(());
             }
             // `-V` as well as `-v`, which is what `zetta --version` takes and
@@ -132,7 +281,7 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
                 );
                 return Ok(());
             }
-            value @ ("list" | "stop" | "share" | "unshare" | "kill" | "attach" | "forget")
+            value @ ("list" | "stop" | "reconnect" | "share" | "unshare" | "kill" | "forget")
                 if command.is_none() =>
             {
                 command = Some(value.to_owned());
@@ -141,18 +290,28 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
                 if !value.starts_with('-')
                     && matches!(
                         command.as_deref(),
-                        Some("kill" | "attach" | "forget" | "share" | "unshare")
+                        Some("reconnect" | "kill" | "forget" | "share" | "unshare")
                     ) =>
             {
                 anyhow::ensure!(session.is_none(), "only one session may be given");
-                session = Some(value.parse::<u64>().map_err(|_| {
-                    anyhow::anyhow!("session ID must be a positive whole number, not {value:?}")
-                })?);
+                session = Some(SessionArgument::parse(&argument)?);
             }
             unknown => anyhow::bail!("unknown mux argument {unknown:?}"),
         }
     }
     anyhow::ensure!(!expect_retention, "--retention requires a mode");
+    anyhow::ensure!(
+        !expect_retention_bytes,
+        "--retention-bytes requires a value"
+    );
+    if let Some(bytes) = retention_bytes {
+        anyhow::ensure!(
+            matches!(retention, retention::Retention::Memory { .. }),
+            "--retention-bytes is only valid with --retention memory"
+        );
+        retention = retention::Retention::Memory { bytes };
+    }
+    retention.validate()?;
 
     if pty_host {
         #[cfg(windows)]
@@ -183,16 +342,23 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
 
     if daemon {
         #[cfg(unix)]
-        return server::run(retention, resume_from);
+        return server::run(retention, resume_from, resume_listener);
         #[cfg(not(unix))]
         {
             let _ = resume_from;
             anyhow::bail!("the multiplexer daemon is not yet supported on this platform");
         }
     }
+    #[cfg(unix)]
+    let _ = (retention, resume_from, resume_listener);
+    #[cfg(not(unix))]
     let _ = (retention, resume_from);
 
     match command.as_deref() {
+        Some("reconnect") => {
+            let session = session.context_missing()?;
+            reconnect::run_reconnect_session(&session.to_string())
+        }
         Some("stop") => {
             #[cfg(unix)]
             {
@@ -219,6 +385,7 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
                 let Some(client) = client::Client::connect_existing()? else {
                     anyhow::bail!("no multiplexer is running");
                 };
+                let session = resolve_session_id(&client, session, &paths::session_catalog_dir())?;
                 client.kill(session)?;
                 println!("Ended session {session}.");
                 Ok(())
@@ -237,6 +404,7 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
                 let Some(client) = client::Client::connect_existing()? else {
                     anyhow::bail!("no multiplexer is running");
                 };
+                let session = resolve_session_id(&client, session, &paths::session_catalog_dir())?;
                 // Sharing is what makes a session joinable from another process,
                 // so it is where a secret is offered: joining a session is being
                 // handed whatever its terminals can already do, and a shell that
@@ -272,6 +440,7 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
                 let Some(client) = client::Client::connect_existing()? else {
                     anyhow::bail!("no multiplexer is running");
                 };
+                let session = resolve_session_id(&client, session, &paths::session_catalog_dir())?;
                 client.forget(session)?;
                 println!("Forgot session {session}.");
                 Ok(())
@@ -281,20 +450,6 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
                 let _ = session;
                 anyhow::bail!("the multiplexer is not yet supported on this platform")
             }
-        }
-        // Kept out of the command list, and kept here: attaching a session takes
-        // its terminal into the asking process, and this one exits a moment
-        // later — so it left the session held by a process that no longer
-        // existed, having revoked it from the window that *was* showing it. The
-        // command cannot be made to work, so it explains what does.
-        Some("attach") => {
-            let session = session.context_missing()?;
-            anyhow::bail!(
-                "`zmux attach` cannot show a session: the terminal would come to this command, \
-                 which exits immediately. Ask a Zetta window to take it — `zetta sessions \
-                 reconnect {session}`, or Ctrl-Shift-A in a window. A session scoped to a window \
-                 that has exited needs `zmux share {session}` first."
-            )
         }
         Some("list") | None => catalog::print_session_catalogs(&paths::session_catalog_dir(), json),
         Some(unknown) => anyhow::bail!("unknown mux command {unknown:?}"),
@@ -456,11 +611,15 @@ fn session_is_protected(client: &client::Client, session_id: u64) -> Result<bool
 }
 
 trait RequiredSession {
-    fn context_missing(self) -> Result<u64>;
+    type Session;
+
+    fn context_missing(self) -> Result<Self::Session>;
 }
 
-impl RequiredSession for Option<u64> {
-    fn context_missing(self) -> Result<u64> {
+impl<T> RequiredSession for Option<T> {
+    type Session = T;
+
+    fn context_missing(self) -> Result<T> {
         self.ok_or_else(|| anyhow::anyhow!("this command requires a session ID"))
     }
 }

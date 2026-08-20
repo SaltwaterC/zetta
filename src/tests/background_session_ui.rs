@@ -9,6 +9,23 @@ fn reconnect_is_immediate_only_for_one_background_session() {
 }
 
 #[test]
+fn no_mux_keep_running_is_explicitly_process_local() {
+    let action = ProtectedSessionAction::KeepRunning;
+
+    assert_eq!(action.title(true), "Keep tab running after close");
+    assert!(
+        action
+            .description(true)
+            .contains("stays inside this Zetta process")
+    );
+    assert_eq!(action.submit_label(true), "Protect and keep running");
+
+    assert_eq!(action.title(false), "Keep and share tab after close");
+    assert!(action.description(false).contains("another Zetta process"));
+    assert_eq!(action.submit_label(false), "Protect, keep, and share");
+}
+
+#[test]
 fn background_session_is_reaped_after_its_final_pane_exits() {
     let profile = Profile {
         name: "System".to_owned(),

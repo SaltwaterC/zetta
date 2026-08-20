@@ -138,36 +138,15 @@ impl Zetta {
                     SettingsControl::RequestFocusStatusAccess,
                     SettingsControl::Dropdown(SettingsDropdown::PaneControlsPosition),
                     SettingsControl::Dropdown(SettingsDropdown::PaneControlsDefaultVisibility),
+                    SettingsControl::Dropdown(SettingsDropdown::SessionRetention),
+                    SettingsControl::Numeric(NumericSetting::SessionRingBytes),
                 ]);
                 #[cfg(feature = "http-server")]
                 controls.push(SettingsControl::Numeric(NumericSetting::HttpServerPort));
                 #[cfg(feature = "tftp-server")]
                 controls.push(SettingsControl::Numeric(NumericSetting::TftpServerPort));
                 for (index, profile) in editor.configuration.profiles.iter().enumerate() {
-                    if !profile.detected {
-                        controls.extend([
-                            SettingsControl::Input(SettingsInput::Configuration(
-                                ConfigTextField::ProfileName(index),
-                            )),
-                            SettingsControl::RemoveProfile(index),
-                            SettingsControl::Input(SettingsInput::Configuration(
-                                ConfigTextField::ProfileProgram(index),
-                            )),
-                            SettingsControl::Input(SettingsInput::Configuration(
-                                ConfigTextField::ProfileArguments(index),
-                            )),
-                        ]);
-                    } else {
-                        controls.push(SettingsControl::Toggle(SettingsToggle::ProfileVisibility(
-                            index,
-                        )));
-                    }
-                    controls.push(SettingsControl::Dropdown(SettingsDropdown::ProfileTheme(
-                        index,
-                    )));
-                    controls.push(SettingsControl::Dropdown(SettingsDropdown::ProfileIcon(
-                        index,
-                    )));
+                    controls.extend(profile_settings_controls(index, profile.detected));
                 }
                 controls.push(SettingsControl::AddProfile);
             }
@@ -438,6 +417,10 @@ impl Zetta {
                     "Visible".to_owned()
                 },
                 Arc::from([String::from("Visible"), String::from("Hidden")]),
+            ),
+            SettingsDropdown::SessionRetention => (
+                editor.configuration.session_retention.label().to_owned(),
+                Arc::from([String::from("None"), String::from("Memory")]),
             ),
             SettingsDropdown::ProfileTheme(index) => (
                 editor
@@ -1075,6 +1058,13 @@ impl Zetta {
             SettingsDropdown::PaneControlsDefaultVisibility => {
                 editor.configuration.pane_controls_hidden_by_default = value == "Hidden";
             }
+            SettingsDropdown::SessionRetention => {
+                editor.configuration.session_retention = if value == "None" {
+                    crate::config::SessionRetention::None
+                } else {
+                    crate::config::SessionRetention::Memory
+                };
+            }
             SettingsDropdown::ProfileTheme(index) => {
                 if let Some(profile) = editor.configuration.profiles.get_mut(index) {
                     profile.theme = (value != "Use application theme").then_some(value);
@@ -1397,6 +1387,18 @@ impl Zetta {
                         .to_string(),
                 );
             }
+            NumericSetting::SessionRingBytes => {
+                let current = configuration
+                    .session_ring_bytes
+                    .text
+                    .trim()
+                    .parse::<usize>()
+                    .unwrap_or(config::DEFAULT_SESSION_RING_BYTES);
+                let value = current
+                    .saturating_add_signed(direction.saturating_mul(4096) as isize)
+                    .clamp(4 * 1024, config::MAX_SESSION_RING_BYTES);
+                configuration.session_ring_bytes = TextField::new(value.to_string());
+            }
         }
         editor.configuration_dirty = true;
         editor.message = None;
@@ -1449,6 +1451,30 @@ impl Zetta {
         }
         cx.notify();
     }
+}
+
+fn profile_settings_controls(index: usize, detected: bool) -> Vec<SettingsControl> {
+    let mut controls = Vec::new();
+    if !detected {
+        controls.extend([
+            SettingsControl::Input(SettingsInput::Configuration(ConfigTextField::ProfileName(
+                index,
+            ))),
+            SettingsControl::RemoveProfile(index),
+            SettingsControl::Input(SettingsInput::Configuration(
+                ConfigTextField::ProfileProgram(index),
+            )),
+            SettingsControl::Input(SettingsInput::Configuration(
+                ConfigTextField::ProfileArguments(index),
+            )),
+        ]);
+    }
+    controls.extend([
+        SettingsControl::Toggle(SettingsToggle::ProfileVisibility(index)),
+        SettingsControl::Dropdown(SettingsDropdown::ProfileTheme(index)),
+        SettingsControl::Dropdown(SettingsDropdown::ProfileIcon(index)),
+    ]);
+    controls
 }
 
 #[cfg(test)]

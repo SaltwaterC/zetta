@@ -18,6 +18,10 @@
   "pane_controls_hidden_by_default": false,
   "http_server_port": 8000,
   "tftp_server_port": 69,
+  "sessions": {
+    "retention": "memory",
+    "ring_bytes": 262144
+  },
   "pane_split_templates": {
     "three-bottom": {
       "env": { "PROJECT": "zetta" },

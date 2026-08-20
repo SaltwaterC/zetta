@@ -525,7 +525,7 @@ impl Zetta {
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(
                             Label::new(match action {
-                                Some(action) => action.title(),
+                                Some(action) => action.title(self.no_mux),
                                 None => "Authenticate protected session",
                             })
                             .size(LabelSize::Large),
@@ -535,7 +535,7 @@ impl Zetta {
                                 .text_sm()
                                 .text_color(colors.text_muted)
                                 .child(match action {
-                                    Some(action) => action.description(),
+                                    Some(action) => action.description(self.no_mux),
                                     None => {
                                         "Enter the secret chosen when this session was detached."
                                     }
@@ -616,7 +616,7 @@ impl Zetta {
                                     Button::new(
                                         "submit-session-authentication",
                                         match action {
-                                            Some(action) => action.submit_label(),
+                                            Some(action) => action.submit_label(self.no_mux),
                                             None => "Authenticate",
                                         },
                                     )

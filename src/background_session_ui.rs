@@ -148,15 +148,16 @@ fn remove_exited_background_pane(
     Some(vec![pane_id])
 }
 
-/// An action that makes a tab's session reachable beyond this window.
+/// An action that normally makes a tab's session reachable beyond this window.
 ///
-/// Each of them ends with the session attachable by something other than the
-/// window driving it now — another window joining it, or a reconnect after this
-/// one is gone — so each offers the secret that will gate that. Offered, not
-/// required: an empty dialog leaves the session unprotected, which is what
+/// In daemon mode each ends with the session attachable by something other than
+/// the window driving it now — another window joining it, or a reconnect after
+/// this one is gone — so each offers the secret that will gate that. Offered,
+/// not required: an empty dialog leaves the session unprotected, which is what
 /// detaching has always meant and therefore what all three mean. They share a
 /// path — settle the secret, then act — and differ only in wording and in what
-/// "act" means.
+/// "act" means. `KeepRunning` remains process-local when `--no-mux` is active;
+/// there is no multiplexer to make it reachable from another process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProtectedSessionAction {
     Detach,
@@ -165,23 +166,31 @@ pub(crate) enum ProtectedSessionAction {
 }
 
 impl ProtectedSessionAction {
-    pub(crate) fn title(self) -> &'static str {
+    pub(crate) fn title(self, no_mux: bool) -> &'static str {
         match self {
             Self::Detach => "Detach session",
-            Self::KeepRunning => "Keep tab running after close",
+            Self::KeepRunning if no_mux => "Keep tab running after close",
+            Self::KeepRunning => "Keep and share tab after close",
             Self::Share => "Share tab",
         }
     }
 
-    pub(crate) fn description(self) -> &'static str {
+    pub(crate) fn description(self, no_mux: bool) -> &'static str {
         match self {
             Self::Detach => {
                 "Leave both fields blank and press Enter to detach without authentication. \
                  Otherwise, enter and confirm a secret."
             }
+            Self::KeepRunning if no_mux => {
+                "Choose the authentication required when this tab is reattached. In --no-mux \
+                 mode the session stays inside this Zetta process after the window closes and \
+                 cannot be shared with another process. Press Enter with both fields empty for \
+                 no authentication."
+            }
             Self::KeepRunning => {
-                "Choose the authentication required when this tab is reattached. Press Enter \
-                 with both fields empty for no authentication."
+                "Choose the authentication required when this tab is reattached. This also makes \
+                 the session available to another Zetta process after this window closes. Press \
+                 Enter with both fields empty for no authentication."
             }
             Self::Share => {
                 "Choose the authentication a window joining this tab has to present; it can \
@@ -191,10 +200,11 @@ impl ProtectedSessionAction {
         }
     }
 
-    pub(crate) fn submit_label(self) -> &'static str {
+    pub(crate) fn submit_label(self, no_mux: bool) -> &'static str {
         match self {
             Self::Detach => "Protect and detach",
-            Self::KeepRunning => "Protect and enable",
+            Self::KeepRunning if no_mux => "Protect and keep running",
+            Self::KeepRunning => "Protect, keep, and share",
             Self::Share => "Protect and share",
         }
     }
@@ -216,10 +226,9 @@ impl Zetta {
 
     /// Runs `action`, asking for a secret first if nothing protects the session.
     ///
-    /// The one path all three actions take, because they all end the same way:
-    /// with the session attachable by something other than the window driving it
-    /// now — another window joining it, or anything running as this user once
-    /// this window is gone. What differs is only which action follows.
+    /// The one path all three actions take to settle protection before acting.
+    /// In daemon mode, the resulting session can be attached by another window
+    /// or process; `--no-mux` keeps **Keep running** process-local.
     pub(crate) fn protect_and_then(
         &mut self,
         tab_id: u64,
@@ -247,6 +256,9 @@ impl Zetta {
         let tab = self.tabs.iter().find(|tab| tab.id == tab_id)?;
         if let Some(authentication) = tab.close_policy.background_authentication().flatten() {
             return Some(Some(authentication.clone()));
+        }
+        if self.no_mux {
+            return None;
         }
         // Read from the published catalog: the multiplexer owns the verifier,
         // and this is the same source the reconnect picker lists.
@@ -282,10 +294,20 @@ impl Zetta {
                 self.detach_tab_by_id(tab_id, authentication, window, cx)
             }
             ProtectedSessionAction::KeepRunning => {
+                let sharing_authentication = authentication.clone();
                 if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
                     tab.close_policy = TabClosePolicy::Background { authentication };
                 }
-                cx.notify();
+                if !self.no_mux {
+                    // Keep-running sessions used to be handed to the multiplexer
+                    // as process-scoped sessions, which made the setting
+                    // ineffective once the owning Zetta process went away. Offer
+                    // it now as well so the handoff on window close preserves a
+                    // cross-process reconnect path. The sharing toggle remains
+                    // independent: an explicit unshare before close restores
+                    // private ownership.
+                    self.set_tab_sharing(tab_id, true, sharing_authentication, cx);
+                }
             }
             ProtectedSessionAction::Share => self.set_tab_sharing(tab_id, true, authentication, cx),
         }
@@ -317,6 +339,14 @@ impl Zetta {
             return;
         };
         let tab_id = tab.id;
+        if self.no_mux {
+            self.show_notice(
+                "Sharing requires the session multiplexer; restart without --no-mux to enable it.",
+                cx,
+            );
+            self.focus_active(window, cx);
+            return;
+        }
         if tab.shared {
             // Scoping a session back to this window takes nothing away from
             // anybody but the windows that could join it, so it needs no secret.
@@ -354,8 +384,7 @@ impl Zetta {
             }
             Ok(false) => {
                 self.show_notice(
-                    "This tab is running outside the session multiplexer, so it cannot be shared \
-                     with another window.",
+                    "Sharing requires the session multiplexer; this tab is running with --no-mux.",
                     cx,
                 );
             }
@@ -503,7 +532,14 @@ impl Zetta {
             self.active_tab = self.tabs.len() - 1;
         }
         self.disable_tab_move_mode_if_unavailable(cx);
-        self.store_background_tab(tab, authentication, cx);
+        if let Some(tab) = self.store_background_tab(tab, authentication, cx) {
+            // A normal launch must not silently turn a failed daemon handoff
+            // into an in-process background session. Put the tab back exactly
+            // where it was so the user can retry after fixing the daemon.
+            let insertion_index = index.min(self.tabs.len());
+            self.tabs.insert(insertion_index, tab);
+            self.active_tab = insertion_index;
+        }
         self.finish_background_session_change(cx);
     }
 
@@ -512,15 +548,7 @@ impl Zetta {
         mut tab: Tab,
         authentication: Option<SessionAuthentication>,
         cx: &mut Context<Self>,
-    ) {
-        tab.rename_buffer = None;
-        tab.renaming_pane = None;
-        for pane in &mut tab.panes {
-            pane.view = None;
-            for entry in &mut pane.stack.entries {
-                entry.view = None;
-            }
-        }
+    ) -> Option<Tab> {
         let terminals = tab
             .panes
             .iter()
@@ -538,18 +566,23 @@ impl Zetta {
         // Hand the session to the multiplexer, which already owns the
         // processes. Dropping the tab then drops the PTY descriptors this
         // process was holding, and the multiplexer resumes reading them.
-        match self.hand_session_to_multiplexer(&tab, authentication.as_ref(), cx) {
+        match self.hand_session_to_multiplexer(&mut tab, authentication.as_ref(), cx) {
             Ok(true) => {
                 self.mux_panes.forget_tab(tab_id);
                 for pane in &tab.panes {
                     self.mux_panes.forget_pane(pane.id);
                 }
-                return;
+                return None;
             }
             Ok(false) => {}
             Err(error) => {
-                // Falling back keeps the session alive in this process rather
-                // than losing it, but it will not outlive the process.
+                if !self.no_mux {
+                    self.pane_output_error = Some(format!(
+                        "Could not hand the session to the multiplexer; it remains in this window: {error:#}"
+                    ));
+                    cx.notify();
+                    return Some(tab);
+                }
                 self.pane_output_error = Some(format!(
                     "Could not hand the session to the multiplexer, so it is being kept in this \
                      window instead: {error:#}"
@@ -558,6 +591,14 @@ impl Zetta {
             }
         }
 
+        tab.rename_buffer = None;
+        tab.renaming_pane = None;
+        for pane in &mut tab.panes {
+            pane.view = None;
+            for entry in &mut pane.stack.entries {
+                entry.view = None;
+            }
+        }
         self.background_sessions.detach(tab, authentication);
         for (pane_id, stack_id, terminal) in terminals {
             if let Some(stack_id) = stack_id {
@@ -571,6 +612,7 @@ impl Zetta {
                 terminal.refresh_foreground_process(cx);
             });
         }
+        None
     }
 
     pub(crate) fn finish_background_session_change(&mut self, cx: &mut Context<Self>) {
@@ -1639,35 +1681,83 @@ mod tests;
 impl Zetta {
     /// Gives a detached tab to the multiplexer to hold.
     ///
-    /// Returns `false` when this tab has no multiplexer session — its panes ran
-    /// as local processes because the multiplexer was unreachable when they
-    /// were spawned — in which case the caller keeps the old in-process
-    /// behaviour.
+    /// Returns `false` when explicit `--no-mux` mode selected the legacy
+    /// in-process owner. Normal launches return an error when a pane cannot be
+    /// handed to the daemon, so backgrounding never silently changes its
+    /// lifetime guarantees.
     fn hand_session_to_multiplexer(
         &mut self,
-        tab: &Tab,
+        tab: &mut Tab,
         authentication: Option<&SessionAuthentication>,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<bool> {
+        if self.no_mux {
+            return Ok(false);
+        }
         let (Some(runtime), Some(session_id)) =
             (self.mux.clone(), self.mux_panes.session_id(tab.id))
         else {
-            return Ok(false);
+            anyhow::bail!(
+                "the tab has no daemon-owned session; start Zetta with --no-mux to use local session ownership"
+            );
         };
+
+        // Stacked terminals are task terminals, not interactive terminals, and
+        // cannot be reattached yet. Stop their readers before releasing their
+        // daemon panes, then leave their durable entries for restore_stack to
+        // mark as failed instead of publishing dangling pane ids.
+        let stacked_mux_panes = tab
+            .panes
+            .iter()
+            .flat_map(|pane| pane.stack.entries.iter().map(|entry| entry.id))
+            .filter_map(|entry_id| {
+                self.mux_panes
+                    .mux_pane_id(entry_id)
+                    .map(|id| (entry_id, id))
+            })
+            .collect::<Vec<_>>();
+        for (entry_id, mux_pane_id) in &stacked_mux_panes {
+            if let Some(terminal) = tab.panes.iter().find_map(|pane| {
+                pane.stack
+                    .entries
+                    .iter()
+                    .find(|entry| entry.id == *entry_id)
+                    .and_then(|entry| entry.terminal.clone())
+            }) {
+                terminal
+                    .update(cx, |terminal, _| terminal.stop_pty_loop())
+                    .context("stopping a stacked terminal before detach")?;
+            }
+            runtime
+                .client()
+                .close_pane(session_id, *mux_pane_id)
+                .with_context(|| format!("closing stacked daemon pane {mux_pane_id}"))?;
+            self.mux_panes.forget_pane(*entry_id);
+        }
 
         // The screen as the user last saw it. The multiplexer keeps a grid of its
         // own, but it has only been reading this pane while nobody was showing
         // it — everything on screen now was drawn here — so the handover starts
         // by giving it that screen to carry on from.
-        let snapshots = tab
-            .panes
-            .iter()
-            .filter_map(|pane| {
-                let mux_pane_id = self.mux_panes.mux_pane_id(pane.id)?;
-                let terminal = pane.terminal.as_ref()?;
-                Some((mux_pane_id, terminal.read(cx).ansi_snapshot(SNAPSHOT_LINES)))
-            })
-            .collect::<Vec<_>>();
+        for pane in &tab.panes {
+            if let Some(terminal) = &pane.terminal {
+                terminal
+                    .update(cx, |terminal, _| terminal.stop_pty_loop())
+                    .context("stopping a terminal before detach")?;
+            }
+        }
+        let snapshots = if runtime.retention().keeps_snapshot() {
+            tab.panes
+                .iter()
+                .filter_map(|pane| {
+                    let mux_pane_id = self.mux_panes.mux_pane_id(pane.id)?;
+                    let terminal = pane.terminal.as_ref()?;
+                    Some((mux_pane_id, terminal.read(cx).ansi_snapshot(SNAPSHOT_LINES)))
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
 
         let (summary, state) =
             self.session_publication(tab, session_id, authentication.is_some(), cx)?;
@@ -1728,7 +1818,12 @@ impl Zetta {
         if self.mux.is_none() {
             // Attaching may be the first thing this window does, before any
             // pane has been spawned through the multiplexer.
-            self.mux = Some(MuxRuntime::connect()?);
+            let retention = self
+                .launch_config
+                .sessions
+                .to_zmux_retention()
+                .context("configuring session retention")?;
+            self.mux = Some(MuxRuntime::connect_with_retention(retention)?);
         }
         let Some(runtime) = self.mux.clone() else {
             anyhow::bail!("no multiplexer is running");
@@ -2670,6 +2765,9 @@ impl Zetta {
     /// picker lists, so the two cannot disagree about what exists, and it costs
     /// no round trip on a path that runs whenever the menu is built.
     pub(crate) fn multiplexer_holds_session(&self, session_id: u64) -> bool {
+        if self.no_mux {
+            return false;
+        }
         crate::background_sessions::read_session_catalogs(
             &crate::background_sessions::session_catalog_dir(),
         )

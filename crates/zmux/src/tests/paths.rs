@@ -48,8 +48,12 @@ fn the_configuration_directory_never_falls_back_to_the_working_directory() {
 
 #[test]
 fn the_session_directory_sits_inside_the_configuration_directory() {
+    #[cfg(debug_assertions)]
+    let expected_name = format!("sessions-debug-v{}", crate::messages::PROTOCOL_VERSION);
+    #[cfg(not(debug_assertions))]
+    let expected_name = "sessions".to_owned();
     assert_eq!(
         session_catalog_dir(),
-        platform_config_dir().join("sessions")
+        platform_config_dir().join(expected_name)
     );
 }

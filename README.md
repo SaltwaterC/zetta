@@ -224,6 +224,8 @@ built, how it should behave, and when the result was good enough.
   keymaps, fonts, and themes
 - [Background sessions](docs/background-sessions.md): detach, share, protect,
   inspect, and reconnect sessions
+- [Compatibility versioning](docs/versioning.md): executable, protocol, and
+  persisted-format version markers
 - [Shell integration](docs/shell-integration.md): command completion and the
   `zvi`/`zwt`/`ztftp`/`zntfy`/`vi` shortcuts
 - [Serial and network tools](docs/tools.md): serial consoles, HTTP and TFTP

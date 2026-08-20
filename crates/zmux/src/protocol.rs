@@ -9,7 +9,11 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-pub const CATALOG_VERSION: u32 = 4;
+pub const CATALOG_VERSION: u32 = 1;
+
+/// Version of the local Zetta process-control protocol used to open a
+/// multiplexer-held session in a window.
+pub const CONTROL_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackgroundSessionCatalog {
@@ -33,10 +37,10 @@ pub struct BackgroundSessionSummary {
     pub held: bool,
     /// The Zetta process this session is scoped to, or `None` if it is shared.
     ///
-    /// Backgrounding a tab is a private act: the session belongs to the window
-    /// that put it away, and another Zetta process must neither offer it in a
-    /// picker nor be able to attach it. Sharing is what makes it everyone's,
-    /// and clears this.
+    /// Plain backgrounding is private: the session belongs to the window that
+    /// put it away, and another Zetta process must neither offer it in a picker
+    /// nor be able to attach it. Sharing — including keep-running's default —
+    /// is what makes it everyone's, and clears this.
     ///
     /// Carried in the catalog because the catalog is one file that every
     /// process reads, so a reader has to be able to tell which entries are its

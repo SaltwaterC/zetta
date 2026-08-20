@@ -16,6 +16,30 @@ fn kill_requires_a_session_id() {
 }
 
 #[test]
+fn reconnect_requires_a_session_id_and_is_documented_separately_from_share() {
+    let error = run(&args(&["reconnect"])).unwrap_err().to_string();
+    assert!(error.contains("requires a session ID"), "{error}");
+    assert!(USAGE.contains("reconnect SESSION_ID"));
+    assert!(USAGE.contains("it does not open it"));
+}
+
+#[test]
+fn no_mux_usage_only_documents_commands_that_do_not_need_a_daemon() {
+    assert!(usage(true).contains("list"));
+    assert!(usage(true).contains("reconnect SESSION_ID"));
+    for daemon_command in ["stop", "share", "unshare", "kill", "forget"] {
+        assert!(
+            !usage(true).contains(daemon_command),
+            "no-mux usage must omit {daemon_command}"
+        );
+    }
+    assert!(!usage(true).contains("--force"));
+    assert!(!usage(true).contains("--upgrade"));
+    assert!(!NO_MUX_SESSION_ID_HELP.contains("share"));
+    assert!(usage(false).contains("--upgrade"));
+}
+
+#[test]
 fn retention_needs_a_mode_and_rejects_unknown_ones() {
     let error = run(&args(&["--retention"])).unwrap_err().to_string();
     assert!(error.contains("requires a mode"), "{error}");
@@ -80,4 +104,30 @@ fn upgrade_has_a_short_form() {
         );
     }
     assert!(USAGE.contains("-u, --upgrade"), "-u must be documented");
+}
+
+#[test]
+fn an_ambiguous_bare_session_id_requires_the_full_identifier() {
+    let session = |process_id, runner_id| protocol::BackgroundSessionCatalog {
+        version: protocol::CATALOG_VERSION,
+        process_id,
+        runner_id,
+        sessions: vec![protocol::BackgroundSessionSummary {
+            id: 1,
+            title: "shell".to_owned(),
+            authentication_required: false,
+            active_pane: 1,
+            layout: protocol::BackgroundPaneLayout::Pane { pane_id: 1 },
+            panes: Vec::new(),
+            held: false,
+            scoped_to: None,
+        }],
+    };
+
+    ensure_unambiguous_session_id(&[session(123, 7)], 1).unwrap();
+    let error = ensure_unambiguous_session_id(&[session(123, 7), session(456, 8)], 1)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("ambiguous"), "{error}");
+    assert!(error.contains("PROCESS:RUNNER:SESSION"), "{error}");
 }

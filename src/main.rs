@@ -20,7 +20,6 @@ mod serial_console;
 #[cfg(servers_enabled)]
 mod server_ui;
 mod session_auth_ui;
-mod session_cli;
 mod session_state;
 mod settings_editor;
 mod shell_integration;
@@ -56,7 +55,6 @@ use background_sessions::{
     BackgroundPaneExit, BackgroundPaneLayout, BackgroundPaneState, BackgroundPaneSummary,
     BackgroundSessionRunner, BackgroundSessionSummary, SessionAuthentication, SessionSecret,
     VerifiedSession, application_from_command_line, background_pane_exit_from_terminal,
-    print_session_catalogs,
 };
 use command_palette::{
     CommandPalette, PaletteCommand, humanize_action_name, project_palette_commands,
@@ -271,6 +269,7 @@ struct ZettaProcessState {
     background_session_entries: Arc<[ProcessBackgroundSessionEntry]>,
     config: Config,
     configuration_error: Option<String>,
+    no_mux: bool,
     control_server: ProcessControlServer,
     _quit_subscription: Subscription,
 }

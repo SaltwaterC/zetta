@@ -251,6 +251,7 @@ pub(crate) fn open_zetta_window(
     enable_performance_overlay: bool,
     performance_report: Option<(PerformanceReportOptions, PerformanceReportStatus)>,
     profile_pane_stress: bool,
+    no_mux: bool,
     cx: &mut App,
 ) -> Result<()> {
     let options = zetta_window_options(cx);
@@ -260,9 +261,12 @@ pub(crate) fn open_zetta_window(
             Zetta::new(
                 config,
                 configuration_error,
-                initial_profile,
-                initial_project,
-                launch_theme_override,
+                ZettaLaunchOptions {
+                    initial_profile,
+                    initial_project,
+                    launch_theme_override,
+                    no_mux,
+                },
                 window,
                 cx,
             )
@@ -447,7 +451,10 @@ pub(crate) fn refresh_process_background_sessions(cx: &mut App) {
             |(session_id, title, details)| (runner_id, *session_id, title.clone(), details.clone()),
         ));
     }
-    entries.extend(multiplexer_session_entries());
+    let no_mux = cx.has_global::<ZettaProcessState>() && cx.global::<ZettaProcessState>().no_mux;
+    if !no_mux {
+        entries.extend(multiplexer_session_entries());
+    }
     if cx.has_global::<ZettaProcessState>() {
         cx.global_mut::<ZettaProcessState>()
             .background_session_entries = entries.into();
@@ -500,7 +507,7 @@ pub(crate) fn quit_zetta_process(cx: &mut App) {
     cx.global::<ZettaProcessState>()
         .control_server
         .begin_shutdown();
-    shutdown_multiplexer_if_idle();
+    shutdown_multiplexer_if_idle(cx);
     cx.quit();
 }
 
@@ -512,7 +519,10 @@ pub(crate) fn quit_zetta_process(cx: &mut App) {
 /// another Zetta process that has not quit yet. So this is a no-op whenever
 /// anything still depends on the daemon, and only actually stops it once
 /// nothing does.
-fn shutdown_multiplexer_if_idle() {
+fn shutdown_multiplexer_if_idle(cx: &App) {
+    if cx.has_global::<ZettaProcessState>() && cx.global::<ZettaProcessState>().no_mux {
+        return;
+    }
     match zmux::client::Client::connect_existing() {
         Ok(Some(client)) => {
             if let Err(error) = client.shutdown() {
@@ -525,7 +535,7 @@ fn shutdown_multiplexer_if_idle() {
 }
 
 pub(crate) fn open_dormant_or_new_window(cx: &mut App) -> Result<()> {
-    let (existing, dormant, config, configuration_error) = {
+    let (existing, dormant, config, configuration_error, no_mux) = {
         let process = cx.global_mut::<ZettaProcessState>();
         (
             process
@@ -536,6 +546,7 @@ pub(crate) fn open_dormant_or_new_window(cx: &mut App) -> Result<()> {
             process.dormant.pop(),
             process.config.clone(),
             process.configuration_error.clone(),
+            process.no_mux,
         )
     };
     if let Some((window_id, _)) = existing {
@@ -567,6 +578,7 @@ pub(crate) fn open_dormant_or_new_window(cx: &mut App) -> Result<()> {
             false,
             None,
             false,
+            no_mux,
             cx,
         )
     }
@@ -869,6 +881,22 @@ fn focus_visible_tab_by_attention_id(cx: &mut App, attention_id: u64) -> bool {
     })
 }
 
+fn reconnect_window_id(runner_id: u64, attention_id: Option<u64>, cx: &App) -> Option<WindowId> {
+    let process = cx.global::<ZettaProcessState>();
+    if let Some(attention_id) = attention_id {
+        return process.windows.iter().find_map(|(window_id, zetta)| {
+            zetta
+                .read(cx)
+                .has_visible_tab_by_attention_id(attention_id)
+                .then_some(*window_id)
+        });
+    }
+    let runner = process.runners.get(&runner_id)?;
+    process.windows.iter().find_map(|(window_id, zetta)| {
+        (zetta.entity_id() == runner.entity_id()).then_some(*window_id)
+    })
+}
+
 pub(crate) fn run() -> Result<()> {
     let args = parse_args()?;
     let mut startup_project_root = None;
@@ -1100,13 +1128,8 @@ pub(crate) fn run() -> Result<()> {
         );
         return Ok(());
     }
-    match &args.mode {
-        StartupMode::ListBackgroundSessions { json } => return print_session_catalogs(*json),
-        StartupMode::ReconnectBackgroundSession { identifier } => {
-            return crate::session_cli::run_reconnect_session(identifier);
-        }
-        StartupMode::Mux(arguments) => return zmux::run(arguments),
-        _ => {}
+    if let StartupMode::Mux(arguments) = &args.mode {
+        return zmux::run(arguments);
     }
     #[cfg(cli_services)]
     if let StartupMode::CliService(command) = &args.mode {
@@ -1242,7 +1265,7 @@ pub(crate) fn run() -> Result<()> {
                         .control_server
                         .begin_shutdown();
                 }
-                shutdown_multiplexer_if_idle();
+                shutdown_multiplexer_if_idle(cx);
                 async {}
             });
             cx.set_global(ZettaProcessState {
@@ -1254,11 +1277,14 @@ pub(crate) fn run() -> Result<()> {
                 background_session_entries: Arc::from([]),
                 config: config.clone(),
                 configuration_error: configuration_error.clone(),
+                no_mux: args.no_mux,
                 control_server,
                 _quit_subscription: quit_subscription,
             });
             silent_mode::start_observer(cx);
-            start_multiplexer_session_watcher(cx);
+            if !args.no_mux {
+                start_multiplexer_session_watcher(cx);
+            }
             #[cfg(all(target_os = "macos", feature = "notifications"))]
             cx.on_system_notification_response(|response, cx| {
                 let target = macos_notification_target_for_response(
@@ -1793,6 +1819,7 @@ pub(crate) fn run() -> Result<()> {
                         ProcessControlCommand::ReconnectSession {
                             runner_id,
                             session_id,
+                            attention_id,
                             secret,
                             completion,
                         } => {
@@ -1805,22 +1832,33 @@ pub(crate) fn run() -> Result<()> {
                                 {
                                     return false;
                                 }
-                                if cx.global::<ZettaProcessState>().windows.is_empty()
-                                    && open_dormant_or_new_window(cx).is_err()
-                                {
-                                    return false;
-                                }
-                                let Some(window_id) = cx
-                                    .global::<ZettaProcessState>()
-                                    .windows
-                                    .keys()
-                                    .next()
-                                    .copied()
-                                else {
+                                let window_id = if attention_id.is_some() {
+                                    // A request carrying an originating tab must never fall
+                                    // back to another window: that would make a shared-session
+                                    // reconnect look successful while moving it elsewhere.
+                                    reconnect_window_id(runner_id, attention_id, cx)
+                                } else {
+                                    if cx.global::<ZettaProcessState>().windows.is_empty()
+                                        && open_dormant_or_new_window(cx).is_err()
+                                    {
+                                        return false;
+                                    }
+                                    reconnect_window_id(runner_id, None, cx).or_else(|| {
+                                        cx.global::<ZettaProcessState>()
+                                            .windows
+                                            .keys()
+                                            .next()
+                                            .copied()
+                                    })
+                                };
+                                let Some(window_id) = window_id else {
                                     return false;
                                 };
                                 gpui::WindowHandle::<Zetta>::new(window_id)
                                     .update(cx, |zetta, window, cx| {
+                                        if attention_id.is_some() {
+                                            window.activate_window();
+                                        }
                                         zetta.reconnect_session_from_cli(
                                             runner_id,
                                             session_id,
@@ -1860,6 +1898,7 @@ pub(crate) fn run() -> Result<()> {
                 profiling,
                 report_options.map(|options| (options, report_status_for_app)),
                 args.profile_pane_stress,
+                args.no_mux,
                 cx,
             )
             .expect("failed to open Zetta window");

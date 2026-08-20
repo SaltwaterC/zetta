@@ -1,6 +1,6 @@
 //! The local transport between a client and the multiplexer.
 //!
-//! Two things travel over it: newline-delimited JSON control messages, and —
+//! Two things travel over it: length-prefixed JSON control messages, and —
 //! on attach — the PTY master file descriptor itself. Passing the descriptor is
 //! what keeps an attached pane exactly as fast as one this process spawned:
 //! the client reads and writes the real PTY, and the daemon does not sit in the
@@ -12,7 +12,7 @@
 //! secret, which is checked in [`crate::auth`].
 
 use std::{
-    io::{BufRead as _, BufReader, Read, Write},
+    io::{Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -117,8 +117,8 @@ fn encode_hex(bytes: &[u8]) -> String {
 }
 
 pub fn write_message(stream: &mut impl Write, message: &impl Serialize) -> Result<()> {
-    serde_json::to_writer(&mut *stream, message)?;
-    stream.write_all(b"\n")?;
+    let frame = encode_message(message)?;
+    stream.write_all(&frame)?;
     stream.flush()?;
     Ok(())
 }
@@ -129,22 +129,48 @@ pub fn write_message(stream: &mut impl Write, message: &impl Serialize) -> Resul
 /// frame has to be complete before it is queued, because a message split across
 /// two queue entries would be read as the tail of whatever followed it.
 pub fn encode_message(message: &impl Serialize) -> Result<Vec<u8>> {
-    let mut bytes = serde_json::to_vec(message)?;
-    bytes.push(b'\n');
-    Ok(bytes)
+    let bytes = serde_json::to_vec(message)?;
+    anyhow::ensure!(
+        bytes.len() <= MAX_MESSAGE_BYTES,
+        "multiplexer message is too long"
+    );
+    let length = u32::try_from(bytes.len()).context("multiplexer message length overflow")?;
+    let mut frame = Vec::with_capacity(4 + bytes.len());
+    frame.extend_from_slice(&length.to_be_bytes());
+    frame.extend_from_slice(&bytes);
+    Ok(frame)
 }
 
 pub fn read_message<T: DeserializeOwned>(reader: &mut impl Read) -> Result<T> {
     // Zeroized because a request may carry a session secret.
-    let mut bytes = Zeroizing::new(Vec::new());
-    let mut reader = BufReader::new(reader).take((MAX_MESSAGE_BYTES + 1) as u64);
-    reader.read_until(b'\n', &mut bytes)?;
+    let mut header = [0; 4];
+    reader.read_exact(&mut header)?;
+    let length = u32::from_be_bytes(header) as usize;
     anyhow::ensure!(
-        bytes.last() == Some(&b'\n'),
-        "multiplexer message is too long or incomplete"
+        length <= MAX_MESSAGE_BYTES,
+        "multiplexer message is too long"
     );
-    bytes.pop();
+    let mut bytes = Zeroizing::new(vec![0; length]);
+    reader.read_exact(&mut bytes)?;
     serde_json::from_slice(&bytes).context("parsing multiplexer message")
+}
+
+fn take_frame(buffer: &mut Vec<u8>) -> Result<Option<Zeroizing<Vec<u8>>>> {
+    if buffer.len() < 4 {
+        return Ok(None);
+    }
+    let length = u32::from_be_bytes(buffer[..4].try_into().unwrap()) as usize;
+    anyhow::ensure!(
+        length <= MAX_MESSAGE_BYTES,
+        "multiplexer message is too long"
+    );
+    let frame_length = 4 + length;
+    if buffer.len() < frame_length {
+        return Ok(None);
+    }
+    let mut frame = Zeroizing::new(buffer.drain(..frame_length).collect::<Vec<_>>());
+    frame.drain(..4);
+    Ok(Some(frame))
 }
 
 #[cfg(unix)]
@@ -194,6 +220,50 @@ pub fn peer_uid(stream: &Stream) -> Result<u32> {
 pub fn peer_is_this_user(stream: &Stream) -> Result<bool> {
     // SAFETY: geteuid only reads the calling process's effective user ID.
     Ok(peer_uid(stream)? == unsafe { libc::geteuid() })
+}
+
+/// The kernel-reported process on the other end of a local socket.
+///
+/// The envelope still carries a process id because Windows handle duplication
+/// needs a target and because test/remote transports may not expose one. On
+/// Linux, however, administrative authorization must not trust that field: a
+/// same-user client can read the endpoint token and otherwise claim to be the
+/// owner of a protected session.
+#[cfg(unix)]
+pub fn peer_process_id(stream: &Stream) -> Result<Option<u32>> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut credentials = std::mem::MaybeUninit::<libc::ucred>::uninit();
+        let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        // SAFETY: the socket is connected, and the destination and its length
+        // describe the same `ucred`.
+        let result = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                credentials.as_mut_ptr().cast(),
+                &mut length,
+            )
+        };
+        anyhow::ensure!(
+            result == 0,
+            "reading peer process credentials: {}",
+            last_error()
+        );
+        // SAFETY: getsockopt filled the structure after returning zero.
+        Ok(Some(unsafe { credentials.assume_init() }.pid as u32))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = stream;
+        Ok(None)
+    }
+}
+
+#[cfg(windows)]
+pub fn peer_process_id(_stream: &Stream) -> Result<Option<u32>> {
+    Ok(None)
 }
 
 #[cfg(windows)]
@@ -384,8 +454,7 @@ impl Connection {
         message: &impl Serialize,
         descriptors: &[BorrowedFd<'_>],
     ) -> Result<()> {
-        let mut payload = serde_json::to_vec(message)?;
-        payload.push(b'\n');
+        let payload = encode_message(message)?;
         send_with_descriptors(&self.stream, &payload, descriptors)
     }
 
@@ -393,14 +462,13 @@ impl Connection {
     pub fn receive<T: DeserializeOwned>(&mut self) -> Result<(T, Vec<OwnedFd>)> {
         let mut descriptors = Vec::new();
         loop {
-            if let Some(position) = self.leftover.iter().position(|byte| *byte == b'\n') {
-                let line = Zeroizing::new(self.leftover.drain(..=position).collect::<Vec<u8>>());
-                let message = serde_json::from_slice(&line[..line.len() - 1])
-                    .context("parsing multiplexer message")?;
+            if let Some(frame) = take_frame(&mut self.leftover)? {
+                let message =
+                    serde_json::from_slice(&frame).context("parsing multiplexer message")?;
                 return Ok((message, descriptors));
             }
             anyhow::ensure!(
-                self.leftover.len() <= MAX_MESSAGE_BYTES,
+                self.leftover.len() <= MAX_MESSAGE_BYTES + 4,
                 "multiplexer message is too long"
             );
 
@@ -602,14 +670,13 @@ impl Connection {
 
     pub fn receive<T: DeserializeOwned>(&mut self) -> Result<(T, Vec<()>)> {
         loop {
-            if let Some(position) = self.leftover.iter().position(|byte| *byte == b'\n') {
-                let line = Zeroizing::new(self.leftover.drain(..=position).collect::<Vec<u8>>());
-                let message = serde_json::from_slice(&line[..line.len() - 1])
-                    .context("parsing multiplexer message")?;
+            if let Some(frame) = take_frame(&mut self.leftover)? {
+                let message =
+                    serde_json::from_slice(&frame).context("parsing multiplexer message")?;
                 return Ok((message, Vec::new()));
             }
             anyhow::ensure!(
-                self.leftover.len() <= MAX_MESSAGE_BYTES,
+                self.leftover.len() <= MAX_MESSAGE_BYTES + 4,
                 "multiplexer message is too long"
             );
 

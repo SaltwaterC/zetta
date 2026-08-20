@@ -28,6 +28,57 @@ fn request(token: &str, command: &str) -> ControlRequest {
     }
 }
 
+fn send_reconnect_session_request(
+    endpoint: &ControlEndpoint,
+    runner_id: u64,
+    session_id: u64,
+    attention_id: Option<u64>,
+    secret: Option<SessionSecret>,
+) -> Result<ReconnectSessionResult> {
+    use zeroize::Zeroize as _;
+
+    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
+    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    let mut request = ControlRequest {
+        token: endpoint.token.clone(),
+        command: "reconnect_session".to_owned(),
+        runner_id: Some(runner_id),
+        session_id: Some(session_id),
+        secret: secret.as_ref().map(|secret| secret.expose().to_owned()),
+        icon: None,
+        pane_theme: None,
+        pane_overlay: None,
+        pane_overlay_font_size: None,
+        pane_overlay_opacity: None,
+        pane_overlay_color: None,
+        attention_id,
+        attention_summary: None,
+        attention_body: None,
+        tab_name: None,
+        worktree_name: None,
+        config_path: None,
+        split: None,
+        profile: None,
+        theme: None,
+        pane_request: None,
+    };
+    let result = write_message(&mut stream, &request).and_then(|()| {
+        let response = read_message::<ControlResponse>(&mut stream)?;
+        Ok(match response.status.as_str() {
+            "ok" => ReconnectSessionResult::Reconnected,
+            "authentication_failed" => ReconnectSessionResult::AuthenticationFailed,
+            "session_not_found" => ReconnectSessionResult::SessionNotFound,
+            "session_starting" => ReconnectSessionResult::StillStarting,
+            _ => ReconnectSessionResult::Rejected,
+        })
+    });
+    if let Some(secret) = request.secret.as_mut() {
+        secret.zeroize();
+    }
+    result
+}
+
 #[test]
 fn control_requests_require_the_endpoint_token() {
     assert_eq!(
@@ -772,10 +823,34 @@ fn reconnect_requests_carry_a_session_target_and_optional_secret() {
         Some(ControlRequestCommand::ReconnectSession {
             runner_id: 7,
             session_id: 42,
+            attention_id: None,
             secret: Some(SessionSecret::new("not-an-argument".to_owned())),
         })
     );
     assert!(request.secret.is_none());
+}
+
+#[test]
+fn reconnect_requests_can_target_the_originating_tab() {
+    let mut reconnect_request = request("token", "reconnect_session");
+    reconnect_request.runner_id = Some(7);
+    reconnect_request.session_id = Some(42);
+    reconnect_request.attention_id = Some(99);
+    assert_eq!(
+        decode_control_request(&mut reconnect_request, "token"),
+        Some(ControlRequestCommand::ReconnectSession {
+            runner_id: 7,
+            session_id: 42,
+            attention_id: Some(99),
+            secret: None,
+        })
+    );
+
+    let mut invalid = request("token", "reconnect_session");
+    invalid.runner_id = Some(7);
+    invalid.session_id = Some(42);
+    invalid.attention_id = Some(0);
+    assert_eq!(decode_control_request(&mut invalid, "token"), None);
 }
 
 #[test]
@@ -806,7 +881,7 @@ fn an_authentication_failure_still_fits_the_completion_budget() {
     // A wrong secret costs one Argon2 verification. Guess-rate limiting refuses
     // early attempts rather than sleeping on them, precisely so it stays out of
     // this budget: a delay long enough to matter would exceed the timeout, and
-    // `zetta session reconnect` would report that Zetta refused the request
+    // `zmux reconnect` would report that Zetta refused the request
     // rather than that the secret was wrong. If verification alone ever
     // approaches the budget, raise the budget rather than the Argon2 cost.
     let authentication =
@@ -820,9 +895,6 @@ fn an_authentication_failure_still_fits_the_completion_budget() {
         "verification takes {verification:?}, too close to the \
          {RECONNECT_COMPLETION_TIMEOUT:?} reconnect budget"
     );
-    // The client must outlast the server's own deadline, or a slow failure
-    // would surface as a dropped connection instead of an answer.
-    assert!(RECONNECT_COMPLETION_TIMEOUT < RECONNECT_CLIENT_TIMEOUT);
 }
 
 #[cfg(unix)]
@@ -1114,6 +1186,39 @@ fn control_server_delivers_a_tab_attention_request() {
     assert_eq!(request, expected);
     completion.send(true).unwrap();
     assert!(client.join().unwrap().unwrap());
+}
+
+#[test]
+fn control_server_delivers_a_reconnect_origin() {
+    let directory = tempfile::tempdir().unwrap();
+    let endpoint_path = directory.path().join("control.json");
+    let (commands, mut received) = futures::channel::mpsc::unbounded();
+    let _server = ProcessControlServer::start_at(commands, endpoint_path.clone()).unwrap();
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&fs::read(endpoint_path).unwrap()).unwrap();
+
+    let client = thread::spawn(move || {
+        send_reconnect_session_request(&endpoint, 7, 42, Some(99), None).unwrap()
+    });
+    let command = futures::executor::block_on(received.next()).unwrap();
+    let ProcessControlCommand::ReconnectSession {
+        runner_id,
+        session_id,
+        attention_id,
+        secret,
+        completion,
+    } = command
+    else {
+        panic!("unexpected process control command");
+    };
+    assert_eq!(runner_id, 7);
+    assert_eq!(session_id, 42);
+    assert_eq!(attention_id, Some(99));
+    assert!(secret.is_none());
+    completion
+        .send(ReconnectSessionResult::Reconnected)
+        .unwrap();
+    assert_eq!(client.join().unwrap(), ReconnectSessionResult::Reconnected);
 }
 
 #[cfg(feature = "notifications")]

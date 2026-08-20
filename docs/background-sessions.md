@@ -1,8 +1,11 @@
 # Background sessions
 
 Zetta can detach a complete tab while keeping its terminal processes and
-scrollback alive. Detached sessions can be reconnected from any Zetta window,
-and survive Zetta closing entirely.
+scrollback alive. In normal daemon mode, detached sessions can be reconnected
+from any Zetta window and survive Zetta closing entirely. `zetta --no-mux` uses
+the compatibility owner inside the Zetta process instead: background sessions
+still work, but they are not shared with another process and end when that
+Zetta process ends.
 
 ## Where a session lives
 
@@ -22,16 +25,45 @@ way:
 
 ```sh
 zmux list             # the sessions being held
-zmux share SESSION    # let every Zetta process see and attach it
-zmux unshare SESSION  # scope it back to the window that held it
-zmux kill SESSION     # end a session and everything running in it
+zmux share SESSION_ID    # make a scoped session shared/joinable
+zmux reconnect SESSION_ID # open it in a Zetta window
+zmux unshare SESSION_ID  # scope it back to the window that held it
+zmux kill SESSION_ID     # end a session and everything running in it
 zmux stop             # stop the multiplexer, once nothing is running in it
 zmux --upgrade        # replace the multiplexer, keeping its sessions
 ```
 
-If the multiplexer cannot be reached, panes still open — as ordinary local
-processes — and Zetta says so. Such a session can still be detached, but it will
-not outlive the window.
+`SESSION_ID` accepts the short numeric session ID when it is unambiguous, and
+the stable `PROCESS:RUNNER:SESSION` identifier printed by `zmux list` in every
+case. The human-readable list shows both forms for an unambiguous session and
+only the full form when numeric IDs conflict. Shell completion offers the
+stable form for `share`, `reconnect`, `unshare`, `kill`, and `forget`.
+
+`share` and `reconnect` are deliberately separate actions. `share` changes a
+session's scope so any Zetta process may attach it; it does not open a window.
+`reconnect` is the action that opens the session in a Zetta window. A scoped
+session therefore needs `zmux share SESSION_ID` first, followed by `zmux
+reconnect SESSION_ID`. The same commands are available as `zetta mux share`
+and `zetta mux reconnect`.
+
+Normal startup requires the multiplexer. If it cannot be started or reached,
+Zetta reports the error and does not create a terminal outside daemon ownership.
+Use `zetta --no-mux` only when the explicit compatibility path is wanted; it
+keeps the legacy in-process runner for that launch, so those sessions end with
+the Zetta process and are not held by the daemon. The in-process runner still
+supports **Detach** and **Keep running**: closing a window moves those tabs into
+the dormant Zetta process, and reopening a window in that same process can
+reconnect them. `Keep running` does not imply sharing in this mode, and Zetta
+does not inspect, connect to, or stop an already-running multiplexer. On the
+Phase 0–2 Windows build, daemon mode is intentionally gated; start with
+`zetta --no-mux` until the Windows pseudoconsole host lifecycle is delivered.
+The standalone `zmux.exe` package is still built and installed for
+daemon-capable platforms.
+
+Debug builds use a protocol-scoped `sessions-debug-vN` directory. This lets a
+`target/debug/zetta` and its adjacent `target/debug/zmux` run alongside an
+installed release without sending development requests to the release daemon;
+debug `zmux` commands operate on that same debug daemon.
 
 ### Stopping the multiplexer
 
@@ -89,7 +121,8 @@ multiplexer resolved for itself at startup — never one a client names — so t
 no more privileged than any other upgrade.
 
 Upgrading is not supported on Windows, where a pseudoconsole cannot be moved
-between processes. Sessions have to be closed there first.
+between processes. Phase 0–2 Windows therefore uses the explicit `--no-mux`
+path; sessions have to be closed there before the daemon lifecycle is enabled.
 
 ### How much output is kept
 
@@ -98,13 +131,13 @@ terminal's buffer filled — but how much is *kept* is configurable:
 
 | `sessions.retention` | what a reattached pane shows |
 | --- | --- |
-| `memory` (default) | the screen as it was, plus output since, up to a bounded buffer |
+| `memory` (default) | the screen as it was, plus output since, up to `sessions.ring_bytes` |
 | `none` | a cleared screen and whatever the program redraws |
 
 `none` is for hosts where memory matters more than scrollback. The
 `scrollback-buffer` feature compiles the buffer out altogether.
 
-What is kept is a *grid*, not the bytes: the multiplexer runs an off-screen
+What is kept is a bounded *terminal grid*, rather than raw bytes: the multiplexer runs an off-screen
 terminal for every pane it reads, feeds it the same output the pane produces, and
 serializes the screen from it when a window asks for the session. Keeping bytes
 instead could not work for a full-screen program, whose output repaints parts of a
@@ -114,7 +147,7 @@ reattached `htop` came back as pieces of itself over a blank terminal. A grid is
 what a terminal keeps for the same reason, and it holds the screen however long
 the session runs.
 
-`sessions.retention`'s memory figure is therefore a scrollback budget: the screen
+`sessions.ring_bytes` is therefore a scrollback budget: the screen
 plus a bounded history above it, with the oldest lines going first, exactly as a
 terminal's own scrollback does. Reading every byte costs the multiplexer roughly
 what it costs a terminal — a pane producing output at full tilt while nobody is
@@ -134,8 +167,9 @@ Sharing is the separate, explicit request, and it works on a session in the
 background as well as one on screen:
 
 ```sh
-zmux share 3      # any window may now attach session 3, with its secret
-zmux unshare 3    # session 3 is the window that last held it again
+zmux share 12345:7:3      # make it joinable, with its secret
+zmux reconnect 12345:7:3  # open it in a Zetta window
+zmux unshare 12345:7:3   # the window that last held it owns it again
 ```
 
 `Ctrl-Shift-K` asks for the secret a joining window will have to present, exactly
@@ -157,19 +191,28 @@ needs that window to still be running, and it refuses a session that is on
 screen, because a session several windows are driving may only be scoped back
 from the one showing it, which is what `Ctrl-Shift-K` does there.
 
-The scope outlives the window. A session whose Zetta has exited — closed or
-crashed — stays that process's, and no other window may attach it: backgrounding
-a tab is not a slow way of sharing it, so nothing widens a session's reach except
-somebody asking. `zmux list` says which process each scoped session belongs to,
-and `zmux share SESSION` is how one whose window is gone is picked up again. It
-can also be ended with `zmux kill SESSION` like any other.
+The scope outlives the window in normal daemon mode. A session detached with
+`Ctrl-Shift-D` whose Zetta has exited — closed or crashed — stays that process's,
+and no other window may attach it: ordinary detaching is not a slow way of
+sharing it. `Ctrl-Shift-B` is the exception: **Keep running** also shares the
+session, so the handoff is available to a new Zetta process after the window
+closes. `zmux list` says which process each still-scoped session belongs to. If
+that process is gone, run `zmux share SESSION` to change the scope, then
+`zmux reconnect SESSION` to open it. It can also be ended with `zmux kill SESSION`
+by the session owner or current holder, like any other protected administrative
+action.
+
+With `zetta --no-mux`, the same **Detach** and **Keep running** actions retain
+the tab in the current Zetta process. Closing its last window leaves that
+process dormant while the session exists; open a new window in that process to
+reconnect it. There is no shared live-pane attach or daemon reconnect path, and
+ending the Zetta process ends the locally owned sessions.
 
 ## Detach and reconnect
 
 Use `Ctrl-Shift-D` or the archive button beside the new-tab button to detach the
-active tab. Its rendered terminal views are destroyed, while a lightweight
-background runner retains the live processes, scrollback, and complete tab
-model, including:
+active tab. Its rendered terminal views are destroyed, while `zmux` retains the
+live processes, bounded screen/scrollback, and complete tab model, including:
 
 - nested pane splits and the active pane
 - minimized and maximized panes
@@ -199,7 +242,7 @@ windows, which is all that was missing.
 From there:
 
 1. Share the tab in the first window, choosing a secret or **No authentication**
-   when asked. It now appears in `zmux list`, `zetta sessions`, and every
+   when asked. It now appears in `zmux list` and every
    window's reconnect picker, marked **in use** because a window is still
    showing it.
 2. Reconnect that session from a *second* Zetta process, entering the secret if it
@@ -267,23 +310,26 @@ What releases a pane is a viewer *going*: closing its tab, or its process ending
 There is also a last-resort timeout of half a minute for a window that has hung with
 a pane still attached, so one frozen window cannot hold a session for ever.
 
-Sharing and **Keep running** are independent requests. Sharing says who may see
-the session now; keep-running says whether it outlives this window. A shared tab
-whose window closes without either detaching or keep-running ends like any other,
-and a tab that keeps running is attachable whether or not it was ever shared.
-Sharing offers a session's secret exactly as detaching and keep-running do: a tab
-that already carries one is shared with it, and a tab without one is asked, since
-sharing is the point at which another process may join. Worth answering rather
-than skipping — "running as you" is not the boundary that matters here, because a
-session's terminals may hold privileges the process joining them does not.
+Sharing and **Keep running** remain separate properties in daemon mode, but
+enabling **Keep running** requests both: the tab outlives this window and its
+session is shared by default. Sharing alone does not keep a session alive after
+every viewer goes, so a shared tab whose window closes without **Keep running**
+ends like any other. In `--no-mux` mode, **Keep running** only requests the
+process-local background owner because sharing is unavailable.
+If sharing is explicitly turned off before a keep-running tab closes, the
+handoff is private again. The authentication dialog covers both properties: a
+tab that already carries a secret reuses it, and a tab without one is asked.
+Worth answering rather than skipping — "running as you" is not the boundary that
+matters here, because a session's terminals may hold privileges the process
+joining them does not.
 
 ## Inspect sessions from the command line
 
 Inspect detached sessions without opening another window:
 
 ```sh
-zetta sessions
-zetta sessions -j # or --json
+zetta mux list
+zetta mux list -j # or --json
 ```
 
 The human-readable listing includes a stable `process:runner:session` ID, saved
@@ -299,17 +345,35 @@ such as the source of the report, the classification, and the sanitized
 foreground command name. Catalogs written by older schema versions are ignored
 until their owning process publishes the current format.
 
-Reconnect a session by its stable ID:
+Reconnect a session by its stable ID. Use `share` first if the listing says it
+is scoped to another process:
 
 ```sh
-zetta sessions reconnect 12345:7:42
+zetta mux share 12345:7:42
+zetta mux reconnect 12345:7:42
+# `zmux share` and `zmux reconnect` are equivalent standalone commands.
 ```
 
 Use the complete `PROCESS:RUNNER:SESSION` ID when more than one process has a
 session with the same numeric ID. Reconnecting a protected session prompts for
 the secret on the controlling terminal with terminal echo disabled. The secret
 is read from the prompt rather than a command-line option, so it is not stored
-in shell history or exposed in the process list.
+in shell history or exposed in the process list. When this command runs inside
+a Zetta terminal, the reconnect is routed to that terminal's Zetta process and
+window; an invocation from outside Zetta uses the available running window.
+
+In a shell launched by `zetta --no-mux`, the local session catalog is still
+managed from the CLI:
+
+```sh
+zetta mux list
+zetta mux reconnect PROCESS:RUNNER:SESSION
+```
+
+`share`, `unshare`, `kill`, `forget`, `stop`, and `--upgrade` require a daemon,
+so `zetta mux --help` and shell completion omit them in that mode. The same
+filter applies to the standalone `zmux` command. A session kept in this mode
+remains owned by that Zetta process and cannot be shared with another process.
 
 ## Unexpected terminal exits
 
@@ -354,10 +418,10 @@ A detached tab comes back with its layout, labels, overlays, icon, pinning and
 per-pane configuration, and each pane's screen as it was.
 
 Commands *stacked* on a pane — run in front of its shell rather than in it — come
-back listed with their recorded outcome, but a command that was still running is
-marked as not restored rather than shown as running: a stacked command's terminal
-cannot be reattached, so restoring it as running would leave something that never
-finishes.
+back listed with their recorded outcome. A command that was still running is
+stopped before detach, its daemon pane is closed, and it is restored as a failed
+task rather than shown as running: a stacked command's terminal cannot yet be
+reattached, so restoring it as running would leave something that never finishes.
 
 ## Closing a pane
 
@@ -376,8 +440,9 @@ and do not become background sessions implicitly.
 
 Launching `zetta` again finds the multiplexer through an authenticated local
 AF_UNIX control socket and offers its sessions through the reconnect action.
-`zetta sessions` lists them without opening a window at all, because the
-multiplexer publishes the catalog to disk.
+`zmux list` (or `zetta mux list`) lists them without opening a window at all,
+because the multiplexer publishes the catalog to disk. Use `zmux reconnect` or
+`zetta mux reconnect` when you want to open one.
 
 ## Session protection
 
@@ -413,16 +478,20 @@ running a privileged shell. Three properties hold it up.
 
 Reattaching a protected session requires the secret. The process control socket
 is mode `0600` in a `0700` directory, and its endpoint token authenticates the
-*channel*, not the session: no control command can reattach a protected
-session, and none can observe or modify one. Renaming, attention, and
-silent-mode queries all skip protected sessions, so the token cannot even be
-used to confirm one exists.
+*channel*, not the session. Protected catalog entries reveal only a stable ID
+and protection flag; direct pane-state observation and administrative commands
+(`kill`, `forget`, `resize`, `close`, and scope changes) require the session
+owner or a current holder. On Linux the daemon binds that decision to the
+Unix-socket peer PID, so changing only the JSON process-ID field is not enough.
+Renaming, attention, and silent-mode queries also skip protected sessions.
 
 The secret is never stored. Only a uniquely salted Argon2id verifier lives in
-the session runner, and it is never written to `config.json`, control JSON, or
-the session catalog. Editing files on disk cannot replace it. Protected catalog
-entries carry only an ID and a protection flag, so commands, titles, and
-working directories stay private while detached.
+the `zmux` daemon's memory during Phase 0–2, and it is never written to
+`config.json`, control JSON, or the session catalog. Phase 3 may place the
+verifier inside an age-encrypted record, never in cleartext. Editing files on
+disk cannot replace it. Protected catalog entries carry only an ID and a
+protection flag, so commands, titles, and working directories stay private
+while detached.
 
 Wrong secrets are rate limited with an escalating backoff. Each consecutive
 failure doubles the window during which that session refuses further attempts,
@@ -474,9 +543,11 @@ can pick it back up.
 ## Automatically background a tab
 
 Use `Ctrl-Shift-B` or **Zetta: Toggle Auto Background Tab** in the command
-palette to keep a tab running when the tab or its window closes. This
-**Keep running** setting is separate from the visual `Pin Tab` action, which
-only keeps a tab at the leading edge of the current tab bar.
+palette to keep a tab running when the tab or its window closes. **Keep running**
+also shares the session by default in daemon mode, so a new Zetta process can
+reconnect after the handoff. With `--no-mux`, it keeps the session in the same
+Zetta process without sharing. This setting is separate from the visual `Pin
+Tab` action, which only keeps a tab at the leading edge of the current tab bar.
 
 Enabling the toggle asks for reattachment authentication immediately, in the same
 dialog detaching and sharing use: select **No authentication**, or enter and

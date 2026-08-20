@@ -45,6 +45,7 @@ uds_windows = "1.2"
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_System_Console",
     "Win32_System_Threading",
 ] }
 

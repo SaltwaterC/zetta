@@ -100,13 +100,11 @@ $zettaSoundNames = @('zetta-default', 'zetta-ok', 'zetta-alarm') + $(
     }
 )
 
-$zettaSessionIds = {
+$zmuxSessionIds = {
     try {
-        $catalogs = @(zetta sessions --json 2>$null | ConvertFrom-Json)
-        foreach ($catalog in $catalogs) {
-            foreach ($session in @($catalog.sessions)) {
-                "{0}:{1}:{2}" -f $catalog.process_id, $catalog.runner_id, $session.id
-            }
+        $lines = if ($commandName -eq 'zmux') { @(zmux list 2>$null) } else { @(zetta mux list 2>$null) }
+        foreach ($line in $lines) {
+            if ($line -match '^\s*reconnect\s+id:\s+(\d+:\d+:\d+)(?:\s+\(short:\s+\d+\))?\s*$') { $matches[1] }
         }
     } catch {}
 }
@@ -115,6 +113,7 @@ $zettaCompletions = {
     param($wordToComplete, $commandAst, $cursorPosition)
 
     $commandName = $commandAst.CommandElements[0].Value
+    $noMux = $env:ZETTA_NO_MUX -eq '1'
     $words = @($commandAst.CommandElements | ForEach-Object { $_.Value })
     if ($commandName -eq 'zmux') {
         # `zmux` takes the same arguments as `zetta mux`, so completing it
@@ -144,7 +143,7 @@ $zettaCompletions = {
         }
     }
     $subcommand = $words | Where-Object {
-        $_ -in 'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'mux', 'splits', 'pane', 'profile', 'project', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'notify-cleanup', 'attention', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', 'wt'
+        $_ -in 'benchmark', 'benchmark-output', 'terminal-size', 'mux', 'splits', 'pane', 'profile', 'project', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'notify-cleanup', 'attention', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', 'wt'
     } | Select-Object -First 1
     $worktreeCommand = $false
     $worktreeOperation = ''
@@ -192,7 +191,7 @@ $zettaCompletions = {
         & $zettaSplits
     } elseif ($previous -eq '--replace-pane' -or ($previous -eq '-r' -and $null -eq $subcommand)) {
         if ($wordToComplete -like '-*' -or [string]::IsNullOrEmpty($wordToComplete)) {
-            '--help', '--version', '--config', '--keymap', '--profile', '--split', '--theme'
+            '--help', '--version', '--config', '--keymap', '--profile', '--split', '--theme', '--no-mux'
         } else {
             @()
         }
@@ -265,8 +264,11 @@ $zettaCompletions = {
         $profileArguments = @($words | Select-Object -Skip ($profileIndex + 2) | Where-Object { $_ -notlike '-*' -and -not [string]::IsNullOrEmpty($_) })
         if ($profileArguments.Count -ge 2 -or ($profileArguments.Count -eq 1 -and [string]::IsNullOrEmpty($wordToComplete))) { & $zettaProfileThemes $configArguments }
         else { & $zettaProfiles $configArguments }
-    } elseif ($subcommand -eq 'sessions' -and $words.Count -ge 3 -and $words[2] -eq 'reconnect') {
-        if ($previous -in '--session', '-s') { @() } else { & $zettaSessionIds }
+    } elseif ($subcommand -eq 'mux' -and $words.Count -ge 3 -and (
+        $words[2] -eq 'reconnect' -or
+        (-not $noMux -and $words[2] -in 'share', 'unshare', 'kill', 'forget')
+    ) -and $wordToComplete -notlike '-*') {
+        & $zmuxSessionIds
     } elseif ($worktreeCommand) {
         if ([string]::IsNullOrEmpty($worktreeOperation)) {
             'new', 'done', 'status', 'rerere', '--help'
@@ -278,7 +280,7 @@ $zettaCompletions = {
             '--help'
         }
     } elseif ($null -eq $subcommand) {
-        'benchmark', 'benchmark-output', 'terminal-size', 'sessions', 'mux', 'profile', 'project', 'splits', 'pane', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'notify-cleanup', 'attention', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', 'wt', '--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme'
+        'benchmark', 'benchmark-output', 'terminal-size', 'mux', 'profile', 'project', 'splits', 'pane', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'notify-cleanup', 'attention', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', 'wt', '--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme', '--no-mux'
     } else {
         switch ($subcommand) {
             'benchmark' { '--profile-report', '--profile-duration', '--profile-pane-stress', '--profile-background-stress', '--profile-sparse-updates', '--profile-alt-screen-scroll', '--profile-external-terminal', '--help' }
@@ -287,16 +289,13 @@ $zettaCompletions = {
             'edit' { '--delete-after', '--help' }
             'vi' { '--help' }
             'mux' {
-                if ($words.Count -le 2) { 'list', 'stop', 'share', 'unshare', '--json', '--upgrade', '--help', '--version' }
+                if ($words.Count -le 2) {
+                    if ($noMux) { 'list', 'reconnect', '--json', '--help', '--version' }
+                    else { 'list', 'stop', 'reconnect', 'share', 'unshare', 'kill', 'forget', '--json', '--upgrade', '--help', '--version' }
+                }
+                elseif ($noMux -and $words[2] -notin 'list', 'reconnect') { @() }
                 elseif ($words[2] -eq 'stop') { '--force', '--help' }
                 else { '--json', '--help' }
-            }
-            'sessions' {
-                if ($words.Count -le 2 -or ($words.Count -eq 3 -and $words[2] -ne 'reconnect')) {
-                    'reconnect', '--json', '--help'
-                } elseif ($words[2] -eq 'reconnect') {
-                    if ($last -eq 'reconnect') { & $zettaSessionIds } else { '--session', '--help' }
-                } else { '--json', '--help' }
             }
             'splits' { '--help' }
             'pane' { '--direction', '--label', '--pane', '--overlay', '--overlay-size', '--overlay-opacity', '--overlay-color', '--stack', '--list', '--help' }

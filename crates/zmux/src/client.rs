@@ -27,6 +27,7 @@ use crate::{
     },
     paths::session_catalog_dir,
     protocol::BackgroundSessionSummary,
+    retention::Retention,
     server::endpoint_path,
     transport::{Connection, Endpoint, Stream},
 };
@@ -35,7 +36,10 @@ use crate::{
 /// endpoint. Generous, because the first start also creates the directory.
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const STARTUP_POLL: Duration = Duration::from_millis(10);
-
+/// A request must not be able to leave the terminal-opening task waiting on a
+/// daemon forever. This also bounds a peer that accepted a connection but does
+/// not understand the request framing.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct Client {
     endpoint: Endpoint,
     /// Where this client found its multiplexer, so a subscription that is lost
@@ -263,7 +267,16 @@ enum VersionCheck {
 impl Client {
     /// Connects to the running multiplexer, starting one if there is none.
     pub fn connect() -> Result<Self> {
-        Self::connect_at(&session_catalog_dir())
+        Self::connect_with_retention(Retention::default())
+    }
+
+    /// Connects to the running multiplexer, starting one with `retention` if
+    /// there is none. The application resolves this before the first pane is
+    /// spawned, so a constrained build cannot silently start a daemon with a
+    /// different retention policy.
+    pub fn connect_with_retention(retention: Retention) -> Result<Self> {
+        retention.validate()?;
+        Self::connect_at_with_retention(&session_catalog_dir(), retention)
     }
 
     /// Connects only if a multiplexer is already running.
@@ -293,10 +306,20 @@ impl Client {
     /// that tests — and, later, more than one multiplexer on a host — do not
     /// have to mutate process-global state to choose one.
     pub fn connect_at(directory: &std::path::Path) -> Result<Self> {
+        Self::connect_at_with_retention(directory, Retention::default())
+    }
+
+    /// As [`Self::connect_with_retention`], against an explicit session
+    /// directory. Tests use this so each daemon has isolated state.
+    pub fn connect_at_with_retention(
+        directory: &std::path::Path,
+        retention: Retention,
+    ) -> Result<Self> {
+        retention.validate()?;
         if let Some(client) = Self::connect_existing_at(directory)? {
             return Ok(client);
         }
-        start_daemon(directory)?;
+        start_daemon(directory, retention)?;
         let deadline = Instant::now() + STARTUP_TIMEOUT;
         loop {
             if let Some(client) = Self::connect_existing_at(directory)? {
@@ -312,6 +335,14 @@ impl Client {
 
     pub fn connect_existing_at(directory: &std::path::Path) -> Result<Option<Self>> {
         Self::connect_endpoint(directory, VersionCheck::Required)
+    }
+
+    /// The process ID published by the daemon endpoint. It is part of a
+    /// session's stable catalog identifier and lets administrative commands
+    /// reject an identifier belonging to a different catalog in the same
+    /// session directory.
+    pub fn process_id(&self) -> u32 {
+        self.endpoint.process_id
     }
 
     fn connect_endpoint(
@@ -330,14 +361,14 @@ impl Client {
             return Ok(None);
         }
         // A multiplexer left over from an earlier build cannot serve this
-        // client. Finding that out here — rather than when the first terminal
-        // fails to open — is what lets the caller fall back to a local
-        // process instead of failing outright.
+        // client. Finding that out here lets the application report the
+        // ownership conflict before it creates a terminal outside the daemon
+        // contract.
         anyhow::ensure!(
             matches!(version_check, VersionCheck::Tolerated)
                 || endpoint.protocol_version == PROTOCOL_VERSION,
             "the multiplexer running as process {} speaks protocol version {}, not \
-             {PROTOCOL_VERSION}. Sessions it holds are still listed by `zetta sessions` but \
+             {PROTOCOL_VERSION}. Sessions it holds are still listed by `zmux list` but \
              cannot be attached until it is replaced; `zmux --upgrade` replaces it in place, \
              keeping them.",
             endpoint.process_id,
@@ -436,6 +467,12 @@ impl Client {
     fn open_as(&self, request: Request, client_process_id: u32) -> Result<Connection> {
         let stream =
             Stream::connect(&self.endpoint.socket_path).context("connecting to the multiplexer")?;
+        stream
+            .set_read_timeout(Some(REQUEST_TIMEOUT))
+            .context("setting the multiplexer request read timeout")?;
+        stream
+            .set_write_timeout(Some(REQUEST_TIMEOUT))
+            .context("setting the multiplexer request write timeout")?;
         let mut connection = Connection::new(stream);
         connection.send(&Envelope {
             version: PROTOCOL_VERSION,
@@ -746,7 +783,8 @@ impl Client {
     /// Asks the daemon to replace itself, keeping its sessions.
     pub fn upgrade(&self) -> Result<()> {
         let mut connection = self.open(Request::Upgrade)?;
-        match connection.receive::<Response>()?.0 {
+        let response = connection.receive::<Response>()?.0;
+        match response {
             Response::Ok => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to upgrade: {other:?}"),
@@ -797,6 +835,14 @@ impl Client {
     /// it is treating the lost connection as the pane's process ending.
     pub fn subscribe(&self) -> Result<Subscription> {
         let connection = self.open(Request::Subscribe)?;
+        // Subscription connections are intentionally long-lived and may be
+        // idle for hours. Keep the write deadline from `open_as`, but remove
+        // the request read deadline before handing the connection to the
+        // event loop.
+        connection
+            .stream()
+            .set_read_timeout(None)
+            .context("clearing the multiplexer subscription read timeout")?;
         let exits = Arc::new(ExitReporters::default());
         let revokes = Arc::new(PaneSignals::default());
         let grants = Arc::new(PaneSignals::default());
@@ -1245,8 +1291,12 @@ impl PaneSignals {
 }
 
 /// Starts a detached daemon that outlives this process.
-fn start_daemon(directory: &std::path::Path) -> Result<()> {
-    let (executable, arguments) = multiplexer_command()?;
+fn start_daemon(directory: &std::path::Path, retention: Retention) -> Result<()> {
+    let (executable, mut arguments) = multiplexer_command()?;
+    arguments.extend(["--retention".to_owned(), retention.name().to_owned()]);
+    if let Retention::Memory { bytes } = retention {
+        arguments.extend(["--retention-bytes".to_owned(), bytes.to_string()]);
+    }
     let _ = directory;
     Command::new(&executable)
         .args(&arguments)

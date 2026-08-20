@@ -474,10 +474,10 @@ pub(crate) struct Zetta {
     pub(crate) tabs: Vec<Tab>,
     pub(crate) background_sessions: BackgroundSessionRunner<Tab>,
     /// The multiplexer that owns every pane's process, connected on first use.
-    /// `None` until then, and after a failure to reach it — a terminal falls
-    /// back to a local process rather than refusing to open, because a broken
-    /// multiplexer must not make the application unusable.
+    /// `None` until then. Normal launches require the daemon; `--no-mux` is an
+    /// explicit compatibility escape hatch for the legacy in-process owner.
     pub(crate) mux: Option<MuxRuntime>,
+    pub(crate) no_mux: bool,
     pub(crate) mux_panes: MuxPanes,
     /// The panes this window shows in shared mode, keyed by pane id. A shared
     /// pane's terminal reads a relayed byte stream rather than the pty, so the
@@ -578,6 +578,13 @@ pub(crate) struct Zetta {
     pub(crate) _subscriptions: Vec<Subscription>,
 }
 
+pub(crate) struct ZettaLaunchOptions {
+    pub(crate) initial_profile: Option<Profile>,
+    pub(crate) initial_project: Option<ProjectConfig>,
+    pub(crate) launch_theme_override: Option<(String, String)>,
+    pub(crate) no_mux: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CloseTabConfirmation {
     pub(crate) tab_id: u64,
@@ -664,12 +671,16 @@ impl Zetta {
     pub(crate) fn new(
         config: Config,
         mut configuration_error: Option<String>,
-        initial_profile: Option<Profile>,
-        initial_project: Option<ProjectConfig>,
-        launch_theme_override: Option<(String, String)>,
+        launch_options: ZettaLaunchOptions,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let ZettaLaunchOptions {
+            initial_profile,
+            initial_project,
+            launch_theme_override,
+            no_mux,
+        } = launch_options;
         let button_layout = system_window_button_layout(cx);
         let projects = match ProjectState::load() {
             Ok(projects) => projects,
@@ -695,6 +706,7 @@ impl Zetta {
             tabs: Vec::new(),
             background_sessions: BackgroundSessionRunner::default(),
             mux: None,
+            no_mux,
             mux_panes: MuxPanes::default(),
             shared_panes: HashMap::new(),
             background_observed_panes: HashSet::new(),
@@ -1514,6 +1526,7 @@ impl Zetta {
             false,
             None,
             false,
+            self.no_mux,
             cx,
         )
         .log_err();

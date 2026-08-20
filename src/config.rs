@@ -24,6 +24,77 @@ const DEFAULT_MAX_SCROLL_HISTORY_LINES: usize = MAX_SCROLL_HISTORY_LINES;
 pub(crate) const DEFAULT_INACTIVE_PANE_OPACITY: f32 = 0.8;
 pub(crate) const DEFAULT_HTTP_PORT: u16 = 8000;
 pub(crate) const DEFAULT_TFTP_SERVER_PORT: u16 = 69;
+pub(crate) const DEFAULT_SESSION_RING_BYTES: usize = zmux::retention::DEFAULT_RING_BYTES;
+pub(crate) const MAX_SESSION_RING_BYTES: usize = zmux::retention::MAX_RING_BYTES;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SessionRetention {
+    None,
+    #[default]
+    Memory,
+    /// Reserved for the Phase 3 encrypted store. Keeping the value in the
+    /// typed configuration lets an unsupported build reject it explicitly.
+    Persist,
+}
+
+impl SessionRetention {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Memory => "memory",
+            Self::Persist => "persist",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Memory => "Memory",
+            Self::Persist => "Persist",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "none" => Ok(Self::None),
+            "memory" => Ok(Self::Memory),
+            "persist" => Ok(Self::Persist),
+            _ => anyhow::bail!("sessions.retention must be \"none\", \"memory\", or \"persist\""),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionsConfig {
+    pub retention: SessionRetention,
+    pub ring_bytes: usize,
+}
+
+impl Default for SessionsConfig {
+    fn default() -> Self {
+        Self {
+            retention: SessionRetention::default(),
+            ring_bytes: DEFAULT_SESSION_RING_BYTES,
+        }
+    }
+}
+
+impl SessionsConfig {
+    pub(crate) fn to_zmux_retention(&self) -> Result<zmux::retention::Retention> {
+        let retention = match self.retention {
+            SessionRetention::None => zmux::retention::Retention::None,
+            SessionRetention::Memory => zmux::retention::Retention::Memory {
+                bytes: self.ring_bytes,
+            },
+            SessionRetention::Persist => anyhow::bail!(
+                "sessions.retention=\"persist\" needs the session-persistence feature, which \
+                 this build does not provide"
+            ),
+        };
+        retention.validate()?;
+        Ok(retention)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PaneControlsPosition {
@@ -347,6 +418,7 @@ pub struct Config {
     pub pane_controls_hidden_by_default: bool,
     pub http_server_port: u16,
     pub tftp_server_port: u16,
+    pub sessions: SessionsConfig,
     pub pane_split_templates: HashMap<String, PaneSplitTemplateConfig>,
 }
 
@@ -382,6 +454,7 @@ impl Config {
             pane_controls_hidden_by_default: false,
             http_server_port: DEFAULT_HTTP_PORT,
             tftp_server_port: DEFAULT_TFTP_SERVER_PORT,
+            sessions: SessionsConfig::default(),
             pane_split_templates: default_pane_split_templates(),
         }
     }
@@ -546,6 +619,36 @@ impl Config {
         if let Some(port) = root.get("tftp_server_port") {
             config.tftp_server_port = parse_server_port(port, "tftp_server_port")?;
         }
+        if let Some(sessions) = root.get("sessions") {
+            let sessions = sessions.as_object().context("sessions must be an object")?;
+            if let Some(field) = sessions
+                .keys()
+                .find(|field| !matches!(field.as_str(), "retention" | "ring_bytes"))
+            {
+                anyhow::bail!("unrecognized sessions configuration field {field:?}");
+            }
+            if let Some(retention) = sessions.get("retention") {
+                config.sessions.retention = SessionRetention::parse(
+                    retention
+                        .as_str()
+                        .context("sessions.retention must be a string")?,
+                )?;
+            }
+            if let Some(ring_bytes) = sessions.get("ring_bytes") {
+                let ring_bytes = ring_bytes
+                    .as_u64()
+                    .context("sessions.ring_bytes must be a positive integer")?;
+                config.sessions.ring_bytes = usize::try_from(ring_bytes)
+                    .ok()
+                    .filter(|bytes| (4 * 1024..=MAX_SESSION_RING_BYTES).contains(bytes))
+                    .with_context(|| {
+                        format!(
+                            "sessions.ring_bytes must be between 4096 and {MAX_SESSION_RING_BYTES} bytes"
+                        )
+                    })?;
+            }
+            config.sessions.to_zmux_retention()?;
+        }
 
         if let Some(profiles) = root.get("profiles") {
             let profiles = profiles.as_array().context("profiles must be an array")?;
@@ -608,6 +711,7 @@ fn validate_config_fields(root: &Value) -> Result<()> {
         "pane_controls_hidden_by_default",
         "http_server_port",
         "tftp_server_port",
+        "sessions",
         "pane_split_templates",
         "profiles",
     ];

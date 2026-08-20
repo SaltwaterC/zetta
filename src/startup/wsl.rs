@@ -58,7 +58,11 @@ where
         .or_else(|| env::var("WSLENV").ok())
         .unwrap_or_default();
 
-    for variable in ["ZETTA_PROCESS_ID/u", "ZETTA_ATTENTION_ID/u"] {
+    for variable in [
+        "ZETTA_PROCESS_ID/u",
+        "ZETTA_ATTENTION_ID/u",
+        "ZETTA_NO_MUX/u",
+    ] {
         add_wslenv_entry(&mut wslenv, variable);
     }
 

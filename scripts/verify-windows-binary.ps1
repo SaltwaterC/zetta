@@ -3,7 +3,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$ConsoleBinaryPath,
     [Parameter(Mandatory = $true)]
-    [string]$GuiBinaryPath
+    [string]$GuiBinaryPath,
+    [Parameter(Mandatory = $true)]
+    [string]$MuxBinaryPath
 )
 
 $ErrorActionPreference = "Stop"
@@ -53,17 +55,25 @@ $consoleSubsystem = 3
 $guiSubsystem = 2
 $consoleBinary = (Resolve-Path -LiteralPath $ConsoleBinaryPath).Path
 $guiBinary = (Resolve-Path -LiteralPath $GuiBinaryPath).Path
+$muxBinary = (Resolve-Path -LiteralPath $MuxBinaryPath).Path
 $actualConsoleSubsystem = Get-PeSubsystem $consoleBinary
 $actualGuiSubsystem = Get-PeSubsystem $guiBinary
+$actualMuxSubsystem = Get-PeSubsystem $muxBinary
 if ($actualConsoleSubsystem -ne $consoleSubsystem) {
     throw "$consoleBinary uses PE subsystem $actualConsoleSubsystem; expected console subsystem $consoleSubsystem"
 }
 if ($actualGuiSubsystem -ne $guiSubsystem) {
     throw "$guiBinary uses PE subsystem $actualGuiSubsystem; expected GUI subsystem $guiSubsystem"
 }
+if ($actualMuxSubsystem -ne $consoleSubsystem) {
+    throw "$muxBinary uses PE subsystem $actualMuxSubsystem; expected console subsystem $consoleSubsystem"
+}
 
-$version = & $consoleBinary --version
-if ($LASTEXITCODE -ne 0 -or $version -notmatch '^Zetta \S+$') {
+$version = (& $consoleBinary --version | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $version -notmatch '(?m)^Zetta \S+$' -or
+    $version -notmatch '(?m)^CONTROL_VERSION=\d+$' -or
+    $version -notmatch '(?m)^CATALOG_VERSION=\d+$' -or
+    $version -notmatch '(?m)^ZMUX_PROTOCOL_VERSION=\d+$') {
     throw "$consoleBinary --version failed its CLI smoke test"
 }
 $guiVersion = Invoke-GuiLauncher $guiBinary "--version"
@@ -75,6 +85,11 @@ if ($guiInvalidArgument.ExitCode -eq 0 -or
     $guiInvalidArgument.Stderr -notmatch 'unknown argument') {
     throw "$guiBinary failed to propagate errors from $consoleBinary"
 }
+$muxVersion = & $muxBinary --version
+if ($LASTEXITCODE -ne 0 -or $muxVersion -notmatch '^zmux \S+ \(protocol \d+\)$') {
+    throw "$muxBinary --version failed its CLI smoke test"
+}
 
 Write-Host "Verified Windows console executable: $consoleBinary ($version)"
 Write-Host "Verified Windows GUI launcher: $guiBinary"
+Write-Host "Verified Windows multiplexer executable: $muxBinary ($muxVersion)"

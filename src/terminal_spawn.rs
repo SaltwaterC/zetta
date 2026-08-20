@@ -229,6 +229,7 @@ impl Zetta {
             &combined_environment,
             std::process::id(),
             attention_id,
+            self.no_mux,
         );
         if is_wsl {
             add_wsl_environment_variable_names(
@@ -237,7 +238,23 @@ impl Zetta {
             );
             add_wsl_environment_variables(&mut environment);
         }
-        let mux_provider = self.mux_provider_for_tab(tab_id, cx);
+        let mux_provider = match self.mux_provider_for_tab(tab_id, cx) {
+            Ok(provider) => provider,
+            Err(error) => {
+                if let Some(pane) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.id == tab_id)
+                    .and_then(|tab| tab.pane_mut(pane_id))
+                {
+                    pane.error = Some(format!(
+                        "Could not start the terminal through the session multiplexer: {error:#}"
+                    ));
+                }
+                cx.notify();
+                return;
+            }
+        };
         let builder = TerminalBuilder::new(
             working_directory,
             None,
@@ -488,6 +505,7 @@ pub(crate) fn apply_terminal_environment_overrides<S>(
     overrides: &HashMap<String, String>,
     process_id: u32,
     attention_id: u64,
+    no_mux: bool,
 ) where
     S: std::hash::BuildHasher,
 {
@@ -501,6 +519,10 @@ pub(crate) fn apply_terminal_environment_overrides<S>(
     }
     environment.insert("ZETTA_PROCESS_ID".to_owned(), process_id.to_string());
     environment.insert("ZETTA_ATTENTION_ID".to_owned(), attention_id.to_string());
+    environment.insert(
+        zmux::NO_MUX_ENVIRONMENT_VARIABLE.to_owned(),
+        if no_mux { "1" } else { "0" }.to_owned(),
+    );
 }
 
 /// Builds the shell invocation used by a stacked command. Native profiles go
@@ -635,6 +657,7 @@ impl Zetta {
             &project_environment,
             std::process::id(),
             attention_id,
+            self.no_mux,
         );
         if is_wsl {
             add_wsl_environment_variable_names(
@@ -670,7 +693,23 @@ impl Zetta {
             completion_rx,
             spawned_task: task,
         };
-        let mux_provider = self.mux_provider_for_tab(tab_id, cx);
+        let mux_provider = match self.mux_provider_for_tab(tab_id, cx) {
+            Ok(provider) => provider,
+            Err(error) => {
+                if let Some(pane) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.id == tab_id)
+                    .and_then(|tab| tab.pane_mut(pane_id))
+                {
+                    pane.error = Some(format!(
+                        "Could not start the stacked terminal through the session multiplexer: {error:#}"
+                    ));
+                }
+                cx.notify();
+                return;
+            }
+        };
         let builder = TerminalBuilder::new(
             working_directory,
             Some(task_state),

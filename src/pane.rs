@@ -1916,8 +1916,9 @@ pub(crate) struct Tab {
     /// them can join it and both then drive the same panes.
     ///
     /// Separate from `close_policy`: sharing says who may see the session now,
-    /// keep-running says whether it outlives this window. Either one makes the
-    /// session attachable, but only the second changes what happens on close.
+    /// keep-running says whether it outlives this window. Enabling keep-running
+    /// also turns sharing on by default so the handoff remains reconnectable
+    /// from another process; the sharing toggle can still turn that offer off.
     pub(crate) shared: bool,
     /// A title entered through the tab rename UI. This is the highest-priority
     /// title source and is intentionally separate from process/worktree state.

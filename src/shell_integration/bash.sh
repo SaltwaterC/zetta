@@ -181,17 +181,16 @@ _zetta_complete() {
         done < <(zetta project list 2>/dev/null)
     }
 
-    _zetta_complete_session_ids() {
+    _zetta_complete_mux_session_ids() {
         COMPREPLY=()
         local session_id
+        local -a mux_list_command=(zetta mux list)
+        if [[ ${_zetta_mux_completion_command:-} == zmux ]]; then
+            mux_list_command=(zmux list)
+        fi
         while IFS= read -r session_id; do
             [[ $session_id == "$current"* ]] && COMPREPLY+=("$session_id")
-        done < <(zetta sessions --json 2>/dev/null | awk '
-            /"process_id"[[:space:]]*:/ { match($0, /[0-9]+/); process=substr($0, RSTART, RLENGTH) }
-            /"runner_id"[[:space:]]*:/ { match($0, /[0-9]+/); runner=substr($0, RSTART, RLENGTH) }
-            /"id"[[:space:]]*:/ { match($0, /[0-9]+/); session=substr($0, RSTART, RLENGTH) }
-            /"authentication_required"[[:space:]]*:/ { print process ":" runner ":" session }
-        ')
+        done < <("${mux_list_command[@]}" 2>/dev/null | awk '$1 == "reconnect" && $2 == "id:" && $3 ~ /^[0-9]+:[0-9]+:[0-9]+$/ { print $3 }')
     }
 
     _zetta_complete_tab_icons() {
@@ -315,7 +314,7 @@ _zetta_complete() {
             ;;
         --replace-pane)
             if [[ $current == -* || -z $current ]]; then
-                _zetta_compgen '--help --version --config --keymap --profile --split --theme'
+                _zetta_compgen '--help --version --config --keymap --profile --split --theme --no-mux'
             else
                 COMPREPLY=()
             fi
@@ -418,7 +417,7 @@ _zetta_complete() {
                 COMPREPLY=()
             elif [[ $command == -* || -z $command ]]; then
                 if [[ $current == -* || -z $current ]]; then
-                    _zetta_compgen '--help --version --config --keymap --profile --split --theme'
+                    _zetta_compgen '--help --version --config --keymap --profile --split --theme --no-mux'
                 else
                     COMPREPLY=()
                 fi
@@ -450,7 +449,7 @@ _zetta_complete() {
     esac
 
     if (( COMP_CWORD == 1 )); then
-        _zetta_compgen 'benchmark benchmark-output terminal-size sessions mux pane profile project edit vi init serial http tftp notify notify-cleanup attention copy paste splits tabicon panetheme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme'
+        _zetta_compgen 'benchmark benchmark-output terminal-size mux pane profile project edit vi init serial http tftp notify notify-cleanup attention copy paste splits tabicon panetheme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme --no-mux'
         return
     fi
 
@@ -459,7 +458,7 @@ _zetta_complete() {
     # offering the remaining top-level flags instead of falling through to
     # the subcommand-specific cases below, which would offer nothing.
     if [[ $command == -* ]]; then
-        _zetta_compgen '--help --version --config --keymap --profile --split --replace-pane --theme'
+        _zetta_compgen '--help --version --config --keymap --profile --split --replace-pane --theme --no-mux'
         return
     fi
 
@@ -575,26 +574,21 @@ _zetta_complete() {
                 COMPREPLY=( $(compgen -f -- "$current") )
             fi
             ;;
-        sessions)
-            if (( COMP_CWORD == 2 )); then
-                _zetta_compgen 'reconnect --json --help'
-            elif [[ ${COMP_WORDS[2]} == reconnect ]]; then
-                if [[ $previous == --session || $previous == -s ]]; then
-                    COMPREPLY=()
-                elif (( COMP_CWORD == 3 )); then
-                    _zetta_complete_session_ids
-                else
-                    _zetta_compgen '--session --help'
-                fi
-            else
-                _zetta_compgen '--json --help'
-            fi
-            ;;
         mux)
             if (( COMP_CWORD == 2 )); then
-                _zetta_compgen 'list stop share unshare --json --upgrade --help --version'
+                if [[ ${ZETTA_NO_MUX:-0} == 1 ]]; then
+                    _zetta_compgen 'list reconnect --json --help --version'
+                else
+                    _zetta_compgen 'list stop reconnect share unshare kill forget --json --upgrade --help --version'
+                fi
+            elif [[ ${ZETTA_NO_MUX:-0} == 1 && ${COMP_WORDS[2]} != reconnect && ${COMP_WORDS[2]} != list ]]; then
+                COMPREPLY=()
             elif [[ ${COMP_WORDS[2]} == stop ]]; then
                 _zetta_compgen '--force --help'
+            elif [[ ${COMP_WORDS[2]} == reconnect ]] && (( COMP_CWORD == 3 )); then
+                _zetta_complete_mux_session_ids
+            elif [[ ${ZETTA_NO_MUX:-0} != 1 && ( ${COMP_WORDS[2]} == share || ${COMP_WORDS[2]} == unshare || ${COMP_WORDS[2]} == kill || ${COMP_WORDS[2]} == forget ) ]] && (( COMP_CWORD == 3 )); then
+                _zetta_complete_mux_session_ids
             else
                 _zetta_compgen '--json --help'
             fi
@@ -684,6 +678,7 @@ _zetta_complete_zwt() {
 }
 
 _zetta_complete_zmux() {
+    local _zetta_mux_completion_command=zmux
     local saved_words=("${COMP_WORDS[@]}")
     local saved_cword=$COMP_CWORD
     COMP_WORDS=(zetta mux "${COMP_WORDS[@]:1}")

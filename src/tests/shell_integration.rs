@@ -64,6 +64,7 @@ fn supported_shells_generate_completion_and_tftp_shortcut() {
         assert!(script.contains("zetta panetheme --list"));
         assert!(script.contains("zetta splits"));
         assert!(script.contains("zetta pane --list"));
+        assert!(script.contains("ZETTA_NO_MUX"));
         assert!(script.contains("--direction"));
         assert!(script.contains("--pane"));
         assert!(script.contains("replace-pane"));
@@ -319,10 +320,20 @@ fn bash_zmux_completes_the_same_as_zetta_mux() {
 
     let script = ShellIntegration::Bash.script(&profiles());
     let driver = "\
+zetta() { if [[ $1 == mux && $2 == list ]]; then printf '%s\\n' '  reconnect id: 12345:7:42 (short: 42)'; fi; }\n\
+zmux() { if [[ $1 == list ]]; then printf '%s\\n' '  reconnect id: 12345:7:42 (short: 42)'; fi; }\n\
 COMP_WORDS=(zetta mux '')\nCOMP_CWORD=2\n_zetta_complete\nprintf 'mux:%s\\n' \"${COMPREPLY[@]}\"\n\
 COMP_WORDS=(zmux '')\nCOMP_CWORD=1\n_zetta_complete_zmux\nprintf 'zmux:%s\\n' \"${COMPREPLY[@]}\"\n\
+COMP_WORDS=(zetta mux share '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'mux-share:%s\\n' \"${COMPREPLY[@]}\"\n\
+COMP_WORDS=(zmux share '')\nCOMP_CWORD=2\n_zetta_complete_zmux\nprintf 'zmux-share:%s\\n' \"${COMPREPLY[@]}\"\n\
+COMP_WORDS=(zmux unshare '')\nCOMP_CWORD=2\n_zetta_complete_zmux\nprintf 'zmux-unshare:%s\\n' \"${COMPREPLY[@]}\"\n\
 COMP_WORDS=(zetta mux stop --)\nCOMP_CWORD=3\n_zetta_complete\nprintf 'mux-stop:%s\\n' \"${COMPREPLY[@]}\"\n\
-COMP_WORDS=(zmux stop --)\nCOMP_CWORD=2\n_zetta_complete_zmux\nprintf 'zmux-stop:%s\\n' \"${COMPREPLY[@]}\"\n";
+COMP_WORDS=(zmux stop --)\nCOMP_CWORD=2\n_zetta_complete_zmux\nprintf 'zmux-stop:%s\\n' \"${COMPREPLY[@]}\"\n\
+ZETTA_NO_MUX=1\n\
+COMP_WORDS=(zetta mux '')\nCOMP_CWORD=2\n_zetta_complete\nprintf 'no-mux:%s\\n' \"${COMPREPLY[@]}\"\n\
+COMP_WORDS=(zmux '')\nCOMP_CWORD=1\n_zetta_complete_zmux\nprintf 'no-mux-zmux:%s\\n' \"${COMPREPLY[@]}\"\n\
+COMP_WORDS=(zetta mux reconnect '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'no-mux-reconnect:%s\\n' \"${COMPREPLY[@]}\"\n\
+COMP_WORDS=(zetta mux share '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'no-mux-share:%s\\n' \"${COMPREPLY[@]}\"\n";
     let mut child = bash_command()
         .args(["--noprofile", "--norc"])
         .stdin(Stdio::piped())
@@ -353,12 +364,42 @@ COMP_WORDS=(zmux stop --)\nCOMP_CWORD=2\n_zetta_complete_zmux\nprintf 'zmux-stop
     let zmux = candidates("zmux:");
     assert!(!mux.is_empty());
     assert_eq!(mux, zmux, "zmux should complete the same as zetta mux");
+    for prefix in ["mux-share:", "zmux-share:", "zmux-unshare:"] {
+        assert_eq!(
+            candidates(prefix),
+            vec!["12345:7:42"],
+            "{prefix} should offer the full reconnect identifier"
+        );
+    }
     let mux_stop = candidates("mux-stop:");
     let zmux_stop = candidates("zmux-stop:");
     assert!(mux_stop.contains(&"--force"));
     assert_eq!(
         mux_stop, zmux_stop,
         "zmux stop should complete the same as zetta mux stop"
+    );
+    let no_mux = candidates("no-mux:");
+    let no_mux_zmux = candidates("no-mux-zmux:");
+    assert_eq!(
+        no_mux, no_mux_zmux,
+        "no-mux zmux completion should match zetta mux"
+    );
+    for unavailable in ["stop", "share", "unshare", "kill", "forget", "--upgrade"] {
+        assert!(
+            !no_mux.contains(&unavailable),
+            "no-mux completion offered daemon-only candidate {unavailable:?}: {no_mux:?}"
+        );
+    }
+    assert_eq!(
+        candidates("no-mux-reconnect:"),
+        vec!["12345:7:42"],
+        "reconnect remains available for local sessions"
+    );
+    assert!(
+        candidates("no-mux-share:")
+            .iter()
+            .all(|candidate| candidate.is_empty()),
+        "share should not be completed without a daemon"
     );
 }
 
@@ -1582,7 +1623,7 @@ fn generated_scripts_only_offer_long_form_flags() {
         match shell {
             ShellIntegration::Bash => {
                 assert!(script.contains(
-                    "terminal-size sessions mux pane profile project edit vi init serial http tftp notify notify-cleanup attention copy paste splits tabicon panetheme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme'"
+                    "terminal-size mux pane profile project edit vi init serial http tftp notify notify-cleanup attention copy paste splits tabicon panetheme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme --no-mux'"
                 ));
                 assert!(script.contains("auto zetta bash zsh fish"));
             }
@@ -1597,7 +1638,7 @@ fn generated_scripts_only_offer_long_form_flags() {
             }
             ShellIntegration::PowerShell => {
                 assert!(script.contains(
-                    "'--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme'"
+                    "'--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme', '--no-mux'"
                 ));
                 assert!(script.contains("'overlay', 'wt', '--help'"));
                 assert!(script.contains("'auto', 'zetta', 'bash', 'zsh', 'fish'"));
@@ -1622,7 +1663,7 @@ fn fish_script_emits_long_option_candidates_for_every_command_context() {
         "serial",
         "http",
         "terminal-size",
-        "sessions",
+        "mux",
         "benchmark-output",
         "benchmark",
         "serial-console",
@@ -1681,6 +1722,7 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
                 "--split",
                 "--replace-pane",
                 "--theme",
+                "--no-mux",
             ][..],
         ),
         (
@@ -1738,14 +1780,16 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
             "zetta terminal-size ",
             &["--json", "--resize", "--columns", "--rows", "--help"][..],
         ),
-        ("zetta sessions ", &["--json", "--help"][..]),
         (
             "zetta mux ",
             &[
                 "list",
                 "stop",
+                "reconnect",
                 "share",
                 "unshare",
+                "kill",
+                "forget",
                 "--json",
                 "--upgrade",
                 "--help",
@@ -1757,8 +1801,11 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
             &[
                 "list",
                 "stop",
+                "reconnect",
                 "share",
                 "unshare",
+                "kill",
+                "forget",
                 "--json",
                 "--upgrade",
                 "--help",
@@ -1928,6 +1975,68 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
                 .any(|candidate| candidate.starts_with('-') && !candidate.starts_with("--")),
             "did not expect short-form options in Fish completions for {line:?}: {completions}"
         );
+    }
+}
+
+#[test]
+fn fish_omits_daemon_only_mux_candidates_in_no_mux_shells() {
+    use std::process::Command;
+
+    if Command::new("fish").arg("--version").output().is_err() {
+        return;
+    }
+
+    let script = ShellIntegration::Fish.script(&profiles());
+    let script_file = tempfile::NamedTempFile::new().unwrap();
+    fs::write(script_file.path(), script).unwrap();
+    for line in ["zetta mux ", "zmux "] {
+        let output = Command::new("fish")
+            .args([
+                "--no-config",
+                "-c",
+                "function zetta; end; source $argv[1]; complete -C \"$argv[2]\"",
+                "--",
+                script_file.path().to_str().unwrap(),
+                line,
+            ])
+            .env_remove("ZETTA_HOST_EXECUTABLE")
+            .env("ZETTA_NO_MUX", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "Fish rejected no-mux completion for {line:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let completions = String::from_utf8_lossy(&output.stdout);
+        let candidates = completions
+            .lines()
+            .map(|completion| {
+                completion
+                    .split_once('\t')
+                    .map_or(completion, |(name, _)| name)
+            })
+            .collect::<Vec<_>>();
+        for expected in ["list", "reconnect", "--json", "--help", "--version"] {
+            assert!(
+                candidates.contains(&expected),
+                "expected {expected:?} in Fish no-mux completions for {line:?}: {candidates:?}"
+            );
+        }
+        for unavailable in [
+            "stop",
+            "share",
+            "unshare",
+            "kill",
+            "forget",
+            "--force",
+            "--upgrade",
+        ] {
+            assert!(
+                !candidates.contains(&unavailable),
+                "no-mux Fish completion offered {unavailable:?} for {line:?}: {candidates:?}"
+            );
+        }
     }
 }
 

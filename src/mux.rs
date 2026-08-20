@@ -23,12 +23,14 @@ use terminal::{PtyHandover, PtyProvider, PtySpawnRequest};
 use zmux::{
     client::{Client, ExitReporters, PaneSignals},
     messages::{SpawnRequest, TerminalSize},
+    retention::Retention,
 };
 
 /// The connection shared by every pane in this process.
 #[derive(Clone)]
 pub(crate) struct MuxRuntime {
     client: Arc<Client>,
+    retention: Retention,
     reporters: Arc<ExitReporters>,
     revoke_reporters: Arc<PaneSignals>,
     grant_reporters: Arc<PaneSignals>,
@@ -36,17 +38,24 @@ pub(crate) struct MuxRuntime {
 
 impl MuxRuntime {
     /// Connects to the multiplexer, starting one if there is none.
-    pub(crate) fn connect() -> Result<Self> {
-        let client = Arc::new(Client::connect().context("connecting to the multiplexer")?);
+    pub(crate) fn connect_with_retention(retention: Retention) -> Result<Self> {
+        let client = Arc::new(
+            Client::connect_with_retention(retention).context("connecting to the multiplexer")?,
+        );
         let subscription = client
             .subscribe()
             .context("subscribing to multiplexer events")?;
         Ok(Self {
             client,
+            retention,
             reporters: subscription.exits,
             revoke_reporters: subscription.revokes,
             grant_reporters: subscription.grants,
         })
+    }
+
+    pub(crate) fn retention(&self) -> Retention {
+        self.retention
     }
 
     pub(crate) fn client(&self) -> &Arc<Client> {
@@ -267,17 +276,24 @@ mod tests;
 impl crate::Zetta {
     /// A provider that spawns into `tab_id`'s multiplexer session.
     ///
-    /// Returns `None` when the multiplexer cannot be reached, so the pane opens
-    /// on a local process instead. A session that cannot be backgrounded is a
-    /// smaller failure than a terminal that will not open at all, and the
-    /// reason is surfaced rather than swallowed.
+    /// Returns `None` only for the explicit `--no-mux` legacy mode. In normal
+    /// mode, a failed daemon connection is returned so a terminal cannot
+    /// silently escape daemon ownership.
     pub(crate) fn mux_provider_for_tab(
         &mut self,
         tab_id: u64,
         cx: &mut gpui::Context<Self>,
-    ) -> Option<Arc<MuxPtyProvider>> {
+    ) -> Result<Option<Arc<MuxPtyProvider>>> {
+        if self.no_mux {
+            return Ok(None);
+        }
         if self.mux.is_none() {
-            match MuxRuntime::connect() {
+            match self
+                .launch_config
+                .sessions
+                .to_zmux_retention()
+                .and_then(MuxRuntime::connect_with_retention)
+            {
                 Ok(runtime) => self.mux = Some(runtime),
                 Err(error) => {
                     self.configuration_error = Some(format!(
@@ -285,12 +301,17 @@ impl crate::Zetta {
                          backgrounded: {error:#}"
                     ));
                     cx.notify();
-                    return None;
+                    return Err(error).context("connecting to the session multiplexer");
                 }
             }
         }
         let session = self.mux_panes.session_for_tab(tab_id);
-        Some(self.mux.as_ref()?.provider(session))
+        Ok(Some(
+            self.mux
+                .as_ref()
+                .context("multiplexer runtime disappeared during terminal spawn")?
+                .provider(session),
+        ))
     }
 
     /// Records what the multiplexer created for a pane, and routes that pane's

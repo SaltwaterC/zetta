@@ -38,7 +38,12 @@ use crate::pane::{OverlayFontSize, PaneOverlayRequest, overlay_color_from_value}
 /// that knows to ask the multiplexer for it. An older window accepts the
 /// request and reports that the session does not exist, which is exactly the
 /// confusing failure this guards against.
-const CONTROL_VERSION: u32 = 14;
+///
+/// 15 adds the originating tab target to reconnect requests. Without it, a
+/// shared session was sent to whichever process-control endpoint happened to
+/// answer first, and that process then chose its first window.
+/// The shared value is also used by the standalone `zmux reconnect` client.
+pub(crate) const CONTROL_VERSION: u32 = zmux::protocol::CONTROL_VERSION;
 // A 64 KiB argv payload can expand substantially when it contains many
 // one-character arguments and each value is represented as JSON. Keep enough
 // framing headroom for that worst case as well as the endpoint token.
@@ -51,12 +56,12 @@ const CONTROL_CLIENT_TIMEOUT: Duration = Duration::from_secs(3);
 // it. Give that path its own budget instead of squeezing it into the generic
 // one: otherwise raising the Argon2 cost or the anti-guessing delay would
 // silently turn "the session secret was incorrect" into "Zetta rejected the
-// reconnect request". `session_cli` covers the resulting ordering. The budget
+// reconnect request". The `zmux reconnect` client covers the resulting
+// ordering. The budget
 // is sized to keep an Argon2 verification under a quarter of it on slow
 // machines: memory-constrained VMs and debug builds can take seconds per
 // verification.
 const RECONNECT_COMPLETION_TIMEOUT: Duration = Duration::from_secs(12);
-const RECONNECT_CLIENT_TIMEOUT: Duration = Duration::from_secs(16);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReconnectSessionResult {
@@ -122,6 +127,7 @@ pub(crate) enum ProcessControlCommand {
     ReconnectSession {
         runner_id: u64,
         session_id: u64,
+        attention_id: Option<u64>,
         secret: Option<SessionSecret>,
         completion: Sender<ReconnectSessionResult>,
     },
@@ -187,6 +193,7 @@ enum ControlRequestCommand {
     ReconnectSession {
         runner_id: u64,
         session_id: u64,
+        attention_id: Option<u64>,
         secret: Option<SessionSecret>,
     },
     SetTabIcon {
@@ -552,6 +559,7 @@ impl ProcessControlServer {
                         Some(ControlRequestCommand::ReconnectSession {
                             runner_id,
                             session_id,
+                            attention_id,
                             secret,
                         }) => {
                             let (completion, completed) = channel();
@@ -559,6 +567,7 @@ impl ProcessControlServer {
                                 .unbounded_send(ProcessControlCommand::ReconnectSession {
                                     runner_id,
                                     session_id,
+                                    attention_id,
                                     secret,
                                     completion,
                                 })
@@ -924,6 +933,7 @@ fn decode_control_request(
             | "set_tab_name"
             | "set_worktree_name"
             | "get_silent_mode"
+            | "reconnect_session"
     ) && request.attention_id.is_some())
         || (request.command != "set_tab_attention"
             && (request.attention_summary.is_some() || request.attention_body.is_some()))
@@ -1109,7 +1119,6 @@ fn decode_control_request(
                 && request.pane_overlay_font_size.is_none()
                 && request.pane_overlay_opacity.is_none()
                 && request.pane_overlay_color.is_none()
-                && request.attention_id.is_none()
                 && request.attention_summary.is_none()
                 && request.attention_body.is_none()
                 && request.tab_name.is_none()
@@ -1120,6 +1129,10 @@ fn decode_control_request(
                 && request.theme.is_none()
                 && request.pane_request.is_none() =>
         {
+            let attention_id = match request.attention_id.take() {
+                Some(0) => return None,
+                attention_id => attention_id,
+            };
             request
                 .runner_id
                 .zip(request.session_id)
@@ -1127,6 +1140,7 @@ fn decode_control_request(
                     |(runner_id, session_id)| ControlRequestCommand::ReconnectSession {
                         runner_id,
                         session_id,
+                        attention_id,
                         secret: request.secret.take().map(SessionSecret::new),
                     },
                 )
@@ -1697,28 +1711,6 @@ pub(crate) fn request_existing_process_configuration_reload(path: &Path) -> Resu
         }
     }
     Ok(false)
-}
-
-pub(crate) fn request_reconnect_session(
-    process_id: u32,
-    runner_id: u64,
-    session_id: u64,
-    secret: Option<SessionSecret>,
-) -> Result<ReconnectSessionResult> {
-    let endpoint_path = control_endpoint_path(process_id);
-    let contents = fs::read(&endpoint_path).with_context(|| {
-        format!(
-            "reading Zetta process control endpoint {}",
-            endpoint_path.display()
-        )
-    })?;
-    let endpoint: ControlEndpoint =
-        serde_json::from_slice(&contents).context("parsing Zetta process control endpoint")?;
-    anyhow::ensure!(
-        endpoint.version == CONTROL_VERSION && endpoint.process_id == process_id,
-        "Zetta process control endpoint is outdated"
-    );
-    send_reconnect_session_request(&endpoint, runner_id, session_id, secret)
 }
 
 pub(crate) fn request_process_tab_attention(
@@ -2415,54 +2407,6 @@ fn send_set_overlay_request(
     Ok(response.status == "ok")
 }
 
-fn send_reconnect_session_request(
-    endpoint: &ControlEndpoint,
-    runner_id: u64,
-    session_id: u64,
-    secret: Option<SessionSecret>,
-) -> Result<ReconnectSessionResult> {
-    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
-    stream.set_read_timeout(Some(RECONNECT_CLIENT_TIMEOUT))?;
-    stream.set_write_timeout(Some(RECONNECT_CLIENT_TIMEOUT))?;
-    let mut request = ControlRequest {
-        token: endpoint.token.clone(),
-        command: "reconnect_session".to_owned(),
-        runner_id: Some(runner_id),
-        session_id: Some(session_id),
-        secret: secret.as_ref().map(|secret| secret.expose().to_owned()),
-        icon: None,
-        pane_theme: None,
-        pane_overlay: None,
-        pane_overlay_font_size: None,
-        pane_overlay_opacity: None,
-        pane_overlay_color: None,
-        attention_id: None,
-        attention_summary: None,
-        attention_body: None,
-        tab_name: None,
-        worktree_name: None,
-        config_path: None,
-        split: None,
-        profile: None,
-        theme: None,
-        pane_request: None,
-    };
-    let result = write_message(&mut stream, &request).and_then(|()| {
-        let response = read_message::<ControlResponse>(&mut stream)?;
-        Ok(match response.status.as_str() {
-            "ok" => ReconnectSessionResult::Reconnected,
-            "authentication_failed" => ReconnectSessionResult::AuthenticationFailed,
-            "session_not_found" => ReconnectSessionResult::SessionNotFound,
-            "session_starting" => ReconnectSessionResult::StillStarting,
-            _ => ReconnectSessionResult::Rejected,
-        })
-    });
-    if let Some(secret) = request.secret.as_mut() {
-        secret.zeroize();
-    }
-    result
-}
-
 /// Reads one newline-framed message. A reconnect request carries the session
 /// secret in this buffer, so it is zeroized on every exit path rather than left
 /// in freed heap memory.
@@ -2600,68 +2544,3 @@ fn write_endpoint(path: &Path, endpoint: &ControlEndpoint) -> Result<()> {
 #[cfg(test)]
 #[path = "tests/process_control.rs"]
 mod tests;
-
-/// Asks any running Zetta window to attach a session the multiplexer holds.
-///
-/// A session's published process is the multiplexer's, not a Zetta's, so there
-/// is no control endpoint at that identifier to send to — which is exactly
-/// what `zetta sessions reconnect` used to try. Any live window will do: the
-/// session belongs to the multiplexer, not to a particular one.
-pub(crate) fn request_multiplexer_reconnect(
-    session_id: u64,
-    scoped_to: Option<u32>,
-    secret: Option<SessionSecret>,
-) -> Result<ReconnectSessionResult> {
-    let directory = crate::background_sessions::session_catalog_dir();
-    let entries = fs::read_dir(&directory)
-        .with_context(|| format!("looking for a Zetta window in {}", directory.display()))?;
-
-    let mut endpoints = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let is_control = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("control-") && name.ends_with(".json"));
-        if !is_control {
-            continue;
-        }
-        let Ok(contents) = fs::read(&path) else {
-            continue;
-        };
-        let Ok(endpoint) = serde_json::from_slice::<ControlEndpoint>(&contents) else {
-            continue;
-        };
-        if endpoint.version == CONTROL_VERSION && process_is_running(endpoint.process_id) {
-            endpoints.push(endpoint);
-        }
-    }
-    anyhow::ensure!(
-        !endpoints.is_empty(),
-        "no running Zetta window can attach a multiplexer session. Any window still running an \
-         older Zetta cannot: restart Zetta, or install the current build, and try again."
-    );
-    // A backgrounded session belongs to the window that put it away, and the
-    // multiplexer refuses every other window's attach. Asking them anyway would
-    // report the refusal as though the session were missing.
-    if let Some(owner) = scoped_to {
-        endpoints.retain(|endpoint| endpoint.process_id == owner);
-        anyhow::ensure!(
-            !endpoints.is_empty(),
-            "session {session_id} is scoped to Zetta process {owner}, which is not running. Share \
-             it with `zmux share {session_id}` to attach it from another window."
-        );
-    }
-
-    // Any window can take it, but one that answers is better than the first
-    // one found: an endpoint file can outlive the process that wrote it by a
-    // moment, and refusing on that would be needless.
-    let mut last_error = None;
-    for endpoint in &endpoints {
-        match send_reconnect_session_request(endpoint, 0, session_id, secret.clone()) {
-            Ok(result) => return Ok(result),
-            Err(error) => last_error = Some(error),
-        }
-    }
-    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no Zetta window accepted the session")))
-}

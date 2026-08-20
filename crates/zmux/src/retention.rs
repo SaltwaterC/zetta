@@ -35,6 +35,10 @@ pub const MAX_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
 /// a size — so deriving lines from it changes no setting.
 pub const DEFAULT_RING_BYTES: usize = 256 * 1024;
 
+/// Upper bound for the configured in-memory retention budget. The daemon owns
+/// this allocation, so reject implausibly large values before a pane exists.
+pub const MAX_RING_BYTES: usize = 64 * 1024 * 1024;
+
 /// What a retained line is assumed to cost, turning the budget above into the
 /// scrollback a grid keeps. A cell costs more than a byte, so this is
 /// deliberately pessimistic rather than exact.
@@ -68,7 +72,15 @@ impl Retention {
     pub fn parse(value: &str) -> anyhow::Result<Self> {
         match value {
             "none" => Ok(Self::None),
-            "memory" => Ok(Self::default()),
+            "memory" => {
+                #[cfg(feature = "scrollback-buffer")]
+                return Ok(Self::default());
+                #[cfg(not(feature = "scrollback-buffer"))]
+                anyhow::bail!(
+                    "retention \"memory\" needs the scrollback-buffer feature, which this \
+                     multiplexer was built without"
+                )
+            }
             "persist" => anyhow::bail!(
                 "retention \"persist\" needs the session-persistence feature, which this \
                  multiplexer was built without"
@@ -77,6 +89,46 @@ impl Retention {
                 "unknown retention {unknown:?}; expected \"none\", \"memory\" or \"persist\""
             ),
         }
+    }
+
+    /// Rejects a retention mode that this binary cannot actually provide.
+    ///
+    /// Keeping this separate from [`new_retained`] is intentional: the latter
+    /// is used by the daemon's hot path, while configuration errors need to be
+    /// reported before a daemon starts holding any terminals. In particular,
+    /// a memory request must never silently turn into `none` just because a
+    /// constrained build omitted the scrollback implementation.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if let Self::Memory { bytes } = self {
+            anyhow::ensure!(
+                (4 * 1024..=MAX_RING_BYTES).contains(bytes),
+                "memory retention must be between 4096 and {MAX_RING_BYTES} bytes"
+            );
+        }
+        #[cfg(not(feature = "scrollback-buffer"))]
+        if matches!(self, Self::Memory { .. }) {
+            anyhow::bail!(
+                "retention \"memory\" needs the scrollback-buffer feature, which this \
+                 multiplexer was built without"
+            );
+        }
+        Ok(())
+    }
+
+    /// The stable configuration spelling used when starting a daemon.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Memory { .. } => "memory",
+        }
+    }
+
+    /// Whether a client should serialize and send its current screen during a
+    /// handover. The daemon still has to receive the handover request itself,
+    /// but `none` must not make the application perform snapshot work that it
+    /// immediately discards.
+    pub const fn keeps_snapshot(self) -> bool {
+        matches!(self, Self::Memory { .. })
     }
 
     /// A pane's retained screen, at the size that pane is running at.

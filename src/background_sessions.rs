@@ -212,11 +212,11 @@ pub(crate) fn process_is_zetta(process_id: u32) -> bool {
 /// routing them there is how a reconnect that used to transfer the tab in
 /// process turned into "could not attach that session".
 ///
-/// Sessions scoped to another Zetta process are left out. Backgrounding a tab
-/// keeps its session to the window that did it, so another process must not be
-/// offered it: the multiplexer refuses that attach, and listing it anyway would
-/// put an entry in the picker whose only outcome is an error. A session with no
-/// scope is shared, and one scoped to this process is this window's own.
+/// Sessions scoped to another Zetta process are left out. A private backgrounded
+/// tab keeps its session to the window that did it, so another process must not
+/// be offered it: the multiplexer refuses that attach, and listing it anyway
+/// would put an entry in the picker whose only outcome is an error. A session
+/// with no scope is shared, and one scoped to this process is this window's own.
 ///
 /// The predicate and the process id are parameters so the discrimination is
 /// testable without touching the real session directory.
@@ -239,10 +239,6 @@ pub(crate) fn multiplexer_held_catalog_sessions(
                 .scoped_to
                 .is_none_or(|process_id| process_id == this_process)
         })
-}
-
-pub(crate) fn print_session_catalogs(json: bool) -> Result<()> {
-    zmux::catalog::print_session_catalogs(&session_catalog_dir(), json)
 }
 
 #[cfg(test)]

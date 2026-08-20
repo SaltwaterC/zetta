@@ -89,7 +89,7 @@ impl TestDaemon {
     }
 
     fn sessions_dir(&self) -> PathBuf {
-        self.config.join("zetta").join("sessions")
+        daemon_sessions_dir(&self.config)
     }
 
     /// A client pointed at this daemon. The directory is passed explicitly so
@@ -99,6 +99,15 @@ impl TestDaemon {
             .expect("looking for the daemon")
             .expect("the daemon should be running")
     }
+}
+
+fn daemon_sessions_dir(config: &Path) -> PathBuf {
+    let name = if cfg!(debug_assertions) {
+        format!("sessions-debug-v{}", zmux::messages::PROTOCOL_VERSION)
+    } else {
+        "sessions".to_owned()
+    };
+    config.join("zetta").join(name)
 }
 
 impl TestDaemon {
@@ -191,6 +200,22 @@ fn summary(session_id: u64, pane_id: u64) -> BackgroundSessionSummary {
         held: false,
         scoped_to: None,
     }
+}
+
+fn write_json_frame(stream: &mut std::os::unix::net::UnixStream, value: &serde_json::Value) {
+    let bytes = serde_json::to_vec(value).unwrap();
+    stream
+        .write_all(&(u32::try_from(bytes.len()).unwrap()).to_be_bytes())
+        .unwrap();
+    stream.write_all(&bytes).unwrap();
+}
+
+fn read_json_frame(stream: &mut std::os::unix::net::UnixStream) -> String {
+    let mut length = [0; 4];
+    stream.read_exact(&mut length).unwrap();
+    let mut bytes = vec![0; u32::from_be_bytes(length) as usize];
+    stream.read_exact(&mut bytes).unwrap();
+    String::from_utf8(bytes).unwrap()
 }
 
 /// The secret every shared session in these tests is protected with.
@@ -472,7 +497,7 @@ fn a_protected_session_needs_its_secret() {
     // The catalog must not describe a protected session, and must never carry
     // the verifier.
     let catalog = std::fs::read_to_string(
-        std::fs::read_dir(daemon.config.join("zetta").join("sessions"))
+        std::fs::read_dir(daemon.sessions_dir())
             .unwrap()
             .filter_map(Result::ok)
             .map(|entry| entry.path())
@@ -612,10 +637,8 @@ fn a_connection_with_the_wrong_token_gets_nothing() {
         "token": "0".repeat(64),
         "request": {"request": "list"},
     });
-    writeln!(stream, "{request}").unwrap();
-
-    let mut response = String::new();
-    stream.read_to_string(&mut response).unwrap();
+    write_json_frame(&mut stream, &request);
+    let response = read_json_frame(&mut stream);
     assert!(response.contains("invalid multiplexer token"), "{response}");
     assert!(!response.contains("\"sessions\""));
 }
@@ -872,10 +895,8 @@ fn a_client_from_a_newer_build_is_told_why_rather_than_dropped() {
         "request": {"request": "list"},
         "something_new": true,
     });
-    writeln!(stream, "{request}").unwrap();
-
-    let mut response = String::new();
-    stream.read_to_string(&mut response).unwrap();
+    write_json_frame(&mut stream, &request);
+    let response = read_json_frame(&mut stream);
     assert!(
         response.contains("protocol version"),
         "expected a version error, got {response:?}"
@@ -910,6 +931,16 @@ fn an_upgrade_is_accepted_from_a_client_that_disagrees_about_the_protocol() {
         .unwrap();
     drop(descriptor);
 
+    use std::os::unix::fs::MetadataExt as _;
+    let socket_path = daemon.sessions_dir().join("zmux.sock");
+    let socket_metadata = std::fs::metadata(&socket_path).unwrap();
+    let before_socket_identity = (socket_metadata.dev(), socket_metadata.ino());
+    let before_runner_id = zmux::catalog::read_session_catalogs(&daemon.sessions_dir())
+        .unwrap()
+        .first()
+        .map(|catalog| catalog.runner_id)
+        .unwrap();
+
     let endpoint: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(daemon.sessions_dir().join("zmux.json")).unwrap(),
     )
@@ -922,9 +953,8 @@ fn an_upgrade_is_accepted_from_a_client_that_disagrees_about_the_protocol() {
         "client_process_id": std::process::id(),
         "request": {"request": "upgrade"},
     });
-    writeln!(stream, "{request}").unwrap();
-    let mut response = String::new();
-    stream.read_to_string(&mut response).unwrap();
+    write_json_frame(&mut stream, &request);
+    let response = read_json_frame(&mut stream);
     assert!(
         !response.contains("protocol version"),
         "the upgrade was refused over the version: {response:?}"
@@ -941,6 +971,21 @@ fn an_upgrade_is_accepted_from_a_client_that_disagrees_about_the_protocol() {
     assert!(
         process_is_alive(pane.child_pid),
         "the replacement lost the session's process"
+    );
+    let socket_metadata = std::fs::metadata(&socket_path).unwrap();
+    assert_eq!(
+        before_socket_identity,
+        (socket_metadata.dev(), socket_metadata.ino()),
+        "Unix upgrade must keep the listening socket rather than rebind it"
+    );
+    let after_catalogs = zmux::catalog::read_session_catalogs(&daemon.sessions_dir()).unwrap();
+    assert_eq!(
+        after_catalogs.first().map(|catalog| catalog.runner_id),
+        Some(before_runner_id)
+    );
+    assert_eq!(
+        sessions.first().map(|session| session.id),
+        Some(pane.session_id)
     );
 }
 
@@ -1075,7 +1120,7 @@ fn replacing_the_binary_out_from_under_the_daemon_does_not_lose_its_sessions() {
 
     let config = tempfile::tempdir().unwrap();
     let mut process = spawn_copied_daemon(&copied, config.path());
-    let sessions = config.path().join("zetta").join("sessions");
+    let sessions = daemon_sessions_dir(config.path());
     let deadline = Instant::now() + Duration::from_secs(10);
     while !sessions.join("zmux.json").is_file() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
@@ -1148,7 +1193,7 @@ fn a_session_holding_no_panes_is_never_offered() {
         client.list().unwrap()
     );
 
-    // And the published catalog agrees, since that is what `zetta sessions`
+    // And the published catalog agrees, since that is what `zmux list`
     // and the reconnect picker read.
     let catalog = std::fs::read_dir(daemon.sessions_dir())
         .unwrap()
@@ -1791,6 +1836,55 @@ fn a_live_session_is_only_offered_once_its_window_shares_it() {
         "withdrawing an offer must not end the session"
     );
     assert_terminal_echoes(&descriptor, "still-here");
+}
+
+/// A session that is both kept and shared stays shared when its window hands
+/// the terminal back. This is the daemon-side contract for Zetta's
+/// `Ctrl-Shift-B`: closing that window must leave a session another process can
+/// reconnect to, rather than narrowing it back to the old process.
+#[test]
+fn a_shared_session_stays_shared_when_it_is_detached() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; sleep 60"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+    client
+        .share(
+            pane.session_id,
+            summary(pane.session_id, pane.pane_id),
+            serde_json::Value::Null,
+            None,
+            true,
+        )
+        .unwrap();
+    drop(descriptor);
+    client
+        .detach(
+            pane.session_id,
+            summary(pane.session_id, pane.pane_id),
+            serde_json::Value::Null,
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+
+    let listed = client.list().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].scoped_to, None);
+
+    let stranger = Command::new("/bin/sleep").arg("120").spawn().unwrap();
+    match client
+        .attach_as(pane.session_id, pane.pane_id, stranger.id(), None)
+        .unwrap()
+    {
+        AttachOutcome::Attached { pane, .. } => drop(std::fs::File::from(pane.descriptor)),
+        _ => panic!("a shared kept session must attach from another process"),
+    }
+    reap(stranger);
 }
 
 /// Unsharing scopes a session back to one window, so it is only accepted while one
@@ -3123,13 +3217,13 @@ fn an_idle_multiplexer_stops_when_asked() {
     );
 }
 
-/// A backgrounded session belongs to the window that backgrounded it.
+/// A privately backgrounded session belongs to the window that backgrounded it.
 ///
 /// Before the multiplexer held these sessions they lived inside the process
 /// that made them, and no other Zetta could see or take one. Moving them out
-/// published every one of them to every process, so a tab put away in one
-/// window turned up in another window's reconnect picker. Backgrounding is not
-/// sharing: `Ctrl-Shift-K` is.
+/// published every one of them to every process, so a privately kept tab put
+/// away in one window turned up in another window's reconnect picker.
+/// `Ctrl-Shift-K` and the shared keep-running path are the explicit exceptions.
 #[test]
 fn a_backgrounded_session_is_scoped_to_the_process_that_backgrounded_it() {
     let daemon = TestDaemon::start();
@@ -3349,6 +3443,73 @@ fn protecting_a_session_is_optional_whichever_way_it_is_made_reachable() {
         "a wrong secret must not join a protected session"
     );
     reap(stranger);
+}
+
+/// A protected session's administrative boundary is tied to the local socket
+/// peer, not to the process id a client writes into its JSON envelope.
+#[test]
+fn protected_controls_reject_a_claimed_owner_without_peer_authority() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let owner = Command::new("/bin/sleep").arg("120").spawn().unwrap();
+    let owner_pid = owner.id();
+    let pane = client
+        .spawn(spawn_request_as(None, "printf ready; sleep 120", owner_pid))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+    drop(descriptor);
+
+    // The session starts unprotected, so this test can set up an owner label
+    // that differs from the actual peer without bypassing the boundary it is
+    // testing. Once protected, changing only the claimed process id must not
+    // make the current test process an administrator.
+    client
+        .detach_as(
+            pane.session_id,
+            summary(pane.session_id, pane.pane_id),
+            serde_json::Value::Null,
+            None,
+            owner_pid,
+        )
+        .unwrap();
+    client
+        .set_session_scope(pane.session_id, true, Some(test_verifier()))
+        .unwrap();
+
+    for error in [
+        client.kill(pane.session_id).unwrap_err().to_string(),
+        client.forget(pane.session_id).unwrap_err().to_string(),
+        client
+            .resize(pane.session_id, pane.pane_id, 100, 30)
+            .unwrap_err()
+            .to_string(),
+        client
+            .close_pane(pane.session_id, pane.pane_id)
+            .unwrap_err()
+            .to_string(),
+        client
+            .set_session_scope(pane.session_id, false, None)
+            .unwrap_err()
+            .to_string(),
+    ] {
+        assert!(
+            error.contains("protected"),
+            "unexpected authorization error: {error}"
+        );
+    }
+    let state = client.pane_states(vec![pane.pane_id]).unwrap();
+    assert!(
+        state[0].unknown,
+        "protected pane state leaked to a foreign peer"
+    );
+    assert_eq!(
+        client.list().unwrap().len(),
+        1,
+        "unauthorized controls changed the session"
+    );
+
+    reap(owner);
 }
 
 /// A backgrounded session stays its window's, even after that window is gone.

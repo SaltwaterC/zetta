@@ -358,6 +358,35 @@ fn session_authentication_is_not_a_mutable_global_configuration_value() {
 }
 
 #[test]
+fn session_retention_is_typed_and_bounded() {
+    let config = Config::parse(
+        r#"{"sessions":{"retention":"memory","ring_bytes":4096}}"#,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(config.sessions.retention, SessionRetention::Memory);
+    assert_eq!(config.sessions.ring_bytes, 4096);
+
+    let none = Config::parse(
+        r#"{"sessions":{"retention":"none","ring_bytes":65536}}"#,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(none.sessions.retention, SessionRetention::None);
+
+    for document in [
+        r#"{"sessions":{"retention":"persist"}}"#,
+        r#"{"sessions":{"ring_bytes":4095}}"#,
+        r#"{"sessions":{"ring_bytes":67108865}}"#,
+    ] {
+        let error = Config::parse(document, None, None).unwrap_err();
+        assert!(!error.to_string().is_empty());
+    }
+}
+
+#[test]
 fn configured_home_alias_is_equivalent_to_the_default_directory() {
     let config_path = env::temp_dir().join(format!(
         "zetta-working-directory-{}-{}.json",

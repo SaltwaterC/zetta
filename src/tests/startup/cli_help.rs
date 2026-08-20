@@ -11,10 +11,20 @@ fn version_flags_and_output_are_defined() {
     assert!(is_version_argument("-v"));
     assert!(is_version_argument("--version"));
     assert!(!is_version_argument("-V"));
-    assert_eq!(
-        version_text(),
-        format!("Zetta {}", env!("CARGO_PKG_VERSION"))
-    );
+    let version = version_text();
+    assert!(version.starts_with(&format!("Zetta {}\n", env!("CARGO_PKG_VERSION"))));
+    assert!(version.contains(&format!(
+        "CONTROL_VERSION={}",
+        crate::process_control::CONTROL_VERSION
+    )));
+    assert!(version.contains(&format!(
+        "CATALOG_VERSION={}",
+        zmux::protocol::CATALOG_VERSION
+    )));
+    assert!(version.contains(&format!(
+        "ZMUX_PROTOCOL_VERSION={}",
+        zmux::messages::PROTOCOL_VERSION
+    )));
 }
 
 #[test]
@@ -45,6 +55,7 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     assert!(help.contains("Select one of the profiles listed above"));
     assert!(help.contains("-s, --split NAME"));
     assert!(help.contains("-r, --replace-pane"));
+    assert!(help.contains("-n, --no-mux"));
     assert!(help.contains("zetta pane [OPTIONS] -- COMMAND [ARGUMENT ...]"));
     assert!(
         help.contains(

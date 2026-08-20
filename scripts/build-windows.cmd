@@ -52,10 +52,10 @@ if not defined VSCMD_VER (
     if errorlevel 1 exit /b !errorlevel!
 )
 
-%CARGO% build %PROFILE_ARGS% --jobs %CARGO_BUILD_JOBS% --locked --no-default-features --features %FEATURES% --bin zetta --bin zetta-gui
+%CARGO% build %PROFILE_ARGS% --jobs %CARGO_BUILD_JOBS% --locked --no-default-features --features %FEATURES% --bin zetta --bin zetta-gui --bin zmux
 if errorlevel 1 exit /b !errorlevel!
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\verify-windows-binary.ps1 -ConsoleBinaryPath !TARGET_DIR!\zetta.exe -GuiBinaryPath !TARGET_DIR!\zetta-gui.exe
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\verify-windows-binary.ps1 -ConsoleBinaryPath !TARGET_DIR!\zetta.exe -GuiBinaryPath !TARGET_DIR!\zetta-gui.exe -MuxBinaryPath !TARGET_DIR!\zmux.exe
 exit /b !errorlevel!
 
 :append_feature

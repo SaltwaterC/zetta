@@ -146,13 +146,10 @@ _zetta_pane_labels() {
     compadd -- "${(@f)$(zetta pane --list 2>/dev/null)}"
 }
 
-_zetta_session_ids() {
-    compadd -- "${(@f)$(zetta sessions --json 2>/dev/null | awk '
-        /"process_id"[[:space:]]*:/ { match($0, /[0-9]+/); process=substr($0, RSTART, RLENGTH) }
-        /"runner_id"[[:space:]]*:/ { match($0, /[0-9]+/); runner=substr($0, RSTART, RLENGTH) }
-        /"id"[[:space:]]*:/ { match($0, /[0-9]+/); session=substr($0, RSTART, RLENGTH) }
-        /"authentication_required"[[:space:]]*:/ { print process ":" runner ":" session }
-    ')}"
+_zmux_session_ids() {
+    local -a mux_list_command=(zetta mux list)
+    [[ ${_zetta_mux_completion_command:-} == zmux ]] && mux_list_command=(zmux list)
+    compadd -- "${(@f)$(${mux_list_command[@]} 2>/dev/null | awk '$1 == "reconnect" && $2 == "id:" && $3 ~ /^[0-9]+:[0-9]+:[0-9]+$/ { print $3 }')}"
 }
 
 _zetta_tab_icons() {
@@ -245,8 +242,8 @@ _zetta() {
     fi
 
     if (( CURRENT == 2 )); then
-        compadd -S ' ' -- benchmark benchmark-output terminal-size sessions mux profile project edit vi init serial http tftp notify notify-cleanup attention copy paste splits pane tabicon panetheme overlay wt
-        _zetta_options --help --version --config --keymap --profile --split --replace-pane --theme
+        compadd -S ' ' -- benchmark benchmark-output terminal-size mux profile project edit vi init serial http tftp notify notify-cleanup attention copy paste splits pane tabicon panetheme overlay wt
+        _zetta_options --help --version --config --keymap --profile --split --replace-pane --theme --no-mux
         return
     fi
 
@@ -339,7 +336,7 @@ _zetta() {
             ;;
         --replace-pane)
             if [[ $words[CURRENT] == -* || -z $words[CURRENT] ]]; then
-                _zetta_options --help --version --config --keymap --profile --split --theme
+                _zetta_options --help --version --config --keymap --profile --split --theme --no-mux
             fi
             return
             ;;
@@ -424,7 +421,7 @@ _zetta() {
             fi
             if [[ $words[2] == terminal-size || $words[2] == profile || $words[2] == -* || -z $words[2] ]]; then
                 if [[ $words[2] == -* && ($words[CURRENT] == -* || -z $words[CURRENT]) ]]; then
-                    _zetta_options --help --version --config --keymap --profile --split --theme
+                    _zetta_options --help --version --config --keymap --profile --split --theme --no-mux
                 fi
                 return
             fi
@@ -499,7 +496,7 @@ _zetta() {
     # offering the remaining top-level flags instead of falling through to
     # the subcommand-specific cases below, which would offer nothing.
     if [[ $words[2] == -* ]]; then
-        _zetta_options --help --version --config --keymap --profile --split --replace-pane --theme
+        _zetta_options --help --version --config --keymap --profile --split --replace-pane --theme --no-mux
         return
     fi
 
@@ -531,26 +528,21 @@ _zetta() {
             ;;
         mux)
             if (( CURRENT == 3 )); then
-                compadd -S ' ' -- list stop share unshare
-                _zetta_options --json --upgrade --help --version
+                if [[ ${ZETTA_NO_MUX:-0} == 1 ]]; then
+                    compadd -S ' ' -- list reconnect
+                    _zetta_options --json --help --version
+                else
+                    compadd -S ' ' -- list stop reconnect share unshare kill forget
+                    _zetta_options --json --upgrade --help --version
+                fi
+            elif [[ ${ZETTA_NO_MUX:-0} == 1 && ${words[3]} != reconnect && ${words[3]} != list ]]; then
+                return
             elif [[ ${words[3]} == stop ]]; then
                 _zetta_options --force --help
-            else
-                _zetta_options --json --help
-            fi
-            ;;
-        sessions)
-            if (( CURRENT == 3 )); then
-                compadd -S ' ' -- reconnect
-                _zetta_options --json --help
-            elif [[ $words[3] == reconnect ]]; then
-                if [[ $previous != --session && $previous != -s ]]; then
-                    if (( CURRENT == 4 )); then
-                        _zetta_session_ids
-                    else
-                        _zetta_options --session --help
-                    fi
-                fi
+            elif [[ ${words[3]} == reconnect ]]; then
+                _zmux_session_ids
+            elif [[ ${ZETTA_NO_MUX:-0} != 1 && ( ${words[3]} == share || ${words[3]} == unshare || ${words[3]} == kill || ${words[3]} == forget ) ]]; then
+                _zmux_session_ids
             else
                 _zetta_options --json --help
             fi
@@ -771,6 +763,7 @@ _zwt() {
 }
 compdef _zwt zwt
 _zmux() {
+    local _zetta_mux_completion_command=zmux
     local -a saved_words=("${words[@]}")
     local saved_current=$CURRENT
     words=(zetta mux "${words[@]:1}")

@@ -3,11 +3,19 @@ use super::*;
 #[test]
 fn retention_modes_parse_and_persist_names_the_missing_feature() {
     assert_eq!(Retention::parse("none").unwrap(), Retention::None);
+    #[cfg(feature = "scrollback-buffer")]
     assert_eq!(
         Retention::parse("memory").unwrap(),
         Retention::Memory {
             bytes: DEFAULT_RING_BYTES
         }
+    );
+    #[cfg(not(feature = "scrollback-buffer"))]
+    assert!(
+        Retention::parse("memory")
+            .unwrap_err()
+            .to_string()
+            .contains("scrollback-buffer")
     );
     assert!(Retention::parse("everything").is_err());
 
@@ -15,6 +23,22 @@ fn retention_modes_parse_and_persist_names_the_missing_feature() {
     // for persistence does not quietly stop persisting.
     let error = Retention::parse("persist").unwrap_err().to_string();
     assert!(error.contains("session-persistence"), "{error}");
+}
+
+#[test]
+fn retention_memory_budget_is_bounded_before_a_daemon_starts() {
+    #[cfg(feature = "scrollback-buffer")]
+    {
+        assert!(Retention::Memory { bytes: 4_095 }.validate().is_err());
+        assert!(Retention::Memory { bytes: 4_096 }.validate().is_ok());
+        assert!(
+            Retention::Memory {
+                bytes: MAX_RING_BYTES + 1
+            }
+            .validate()
+            .is_err()
+        );
+    }
 }
 
 /// The text a retained screen shows, one line per row, for comparing what a

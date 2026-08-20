@@ -6,6 +6,11 @@
 
 use std::{env, path::PathBuf};
 
+#[cfg(debug_assertions)]
+const SESSION_DIRECTORY_PREFIX: &str = "sessions-debug-v";
+#[cfg(not(debug_assertions))]
+const SESSION_DIRECTORY_NAME: &str = "sessions";
+
 pub fn platform_config_dir() -> PathBuf {
     #[cfg(windows)]
     return windows_config_dir(
@@ -23,8 +28,21 @@ pub fn platform_config_dir() -> PathBuf {
 /// The directory holding session catalogs and the control endpoint. Created
 /// with `0700` by [`crate::catalog::create_private_dir`] before anything is
 /// written into it.
+///
+/// Debug builds use a protocol-scoped directory so a `target/debug` build can
+/// run beside an installed release. This is important while the wire protocol
+/// is still changing: a debug client must not connect to an older daemon that
+/// can accept the socket but cannot understand its framing. The adjacent debug
+/// `zmux` binary and all debug Zetta processes use the same directory.
 pub fn session_catalog_dir() -> PathBuf {
-    platform_config_dir().join("sessions")
+    #[cfg(debug_assertions)]
+    let name = format!(
+        "{SESSION_DIRECTORY_PREFIX}{}",
+        crate::messages::PROTOCOL_VERSION
+    );
+    #[cfg(not(debug_assertions))]
+    let name = SESSION_DIRECTORY_NAME.to_owned();
+    platform_config_dir().join(name)
 }
 
 #[cfg(any(not(windows), test))]

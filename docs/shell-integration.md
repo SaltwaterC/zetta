@@ -17,6 +17,24 @@ notification options while retaining all short aliases.
 
 `zmux`, the standalone multiplexer binary, gets the same completion as
 `zetta mux`, since the two take identical arguments.
+The mux command list includes `list`, `stop`, `reconnect`, `share`, `unshare`,
+`kill`, and `forget`; the session argument for `reconnect`, `share`, `unshare`,
+`kill`, and `forget` is
+fetched dynamically from `zmux list`/`zetta mux list` in the full
+`PROCESS:RUNNER:SESSION` form. Bare numeric IDs remain accepted as a
+compatibility shorthand. The root `--no-mux` opt-out is completed as a long option;
+its short `-n` spelling remains available to the parser without adding noise
+to completion candidates.
+
+Inside a shell launched by `zetta --no-mux` (or `zetta -n`), the integration
+knows that no daemon owns that shell's background sessions. It offers only
+`list` and `reconnect` for `zetta mux` and `zmux`, and their `--json`, `--help`,
+and `--version` options; daemon-only commands and options are omitted. The
+same reduced surface is shown by `zetta mux --help` in that shell.
+
+Completion intentionally offers the same catalog IDs for `share` and
+`reconnect`: `share` changes a scoped session to shared mode, while
+`reconnect` is the action that opens it in a Zetta window.
 
 It also provides `zwt`, a wrapper for the Git worktree workflow. `zwt new NAME`
 captures `zetta wt new --path-only NAME` and changes into the created worktree;

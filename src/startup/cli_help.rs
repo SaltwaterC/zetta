@@ -29,7 +29,13 @@ pub(crate) fn parse_tftp_args(_: impl IntoIterator<Item = OsString>) -> Result<T
 }
 
 pub(crate) fn version_text() -> String {
-    format!("Zetta {}", env!("CARGO_PKG_VERSION"))
+    format!(
+        "Zetta {}\nCONTROL_VERSION={}\nCATALOG_VERSION={}\nZMUX_PROTOCOL_VERSION={}",
+        env!("CARGO_PKG_VERSION"),
+        crate::process_control::CONTROL_VERSION,
+        zmux::protocol::CATALOG_VERSION,
+        zmux::messages::PROTOCOL_VERSION,
+    )
 }
 
 pub(crate) fn help_text(profiles: &[Profile]) -> String {
@@ -121,7 +127,7 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         .collect::<Vec<_>>()
         .join("\n  ");
     let help = format!(
-        "Zetta Terminal\n\nUsage: zetta [OPTIONS]\n       zetta benchmark [OPTIONS]\n       zetta benchmark-output [OPTIONS]\n       zetta terminal-size [--json | --resize [--columns COLUMNS] [--rows ROWS]]\n       zetta sessions [--json]\n       zetta profile <COMMAND>\n       zetta project <COMMAND>\n       zetta init [SHELL]{serial_usage}{http_usage}{tftp_usage}{notify_usage}{notify_cleanup_usage}{clipboard_usage}\n\nCommands:\n  benchmark                           Profile terminal rendering\n  benchmark-output                    Write and time a text payload (default: 10 MiB)\n  terminal-size                       Print or resize the current terminal pane\n  sessions                            List detached background sessions\n  profile                             List and manage profiles\n  project                             List, add, remove, or open projects\n  init                                Configure or generate shell integration{serial_command}{http_command}{tftp_command}{notify_command}{notify_cleanup_command}{clipboard_command}\n\nBuilt-in features:\n  {}\n\nProfiles accepted by --profile NAME (case-insensitive):\n  {profiles}\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Select one of the profiles listed above\n  -s, --split NAME                    Apply a configured pane split template; run `zetta splits` to list available names\n  -t, --theme NAME                    Non-persistently override --profile's theme for this launch",
+        "Zetta Terminal\n\nUsage: zetta [OPTIONS]\n       zetta benchmark [OPTIONS]\n       zetta benchmark-output [OPTIONS]\n       zetta terminal-size [--json | --resize [--columns COLUMNS] [--rows ROWS]]\n       zetta mux [COMMAND]\n       zetta profile <COMMAND>\n       zetta project <COMMAND>\n       zetta init [SHELL]{serial_usage}{http_usage}{tftp_usage}{notify_usage}{notify_cleanup_usage}{clipboard_usage}\n\nCommands:\n  benchmark                           Profile terminal rendering\n  benchmark-output                    Write and time a text payload (default: 10 MiB)\n  terminal-size                       Print or resize the current terminal pane\n  mux                                 Control, list, and reconnect background sessions\n  profile                             List and manage profiles\n  project                             List, add, remove, or open projects\n  init                                Configure or generate shell integration{serial_command}{http_command}{tftp_command}{notify_command}{notify_cleanup_command}{clipboard_command}\n\nBuilt-in features:\n  {}\n\nProfiles accepted by --profile NAME (case-insensitive):\n  {profiles}\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Select one of the profiles listed above\n  -s, --split NAME                    Apply a configured pane split template; run `zetta splits` to list available names\n  -t, --theme NAME                    Non-persistently override --profile's theme for this launch",
         features.join("\n  "),
     );
     help
@@ -142,20 +148,28 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         "  profile                             List and manage profiles\n  attention                           Mark the originating tab as needing attention",
     )
     .replace(
-        "       zetta sessions [--json]",
-        "       zetta sessions [--json]\n       zetta wt <COMMAND>",
+        "       zetta mux [COMMAND]",
+        "       zetta mux [COMMAND]\n       zetta wt <COMMAND>",
     )
     .replace(
         "  -s, --split NAME                    Apply a configured pane split template; run `zetta splits` to list available names\n  -t, --theme NAME                    Non-persistently override --profile's theme for this launch",
         "  -s, --split NAME                    Apply a configured pane split template; run `zetta splits` to list available names\n  -r, --replace-pane                  Replace the active pane in a running process; requires --split or --profile\n  -t, --theme NAME                    Non-persistently override --profile's theme for this launch",
     )
     .replace(
-        "       zetta sessions [--json]",
-        "       zetta sessions [--json]\n       zetta sessions reconnect SESSION_ID\n       zetta splits\n       zetta tabicon [OPTIONS] ICON\n       zetta tabicon --list\n       zetta panetheme [OPTIONS] THEME\n       zetta panetheme --reset\n       zetta panetheme --list\n       zetta overlay [OPTIONS] TEXT\n       zetta overlay --reset\n       zetta edit [OPTIONS] [--] FILE ...\n       zetta vi [OPTIONS] [FILE ...]",
+        "  -t, --theme NAME                    Non-persistently override --profile's theme for this launch",
+        "  -t, --theme NAME                    Non-persistently override --profile's theme for this launch\n  -n, --no-mux                         Keep background sessions in this process for this launch; sharing unavailable",
     )
     .replace(
-        "sessions                            List detached background sessions",
-        "sessions                            List or reconnect detached background sessions\n  wt                                  Create and integrate Git worktrees\n  splits                              List configured pane split templates\n  tabicon                             Set the active tab icon\n  panetheme                           Non-persistently change the active pane's theme\n  overlay                             Non-persistently show text over the active pane\n  edit                                Edit files with $EDITOR, falling back to Zetta vi\n  vi                                  Edit files with Zetta's built-in vi",
+        "       zetta mux [COMMAND]",
+        "       zetta mux [COMMAND]\n       zetta mux reconnect SESSION_ID\n       zetta splits\n       zetta tabicon [OPTIONS] ICON\n       zetta tabicon --list\n       zetta panetheme [OPTIONS] THEME\n       zetta panetheme --reset\n       zetta panetheme --list\n       zetta overlay [OPTIONS] TEXT\n       zetta overlay --reset\n       zetta edit [OPTIONS] [--] FILE ...\n       zetta vi [OPTIONS] [FILE ...]",
+    )
+    .replace(
+        "mux                                 Control, list, and reconnect background sessions",
+        "mux                                 Control, list, and reconnect background sessions\n  wt                                  Create and integrate Git worktrees\n  splits                              List configured pane split templates\n  tabicon                             Set the active tab icon\n  panetheme                           Non-persistently change the active pane's theme\n  overlay                             Non-persistently show text over the active pane\n  edit                                Edit files with $EDITOR, falling back to Zetta vi\n  vi                                  Edit files with Zetta's built-in vi",
+    )
+    .replace(
+        "  -v, --version                       Print version",
+        "  -v, --version                       Print version and compatibility versions",
     )
 }
 

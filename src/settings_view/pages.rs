@@ -107,6 +107,11 @@ pub(crate) fn render_settings_pages(
                 },
                 SettingsDropdown::PaneControlsDefaultVisibility,
             );
+            let session_retention = dropdown(
+                "settings-session-retention".to_owned(),
+                configuration.session_retention.label().to_owned(),
+                SettingsDropdown::SessionRetention,
+            );
             let current_font = configuration.terminal_font_family.clone();
             let picker_handle = handle.clone();
             let font_family = h_flex()
@@ -235,6 +240,43 @@ pub(crate) fn render_settings_pages(
                         ConfigTextField::ScrollHistory,
                     ),
                 ),
+                div()
+                    .pt_4()
+                    .pb_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(colors.text_muted)
+                            .child("Background sessions (zmux)"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.text_muted)
+                            .child("Screen retention for detached and shared sessions"),
+                    )
+                    .into_any_element(),
+                setting_row(
+                    "Detached session retention",
+                    "Keep no screen, or a bounded in-memory screen for background sessions",
+                    editor.focused_control
+                        == Some(SettingsControl::Dropdown(
+                            SettingsDropdown::SessionRetention,
+                        )),
+                    session_retention,
+                ),
+                setting_row(
+                    "Detached session ring bytes",
+                    "Memory budget for the bounded screen retained by background sessions",
+                    editor.focused_control
+                        == Some(SettingsControl::Numeric(NumericSetting::SessionRingBytes)),
+                    numeric(
+                        "settings-session-ring-bytes",
+                        configuration.session_ring_bytes.clone(),
+                        NumericSetting::SessionRingBytes,
+                        ConfigTextField::SessionRingBytes,
+                    ),
+                ),
                 setting_row(
                     "Inactive pane opacity",
                     "Dimming level as a percentage",
@@ -348,6 +390,25 @@ pub(crate) fn render_settings_pages(
                     pane_controls_default_visibility,
                 ),
             ];
+            #[cfg(any(feature = "http-server", feature = "tftp-server"))]
+            rows.push(
+                div()
+                    .pt_4()
+                    .pb_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(colors.text_muted)
+                            .child("Network services"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.text_muted)
+                            .child("Ports used by the optional local servers"),
+                    )
+                    .into_any_element(),
+            );
             #[cfg(feature = "http-server")]
             rows.push(setting_row(
                 "HTTP server port",
@@ -427,27 +488,27 @@ pub(crate) fn render_settings_pages(
                         ProfileIcon::selector_label(profile.icon.as_ref()).to_owned(),
                         SettingsDropdown::ProfileIcon(index),
                     ));
+                let visibility_handle = handle.clone();
+                let profile_visibility = switch(
+                    format!("settings-profile-{index}-visibility"),
+                    (!profile.hidden).into(),
+                )
+                .label(if profile.hidden { "Hidden" } else { "Visible" })
+                .full_width(true)
+                .aria_label("Show profile in Profiles menu")
+                .on_click(move |state, window, cx| {
+                    visibility_handle
+                        .update(cx, |this, cx| {
+                            this.set_settings_toggle(
+                                SettingsToggle::ProfileVisibility(index),
+                                state.selected(),
+                                window,
+                                cx,
+                            );
+                        })
+                        .ok();
+                });
                 let card = if profile.detected {
-                    let visibility_handle = handle.clone();
-                    let profile_visibility = switch(
-                        format!("settings-profile-{index}-visibility"),
-                        (!profile.hidden).into(),
-                    )
-                    .label(if profile.hidden { "Hidden" } else { "Visible" })
-                    .full_width(true)
-                    .aria_label("Show profile in Profiles menu")
-                    .on_click(move |state, window, cx| {
-                        visibility_handle
-                            .update(cx, |this, cx| {
-                                this.set_settings_toggle(
-                                    SettingsToggle::ProfileVisibility(index),
-                                    state.selected(),
-                                    window,
-                                    cx,
-                                );
-                            })
-                            .ok();
-                    });
                     h_flex()
                         .p_3()
                         .mb_2()
@@ -618,6 +679,19 @@ pub(crate) fn render_settings_pages(
                             div().mt_2().child(
                                 h_flex()
                                     .gap_4()
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .flex_1()
+                                            .child(
+                                                div()
+                                                    .mb_1()
+                                                    .text_xs()
+                                                    .text_color(colors.text_muted)
+                                                    .child("Shown in Profiles menu"),
+                                            )
+                                            .child(profile_visibility),
+                                    )
                                     .child(
                                         div()
                                             .min_w_0()

@@ -73,6 +73,103 @@ fn catalog_round_trips_pane_process_details() {
 }
 
 #[test]
+fn session_identifiers_round_trip_in_the_reconnect_format() {
+    let identifier = parse_session_identifier("123:7:42").unwrap();
+    assert_eq!(
+        identifier,
+        SessionIdentifier {
+            process_id: 123,
+            runner_id: 7,
+            session_id: 42,
+        }
+    );
+    assert_eq!(identifier.to_string(), "123:7:42");
+}
+
+#[test]
+fn session_identifiers_reject_missing_or_zero_components() {
+    for value in [
+        "42",
+        "123:7",
+        "123:7:42:extra",
+        "0:7:42",
+        "123:0:42",
+        "123:7:0",
+    ] {
+        assert!(
+            parse_session_identifier(value).is_err(),
+            "accepted {value:?}"
+        );
+    }
+}
+
+fn catalog_with_session_ids(
+    process_id: u32,
+    runner_id: u64,
+    session_ids: &[u64],
+) -> BackgroundSessionCatalog {
+    BackgroundSessionCatalog {
+        version: CATALOG_VERSION,
+        process_id,
+        runner_id,
+        sessions: session_ids
+            .iter()
+            .map(|&id| BackgroundSessionSummary {
+                id,
+                title: format!("session {id}"),
+                authentication_required: false,
+                active_pane: 1,
+                layout: BackgroundPaneLayout::Pane { pane_id: 1 },
+                panes: Vec::new(),
+                held: false,
+                scoped_to: None,
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn short_session_ids_are_only_displayed_when_unambiguous() {
+    let catalogs = vec![
+        catalog_with_session_ids(123, 7, &[1, 2]),
+        catalog_with_session_ids(456, 8, &[2, 3]),
+    ];
+    let unambiguous = unambiguous_session_ids(&catalogs);
+
+    assert!(unambiguous.contains(&1));
+    assert!(!unambiguous.contains(&2));
+    assert!(unambiguous.contains(&3));
+
+    let unique = SessionIdentifier {
+        process_id: 123,
+        runner_id: 7,
+        session_id: 1,
+    };
+    assert_eq!(
+        display_session_identifier(unique, &unambiguous),
+        "123:7:1 (short: 1)"
+    );
+    assert_eq!(
+        scoped_session_instructions(unique, &unambiguous),
+        "run `zmux share 1` to make it shared, then `zmux reconnect 1` to open it"
+    );
+
+    let conflicting = SessionIdentifier {
+        process_id: 456,
+        runner_id: 8,
+        session_id: 2,
+    };
+    assert_eq!(
+        display_session_identifier(conflicting, &unambiguous),
+        "456:8:2"
+    );
+    assert_eq!(
+        scoped_session_instructions(conflicting, &unambiguous),
+        "run `zmux share 456:8:2` to make it shared, then `zmux reconnect 456:8:2` to open it"
+    );
+}
+
+#[test]
 fn legacy_catalogs_are_ignored_after_the_schema_bump() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory

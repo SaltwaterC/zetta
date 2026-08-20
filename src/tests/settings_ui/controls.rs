@@ -72,3 +72,14 @@ fn the_form_scroll_mapping_skips_the_controls_that_live_in_the_dialog_header() {
     assert_eq!(leading_header_controls(&controls[..7]), 7);
     assert_eq!(leading_header_controls(&[]), 0);
 }
+
+#[test]
+fn custom_profiles_can_reach_their_visibility_control() {
+    let controls = profile_settings_controls(3, false);
+
+    assert!(
+        controls.contains(&SettingsControl::Toggle(SettingsToggle::ProfileVisibility(
+            3
+        )))
+    );
+}

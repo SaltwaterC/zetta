@@ -34,15 +34,9 @@ pub(crate) enum StartupMode {
         json: bool,
         resize: Option<TerminalResize>,
     },
-    ListBackgroundSessions {
-        json: bool,
-    },
     /// `zetta mux ...`, forwarded verbatim to the multiplexer so the subcommand
     /// and the `zmux` binary cannot accept different arguments.
     Mux(Vec<OsString>),
-    ReconnectBackgroundSession {
-        identifier: String,
-    },
     SetTabIcon {
         icon: Option<IconName>,
     },
@@ -88,6 +82,9 @@ pub(crate) struct StartupArgs {
     pub(crate) replace_pane: bool,
     /// Non-persistently overrides `profile`'s configured theme for this launch only.
     pub(crate) theme_override: Option<String>,
+    /// Explicitly retain the legacy in-process session owner instead of
+    /// requiring the daemon-backed multiplexer.
+    pub(crate) no_mux: bool,
     pub(crate) mode: StartupMode,
     pub(crate) profile_report: Option<PathBuf>,
     pub(crate) profile_duration: Option<Duration>,
@@ -189,6 +186,7 @@ pub(crate) fn parse_attention_args(args: &[OsString]) -> Result<StartupArgs> {
         split: None,
         replace_pane: false,
         theme_override: None,
+        no_mux: false,
         mode: StartupMode::Attention(AttentionCommand {
             notify,
             notification: NotificationRequest {
@@ -455,6 +453,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             split: None,
             replace_pane: false,
             theme_override: None,
+            no_mux: false,
             mode: StartupMode::Project(parse_project_args(&arguments[1..])?),
             profile_report: None,
             profile_duration: None,
@@ -472,6 +471,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             split: None,
             replace_pane: false,
             theme_override: None,
+            no_mux: false,
             mode: StartupMode::Pane(parse_pane_args(&arguments[1..])?),
             profile_report: None,
             profile_duration: None,
@@ -489,6 +489,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             split: None,
             replace_pane: false,
             theme_override: None,
+            no_mux: false,
             mode: StartupMode::Worktree(parse_worktree_args(&arguments[1..])?),
             profile_report: None,
             profile_duration: None,
@@ -508,6 +509,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             split: None,
             replace_pane: false,
             theme_override: None,
+            no_mux: false,
             mode: StartupMode::Profile(parsed.command),
             profile_report: None,
             profile_duration: None,
@@ -528,6 +530,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             split: None,
             replace_pane: false,
             theme_override: None,
+            no_mux: false,
             mode: parse_tab_icon_args(&arguments[1..])?,
             profile_report: None,
             profile_duration: None,
@@ -548,6 +551,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             split: None,
             replace_pane: false,
             theme_override: None,
+            no_mux: false,
             mode: parse_pane_theme_args(&arguments[1..])?,
             profile_report: None,
             profile_duration: None,
@@ -578,6 +582,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             split: None,
             replace_pane: false,
             theme_override: None,
+            no_mux: false,
             mode: StartupMode::ListPaneSplits,
             profile_report: None,
             profile_duration: None,
@@ -598,6 +603,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             split: None,
             replace_pane: false,
             theme_override: None,
+            no_mux: false,
             mode: parse_overlay_args(&arguments[1..])?,
             profile_report: None,
             profile_duration: None,
@@ -673,6 +679,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             split: None,
             replace_pane: false,
             theme_override: None,
+            no_mux: false,
             mode: StartupMode::OutputBenchmark {
                 size_mib: size_mib.unwrap_or(DEFAULT_OUTPUT_BENCHMARK_MIB),
                 output_type,
@@ -747,6 +754,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             split: None,
             replace_pane: false,
             theme_override: None,
+            no_mux: false,
             mode: StartupMode::PrintTerminalSize {
                 json,
                 resize: resize.then_some(TerminalResize { columns, rows }),
@@ -767,97 +775,8 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             split: None,
             replace_pane: false,
             theme_override: None,
+            no_mux: false,
             mode: StartupMode::Mux(arguments[1..].to_vec()),
-            profile_report: None,
-            profile_duration: None,
-            profile_pane_stress: false,
-            profile_workload: PerformanceWorkload::Standard,
-            profile_external_terminal: false,
-            tftp_command: None,
-        });
-    }
-    if arguments
-        .first()
-        .is_some_and(|argument| argument == "sessions")
-    {
-        if arguments
-            .get(1)
-            .is_some_and(|argument| argument == "reconnect")
-        {
-            let mut identifier = None;
-            let mut session_arguments = arguments[2..].iter();
-            while let Some(argument) = session_arguments.next() {
-                match argument.to_string_lossy().as_ref() {
-                    "--session" | "-s" => {
-                        anyhow::ensure!(
-                            identifier.is_none(),
-                            "--session may only be specified once"
-                        );
-                        identifier = Some(
-                            session_arguments
-                                .next()
-                                .context("--session requires a session ID")?
-                                .to_string_lossy()
-                                .into_owned(),
-                        );
-                    }
-                    "--help" | "-h" => {
-                        println!(
-                            "Reconnect a detached Zetta session\n\nUsage: zetta sessions reconnect SESSION_ID\n\nSESSION_ID is the PROCESS:RUNNER:SESSION identifier printed by `zetta sessions`. Protected sessions prompt for their secret without echoing it or placing it in shell history. A bare SESSION value is accepted only when it is unique.\n\nOptions:\n  -s, --session SESSION_ID  Specify the session ID as an option\n  -h, --help                Print help"
-                        );
-                        std::process::exit(0);
-                    }
-                    value if !value.starts_with('-') => {
-                        anyhow::ensure!(
-                            identifier.is_none(),
-                            "only one session ID may be specified"
-                        );
-                        identifier = Some(value.to_owned());
-                    }
-                    unknown => anyhow::bail!("unknown sessions reconnect argument {unknown:?}"),
-                }
-            }
-            return Ok(StartupArgs {
-                config_path: None,
-                keymap_path: None,
-                profile: None,
-                split: None,
-                replace_pane: false,
-                theme_override: None,
-                mode: StartupMode::ReconnectBackgroundSession {
-                    identifier: identifier.context(
-                        "sessions reconnect requires a session ID; run `zetta sessions reconnect --help` for usage",
-                    )?,
-                },
-                profile_report: None,
-                profile_duration: None,
-                profile_pane_stress: false,
-                profile_workload: PerformanceWorkload::Standard,
-                profile_external_terminal: false,
-                tftp_command: None,
-            });
-        }
-        let mut json = false;
-        for argument in &arguments[1..] {
-            match argument.to_string_lossy().as_ref() {
-                "--json" | "-j" => json = true,
-                "--help" | "-h" => {
-                    println!(
-                        "List or reconnect detached Zetta sessions\n\nUsage: zetta sessions [--json]\n       zetta sessions reconnect SESSION_ID\n\nOptions:\n  -j, --json  Print machine-readable JSON\n  -h, --help  Print help\n\nRun `zetta sessions reconnect --help` for reconnect options."
-                    );
-                    std::process::exit(0);
-                }
-                unknown => anyhow::bail!("unknown sessions argument {unknown:?}"),
-            }
-        }
-        return Ok(StartupArgs {
-            config_path: None,
-            keymap_path: None,
-            profile: None,
-            split: None,
-            replace_pane: false,
-            theme_override: None,
-            mode: StartupMode::ListBackgroundSessions { json },
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,
@@ -902,6 +821,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             split: None,
             replace_pane: false,
             theme_override: None,
+            no_mux: false,
             mode: StartupMode::Edit {
                 arguments: paths,
                 delete_after,
@@ -922,6 +842,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             split: None,
             replace_pane: false,
             theme_override: None,
+            no_mux: false,
             mode: StartupMode::Vi(
                 arguments[1..]
                     .iter()
@@ -957,6 +878,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 split: None,
                 replace_pane: false,
                 theme_override: None,
+                no_mux: false,
                 mode: StartupMode::ConfigureCurrentShellIntegration,
                 profile_report: None,
                 profile_duration: None,
@@ -976,6 +898,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             split: None,
             replace_pane: false,
             theme_override: None,
+            no_mux: false,
             mode: StartupMode::PrintShellIntegration(ShellIntegration::parse(shell)?),
             profile_report: None,
             profile_duration: None,
@@ -1006,6 +929,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 split: None,
                 replace_pane: false,
                 theme_override: None,
+                no_mux: false,
                 mode: StartupMode::CliService(parse_serial_args(serial_arguments.iter().cloned())?),
                 profile_report: None,
                 profile_duration: None,
@@ -1036,6 +960,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 split: None,
                 replace_pane: false,
                 theme_override: None,
+                no_mux: false,
                 mode: StartupMode::CliService(parse_http_args(http_arguments.iter().cloned())?),
                 profile_report: None,
                 profile_duration: None,
@@ -1071,6 +996,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                     split: None,
                     replace_pane: false,
                     theme_override: None,
+                    no_mux: false,
                     mode: StartupMode::CliService(parse_tftp_server_args(
                         server_arguments.iter().cloned(),
                     )?),
@@ -1099,6 +1025,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             split: None,
             replace_pane: false,
             theme_override: None,
+            no_mux: false,
             mode: StartupMode::Application,
             profile_report: None,
             profile_duration: None,
@@ -1129,6 +1056,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 split: None,
                 replace_pane: false,
                 theme_override: None,
+                no_mux: false,
                 mode: StartupMode::CliService(parse_notify_args(notify_arguments.iter().cloned())?),
                 profile_report: None,
                 profile_duration: None,
@@ -1162,6 +1090,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 split: None,
                 replace_pane: false,
                 theme_override: None,
+                no_mux: false,
                 mode: StartupMode::CliService(parse_notify_cleanup_args(
                     cleanup_arguments.iter().cloned(),
                 )?),
@@ -1198,6 +1127,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 split: None,
                 replace_pane: false,
                 theme_override: None,
+                no_mux: false,
                 mode: StartupMode::CliService(parse_copy_args(copy_arguments.iter().cloned())?),
                 profile_report: None,
                 profile_duration: None,
@@ -1233,6 +1163,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 split: None,
                 replace_pane: false,
                 theme_override: None,
+                no_mux: false,
                 mode: StartupMode::CliService(parse_paste_args(paste_arguments.iter().cloned())?),
                 profile_report: None,
                 profile_duration: None,
@@ -1263,6 +1194,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
     let mut split = None;
     let mut replace_pane = false;
     let mut theme_override = None;
+    let mut no_mux = false;
     #[cfg(windows)]
     let mut mode = StartupMode::Application;
     #[cfg(not(windows))]
@@ -1313,6 +1245,10 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                         .into_owned(),
                 )
             }
+            "--no-mux" | "-n" => {
+                anyhow::ensure!(!no_mux, "--no-mux may only be specified once");
+                no_mux = true;
+            }
             #[cfg(windows)]
             // Hidden: written into the Start menu shortcut by the installer,
             // not something a user types.
@@ -1347,6 +1283,10 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
         theme_override.is_none() || profile.is_some(),
         "--theme requires --profile"
     );
+    anyhow::ensure!(
+        !no_mux || mode == StartupMode::Application,
+        "--no-mux cannot be combined with another startup mode"
+    );
     Ok(StartupArgs {
         config_path: config,
         keymap_path: keymap,
@@ -1354,6 +1294,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
         split,
         replace_pane,
         theme_override,
+        no_mux,
         mode,
         profile_report: None,
         profile_duration: None,
@@ -1475,6 +1416,7 @@ fn parse_benchmark_args(arguments: &[OsString]) -> Result<StartupArgs> {
         split: None,
         replace_pane: false,
         theme_override: None,
+        no_mux: false,
         mode,
         profile_report,
         profile_duration,
@@ -1545,7 +1487,7 @@ fn profile_subcommand_index(arguments: &[OsString]) -> Option<usize> {
             | "--theme" | "-t" => {
                 index = index.checked_add(2)?;
             }
-            "--replace-pane" | "-r" => index += 1,
+            "--replace-pane" | "-r" | "--no-mux" | "-n" => index += 1,
             "--help" | "-h" | "--version" | "-v" => index += 1,
             "profile" => return Some(index),
             _ => return None,
@@ -1580,6 +1522,7 @@ pub(crate) fn should_handoff_to_existing_process(args: &StartupArgs) -> bool {
         && args.config_path.is_none()
         && args.keymap_path.is_none()
         && !args.replace_pane
+        && !args.no_mux
         && args.profile.is_none()
         && args.split.is_none()
 }
@@ -1587,6 +1530,7 @@ pub(crate) fn should_handoff_to_existing_process(args: &StartupArgs) -> bool {
 pub(crate) fn should_replace_pane_in_existing_process(args: &StartupArgs) -> bool {
     args.mode == StartupMode::Application
         && args.replace_pane
+        && !args.no_mux
         && args.config_path.is_none()
         && args.keymap_path.is_none()
 }

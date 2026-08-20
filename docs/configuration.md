@@ -105,8 +105,10 @@ the CLI through process control remain silent.
 
 Press `Ctrl-,` or use the tab-bar settings button to open typed controls for
 the active configuration and keymap files. Profiles and themes use checked
-dropdowns, the font picker searches installed families, and detected profiles
-expose theme overrides and individual visibility toggles for the Profiles menu.
+dropdowns, the font picker searches installed families, and every profile
+exposes theme, icon, and individual visibility controls for the Profiles menu.
+The Configuration page's **Background sessions (zmux)** section controls
+detached/shared-session screen retention and its memory budget.
 
 Font size and scrollback accept typed values and press-and-hold steppers;
 scrollback also supports a `Max` sentinel. Inactive-pane opacity uses a
@@ -130,6 +132,28 @@ and `--keymap` paths remain CLI-only settings.
 The HTTP and TFTP server ports are typed settings backed by
 `http_server_port` and `tftp_server_port` in `config.json`. They default to
 8000 and 69 respectively and accept integers from 1 through 65535.
+
+## Background-session retention
+
+Background sessions are owned by the separate `zmux` daemon. Configure the
+screen retained while a pane is detached or shared with:
+
+```json
+{
+  "sessions": {
+    "retention": "memory",
+    "ring_bytes": 262144
+  }
+}
+```
+
+`sessions.retention` accepts `"memory"` (the default) or `"none"`.
+`memory` keeps a bounded terminal grid and scrollback; `ring_bytes` is the
+budget used to derive that bound and must be between 4096 and 67108864 bytes.
+`none` keeps the processes alive but does not request or retain a detach
+snapshot. The setting is global to a daemon start: restart `zmux` after
+changing it if an existing daemon is still running. `"persist"` is reserved
+for the later session-persistence feature and is rejected by this build.
 
 ## Git worktree root
 

@@ -75,7 +75,7 @@ fn an_endpoint_from_a_future_version_is_refused() {
 }
 
 #[test]
-fn messages_are_newline_framed_and_bounded() {
+fn messages_are_length_framed_and_bounded() {
     #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
     struct Message {
         session: u64,
@@ -83,14 +83,25 @@ fn messages_are_newline_framed_and_bounded() {
 
     let mut wire = Vec::new();
     write_message(&mut wire, &Message { session: 7 }).unwrap();
-    assert_eq!(wire.last(), Some(&b'\n'));
+    assert_eq!(
+        wire.len(),
+        4 + serde_json::to_vec(&Message { session: 7 }).unwrap().len()
+    );
+    assert_eq!(
+        &wire[..4],
+        &(serde_json::to_vec(&Message { session: 7 }).unwrap().len() as u32).to_be_bytes()
+    );
     assert_eq!(
         read_message::<Message>(&mut wire.as_slice()).unwrap(),
         Message { session: 7 }
     );
 
     // An unterminated message is refused rather than buffered without bound.
-    let oversized = vec![b'a'; MAX_MESSAGE_BYTES + 2];
+    let oversized = (MAX_MESSAGE_BYTES as u32 + 1)
+        .to_be_bytes()
+        .into_iter()
+        .chain(std::iter::repeat_n(b'a', MAX_MESSAGE_BYTES + 1))
+        .collect::<Vec<_>>();
     assert!(read_message::<Message>(&mut oversized.as_slice()).is_err());
 }
 

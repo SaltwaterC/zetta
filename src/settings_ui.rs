@@ -47,6 +47,7 @@ pub(crate) enum SettingsDropdown {
     WorkingDirectoryScope,
     PaneControlsPosition,
     PaneControlsDefaultVisibility,
+    SessionRetention,
     ProfileTheme(usize),
     ProfileIcon(usize),
     ProfileDraftTheme,
@@ -90,6 +91,7 @@ pub(crate) enum OpacityTarget {
 pub(crate) enum NumericSetting {
     FontSize,
     ScrollHistory,
+    SessionRingBytes,
     #[cfg(feature = "http-server")]
     HttpServerPort,
     #[cfg(feature = "tftp-server")]

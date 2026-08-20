@@ -149,7 +149,7 @@ fn shares_attention_target_environment_with_wsl() {
 
     assert_eq!(
         environment.get("WSLENV").map(String::as_str),
-        Some("ZETTA_PROCESS_ID/u:ZETTA_ATTENTION_ID/u")
+        Some("ZETTA_PROCESS_ID/u:ZETTA_ATTENTION_ID/u:ZETTA_NO_MUX/u")
     );
 }
 
@@ -164,7 +164,7 @@ fn preserves_existing_wslenv_entries_without_duplicates() {
 
     assert_eq!(
         environment.get("WSLENV").map(String::as_str),
-        Some("PATH/l:ZETTA_PROCESS_ID/l:USER/u:ZETTA_ATTENTION_ID/u")
+        Some("PATH/l:ZETTA_PROCESS_ID/l:USER/u:ZETTA_ATTENTION_ID/u:ZETTA_NO_MUX/u")
     );
 }
 
@@ -223,11 +223,14 @@ fn wsl_environment_normalizes_the_host_executable_wslenv_entry_once() {
     );
     environment.insert("ZETTA_PROCESS_ID".to_owned(), "123".to_owned());
     environment.insert("ZETTA_ATTENTION_ID".to_owned(), "456".to_owned());
+    environment.insert("ZETTA_NO_MUX".to_owned(), "1".to_owned());
     add_wsl_environment_variables(&mut environment);
 
     assert_eq!(
         environment.get("WSLENV").map(String::as_str),
-        Some("ZETTA_HOST_EXECUTABLE/up:USER/u:ZETTA_PROCESS_ID/u:ZETTA_ATTENTION_ID/u")
+        Some(
+            "ZETTA_HOST_EXECUTABLE/up:USER/u:ZETTA_PROCESS_ID/u:ZETTA_ATTENTION_ID/u:ZETTA_NO_MUX/u",
+        )
     );
     assert_eq!(
         environment

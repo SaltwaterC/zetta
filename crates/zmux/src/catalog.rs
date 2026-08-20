@@ -1,11 +1,12 @@
 //! Publishing and reading the session catalog.
 //!
 //! The catalog is the one piece of session state that is readable without a
-//! connection, so `zetta sessions` stays cheap. It lives in a directory only
+//! connection, so `zmux list` stays cheap. It lives in a directory only
 //! the current user may traverse, is replaced atomically, and never contains a
 //! verifier or a protected session's details.
 
 use std::{
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -20,6 +21,60 @@ use crate::protocol::{
 
 static NEXT_RUNNER_ID: AtomicU64 = AtomicU64::new(1);
 
+/// The stable identifier shared by `zmux` and `zetta mux reconnect`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SessionIdentifier {
+    pub process_id: u32,
+    pub runner_id: u64,
+    pub session_id: u64,
+}
+
+impl std::fmt::Display for SessionIdentifier {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{}:{}:{}",
+            self.process_id, self.runner_id, self.session_id
+        )
+    }
+}
+
+/// Parses the catalog identifier used by `zetta mux reconnect`.
+pub fn parse_session_identifier(value: &str) -> Result<SessionIdentifier> {
+    let mut parts = value.split(':');
+    let process_id = parts
+        .next()
+        .filter(|part| !part.is_empty())
+        .context("session ID must have the form PROCESS:RUNNER:SESSION")?
+        .parse::<u32>()
+        .context("session process ID must be a positive whole number")?;
+    let runner_id = parts
+        .next()
+        .filter(|part| !part.is_empty())
+        .context("session ID must have the form PROCESS:RUNNER:SESSION")?
+        .parse::<u64>()
+        .context("session runner ID must be a positive whole number")?;
+    let session_id = parts
+        .next()
+        .filter(|part| !part.is_empty())
+        .context("session ID must have the form PROCESS:RUNNER:SESSION")?
+        .parse::<u64>()
+        .context("session ID must be a positive whole number")?;
+    anyhow::ensure!(
+        parts.next().is_none(),
+        "session ID must have the form PROCESS:RUNNER:SESSION"
+    );
+    anyhow::ensure!(
+        process_id > 0 && runner_id > 0 && session_id > 0,
+        "session ID components must be positive whole numbers"
+    );
+    Ok(SessionIdentifier {
+        process_id,
+        runner_id,
+        session_id,
+    })
+}
+
 pub struct SessionCatalogPublisher {
     pub(crate) path: PathBuf,
     last_contents: Option<Vec<u8>>,
@@ -30,7 +85,15 @@ impl SessionCatalogPublisher {
     /// runner, so several runners in one process cannot overwrite each other.
     pub fn new(directory: &Path) -> Self {
         let runner_id = NEXT_RUNNER_ID.fetch_add(1, Ordering::Relaxed);
-        Self::at_path(directory.join(format!("zetta-{}-{runner_id}.json", std::process::id())))
+        Self::with_generation(directory, runner_id)
+    }
+
+    /// Creates a publisher whose generation is supplied by a daemon. Unlike
+    /// the in-process Zetta runner, a daemon must carry this value across an
+    /// exec so a reconnect identifier does not change while the daemon is
+    /// being upgraded.
+    pub fn with_generation(directory: &Path, generation: u64) -> Self {
+        Self::at_path(directory.join(format!("zetta-{}-{generation}.json", std::process::id())))
     }
 
     pub fn at_path(path: PathBuf) -> Self {
@@ -210,14 +273,18 @@ pub fn print_session_catalogs(directory: &Path, json: bool) -> Result<()> {
         "{session_count} background session{}:",
         if session_count == 1 { "" } else { "s" }
     );
+    let unambiguous_session_ids = unambiguous_session_ids(&catalogs);
     for catalog in catalogs {
         for session in catalog.sessions {
-            // The session id first and named, because it is the argument every
-            // other command takes: `zmux share`, `unshare`, `kill` and `forget`
-            // all address a session by it. Reading it out of a composite
-            // `PROCESS:RUNNER:SESSION` identifier — which is what `zetta
-            // sessions reconnect` wants, and is printed below — left the one
-            // number these commands need looking like part of something else.
+            let identifier = SessionIdentifier {
+                process_id: catalog.process_id,
+                runner_id: catalog.runner_id,
+                session_id: session.id,
+            };
+            // Keep the short number first for a readable administrative list;
+            // the stable composite identifier used by `zmux reconnect` is
+            // printed immediately below and is what completion offers for
+            // every command that takes a session.
             println!(
                 "\nsession {}  {}  ({} pane{}{}{})",
                 session.id,
@@ -242,14 +309,13 @@ pub fn print_session_catalogs(directory: &Path, json: bool) -> Result<()> {
             // another process's picker, so saying so is the difference between
             // "missing" and "not yours".
             if let Some(process_id) = session.scoped_to {
-                println!(
-                    "  scoped to process {process_id}  (zmux share {} to open it up)",
-                    session.id
-                );
+                let instructions =
+                    scoped_session_instructions(identifier, &unambiguous_session_ids);
+                println!("  scoped to process {process_id}  ({instructions})");
             }
             println!(
-                "  reconnect id: {}:{}:{}",
-                catalog.process_id, catalog.runner_id, session.id
+                "  reconnect id: {}",
+                display_session_identifier(identifier, &unambiguous_session_ids)
             );
             if session.authentication_required {
                 continue;
@@ -290,6 +356,47 @@ pub fn print_session_catalogs(directory: &Path, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Returns the numeric IDs that can safely be used as shorthand. A session ID
+/// is allocated by a multiplexer, but the catalog can contain more than one
+/// live multiplexer generation, so the number is not globally unique here.
+fn unambiguous_session_ids(catalogs: &[BackgroundSessionCatalog]) -> HashSet<u64> {
+    let mut counts = HashMap::new();
+    for catalog in catalogs {
+        for session in &catalog.sessions {
+            *counts.entry(session.id).or_insert(0_usize) += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .filter_map(|(session_id, count)| (count == 1).then_some(session_id))
+        .collect()
+}
+
+fn display_session_identifier(
+    identifier: SessionIdentifier,
+    unambiguous_session_ids: &HashSet<u64>,
+) -> String {
+    if unambiguous_session_ids.contains(&identifier.session_id) {
+        format!("{identifier} (short: {})", identifier.session_id)
+    } else {
+        identifier.to_string()
+    }
+}
+
+fn scoped_session_instructions(
+    identifier: SessionIdentifier,
+    unambiguous_session_ids: &HashSet<u64>,
+) -> String {
+    let session_id = if unambiguous_session_ids.contains(&identifier.session_id) {
+        identifier.session_id.to_string()
+    } else {
+        identifier.to_string()
+    };
+    format!(
+        "run `zmux share {session_id}` to make it shared, then `zmux reconnect {session_id}` to open it"
+    )
 }
 
 fn display_text(text: &str) -> String {

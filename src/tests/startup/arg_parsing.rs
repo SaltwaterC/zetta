@@ -739,6 +739,7 @@ fn attention_subcommand_defaults_to_a_badge_without_notification() {
         split: None,
         replace_pane: false,
         theme_override: None,
+        no_mux: false,
         mode: StartupMode::Attention(command),
         profile_report: None,
         profile_duration: None,
@@ -911,24 +912,6 @@ fn mux_subcommand_forwards_its_arguments_verbatim() {
 }
 
 #[test]
-fn sessions_subcommand_supports_human_and_json_output() {
-    let human = parse_args_from([OsString::from("sessions")]).unwrap();
-    assert_eq!(
-        human.mode,
-        StartupMode::ListBackgroundSessions { json: false }
-    );
-
-    let json = parse_args_from([OsString::from("sessions"), OsString::from("--json")]).unwrap();
-    assert_eq!(
-        json.mode,
-        StartupMode::ListBackgroundSessions { json: true }
-    );
-    let short_json = parse_args_from([OsString::from("sessions"), OsString::from("-j")]).unwrap();
-    assert_eq!(short_json, json);
-    assert!(parse_args_from([OsString::from("sessions"), OsString::from("--unknown")]).is_err());
-}
-
-#[test]
 fn splits_subcommand_lists_configured_templates_without_starting_the_application() {
     let args = parse_args_from([OsString::from("splits")]).unwrap();
     assert_eq!(args.mode, StartupMode::ListPaneSplits);
@@ -963,39 +946,21 @@ fn splits_subcommand_lists_configured_templates_without_starting_the_application
 }
 
 #[test]
-fn sessions_reconnect_subcommand_accepts_a_stable_id_without_a_secret_argument() {
+fn mux_reconnect_subcommand_is_forwarded_with_its_stable_id() {
     let args = parse_args_from([
-        OsString::from("sessions"),
+        OsString::from("mux"),
         OsString::from("reconnect"),
         OsString::from("123:7:42"),
     ])
     .unwrap();
     assert_eq!(
         args.mode,
-        StartupMode::ReconnectBackgroundSession {
-            identifier: "123:7:42".to_owned(),
-        }
+        StartupMode::Mux(vec![
+            OsString::from("reconnect"),
+            OsString::from("123:7:42"),
+        ])
     );
     assert!(!should_handoff_to_existing_process(&args));
-
-    let option = parse_args_from([
-        OsString::from("sessions"),
-        OsString::from("reconnect"),
-        OsString::from("-s"),
-        OsString::from("123:7:42"),
-    ])
-    .unwrap();
-    assert_eq!(option, args);
-    assert!(parse_args_from([OsString::from("sessions"), OsString::from("reconnect"),]).is_err());
-    assert!(
-        parse_args_from([
-            OsString::from("sessions"),
-            OsString::from("reconnect"),
-            OsString::from("--secret"),
-            OsString::from("not-private"),
-        ])
-        .is_err()
-    );
 }
 
 #[test]
@@ -1258,16 +1223,23 @@ fn output_benchmark_subcommand_bypasses_application_startup() {
 }
 
 #[test]
-fn only_plain_application_launches_handoff_to_the_session_runner() {
+fn only_plain_application_launches_handoff_to_the_existing_process() {
     let plain = parse_args_from(Vec::<OsString>::new()).unwrap();
     let profile = parse_args_from([OsString::from("--profile"), OsString::from("System")]).unwrap();
     let split = parse_args_from([OsString::from("--split"), OsString::from("quarters")]).unwrap();
-    let sessions = parse_args_from([OsString::from("sessions")]).unwrap();
+    let mux = parse_args_from([OsString::from("mux")]).unwrap();
+    let no_mux = parse_args_from([OsString::from("--no-mux")]).unwrap();
+    let short_no_mux = parse_args_from([OsString::from("-n")]).unwrap();
 
     assert!(should_handoff_to_existing_process(&plain));
     assert!(!should_handoff_to_existing_process(&profile));
     assert!(!should_handoff_to_existing_process(&split));
-    assert!(!should_handoff_to_existing_process(&sessions));
+    assert!(!should_handoff_to_existing_process(&mux));
+    assert!(no_mux.no_mux);
+    assert_eq!(no_mux, short_no_mux);
+    assert!(!should_handoff_to_existing_process(&no_mux));
+    assert!(parse_args_from([OsString::from("--no-mux"), OsString::from("--no-mux")]).is_err());
+    assert!(parse_args_from([OsString::from("--no-mux"), OsString::from("sessions")]).is_err());
 }
 
 #[test]
@@ -1411,6 +1383,7 @@ fn benchmark_subcommand_arguments_are_cross_platform() {
             split: None,
             replace_pane: false,
             theme_override: None,
+            no_mux: false,
             mode: StartupMode::TerminalRenderingProfile,
             profile_report: None,
             profile_duration: None,
@@ -1433,6 +1406,7 @@ fn benchmark_subcommand_arguments_are_cross_platform() {
             split: None,
             replace_pane: false,
             theme_override: None,
+            no_mux: false,
             mode: StartupMode::TerminalRenderingWorkload,
             profile_report: None,
             profile_duration: None,

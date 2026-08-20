@@ -343,13 +343,19 @@ function __zetta_tftp_server
     and test "$words[3]" = server
 end
 
-function __zetta_session_ids
-    zetta sessions --json 2>/dev/null | awk '
-        /"process_id"[[:space:]]*:/ { match($0, /[0-9]+/); process=substr($0, RSTART, RLENGTH) }
-        /"runner_id"[[:space:]]*:/ { match($0, /[0-9]+/); runner=substr($0, RSTART, RLENGTH) }
-        /"id"[[:space:]]*:/ { match($0, /[0-9]+/); session=substr($0, RSTART, RLENGTH) }
-        /"authentication_required"[[:space:]]*:/ { print process ":" runner ":" session }
-    '
+function __zetta_mux_session_ids
+    set -l command_name zetta
+    set -l command_arguments mux list
+    set -l words (commandline -opc)
+    if test "$words[1]" = zmux
+        set command_name zmux
+        set command_arguments list
+    end
+    $command_name $command_arguments 2>/dev/null | awk '$1 == "reconnect" && $2 == "id:" && $3 ~ /^[0-9]+:[0-9]+:[0-9]+$/ { print $3 }'
+end
+
+function __zetta_mux_daemon_commands
+    test "$ZETTA_NO_MUX" != 1
 end
 
 # Fish only considers options registered with `-l` after the user has typed a
@@ -382,7 +388,8 @@ function __zetta_long_options
                 --profile 'Select a profile' \
                 --split 'Apply a configured pane split template' \
                 --replace-pane 'Replace the active pane in a running process' \
-                --theme 'Non-persistently override the profile theme'
+                --theme 'Non-persistently override the profile theme' \
+                --no-mux 'Keep background sessions in this process for this launch'
         case profile
             printf '%s\t%s\n' \
                 list 'List all resolved profiles' \
@@ -447,10 +454,12 @@ function __zetta_long_options
             printf '%s\t%s\n' --delete-after 'Delete a managed buffer after editing' --help 'Print help'
         case vi
             printf '%s\t%s\n' --help 'Print help'
-        case sessions
-            printf '%s\t%s\n' --json 'Print machine-readable JSON' --help 'Print help'
         case mux
-            printf '%s\t%s\n' --json 'Print machine-readable JSON' --force 'Stop even while sessions are running' --upgrade 'Replace the multiplexer, keeping its sessions' --help 'Print help' --version 'Print version'
+            if test "$ZETTA_NO_MUX" = 1
+                printf '%s\t%s\n' --json 'Print machine-readable JSON' --help 'Print help' --version 'Print version'
+            else
+                printf '%s\t%s\n' --json 'Print machine-readable JSON' --force 'Stop even while sessions are running' --upgrade 'Replace the multiplexer, keeping its sessions' --help 'Print help' --version 'Print version'
+            end
         case benchmark-output
             printf '%s\t%s\n' \
                 --size 'Set the output size in MiB' \
@@ -524,7 +533,6 @@ complete -c zetta -f
 complete -c zetta -n '__zetta_at_root' -a benchmark -d 'Profile terminal rendering'
 complete -c zetta -n '__zetta_at_root' -a benchmark-output -d 'Write and time a text payload'
 complete -c zetta -n '__zetta_at_root' -a terminal-size -d 'Print the current terminal size'
-complete -c zetta -n '__zetta_at_root' -a sessions -d 'List detached background sessions'
 complete -c zetta -n '__zetta_at_root' -a mux -d 'Control the session multiplexer'
 complete -c zetta -n '__zetta_at_root' -a profile -d 'List and manage profiles'
 complete -c zetta -n '__zetta_at_root' -a project -d 'List and manage projects'
@@ -553,6 +561,7 @@ complete -c zetta -n '__zetta_use_subcommand' -l profile -r -a '(__zetta_profile
 complete -c zetta -n '__zetta_use_subcommand' -l split -r -a '(__zetta_pane_splits)' -d 'Apply a configured pane split template'
 complete -c zetta -n '__zetta_use_subcommand' -l replace-pane -d 'Replace the active pane in a running process'
 complete -c zetta -n '__zetta_use_subcommand' -l theme -r -a '(__zetta_profile_themes)' -d 'Non-persistently override the profile theme'
+complete -c zetta -n '__zetta_use_subcommand' -l no-mux -d 'Keep background sessions in this process for this launch'
 complete -c zetta -n '__zetta_use_subcommand' -a '(__zetta_long_options root)'
 complete -c zetta -s c -r -n '__zetta_use_subcommand; and __zetta_short_option -c'
 complete -c zetta -s k -r -n '__zetta_use_subcommand; and __zetta_short_option -k'
@@ -595,16 +604,19 @@ complete -c zetta -n '__fish_seen_subcommand_from http' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from http' -a '(__zetta_long_options http)'
 complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l json -d 'Print machine-readable JSON'
 complete -c zetta -n '__zetta_at_subcommand mux' -a list -d 'List the sessions the multiplexer is holding'
-complete -c zetta -n '__zetta_at_subcommand mux' -a stop -d 'Stop the multiplexer'
-complete -c zetta -n '__zetta_at_subcommand mux' -a share -d 'Let every Zetta process attach a backgrounded session'
-complete -c zetta -n '__zetta_at_subcommand mux' -a unshare -d 'Scope a session back to the window that held it'
-complete -c zetta -n '__fish_seen_subcommand_from mux' -l force -d 'Stop even while sessions are running'
-complete -c zetta -n '__fish_seen_subcommand_from mux' -l upgrade -d 'Replace the multiplexer, keeping its sessions'
+complete -c zetta -n '__zetta_at_subcommand mux; and __zetta_mux_daemon_commands' -a stop -d 'Stop the multiplexer'
+complete -c zetta -n '__zetta_at_subcommand mux' -a reconnect -d 'Open a session in a Zetta window'
+complete -c zetta -n '__zetta_at_subcommand mux; and __zetta_mux_daemon_commands' -a share -d 'Let every Zetta process attach a backgrounded session'
+complete -c zetta -n '__zetta_at_subcommand mux; and __zetta_mux_daemon_commands' -a unshare -d 'Scope a session back to the window that held it'
+complete -c zetta -n '__zetta_at_subcommand mux; and __zetta_mux_daemon_commands' -a kill -d 'End a session and everything running in it'
+complete -c zetta -n '__zetta_at_subcommand mux; and __zetta_mux_daemon_commands' -a forget -d 'Remove a session from the catalog without killing it'
+complete -c zetta -n '__fish_seen_subcommand_from mux; and __fish_seen_subcommand_from reconnect' -a '(__zetta_mux_session_ids)' -d 'Multiplexer session ID'
+complete -c zetta -n '__fish_seen_subcommand_from mux; and __fish_seen_subcommand_from share unshare kill forget; and __zetta_mux_daemon_commands' -a '(__zetta_mux_session_ids)' -d 'Multiplexer session ID'
+complete -c zetta -n '__fish_seen_subcommand_from mux; and __zetta_mux_daemon_commands' -l force -d 'Stop even while sessions are running'
+complete -c zetta -n '__fish_seen_subcommand_from mux; and __zetta_mux_daemon_commands' -l upgrade -d 'Replace the multiplexer, keeping its sessions'
 complete -c zetta -n '__fish_seen_subcommand_from mux' -l json -d 'Print machine-readable JSON'
 complete -c zetta -n '__fish_seen_subcommand_from mux' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from mux' -a '(__zetta_long_options mux)'
-complete -c zetta -n '__fish_seen_subcommand_from sessions' -l json -d 'Print machine-readable JSON'
-complete -c zetta -n '__zetta_at_subcommand sessions' -a reconnect -d 'Reconnect a detached session'
 complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l resize -d 'Resize the current pane'
 complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l columns -r -d 'Set pane width in columns'
 complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l rows -r -d 'Set pane height in rows'
@@ -612,10 +624,6 @@ complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l help -d 'Pri
 complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -a '(__zetta_long_options terminal-size)'
 complete -c zetta -s c -r -n '__fish_seen_subcommand_from terminal-size; and __zetta_short_option -c'
 complete -c zetta -s R -r -n '__fish_seen_subcommand_from terminal-size; and __zetta_short_option -R'
-complete -c zetta -n '__fish_seen_subcommand_from sessions' -l help -d 'Print help'
-complete -c zetta -n '__fish_seen_subcommand_from sessions' -a '(__zetta_long_options sessions)'
-complete -c zetta -n '__fish_seen_subcommand_from sessions; and __fish_seen_subcommand_from reconnect' -a '(__zetta_session_ids)'
-complete -c zetta -n '__fish_seen_subcommand_from sessions; and __fish_seen_subcommand_from reconnect' -l session -r -d 'Session ID to reconnect'
 complete -c zetta -n '__fish_seen_subcommand_from splits' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from splits' -a '(__zetta_long_options splits)'
 complete -c zetta -n '__zetta_at_subcommand project' -a 'add list remove open'
@@ -773,11 +781,16 @@ complete -c zwt -s c -r -F -n '__fish_seen_subcommand_from new; and __zetta_shor
 complete -c zwt -n '__fish_seen_subcommand_from new done status rerere' -l help -d 'Print help'
 complete -c zmux -f
 complete -c zmux -n '__fish_use_subcommand' -a list -d 'List the sessions the multiplexer is holding'
-complete -c zmux -n '__fish_use_subcommand' -a stop -d 'Stop the multiplexer'
-complete -c zmux -n '__fish_use_subcommand' -a share -d 'Let every Zetta process attach a backgrounded session'
-complete -c zmux -n '__fish_use_subcommand' -a unshare -d 'Scope a session back to the window that held it'
-complete -c zmux -l force -d 'Stop even while sessions are running'
-complete -c zmux -l upgrade -d 'Replace the multiplexer, keeping its sessions'
+complete -c zmux -n '__fish_use_subcommand; and __zetta_mux_daemon_commands' -a stop -d 'Stop the multiplexer'
+complete -c zmux -n '__fish_use_subcommand' -a reconnect -d 'Open a session in a Zetta window'
+complete -c zmux -n '__fish_use_subcommand; and __zetta_mux_daemon_commands' -a share -d 'Let every Zetta process attach a backgrounded session'
+complete -c zmux -n '__fish_use_subcommand; and __zetta_mux_daemon_commands' -a unshare -d 'Scope a session back to the window that held it'
+complete -c zmux -n '__fish_use_subcommand; and __zetta_mux_daemon_commands' -a kill -d 'End a session and everything running in it'
+complete -c zmux -n '__fish_use_subcommand; and __zetta_mux_daemon_commands' -a forget -d 'Remove a session from the catalog without killing it'
+complete -c zmux -n '__fish_seen_subcommand_from reconnect' -a '(__zetta_mux_session_ids)' -d 'Multiplexer session ID'
+complete -c zmux -n '__fish_seen_subcommand_from share unshare kill forget; and __zetta_mux_daemon_commands' -a '(__zetta_mux_session_ids)' -d 'Multiplexer session ID'
+complete -c zmux -n '__zetta_mux_daemon_commands' -l force -d 'Stop even while sessions are running'
+complete -c zmux -n '__zetta_mux_daemon_commands' -l upgrade -d 'Replace the multiplexer, keeping its sessions'
 complete -c zmux -l json -d 'Print machine-readable JSON'
 complete -c zmux -l help -d 'Print help'
 complete -c zmux -l version -d 'Print version'

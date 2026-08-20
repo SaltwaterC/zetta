@@ -1240,16 +1240,16 @@ impl Zetta {
                             .style(ButtonStyle::Subtle)
                             .size(ButtonSize::Large)
                             .toggle_state(auto_background_tab)
-                            .aria_label("Keep this tab running after close")
+                            .aria_label("Keep and share this tab after close")
                             .tooltip(Tooltip::for_action_title(
                                 if auto_background_tab {
                                     if auto_background_protected {
-                                        "Keep running after close is on · authentication required"
+                                        "Keep running and sharing after close is on · authentication required"
                                     } else {
-                                        "Keep running after close is on · no authentication"
+                                        "Keep running and sharing after close is on · no authentication"
                                     }
                                 } else {
-                                    "Keep this tab running after the tab or window is closed"
+                                    "Keep and share this tab after the tab or window is closed"
                                 },
                                 &ToggleAutoBackgroundTab,
                             ))

@@ -4,6 +4,7 @@ use std::os::fd::IntoRawFd as _;
 fn handover() -> Handover {
     Handover {
         version: HANDOVER_VERSION,
+        generation: 17,
         next_session_id: 5,
         next_pane_id: 9,
         sessions: vec![SessionHandover {

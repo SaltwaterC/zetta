@@ -31,7 +31,7 @@ use alacritty_terminal::{
 use anyhow::{Context as _, Result};
 
 #[cfg(unix)]
-use std::os::fd::AsRawFd as _;
+use std::os::fd::{AsRawFd as _, BorrowedFd, FromRawFd as _, RawFd};
 
 use crate::{
     auth::SessionAuthentication,
@@ -258,25 +258,25 @@ struct Session {
     /// Whether the user asked for this session to be joinable while a window is
     /// still showing it.
     ///
-    /// Independent of `keep`, in both directions. Offering a session does not
-    /// make it outlive its windows: a shared session whose every viewer has gone
-    /// is abandoned like any other, because nobody asked for it to be kept. And
-    /// a kept session is attachable whether or not it was ever offered, which is
-    /// what detaching has always meant.
+    /// Independent of `keep` as a property: offering a session does not by
+    /// itself make it outlive its windows, while a kept session is attachable
+    /// whether or not it was ever offered. A caller may request both, which is
+    /// what Zetta's keep-running action does by default.
     offered: bool,
     /// The process this session belongs to while it is not offered.
     ///
-    /// Backgrounding a tab is a private act. Before the multiplexer held these
-    /// sessions they lived in the process that made them and no other Zetta
-    /// could see them, and that is still what `Ctrl-Shift-D` means; `offered`
-    /// is what makes a session everyone's. Recorded rather than inferred from
+    /// Backgrounding a tab is private unless it was already offered. Before the
+    /// multiplexer held these sessions they lived in the process that made them
+    /// and no other Zetta could see them, and that is still what plain
+    /// `Ctrl-Shift-D` means; `offered` is what makes a session everyone's.
+    /// Recorded rather than inferred from
     /// the panes' attachments, because a detached session has none.
     ///
     /// Kept when that process goes away, rather than released: a session
     /// backgrounded in one window must not become another window's because the
     /// first one exited, which is the whole difference between backgrounding and
-    /// sharing. Widening a session stays an explicit request — `Share` or
-    /// `SetSessionScope` — so a session whose window is gone is still listed,
+    /// sharing. Widening a private session stays an explicit request — `Share`
+    /// or `SetSessionScope` — so a session whose window is gone is still listed,
     /// killable and shareable, but not silently attachable.
     ///
     /// `None` only for a session nobody has held yet.
@@ -309,22 +309,35 @@ pub struct Daemon {
     /// exactly what rebuilding does — so the upgrade would try to execute a
     /// path that cannot exist.
     executable: Option<PathBuf>,
+    #[cfg(unix)]
+    /// The listener is inherited during an upgrade so clients never observe a
+    /// rebind gap.
+    listener_fd: RawFd,
     /// Wakes the drain thread when a pane is attached or detached.
     drain_wake: Mutex<Option<Stream>>,
 }
 
 impl Daemon {
-    fn new(directory: &Path, retention: Retention) -> Self {
+    fn new(
+        directory: &Path,
+        retention: Retention,
+        generation: u64,
+        #[cfg(unix)] listener_fd: RawFd,
+    ) -> Self {
         Self {
             sessions: Mutex::new(Vec::new()),
             sessions_condvar: Condvar::new(),
             next_session_id: AtomicU64::new(1),
             next_pane_id: AtomicU64::new(1),
             subscribers: Mutex::new(HashMap::new()),
-            catalog: Mutex::new(SessionCatalogPublisher::new(directory)),
+            catalog: Mutex::new(SessionCatalogPublisher::with_generation(
+                directory, generation,
+            )),
             retention,
             running: AtomicBool::new(true),
             executable: resolve_own_executable(),
+            #[cfg(unix)]
+            listener_fd,
             drain_wake: Mutex::new(None),
         }
     }
@@ -342,7 +355,27 @@ fn socket_path(directory: &Path) -> PathBuf {
 ///
 /// `resume_from` is the handover descriptor left by a previous image that
 /// replaced itself; the sessions it describes are adopted rather than started.
-pub fn run(retention: Retention, resume_from: Option<i32>) -> Result<()> {
+pub fn run(
+    retention: Retention,
+    resume_from: Option<i32>,
+    #[cfg(unix)] resume_listener: Option<i32>,
+) -> Result<()> {
+    retention.validate()?;
+    #[cfg(unix)]
+    let resumed_handover = resume_from
+        .map(crate::upgrade::read_handover)
+        .transpose()
+        .context("reading the multiplexer upgrade handover")?;
+    #[cfg(unix)]
+    let generation = resumed_handover
+        .as_ref()
+        .map(|handover| handover.generation)
+        .unwrap_or(new_generation()?);
+    #[cfg(not(unix))]
+    let generation = {
+        let _ = resume_from;
+        new_generation()?
+    };
     let directory = session_catalog_dir();
     create_private_dir(&directory)?;
     let socket = socket_path(&directory);
@@ -367,11 +400,38 @@ pub fn run(retention: Retention, resume_from: Option<i32>) -> Result<()> {
             existing.socket_path.display()
         );
     }
-    let _ = std::fs::remove_file(&socket);
-
-    let listener = Listener::bind(&socket)
-        .with_context(|| format!("binding the multiplexer socket {}", socket.display()))?;
-    restrict_socket(&socket)?;
+    #[cfg(unix)]
+    let listener = if let Some(descriptor) = resume_listener {
+        anyhow::ensure!(
+            resumed_handover.is_some(),
+            "--resume-listener requires --resume-from"
+        );
+        anyhow::ensure!(
+            crate::upgrade::descriptor_is_open(descriptor),
+            "the inherited listener descriptor {descriptor} was not inherited"
+        );
+        // SAFETY: the descriptor was inherited from the previous image and is
+        // claimed by this listener exactly once.
+        unsafe { Listener::from_raw_fd(descriptor) }
+    } else {
+        anyhow::ensure!(
+            resumed_handover.is_none(),
+            "an upgrade did not carry its listening socket"
+        );
+        let _ = std::fs::remove_file(&socket);
+        let listener = Listener::bind(&socket)
+            .with_context(|| format!("binding the multiplexer socket {}", socket.display()))?;
+        restrict_socket(&socket)?;
+        listener
+    };
+    #[cfg(not(unix))]
+    let listener = {
+        let _ = std::fs::remove_file(&socket);
+        let listener = Listener::bind(&socket)
+            .with_context(|| format!("binding the multiplexer socket {}", socket.display()))?;
+        restrict_socket(&socket)?;
+        listener
+    };
     let token = match inherited {
         Some(endpoint) => endpoint.token,
         None => random_hex(32)?,
@@ -385,15 +445,19 @@ pub fn run(retention: Retention, resume_from: Option<i32>) -> Result<()> {
     }
     .write(&endpoint)?;
 
-    let daemon = Arc::new(Daemon::new(&directory, retention));
+    let daemon = Arc::new(Daemon::new(
+        &directory,
+        retention,
+        generation,
+        #[cfg(unix)]
+        listener.as_raw_fd(),
+    ));
     #[cfg(unix)]
-    if let Some(descriptor) = resume_from {
+    if let Some(handover) = resumed_handover {
         // The previous image left its sessions behind in this same process:
         // the descriptors are still open and the shells are still this
         // process's children, so they are adopted rather than restarted.
-        match crate::upgrade::read_handover(descriptor)
-            .and_then(|handover| adopt_handover(&daemon, handover))
-        {
+        match adopt_handover(&daemon, handover) {
             Ok(count) => log::info!("zmux resumed {count} session(s) across an upgrade"),
             Err(error) => log::error!("could not resume sessions across the upgrade: {error:#}"),
         }
@@ -442,6 +506,10 @@ pub fn run(retention: Retention, resume_from: Option<i32>) -> Result<()> {
     Ok(())
 }
 
+fn new_generation() -> Result<u64> {
+    u64::from_str_radix(&random_hex(8)?, 16).context("creating a daemon generation")
+}
+
 #[cfg(unix)]
 fn restrict_socket(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
@@ -465,6 +533,7 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
         peer_is_this_user(&stream)?,
         "refusing a connection from another user"
     );
+    let peer_process_id = crate::transport::peer_process_id(&stream)?;
 
     let mut connection = Connection::new(stream);
     // Every refusal below answers before it returns. A connection that simply
@@ -567,9 +636,18 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
         Request::Input { .. } => connection.send(&Response::Error {
             message: "input belongs on a shared connection".to_owned(),
         }),
-        Request::Detach(request) => {
-            detach(daemon, request, envelope.client_process_id, &mut connection)
-        }
+        Request::Detach(request) => match detach(
+            daemon,
+            request,
+            envelope.client_process_id,
+            peer_process_id,
+            &mut connection,
+        ) {
+            Ok(()) => Ok(()),
+            Err(error) => connection.send(&Response::Error {
+                message: format!("{error:#}"),
+            }),
+        },
         Request::TakeExclusive {
             session_id,
             pane_id,
@@ -580,17 +658,33 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
             envelope.client_process_id,
             &mut connection,
         ),
-        Request::Share(request) => {
-            share(daemon, request, envelope.client_process_id, &mut connection)
-        }
+        Request::Share(request) => share(
+            daemon,
+            request,
+            envelope.client_process_id,
+            peer_process_id,
+            &mut connection,
+        ),
         Request::Resize {
             session_id,
             pane_id,
             columns,
             lines,
         } => {
-            resize_pane(daemon, session_id, pane_id, columns, lines);
-            connection.send(&Response::Ok)
+            match resize_pane(
+                daemon,
+                session_id,
+                pane_id,
+                columns,
+                lines,
+                envelope.client_process_id,
+                peer_process_id,
+            ) {
+                Ok(()) => connection.send(&Response::Ok),
+                Err(error) => connection.send(&Response::Error {
+                    message: format!("{error:#}"),
+                }),
+            }
         }
         Request::List => {
             // Sanitized exactly as the published catalog is. The endpoint token
@@ -608,32 +702,80 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
             connection.send(&Response::Sessions { sessions })
         }
         Request::PaneStates { pane_ids } => {
-            let panes = pane_states(daemon, &pane_ids);
+            let panes = pane_states(
+                daemon,
+                &pane_ids,
+                envelope.client_process_id,
+                peer_process_id,
+            );
             connection.send(&Response::PaneStates { panes })
         }
         Request::ClosePane {
             session_id,
             pane_id,
         } => {
-            close_pane(daemon, session_id, pane_id, envelope.client_process_id);
-            connection.send(&Response::Ok)
+            match close_pane(
+                daemon,
+                session_id,
+                pane_id,
+                envelope.client_process_id,
+                peer_process_id,
+            ) {
+                Ok(()) => connection.send(&Response::Ok),
+                Err(error) => connection.send(&Response::Error {
+                    message: format!("{error:#}"),
+                }),
+            }
         }
         Request::Kill { session_id } => {
-            kill(daemon, session_id);
-            publish(daemon);
-            connection.send(&Response::Ok)
+            match kill(
+                daemon,
+                session_id,
+                envelope.client_process_id,
+                peer_process_id,
+            ) {
+                Ok(()) => {
+                    publish(daemon);
+                    connection.send(&Response::Ok)
+                }
+                Err(error) => connection.send(&Response::Error {
+                    message: format!("{error:#}"),
+                }),
+            }
         }
         Request::SetSessionScope {
             session_id,
             shared,
             verifier,
-        } => set_session_scope(daemon, session_id, shared, verifier, &mut connection),
+        } => match set_session_scope(
+            daemon,
+            session_id,
+            shared,
+            verifier,
+            envelope.client_process_id,
+            peer_process_id,
+            &mut connection,
+        ) {
+            Ok(()) => Ok(()),
+            Err(error) => connection.send(&Response::Error {
+                message: format!("{error:#}"),
+            }),
+        },
         Request::Forget { session_id } => {
-            let mut sessions = daemon.sessions.lock().unwrap();
-            sessions.retain(|session| session.id != session_id);
-            drop(sessions);
-            publish(daemon);
-            connection.send(&Response::Ok)
+            match forget(
+                daemon,
+                session_id,
+                envelope.client_process_id,
+                peer_process_id,
+            ) {
+                Ok(()) => {
+                    publish(daemon);
+                    connection.send(&Response::Ok)
+                }
+                Err(error) => connection.send(&Response::Error {
+                    message: format!("{error:#}"),
+                }),
+            }
         }
         Request::Upgrade => {
             #[cfg(unix)]
@@ -1931,6 +2073,7 @@ fn detach(
     daemon: &Arc<Daemon>,
     request: crate::messages::DetachRequest,
     client_process_id: u32,
+    peer_process_id: Option<u32>,
     connection: &mut Connection,
 ) -> Result<()> {
     // Read the snapshots before taking the lock: they arrive as raw bytes on
@@ -1953,6 +2096,11 @@ fn detach(
             message: format!("session {} does not exist", request.session_id),
         });
     };
+    anyhow::ensure!(
+        session_control_authorized(session, client_process_id, peer_process_id),
+        "session {} is protected and can only be detached by its owner or current holder",
+        request.session_id
+    );
     // The session's identity belongs to the daemon, not to whatever the
     // client puts in the summary. A client that published a summary whose id
     // disagreed with the session's own id (a tab id instead of the mux
@@ -1963,10 +2111,13 @@ fn detach(
     session.summary.id = session.id;
     session.state = request.state;
     session.keep = true;
-    // Backgrounded *by* this client, and therefore its own: another process must
-    // not be offered a session this one put away. Sharing is the separate,
-    // explicit request that undoes this.
-    session.owner = Some(client_process_id);
+    // A plain detach is private, but a tab that was already shared asked for
+    // both properties: keep it after this window goes and leave it available to
+    // another process. Preserve the offer through the handoff so closing a
+    // keep-running tab does not narrow it back to the process that just closed.
+    if !session.offered {
+        session.owner = Some(client_process_id);
+    }
     if let Some(verifier) = request.verifier {
         session.authentication = Some(SessionAuthentication::from_verifier(verifier)?);
         session.failed_authentications = 0;
@@ -2016,6 +2167,7 @@ fn share(
     daemon: &Arc<Daemon>,
     request: crate::messages::ShareRequest,
     client_process_id: u32,
+    peer_process_id: Option<u32>,
     connection: &mut Connection,
 ) -> Result<()> {
     let mut sessions = daemon.sessions.lock().unwrap();
@@ -2032,7 +2184,12 @@ fn share(
     // is not displaying, and this request rewrites the verifier, so letting any
     // client send it would be a way to reprotect a session without knowing the
     // secret it already has.
-    if !session_is_held_by(session, client_process_id) {
+    let holder_process_id = if session.authentication.is_some() {
+        control_process_id(client_process_id, peer_process_id)
+    } else {
+        client_process_id
+    };
+    if !session_is_held_by(session, holder_process_id) {
         return connection.send(&Response::Error {
             message: format!(
                 "session {} cannot be shared by a client that is not showing it",
@@ -2108,6 +2265,8 @@ fn set_session_scope(
     session_id: u64,
     shared: bool,
     verifier: Option<String>,
+    client_process_id: u32,
+    peer_process_id: Option<u32>,
     connection: &mut Connection,
 ) -> Result<()> {
     let mut sessions = daemon.sessions.lock().unwrap();
@@ -2127,6 +2286,10 @@ fn set_session_scope(
             ),
         });
     }
+    anyhow::ensure!(
+        session_control_authorized(session, client_process_id, peer_process_id),
+        "session {session_id} is protected and can only be changed by its owner or current holder"
+    );
     if let Some(verifier) = verifier {
         session.authentication = Some(SessionAuthentication::from_verifier(verifier)?);
         session.failed_authentications = 0;
@@ -2148,6 +2311,26 @@ fn set_session_scope(
     drop(sessions);
     publish(daemon);
     connection.send(&Response::Ok)
+}
+
+/// Uses the kernel's peer PID when the local transport exposes one. The
+/// envelope value remains useful for handle duplication and for transports
+/// without peer credentials, but it must not be the sole proof of ownership
+/// for a protected session.
+fn control_process_id(client_process_id: u32, peer_process_id: Option<u32>) -> u32 {
+    peer_process_id.unwrap_or(client_process_id)
+}
+
+fn session_control_authorized(
+    session: &Session,
+    client_process_id: u32,
+    peer_process_id: Option<u32>,
+) -> bool {
+    if session.authentication.is_none() {
+        return true;
+    }
+    let process_id = control_process_id(client_process_id, peer_process_id);
+    session.owner == Some(process_id) || session_is_held_by(session, process_id)
 }
 
 /// How many windows are being relayed this pane. Zero for a pane one window holds
@@ -2177,15 +2360,36 @@ fn session_is_held_by(session: &Session, client_process_id: u32) -> bool {
 
 /// Applies a client's new size to a pane's terminal, recording it as the
 /// pane's size so a later shared attach starts from it.
-fn resize_pane(daemon: &Arc<Daemon>, session_id: u64, pane_id: u64, columns: u16, lines: u16) {
+fn resize_pane(
+    daemon: &Arc<Daemon>,
+    session_id: u64,
+    pane_id: u64,
+    columns: u16,
+    lines: u16,
+    client_process_id: u32,
+    peer_process_id: Option<u32>,
+) -> Result<()> {
     use alacritty_terminal::event::OnResize as _;
     let mut sessions = daemon.sessions.lock().unwrap();
+    let Some(session) = sessions.iter().find(|session| session.id == session_id) else {
+        anyhow::bail!("session {session_id} does not exist");
+    };
+    if session.authentication.is_some()
+        && !session_is_held_by(
+            session,
+            control_process_id(client_process_id, peer_process_id),
+        )
+    {
+        anyhow::bail!(
+            "session {session_id} is protected and can only be resized by its current holder"
+        );
+    }
     let Some(pane) = sessions
         .iter_mut()
         .find(|session| session.id == session_id)
         .and_then(|session| session.panes.iter_mut().find(|pane| pane.id == pane_id))
     else {
-        return;
+        anyhow::bail!("session {session_id} has no pane {pane_id}");
     };
     pane.pty.on_resize(window_size(TerminalSize {
         columns,
@@ -2202,12 +2406,44 @@ fn resize_pane(daemon: &Arc<Daemon>, session_id: u64, pane_id: u64, columns: u16
     // What is kept of the pane wraps where the pane wraps, or a reattach would
     // show the session rewrapped at a width nothing was drawn at.
     pane.retained.resize(columns, lines);
+    Ok(())
 }
 
-fn kill(daemon: &Arc<Daemon>, session_id: u64) {
+fn kill(
+    daemon: &Arc<Daemon>,
+    session_id: u64,
+    client_process_id: u32,
+    peer_process_id: Option<u32>,
+) -> Result<()> {
     let mut sessions = daemon.sessions.lock().unwrap();
+    let Some(session) = sessions.iter().find(|session| session.id == session_id) else {
+        anyhow::bail!("session {session_id} does not exist");
+    };
+    anyhow::ensure!(
+        session_control_authorized(session, client_process_id, peer_process_id),
+        "session {session_id} is protected and can only be ended by its owner or current holder"
+    );
     // Dropping the panes drops their PTYs, which hangs up the children.
     sessions.retain(|session| session.id != session_id);
+    Ok(())
+}
+
+fn forget(
+    daemon: &Arc<Daemon>,
+    session_id: u64,
+    client_process_id: u32,
+    peer_process_id: Option<u32>,
+) -> Result<()> {
+    let mut sessions = daemon.sessions.lock().unwrap();
+    let Some(session) = sessions.iter().find(|session| session.id == session_id) else {
+        anyhow::bail!("session {session_id} does not exist");
+    };
+    anyhow::ensure!(
+        session_control_authorized(session, client_process_id, peer_process_id),
+        "session {session_id} is protected and can only be forgotten by its owner or current holder"
+    );
+    sessions.retain(|session| session.id != session_id);
+    Ok(())
 }
 
 /// Reports what is known about each requested pane, in the order asked.
@@ -2216,15 +2452,33 @@ fn kill(daemon: &Arc<Daemon>, session_id: u64) {
 /// omitted: the caller is a client trying to find out whether it may stop
 /// waiting, and "I have never heard of it" and "it is still running" must not
 /// look the same to it.
-fn pane_states(daemon: &Arc<Daemon>, pane_ids: &[u64]) -> Vec<crate::messages::PaneStateReport> {
+fn pane_states(
+    daemon: &Arc<Daemon>,
+    pane_ids: &[u64],
+    client_process_id: u32,
+    peer_process_id: Option<u32>,
+) -> Vec<crate::messages::PaneStateReport> {
     let sessions = daemon.sessions.lock().unwrap();
     pane_ids
         .iter()
         .map(|&pane_id| {
-            let pane = sessions
+            let session = sessions
                 .iter()
-                .flat_map(|session| session.panes.iter())
-                .find(|pane| pane.id == pane_id);
+                .find(|session| session.panes.iter().any(|pane| pane.id == pane_id));
+            if session.is_some_and(|session| {
+                session.authentication.is_some()
+                    && !session_control_authorized(session, client_process_id, peer_process_id)
+            }) {
+                return crate::messages::PaneStateReport {
+                    pane_id,
+                    unknown: true,
+                    exited: false,
+                    raw_status: None,
+                    input_sent: false,
+                };
+            }
+            let pane =
+                session.and_then(|session| session.panes.iter().find(|pane| pane.id == pane_id));
             match pane {
                 Some(pane) => crate::messages::PaneStateReport {
                     pane_id,
@@ -2253,13 +2507,24 @@ fn pane_states(daemon: &Arc<Daemon>, pane_ids: &[u64]) -> Vec<crate::messages::P
 /// a session that nobody asked to keep and that nobody is holding any more ends
 /// with the window it belonged to — the same rule the liveness reclaim applies,
 /// reached here promptly instead of on a two-second timer.
-fn close_pane(daemon: &Arc<Daemon>, session_id: u64, pane_id: u64, client_process_id: u32) {
+fn close_pane(
+    daemon: &Arc<Daemon>,
+    session_id: u64,
+    pane_id: u64,
+    client_process_id: u32,
+    peer_process_id: Option<u32>,
+) -> Result<()> {
+    let client_process_id = control_process_id(client_process_id, peer_process_id);
     let mut sessions = daemon.sessions.lock().unwrap();
     let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
-        return;
+        anyhow::bail!("session {session_id} does not exist");
     };
+    anyhow::ensure!(
+        session_control_authorized(session, client_process_id, peer_process_id),
+        "session {session_id} is protected and can only be changed by its owner or current holder"
+    );
     let Some(pane) = session.panes.iter_mut().find(|pane| pane.id == pane_id) else {
-        return;
+        anyhow::bail!("session {session_id} has no pane {pane_id}");
     };
     match pane.attachment {
         Attachment::Exclusive(holder) | Attachment::Revoking { holder }
@@ -2270,7 +2535,7 @@ fn close_pane(daemon: &Arc<Daemon>, session_id: u64, pane_id: u64, client_proces
         // A shared client leaves by closing its own data-plane connection,
         // which is what `remove_shared_client` acts on; releasing the whole
         // pane here would evict the other viewers too.
-        _ => return,
+        _ => anyhow::bail!("client {client_process_id} does not hold pane {pane_id}"),
     }
     let released = end_abandoned_sessions(&mut sessions);
     drop(sessions);
@@ -2282,6 +2547,7 @@ fn close_pane(daemon: &Arc<Daemon>, session_id: u64, pane_id: u64, client_proces
     if released {
         log::debug!("ended a session whose last pane was closed with its window");
     }
+    Ok(())
 }
 
 /// A session as it is offered, which is not quite as its client described it.
@@ -2903,10 +3169,11 @@ fn reclaim_panes_from_departed_clients(daemon: &Arc<Daemon>) {
     let mut reclaimed = false;
     let mut sessions = daemon.sessions.lock().unwrap();
     // Only the panes are reclaimed. A session's *scope* is deliberately left
-    // alone: backgrounding one is not a slow way of sharing it, so a window
-    // exiting must not turn a session another Zetta could not see into one it can
-    // attach. `Request::SetSessionScope` is how that happens, and it is a
-    // request somebody makes.
+    // alone: a private backgrounding is not a slow way of sharing it, so a
+    // window exiting must not turn a session another Zetta could not see into
+    // one it can attach. `Request::SetSessionScope` is how that happens, and it
+    // is a request somebody makes. A session already offered by its window is
+    // already shared, so reclaiming its pane does not need to widen anything.
     for session in sessions.iter_mut() {
         for pane in session.panes.iter_mut() {
             let departed_holder = match pane.attachment {
@@ -3034,7 +3301,7 @@ fn prepare_and_exec(
 
     // Past this point the process becomes the replacement, so anything that
     // was going to fail had to have failed already.
-    match crate::upgrade::exec_replacement(&executable, file.as_raw_fd()) {
+    match crate::upgrade::exec_replacement(&executable, file.as_raw_fd(), daemon.listener_fd) {
         Ok(_) => Ok(()),
         Err(error) => Err(UpgradeRefused::AfterAnswering(error)),
     }
@@ -3064,6 +3331,7 @@ fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, std::fs::File)> {
     let now = std::time::Instant::now();
     let handover = crate::upgrade::Handover {
         version: crate::upgrade::HANDOVER_VERSION,
+        generation: daemon.catalog.lock().unwrap().runner_id(),
         next_session_id: daemon.next_session_id.load(Ordering::SeqCst),
         next_pane_id: daemon.next_pane_id.load(Ordering::SeqCst),
         sessions: sessions
@@ -3118,6 +3386,11 @@ fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, std::fs::File)> {
             crate::upgrade::keep_across_exec(pane.pty.file())?;
         }
     }
+    // Keep the listener together with the PTY masters. Rebinding it after exec
+    // introduced a refusal window in which clients could mistake an orderly
+    // upgrade for a dead daemon.
+    let listener = unsafe { BorrowedFd::borrow_raw(daemon.listener_fd) };
+    crate::upgrade::keep_across_exec(&listener)?;
     let file = crate::upgrade::write_handover(&handover)?;
     drop(sessions);
     Ok((executable, file))
