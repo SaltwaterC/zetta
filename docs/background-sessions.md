@@ -46,6 +46,39 @@ identity decrypts the record. zmux resume SESSION -i PATH accepts repeatable
 identity files; the configured identity path is used by the Zetta picker when
 one is set.
 
+### SSH identity cipher compatibility
+
+Some OpenSSH versions encrypt private keys with
+`aes256-gcm@openssh.com`. The age SSH identity reader that reports
+`unknown cipher` accepts `aes256-ctr` (and `aes256-cbc`) instead. Re-encrypt a
+copy of the private key so the original remains available as a backup:
+
+```sh
+cp -p ~/.ssh/id_ed25519 ~/.ssh/id_ed25519.age
+chmod 600 ~/.ssh/id_ed25519.age
+ssh-keygen -p -Z aes256-ctr -f ~/.ssh/id_ed25519.age
+```
+
+Enter the existing passphrase when prompted, then enter the new passphrase
+twice. Keeping the same passphrase is fine. This changes only the private-key
+encryption, not the key pair or the SSH recipient, so existing age files remain
+decryptable. Use the converted copy for the test:
+
+```sh
+age -d -i ~/.ssh/id_ed25519.age session-1.age
+```
+
+For a Zetta disk record, use the same path with `zmux resume SESSION -i` or as
+the `sessions.persistence.identity` path. If `ssh-keygen` does not offer
+`-Z`, convert the copy to legacy PEM instead:
+
+```sh
+ssh-keygen -p -m PEM -f ~/.ssh/id_ed25519.age
+```
+
+That format uses AES-256-CBC, which is also accepted by the error above. Pass
+the private key file, not its `.pub` file, to `age`.
+
 `share` and `reconnect` are deliberately separate actions. `share` changes a
 session's scope so any Zetta process may attach it; it does not open a window.
 `reconnect` is the action that opens the session in a Zetta window. A scoped

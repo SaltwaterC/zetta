@@ -8,8 +8,13 @@
 use std::{
     collections::HashMap,
     io::{Read, Write as _},
+    os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -20,10 +25,8 @@ use zmux::{
     client::{AttachOutcome, Client},
     messages::{SpawnRequest, TerminalSize},
     protocol::{BackgroundPaneLayout, BackgroundSessionSummary},
+    retention::Retention,
 };
-
-#[cfg(feature = "session-persistence")]
-use zmux::retention::Retention;
 
 /// A daemon with a private configuration directory, stopped when dropped.
 struct TestDaemon {
@@ -285,12 +288,100 @@ fn read_json_frame(stream: &mut std::os::unix::net::UnixStream) -> String {
     String::from_utf8(bytes).unwrap()
 }
 
+fn try_read_json_frame(stream: &mut UnixStream) -> Option<serde_json::Value> {
+    let mut length = [0; 4];
+    stream.read_exact(&mut length).ok()?;
+    let mut bytes = vec![0; u32::from_be_bytes(length) as usize];
+    stream.read_exact(&mut bytes).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
 /// The secret every shared session in these tests is protected with.
 ///
 /// Sharing one is what makes it joinable from another process, so the
 /// multiplexer refuses to offer a session that has no secret: joining a session
 /// is being handed whatever its terminals can already do.
 const TEST_SECRET: &str = "test-secret";
+
+/// Exercises the client-side retry without needing an executable from an older
+/// checkout. The first server image rejects Configure exactly as a pre-Configure
+/// daemon does; its accepted Upgrade flips the listener into the replacement
+/// image, which accepts the raw retry. The real daemon tests cover the PTY and
+/// session state carried by an upgrade separately.
+#[test]
+fn configure_retries_once_after_an_unsupported_request() {
+    let directory = tempfile::tempdir().unwrap();
+    let socket_path = directory.path().join("zmux.sock");
+    let endpoint_path = directory.path().join("zmux.json");
+    let token = "test-token".to_owned();
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    std::fs::write(
+        &endpoint_path,
+        serde_json::json!({
+            "version": 1,
+            "protocol_version": zmux::messages::PROTOCOL_VERSION,
+            "process_id": 4242,
+            "socket_path": socket_path,
+            "token": token,
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let upgraded = Arc::new(AtomicBool::new(false));
+    let configure_requests = Arc::new(AtomicUsize::new(0));
+    let upgrade_requests = Arc::new(AtomicUsize::new(0));
+    let server = std::thread::spawn({
+        let stop = stop.clone();
+        let upgraded = upgraded.clone();
+        let configure_requests = configure_requests.clone();
+        let upgrade_requests = upgrade_requests.clone();
+        move || {
+            while !stop.load(Ordering::Acquire) {
+                let (mut stream, _) = listener.accept().unwrap();
+                let Some(request) = try_read_json_frame(&mut stream) else {
+                    continue;
+                };
+                let name = request["request"]["request"].as_str();
+                let response = match name {
+                    Some("configure") => {
+                        configure_requests.fetch_add(1, Ordering::Relaxed);
+                        if upgraded.load(Ordering::Acquire) {
+                            serde_json::json!({"response": "ok"})
+                        } else {
+                            serde_json::json!({
+                                "response": "error",
+                                "message": "unknown variant `configure`, expected `spawn`"
+                            })
+                        }
+                    }
+                    Some("upgrade") => {
+                        upgrade_requests.fetch_add(1, Ordering::Relaxed);
+                        upgraded.store(true, Ordering::Release);
+                        serde_json::json!({"response": "ok"})
+                    }
+                    _ => serde_json::json!({
+                        "response": "error",
+                        "message": "unexpected request in configure retry test"
+                    }),
+                };
+                write_json_frame(&mut stream, &response);
+            }
+        }
+    });
+
+    let client = Client::connect_existing_at(directory.path())
+        .unwrap()
+        .unwrap();
+    client.configure(Retention::None, Vec::new()).unwrap();
+    assert_eq!(configure_requests.load(Ordering::Acquire), 2);
+    assert_eq!(upgrade_requests.load(Ordering::Acquire), 1);
+
+    stop.store(true, Ordering::Release);
+    let _ = UnixStream::connect(&socket_path);
+    server.join().unwrap();
+}
 
 /// Opens a session to other processes, as `Ctrl-Shift-K` does to a tab.
 ///
@@ -372,6 +463,50 @@ fn a_new_client_applies_disk_retention_to_an_existing_daemon() {
     read_until(&descriptor, "ready");
     drop(descriptor);
 
+    client
+        .detach(
+            pane.session_id,
+            summary(pane.session_id, pane.pane_id),
+            serde_json::json!({"configured_after_startup": true}),
+            None,
+            vec![(pane.pane_id, b"encrypted after reconfiguration".to_vec())],
+        )
+        .unwrap();
+
+    let persistence = daemon.sessions_dir().join("persistence");
+    assert!(persistence.join("manifest.json").is_file());
+    assert!(
+        persistence
+            .join(format!("session-{}.age", pane.session_id))
+            .is_file()
+    );
+    client.kill(pane.session_id).unwrap();
+}
+
+#[cfg(feature = "session-persistence")]
+#[test]
+fn reconfiguring_to_disk_keeps_an_existing_process_and_creates_encrypted_persistence() {
+    let identity = age::x25519::Identity::generate();
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; sleep 60"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+
+    client
+        .configure_with_retention_and_persistence(
+            Retention::Disk,
+            zmux::persistence::PersistenceOptions {
+                recipients: vec![identity.to_public().to_string()],
+                identity: None,
+            },
+        )
+        .unwrap();
+    assert!(process_is_alive(pane.child_pid));
+
+    drop(descriptor);
     client
         .detach(
             pane.session_id,
@@ -1089,6 +1224,88 @@ fn retention_none_keeps_a_session_running_without_holding_its_output() {
         ),
         _ => panic!("attach failed"),
     }
+}
+
+#[test]
+fn reconfiguring_to_none_discards_a_snapshot_but_keeps_the_session_process() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; sleep 60"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+
+    client.configure(Retention::None, Vec::new()).unwrap();
+    drop(descriptor);
+    client
+        .detach(
+            pane.session_id,
+            summary(pane.session_id, pane.pane_id),
+            serde_json::Value::Null,
+            None,
+            vec![(pane.pane_id, b"this snapshot is discarded".to_vec())],
+        )
+        .unwrap();
+
+    match client
+        .attach(pane.session_id, Some(pane.pane_id), None)
+        .unwrap()
+    {
+        AttachOutcome::Attached { pane: attached, .. } => {
+            assert_eq!(attached.child_pid, pane.child_pid);
+            assert!(attached.replay.is_empty(), "retention none replayed output");
+            drop(std::fs::File::from(attached.descriptor));
+        }
+        _ => panic!("the reconfigured session must attach exclusively"),
+    }
+    assert!(process_is_alive(pane.child_pid));
+    client.kill(pane.session_id).unwrap();
+}
+
+#[cfg(feature = "scrollback-buffer")]
+#[test]
+fn reconfiguring_to_memory_retains_a_snapshot_and_keeps_the_session_process() {
+    let daemon = TestDaemon::start_with(&["--retention", "none"]);
+    let client = daemon.client();
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; sleep 60"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+
+    client
+        .configure(Retention::Memory { bytes: 4096 }, Vec::new())
+        .unwrap();
+    drop(descriptor);
+    client
+        .detach(
+            pane.session_id,
+            summary(pane.session_id, pane.pane_id),
+            serde_json::Value::Null,
+            None,
+            vec![(pane.pane_id, b"snapshot retained after reload".to_vec())],
+        )
+        .unwrap();
+
+    match client
+        .attach(pane.session_id, Some(pane.pane_id), None)
+        .unwrap()
+    {
+        AttachOutcome::Attached { pane: attached, .. } => {
+            assert_eq!(attached.child_pid, pane.child_pid);
+            assert!(
+                String::from_utf8_lossy(&attached.replay)
+                    .starts_with("snapshot retained after reload"),
+                "the configured memory ring did not retain the snapshot: {:?}",
+                attached.replay
+            );
+            drop(std::fs::File::from(attached.descriptor));
+        }
+        _ => panic!("the reconfigured session must attach exclusively"),
+    }
+    assert!(process_is_alive(pane.child_pid));
+    client.kill(pane.session_id).unwrap();
 }
 
 #[test]

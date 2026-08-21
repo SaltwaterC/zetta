@@ -174,6 +174,10 @@ be restarted. Use `zmux list` to see opaque restorable records and
 `-i/--identity` may be repeated. `"persist"` is rejected with a migration
 hint to `"disk"`.
 
+If an SSH identity produces an `unknown cipher "aes256-gcm@openssh.com"` error
+when it is passed to `age`, see [SSH identity cipher
+compatibility](background-sessions.md#ssh-identity-cipher-compatibility).
+
 ## Git worktree root
 
 The `zetta wt` commands use Git's effective `wt.root` configuration; it is not

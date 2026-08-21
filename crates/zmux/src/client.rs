@@ -265,6 +265,7 @@ fn is_unsupported_configure(error: &anyhow::Error) -> bool {
         let message = cause.to_string();
         message.contains("unknown variant `configure`")
             || message.contains("unknown variant 'configure'")
+            || message.contains("unknown variant \"configure\"")
     })
 }
 
@@ -368,14 +369,8 @@ impl Client {
         {
             retention.validate()?;
             if let Some(client) = Self::connect_existing_at(directory)? {
-                match client.configure(retention, Vec::new()) {
-                    Ok(()) => return Ok(client),
-                    Err(error) if is_unsupported_configure(&error) => {
-                        client.upgrade()?;
-                        return Self::connect_after_upgrade(directory, retention, Vec::new());
-                    }
-                    Err(error) => return Err(error),
-                }
+                client.configure(retention, Vec::new())?;
+                return Ok(client);
             }
             start_daemon(directory, retention)?;
             let deadline = Instant::now() + STARTUP_TIMEOUT;
@@ -405,14 +400,8 @@ impl Client {
             Vec::new()
         };
         if let Some(client) = Self::connect_existing_at(directory)? {
-            match client.configure(retention, resolved_recipients.clone()) {
-                Ok(()) => return Ok(client),
-                Err(error) if is_unsupported_configure(&error) => {
-                    client.upgrade()?;
-                    return Self::connect_after_upgrade(directory, retention, resolved_recipients);
-                }
-                Err(error) => return Err(error),
-            }
+            client.configure(retention, resolved_recipients)?;
+            return Ok(client);
         }
         start_daemon(directory, retention, Some(resolved_recipients))?;
         let deadline = Instant::now() + STARTUP_TIMEOUT;
@@ -428,17 +417,18 @@ impl Client {
         }
     }
 
-    fn connect_after_upgrade(
-        directory: &std::path::Path,
+    #[cfg(unix)]
+    fn configure_after_upgrade(
+        &self,
         retention: Retention,
         persistence_recipients: Vec<String>,
-    ) -> Result<Self> {
+    ) -> Result<()> {
         let deadline = Instant::now() + STARTUP_TIMEOUT;
         let mut last_error = None;
         loop {
-            if let Some(client) = Self::connect_existing_at(directory)? {
-                match client.configure(retention, persistence_recipients.clone()) {
-                    Ok(()) => return Ok(client),
+            if let Some(client) = Self::connect_existing_at(&self.directory)? {
+                match client.configure_raw(retention, persistence_recipients.clone()) {
+                    Ok(()) => return Ok(()),
                     Err(error) if is_closed(&error) || is_unsupported_configure(&error) => {
                         last_error = Some(error);
                     }
@@ -1043,7 +1033,45 @@ impl Client {
 
     /// Applies the retention settings selected by the current client to a
     /// daemon that may have been started by an earlier client.
+    ///
+    /// A daemon from before `Configure` existed rejects the request as an
+    /// unknown variant. On Unix, that is recoverable: replace the daemon in
+    /// place, wait for the new image to answer, and send the same effective
+    /// settings again. The retry deliberately uses [`Self::configure_raw`]
+    /// rather than this method, because the replacement is expected to be
+    /// current and must not trigger a second upgrade while the first one is
+    /// settling.
     pub fn configure(
+        &self,
+        retention: Retention,
+        persistence_recipients: Vec<String>,
+    ) -> Result<()> {
+        retention.validate()?;
+        match self.configure_raw(retention, persistence_recipients.clone()) {
+            Ok(()) => Ok(()),
+            Err(error) if is_unsupported_configure(&error) => {
+                #[cfg(unix)]
+                {
+                    self.upgrade()
+                        .context("upgrading the multiplexer to apply retention settings")?;
+                    self.configure_after_upgrade(retention, persistence_recipients)
+                }
+                #[cfg(not(unix))]
+                {
+                    Err(error)
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Sends a single wire-level configure request.
+    ///
+    /// This is intentionally separate from [`Self::configure`]. The latter
+    /// may have just replaced the daemon, so retrying it here would attempt a
+    /// recursive upgrade instead of merely applying the requested settings to
+    /// the replacement.
+    fn configure_raw(
         &self,
         retention: Retention,
         persistence_recipients: Vec<String>,

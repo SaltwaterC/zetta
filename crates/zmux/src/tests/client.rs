@@ -18,3 +18,28 @@ fn the_multiplexer_is_resolved_beside_this_executable_not_from_the_path() {
         assert_eq!(arguments.first().map(String::as_str), Some("mux"));
     }
 }
+
+#[test]
+fn only_an_unknown_configure_variant_triggers_the_upgrade_fallback() {
+    for message in [
+        "unknown variant `configure`, expected `spawn`",
+        "unknown variant 'configure', expected 'spawn'",
+        "unknown variant \"configure\", expected \"spawn\"",
+    ] {
+        assert!(
+            is_unsupported_configure(&anyhow::anyhow!(message)),
+            "{message}"
+        );
+    }
+
+    for message in [
+        "unknown variant `spawn`, expected `configure`",
+        "the daemon rejected the configure request",
+        "unknown field `configure`",
+    ] {
+        assert!(
+            !is_unsupported_configure(&anyhow::anyhow!(message)),
+            "{message}"
+        );
+    }
+}

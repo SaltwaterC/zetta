@@ -102,6 +102,10 @@ impl MuxRuntime {
 
     #[cfg(not(feature = "session-persistence"))]
     pub(crate) fn reconfigure_with_retention(&mut self, retention: Retention) -> Result<()> {
+        // `Client::configure` may replace an older daemon in place. Keep this
+        // client (and the subscription registries beside it) alive across that
+        // handover, and only let the local view of retention follow a confirmed
+        // daemon response.
         self.client.configure(retention, Vec::new())?;
         self.retention = retention;
         Ok(())
@@ -113,6 +117,9 @@ impl MuxRuntime {
         retention: Retention,
         persistence: PersistenceOptions,
     ) -> Result<()> {
+        // Recipient resolution and the upgrade-aware retry both happen inside
+        // the existing client. Replacing the `Arc<Client>` here would strand
+        // pane reporters and revoke/grant watchers on the old subscription.
         self.client
             .configure_with_retention_and_persistence(retention, persistence)?;
         self.retention = retention;
