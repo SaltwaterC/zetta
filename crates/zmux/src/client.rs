@@ -934,7 +934,24 @@ impl Client {
         identity_paths: &[PathBuf],
         secret: Option<&SessionSecret>,
     ) -> Result<crate::persistence::PersistedSession> {
-        let identities = crate::persistence::IdentitySet::from_paths(identity_paths)?;
+        self.resume_with_secret_and_identity_passphrases(record_id, identity_paths, &[], secret)
+    }
+
+    /// Resumes a record after the caller has handled both UI-specific prompts.
+    /// Identity passphrases are positional with `identity_paths`; they stay in
+    /// the client and are never included in the daemon request.
+    #[cfg(feature = "session-persistence")]
+    pub fn resume_with_secret_and_identity_passphrases(
+        &self,
+        record_id: u64,
+        identity_paths: &[PathBuf],
+        identity_passphrases: &[Option<SessionSecret>],
+        secret: Option<&SessionSecret>,
+    ) -> Result<crate::persistence::PersistedSession> {
+        let identities = crate::persistence::IdentitySet::from_paths_with_passphrases(
+            identity_paths,
+            identity_passphrases,
+        )?;
         let persisted = crate::persistence::load_session_from_directory(
             &self.directory,
             record_id,
@@ -964,11 +981,14 @@ impl Client {
                 .iter()
                 .map(|snapshot| ResumeSnapshot {
                     pane_id: snapshot.pane_id,
-                    bytes: snapshot.bytes.clone(),
+                    length: snapshot.bytes.len(),
                 })
                 .collect(),
         });
         let mut connection = self.open(request)?;
+        for snapshot in &persisted.snapshots {
+            connection.write_all(&snapshot.bytes)?;
+        }
         match connection.receive::<Response>()?.0 {
             Response::Resumed { .. } => Ok(persisted),
             Response::AuthenticationRequired => {

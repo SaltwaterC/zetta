@@ -60,13 +60,19 @@ fn a_shared_pane_with_no_clients_left_is_unheld() {
     // left the pane shared with nobody: still drained, but never exclusively
     // attachable again, and never pruned, because both need `Attachment::None`.
     let mut attachment = Attachment::Shared(Vec::new());
-    collapse_empty_shared(&mut attachment);
+    collapse_empty_shared(&mut attachment, 0);
     assert!(attachment.is_none());
 
     // A pane nobody was ever sharing is left exactly as it is.
     let mut exclusive = Attachment::Exclusive(7);
-    collapse_empty_shared(&mut exclusive);
+    collapse_empty_shared(&mut exclusive, 0);
     assert!(matches!(exclusive, Attachment::Exclusive(7)));
+
+    // A revoke handover owns the empty shared state until its waiter joins;
+    // output and size eviction must not turn it back into an exclusive pane.
+    let mut handover = Attachment::Shared(Vec::new());
+    collapse_empty_shared(&mut handover, 1);
+    assert!(matches!(handover, Attachment::Shared(clients) if clients.is_empty()));
 }
 
 #[test]

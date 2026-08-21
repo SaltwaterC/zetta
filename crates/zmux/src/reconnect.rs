@@ -10,7 +10,11 @@
 use std::{env, fs, path::PathBuf};
 
 use anyhow::{Context as _, Result};
+#[cfg(feature = "session-persistence")]
+use serde::Serializer;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "session-persistence")]
+use zeroize::{Zeroize as _, Zeroizing};
 
 use crate::{
     auth::SessionSecret,
@@ -285,9 +289,10 @@ fn request_multiplexer_reconnect(
     Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no Zetta window accepted the session")))
 }
 
-/// Gives a running Zetta process the decrypted disk-resume job. The GUI owns
-/// rebuilding the inert tab; a standalone invocation falls back to restoring
-/// only in the daemon when no Zetta process is available.
+/// Gives a running Zetta process the disk-resume request and any identity
+/// passphrases needed to decrypt it. The GUI owns rebuilding the saved screen
+/// as a read-only tab; a standalone invocation falls back to restoring only in
+/// the daemon when no Zetta process is available.
 #[cfg(feature = "session-persistence")]
 pub fn try_run_resume_disk_session(identifier: &str, identity_paths: &[PathBuf]) -> Result<bool> {
     #[cfg(not(any(unix, windows)))]
@@ -314,12 +319,6 @@ pub fn try_run_resume_disk_session(identifier: &str, identity_paths: &[PathBuf])
         let secret = protected
             .then(crate::secret_prompt::prompt_for_reconnect_secret)
             .transpose()?;
-        let encoded_paths = serde_json::to_string(
-            &identity_paths
-                .iter()
-                .map(|path| path.to_string_lossy().into_owned())
-                .collect::<Vec<_>>(),
-        )?;
 
         let endpoint_entries = match fs::read_dir(&directory) {
             Ok(entries) => entries,
@@ -355,12 +354,29 @@ pub fn try_run_resume_disk_session(identifier: &str, identity_paths: &[PathBuf])
             );
         }
 
+        let identity_passphrases = prompt_for_identity_passphrases(identity_paths)?;
+        let encoded_identity_payload =
+            Zeroizing::new(serde_json::to_string(&ResumeIdentityPayload {
+                identity_paths: identity_paths
+                    .iter()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect(),
+                identity_passphrases: identity_passphrases
+                    .iter()
+                    .map(|passphrase| {
+                        passphrase.as_ref().map(|passphrase| {
+                            ResumeIdentityPassphrase(Zeroizing::new(passphrase.expose().to_owned()))
+                        })
+                    })
+                    .collect(),
+            })?);
+
         let mut last_error = None;
         for endpoint in endpoints {
             match send_resume_disk_session_request(
                 &endpoint,
                 session_id,
-                encoded_paths.clone(),
+                encoded_identity_payload.as_str().to_owned(),
                 secret.clone(),
             ) {
                 Ok(ReconnectSessionResult::Reconnected) => return Ok(true),
@@ -387,12 +403,53 @@ pub fn try_run_resume_disk_session(identifier: &str, identity_paths: &[PathBuf])
 
 #[cfg(feature = "session-persistence")]
 #[cfg(any(unix, windows))]
+fn prompt_for_identity_passphrases(
+    identity_paths: &[PathBuf],
+) -> Result<Vec<Option<SessionSecret>>> {
+    identity_paths
+        .iter()
+        .map(|path| {
+            if !crate::persistence::identity_path_requires_passphrase(path)? {
+                return Ok(None);
+            }
+            let passphrase = crate::secret_prompt::prompt_for_passphrase(&format!(
+                "Identity passphrase for {}: ",
+                path.display()
+            ))?;
+            Ok(Some(SessionSecret::from_zeroizing(passphrase)))
+        })
+        .collect()
+}
+
+#[cfg(feature = "session-persistence")]
+#[derive(Serialize)]
+struct ResumeIdentityPayload {
+    identity_paths: Vec<String>,
+    identity_passphrases: Vec<Option<ResumeIdentityPassphrase>>,
+}
+
+#[cfg(feature = "session-persistence")]
+struct ResumeIdentityPassphrase(Zeroizing<String>);
+
+#[cfg(feature = "session-persistence")]
+impl Serialize for ResumeIdentityPassphrase {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.0.as_str().serialize(serializer)
+    }
+}
+
+#[cfg(feature = "session-persistence")]
+#[cfg(any(unix, windows))]
 fn send_resume_disk_session_request(
     endpoint: &ControlEndpoint,
     session_id: u64,
-    identity_paths: String,
+    identity_payload: String,
     secret: Option<SessionSecret>,
 ) -> Result<ReconnectSessionResult> {
+    let identity_payload = Zeroizing::new(identity_payload);
     let mut stream = ControlStream::connect(&endpoint.socket_path)?;
     stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
     stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
@@ -413,7 +470,7 @@ fn send_resume_disk_session_request(
         attention_body: None,
         tab_name: None,
         worktree_name: None,
-        config_path: Some(identity_paths),
+        config_path: Some(identity_payload.as_str().to_owned()),
         split: None,
         profile: None,
         theme: None,
@@ -429,8 +486,10 @@ fn send_resume_disk_session_request(
             _ => ReconnectSessionResult::Rejected,
         })
     });
+    if let Some(payload) = request.config_path.as_mut() {
+        payload.zeroize();
+    }
     if let Some(secret) = request.secret.as_mut() {
-        use zeroize::Zeroize as _;
         secret.zeroize();
     }
     result

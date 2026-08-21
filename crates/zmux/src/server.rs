@@ -78,6 +78,11 @@ struct Pane {
     /// what the daemon read after the handover is new to it. Cleared by the
     /// first shared attach, which is that client's.
     handed_over: Option<RevokeHandover>,
+    /// Attach requests waiting for the revoke that produced `handed_over`.
+    /// Keep an empty shared attachment alive until these waiters have had a
+    /// chance to join; otherwise a holder that briefly re-attaches and closes
+    /// can collapse the handover to exclusive before the waiting client wakes.
+    handover_waiters: usize,
     exited: bool,
     /// The raw status observed when the process ended, kept so a client that
     /// missed the broadcast can still be told the *real* exit rather than
@@ -1099,6 +1104,7 @@ fn spawn(daemon: &Arc<Daemon>, request: SpawnRequest, connection: &mut Connectio
         size: request.size,
         retained: retention.new_retained(request.size.columns, request.size.lines),
         handed_over: None,
+        handover_waiters: 0,
         exited: false,
         exit_status: None,
         pending_input: Vec::new(),
@@ -1296,11 +1302,21 @@ fn attach(
             unreachable!("the pane's attachment was decided above");
         }
     }
+    // Keep the shared-empty state alive until this request has joined. A
+    // holder can re-attach concurrently with this waiter and its connection
+    // may close before the waiter gets the condvar wake-up.
+    pane.handover_waiters = pane.handover_waiters.saturating_add(1);
+    let _ = pane;
 
     let deadline = Instant::now() + REVOKE_TIMEOUT;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
+            if let Some(session) = sessions.iter_mut().find(|session| session.id == session_id)
+                && let Some(pane) = session.panes.iter_mut().find(|pane| pane.id == pane_id)
+            {
+                finish_handover_waiter(pane, true);
+            }
             return connection.send(&Response::Error {
                 message: format!(
                     "the session's current viewer did not hand over pane {pane_id} within \
@@ -1334,12 +1350,14 @@ fn attach(
             });
         };
         if pane.exited {
+            finish_handover_waiter(pane, true);
             return connection.send(&Response::Error {
                 message: format!("session {session_id} pane {pane_id} has ended"),
             });
         }
         match pane.attachment {
             Attachment::Shared(_) => {
+                finish_handover_waiter(pane, false);
                 return attach_shared(
                     daemon,
                     sessions,
@@ -1352,6 +1370,7 @@ fn attach(
                 );
             }
             Attachment::None => {
+                finish_handover_waiter(pane, true);
                 return attach_exclusive(
                     daemon,
                     sessions,
@@ -1372,6 +1391,7 @@ fn attach(
                 // this function already handles from the top, so start over
                 // rather than treating it as impossible.
                 if holder == client_process_id {
+                    finish_handover_waiter(pane, true);
                     return attach_exclusive(
                         daemon,
                         sessions,
@@ -1406,6 +1426,7 @@ fn attach(
                 if !process_is_running(holder) =>
             {
                 pane.attachment = Attachment::None;
+                finish_handover_waiter(pane, true);
                 return attach_exclusive(
                     daemon,
                     sessions,
@@ -1419,6 +1440,18 @@ fn attach(
             }
             Attachment::Revoking { .. } | Attachment::Granting { .. } => {}
         }
+    }
+}
+
+/// Releases one attach request waiting for a revoke.
+fn finish_handover_waiter(pane: &mut Pane, collapse_empty_shared: bool) {
+    pane.handover_waiters = pane.handover_waiters.saturating_sub(1);
+    if collapse_empty_shared
+        && pane.handover_waiters == 0
+        && matches!(&pane.attachment, Attachment::Shared(clients) if clients.is_empty())
+    {
+        pane.attachment = Attachment::None;
+        pane.handed_over = None;
     }
 }
 
@@ -1461,6 +1494,14 @@ fn attach_exclusive(
     pane.retained.clear();
     let child_pid = pane.pty.child_pid();
     let handles = handover_handles(&pane.pty, client_process_id)?;
+    // The guard is this function's to release: publish re-locks the sessions
+    // mutex, and the persistence catalogue must be updated before the reply is
+    // visible to a client that may immediately refresh it.
+    drop(sessions);
+    #[cfg(feature = "session-persistence")]
+    if let Err(error) = forget_persisted_session(daemon, session_id) {
+        log::warn!("could not remove the attached session's persisted record: {error:#}");
+    }
     connection.send_with(
         &Response::Attached {
             pane_id,
@@ -1474,14 +1515,6 @@ fn attach_exclusive(
     )?;
     if !replay.is_empty() {
         connection.write_all(&replay)?;
-    }
-
-    // The guard is this function's to release: publish re-locks the sessions
-    // mutex, and the guard outlives the reborrow the caller handed over.
-    drop(sessions);
-    #[cfg(feature = "session-persistence")]
-    if let Err(error) = forget_persisted_session(daemon, session_id) {
-        log::warn!("could not remove the attached session's persisted record: {error:#}");
     }
     publish(daemon);
     wake_drain(daemon);
@@ -1771,7 +1804,14 @@ fn serve_shared(
                     let (columns, lines) = effective_size(pane);
                     if (columns, lines) != (pane.size.columns, pane.size.lines) {
                         apply_size(pane, columns, lines);
-                        broadcast_size(session_id, pane_id, &mut pane.attachment, columns, lines);
+                        broadcast_size(
+                            session_id,
+                            pane_id,
+                            &mut pane.attachment,
+                            pane.handover_waiters,
+                            columns,
+                            lines,
+                        );
                     }
                 }
             }
@@ -1900,6 +1940,11 @@ fn take_exclusive(
     // belongs to and is only swapping what feeds it. They travel because the
     // exclusive attach's reply is the shape that carries a descriptor.
     let state = serde_json::Value::Null;
+    drop(sessions);
+    #[cfg(feature = "session-persistence")]
+    if let Err(error) = forget_persisted_session(daemon, session_id) {
+        log::warn!("could not remove the attached session's persisted record: {error:#}");
+    }
     connection.send_with(
         &Response::Attached {
             pane_id,
@@ -1911,11 +1956,6 @@ fn take_exclusive(
         },
         &handles.attachments,
     )?;
-    drop(sessions);
-    #[cfg(feature = "session-persistence")]
-    if let Err(error) = forget_persisted_session(daemon, session_id) {
-        log::warn!("could not remove the attached session's persisted record: {error:#}");
-    }
     daemon.sessions_condvar.notify_all();
     publish(daemon);
     wake_drain(daemon);
@@ -1979,7 +2019,7 @@ fn remove_shared_client(
     if let Attachment::Shared(clients) = &mut pane.attachment {
         let before = clients.len();
         clients.retain(|client| client.process_id != client_process_id);
-        if clients.is_empty() {
+        if clients.is_empty() && pane.handover_waiters == 0 {
             pane.attachment = Attachment::None;
             // Nobody is left to claim the handover, and the next one records
             // its own.
@@ -1989,7 +2029,14 @@ fn remove_shared_client(
             let (columns, lines) = effective_size(pane);
             if (columns, lines) != (pane.size.columns, pane.size.lines) {
                 apply_size(pane, columns, lines);
-                broadcast_size(session_id, pane_id, &mut pane.attachment, columns, lines);
+                broadcast_size(
+                    session_id,
+                    pane_id,
+                    &mut pane.attachment,
+                    pane.handover_waiters,
+                    columns,
+                    lines,
+                );
             }
             // Down to one viewer: relaying to a single client is the daemon doing
             // work the client can do better itself, so offer it the terminal.
@@ -2185,6 +2232,7 @@ fn broadcast_size(
     session_id: u64,
     pane_id: u64,
     attachment: &mut Attachment,
+    handover_waiters: usize,
     columns: u16,
     lines: u16,
 ) {
@@ -2200,7 +2248,7 @@ fn broadcast_size(
     // Queued alongside the pane's output rather than written past it, so a
     // viewer applies the new size at the point in the stream where it happened.
     match crate::transport::encode_message(&event) {
-        Ok(frame) => queue_for_shared_clients(attachment, &Arc::from(frame)),
+        Ok(frame) => queue_for_shared_clients(attachment, handover_waiters, &Arc::from(frame)),
         Err(error) => log::warn!("could not frame a pane's new size: {error:#}"),
     }
 }
@@ -2211,7 +2259,11 @@ fn broadcast_size(
 /// `try_send` never blocks: a full queue means this viewer is not keeping up, and
 /// making the pane wait for it would stall every other viewer and the drain with
 /// it. Collapses the attachment when that leaves nobody.
-fn queue_for_shared_clients(attachment: &mut Attachment, frame: &Arc<[u8]>) {
+fn queue_for_shared_clients(
+    attachment: &mut Attachment,
+    handover_waiters: usize,
+    frame: &Arc<[u8]>,
+) {
     let Attachment::Shared(clients) = attachment else {
         return;
     };
@@ -2244,7 +2296,7 @@ fn queue_for_shared_clients(attachment: &mut Attachment, frame: &Arc<[u8]>) {
         failed.len()
     );
     clients.retain(|client| !failed.contains(&client.process_id));
-    collapse_empty_shared(attachment);
+    collapse_empty_shared(attachment, handover_waiters);
 }
 
 /// The exclusive attachment a client process id maps to. A client that does
@@ -2279,6 +2331,18 @@ fn resume(
     #[cfg(feature = "session-persistence")]
     {
         let mut request = request;
+        // The metadata frame intentionally contains lengths only. Read the
+        // potentially large screen bytes through the raw side of the same
+        // connection, just as detach does, so a record's scrollback cannot
+        // exceed the control-message ceiling.
+        let mut snapshots = HashMap::new();
+        for snapshot in &request.snapshots {
+            anyhow::ensure!(
+                snapshot.length <= crate::retention::MAX_SNAPSHOT_BYTES,
+                "a pane snapshot exceeded the retention limit"
+            );
+            snapshots.insert(snapshot.pane_id, connection.read_exact(snapshot.length)?);
+        }
         anyhow::ensure!(
             daemon
                 .persistence
@@ -2321,7 +2385,8 @@ fn resume(
                         .as_secs();
                 request.updated_at = unix_now();
                 if let Some(persistence) = daemon.persistence.lock().unwrap().as_mut() {
-                    persistence.update_session(&persisted_from_resume_request(&request))?;
+                    persistence
+                        .update_session(&persisted_from_resume_request(&request, &snapshots))?;
                 }
                 return connection.send(&Response::AuthenticationFailed);
             }
@@ -2349,7 +2414,10 @@ fn resume(
 }
 
 #[cfg(feature = "session-persistence")]
-fn persisted_from_resume_request(request: &crate::messages::ResumeRequest) -> PersistedSession {
+fn persisted_from_resume_request(
+    request: &crate::messages::ResumeRequest,
+    snapshots: &HashMap<u64, Vec<u8>>,
+) -> PersistedSession {
     PersistedSession {
         id: request.record_id,
         created_at: request.created_at,
@@ -2362,9 +2430,13 @@ fn persisted_from_resume_request(request: &crate::messages::ResumeRequest) -> Pe
         snapshots: request
             .snapshots
             .iter()
-            .map(|snapshot| PersistedSnapshot {
-                pane_id: snapshot.pane_id,
-                bytes: snapshot.bytes.clone(),
+            .filter_map(|snapshot| {
+                snapshots
+                    .get(&snapshot.pane_id)
+                    .map(|bytes| PersistedSnapshot {
+                        pane_id: snapshot.pane_id,
+                        bytes: bytes.clone(),
+                    })
             })
             .collect(),
     }
@@ -3303,7 +3375,7 @@ fn drain_loop(daemon: Arc<Daemon>, mut waker: Stream) {
                                         &buffer[..read],
                                     );
                                     record_handover_output(pane, &buffer[..read]);
-                                    relay_output(&mut pane.attachment, pane.id, &buffer[..read]);
+                                    relay_output(pane, &buffer[..read]);
                                 }
                             }
                         }
@@ -3348,7 +3420,7 @@ fn drain_loop(daemon: Arc<Daemon>, mut waker: Stream) {
                         record_persistence_output(&daemon, session_id, pane.id, &buffer[..filled]);
                         record_handover_output(pane, &buffer[..filled]);
                         idle = false;
-                        relay_output(&mut pane.attachment, pane.id, &buffer[..filled]);
+                        relay_output(pane, &buffer[..filled]);
                     }
                 }
             }
@@ -3440,7 +3512,7 @@ fn relay_backpressure(pane: &mut Pane, evicted: &mut bool) -> bool {
         }
     }
     if !stalled.is_empty() {
-        collapse_empty_shared(&mut pane.attachment);
+        collapse_empty_shared(&mut pane.attachment, pane.handover_waiters);
         *evicted = true;
     }
     hold
@@ -3584,14 +3656,14 @@ fn flush_pending_input(pane: &mut Pane) {
 /// Sends a pane's output to every shared client, dropping clients whose
 /// socket can no longer be written. A pane whose shared set empties stops
 /// being shared.
-fn relay_output(attachment: &mut Attachment, pane_id: u64, bytes: &[u8]) {
-    if !matches!(attachment, Attachment::Shared(_)) {
+fn relay_output(pane: &mut Pane, bytes: &[u8]) {
+    if !matches!(pane.attachment, Attachment::Shared(_)) {
         return;
     }
     // One frame, shared between the viewers by reference: the fan-out costs a
     // refcount each rather than a copy of the pane's output per viewer.
     let frame = match crate::transport::encode_message(&Event::Output {
-        pane_id,
+        pane_id: pane.id,
         length: bytes.len(),
     }) {
         Ok(mut frame) => {
@@ -3603,7 +3675,7 @@ fn relay_output(attachment: &mut Attachment, pane_id: u64, bytes: &[u8]) {
             return;
         }
     };
-    queue_for_shared_clients(attachment, &frame);
+    queue_for_shared_clients(&mut pane.attachment, pane.handover_waiters, &frame);
 }
 
 /// Returns a pane whose last shared client has gone to being unheld.
@@ -3612,8 +3684,10 @@ fn relay_output(attachment: &mut Attachment, pane_id: u64, bytes: &[u8]) {
 /// unwritable — a wedged viewer past the relay's write timeout — left the pane
 /// "shared with nobody": still drained, but never exclusively attachable again
 /// and never pruned, because both require [`Attachment::None`].
-fn collapse_empty_shared(attachment: &mut Attachment) {
-    if matches!(attachment, Attachment::Shared(clients) if clients.is_empty()) {
+fn collapse_empty_shared(attachment: &mut Attachment, handover_waiters: usize) {
+    if handover_waiters == 0
+        && matches!(attachment, Attachment::Shared(clients) if clients.is_empty())
+    {
         *attachment = Attachment::None;
     }
 }
@@ -4037,6 +4111,7 @@ fn adopt_handover(daemon: &Arc<Daemon>, handover: crate::upgrade::Handover) -> R
                 // An upgrade cannot land mid-handover: the client that would be
                 // waiting for one is the client that asked for the upgrade.
                 handed_over: None,
+                handover_waiters: 0,
                 exited: pane.exited,
                 exit_status: pane.exit_status,
                 pending_input: Vec::new(),

@@ -513,7 +513,7 @@ fn daemon_loss_makes_disk_records_restorable_and_resume_consumes_them() {
             summary(pane.session_id, pane.pane_id),
             serde_json::json!({"restored": true}),
             None,
-            Vec::new(),
+            vec![(pane.pane_id, vec![b'x'; 96 * 1024])],
         )
         .unwrap();
     drop(client);
@@ -535,6 +535,7 @@ fn daemon_loss_makes_disk_records_restorable_and_resume_consumes_them() {
         .resume(pane.session_id, std::slice::from_ref(&identity_path))
         .unwrap();
     assert_eq!(restored.state, serde_json::json!({"restored": true}));
+    assert_eq!(restored.snapshots[0].bytes.len(), 96 * 1024);
     let (_, records) = client.list_with_restorable().unwrap();
     assert!(
         records
@@ -1493,7 +1494,9 @@ fn replacing_the_binary_out_from_under_the_daemon_does_not_lose_its_sessions() {
 
     let config = tempfile::tempdir().unwrap();
     let mut process = spawn_copied_daemon(&copied, config.path());
-    let sessions = daemon_sessions_dir(config.path());
+    // The copied binary is deliberately outside Cargo's target/debug tree, so
+    // it uses the installed application's ordinary session directory.
+    let sessions = config.path().join("zetta/sessions");
     let deadline = Instant::now() + Duration::from_secs(10);
     while !sessions.join("zmux.json").is_file() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));

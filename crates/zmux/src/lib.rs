@@ -46,7 +46,7 @@ Usage: zmux [COMMAND]
 
 Commands:
   list          List the sessions this multiplexer is holding
-  resume SESSION Resume an encrypted disk record; panes are restored inert
+  resume SESSION Resume an encrypted disk record; saved screens are read-only
   stop          Stop the multiplexer. It refuses while it is holding a
                 session, because stopping it ends everything running in one;
                 --force stops it anyway, ending them. Stopping a multiplexer
@@ -506,7 +506,7 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
             {
                 if reconnect::try_run_resume_disk_session(&session.to_string(), &identity_paths)? {
                     println!(
-                        "Resumed disk session {}; its panes are inert until run.",
+                        "Resumed disk session {}; its saved screens are read-only; processes are not resumed.",
                         session
                     );
                     return Ok(());
@@ -517,7 +517,9 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
                 )?;
                 let record_id = resolve_restorable_id(&client, session)?;
                 client.resume(record_id, &identity_paths)?;
-                println!("Resumed disk session {record_id}; its panes are inert until run.");
+                println!(
+                    "Resumed disk session {record_id}; its saved screens are read-only; processes are not resumed."
+                );
                 Ok(())
             }
             #[cfg(not(feature = "session-persistence"))]

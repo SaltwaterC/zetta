@@ -31,7 +31,7 @@ use hpke::{
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use crate::{catalog, protocol::BackgroundSessionSummary, secret_prompt};
+use crate::{auth::SessionSecret, catalog, protocol::BackgroundSessionSummary, secret_prompt};
 
 const PQ_RECIPIENT_HRP: &str = "age1pq";
 const PQ_IDENTITY_HRP: &str = "AGE-SECRET-KEY-PQ-";
@@ -224,9 +224,24 @@ impl IdentitySet {
     /// Loads native age, PQ, and SSH identity files. Files may be repeated by
     /// callers in the same way `age -i` is repeatable.
     pub fn from_paths(paths: &[PathBuf]) -> Result<Self> {
+        Self::from_paths_with_passphrases(paths, &[])
+    }
+
+    /// Loads identity files with positional passphrases collected by a caller.
+    /// A missing passphrase keeps the normal terminal prompt for standalone
+    /// clients; GUI callers can therefore provide passphrases without making
+    /// the daemon or the GUI depend on a controlling terminal.
+    pub fn from_paths_with_passphrases(
+        paths: &[PathBuf],
+        passphrases: &[Option<SessionSecret>],
+    ) -> Result<Self> {
         let mut identities = Vec::new();
-        for path in paths {
-            load_identity_file(path, &mut identities)?;
+        for (index, path) in paths.iter().enumerate() {
+            let passphrase = passphrases
+                .get(index)
+                .and_then(Option::as_ref)
+                .map(|passphrase| age::secrecy::SecretString::from(passphrase.expose()));
+            load_identity_file(path, &mut identities, passphrase)?;
         }
         anyhow::ensure!(!identities.is_empty(), "no identities were found");
         Ok(Self { identities })
@@ -750,8 +765,10 @@ fn bech32_polymod(hrp: &[u8], values: &[u8]) -> u32 {
     })
 }
 
-#[derive(Clone, Copy)]
-struct PromptCallbacks;
+#[derive(Clone)]
+struct PromptCallbacks {
+    passphrase: Option<age::secrecy::SecretString>,
+}
 
 impl age::Callbacks for PromptCallbacks {
     fn display_message(&self, _: &str) {}
@@ -765,14 +782,20 @@ impl age::Callbacks for PromptCallbacks {
     }
 
     fn request_passphrase(&self, description: &str) -> Option<age::secrecy::SecretString> {
-        secret_prompt::prompt_for_passphrase(description)
-            .ok()
-            .map(|secret| age::secrecy::SecretString::from(secret.as_str().to_owned()))
+        self.passphrase.clone().or_else(|| {
+            secret_prompt::prompt_for_passphrase(description)
+                .ok()
+                .map(|secret| age::secrecy::SecretString::from(secret.as_str().to_owned()))
+        })
     }
 }
 
 enum PassphraseIdentityState {
-    Encrypted { bytes: Vec<u8>, filename: String },
+    Encrypted {
+        bytes: Vec<u8>,
+        filename: String,
+        passphrase: Option<age::secrecy::SecretString>,
+    },
     Loaded(Vec<Box<dyn age::Identity + Send + Sync>>),
     Failed(age::DecryptError),
 }
@@ -782,9 +805,17 @@ struct PassphraseIdentity {
 }
 
 impl PassphraseIdentity {
-    fn new(bytes: Vec<u8>, filename: String) -> Self {
+    fn new(
+        bytes: Vec<u8>,
+        filename: String,
+        passphrase: Option<age::secrecy::SecretString>,
+    ) -> Self {
         Self {
-            state: Mutex::new(PassphraseIdentityState::Encrypted { bytes, filename }),
+            state: Mutex::new(PassphraseIdentityState::Encrypted {
+                bytes,
+                filename,
+                passphrase,
+            }),
         }
     }
 
@@ -800,16 +831,18 @@ impl PassphraseIdentity {
             PassphraseIdentityState::Failed(age::DecryptError::KeyDecryptionFailed),
         );
         match transition {
-            PassphraseIdentityState::Encrypted { bytes, filename } => {
-                match decrypt_passphrase_identity_file(&bytes, &filename) {
-                    Ok(identities) => {
-                        *state = PassphraseIdentityState::Loaded(identities);
-                    }
-                    Err(error) => {
-                        *state = PassphraseIdentityState::Failed(error);
-                    }
+            PassphraseIdentityState::Encrypted {
+                bytes,
+                filename,
+                passphrase,
+            } => match decrypt_passphrase_identity_file(&bytes, &filename, passphrase.as_ref()) {
+                Ok(identities) => {
+                    *state = PassphraseIdentityState::Loaded(identities);
                 }
-            }
+                Err(error) => {
+                    *state = PassphraseIdentityState::Failed(error);
+                }
+            },
             other @ PassphraseIdentityState::Loaded(_) => *state = other,
             other @ PassphraseIdentityState::Failed(_) => *state = other,
         }
@@ -845,32 +878,61 @@ impl age::Identity for PassphraseIdentity {
     }
 }
 
-fn load_identity_file(
-    path: &Path,
-    identities: &mut Vec<Box<dyn age::Identity + Send + Sync>>,
-) -> Result<()> {
+fn read_identity_file(path: &Path) -> Result<Vec<u8>> {
     let bytes =
         fs::read(path).with_context(|| format!("reading identity file {}", path.display()))?;
     anyhow::ensure!(
         bytes.len() <= 16 * 1024 * 1024,
         "identity file is too large"
     );
+    Ok(bytes)
+}
+
+/// Reports whether an identity file will need a passphrase before it can
+/// unwrap an age file. This only parses the public SSH envelope; it never
+/// attempts to decrypt the private key.
+pub fn identity_path_requires_passphrase(path: &Path) -> Result<bool> {
+    let bytes = read_identity_file(path)?;
+    if bytes.starts_with(b"age-encryption.org/v1")
+        || bytes.starts_with(b"-----BEGIN AGE ENCRYPTED FILE-----")
+    {
+        return Ok(true);
+    }
+    if std::str::from_utf8(&bytes).is_ok_and(|text| text.contains("-----BEGIN")) {
+        let identity = age::ssh::Identity::from_buffer(
+            BufReader::new(Cursor::new(&bytes)),
+            Some(path.display().to_string()),
+        )
+        .with_context(|| format!("parsing SSH identity file {}", path.display()))?;
+        return Ok(matches!(identity, age::ssh::Identity::Encrypted(_)));
+    }
+    Ok(false)
+}
+
+fn load_identity_file(
+    path: &Path,
+    identities: &mut Vec<Box<dyn age::Identity + Send + Sync>>,
+    passphrase: Option<age::secrecy::SecretString>,
+) -> Result<()> {
+    let bytes = read_identity_file(path)?;
     if bytes.starts_with(b"age-encryption.org/v1")
         || bytes.starts_with(b"-----BEGIN AGE ENCRYPTED FILE-----")
     {
         identities.push(Box::new(PassphraseIdentity::new(
             bytes,
             path.display().to_string(),
+            passphrase,
         )));
         return Ok(());
     }
-    identities.extend(parse_identity_file_bytes(&bytes, path)?);
+    identities.extend(parse_identity_file_bytes(&bytes, path, passphrase)?);
     Ok(())
 }
 
 fn parse_identity_file_bytes(
     bytes: &[u8],
     path: &Path,
+    passphrase: Option<age::secrecy::SecretString>,
 ) -> Result<Vec<Box<dyn age::Identity + Send + Sync>>> {
     let mut identities = Vec::new();
     if std::str::from_utf8(bytes).is_ok_and(|text| text.contains("-----BEGIN")) {
@@ -879,9 +941,8 @@ fn parse_identity_file_bytes(
             Some(path.display().to_string()),
         )
         .with_context(|| format!("parsing SSH identity file {}", path.display()))?;
-        identities
-            .push(Box::new(ssh.with_callbacks(PromptCallbacks))
-                as Box<dyn age::Identity + Send + Sync>);
+        identities.push(Box::new(ssh.with_callbacks(PromptCallbacks { passphrase }))
+            as Box<dyn age::Identity + Send + Sync>);
         return Ok(identities);
     }
     let text = std::str::from_utf8(bytes).context("identity file was not UTF-8")?;
@@ -910,16 +971,21 @@ fn parse_identity_file_bytes(
 fn decrypt_passphrase_identity_file(
     bytes: &[u8],
     filename: &str,
+    passphrase: Option<&age::secrecy::SecretString>,
 ) -> std::result::Result<Vec<Box<dyn age::Identity + Send + Sync>>, age::DecryptError> {
     let decryptor =
         age::Decryptor::new_buffered(age::armor::ArmoredReader::new(Cursor::new(bytes)))?;
-    let passphrase = secret_prompt::prompt_for_passphrase(&format!(
-        "Enter passphrase for encrypted identity file {filename}:"
-    ))
-    .map_err(|_| age::DecryptError::KeyDecryptionFailed)?;
-    let identity = age::scrypt::Identity::new(age::secrecy::SecretString::from(
-        passphrase.as_str().to_owned(),
-    ));
+    let passphrase = passphrase
+        .cloned()
+        .or_else(|| {
+            secret_prompt::prompt_for_passphrase(&format!(
+                "Enter passphrase for encrypted identity file {filename}:"
+            ))
+            .ok()
+            .map(|secret| age::secrecy::SecretString::from(secret.as_str().to_owned()))
+        })
+        .ok_or(age::DecryptError::KeyDecryptionFailed)?;
+    let identity = age::scrypt::Identity::new(passphrase);
     let mut reader = decryptor
         .decrypt(std::iter::once(&identity as &dyn age::Identity))
         .map_err(|error| match error {
@@ -930,7 +996,7 @@ fn decrypt_passphrase_identity_file(
     reader
         .read_to_end(&mut plaintext)
         .map_err(age::DecryptError::Io)?;
-    parse_identity_file_bytes(&plaintext, Path::new(filename))
+    parse_identity_file_bytes(&plaintext, Path::new(filename), None)
         .map_err(|_| age::DecryptError::InvalidHeader)
 }
 

@@ -406,6 +406,35 @@ pub(crate) fn zetta_for_runner(runner_id: u64, cx: &App) -> Option<Entity<Zetta>
 /// How often the multiplexer's published catalog is checked for changes.
 const MULTIPLEXER_CATALOG_POLL: Duration = Duration::from_secs(1);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SessionCatalogFileStamp {
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SessionCatalogStamp {
+    catalog: Option<SessionCatalogFileStamp>,
+    persistence_manifest: Option<SessionCatalogFileStamp>,
+}
+
+fn session_catalog_file_stamp(path: &Path) -> Option<SessionCatalogFileStamp> {
+    let metadata = fs::metadata(path).ok()?;
+    Some(SessionCatalogFileStamp {
+        modified: metadata.modified().ok(),
+        len: metadata.len(),
+    })
+}
+
+fn session_catalog_stamp(directory: &Path) -> SessionCatalogStamp {
+    SessionCatalogStamp {
+        catalog: session_catalog_file_stamp(directory),
+        persistence_manifest: session_catalog_file_stamp(
+            &directory.join("persistence").join("manifest.json"),
+        ),
+    }
+}
+
 /// Notices sessions the multiplexer is holding.
 ///
 /// The reconnect list used to be refreshed only when *this* process published
@@ -415,26 +444,27 @@ const MULTIPLEXER_CATALOG_POLL: Duration = Duration::from_secs(1);
 /// nothing to offer.
 ///
 /// The catalog is a file the multiplexer replaces atomically, so this watches
-/// the directory's modification time and only re-reads when it changes. That
-/// keeps an idle process from parsing the catalog and scanning the process
-/// table once a second for no reason.
+/// the directory's modification time and the persistence manifest's
+/// modification time, and only re-reads when either changes. The manifest is
+/// nested below the catalog directory, so watching the directory alone misses
+/// a disk record being consumed by `resume`. That keeps an idle process from
+/// parsing the catalog and scanning the process table once a second for no
+/// reason while still invalidating both live-session and disk-session entries.
 fn start_multiplexer_session_watcher(cx: &mut App) {
     let directory = crate::background_sessions::session_catalog_dir();
-    let mut last_seen: Option<SystemTime> = None;
+    let mut last_seen: Option<SessionCatalogStamp> = None;
     cx.spawn(async move |cx| {
         loop {
             cx.background_executor()
                 .timer(MULTIPLEXER_CATALOG_POLL)
                 .await;
-            let changed = std::fs::metadata(&directory)
-                .and_then(|metadata| metadata.modified())
-                .ok();
+            let changed = session_catalog_stamp(&directory);
             // A first look always refreshes: the catalog may already describe
             // sessions from before this process started.
-            if changed == last_seen && last_seen.is_some() {
+            if last_seen.is_some_and(|last_seen| changed == last_seen) {
                 continue;
             }
-            last_seen = changed;
+            last_seen = Some(changed);
             cx.update(refresh_process_background_sessions);
         }
     })
@@ -1902,6 +1932,7 @@ pub(crate) fn run() -> Result<()> {
                         ProcessControlCommand::ResumeDiskSession {
                             session_id,
                             identity_paths,
+                            identity_passphrases,
                             secret,
                             completion,
                         } => {
@@ -1933,7 +1964,10 @@ pub(crate) fn run() -> Result<()> {
                                         zetta.resume_disk_session_from_cli(
                                             session_id,
                                             secret,
-                                            identity_paths,
+                                            crate::background_session_ui::DiskResumeIdentities {
+                                                paths: identity_paths,
+                                                passphrases: identity_passphrases,
+                                            },
                                             completion.take().expect("completion sender"),
                                             window,
                                             cx,

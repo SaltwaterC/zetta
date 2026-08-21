@@ -104,7 +104,8 @@ pub enum Request {
     Detach(DetachRequest),
     /// Restores an encrypted disk record after the client has decrypted it.
     /// The daemon receives state and authentication metadata, never an age
-    /// identity or a private key.
+    /// identity or a private key. The raw snapshots described by the request
+    /// follow the JSON frame on the same connection.
     Resume(ResumeRequest),
     /// Takes a shared pane's terminal back, in answer to [`Event::Grant`].
     ///
@@ -260,6 +261,11 @@ pub struct ResumeRequest {
     /// record. It is checked by the daemon and then discarded before the
     /// restored record is kept in memory.
     pub secret: Option<String>,
+    /// Per-pane lengths for the raw snapshots that follow this message on the
+    /// connection. Keeping the screen bytes out of the JSON frame matters for
+    /// a disk record with a large scrollback buffer: control messages are
+    /// deliberately capped, while snapshots already have their own retention
+    /// limit and framing.
     pub snapshots: Vec<ResumeSnapshot>,
 }
 
@@ -267,7 +273,8 @@ pub struct ResumeRequest {
 #[serde(deny_unknown_fields)]
 pub struct ResumeSnapshot {
     pub pane_id: u64,
-    pub bytes: Vec<u8>,
+    /// Number of raw bytes following the request for this pane.
+    pub length: usize,
 }
 
 /// Publishes a session the client is still showing, so other clients can find

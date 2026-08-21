@@ -30,7 +30,7 @@ pub struct RestorableSessionRecord {
 
 /// Version of the local Zetta process-control protocol used to open a
 /// multiplexer-held session in a window.
-pub const CONTROL_VERSION: u32 = 1;
+pub const CONTROL_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackgroundSessionCatalog {

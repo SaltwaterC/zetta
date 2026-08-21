@@ -4,11 +4,12 @@
 //! the other's configuration layer, so the resolution lives here and
 //! `zetta`'s `config` module delegates to it.
 
-use std::{env, path::PathBuf};
+use std::{
+    env,
+    path::{Path, PathBuf},
+};
 
-#[cfg(debug_assertions)]
 const SESSION_DIRECTORY_PREFIX: &str = "sessions-debug-v";
-#[cfg(not(debug_assertions))]
 const SESSION_DIRECTORY_NAME: &str = "sessions";
 
 pub fn platform_config_dir() -> PathBuf {
@@ -29,20 +30,38 @@ pub fn platform_config_dir() -> PathBuf {
 /// with `0700` by [`crate::catalog::create_private_dir`] before anything is
 /// written into it.
 ///
-/// Debug builds use a protocol-scoped directory so a `target/debug` build can
-/// run beside an installed release. This is important while the wire protocol
-/// is still changing: a debug client must not connect to an older daemon that
-/// can accept the socket but cannot understand its framing. The adjacent debug
-/// `zmux` binary and all debug Zetta processes use the same directory.
+/// Binaries physically under Cargo's `target/debug` directory use a
+/// protocol-scoped directory so a development build can run beside an
+/// installed release. This is important while the wire protocol is still
+/// changing: a debug client must not connect to an older daemon that can
+/// accept the socket but cannot understand its framing. A debug-profile binary
+/// installed elsewhere is treated as the installed application and uses the
+/// normal session directory.
 pub fn session_catalog_dir() -> PathBuf {
-    #[cfg(debug_assertions)]
-    let name = format!(
-        "{SESSION_DIRECTORY_PREFIX}{}",
-        crate::messages::PROTOCOL_VERSION
-    );
-    #[cfg(not(debug_assertions))]
-    let name = SESSION_DIRECTORY_NAME.to_owned();
+    let development_binary = cfg!(debug_assertions)
+        && env::current_exe()
+            .ok()
+            .is_some_and(|path| is_target_debug_binary(&path));
+    let name = if development_binary {
+        format!(
+            "{SESSION_DIRECTORY_PREFIX}{}",
+            crate::messages::PROTOCOL_VERSION
+        )
+    } else {
+        SESSION_DIRECTORY_NAME.to_owned()
+    };
     platform_config_dir().join(name)
+}
+
+fn is_target_debug_binary(path: &Path) -> bool {
+    let mut saw_target = false;
+    for component in path.components() {
+        if saw_target && component.as_os_str() == "debug" {
+            return true;
+        }
+        saw_target = component.as_os_str() == "target";
+    }
+    false
 }
 
 #[cfg(any(not(windows), test))]

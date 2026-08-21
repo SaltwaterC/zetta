@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(feature = "session-persistence")]
+use crate::background_session_ui::DiskResumeIdentities;
 use crate::background_session_ui::{AttachOutcomeSummary, ProtectedSessionAction};
 use zeroize::{Zeroize as _, Zeroizing};
 
@@ -70,6 +72,10 @@ pub(crate) struct SessionAuthenticationPrompt {
     pub(crate) field: SessionAuthenticationField,
     pub(crate) error: Option<String>,
     pub(crate) working: bool,
+    #[cfg(feature = "session-persistence")]
+    pub(crate) disk_identities: Option<DiskResumeIdentities>,
+    pub(crate) disk_identity_index: Option<usize>,
+    pub(crate) disk_protected: bool,
 }
 
 impl SessionAuthenticationPrompt {
@@ -81,6 +87,10 @@ impl SessionAuthenticationPrompt {
             field: SessionAuthenticationField::Secret,
             error: None,
             working: false,
+            #[cfg(feature = "session-persistence")]
+            disk_identities: None,
+            disk_identity_index: None,
+            disk_protected: false,
         }
     }
 }
@@ -133,18 +143,61 @@ impl Zetta {
         );
     }
 
-    #[cfg_attr(not(feature = "session-persistence"), allow(dead_code))]
+    #[cfg(feature = "session-persistence")]
     pub(crate) fn prompt_to_resume_disk_session(
         &mut self,
         session_id: u64,
+        protected: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        self.open_session_authentication_prompt(
-            SessionAuthenticationPromptMode::ResumeDisk { session_id },
-            window,
-            cx,
-        );
+    ) -> ReconnectSessionResult {
+        let paths = self.disk_resume_identity_paths();
+        let required_identity = paths.iter().enumerate().find_map(|(index, path)| {
+            match zmux::persistence::identity_path_requires_passphrase(path) {
+                Ok(true) => Some(Ok(index)),
+                Ok(false) => None,
+                Err(error) => Some(Err((path.clone(), error))),
+            }
+        });
+        let identity_index = match required_identity {
+            Some(Ok(index)) => Some(index),
+            Some(Err((path, error))) => {
+                self.show_notice(
+                    format!(
+                        "Could not inspect encrypted identity {}: {error:#}",
+                        path.display()
+                    ),
+                    cx,
+                );
+                return ReconnectSessionResult::Rejected;
+            }
+            None => None,
+        };
+        if protected || identity_index.is_some() {
+            let identities = identity_index.map(|_| DiskResumeIdentities {
+                paths: paths.clone(),
+                passphrases: vec![None; paths.len()],
+            });
+            self.open_session_authentication_prompt(
+                SessionAuthenticationPromptMode::ResumeDisk { session_id },
+                window,
+                cx,
+            );
+            if let Some(prompt) = self.session_authentication.as_mut() {
+                prompt.disk_identities = identities;
+                prompt.disk_identity_index = identity_index;
+                prompt.disk_protected = protected;
+            }
+            cx.notify();
+            return ReconnectSessionResult::AuthenticationFailed;
+        }
+        let result = self.resume_disk_session(session_id, None, None, window, cx);
+        if result == ReconnectSessionResult::Rejected
+            && let Some(error) = self.pane_output_error.take()
+        {
+            self.show_notice(error, cx);
+        }
+        result
     }
 
     fn open_session_authentication_prompt(
@@ -244,42 +297,35 @@ impl Zetta {
                 cx.notify();
                 return;
             }
-            SessionAuthenticationPromptMode::ResumeDisk { .. } if secret.is_empty() => {
-                prompt.error = Some("Enter the session secret.".into());
-                cx.notify();
-                return;
+            SessionAuthenticationPromptMode::ResumeDisk { .. } => {
+                if prompt.disk_protected && secret.is_empty() {
+                    prompt.error = Some("Enter the session secret.".into());
+                    cx.notify();
+                    return;
+                }
+                if prompt.disk_identity_index.is_some()
+                    && (if prompt.disk_protected {
+                        prompt.confirmation.text.is_empty()
+                    } else {
+                        secret.is_empty()
+                    })
+                {
+                    prompt.error = Some("Enter the identity passphrase.".into());
+                    cx.notify();
+                    return;
+                }
             }
             SessionAuthenticationPromptMode::Reconnect { .. } => {}
-            SessionAuthenticationPromptMode::ResumeDisk { .. } => {}
+        }
+        #[cfg(feature = "session-persistence")]
+        if let SessionAuthenticationPromptMode::ResumeDisk { session_id } = mode {
+            self.submit_disk_resume_authentication(session_id, window, cx);
+            return;
         }
         prompt.secret.text.zeroize();
         prompt.confirmation.text.zeroize();
         prompt.working = true;
         prompt.error = None;
-        if let SessionAuthenticationPromptMode::ResumeDisk { session_id } = mode {
-            let result = self.resume_disk_session(
-                session_id,
-                Some(SessionSecret::from_zeroizing(secret)),
-                None,
-                window,
-                cx,
-            );
-            if result == ReconnectSessionResult::Reconnected {
-                self.session_authentication = None;
-            } else {
-                let error = self
-                    .pane_output_error
-                    .take()
-                    .unwrap_or_else(|| "Authentication failed.".to_owned());
-                if let Some(prompt) = self.session_authentication.as_mut() {
-                    prompt.working = false;
-                    prompt.secret = TextField::default();
-                    prompt.error = Some(error);
-                }
-            }
-            cx.notify();
-            return;
-        }
         // A session the multiplexer is holding keeps its verifier in the
         // multiplexer, not in any Zetta process, so there is nothing to check
         // here: the secret is handed to the daemon as part of the attach, and
@@ -410,6 +456,90 @@ impl Zetta {
         cx.notify();
     }
 
+    #[cfg(feature = "session-persistence")]
+    fn submit_disk_resume_authentication(
+        &mut self,
+        session_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (protected, identity_index, mut identities, session_secret, identity_passphrase) = {
+            let Some(prompt) = self.session_authentication.as_mut() else {
+                return;
+            };
+            let protected = prompt.disk_protected;
+            let identity_index = prompt.disk_identity_index;
+            let session_secret = protected
+                .then(|| SessionSecret::from_zeroizing(Zeroizing::new(prompt.secret.text.clone())));
+            let identity_passphrase = identity_index.map(|_| {
+                let text = if protected {
+                    prompt.confirmation.text.clone()
+                } else {
+                    prompt.secret.text.clone()
+                };
+                SessionSecret::from_zeroizing(Zeroizing::new(text))
+            });
+            let identities = prompt.disk_identities.clone();
+            prompt.secret.text.zeroize();
+            prompt.confirmation.text.zeroize();
+            prompt.working = true;
+            prompt.error = None;
+            (
+                protected,
+                identity_index,
+                identities,
+                session_secret,
+                identity_passphrase,
+            )
+        };
+
+        if let Some(index) = identity_index {
+            let Some(identity_passphrase) = identity_passphrase else {
+                if let Some(prompt) = self.session_authentication.as_mut() {
+                    prompt.working = false;
+                    prompt.error = Some("The encrypted identity passphrase is unavailable.".into());
+                }
+                cx.notify();
+                return;
+            };
+            let Some(identities) = identities.as_mut() else {
+                if let Some(prompt) = self.session_authentication.as_mut() {
+                    prompt.working = false;
+                    prompt.error = Some("The configured identity is unavailable.".into());
+                }
+                cx.notify();
+                return;
+            };
+            if index >= identities.passphrases.len() {
+                identities
+                    .passphrases
+                    .resize_with(identities.paths.len(), || None);
+            }
+            if let Some(passphrase) = identities.passphrases.get_mut(index) {
+                *passphrase = Some(identity_passphrase);
+            }
+        }
+        let result = self.resume_disk_session(session_id, session_secret, identities, window, cx);
+        if result == ReconnectSessionResult::Reconnected {
+            self.session_authentication = None;
+        } else {
+            let error = self.pane_output_error.take().unwrap_or_else(|| {
+                if protected {
+                    "Authentication failed.".to_owned()
+                } else {
+                    "Could not decrypt the identity file.".to_owned()
+                }
+            });
+            if let Some(prompt) = self.session_authentication.as_mut() {
+                prompt.working = false;
+                prompt.secret = TextField::default();
+                prompt.confirmation = TextField::default();
+                prompt.error = Some(error);
+            }
+        }
+        cx.notify();
+    }
+
     pub(crate) fn session_authentication_key_down(
         &mut self,
         event: &KeyDownEvent,
@@ -425,16 +555,17 @@ impl Zetta {
             }
             return true;
         }
+        let can_tab_between_fields = match prompt.mode {
+            SessionAuthenticationPromptMode::Protect { .. } => true,
+            SessionAuthenticationPromptMode::Reconnect { .. } => false,
+            SessionAuthenticationPromptMode::ResumeDisk { .. } => {
+                prompt.disk_protected && prompt.disk_identity_index.is_some()
+            }
+        };
         match event.keystroke.key.as_str() {
             "escape" => self.dismiss_session_authentication(window, cx),
             "enter" => self.submit_session_authentication(window, cx),
-            "tab"
-                if !matches!(
-                    prompt.mode,
-                    SessionAuthenticationPromptMode::Reconnect { .. }
-                        | SessionAuthenticationPromptMode::ResumeDisk { .. }
-                ) =>
-            {
+            "tab" if can_tab_between_fields => {
                 prompt.field = match prompt.field {
                     SessionAuthenticationField::Secret => SessionAuthenticationField::Confirmation,
                     SessionAuthenticationField::Confirmation => SessionAuthenticationField::Secret,
@@ -551,6 +682,18 @@ impl Zetta {
             SessionAuthenticationPromptMode::Reconnect { .. }
             | SessionAuthenticationPromptMode::ResumeDisk { .. } => None,
         };
+        #[cfg(feature = "session-persistence")]
+        let disk_identity_required = matches!(
+            prompt.mode,
+            SessionAuthenticationPromptMode::ResumeDisk { .. }
+        ) && prompt.disk_identity_index.is_some();
+        #[cfg(not(feature = "session-persistence"))]
+        let disk_identity_required = false;
+        #[cfg(feature = "session-persistence")]
+        let disk_protected = prompt.disk_protected;
+        #[cfg(not(feature = "session-persistence"))]
+        let disk_protected = false;
+        let disk_has_secondary_field = disk_identity_required && disk_protected;
         let submit_handle = handle.clone();
         let without_authentication_handle = handle.clone();
         let cancel_handle = handle.clone();
@@ -604,7 +747,13 @@ impl Zetta {
                                         SessionAuthenticationPromptMode::ResumeDisk { .. }
                                     ) =>
                                     {
-                                        "Enter the session secret after decrypting the disk record."
+                                        if disk_has_secondary_field {
+                                            "Enter the session secret and the identity passphrase."
+                                        } else if disk_identity_required {
+                                            "Enter the passphrase for the encrypted identity file."
+                                        } else {
+                                            "Enter the session secret after decrypting the disk record."
+                                        }
                                     }
                                     None => {
                                         "Enter the secret chosen when this session was detached."
@@ -616,20 +765,32 @@ impl Zetta {
                                 .flex()
                                 .flex_col()
                                 .gap_1()
-                                .child(Label::new("Secret").size(LabelSize::Small))
+                                .child(
+                                    Label::new(if disk_identity_required && !disk_protected {
+                                        "Identity passphrase"
+                                    } else {
+                                        "Session secret"
+                                    })
+                                    .size(LabelSize::Small),
+                                )
                                 .child(field(
                                     "session-authentication-secret",
                                     &prompt.secret,
                                     SessionAuthenticationField::Secret,
                                 )),
                         )
-                        .when(action.is_some(), |panel| {
+                        .when(action.is_some() || disk_has_secondary_field, |panel| {
                             panel.child(
                                 div()
                                     .flex()
                                     .flex_col()
                                     .gap_1()
-                                    .child(Label::new("Confirm secret").size(LabelSize::Small))
+                                    .child(Label::new(if disk_has_secondary_field {
+                                        "Identity passphrase"
+                                    } else {
+                                        "Confirm secret"
+                                    })
+                                    .size(LabelSize::Small))
                                     .child(field(
                                         "session-authentication-confirmation",
                                         &prompt.confirmation,

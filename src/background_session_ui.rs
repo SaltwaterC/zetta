@@ -5,6 +5,12 @@ use crate::worktree_detection::terminal_event_requires_worktree_detection;
 
 const BACKGROUND_PROCESS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
+#[derive(Clone)]
+pub(crate) struct DiskResumeIdentities {
+    pub(crate) paths: Vec<PathBuf>,
+    pub(crate) passphrases: Vec<Option<SessionSecret>>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ReconnectRequest {
     None,
@@ -649,6 +655,24 @@ impl Zetta {
         self.reconnect_process_background_session(runner_id, session_id, window, cx);
     }
 
+    #[cfg(feature = "session-persistence")]
+    pub(crate) fn disk_resume_identity_paths(&self) -> Vec<PathBuf> {
+        self.launch_config
+            .sessions
+            .persistence
+            .identity
+            .clone()
+            .map(|path| {
+                if let Some(relative) = path.to_str().and_then(|path| path.strip_prefix("~/")) {
+                    util::paths::home_dir().join(relative)
+                } else {
+                    path
+                }
+            })
+            .into_iter()
+            .collect()
+    }
+
     fn reconnect_process_background_session(
         &mut self,
         runner_id: u64,
@@ -699,17 +723,7 @@ impl Zetta {
             .ok()
             .and_then(|records| records.into_iter().find(|record| record.id == session_id))
             .is_some_and(|record| record.protected);
-            if protected {
-                self.prompt_to_resume_disk_session(session_id, window, cx);
-                return ReconnectSessionResult::AuthenticationFailed;
-            }
-            let result = self.resume_disk_session(session_id, None, None, window, cx);
-            if result == ReconnectSessionResult::Rejected
-                && let Some(error) = self.pane_output_error.take()
-            {
-                self.show_notice(error, cx);
-            }
-            return result;
+            return self.prompt_to_resume_disk_session(session_id, protected, window, cx);
         }
         if runner_id != self.background_sessions.runner_id() {
             let Some(source) = zetta_for_runner(runner_id, cx) else {
@@ -770,7 +784,7 @@ impl Zetta {
         &mut self,
         session_id: u64,
         secret: Option<SessionSecret>,
-        identity_paths: Option<Vec<PathBuf>>,
+        identities: Option<DiskResumeIdentities>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> ReconnectSessionResult {
@@ -794,36 +808,32 @@ impl Zetta {
             self.mux = Some(runtime.clone());
             runtime
         };
-        let identity_paths = identity_paths.unwrap_or_else(|| {
-            self.launch_config
-                .sessions
-                .persistence
-                .identity
-                .clone()
-                .map(|path| {
-                    if let Some(relative) = path.to_str().and_then(|path| path.strip_prefix("~/")) {
-                        util::paths::home_dir().join(relative)
-                    } else {
-                        path
-                    }
-                })
-                .into_iter()
-                .collect()
-        });
-        let persisted =
-            match runtime
-                .client()
-                .resume_with_secret(session_id, &identity_paths, secret.as_ref())
-            {
-                Ok(persisted) => persisted,
-                Err(error) => {
-                    self.pane_output_error = Some(format!(
-                        "Could not resume encrypted session {session_id}: {error:#}"
-                    ));
-                    cx.notify();
-                    return ReconnectSessionResult::Rejected;
-                }
-            };
+        let (identity_paths, identity_passphrases) = identities
+            .map(|identities| (identities.paths, identities.passphrases))
+            .unwrap_or_else(|| (self.disk_resume_identity_paths(), Vec::new()));
+        let persisted = match runtime
+            .client()
+            .resume_with_secret_and_identity_passphrases(
+                session_id,
+                &identity_paths,
+                &identity_passphrases,
+                secret.as_ref(),
+            ) {
+            Ok(persisted) => persisted,
+            Err(error) => {
+                self.pane_output_error = Some(format!(
+                    "Could not resume encrypted session {session_id}: {error:#}"
+                ));
+                cx.notify();
+                return ReconnectSessionResult::Rejected;
+            }
+        };
+        // The daemon consumes the encrypted record before returning. Refresh
+        // the process-wide picker even if rebuilding the tab below fails, so
+        // the UI cannot keep offering a record that no longer exists.
+        cx.defer(refresh_process_background_sessions);
+        let summary_title = persisted.summary.title.clone();
+        let snapshots = persisted.snapshots;
         let mut state: crate::session_state::TabState =
             match serde_json::from_value(persisted.state).context("reading restored tab state") {
                 Ok(state) => state,
@@ -838,8 +848,9 @@ impl Zetta {
         // A disk record may have been written by a daemon that was alive when
         // the tab detached. Its pane IDs and exit details describe that old
         // process tree, not a process this restore is allowed to revive.
-        // Resume deliberately starts with empty, inert panes; the user chooses
-        // when to run the profile again.
+        // The process cannot be revived from a disk snapshot, but the saved
+        // screen is kept below as a read-only terminal so resume does not lose
+        // the useful state the record actually contains.
         state.keep_running = false;
         state.shared = false;
         for pane in &mut state.panes {
@@ -876,10 +887,38 @@ impl Zetta {
         };
         tab.close_policy = TabClosePolicy::Close;
         tab.shared = false;
+        // The catalog title is what the user selected. A display-only terminal
+        // has no process to emit a fresh title, so preserve it on the restored
+        // tab just as the live multiplexer attach path does.
+        if tab.custom_title.is_none() && !summary_title.is_empty() {
+            tab.process_title = Some(summary_title);
+        }
+        let settings = TerminalSpawnSettings::current(cx);
+        for snapshot in snapshots {
+            if snapshot.bytes.is_empty() {
+                continue;
+            }
+            let builder = TerminalBuilder::new_display_only(
+                settings.cursor_shape,
+                settings.alternate_scroll,
+                settings.max_scroll_history_lines,
+                cx.entity_id().as_u64(),
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .with_replay(snapshot.bytes);
+            let terminal = cx.new(|cx| builder.subscribe(cx));
+            if let Some(pane) = tab.pane_mut(snapshot.pane_id) {
+                pane.terminal = Some(terminal);
+                pane.error = None;
+                pane.base_exited = true;
+            }
+        }
         for pane in &mut tab.panes {
-            pane.error = Some(format!("Run: profile {}", pane.profile.name));
             pane.pending_command = None;
-            pane.base_exited = false;
+            if pane.terminal.is_none() {
+                pane.error = Some(format!("Run: profile {}", pane.profile.name));
+            }
         }
         self.attach_reconnected_tab(tab, true, window, cx);
         ReconnectSessionResult::Reconnected
@@ -890,11 +929,12 @@ impl Zetta {
         &mut self,
         session_id: u64,
         secret: Option<SessionSecret>,
-        identity_paths: Option<Vec<PathBuf>>,
+        identities: Option<DiskResumeIdentities>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> ReconnectSessionResult {
-        let _ = (session_id, secret, identity_paths, window, cx);
+        let identities = identities.map(|identities| (identities.paths, identities.passphrases));
+        let _ = (session_id, secret, identities, window, cx);
         ReconnectSessionResult::Rejected
     }
 
@@ -902,18 +942,12 @@ impl Zetta {
         &mut self,
         session_id: u64,
         secret: Option<SessionSecret>,
-        identity_paths: Vec<PathBuf>,
+        identities: DiskResumeIdentities,
         completion: std::sync::mpsc::Sender<ReconnectSessionResult>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let result = self.resume_disk_session(
-            session_id,
-            secret,
-            (!identity_paths.is_empty()).then_some(identity_paths),
-            window,
-            cx,
-        );
+        let result = self.resume_disk_session(session_id, secret, Some(identities), window, cx);
         if result == ReconnectSessionResult::Rejected
             && let Some(error) = self.pane_output_error.take()
         {
@@ -1270,9 +1304,13 @@ impl Zetta {
         for (pane_id, stack_id, terminal, terminal_theme) in panes {
             match terminal_theme {
                 Ok(theme) => {
+                    let display_only = !terminal.read(cx).is_pty();
                     let view = cx.new(|cx| {
                         TerminalView::new_with_theme(terminal.clone(), theme, window, cx)
                     });
+                    if display_only {
+                        view.update(cx, |view, cx| view.set_input_enabled(false, cx));
+                    }
                     if let Some(entry_id) = stack_id {
                         self.connect_stacked_terminal_view(
                             tab_id, pane_id, entry_id, view, window, cx,
@@ -1685,6 +1723,7 @@ impl Zetta {
                     .is_some_and(|pane| pane.stack.selected_is_base())
         });
         let terminal = view.read(cx).terminal().clone();
+        let display_only = !terminal.read(cx).is_pty();
         terminal.update(cx, |terminal, cx| terminal.set_ui_visible(visible, cx));
         if self.shared_panes.contains_key(&pane_id) {
             self.subscribe_shared_pane_size(pane_id, &terminal, window, cx);
@@ -1756,7 +1795,9 @@ impl Zetta {
             pane.view = Some(view);
             pane.error = None;
             pane.exit = None;
-            pane.base_exited = false;
+            if !display_only {
+                pane.base_exited = false;
+            }
         }
         self.schedule_worktree_detection_for_pane(tab_id, pane_id, cx);
         self.schedule_project_detection_for_pane(tab_id, pane_id, window, cx);

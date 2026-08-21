@@ -835,13 +835,22 @@ fn disk_resume_requests_decode_identity_paths_from_the_private_payload() {
     let mut resume_request = request("token", "resume_disk_session");
     resume_request.session_id = Some(42);
     resume_request.secret = Some("session-secret".to_owned());
-    resume_request.config_path =
-        Some(serde_json::to_string(&vec!["/tmp/identity", "/tmp/second"]).unwrap());
+    resume_request.config_path = Some(
+        serde_json::to_string(&serde_json::json!({
+            "identity_paths": ["/tmp/identity", "/tmp/second"],
+            "identity_passphrases": [null, "identity-secret"]
+        }))
+        .unwrap(),
+    );
     assert_eq!(
         decode_control_request(&mut resume_request, "token"),
         Some(ControlRequestCommand::ResumeDiskSession {
             session_id: 42,
             identity_paths: vec![PathBuf::from("/tmp/identity"), PathBuf::from("/tmp/second")],
+            identity_passphrases: vec![
+                None,
+                Some(SessionSecret::new("identity-secret".to_owned())),
+            ],
             secret: Some(SessionSecret::new("session-secret".to_owned())),
         })
     );
@@ -851,6 +860,17 @@ fn disk_resume_requests_decode_identity_paths_from_the_private_payload() {
     malformed.session_id = Some(42);
     malformed.config_path = Some("not-json".to_owned());
     assert_eq!(decode_control_request(&mut malformed, "token"), None);
+
+    let mut mismatched = request("token", "resume_disk_session");
+    mismatched.session_id = Some(42);
+    mismatched.config_path = Some(
+        serde_json::to_string(&serde_json::json!({
+            "identity_paths": ["/tmp/identity"],
+            "identity_passphrases": []
+        }))
+        .unwrap(),
+    );
+    assert_eq!(decode_control_request(&mut mismatched, "token"), None);
 }
 
 #[test]

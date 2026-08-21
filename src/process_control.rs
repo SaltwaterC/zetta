@@ -20,7 +20,7 @@ use uds_windows::{UnixListener, UnixStream};
 use anyhow::{Context as _, Result};
 use futures::channel::mpsc::UnboundedSender;
 use gpui::Hsla;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 use subtle::ConstantTimeEq as _;
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use ui::IconName;
@@ -44,10 +44,12 @@ use crate::pane::{OverlayFontSize, PaneOverlayRequest, overlay_color_from_value}
 /// answer first, and that process then chose its first window.
 /// The shared value is also used by the standalone `zmux reconnect` client.
 ///
-/// 16 adds the disk-session resume request. Its private identity-path payload
-/// is carried in `config_path` so older request construction stays unchanged;
-/// the command is version-gated and the decoder accepts that field only for
-/// this request.
+/// 16 adds the disk-session resume request. Its private identity payload is
+/// carried in `config_path` so older request construction stays unchanged; the
+/// command is version-gated and the decoder accepts that field only for this
+/// request.
+///
+/// 17 adds passphrases for encrypted identity files to that private payload.
 pub(crate) const CONTROL_VERSION: u32 = zmux::protocol::CONTROL_VERSION;
 // A 64 KiB argv payload can expand substantially when it contains many
 // one-character arguments and each value is represented as JSON. Keep enough
@@ -139,6 +141,7 @@ pub(crate) enum ProcessControlCommand {
     ResumeDiskSession {
         session_id: u64,
         identity_paths: Vec<PathBuf>,
+        identity_passphrases: Vec<Option<SessionSecret>>,
         secret: Option<SessionSecret>,
         completion: Sender<ReconnectSessionResult>,
     },
@@ -210,6 +213,7 @@ enum ControlRequestCommand {
     ResumeDiskSession {
         session_id: u64,
         identity_paths: Vec<PathBuf>,
+        identity_passphrases: Vec<Option<SessionSecret>>,
         secret: Option<SessionSecret>,
     },
     SetTabIcon {
@@ -278,6 +282,30 @@ struct ControlRequest {
     profile: Option<String>,
     theme: Option<String>,
     pane_request: Option<PaneControlRequest>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResumeIdentityPayload {
+    identity_paths: Vec<String>,
+    identity_passphrases: Vec<Option<ResumeIdentityPassphrase>>,
+}
+
+struct ResumeIdentityPassphrase(Zeroizing<String>);
+
+impl<'de> Deserialize<'de> for ResumeIdentityPassphrase {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer).map(|passphrase| Self(Zeroizing::new(passphrase)))
+    }
+}
+
+impl ResumeIdentityPassphrase {
+    fn expose(&self) -> &str {
+        self.0.as_str()
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -598,6 +626,7 @@ impl ProcessControlServer {
                         Some(ControlRequestCommand::ResumeDiskSession {
                             session_id,
                             identity_paths,
+                            identity_passphrases,
                             secret,
                         }) => {
                             let (completion, completed) = channel();
@@ -605,6 +634,7 @@ impl ProcessControlServer {
                                 .unbounded_send(ProcessControlCommand::ResumeDiskSession {
                                     session_id,
                                     identity_paths,
+                                    identity_passphrases,
                                     secret,
                                     completion,
                                 })
@@ -911,6 +941,15 @@ fn handle_control_request(stream: &mut UnixStream, token: &str) -> Option<Contro
     decode_control_request(&mut request, token)
 }
 
+fn zeroize_control_request_secrets(request: &mut ControlRequest) {
+    if let Some(secret) = request.secret.as_mut() {
+        secret.zeroize();
+    }
+    if let Some(payload) = request.config_path.as_mut() {
+        payload.zeroize();
+    }
+}
+
 /// Compares the endpoint token without leaking how many leading bytes matched.
 /// This is the only authentication check guarding the process control socket,
 /// so it must not short-circuit the way `str` equality does.
@@ -928,17 +967,13 @@ fn decode_control_request(
     token: &str,
 ) -> Option<ControlRequestCommand> {
     if !token_matches(&request.token, token) {
-        if let Some(secret) = request.secret.as_mut() {
-            secret.zeroize();
-        }
+        zeroize_control_request_secrets(request);
         return None;
     }
     if !matches!(request.command.as_str(), "run_pane" | "list_panes")
         && request.pane_request.is_some()
     {
-        if let Some(secret) = request.secret.as_mut() {
-            secret.zeroize();
-        }
+        zeroize_control_request_secrets(request);
         return None;
     }
     if !matches!(
@@ -946,21 +981,15 @@ fn decode_control_request(
         "reload_configuration" | "open_project" | "resume_disk_session"
     ) && request.config_path.is_some()
     {
-        if let Some(secret) = request.secret.as_mut() {
-            secret.zeroize();
-        }
+        zeroize_control_request_secrets(request);
         return None;
     }
     if request.command != "set_tab_name" && request.tab_name.is_some() {
-        if let Some(secret) = request.secret.as_mut() {
-            secret.zeroize();
-        }
+        zeroize_control_request_secrets(request);
         return None;
     }
     if request.command != "set_worktree_name" && request.worktree_name.is_some() {
-        if let Some(secret) = request.secret.as_mut() {
-            secret.zeroize();
-        }
+        zeroize_control_request_secrets(request);
         return None;
     }
     if (!matches!(
@@ -975,9 +1004,7 @@ fn decode_control_request(
         || (request.command != "set_tab_attention"
             && (request.attention_summary.is_some() || request.attention_body.is_some()))
     {
-        if let Some(secret) = request.secret.as_mut() {
-            secret.zeroize();
-        }
+        zeroize_control_request_secrets(request);
         return None;
     }
     let command = match request.command.as_str() {
@@ -1202,23 +1229,45 @@ fn decode_control_request(
                 && request.pane_request.is_none() =>
         {
             let session_id = request.session_id.take()?;
-            // The standalone client sends a JSON array here. Keep the paths
-            // private to the authenticated local socket and reject malformed
-            // or empty entries before they reach the GUI.
-            let identity_paths =
-                serde_json::from_str::<Vec<String>>(request.config_path.take()?.as_str())
-                    .ok()?
-                    .into_iter()
-                    .map(PathBuf::from)
-                    .collect::<Vec<_>>();
-            identity_paths
-                .iter()
-                .all(|path| !path.as_os_str().is_empty())
-                .then_some(ControlRequestCommand::ResumeDiskSession {
-                    session_id,
-                    identity_paths,
-                    secret: request.secret.take().map(SessionSecret::new),
+            // The standalone client sends a JSON object here. Keep the paths
+            // and passphrases private to the authenticated local socket and
+            // reject malformed or empty entries before they reach the GUI.
+            let Some(mut encoded_payload) = request.config_path.take() else {
+                zeroize_control_request_secrets(request);
+                return None;
+            };
+            let payload = serde_json::from_str::<ResumeIdentityPayload>(&encoded_payload);
+            encoded_payload.zeroize();
+            let Ok(payload) = payload else {
+                zeroize_control_request_secrets(request);
+                return None;
+            };
+            let identity_paths = payload
+                .identity_paths
+                .into_iter()
+                .map(PathBuf::from)
+                .collect::<Vec<_>>();
+            let identity_passphrases = payload
+                .identity_passphrases
+                .into_iter()
+                .map(|passphrase| {
+                    passphrase.map(|passphrase| SessionSecret::new(passphrase.expose().to_owned()))
                 })
+                .collect::<Vec<_>>();
+            if identity_paths.len() != identity_passphrases.len()
+                || identity_paths
+                    .iter()
+                    .any(|path| path.as_os_str().is_empty())
+            {
+                zeroize_control_request_secrets(request);
+                return None;
+            }
+            Some(ControlRequestCommand::ResumeDiskSession {
+                session_id,
+                identity_paths,
+                identity_passphrases,
+                secret: request.secret.take().map(SessionSecret::new),
+            })
         }
         "set_tab_icon"
             if request.runner_id.is_none()
@@ -1372,10 +1421,8 @@ fn decode_control_request(
         }
         _ => None,
     };
-    if command.is_none()
-        && let Some(secret) = request.secret.as_mut()
-    {
-        secret.zeroize();
+    if command.is_none() {
+        zeroize_control_request_secrets(request);
     }
     command
 }

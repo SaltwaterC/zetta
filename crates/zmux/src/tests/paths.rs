@@ -1,5 +1,22 @@
-use super::*;
 use std::path::Path;
+
+use super::*;
+
+#[test]
+fn only_cargo_debug_paths_are_development_binaries() {
+    assert!(is_target_debug_binary(Path::new(
+        "/home/zetta/target/debug/zetta"
+    )));
+    assert!(is_target_debug_binary(Path::new(
+        "/home/zetta/target/debug/deps/zmux-test"
+    )));
+    assert!(!is_target_debug_binary(Path::new(
+        "/home/user/.local/zetta.app/bin/zetta"
+    )));
+    assert!(!is_target_debug_binary(Path::new(
+        "/home/user/.local/zetta.app/bin/targeted-zetta"
+    )));
+}
 
 #[test]
 fn the_configuration_directory_never_falls_back_to_the_working_directory() {
