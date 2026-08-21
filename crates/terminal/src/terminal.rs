@@ -1311,6 +1311,7 @@ pub const MAX_SCROLL_HISTORY_LINES: usize = i32::MAX as usize;
 // Preserve upstream's immediate-first-event behavior and short bounded drains. Deferring the
 // first event to a display-frame cadence couples PTY progress to rendering and can make a busy
 // terminal monopolize the foreground executor.
+#[cfg(not(any(test, feature = "test-support")))]
 const TERMINAL_EVENT_DRAIN_INTERVAL: Duration = Duration::from_millis(4);
 const MAX_TERMINAL_EVENTS_PER_BATCH: usize = 100;
 // Reflow cost scales with every retained cell and runs synchronously during paint. Above this

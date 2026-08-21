@@ -2180,9 +2180,9 @@ fn resume(
     #[cfg(not(feature = "session-persistence"))]
     {
         let _ = (daemon, request);
-        return connection.send(&Response::Error {
+        connection.send(&Response::Error {
             message: "resume needs the session-persistence feature".to_owned(),
-        });
+        })
     }
     #[cfg(feature = "session-persistence")]
     {

@@ -213,6 +213,14 @@ fn daemon_binary() -> PathBuf {
     binary
 }
 
+fn system_executable(name: &str) -> PathBuf {
+    let path = std::env::var_os("PATH").expect("PATH must be set for this test");
+    std::env::split_paths(&path)
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| panic!("{name} was not found in PATH"))
+}
+
 /// A spawn attributed to another process, so a session can be owned by a window
 /// this test is able to end.
 fn spawn_request_as(
@@ -891,6 +899,9 @@ fn an_attached_pane_learns_that_its_process_exited() {
         .unwrap();
     let (mut pty, events) =
         alacritty_terminal::tty::attach(pane.descriptor, pane.child_pid).unwrap();
+    // Drain the command's initial output. macOS can keep a PTY child in the
+    // exiting path until the master has consumed those bytes.
+    read_until(pty.file(), "ready");
     reporters.register(pane.pane_id, events);
 
     use alacritty_terminal::tty::EventedPty as _;
@@ -1406,7 +1417,7 @@ fn a_session_nobody_detached_ends_with_the_window_that_had_it() {
 /// died. Waiting matters: an unreaped child is a zombie, and a zombie still
 /// reports as an existing process.
 fn reaped_process() -> u32 {
-    let mut child = Command::new("/bin/true").spawn().unwrap();
+    let mut child = Command::new(system_executable("true")).spawn().unwrap();
     let id = child.id();
     child.wait().unwrap();
     id
@@ -3258,7 +3269,7 @@ fn an_upgrade_keeps_a_pane_that_is_still_attached() {
     // was marked dead and pruned. Give the reaper something to wake on first:
     // it only re-examines panes when a child ends.
     reap(
-        Command::new("/bin/true")
+        Command::new(system_executable("true"))
             .stdout(Stdio::null())
             .spawn()
             .unwrap(),

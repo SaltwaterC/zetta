@@ -48,6 +48,26 @@ CARGO_PROFILE_ARGS :=
 endif
 BUILD_TARGET_DIR := target/$(BUILD_PROFILE)
 
+# These packages are intentionally standalone Cargo workspaces rather than
+# members of Zetta's root package. Keep them in the top-level checks so a
+# change under crates/ cannot silently skip formatting or tests.
+ZETTA_CRATE_DIRS := \
+	crates/alacritty_terminal \
+	crates/gpui_linux \
+	crates/gpui_macos \
+	crates/gpui_platform \
+	crates/gpui_windows \
+	crates/terminal \
+	crates/terminal_view \
+	crates/zmux
+# These standalone test workspaces have checked-in lockfiles. The other local
+# platform crates are included in formatting coverage but do not have an
+# independent locked test graph.
+ZETTA_TEST_CRATE_DIRS := \
+	crates/alacritty_terminal \
+	crates/terminal \
+	crates/zmux
+
 ifeq ($(OS),Windows_NT)
 CARGO_BUILD_JOBS ?= $(shell powershell.exe -NoProfile -Command "[Environment]::ProcessorCount")
 else ifeq ($(UNAME_S),Darwin)
@@ -121,9 +141,20 @@ LINUX_USER_CLI_PATH := $(LINUX_USER_BIN_DIR)/zetta
 
 test:
 	$(CARGO) test --locked --quiet --no-default-features --features "$(BUILD_FEATURES)" -- --format=terse
+	for crate in $(ZETTA_TEST_CRATE_DIRS); do \
+		( cd "$$crate" && \
+			if [ "$$crate" = "crates/zmux" ]; then \
+				$(CARGO) build --locked --bin zmux; \
+			fi && \
+			$(CARGO) test --locked --quiet -- --format=terse \
+		) || exit 1; \
+	done
 
 fmt:
 	$(CARGO) fmt --check
+	for crate in $(ZETTA_CRATE_DIRS); do \
+		$(CARGO) fmt --manifest-path "$$crate/Cargo.toml" --check || exit 1; \
+	done
 
 lint:
 	$(CARGO) clippy --locked --all-targets --no-default-features --features "$(BUILD_FEATURES)" -- -D warnings

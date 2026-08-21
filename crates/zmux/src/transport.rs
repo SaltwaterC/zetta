@@ -339,10 +339,17 @@ pub fn send_with_descriptors(
     }
 }
 
+#[cfg(target_os = "linux")]
+const RECEIVE_MSG_FLAGS: libc::c_int = libc::MSG_CMSG_CLOEXEC;
+
+#[cfg(all(unix, not(target_os = "linux")))]
+const RECEIVE_MSG_FLAGS: libc::c_int = 0;
+
 /// Receives a payload and any descriptors sent with it.
 ///
-/// Descriptors arrive with `MSG_CMSG_CLOEXEC`, so a client that goes on to
-/// spawn a process cannot leak a session's terminal into it.
+/// Linux asks `recvmsg` to set close-on-exec atomically. Other Unix platforms
+/// do not expose that flag through `libc`, so the descriptors are marked before
+/// this function returns them to the caller.
 #[cfg(unix)]
 pub fn receive_with_descriptors(
     stream: &Stream,
@@ -363,7 +370,7 @@ pub fn receive_with_descriptors(
     let received = loop {
         // SAFETY: the message describes buffers owned by this frame.
         let received =
-            unsafe { libc::recvmsg(stream.as_raw_fd(), &mut message, libc::MSG_CMSG_CLOEXEC) };
+            unsafe { libc::recvmsg(stream.as_raw_fd(), &mut message, RECEIVE_MSG_FLAGS) };
         if received >= 0 {
             break received as usize;
         }
@@ -398,6 +405,31 @@ pub fn receive_with_descriptors(
         message.msg_flags & libc::MSG_CTRUNC == 0,
         "the multiplexer handover was truncated"
     );
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    for descriptor in &descriptors {
+        // `MSG_CMSG_CLOEXEC` is unavailable on these platforms, so preserve
+        // the same no-leak guarantee before exposing the descriptor.
+        let flags = unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_GETFD) };
+        anyhow::ensure!(
+            flags >= 0,
+            "reading received descriptor flags: {}",
+            last_error()
+        );
+        let result = unsafe {
+            libc::fcntl(
+                descriptor.as_raw_fd(),
+                libc::F_SETFD,
+                flags | libc::FD_CLOEXEC,
+            )
+        };
+        anyhow::ensure!(
+            result >= 0,
+            "setting received descriptor close-on-exec: {}",
+            last_error()
+        );
+    }
+
     Ok((received, descriptors))
 }
 

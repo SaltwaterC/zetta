@@ -1,6 +1,14 @@
 use super::*;
 use std::os::fd::IntoRawFd as _;
 
+fn system_executable(name: &str) -> std::path::PathBuf {
+    let path = std::env::var_os("PATH").expect("PATH must be set for this test");
+    std::env::split_paths(&path)
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| panic!("{name} was not found in PATH"))
+}
+
 fn handover() -> Handover {
     Handover {
         version: HANDOVER_VERSION,
@@ -184,6 +192,8 @@ fn a_replacement_that_cannot_take_over_is_detected_before_it_is_run() {
     // `execv` is irreversible: a daemon that skipped this check and executed a
     // replacement which then refused the handover would have destroyed its own
     // sessions to find out.
-    assert!(!replacement_accepts_handover(std::path::Path::new("/bin/false")).unwrap());
-    assert!(replacement_accepts_handover(std::path::Path::new("/bin/true")).unwrap());
+    let false_executable = system_executable("false");
+    let true_executable = system_executable("true");
+    assert!(!replacement_accepts_handover(&false_executable).unwrap());
+    assert!(replacement_accepts_handover(&true_executable).unwrap());
 }

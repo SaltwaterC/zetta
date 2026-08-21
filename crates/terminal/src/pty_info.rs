@@ -599,7 +599,7 @@ mod tests {
         reason = "the test needs real short-lived child processes and may block"
     )]
     fn a_dead_foreground_process_is_unknown_not_a_running_command() {
-        let mut info = PtyProcessInfo::new(ProcessIdGetter::new(-1, std::process::id()));
+        let info = PtyProcessInfo::new(ProcessIdGetter::new(-1, std::process::id()));
         let mut child = std::process::Command::new("sleep")
             .arg("30")
             .spawn()

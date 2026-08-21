@@ -297,6 +297,7 @@ fn a_tab_arriving_from_elsewhere_inherits_this_windows_project() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().join("project");
     std::fs::create_dir_all(root.join(".zetta")).unwrap();
+    let root = crate::project::canonical_project_root(&root).unwrap();
     std::fs::write(
         crate::project::ProjectConfig::path_for(&root),
         "{\"theme\": \"Ayu Dark\"}\n",
