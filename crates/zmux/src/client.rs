@@ -288,11 +288,11 @@ impl Client {
         Self::connect_with_retention(Retention::default())
     }
 
-    /// Connects to the running multiplexer, starting one with `retention` if
-    /// there is none and applying the setting to an existing daemon. The
-    /// application resolves this before the first pane is spawned, so a
-    /// constrained build cannot silently start or reuse a daemon with a
-    /// different retention policy.
+    /// Connects to the running multiplexer, applying `retention` whether the
+    /// daemon already exists or has just been started. The application
+    /// resolves this before the first pane is spawned, so a constrained build
+    /// cannot silently start or reuse a daemon with a different retention
+    /// policy.
     pub fn connect_with_retention(retention: Retention) -> Result<Self> {
         #[cfg(feature = "session-persistence")]
         {
@@ -372,10 +372,11 @@ impl Client {
                 client.configure(retention, Vec::new())?;
                 return Ok(client);
             }
-            start_daemon(directory, retention)?;
+            start_daemon(directory, None)?;
             let deadline = Instant::now() + STARTUP_TIMEOUT;
             loop {
                 if let Some(client) = Self::connect_existing_at(directory)? {
+                    client.configure(retention, Vec::new())?;
                     return Ok(client);
                 }
                 anyhow::ensure!(
@@ -403,10 +404,11 @@ impl Client {
             client.configure(retention, resolved_recipients)?;
             return Ok(client);
         }
-        start_daemon(directory, retention, Some(resolved_recipients))?;
+        start_daemon(directory, None, Some(resolved_recipients.clone()))?;
         let deadline = Instant::now() + STARTUP_TIMEOUT;
         loop {
             if let Some(client) = Self::connect_existing_at(directory)? {
+                client.configure(retention, resolved_recipients.clone())?;
                 return Ok(client);
             }
             anyhow::ensure!(
@@ -460,7 +462,11 @@ impl Client {
         if let Some(client) = Self::connect_existing_at(directory)? {
             return Ok(client);
         }
-        start_daemon(directory, retention, None)?;
+        // Standalone `zmux resume` has no Zetta configuration to apply after
+        // startup, so it still uses the explicit disk bootstrap mode. The
+        // normal Zetta connection path starts with the daemon's default and
+        // configures it from the loaded application settings instead.
+        start_daemon(directory, Some(retention), None)?;
         let deadline = Instant::now() + STARTUP_TIMEOUT;
         loop {
             if let Some(client) = Self::connect_existing_at(directory)? {
@@ -1615,19 +1621,20 @@ impl PaneSignals {
 }
 
 /// Starts a detached daemon that outlives this process.
+///
+/// Zetta passes `None` for `startup_retention`: it applies the configuration
+/// through `Configure` after the fresh daemon publishes its endpoint. The
+/// standalone disk-resume path supplies a bootstrap mode because it has no
+/// Zetta configuration to apply.
 fn start_daemon(
     directory: &std::path::Path,
-    retention: Retention,
+    startup_retention: Option<Retention>,
     #[cfg(feature = "session-persistence")] persistence_recipients: Option<Vec<String>>,
 ) -> Result<()> {
     let (executable, mut arguments) = multiplexer_command()?;
-    arguments.extend(["--retention".to_owned(), retention.name().to_owned()]);
-    if let Retention::Memory { bytes } = retention {
-        arguments.extend(["--retention-bytes".to_owned(), bytes.to_string()]);
-    }
+    append_startup_retention_arguments(&mut arguments, startup_retention);
     #[cfg(feature = "session-persistence")]
-    if matches!(retention, Retention::Disk)
-        && let Some(recipients) = persistence_recipients
+    if let Some(recipients) = persistence_recipients
         && !recipients.is_empty()
     {
         crate::catalog::create_private_dir(directory)?;
@@ -1646,6 +1653,16 @@ fn start_daemon(
         .spawn()
         .with_context(|| format!("starting the multiplexer {}", executable.display()))?;
     Ok(())
+}
+
+fn append_startup_retention_arguments(arguments: &mut Vec<String>, retention: Option<Retention>) {
+    let Some(retention) = retention else {
+        return;
+    };
+    arguments.extend(["--retention".to_owned(), retention.name().to_owned()]);
+    if let Retention::Memory { bytes } = retention {
+        arguments.extend(["--retention-bytes".to_owned(), bytes.to_string()]);
+    }
 }
 
 /// How to start the multiplexer: the `zmux` binary beside this executable, or

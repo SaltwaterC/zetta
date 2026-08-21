@@ -43,3 +43,26 @@ fn only_an_unknown_configure_variant_triggers_the_upgrade_fallback() {
         );
     }
 }
+
+#[test]
+fn a_configured_zetta_daemon_starts_without_a_retention_argument() {
+    let mut arguments = vec!["--daemon".to_owned()];
+    append_startup_retention_arguments(&mut arguments, None);
+    assert_eq!(arguments, ["--daemon"]);
+}
+
+#[test]
+fn an_independent_daemon_can_still_receive_a_retention_bootstrap() {
+    let mut arguments = vec!["--daemon".to_owned()];
+    append_startup_retention_arguments(&mut arguments, Some(Retention::Memory { bytes: 4096 }));
+    assert_eq!(
+        arguments,
+        [
+            "--daemon",
+            "--retention",
+            "memory",
+            "--retention-bytes",
+            "4096"
+        ]
+    );
+}

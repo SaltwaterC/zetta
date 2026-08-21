@@ -295,10 +295,8 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
                 anyhow::ensure!(!path.is_empty(), "--identity requires a path");
                 identity_paths.push(std::path::PathBuf::from(path));
             }
-            // Hidden: Zetta passes its configured byte budget when it starts
-            // the daemon. The public mode remains deliberately small; this
-            // keeps a global daemon-start setting from being silently reset
-            // to the built-in default.
+            // Hidden: an independent daemon launcher may pass a byte budget
+            // alongside its explicit startup retention mode.
             "--retention-bytes" => expect_retention_bytes = true,
             // Hidden: how a client starts the daemon it could not find.
             "--daemon" => daemon = true,

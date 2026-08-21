@@ -137,7 +137,7 @@ impl Retention {
         Ok(())
     }
 
-    /// The stable configuration spelling used when starting a daemon.
+    /// The stable configuration spelling used by direct daemon bootstrap.
     pub const fn name(self) -> &'static str {
         match self {
             Self::None => "none",

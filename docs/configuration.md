@@ -178,6 +178,12 @@ If an SSH identity produces an `unknown cipher "aes256-gcm@openssh.com"` error
 when it is passed to `age`, see [SSH identity cipher
 compatibility](background-sessions.md#ssh-identity-cipher-compatibility).
 
+The `--retention` option is a bootstrap option for an independently launched
+`zmux --daemon`; it is not a live-state report. Zetta starts its daemon with
+`--daemon` and applies the retention and persistence settings loaded from
+`config.json` after the daemon is ready. The daemon's configured state, rather
+than an old process command line, is authoritative.
+
 ## Git worktree root
 
 The `zetta wt` commands use Git's effective `wt.root` configuration; it is not
