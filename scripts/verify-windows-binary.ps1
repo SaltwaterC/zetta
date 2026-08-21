@@ -5,7 +5,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$GuiBinaryPath,
     [Parameter(Mandatory = $true)]
-    [string]$MuxBinaryPath
+    [string]$MuxBinaryPath,
+    [Parameter(Mandatory = $true)]
+    [string]$PtyBinaryPath
 )
 
 $ErrorActionPreference = "Stop"
@@ -56,9 +58,11 @@ $guiSubsystem = 2
 $consoleBinary = (Resolve-Path -LiteralPath $ConsoleBinaryPath).Path
 $guiBinary = (Resolve-Path -LiteralPath $GuiBinaryPath).Path
 $muxBinary = (Resolve-Path -LiteralPath $MuxBinaryPath).Path
+$ptyBinary = (Resolve-Path -LiteralPath $PtyBinaryPath).Path
 $actualConsoleSubsystem = Get-PeSubsystem $consoleBinary
 $actualGuiSubsystem = Get-PeSubsystem $guiBinary
 $actualMuxSubsystem = Get-PeSubsystem $muxBinary
+$actualPtySubsystem = Get-PeSubsystem $ptyBinary
 if ($actualConsoleSubsystem -ne $consoleSubsystem) {
     throw "$consoleBinary uses PE subsystem $actualConsoleSubsystem; expected console subsystem $consoleSubsystem"
 }
@@ -68,9 +72,13 @@ if ($actualGuiSubsystem -ne $guiSubsystem) {
 if ($actualMuxSubsystem -ne $consoleSubsystem) {
     throw "$muxBinary uses PE subsystem $actualMuxSubsystem; expected console subsystem $consoleSubsystem"
 }
+if ($actualPtySubsystem -ne $consoleSubsystem) {
+    throw "$ptyBinary uses PE subsystem $actualPtySubsystem; expected console subsystem $consoleSubsystem"
+}
 
-$version = (& $consoleBinary --version | Out-String).Trim()
-if ($LASTEXITCODE -ne 0 -or $version -notmatch '(?m)^Zetta \S+$' -or
+$version = ((& $consoleBinary --version | Out-String).Trim() -replace "`r", "")
+$versionExitCode = $LASTEXITCODE
+if ($versionExitCode -ne 0 -or $version -notmatch '(?m)^Zetta \S+$' -or
     $version -notmatch '(?m)^CONTROL_VERSION=\d+$' -or
     $version -notmatch '(?m)^CATALOG_VERSION=\d+$' -or
     $version -notmatch '(?m)^ZMUX_PROTOCOL_VERSION=\d+$') {
@@ -78,7 +86,8 @@ if ($LASTEXITCODE -ne 0 -or $version -notmatch '(?m)^Zetta \S+$' -or
 }
 $guiVersion = Invoke-GuiLauncher $guiBinary "--version"
 $guiInvalidArgument = Invoke-GuiLauncher $guiBinary "--definitely-invalid"
-if ($guiVersion.ExitCode -ne 0 -or $guiVersion.Stdout.Trim() -ne $version) {
+$guiVersionText = $guiVersion.Stdout.Trim() -replace "`r", ""
+if ($guiVersion.ExitCode -ne 0 -or $guiVersionText -ne $version) {
     throw "$guiBinary failed to forward its CLI arguments and output to $consoleBinary"
 }
 if ($guiInvalidArgument.ExitCode -eq 0 -or
@@ -93,3 +102,4 @@ if ($LASTEXITCODE -ne 0 -or $muxVersion -notmatch '^zmux \S+ \(protocol \d+\)$')
 Write-Host "Verified Windows console executable: $consoleBinary ($version)"
 Write-Host "Verified Windows GUI launcher: $guiBinary"
 Write-Host "Verified Windows multiplexer executable: $muxBinary ($muxVersion)"
+Write-Host "Verified Windows pseudoconsole host: $ptyBinary"

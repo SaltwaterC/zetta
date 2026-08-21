@@ -22,11 +22,12 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
+    time::{Duration, Instant},
 };
 
 use alacritty_terminal::{
     event::{OnResize as _, WindowSize},
-    tty::{self, EventedPty as _},
+    tty,
 };
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
@@ -54,6 +55,8 @@ pub fn endpoint_path(directory: &Path) -> PathBuf {
 fn socket_path(directory: &Path) -> PathBuf {
     directory.join("zmux-host.sock")
 }
+
+const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HostEnvelope {
@@ -141,7 +144,7 @@ pub struct ConsoleExit {
 
 struct Console {
     id: u64,
-    pty: tty::Pty,
+    pty: tty::PtyOwner,
     exited: bool,
     /// Set when the exit has been observed but not yet collected by a daemon.
     /// Held until it is reported, so an exit that happens while the daemon is
@@ -240,8 +243,13 @@ fn serve(host: &Arc<Host>, stream: Stream, token: &str) -> Result<()> {
         );
     }
 
+    let shutting_down = matches!(&envelope.request, HostRequest::Shutdown);
     let response = handle(host, envelope);
-    connection.send(&response)
+    let result = connection.send(&response);
+    if shutting_down && matches!(response, HostResponse::Ok) && result.is_ok() {
+        std::process::exit(0);
+    }
+    result
 }
 
 fn handle(host: &Arc<Host>, envelope: HostEnvelope) -> HostResponse {
@@ -323,11 +331,15 @@ fn handle(host: &Arc<Host>, envelope: HostEnvelope) -> HostResponse {
         }
         HostRequest::Shutdown => {
             if host.consoles.lock().unwrap().is_empty() {
-                // Nothing is being held, so nothing is lost by stopping.
-                std::process::exit(0);
-            }
-            HostResponse::Error {
-                message: "the host is still holding consoles".to_owned(),
+                // The serving connection sends the acknowledgement before
+                // terminating the helper, so the daemon can complete a
+                // normal stop without treating the helper's exit as an I/O
+                // failure.
+                HostResponse::Ok
+            } else {
+                HostResponse::Error {
+                    message: "the host is still holding consoles".to_owned(),
+                }
             }
         }
     }
@@ -342,16 +354,19 @@ fn open_console(
     size: TerminalSize,
     target_process_id: u32,
 ) -> Result<HostResponse> {
+    let escape_args = escape_windows_shell_args(program.as_deref());
     let options = tty::Options {
         shell: program.map(|program| tty::Shell::new(program, args)),
         working_directory,
         drain_on_exit: true,
         env,
-        // Already quoted by whoever resolved the command; quoting again would
-        // change what actually runs.
-        escape_args: false,
+        // `PtySpawnRequest` carries logical arguments, so use the same Windows
+        // command-line quoting as a local PTY. CMD is the one exception: its
+        // command arguments have shell-specific quoting that the terminal
+        // layer deliberately passes through raw.
+        escape_args,
     };
-    let pty = tty::new(
+    let pty = tty::new_host(
         &options,
         WindowSize {
             num_lines: size.lines.max(1),
@@ -359,7 +374,6 @@ fn open_console(
             cell_width: size.cell_width,
             cell_height: size.cell_height,
         },
-        0,
     )
     .context("creating a pseudoconsole")?;
 
@@ -381,6 +395,16 @@ fn open_console(
     })
 }
 
+fn escape_windows_shell_args(program: Option<&str>) -> bool {
+    !program
+        .and_then(|program| {
+            Path::new(program)
+                .file_stem()
+                .and_then(|name| name.to_str())
+        })
+        .is_some_and(|name| name.eq_ignore_ascii_case("cmd"))
+}
+
 fn console_handles(
     host: &Arc<Host>,
     console_id: u64,
@@ -398,15 +422,13 @@ fn console_handles(
     })
 }
 
-fn duplicate_console(pty: &tty::Pty, target_process_id: u32) -> Result<Vec<i64>> {
+fn duplicate_console(pty: &tty::PtyOwner, target_process_id: u32) -> Result<Vec<i64>> {
     use std::os::windows::io::AsHandle as _;
     anyhow::ensure!(
         target_process_id != 0,
         "no process was named to hand the console to"
     );
-    let (conout, conin) = pty
-        .handover_handles()
-        .context("this console cannot be handed to another process")?;
+    let (conout, conin) = pty.handover_handles();
     crate::transport::duplicate_to(target_process_id, &[conout.as_handle(), conin.as_handle()])
 }
 
@@ -449,12 +471,25 @@ pub fn ensure_running(directory: &Path) -> Result<HostClient> {
     if let Some(client) = HostClient::connect(directory)? {
         return Ok(client);
     }
-    let executable = std::env::current_exe().context("locating this multiplexer")?;
-    std::process::Command::new(&executable)
-        .arg("--pty-host")
+    let current = std::env::current_exe().context("locating this multiplexer")?;
+    let executable = current
+        .parent()
+        .context("the multiplexer executable has no parent directory")?
+        .join("zmux-pty.exe");
+    anyhow::ensure!(
+        executable.is_file(),
+        "the Windows pseudoconsole host is not installed beside the multiplexer: {}",
+        executable.display()
+    );
+    let mut command = std::process::Command::new(&executable);
+    command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if let Ok(directory) = std::env::current_dir() {
+        command.current_dir(tty::windows::normalize_working_directory(&directory));
+    }
+    command
         .spawn()
         .with_context(|| format!("starting the pseudoconsole host {}", executable.display()))?;
 
@@ -468,6 +503,110 @@ pub fn ensure_running(directory: &Path) -> Result<HostClient> {
             "the pseudoconsole host did not start"
         );
         thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// Stops the host belonging to `directory`, if it is still answering.
+///
+/// The daemon normally asks the host to leave as part of its own shutdown. A
+/// forced stop, however, terminates the daemon before that request can run,
+/// and a host may also be left behind after the daemon endpoint has gone
+/// stale. Keep this cleanup beside the host protocol so both cases use the
+/// same endpoint identity and process tree.
+pub fn stop(directory: &Path, force: bool) -> Result<bool> {
+    let Ok(endpoint) = Endpoint::read(&endpoint_path(directory)) else {
+        return Ok(false);
+    };
+    if Stream::connect(&endpoint.socket_path).is_err() {
+        remove_stopped_files(directory, &endpoint);
+        return Ok(false);
+    }
+
+    let client = HostClient {
+        endpoint: endpoint.clone(),
+    };
+    match client.shutdown() {
+        Ok(()) => {}
+        Err(_error) if force => force_stop(&endpoint).with_context(|| {
+            format!(
+                "the pseudoconsole host did not stop cleanly; forcing process {}",
+                endpoint.process_id
+            )
+        })?,
+        Err(error) => {
+            return Err(error).context(
+                "the pseudoconsole host was left running; rerun with --force to stop it anyway",
+            );
+        }
+    }
+
+    remove_stopped_files(directory, &endpoint);
+    Ok(true)
+}
+
+fn force_stop(endpoint: &Endpoint) -> Result<()> {
+    use std::process::{Command, Stdio};
+
+    anyhow::ensure!(
+        endpoint.process_id > 0,
+        "the pseudoconsole host published an unusable process id"
+    );
+    let system_root = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    let taskkill = system_root.join(r"System32\taskkill.exe");
+    let status = Command::new(&taskkill)
+        .args([
+            "/PID".to_owned(),
+            endpoint.process_id.to_string(),
+            "/T".to_owned(),
+            "/F".to_owned(),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .with_context(|| format!("running {}", taskkill.display()))?;
+    // `taskkill /T` can report an access error for one pseudoconsole child
+    // even while the host is still the process we need to remove. Fall back
+    // to terminating the host itself; closing its handles tears down the
+    // pseudoconsole tree, and this is also what makes the executable
+    // replaceable again.
+    if !status.success() && Stream::connect(&endpoint.socket_path).is_ok() {
+        crate::terminate_process(endpoint.process_id).with_context(|| {
+            format!(
+                "{} could not terminate pseudoconsole host process {}",
+                taskkill.display(),
+                endpoint.process_id
+            )
+        })?;
+    }
+    wait_until_stopped(endpoint)
+}
+
+fn wait_until_stopped(endpoint: &Endpoint) -> Result<()> {
+    let deadline = Instant::now() + STOP_TIMEOUT;
+    loop {
+        if Stream::connect(&endpoint.socket_path).is_err() {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "the pseudoconsole host is still answering on {}",
+            endpoint.socket_path.display()
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn remove_stopped_files(directory: &Path, endpoint: &Endpoint) {
+    // `zmux-pty` exits from its serving thread after acknowledging Shutdown,
+    // so its normal cleanup code is not reached. Remove only files that still
+    // describe this exact host; a replacement that started immediately after
+    // it stopped must keep its own endpoint.
+    if Endpoint::read(&endpoint_path(directory)).is_ok_and(|current| current == *endpoint) {
+        let _ = std::fs::remove_file(&endpoint.socket_path);
+        let _ = std::fs::remove_file(endpoint_path(directory));
     }
 }
 
@@ -578,6 +717,14 @@ impl HostClient {
     pub fn reap(&self) -> Result<Vec<ConsoleExit>> {
         match self.request(HostRequest::Reap, 0)? {
             HostResponse::Exits { exits } => Ok(exits),
+            HostResponse::Error { message } => anyhow::bail!("{message}"),
+            other => anyhow::bail!("unexpected host response: {other:?}"),
+        }
+    }
+
+    pub fn shutdown(&self) -> Result<()> {
+        match self.request(HostRequest::Shutdown, 0)? {
+            HostResponse::Ok => wait_until_stopped(&self.endpoint),
             HostResponse::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected host response: {other:?}"),
         }

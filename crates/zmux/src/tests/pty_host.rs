@@ -5,7 +5,7 @@ fn the_host_protocol_is_additive_only() {
     // The host is the part that does not get upgraded: after a daemon replaces
     // itself it finds the *old* host still running, so the daemon must be able
     // to speak to a host at least as old as this.
-    assert!(MINIMUM_HOST_PROTOCOL_VERSION <= HOST_PROTOCOL_VERSION);
+    const { assert!(MINIMUM_HOST_PROTOCOL_VERSION <= HOST_PROTOCOL_VERSION) };
 }
 
 #[test]
@@ -57,4 +57,16 @@ fn an_exit_is_held_until_a_daemon_collects_it() {
         }
         other => panic!("expected exits, got {other:?}"),
     }
+}
+
+#[test]
+fn windows_shell_arguments_match_the_local_terminal_rules() {
+    assert!(escape_windows_shell_args(Some("powershell.exe")));
+    assert!(escape_windows_shell_args(Some(
+        r"C:\Program Files\PowerShell\7\pwsh.exe"
+    )));
+    assert!(escape_windows_shell_args(Some("wsl.exe")));
+    assert!(!escape_windows_shell_args(Some("cmd.exe")));
+    assert!(!escape_windows_shell_args(Some("cmd.bat")));
+    assert!(escape_windows_shell_args(None));
 }

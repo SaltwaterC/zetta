@@ -57,6 +57,10 @@ required-features = ["windows-gui"]
 name = "zmux"
 path = "src/bin/zmux.rs"
 
+[[bin]]
+name = "zmux-pty"
+path = "src/bin/zmux_pty.rs"
+
 [dependencies]
 anyhow = "1"
 async-channel = "2.5.0"

@@ -1,6 +1,17 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 
+goto :main
+
+:append_feature
+if /i "%~1"=="0" exit /b 0
+if /i "%~1"=="false" exit /b 0
+if /i "%~1"=="no" exit /b 0
+if /i "%~1"=="off" exit /b 0
+set "FEATURES=%FEATURES%,%~2"
+exit /b 0
+
+:main
 if not defined CARGO set "CARGO=cargo"
 if not defined SERIAL set "SERIAL=1"
 if not defined HTTP set "HTTP=1"
@@ -54,16 +65,8 @@ if not defined VSCMD_VER (
     if errorlevel 1 exit /b !errorlevel!
 )
 
-%CARGO% build %PROFILE_ARGS% --jobs %CARGO_BUILD_JOBS% --locked --no-default-features --features %FEATURES% --bin zetta --bin zetta-gui --bin zmux
+%CARGO% build %PROFILE_ARGS% --jobs %CARGO_BUILD_JOBS% --locked --no-default-features --features %FEATURES% --bin zetta --bin zetta-gui --bin zmux --bin zmux-pty
 if errorlevel 1 exit /b !errorlevel!
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\verify-windows-binary.ps1 -ConsoleBinaryPath !TARGET_DIR!\zetta.exe -GuiBinaryPath !TARGET_DIR!\zetta-gui.exe -MuxBinaryPath !TARGET_DIR!\zmux.exe
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\verify-windows-binary.ps1 -ConsoleBinaryPath !TARGET_DIR!\zetta.exe -GuiBinaryPath !TARGET_DIR!\zetta-gui.exe -MuxBinaryPath !TARGET_DIR!\zmux.exe -PtyBinaryPath !TARGET_DIR!\zmux-pty.exe
 exit /b !errorlevel!
-
-:append_feature
-if /i "%~1"=="0" exit /b 0
-if /i "%~1"=="false" exit /b 0
-if /i "%~1"=="no" exit /b 0
-if /i "%~1"=="off" exit /b 0
-set "FEATURES=%FEATURES%,%~2"
-exit /b 0

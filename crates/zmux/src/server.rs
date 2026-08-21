@@ -52,6 +52,12 @@ use crate::persistence::{PersistedSession, PersistedSnapshot, PersistenceStore};
 struct Pane {
     id: u64,
     pty: tty::Pty,
+    #[cfg(windows)]
+    /// The console remains owned by the separate pseudoconsole host.
+    console_id: u64,
+    #[cfg(windows)]
+    /// The daemon's PTY reports child exits through this external watcher.
+    child_events: tty::AttachedChildEvents,
     /// Who holds this pane's terminal, and what that means for reading it.
     ///
     /// The daemon must not read a pane an exclusive client is reading: a PTY
@@ -236,11 +242,18 @@ fn prune_exited_panes(daemon: &Arc<Daemon>) -> bool {
     let mut changed = false;
     #[cfg(feature = "session-persistence")]
     let mut removed_session_ids = Vec::new();
+    #[cfg(windows)]
+    let mut closed_consoles = Vec::new();
     for session in sessions.iter_mut() {
         let before = session.panes.len();
-        session
-            .panes
-            .retain(|pane| !(pane.exited && matches!(pane.attachment, Attachment::None)));
+        session.panes.retain(|pane| {
+            let remove = pane.exited && matches!(pane.attachment, Attachment::None);
+            #[cfg(windows)]
+            if remove {
+                closed_consoles.push(pane.console_id);
+            }
+            !remove
+        });
         changed |= session.panes.len() != before;
         #[cfg(feature = "session-persistence")]
         if session.panes.is_empty() {
@@ -261,6 +274,10 @@ fn prune_exited_panes(daemon: &Arc<Daemon>) -> bool {
                 }
             }
         }
+    }
+    #[cfg(windows)]
+    for console_id in closed_consoles {
+        close_host_console(daemon, console_id);
     }
     changed
 }
@@ -341,6 +358,10 @@ pub struct Daemon {
     /// exactly what rebuilding does — so the upgrade would try to execute a
     /// path that cannot exist.
     executable: Option<PathBuf>,
+    #[cfg(windows)]
+    /// The process that owns every Windows pseudoconsole across daemon
+    /// replacements.
+    pty_host: crate::pty_host::HostClient,
     #[cfg(unix)]
     /// The listener is inherited during an upgrade so clients never observe a
     /// rebind gap.
@@ -363,6 +384,7 @@ impl Daemon {
         next_session_id: u64,
         generation: u64,
         #[cfg(unix)] listener_fd: RawFd,
+        #[cfg(windows)] pty_host: crate::pty_host::HostClient,
     ) -> Self {
         #[cfg(feature = "session-persistence")]
         let persistence_enabled = persistence.is_some();
@@ -378,6 +400,8 @@ impl Daemon {
             retention: Mutex::new(retention),
             running: AtomicBool::new(true),
             executable: resolve_own_executable(),
+            #[cfg(windows)]
+            pty_host,
             #[cfg(unix)]
             listener_fd,
             drain_wake: Mutex::new(None),
@@ -406,8 +430,10 @@ fn socket_path(directory: &Path) -> PathBuf {
 pub fn run(
     retention: Retention,
     persistence_recipients: Option<Vec<String>>,
-    resume_from: Option<i32>,
+    #[cfg(unix)] resume_from: Option<i32>,
+    #[cfg(windows)] resume_from: Option<PathBuf>,
     #[cfg(unix)] resume_listener: Option<i32>,
+    #[cfg(windows)] resume_ready: Option<PathBuf>,
 ) -> Result<()> {
     retention.validate()?;
     #[cfg(not(feature = "session-persistence"))]
@@ -422,16 +448,27 @@ pub fn run(
         .map(crate::upgrade::read_handover)
         .transpose()
         .context("reading the multiplexer upgrade handover")?;
+    #[cfg(windows)]
+    let resumed_handover = resume_from
+        .as_deref()
+        .map(crate::upgrade::read_handover)
+        .transpose()
+        .context("reading the multiplexer upgrade handover")?;
     #[cfg(unix)]
     let generation = resumed_handover
         .as_ref()
         .map(|handover| handover.generation)
         .unwrap_or(new_generation()?);
-    #[cfg(not(unix))]
-    let generation = {
-        let _ = resume_from;
-        new_generation()?
-    };
+    #[cfg(windows)]
+    let generation = resumed_handover
+        .as_ref()
+        .map(|handover| handover.generation)
+        .unwrap_or(new_generation()?);
+    #[cfg(windows)]
+    let retention = resumed_handover
+        .as_ref()
+        .map(|handover| handover.retention)
+        .unwrap_or(retention);
     let directory = session_catalog_dir();
     create_private_dir(&directory)?;
     let socket = socket_path(&directory);
@@ -440,10 +477,34 @@ pub fn run(
     // Replacing itself keeps the endpoint: a client holding the old token has
     // to keep working, and reissuing one would lock out every window that is
     // attached to a session right now. A first start gets a fresh token.
+    #[cfg(unix)]
     let inherited = resume_from
         .is_some()
         .then(|| Endpoint::read(&endpoint).ok())
         .flatten();
+    #[cfg(windows)]
+    let inherited = if resumed_handover.is_some() {
+        Some(Endpoint::read(&endpoint).context("reading the daemon endpoint for replacement")?)
+    } else {
+        None
+    };
+
+    #[cfg(windows)]
+    let pty_host = crate::pty_host::ensure_running(&directory)?;
+
+    #[cfg(windows)]
+    if let Some(handover) = resumed_handover.as_ref() {
+        let ready = resume_ready
+            .as_deref()
+            .context("a Windows handover requires --resume-ready")?;
+        validate_handover_with_host(&pty_host, handover)?;
+        crate::upgrade::mark_ready(ready)?;
+        wait_for_old_daemon(
+            inherited
+                .as_ref()
+                .context("the Windows replacement has no old endpoint")?,
+        )?;
+    }
 
     // A stale socket from a daemon that died is not a reason to refuse to
     // start, but a live one is: two daemons would each own half the sessions.
@@ -480,7 +541,7 @@ pub fn run(
         restrict_socket(&socket)?;
         listener
     };
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     let listener = {
         let _ = std::fs::remove_file(&socket);
         let listener = Listener::bind(&socket)
@@ -524,6 +585,8 @@ pub fn run(
         generation,
         #[cfg(unix)]
         listener.as_raw_fd(),
+        #[cfg(windows)]
+        pty_host,
     ));
     #[cfg(unix)]
     if let Some(handover) = resumed_handover {
@@ -539,6 +602,22 @@ pub fn run(
         // prune what an upgraded daemon should not offer.
         prune_exited_panes(&daemon);
         publish(&daemon);
+    }
+    #[cfg(windows)]
+    if let Some(handover) = resumed_handover {
+        let count = adopt_handover(&daemon, handover)
+            .context("adopting sessions across the Windows upgrade")?;
+        log::info!("zmux resumed {count} session(s) across an upgrade");
+        prune_exited_panes(&daemon);
+        publish(&daemon);
+        if let Some(path) = resume_from.as_deref() {
+            crate::upgrade::remove_handover(
+                path,
+                resume_ready
+                    .as_deref()
+                    .expect("validated Windows replacement readiness path"),
+            );
+        }
     }
     start_reaper(daemon.clone())?;
     start_drain(daemon.clone())?;
@@ -590,6 +669,69 @@ pub fn run(
 
 fn new_generation() -> Result<u64> {
     u64::from_str_radix(&random_hex(8)?, 16).context("creating a daemon generation")
+}
+
+#[cfg(windows)]
+fn validate_handover_with_host(
+    host: &crate::pty_host::HostClient,
+    handover: &crate::upgrade::Handover,
+) -> Result<()> {
+    let consoles = host.list()?;
+    let expected = handover
+        .sessions
+        .iter()
+        .flat_map(|session| session.panes.iter())
+        .map(|pane| pane.console_id)
+        .collect::<std::collections::HashSet<_>>();
+    anyhow::ensure!(
+        expected.len()
+            == handover
+                .sessions
+                .iter()
+                .map(|session| session.panes.len())
+                .sum::<usize>(),
+        "the Windows handover contains a duplicate pseudoconsole"
+    );
+    let known = consoles
+        .iter()
+        .map(|console| console.console_id)
+        .collect::<std::collections::HashSet<_>>();
+    for console_id in &expected {
+        anyhow::ensure!(
+            known.contains(console_id),
+            "the pseudoconsole host no longer holds console {console_id}"
+        );
+        let (_, handles) = host.handles(*console_id, std::process::id())?;
+        let handles = crate::transport::claim_duplicated(&handles);
+        anyhow::ensure!(
+            handles.len() == 2,
+            "pseudoconsole {console_id} did not return two pipe handles"
+        );
+    }
+    // A failed daemon start must not strand a console in the host forever.
+    // This is safe because the host directory identifies one daemon instance.
+    for console in consoles {
+        if !expected.contains(&console.console_id) {
+            let _ = host.close(console.console_id);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn wait_for_old_daemon(endpoint: &Endpoint) -> Result<()> {
+    const TIMEOUT: Duration = Duration::from_secs(10);
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if Stream::connect(&endpoint.socket_path).is_err() {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "the previous multiplexer did not release its endpoint within {TIMEOUT:?}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[cfg(unix)]
@@ -914,7 +1056,7 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
             }),
         },
         Request::Upgrade => {
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             {
                 // Only returns when the replacement was refused: a successful
                 // upgrade never comes back, because this process becomes it.
@@ -934,7 +1076,7 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
                     }
                 }
             }
-            #[cfg(not(unix))]
+            #[cfg(not(any(unix, windows)))]
             connection.send(&Response::Error {
                 message: "replacing the multiplexer in place is not supported on this platform; \
                           a pseudoconsole cannot be moved between processes"
@@ -952,6 +1094,17 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
                         "the multiplexer is holding {held} session{}",
                         if held == 1 { "" } else { "s" }
                     ),
+                });
+            }
+            // The daemon can leave its accept loop as soon as `running` is
+            // cleared. Ask the separate Windows host to exit before doing so;
+            // sending the daemon reply first let this process finish while
+            // the connection worker was still responsible for stopping the
+            // host, which stranded `zmux-pty` after an otherwise clean stop.
+            #[cfg(windows)]
+            if let Err(error) = daemon.pty_host.shutdown() {
+                return connection.send(&Response::Error {
+                    message: format!("could not stop the pseudoconsole host: {error:#}"),
                 });
             }
             daemon.running.store(false, Ordering::SeqCst);
@@ -1035,6 +1188,7 @@ fn configure_daemon(
 }
 
 fn spawn(daemon: &Arc<Daemon>, request: SpawnRequest, connection: &mut Connection) -> Result<()> {
+    #[cfg(unix)]
     let options = tty::Options {
         shell: request
             .program
@@ -1049,9 +1203,36 @@ fn spawn(daemon: &Arc<Daemon>, request: SpawnRequest, connection: &mut Connectio
         #[cfg(windows)]
         escape_args: false,
     };
+    #[cfg(unix)]
     let pty = tty::new(&options, window_size(request.size), 0)
         .context("starting the terminal process")?;
+    #[cfg(unix)]
     let child_pid = pty.child_pid();
+    #[cfg(windows)]
+    let (console_id, child_pid, pty, child_events) = {
+        let (console_id, child_pid, handles) = daemon.pty_host.open(
+            request.program,
+            request.args,
+            request.env,
+            request.working_directory,
+            request.size,
+            std::process::id(),
+        )?;
+        let mut handles = crate::transport::claim_duplicated(&handles);
+        if handles.len() != 2 {
+            let _ = daemon.pty_host.close(console_id);
+            anyhow::bail!("the pseudoconsole host did not return two pipe handles");
+        }
+        let conin = handles.remove(1);
+        let conout = handles.remove(0);
+        match tty::attach(conout, conin, child_pid) {
+            Ok((pty, child_events)) => (console_id, child_pid, pty, child_events),
+            Err(error) => {
+                let _ = daemon.pty_host.close(console_id);
+                return Err(error).context("attaching the pseudoconsole to the daemon");
+            }
+        }
+    };
     let pane_id = daemon.next_pane_id.fetch_add(1, Ordering::Relaxed);
     let retention = *daemon.retention.lock().unwrap();
 
@@ -1100,6 +1281,10 @@ fn spawn(daemon: &Arc<Daemon>, request: SpawnRequest, connection: &mut Connectio
     session.panes.push(Pane {
         id: pane_id,
         pty,
+        #[cfg(windows)]
+        console_id,
+        #[cfg(windows)]
+        child_events,
         attachment: exclusive_attachment(request.client_process_id),
         size: request.size,
         retained: retention.new_retained(request.size.columns, request.size.lines),
@@ -1110,7 +1295,7 @@ fn spawn(daemon: &Arc<Daemon>, request: SpawnRequest, connection: &mut Connectio
         pending_input: Vec::new(),
     });
     let pane = session.panes.last().expect("the pane was just pushed");
-    let handover = handover_handles(&pane.pty, request.client_process_id).and_then(|handles| {
+    let handover = handover_handles(daemon, pane, request.client_process_id).and_then(|handles| {
         connection.send_with(
             &Response::Spawned {
                 session_id,
@@ -1125,6 +1310,8 @@ fn spawn(daemon: &Arc<Daemon>, request: SpawnRequest, connection: &mut Connectio
         // Nobody received this terminal, so nothing can ever read it.
         session.panes.retain(|pane| pane.id != pane_id);
         sessions.retain(|session| !session.panes.is_empty());
+        #[cfg(windows)]
+        let _ = daemon.pty_host.close(console_id);
         return Err(error);
     }
     Ok(())
@@ -1486,6 +1673,11 @@ fn attach_exclusive(
             message: format!("session {session_id} has no pane {pane_id}"),
         });
     };
+    if let Err(error) = pause_pane_reader(pane) {
+        return connection.send(&Response::Error {
+            message: format!("could not stop the pane reader before attaching: {error:#}"),
+        });
+    }
     pane.attachment = exclusive_attachment(client_process_id);
     // The screen, and then nothing: the client reads the terminal itself from
     // here, so what the daemon holds stops describing this pane and must not be
@@ -1493,7 +1685,7 @@ fn attach_exclusive(
     let replay = pane.retained.snapshot();
     pane.retained.clear();
     let child_pid = pane.pty.child_pid();
-    let handles = handover_handles(&pane.pty, client_process_id)?;
+    let handles = handover_handles(daemon, pane, client_process_id)?;
     // The guard is this function's to release: publish re-locks the sessions
     // mutex, and the persistence catalogue must be updated before the reply is
     // visible to a client that may immediately refresh it.
@@ -1803,7 +1995,7 @@ fn serve_shared(
                     }
                     let (columns, lines) = effective_size(pane);
                     if (columns, lines) != (pane.size.columns, pane.size.lines) {
-                        apply_size(pane, columns, lines);
+                        apply_size(daemon, pane, columns, lines);
                         broadcast_size(
                             session_id,
                             pane_id,
@@ -1862,6 +2054,17 @@ fn take_exclusive(
             message: format!("session {session_id} has no pane {pane_id}"),
         });
     };
+    if !matches!(&pane.attachment, Attachment::Shared(clients) if clients.len() == 1 && clients[0].process_id == client_process_id)
+    {
+        return connection.send(&Response::Error {
+            message: format!("pane {pane_id} is not shared with client {client_process_id} alone"),
+        });
+    }
+    if let Err(error) = pause_pane_reader(pane) {
+        return connection.send(&Response::Error {
+            message: format!("could not stop the pane reader before taking it: {error:#}"),
+        });
+    }
     // Only the *sole* viewer may take it. With anybody else still attached the
     // pane has to keep being relayed, and handing the descriptor over would stop
     // the others being read to.
@@ -1880,6 +2083,7 @@ fn take_exclusive(
             clients.pop().expect("exactly one client was matched")
         }
         _ => {
+            pane.pty.resume_reader();
             return connection.send(&Response::Error {
                 message: format!(
                     "pane {pane_id} is not shared with client {client_process_id} alone"
@@ -1920,6 +2124,7 @@ fn take_exclusive(
         // trusted to read the terminal either. Leave the pane unheld rather than
         // handing the descriptor to a client that is not reading.
         pane.attachment = Attachment::None;
+        pane.pty.resume_reader();
         drop(sessions);
         daemon.sessions_condvar.notify_all();
         publish(daemon);
@@ -1935,7 +2140,7 @@ fn take_exclusive(
     pane.retained.clear();
     pane.handed_over = None;
     let child_pid = pane.pty.child_pid();
-    let handles = handover_handles(&pane.pty, client_process_id)?;
+    let handles = handover_handles(daemon, pane, client_process_id)?;
     // Neither is read on this path: the client already has the tab this pane
     // belongs to and is only swapping what feeds it. They travel because the
     // exclusive attach's reply is the shape that carries a descriptor.
@@ -2028,7 +2233,7 @@ fn remove_shared_client(
             // A smaller set may want a bigger pane.
             let (columns, lines) = effective_size(pane);
             if (columns, lines) != (pane.size.columns, pane.size.lines) {
-                apply_size(pane, columns, lines);
+                apply_size(daemon, pane, columns, lines);
                 broadcast_size(
                     session_id,
                     pane_id,
@@ -2151,8 +2356,15 @@ fn smallest_size(sizes: impl Iterator<Item = (u16, u16)>, fallback: TerminalSize
 }
 
 /// Applies a size to a pane's terminal, recording it as the pane's size.
-fn apply_size(pane: &mut Pane, columns: u16, lines: u16) {
+fn apply_size(daemon: &Daemon, pane: &mut Pane, columns: u16, lines: u16) {
     use alacritty_terminal::event::OnResize as _;
+    #[cfg(windows)]
+    if let Err(error) = daemon.pty_host.resize(pane.console_id, columns, lines) {
+        log::warn!(
+            "could not resize pseudoconsole {} to {columns}x{lines}: {error:#}",
+            pane.console_id
+        );
+    }
     pane.pty.on_resize(window_size(TerminalSize {
         columns,
         lines,
@@ -2457,6 +2669,7 @@ fn persisted_from_resume_request(
 /// the sessions lock — so a viewer that stopped reading froze every pane the daemon
 /// holds. The queue in [`SharedClient::relay`] is what took the drain out of that
 /// path.
+#[cfg(unix)]
 const RELAY_WRITE_TIMEOUT: Duration = RELAY_STALL_TIMEOUT;
 
 fn detach(
@@ -2533,6 +2746,8 @@ fn detach(
                 if holder == client_process_id =>
             {
                 pane.attachment = Attachment::None;
+                #[cfg(windows)]
+                pane.pty.resume_reader();
             }
             // A shared viewer detaching the session gives up the session, not
             // the relay; its own connection closing is what removes it from the
@@ -2834,6 +3049,11 @@ fn resize_pane(
         cell_width: 0,
         cell_height: 0,
     }));
+    #[cfg(windows)]
+    daemon
+        .pty_host
+        .resize(pane.console_id, columns, lines)
+        .context("resizing the pseudoconsole")?;
     pane.size = TerminalSize {
         columns,
         lines,
@@ -2861,11 +3081,21 @@ fn kill(
         "session {session_id} is protected and can only be ended by its owner or current holder"
     );
     // Dropping the panes drops their PTYs, which hangs up the children.
+    #[cfg(windows)]
+    let consoles = session
+        .panes
+        .iter()
+        .map(|pane| pane.console_id)
+        .collect::<Vec<_>>();
     sessions.retain(|session| session.id != session_id);
     drop(sessions);
     #[cfg(feature = "session-persistence")]
     if let Some(persistence) = daemon.persistence.lock().unwrap().as_mut() {
         persistence.forget(session_id)?;
+    }
+    #[cfg(windows)]
+    for console_id in consoles {
+        close_host_console(daemon, console_id);
     }
     Ok(())
 }
@@ -2882,11 +3112,21 @@ fn forget(
             session_control_authorized(session, client_process_id, peer_process_id),
             "session {session_id} is protected and can only be forgotten by its owner or current holder"
         );
+        #[cfg(windows)]
+        let consoles = session
+            .panes
+            .iter()
+            .map(|pane| pane.console_id)
+            .collect::<Vec<_>>();
         sessions.retain(|session| session.id != session_id);
         drop(sessions);
         #[cfg(feature = "session-persistence")]
         if let Some(persistence) = daemon.persistence.lock().unwrap().as_mut() {
             persistence.forget(session_id)?;
+        }
+        #[cfg(windows)]
+        for console_id in consoles {
+            close_host_console(daemon, console_id);
         }
         return Ok(());
     }
@@ -3015,8 +3255,12 @@ fn close_pane(
         // pane here would evict the other viewers too.
         _ => anyhow::bail!("client {client_process_id} does not hold pane {pane_id}"),
     }
-    let released = end_abandoned_sessions(&mut sessions);
+    let (released, _consoles) = end_abandoned_sessions(&mut sessions);
     drop(sessions);
+    #[cfg(windows)]
+    for console_id in _consoles {
+        close_host_console(daemon, console_id);
+    }
     // An attach may have been waiting on this pane's revoke handover.
     daemon.sessions_condvar.notify_all();
     prune_exited_panes(daemon);
@@ -3754,13 +3998,19 @@ fn reclaim_panes_from_departed_clients(daemon: &Arc<Daemon>) {
                     }
                 );
                 pane.attachment = Attachment::None;
+                #[cfg(windows)]
+                pane.pty.resume_reader();
                 reclaimed = true;
             }
         }
     }
 
-    end_abandoned_sessions(&mut sessions);
+    let (_, _consoles) = end_abandoned_sessions(&mut sessions);
     drop(sessions);
+    #[cfg(windows)]
+    for console_id in _consoles {
+        close_host_console(daemon, console_id);
+    }
     if reclaimed {
         // An attach may be waiting on this pane's revoke handover.
         daemon.sessions_condvar.notify_all();
@@ -3785,8 +4035,9 @@ fn reclaim_panes_from_departed_clients(daemon: &Arc<Daemon>) {
 /// Dropping a `Session` drops its panes' PTYs, which hangs up their children, so
 /// this is also what stops an orphaned shell from lingering. Returns whether
 /// anything ended.
-fn end_abandoned_sessions(sessions: &mut Vec<Session>) -> bool {
+fn end_abandoned_sessions(sessions: &mut Vec<Session>) -> (bool, Vec<u64>) {
     let before = sessions.len();
+    let mut consoles = Vec::new();
     sessions.retain(|session| {
         let abandoned = !session.keep && session.panes.iter().all(|pane| pane.attachment.is_none());
         if abandoned {
@@ -3794,10 +4045,12 @@ fn end_abandoned_sessions(sessions: &mut Vec<Session>) -> bool {
                 "ending session {}, which no window holds and nobody asked to keep",
                 session.id
             );
+            #[cfg(windows)]
+            consoles.extend(session.panes.iter().map(|pane| pane.console_id));
         }
         !abandoned
     });
-    sessions.len() != before
+    (sessions.len() != before, consoles)
 }
 
 fn process_is_running(process_id: u32) -> bool {
@@ -3814,14 +4067,22 @@ fn wake_drain(daemon: &Arc<Daemon>) {
     }
 }
 
+#[cfg(windows)]
+fn close_host_console(daemon: &Daemon, console_id: u64) {
+    if let Err(error) = daemon.pty_host.close(console_id) {
+        log::debug!("could not close pseudoconsole {console_id}: {error:#}");
+    }
+}
+
 /// Why an upgrade did not happen, and whether the client has been told.
 ///
 /// The answer is sent before the exec, because an exec never returns to send
 /// one. Everything that fails after that point therefore must not be reported on
 /// the connection again.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 enum UpgradeRefused {
     Before(anyhow::Error),
+    #[cfg_attr(windows, allow(dead_code))]
     AfterAnswering(anyhow::Error),
 }
 
@@ -3966,8 +4227,104 @@ fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, std::fs::File)> {
     Ok((executable, file))
 }
 
+#[cfg(windows)]
+fn upgrade_daemon(
+    daemon: &Arc<Daemon>,
+    connection: &mut Connection,
+) -> std::result::Result<(), UpgradeRefused> {
+    let (executable, handover, ready) = prepare_upgrade(daemon).map_err(UpgradeRefused::Before)?;
+    let mut replacement = match crate::upgrade::spawn_replacement(&executable, &handover, &ready) {
+        Ok(child) => child,
+        Err(error) => {
+            crate::upgrade::remove_handover(&handover, &ready);
+            return Err(UpgradeRefused::Before(error));
+        }
+    };
+    if let Err(error) = crate::upgrade::wait_for_ready(&mut replacement, &ready) {
+        let _ = replacement.kill();
+        crate::upgrade::remove_handover(&handover, &ready);
+        return Err(UpgradeRefused::Before(error));
+    }
+    if let Err(error) = connection.send(&Response::Ok) {
+        let _ = replacement.kill();
+        crate::upgrade::remove_handover(&handover, &ready);
+        return Err(UpgradeRefused::Before(error));
+    }
+    broadcast(daemon, &Event::Replacing);
+    daemon.running.store(false, Ordering::SeqCst);
+    let _ = Stream::connect(socket_path(&session_catalog_dir()));
+    Ok(())
+}
+
+#[cfg(windows)]
+fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, PathBuf, PathBuf)> {
+    let executable = daemon
+        .executable
+        .clone()
+        .context("this multiplexer does not know its own path, so it cannot be replaced")?;
+    anyhow::ensure!(
+        executable.is_file(),
+        "{} no longer exists, so this multiplexer cannot replace itself with it. Its sessions \
+         are untouched; rebuild or reinstall in place and try again.",
+        executable.display()
+    );
+    anyhow::ensure!(
+        crate::upgrade::replacement_accepts_handover(&executable)?,
+        "{} cannot take over this multiplexer's sessions, so it was not started",
+        executable.display()
+    );
+
+    let sessions = daemon.sessions.lock().unwrap();
+    let now = Instant::now();
+    let handover = crate::upgrade::Handover {
+        version: crate::upgrade::HANDOVER_VERSION,
+        generation: daemon.catalog.lock().unwrap().runner_id(),
+        next_session_id: daemon.next_session_id.load(Ordering::SeqCst),
+        next_pane_id: daemon.next_pane_id.load(Ordering::SeqCst),
+        retention: *daemon.retention.lock().unwrap(),
+        sessions: sessions
+            .iter()
+            .map(|session| crate::upgrade::SessionHandover {
+                id: session.id,
+                summary: session.summary.clone(),
+                state: session.state.clone(),
+                keep: session.keep,
+                offered: session.offered,
+                owner: session.owner,
+                verifier: session
+                    .authentication
+                    .as_ref()
+                    .map(|authentication| authentication.verifier().to_owned()),
+                failed_authentications: session.failed_authentications,
+                refuse_for: session
+                    .refuse_until
+                    .and_then(|until| until.checked_duration_since(now)),
+                panes: session
+                    .panes
+                    .iter()
+                    .map(|pane| crate::upgrade::PaneHandover {
+                        id: pane.id,
+                        console_id: pane.console_id,
+                        child_pid: pane.pty.child_pid(),
+                        attachment: attachment_handover(&pane.attachment),
+                        columns: pane.size.columns,
+                        lines: pane.size.lines,
+                        exited: pane.exited,
+                        exit_status: pane.exit_status,
+                        retained: pane.retained.snapshot(),
+                    })
+                    .collect(),
+            })
+            .collect(),
+    };
+    drop(sessions);
+    validate_handover_with_host(&daemon.pty_host, &handover)?;
+    let (handover, ready) = crate::upgrade::write_handover(&session_catalog_dir(), &handover)?;
+    Ok((executable, handover, ready))
+}
+
 /// A pane's attachment in the form that crosses an exec.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn attachment_handover(attachment: &Attachment) -> crate::upgrade::AttachmentHandover {
     use crate::upgrade::{AttachmentHandover, SharedClientHandover};
     match attachment {
@@ -4003,7 +4360,7 @@ fn attachment_handover(attachment: &Attachment) -> crate::upgrade::AttachmentHan
 ///
 /// Kept separate so the rule is testable without a live handover: never at or
 /// below anything already held, whatever the handover claims.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn next_ids_after(
     session_ids: &[u64],
     pane_ids: &[u64],
@@ -4033,7 +4390,7 @@ fn next_ids_after(
 /// back exclusive-capable would hand the descriptor to whichever viewer
 /// reconnected first, and the rest would be reading a terminal nobody was
 /// relaying.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn adopt_attachment(attachment: crate::upgrade::AttachmentHandover) -> Attachment {
     use crate::upgrade::AttachmentHandover;
     match attachment {
@@ -4161,6 +4518,98 @@ fn adopt_handover(daemon: &Arc<Daemon>, handover: crate::upgrade::Handover) -> R
     Ok(sessions.len())
 }
 
+#[cfg(windows)]
+fn adopt_handover(daemon: &Arc<Daemon>, handover: crate::upgrade::Handover) -> Result<usize> {
+    let mut sessions = daemon.sessions.lock().unwrap();
+    let now = Instant::now();
+    for session in handover.sessions {
+        if sessions.iter().any(|existing| existing.id == session.id) {
+            log::warn!("ignoring session {}, which is already held", session.id);
+            continue;
+        }
+        let mut summary = session.summary;
+        summary.id = session.id;
+        let mut panes = Vec::new();
+        for pane in session.panes {
+            let (child_pid, handles) = daemon
+                .pty_host
+                .handles(pane.console_id, std::process::id())?;
+            anyhow::ensure!(
+                pane.child_pid == 0 || child_pid == 0 || pane.child_pid == child_pid,
+                "pseudoconsole {} changed children during the upgrade",
+                pane.console_id
+            );
+            let mut handles = crate::transport::claim_duplicated(&handles);
+            anyhow::ensure!(
+                handles.len() == 2,
+                "pseudoconsole {} did not return two pipe handles",
+                pane.console_id
+            );
+            let conin = handles.remove(1);
+            let conout = handles.remove(0);
+            let (pty, child_events) = tty::attach(conout, conin, child_pid)
+                .context("attaching an adopted pseudoconsole to the daemon")?;
+            let retention = *daemon.retention.lock().unwrap();
+            let mut retained = retention.new_retained(pane.columns, pane.lines);
+            retained.seed(pane.retained);
+            panes.push(Pane {
+                id: pane.id,
+                pty,
+                console_id: pane.console_id,
+                child_events,
+                attachment: adopt_attachment(pane.attachment),
+                size: TerminalSize {
+                    columns: pane.columns,
+                    lines: pane.lines,
+                    cell_width: 0,
+                    cell_height: 0,
+                },
+                retained,
+                handed_over: None,
+                handover_waiters: 0,
+                exited: pane.exited,
+                exit_status: pane.exit_status,
+                pending_input: Vec::new(),
+            });
+        }
+        sessions.push(Session {
+            id: session.id,
+            summary,
+            state: session.state,
+            authentication: session
+                .verifier
+                .map(SessionAuthentication::from_verifier)
+                .transpose()?,
+            failed_authentications: session.failed_authentications,
+            refuse_until: session.refuse_for.and_then(|left| now.checked_add(left)),
+            panes,
+            keep: session.keep,
+            offered: session.offered,
+            owner: session.owner,
+        });
+    }
+    let session_ids = sessions
+        .iter()
+        .map(|session| session.id)
+        .collect::<Vec<_>>();
+    let pane_ids = sessions
+        .iter()
+        .flat_map(|session| session.panes.iter())
+        .map(|pane| pane.id)
+        .collect::<Vec<_>>();
+    let (next_session_id, next_pane_id) = next_ids_after(
+        &session_ids,
+        &pane_ids,
+        handover.next_session_id,
+        handover.next_pane_id,
+    );
+    daemon
+        .next_session_id
+        .store(next_session_id, Ordering::SeqCst);
+    daemon.next_pane_id.store(next_pane_id, Ordering::SeqCst);
+    Ok(sessions.len())
+}
+
 /// Reaps children and tells whoever is holding their terminals.
 ///
 /// Windows has no `SIGCHLD`: each PTY carries its own exit watcher, which
@@ -4178,6 +4627,32 @@ fn start_reaper(daemon: Arc<Daemon>) -> Result<()> {
 #[cfg(windows)]
 fn windows_reaper_loop(daemon: Arc<Daemon>) {
     loop {
+        match daemon.pty_host.reap() {
+            Ok(exits) if !exits.is_empty() => {
+                let mut sessions = daemon.sessions.lock().unwrap();
+                for exit in exits {
+                    let Some(pane) = sessions
+                        .iter_mut()
+                        .flat_map(|session| session.panes.iter_mut())
+                        .find(|pane| pane.console_id == exit.console_id)
+                    else {
+                        continue;
+                    };
+                    let result = match exit.exit_code {
+                        Some(code) => pane.child_events.report_exit(code),
+                        None => pane.child_events.report_status_unavailable(),
+                    };
+                    if let Err(error) = result {
+                        log::debug!(
+                            "could not report exit for pseudoconsole {}: {error}",
+                            exit.console_id
+                        );
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(error) => log::warn!("could not collect pseudoconsole exits: {error:#}"),
+        }
         let mut exits = Vec::new();
         {
             let mut sessions = daemon.sessions.lock().unwrap();
@@ -4221,11 +4696,12 @@ struct Handover {
 }
 
 #[cfg(unix)]
-fn handover_handles(pty: &tty::Pty, _client_process_id: u32) -> Result<Handover> {
+fn handover_handles(_daemon: &Daemon, pane: &Pane, _client_process_id: u32) -> Result<Handover> {
     // SAFETY: the borrow lives only until the message has been sent, well
     // inside the lifetime of the PTY the daemon is holding.
-    let descriptor =
-        unsafe { std::os::fd::BorrowedFd::borrow_raw(std::os::fd::AsRawFd::as_raw_fd(pty.file())) };
+    let descriptor = unsafe {
+        std::os::fd::BorrowedFd::borrow_raw(std::os::fd::AsRawFd::as_raw_fd(pane.pty.file()))
+    };
     Ok(Handover {
         attachments: vec![descriptor],
         values: Vec::new(),
@@ -4233,23 +4709,45 @@ fn handover_handles(pty: &tty::Pty, _client_process_id: u32) -> Result<Handover>
 }
 
 #[cfg(windows)]
-fn handover_handles(pty: &tty::Pty, client_process_id: u32) -> Result<Handover> {
-    use std::os::windows::io::AsHandle as _;
+fn handover_handles(daemon: &Daemon, pane: &Pane, client_process_id: u32) -> Result<Handover> {
     anyhow::ensure!(
         client_process_id != 0,
         "the client did not say which process to hand its terminal to"
     );
-    let (conout, conin) = pty
-        .handover_handles()
-        .context("this terminal cannot be handed to another process")?;
-    let values = crate::transport::duplicate_to(
-        client_process_id,
-        &[conout.as_handle(), conin.as_handle()],
-    )?;
+    let (_, values) = daemon
+        .pty_host
+        .handles(pane.console_id, client_process_id)?;
     Ok(Handover {
         attachments: Vec::new(),
         values,
     })
+}
+
+/// Stops the Windows daemon reader at the same boundary at which the console
+/// handles are handed to an exclusive client. The reader's internal pipe may
+/// already contain bytes after its last drain pass, so retain and relay those
+/// bytes before the descriptor changes owner.
+#[cfg(windows)]
+fn pause_pane_reader(pane: &mut Pane) -> Result<()> {
+    pane.pty
+        .pause_reader()
+        .context("pausing the Windows pseudoconsole reader")?;
+    let mut buffer = [0; 16 * 1024];
+    loop {
+        let read = pane.pty.read_buffered(&mut buffer);
+        if read == 0 {
+            break;
+        }
+        pane.retained.push(&buffer[..read]);
+        record_handover_output(pane, &buffer[..read]);
+        relay_output(pane, &buffer[..read]);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn pause_pane_reader(_pane: &mut Pane) -> Result<()> {
+    Ok(())
 }
 
 /// Reads whatever a detached pane has produced.
@@ -4274,7 +4772,15 @@ fn read_pane(pty: &mut tty::Pty, buffer: &mut [u8]) -> std::io::Result<usize> {
 /// is gone, and guessing at which file replaced it is how a multiplexer ends
 /// up executing something the user did not install.
 fn resolve_own_executable() -> Option<PathBuf> {
-    let path = std::env::current_exe().ok()?;
+    let current = std::env::current_exe().ok()?;
+    #[cfg(unix)]
+    let path = current;
+    #[cfg(windows)]
+    let path = current
+        .parent()
+        .map(|directory| directory.join("zmux.exe"))
+        .filter(|candidate| candidate.is_file())
+        .unwrap_or(current);
     if path.as_os_str().as_encoded_bytes().ends_with(b" (deleted)") {
         log::warn!(
             "this multiplexer's executable was already replaced at startup, so it cannot be \

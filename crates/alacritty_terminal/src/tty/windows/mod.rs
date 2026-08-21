@@ -14,7 +14,8 @@ mod child;
 mod conpty;
 
 use std::num::NonZeroU32;
-use std::os::windows::io::FromRawHandle as _;
+use std::os::windows::io::{FromRawHandle as _, IntoRawHandle as _};
+use std::path::{Path, PathBuf};
 
 use blocking::{UnblockedReader, UnblockedWriter};
 use conpty::Conpty as Backend;
@@ -23,6 +24,26 @@ use polling::{Event, Poller};
 
 pub const PTY_CHILD_EVENT_TOKEN: usize = 1;
 pub const PTY_READ_WRITE_TOKEN: usize = 2;
+
+/// Converts a Windows verbatim path into the conventional form expected by
+/// shells and runtimes when it is used as a process current directory.
+///
+/// `fs::canonicalize` returns paths such as `\\?\\C:\\work`. The Win32 file
+/// APIs accept those paths, but CMD, PowerShell's filesystem provider, and
+/// some programs built on .NET do not treat them as ordinary current
+/// directories. A process current directory is not a place where the
+/// extended-length spelling provides useful behavior, so remove only the
+/// verbatim wrapper here and leave all other paths unchanged.
+pub fn normalize_working_directory(path: &Path) -> PathBuf {
+    let value = path.to_string_lossy();
+    if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = value.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        path.to_path_buf()
+    }
+}
 
 type ReadPipe = UnblockedReader<AnonRead>;
 type WritePipe = UnblockedWriter<AnonWrite>;
@@ -125,7 +146,66 @@ pub fn attach(
 const PIPE_CAPACITY: usize = conpty::PIPE_CAPACITY;
 
 pub fn new(config: &Options, window_size: WindowSize, _window_id: u64) -> Result<Pty> {
-    conpty::new(config, window_size)
+    let conpty::SpawnedPty { backend, conout, conin, child_watcher } =
+        conpty::new(config, window_size)?;
+    // Duplicated before the unblocking wrappers take ownership of the pipes:
+    // the multiplexer hands these to a client when it attaches, and there is
+    // nothing left to duplicate once the reader thread owns the original.
+    let handover = conpty::duplicate_console_pipes(&conout, &conin);
+    let conout = unsafe { AnonRead::from_raw_handle(conout.into_raw_handle()) };
+    let conin = unsafe { AnonWrite::from_raw_handle(conin.into_raw_handle()) };
+    let conout = UnblockedReader::new(conout, PIPE_CAPACITY);
+    let conin = UnblockedWriter::new(conin, PIPE_CAPACITY);
+    Ok(Pty::new(backend, conout, conin, child_watcher, handover))
+}
+
+/// Creates a pseudoconsole for the Windows multiplexer host.
+///
+/// The host keeps the console's raw pipes open and hands duplicates to the
+/// attached client. It must not wrap them in `UnblockedReader`/`UnblockedWriter`:
+/// those wrappers consume or write the pipe on their own threads, competing
+/// with the process that is actually displaying the terminal.
+pub fn new_host(config: &Options, window_size: WindowSize) -> Result<PtyOwner> {
+    let conpty::SpawnedPty { backend, conout, conin, child_watcher } =
+        conpty::new(config, window_size)?;
+    Ok(PtyOwner { backend, conout, conin, child_watcher })
+}
+
+/// The multiplexer host's side of a pseudoconsole.
+///
+/// This owns the `HPCON`, child watcher, and one keep-alive handle for each
+/// console pipe, but deliberately does not read or write either pipe. The
+/// handles are duplicated into the daemon/client that owns the visible
+/// terminal.
+pub struct PtyOwner {
+    // Keep the backend first: closing the pseudoconsole before its pipe handles
+    // avoids the ConPTY close/drain deadlock documented in `Conpty::drop`.
+    backend: Backend,
+    conout: std::os::windows::io::OwnedHandle,
+    conin: std::os::windows::io::OwnedHandle,
+    child_watcher: ChildExitWatcher,
+}
+
+impl PtyOwner {
+    pub fn handover_handles(
+        &self,
+    ) -> (&std::os::windows::io::OwnedHandle, &std::os::windows::io::OwnedHandle) {
+        (&self.conout, &self.conin)
+    }
+
+    pub fn child_pid(&self) -> u32 {
+        self.child_watcher.pid().map(|pid| pid.get()).unwrap_or_default()
+    }
+
+    pub fn next_child_event(&mut self) -> Option<ChildEvent> {
+        child_event_from_recv(self.child_watcher.event_rx().try_recv())
+    }
+}
+
+impl OnResize for PtyOwner {
+    fn on_resize(&mut self, window_size: WindowSize) {
+        self.backend.on_resize(window_size);
+    }
 }
 
 impl Pty {
@@ -164,6 +244,25 @@ impl Pty {
 
     pub fn child_watcher(&self) -> &ChildExitWatcher {
         &self.child_watcher
+    }
+
+    /// Stop consuming the attached console's output until the daemon owns it
+    /// again. A Windows ConPTY has one meaningful reader, so leaving the
+    /// daemon's source thread alive while handing duplicate handles to a
+    /// client splits the stream between the two processes.
+    pub fn pause_reader(&mut self) -> io::Result<()> {
+        self.conout.pause()
+    }
+
+    /// Allow the daemon to begin consuming output again on its next drain.
+    pub fn resume_reader(&mut self) {
+        self.conout.resume();
+    }
+
+    /// Read bytes that were already copied into the daemon's internal pipe,
+    /// without starting a new source reader.
+    pub fn read_buffered(&mut self, buffer: &mut [u8]) -> usize {
+        self.conout.try_read_buffered(buffer)
     }
 }
 
@@ -320,6 +419,7 @@ pub fn win32_string<S: AsRef<OsStr> + ?Sized>(value: &S) -> Vec<u16> {
 mod test {
     use crate::tty::windows::{cmdline, push_escaped_arg};
     use crate::tty::{ChildEvent, Options, Shell};
+    use std::path::{Path, PathBuf};
     use std::sync::mpsc::TryRecvError;
 
     #[test]
@@ -382,5 +482,40 @@ mod test {
 
         options.escape_args = true;
         assert_eq!(cmdline(&options), "echo \"hello world\"");
+    }
+
+    #[test]
+    fn test_powershell_command_is_quoted_as_one_argument() {
+        let script = r#"[Console]::Write("$([char]27)]2;zetta-cwd:$zettaDirectory$([char]27)\")"#;
+        let options = Options {
+            shell: Some(Shell {
+                program: "pwsh.exe".to_owned(),
+                args: vec!["-NoExit".to_owned(), "-Command".to_owned(), script.to_owned()],
+            }),
+            working_directory: None,
+            drain_on_exit: true,
+            env: Default::default(),
+            escape_args: true,
+        };
+
+        let command_line = cmdline(&options);
+        assert!(command_line.contains("-Command [Console]::Write(\\\"$"));
+        assert!(command_line.ends_with(r#"$([char]27)\\\")"#));
+    }
+
+    #[test]
+    fn verbatim_working_directories_are_normalized_for_shells() {
+        assert_eq!(
+            super::normalize_working_directory(Path::new(r"\\?\C:\work\zetta")),
+            PathBuf::from(r"C:\work\zetta")
+        );
+        assert_eq!(
+            super::normalize_working_directory(Path::new(r"\\?\UNC\server\share\zetta")),
+            PathBuf::from(r"\\server\share\zetta")
+        );
+        assert_eq!(
+            super::normalize_working_directory(Path::new(r"C:\work\zetta")),
+            PathBuf::from(r"C:\work\zetta")
+        );
     }
 }

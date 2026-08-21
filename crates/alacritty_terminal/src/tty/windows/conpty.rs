@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io::{Error, Result};
 use std::os::windows::ffi::OsStrExt;
-use std::os::windows::io::IntoRawHandle;
+use std::os::windows::io::{FromRawHandle, IntoRawHandle, OwnedHandle};
 use std::{mem, ptr};
 
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, S_OK};
@@ -22,9 +22,8 @@ use windows_sys::Win32::System::Threading::{
 
 use crate::event::{OnResize, WindowSize};
 use crate::tty::Options;
-use crate::tty::windows::blocking::{UnblockedReader, UnblockedWriter};
 use crate::tty::windows::child::ChildExitWatcher;
-use crate::tty::windows::{Pty, cmdline, win32_string};
+use crate::tty::windows::{cmdline, normalize_working_directory, win32_string};
 
 /// Visible to the parent module so an *attached* console is unblocked through
 /// the same buffer as one created here, by construction rather than by a
@@ -110,7 +109,14 @@ impl Drop for Conpty {
 // The ConPTY handle can be sent between threads.
 unsafe impl Send for Conpty {}
 
-pub fn new(config: &Options, window_size: WindowSize) -> Result<Pty> {
+pub(super) struct SpawnedPty {
+    pub(super) backend: Conpty,
+    pub(super) conout: OwnedHandle,
+    pub(super) conin: OwnedHandle,
+    pub(super) child_watcher: ChildExitWatcher,
+}
+
+pub(super) fn new(config: &Options, window_size: WindowSize) -> Result<SpawnedPty> {
     let api = ConptyApi::new();
     let mut pty_handle: HPCON = 0;
 
@@ -206,7 +212,10 @@ pub fn new(config: &Options, window_size: WindowSize) -> Result<Pty> {
 
     // Prepare child process creation arguments.
     let cmdline = win32_string(&cmdline(config));
-    let cwd = config.working_directory.as_ref().map(win32_string);
+    let cwd = config.working_directory.as_deref().map(|directory| {
+        let directory = normalize_working_directory(directory);
+        win32_string(directory.as_os_str())
+    });
     let mut creation_flags = EXTENDED_STARTUPINFO_PRESENT;
     let custom_env_block = convert_custom_env(&config.env);
     let custom_env_block_pointer = match &custom_env_block {
@@ -237,13 +246,6 @@ pub fn new(config: &Options, window_size: WindowSize) -> Result<Pty> {
         }
     }
 
-    // Duplicated before the unblocking wrappers take ownership of the pipes:
-    // the multiplexer hands these to a client when it attaches, and there is
-    // nothing left to duplicate once the reader thread owns the original.
-    let handover = duplicate_console_pipes(&conout, &conin);
-    let conin = UnblockedWriter::new(conin, PIPE_CAPACITY);
-    let conout = UnblockedReader::new(conout, PIPE_CAPACITY);
-
     // `ChildExitWatcher` takes ownership of the process handle. The thread
     // handle is not needed after CreateProcessW returns and must be closed
     // independently.
@@ -254,7 +256,16 @@ pub fn new(config: &Options, window_size: WindowSize) -> Result<Pty> {
     let child_watcher = child_watcher?;
     let conpty = Conpty { handle: pty_handle as HPCON, api };
 
-    Ok(Pty::new(conpty, conout, conin, child_watcher, handover))
+    // Keep the console pipes as raw handles until the caller decides whether
+    // it is creating an ordinary terminal (which needs the unblocking reader
+    // and writer) or a multiplexer host console (which must not read at all).
+    // The latter hands duplicates to the attached client; putting the pipes in
+    // `UnblockedReader` here would make the host compete with that client for
+    // ConPTY output.
+    let conout = unsafe { OwnedHandle::from_raw_handle(conout.into_raw_handle()) };
+    let conin = unsafe { OwnedHandle::from_raw_handle(conin.into_raw_handle()) };
+
+    Ok(SpawnedPty { backend: conpty, conout, conin, child_watcher })
 }
 
 // Windows environment variables are case-insensitive, and the caller is responsible for
@@ -334,7 +345,7 @@ impl From<WindowSize> for COORD {
 /// Returns `None` when either duplicate fails; a partial pair is useless, and
 /// a terminal that simply cannot be handed over is better than one that hands
 /// over half of itself.
-fn duplicate_console_pipes(
+pub(super) fn duplicate_console_pipes(
     conout: &impl std::os::windows::io::AsRawHandle,
     conin: &impl std::os::windows::io::AsRawHandle,
 ) -> Option<(std::os::windows::io::OwnedHandle, std::os::windows::io::OwnedHandle)> {

@@ -5,9 +5,7 @@ mod pty_info;
 mod snapshot;
 pub mod terminal_settings;
 
-#[cfg(not(windows))]
-use anyhow::Context as _;
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use futures_lite::future::yield_now;
 use log::trace;
 
@@ -1146,6 +1144,13 @@ fn reported_foreground_command_from_title(title: &str) -> Option<String> {
 #[cfg(windows)]
 fn reported_foreground_command_name(command: &str) -> Option<String> {
     let command = command.split_whitespace().next()?;
+    // A relative path is not a command name. In particular, do not turn a
+    // shell-reported `./program` into a seemingly trustworthy bare name after
+    // stripping its path; absolute Windows paths are still reduced to their
+    // executable name below.
+    if command.starts_with('.') {
+        return None;
+    }
     let command = command.rsplit(['/', '\\']).next().unwrap_or(command);
     normalize_path_command_name(command)
 }
@@ -1547,6 +1552,7 @@ fn open_provided_pty(
 ) -> Result<(
     AlacrittyPty,
     Option<alacritty_terminal::tty::AttachedChildEvents>,
+    Vec<u8>,
 )> {
     let _ = pty_options;
     let (program, args) = match shell {
@@ -1564,7 +1570,9 @@ fn open_provided_pty(
     if !handover.replay.is_empty() {
         output_processor.advance(&mut *term.lock(), &handover.replay);
     }
-    Ok((pty, Some(child_events)))
+    // Windows has already replayed the retained output into the terminal,
+    // unlike Unix, which defers it until the terminal has been laid out.
+    Ok((pty, Some(child_events), Vec::new()))
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -1579,6 +1587,7 @@ fn open_provided_pty(
 ) -> Result<(
     AlacrittyPty,
     Option<alacritty_terminal::tty::AttachedChildEvents>,
+    Vec<u8>,
 )> {
     anyhow::bail!("the multiplexer cannot hand over a console on this platform")
 }
@@ -1836,11 +1845,9 @@ impl TerminalBuilder {
             alacritty_terminal::tty::attach(handover.descriptor, handover.child_pid)
                 .context("adopting the multiplexer's terminal")?;
         #[cfg(windows)]
-        let (pty, child_events) = {
-            use anyhow::Context as _;
+        let (pty, child_events) =
             alacritty_terminal::tty::attach(handover.conout, handover.conin, handover.child_pid)
-                .context("adopting the multiplexer's terminal")?
-        };
+                .context("adopting the multiplexer's terminal")?;
         let info = PtyProcessInfo::new(ProcessIdGetter::from(&pty));
         let listener = ZedListener::new(
             builder.events_tx.clone(),
@@ -5713,8 +5720,10 @@ mod tests {
 
     /// A writer that records what a terminal sends, so a test can tell whether
     /// input reached the byte stream or vanished into a stopped pty loop.
+    #[cfg(unix)]
     struct RecordingWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
+    #[cfg(unix)]
     impl std::io::Write for RecordingWriter {
         fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
             self.0.lock().unwrap().extend_from_slice(buffer);
@@ -6655,7 +6664,6 @@ mod tests {
         );
     }
 
-    #[cfg(not(target_os = "windows"))]
     fn init_test(cx: &mut TestAppContext) {
         cx.update(|cx| {
             let settings_store = settings::SettingsStore::test(cx);

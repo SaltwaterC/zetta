@@ -725,6 +725,16 @@ impl<T> Term<T> {
         &mut self.grid
     }
 
+    /// Access to the inactive screen buffer.
+    ///
+    /// This is the primary buffer while the alternate screen is active, and
+    /// the alternate buffer otherwise. Consumers that serialize a terminal
+    /// state need both buffers: replaying only the active alternate screen
+    /// would make leaving a full-screen program reveal a blank primary screen.
+    pub(crate) fn inactive_grid(&self) -> &Grid<Cell> {
+        &self.inactive_grid
+    }
+
     /// Resize terminal to new dimensions.
     pub fn resize<S: Dimensions>(&mut self, size: S) {
         let old_cols = self.columns();

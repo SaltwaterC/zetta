@@ -87,9 +87,17 @@ endif
 # SYNTAX_HIGHLIGHTING, or SESSION_PERSISTENCE to 0, false, no, or off to omit
 # that capability from the built binary.
 # TFTP is a convenient shorthand for disabling both the server and client.
-# Set X11=1 to include the X11 backend alongside the default Wayland backend.
+# Linux and FreeBSD default to Wayland; set X11=1 to include the X11 backend.
 tool_enabled = $(if $(filter 0 false no off,$(strip $(1))),,1)
+ifeq ($(OS),Windows_NT)
+BUILD_FEATURES := windows-gui
+else ifeq ($(UNAME_S),Darwin)
+BUILD_FEATURES :=
+else ifneq ($(filter Linux FreeBSD,$(UNAME_S)),)
 BUILD_FEATURES := wayland
+else
+BUILD_FEATURES :=
+endif
 ifneq ($(call tool_enabled,$(SERIAL)),)
 BUILD_FEATURES += serial-console
 endif
@@ -115,7 +123,9 @@ ifneq ($(call tool_enabled,$(SESSION_PERSISTENCE)),)
 BUILD_FEATURES += session-persistence
 endif
 ifneq ($(call tool_enabled,$(X11)),)
+ifneq ($(filter Linux FreeBSD,$(UNAME_S)),)
 BUILD_FEATURES += x11
+endif
 endif
 
 export SERIAL HTTP TFTP TFTP_SERVER TFTP_CLIENT NOTIFY CLIPBOARD SYNTAX_HIGHLIGHTING SESSION_PERSISTENCE X11
@@ -168,10 +178,10 @@ build:
 	cmd.exe /d /c scripts\build-windows.cmd $(CARGO_PROFILE_ARGS)
 
 install: build
-	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action Install -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" -SourceMuxBinary "$(BUILD_TARGET_DIR)/zmux.exe"
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action Install -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" -SourceMuxBinary "$(BUILD_TARGET_DIR)/zmux.exe" -SourcePtyBinary "$(BUILD_TARGET_DIR)/zmux-pty.exe"
 
 install-binary:
-	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action InstallBinary -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" -SourceMuxBinary "$(BUILD_TARGET_DIR)/zmux.exe"
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action InstallBinary -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" -SourceMuxBinary "$(BUILD_TARGET_DIR)/zmux.exe" -SourcePtyBinary "$(BUILD_TARGET_DIR)/zmux-pty.exe"
 
 install-capabilities:
 

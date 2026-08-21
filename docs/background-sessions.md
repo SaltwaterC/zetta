@@ -94,11 +94,10 @@ the Zetta process and are not held by the daemon. The in-process runner still
 supports **Detach** and **Keep running**: closing a window moves those tabs into
 the dormant Zetta process, and reopening a window in that same process can
 reconnect them. `Keep running` does not imply sharing in this mode, and Zetta
-does not inspect, connect to, or stop an already-running multiplexer. On the
-Phase 0–2 Windows build, daemon mode is intentionally gated; start with
-`zetta --no-mux` until the Windows pseudoconsole host lifecycle is delivered.
-The standalone `zmux.exe` package is still built and installed for
-daemon-capable platforms.
+does not inspect, connect to, or stop an already-running multiplexer. On
+Windows the daemon is accompanied by `zmux-pty.exe`, a small helper that owns
+the pseudoconsole handles so the daemon can be replaced without ending the
+shells it holds.
 
 Debug builds use a protocol-scoped `sessions-debug-vN` directory. This lets a
 `target/debug/zetta` and its adjacent `target/debug/zmux` run alongside an
@@ -129,11 +128,14 @@ success, because a reply says the request arrived, not that the process left.
 ### Replacing the multiplexer
 
 `zmux --upgrade` replaces the running multiplexer without ending anything it is
-holding. It re-executes itself, so the process, its terminals and its
-parent/child relationship with every shell all survive; a session's protection
-and its failed-attempt backoff survive with them. The replacement is checked
-before it is run, so a multiplexer that cannot be replaced keeps running rather
-than taking its sessions down with it.
+holding. On Unix it re-executes itself, so the process, its terminals and its
+parent/child relationship with every shell all survive. On Windows the daemon
+is started side by side from the same executable path, while `zmux-pty.exe`
+continues to own the pseudoconsole handles and child processes; the new daemon
+adopts the session state and reconnects to those consoles. In both cases a
+session's protection and failed-attempt backoff survive. The replacement is
+checked before the old daemon is stopped, so a candidate that cannot take over
+keeps the running sessions safe.
 
 Panes that are on screen at the time are unaffected, whether or not they were
 ever detached. Zetta holds their terminals itself, so they keep displaying output
@@ -160,9 +162,9 @@ until the client's half was there. The replacement is still the image the
 multiplexer resolved for itself at startup — never one a client names — so this is
 no more privileged than any other upgrade.
 
-Upgrading is not supported on Windows, where a pseudoconsole cannot be moved
-between processes. Phase 0–2 Windows therefore uses the explicit `--no-mux`
-path; sessions have to be closed there before the daemon lifecycle is enabled.
+On Windows the small `zmux-pty.exe` host is deliberately not replaced during
+this operation. It is a versioned, additive protocol boundary: a newly built
+daemon must continue to drive the host that created the existing consoles.
 
 ### How much output is kept
 

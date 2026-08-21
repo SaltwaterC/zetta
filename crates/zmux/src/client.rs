@@ -1693,10 +1693,14 @@ fn append_startup_retention_arguments(arguments: &mut Vec<String>, retention: Op
 /// unrelated `zmux` earlier in the path cannot be handed a session's terminals.
 fn multiplexer_command() -> Result<(PathBuf, Vec<String>)> {
     let current = std::env::current_exe().context("locating this executable")?;
-    if current.file_name().and_then(|name| name.to_str()) == Some("zmux") {
+    let current_name = current
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if current_name == "zmux" || (cfg!(windows) && current_name.eq_ignore_ascii_case("zmux.exe")) {
         return Ok((current, vec!["--daemon".to_owned()]));
     }
-    let beside = current.with_file_name("zmux");
+    let beside = current.with_file_name(if cfg!(windows) { "zmux.exe" } else { "zmux" });
     if beside.is_file() {
         return Ok((beside, vec!["--daemon".to_owned()]));
     }

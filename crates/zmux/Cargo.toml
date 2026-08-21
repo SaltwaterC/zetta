@@ -14,6 +14,10 @@ doctest = false
 name = "zmux"
 path = "src/main.rs"
 
+[[bin]]
+name = "zmux-pty"
+path = "src/bin/zmux_pty.rs"
+
 [features]
 default = ["scrollback-buffer", "session-persistence"]
 # Retains a bounded in-memory ring buffer of a detached pane's output, and the
@@ -59,6 +63,7 @@ windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_System_Console",
+    "Win32_System_Pipes",
     "Win32_System_Threading",
 ] }
 

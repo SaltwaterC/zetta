@@ -12,6 +12,7 @@ param(
     [string]$SourceBinary,
     [string]$SourceGuiBinary,
     [string]$SourceMuxBinary,
+    [string]$SourcePtyBinary,
     [string]$InstallDirectory,
     [string]$ShortcutPath
 )
@@ -35,6 +36,9 @@ if (-not $SourceGuiBinary) {
 if (-not $SourceMuxBinary) {
     $SourceMuxBinary = Join-Path (Split-Path -Parent $SourceBinary) "zmux.exe"
 }
+if (-not $SourcePtyBinary) {
+    $SourcePtyBinary = Join-Path (Split-Path -Parent $SourceBinary) "zmux-pty.exe"
+}
 if (-not $InstallDirectory) {
     $InstallDirectory = Join-Path $env:LOCALAPPDATA "Programs\Zetta"
 }
@@ -45,6 +49,7 @@ if (-not $ShortcutPath) {
 $installedBinary = Join-Path $InstallDirectory "zetta.exe"
 $installedGuiBinary = Join-Path $InstallDirectory "zetta-gui.exe"
 $installedMuxBinary = Join-Path $InstallDirectory "zmux.exe"
+$installedPtyBinary = Join-Path $InstallDirectory "zmux-pty.exe"
 $runtimeFileNames = @("conpty.dll", "OpenConsole.exe")
 $sourceDirectory = Split-Path -Parent $SourceBinary
 $pathMarker = Join-Path $InstallDirectory ".zetta-path-managed"
@@ -60,7 +65,8 @@ function Get-InstallFiles {
     $files = @(
         [pscustomobject]@{ Source = $SourceBinary; Destination = $installedBinary },
         [pscustomobject]@{ Source = $SourceGuiBinary; Destination = $installedGuiBinary },
-        [pscustomobject]@{ Source = $SourceMuxBinary; Destination = $installedMuxBinary }
+        [pscustomobject]@{ Source = $SourceMuxBinary; Destination = $installedMuxBinary },
+        [pscustomobject]@{ Source = $SourcePtyBinary; Destination = $installedPtyBinary }
     )
     foreach ($fileName in $runtimeFileNames) {
         $files += [pscustomobject]@{

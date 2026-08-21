@@ -7,21 +7,24 @@
 //! reads — takes one when it hands a session back. Without it, reattaching would
 //! show whatever the program happens to redraw next and nothing underneath.
 //!
-//! Its tests live in `crates/terminal/src/tests/snapshot.rs`, where the harness
-//! for building a terminal from a byte stream already is.
+//! Its terminal-facing tests live in `crates/terminal/src/tests/snapshot.rs`,
+//! where the harness for building a terminal from a byte stream already is;
+//! this module also keeps a small buffer-only regression test below.
 //!
 //! The output is SGR attributes, text, and newlines, plus whatever it takes to
 //! restore a session that was not in the state a fresh terminal starts in: the
 //! alternate screen entry, the cursor position, and the cursor visibility. A
 //! fresh terminal starts on the primary screen with a visible cursor at the end
-//! of whatever it has replayed, so a session that matches that stays plain and
-//! a full-screen program — which hides the cursor and addresses it directly —
-//! is restored into the buffer it actually ran in.
+//! of whatever it has replayed, so a session that matches that stays plain. A
+//! full-screen program — which hides the cursor and addresses it directly —
+//! is restored into the buffer it actually ran in, while the primary buffer is
+//! restored before entering the alternate one so leaving the program reveals
+//! the shell screen it had before the handover.
 
 use std::io::Write as _;
 
 use crate::{
-    grid::{Dimensions as _, Row},
+    grid::{Dimensions as _, Grid, Row},
     index::{Column, Line},
     term::{
         Term, TermMode,
@@ -105,9 +108,7 @@ fn painted_length(row: &Row<Cell>) -> usize {
 /// Bounded by line count rather than bytes because that is what the user sees;
 /// the caller bounds the result again by whatever it is willing to retain.
 pub fn ansi_snapshot<T>(term: &Term<T>, max_lines: usize) -> Vec<u8> {
-    let grid = term.grid();
-    let total = grid.total_lines();
-    if total == 0 || max_lines == 0 {
+    if term.grid().total_lines() == 0 || max_lines == 0 {
         return Vec::new();
     }
 
@@ -115,6 +116,45 @@ pub fn ansi_snapshot<T>(term: &Term<T>, max_lines: usize) -> Vec<u8> {
     let in_alternate_screen = mode.contains(TermMode::ALT_SCREEN);
     let cursor_hidden = !mode.contains(TermMode::SHOW_CURSOR);
 
+    let mut out = Vec::new();
+    if in_alternate_screen {
+        // The inactive grid is the primary screen while a full-screen program
+        // owns the alternate one. Restore it first: when the program exits,
+        // its 1049l must reveal the shell screen that was underneath it rather
+        // than the blank primary buffer of the fresh terminal we replay into.
+        let primary = term.inactive_grid();
+        let primary_cursor_needs_line_advance = primary.cursor.point.column.0 > 0;
+        append_grid_snapshot(&mut out, primary, max_lines, false);
+        if primary_cursor_needs_line_advance {
+            // Windows PowerShell can leave the cursor after the command that
+            // launched a TUI. Its next prompt does not always emit a line
+            // ending after the alternate screen closes, so preserve the
+            // command line and put the restored prompt on the following row.
+            out.extend_from_slice(b"\r\n");
+        }
+
+        // A full-screen program owns the alternate screen; enter it before
+        // replaying the active grid so its drawing and subsequent input remain
+        // in the buffer the program expects.
+        out.extend_from_slice(b"\x1b[?1049h");
+    }
+
+    append_grid_snapshot(&mut out, term.grid(), max_lines, cursor_hidden);
+
+    // Last, so the replay above happens in a fresh terminal's modes and the
+    // session's own modes are what the *program* then talks to. `ORIGIN` in
+    // particular changes how the cursor position just emitted would be read.
+    write_modes(&mut out, *mode);
+    out
+}
+
+/// Appends one screen buffer's contents and cursor position to a replay.
+///
+/// `hide_cursor` applies only to the active buffer. Cursor visibility is a
+/// terminal-wide mode, so hiding it while restoring the primary buffer would
+/// also hide it before the alternate-screen program has been replayed; emit it
+/// once, after the active buffer instead.
+fn append_grid_snapshot(out: &mut Vec<u8>, grid: &Grid<Cell>, max_lines: usize, hide_cursor: bool) {
     // Walk from the oldest retained line to the bottom of the screen. Lines
     // above the requested limit are dropped from the top, which is where a
     // terminal loses history anyway.
@@ -124,13 +164,6 @@ pub fn ansi_snapshot<T>(term: &Term<T>, max_lines: usize) -> Vec<u8> {
         .saturating_sub(max_lines.saturating_sub(1) as i32)
         .max(grid.topmost_line().0);
     let last = grid.bottommost_line().0;
-
-    let mut out = Vec::new();
-    if in_alternate_screen {
-        // A full-screen program owns the alternate screen; reattach into the
-        // primary one and its drawing continues in the wrong buffer.
-        out.extend_from_slice(b"\x1b[?1049h");
-    }
 
     let mut style = Style::default();
     // Trailing blank lines at the bottom of the screen are not worth replaying;
@@ -166,7 +199,7 @@ pub fn ansi_snapshot<T>(term: &Term<T>, max_lines: usize) -> Vec<u8> {
 
             let cell_style = Style::of(cell);
             if cell_style != style {
-                write_sgr(&mut out, &cell_style);
+                write_sgr(out, &cell_style);
                 style = cell_style;
             }
             let mut buffer = [0; 4];
@@ -204,14 +237,9 @@ pub fn ansi_snapshot<T>(term: &Term<T>, max_lines: usize) -> Vec<u8> {
     if on_replayed_content && (cursor_row, cursor_column) != (natural_line, natural_column) {
         write!(out, "\x1b[{};{}H", cursor_row + 1, cursor_column + 1).expect("write to Vec");
     }
-    if cursor_hidden {
+    if hide_cursor {
         out.extend_from_slice(b"\x1b[?25l");
     }
-    // Last, so the replay above happens in a fresh terminal's modes and the
-    // session's own modes are what the *program* then talks to. `ORIGIN` in
-    // particular changes how the cursor position just emitted would be read.
-    write_modes(&mut out, *mode);
-    out
 }
 
 /// The modes a session was in that a fresh terminal is not.
@@ -376,4 +404,60 @@ fn named_index(named: NamedColor) -> Option<u8> {
         // to the reset keeps the replay readable rather than approximating.
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ansi_snapshot;
+
+    use crate::{
+        event::VoidListener,
+        grid::Dimensions,
+        index::{Column, Line},
+        term::{Config, Term, cell::LineLength as _},
+        vte::ansi::{Processor, StdSyncHandler},
+    };
+
+    struct Size {
+        columns: usize,
+        lines: usize,
+    }
+
+    impl Dimensions for Size {
+        fn total_lines(&self) -> usize {
+            self.lines
+        }
+
+        fn screen_lines(&self) -> usize {
+            self.lines
+        }
+
+        fn columns(&self) -> usize {
+            self.columns
+        }
+    }
+
+    fn term_showing(input: &[u8]) -> Term<VoidListener> {
+        let mut term = Term::new(Config::default(), &Size { columns: 80, lines: 24 }, VoidListener);
+        Processor::<StdSyncHandler>::new().advance(&mut term, input);
+        term
+    }
+
+    fn line_text(term: &Term<VoidListener>, line: i32) -> String {
+        let row = &term.grid()[Line(line)];
+        (0..row.line_length().0).map(|column| row[Column(column)].c).collect()
+    }
+
+    #[test]
+    fn leaving_an_alternate_screen_restores_the_primary_buffer() {
+        let original = term_showing(b"prompt> htop\x1b[?1049h\x1b[2Jpanel");
+        let snapshot = ansi_snapshot(&original, 1000);
+        let mut replayed = term_showing(&snapshot);
+
+        Processor::<StdSyncHandler>::new()
+            .advance(&mut replayed, b"\x1b[?1049lPS C:\\Users\\saltw> ");
+
+        assert_eq!(line_text(&replayed, 0), "prompt> htop");
+        assert_eq!(line_text(&replayed, 1), "PS C:\\Users\\saltw>");
+    }
 }

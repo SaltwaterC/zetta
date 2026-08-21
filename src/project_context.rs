@@ -55,8 +55,11 @@ impl ProjectState {
     }
 
     pub(crate) fn config_for_pane(&self, pane_id: u64) -> Option<&Arc<ProjectConfig>> {
-        self.root_for_pane(pane_id)
-            .and_then(|root| self.configs.get(root))
+        self.root_for_pane(pane_id).and_then(|root| {
+            self.configs
+                .iter()
+                .find_map(|(config_root, config)| paths_equal(config_root, root).then_some(config))
+        })
     }
 
     pub(crate) fn insert_config(&mut self, config: ProjectConfig) -> Arc<ProjectConfig> {

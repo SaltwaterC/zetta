@@ -27,6 +27,9 @@ pub mod server;
 pub mod transport;
 #[cfg(unix)]
 pub mod upgrade;
+#[cfg(windows)]
+#[path = "upgrade_windows.rs"]
+pub mod upgrade;
 
 use std::ffi::OsString;
 
@@ -174,7 +177,7 @@ fn resolve_restorable_id(client: &client::Client, argument: SessionArgument) -> 
     Ok(id)
 }
 
-#[cfg(feature = "session-persistence")]
+#[cfg(all(unix, feature = "session-persistence"))]
 fn resolve_forget_id(argument: SessionArgument, directory: &std::path::Path) -> Result<u64> {
     match argument {
         SessionArgument::Bare(id) => {
@@ -244,7 +247,10 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
     let mut expect_retention = false;
     let mut expect_retention_bytes = false;
     let mut retention_bytes = None;
-    let mut resume_from = None;
+    #[cfg(unix)]
+    let mut resume_from: Option<i32> = None;
+    #[cfg(windows)]
+    let mut resume_from: Option<std::path::PathBuf> = None;
     #[cfg(feature = "session-persistence")]
     let mut daemon_options = None;
     let mut identity_paths = Vec::new();
@@ -253,6 +259,8 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
     let daemon_options = None;
     #[cfg(unix)]
     let mut resume_listener = None;
+    #[cfg(windows)]
+    let mut resume_ready = None;
     let mut upgrade = false;
     let mut pty_host = false;
     let mut force = false;
@@ -336,7 +344,7 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
             "--upgrade" | "-u" => upgrade = true,
             // Hidden: asked of a candidate replacement before this daemon
             // executes it, because `execv` cannot be undone.
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             value if value.starts_with("--resume-check") => {
                 let supported = value
                     .split_once('=')
@@ -352,11 +360,20 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
                 std::process::exit(if understood { 0 } else { 1 });
             }
             // Hidden: set by the previous image when it replaced itself.
+            #[cfg(unix)]
             value if value.starts_with("--resume-from=") => {
                 resume_from = value
                     .split_once('=')
                     .and_then(|(_, descriptor)| descriptor.parse::<i32>().ok());
                 anyhow::ensure!(resume_from.is_some(), "unusable --resume-from descriptor");
+            }
+            #[cfg(windows)]
+            value if value.starts_with("--resume-from=") => {
+                resume_from = value
+                    .split_once('=')
+                    .map(|(_, path)| std::path::PathBuf::from(path))
+                    .filter(|path| !path.as_os_str().is_empty());
+                anyhow::ensure!(resume_from.is_some(), "unusable --resume-from path");
             }
             // Hidden: inherited by the replacement so the listening socket is
             // not rebound during an upgrade.
@@ -369,6 +386,17 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
                     resume_listener.is_some(),
                     "unusable --resume-listener descriptor"
                 );
+            }
+            // Hidden: the candidate publishes this marker after it has read
+            // and validated the handover, before it waits for the old daemon's
+            // endpoint to go away.
+            #[cfg(windows)]
+            value if value.starts_with("--resume-ready=") => {
+                resume_ready = value
+                    .split_once('=')
+                    .map(|(_, path)| std::path::PathBuf::from(path))
+                    .filter(|path| !path.as_os_str().is_empty());
+                anyhow::ensure!(resume_ready.is_some(), "unusable --resume-ready path");
             }
             "--help" | "-h" => {
                 let session_id_help = if no_mux {
@@ -453,26 +481,32 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
             println!("Replaced the multiplexer; its sessions were kept.");
             return Ok(());
         }
-        #[cfg(not(unix))]
-        anyhow::bail!(
-            "replacing the multiplexer in place is not supported on this platform; its \
-             sessions must be closed first"
-        );
+        #[cfg(windows)]
+        {
+            let Some(client) = client::Client::connect_for_upgrade()? else {
+                anyhow::bail!("no multiplexer is running");
+            };
+            client.upgrade()?;
+            println!("Replaced the multiplexer; its sessions were kept.");
+            return Ok(());
+        }
     }
 
     if daemon {
         #[cfg(unix)]
         return server::run(retention, daemon_options, resume_from, resume_listener);
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        return server::run(retention, daemon_options, resume_from, resume_ready);
+        #[cfg(not(any(unix, windows)))]
         {
-            let _ = resume_from;
+            let _ = (retention, daemon_options, resume_from);
             anyhow::bail!("the multiplexer daemon is not yet supported on this platform");
         }
     }
     #[cfg(unix)]
     let _ = (retention, daemon_options, resume_from, resume_listener);
-    #[cfg(not(unix))]
-    let _ = (retention, daemon_options, resume_from);
+    #[cfg(windows)]
+    let _ = (retention, daemon_options, resume_from, resume_ready);
 
     match command.as_deref() {
         Some("reconnect") => {
@@ -480,23 +514,15 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
             reconnect::run_reconnect_session(&session.to_string())
         }
         Some("stop") => {
-            #[cfg(unix)]
-            {
-                match stop(&paths::session_catalog_dir(), force)? {
-                    StopOutcome::NotRunning => println!("No multiplexer is running."),
-                    StopOutcome::Stopped => println!("Stopped the multiplexer."),
-                    StopOutcome::Signalled { process_id } => println!(
-                        "Stopped the multiplexer (process {process_id}), ending what it was \
-                         holding."
-                    ),
-                }
-                Ok(())
+            match stop(&paths::session_catalog_dir(), force)? {
+                StopOutcome::NotRunning => println!("No multiplexer is running."),
+                StopOutcome::Stopped => println!("Stopped the multiplexer."),
+                StopOutcome::Signalled { process_id } => println!(
+                    "Stopped the multiplexer (process {process_id}), ending what it was \
+                     holding."
+                ),
             }
-            #[cfg(not(unix))]
-            {
-                let _ = force;
-                anyhow::bail!("the multiplexer is not yet supported on this platform")
-            }
+            Ok(())
         }
         Some("resume") => {
             let session = session.context_missing()?;
@@ -531,58 +557,42 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
         }
         Some("kill") => {
             let session = session.context_missing()?;
-            #[cfg(unix)]
-            {
-                let Some(client) = client::Client::connect_existing()? else {
-                    anyhow::bail!("no multiplexer is running");
-                };
-                let session = resolve_session_id(&client, session, &paths::session_catalog_dir())?;
-                client.kill(session)?;
-                println!("Ended session {session}.");
-                Ok(())
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = session;
-                anyhow::bail!("the multiplexer is not yet supported on this platform")
-            }
+            let Some(client) = client::Client::connect_existing()? else {
+                anyhow::bail!("no multiplexer is running");
+            };
+            let session = resolve_session_id(&client, session, &paths::session_catalog_dir())?;
+            client.kill(session)?;
+            println!("Ended session {session}.");
+            Ok(())
         }
         command @ (Some("share") | Some("unshare")) => {
             let shared = command == Some("share");
             let session = session.context_missing()?;
-            #[cfg(unix)]
-            {
-                let Some(client) = client::Client::connect_existing()? else {
-                    anyhow::bail!("no multiplexer is running");
-                };
-                let session = resolve_session_id(&client, session, &paths::session_catalog_dir())?;
-                // Sharing is what makes a session joinable from another process,
-                // so it is where a secret is offered: joining a session is being
-                // handed whatever its terminals can already do, and a shell that
-                // has answered `sudo` can do a great deal. Offered rather than
-                // required, as the dialog in a window offers it — and not offered
-                // at all for a session that already has one, because a second
-                // secret would replace the one whoever knows it is expecting.
-                let verifier = match (shared, session_is_protected(&client, session)?) {
-                    (true, false) => secret_prompt::prompt_for_optional_secret()?
-                        .map(|secret| auth::SessionAuthentication::create(secret.expose()))
-                        .transpose()?
-                        .map(|authentication| authentication.verifier().to_owned()),
-                    _ => None,
-                };
-                client.set_session_scope(session, shared, verifier)?;
-                if shared {
-                    println!("Shared session {session} with every Zetta process.");
-                } else {
-                    println!("Scoped session {session} back to the window that held it.");
-                }
-                Ok(())
+            let Some(client) = client::Client::connect_existing()? else {
+                anyhow::bail!("no multiplexer is running");
+            };
+            let session = resolve_session_id(&client, session, &paths::session_catalog_dir())?;
+            // Sharing is what makes a session joinable from another process,
+            // so it is where a secret is offered: joining a session is being
+            // handed whatever its terminals can already do, and a shell that
+            // has answered `sudo` can do a great deal. Offered rather than
+            // required, as the dialog in a window offers it — and not offered
+            // at all for a session that already has one, because a second
+            // secret would replace the one whoever knows it is expecting.
+            let verifier = match (shared, session_is_protected(&client, session)?) {
+                (true, false) => secret_prompt::prompt_for_optional_secret()?
+                    .map(|secret| auth::SessionAuthentication::create(secret.expose()))
+                    .transpose()?
+                    .map(|authentication| authentication.verifier().to_owned()),
+                _ => None,
+            };
+            client.set_session_scope(session, shared, verifier)?;
+            if shared {
+                println!("Shared session {session} with every Zetta process.");
+            } else {
+                println!("Scoped session {session} back to the window that held it.");
             }
-            #[cfg(not(unix))]
-            {
-                let _ = (session, shared);
-                anyhow::bail!("the multiplexer is not yet supported on this platform")
-            }
+            Ok(())
         }
         Some("forget") => {
             let session = session.context_missing()?;
@@ -617,7 +627,17 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
                 println!("Forgot session {session_id}.");
                 Ok(())
             }
-            #[cfg(not(unix))]
+            #[cfg(windows)]
+            {
+                let Some(client) = client::Client::connect_existing()? else {
+                    anyhow::bail!("no multiplexer is running");
+                };
+                let session = resolve_session_id(&client, session, &paths::session_catalog_dir())?;
+                client.forget(session)?;
+                println!("Forgot session {session}.");
+                Ok(())
+            }
+            #[cfg(not(any(unix, windows)))]
             {
                 let _ = session;
                 anyhow::bail!("the multiplexer is not yet supported on this platform")
@@ -631,8 +651,9 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
 /// What stopping the multiplexer turned out to involve.
 #[derive(Debug, PartialEq, Eq)]
 pub enum StopOutcome {
-    /// There was nothing to stop, which is not a failure: the request was that
-    /// the multiplexer not be running, and it is not.
+    /// There was no daemon or Windows pseudoconsole host to stop, which is not
+    /// a failure: the request was that the multiplexer not be running, and it
+    /// is not.
     NotRunning,
     /// Asked to stop, and it left.
     Stopped,
@@ -643,8 +664,17 @@ pub enum StopOutcome {
 }
 
 /// How long the multiplexer is given to stop answering before this gives up.
-#[cfg(unix)]
 const STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[cfg(windows)]
+fn stop_pty_host(directory: &std::path::Path, force: bool) -> Result<bool> {
+    pty_host::stop(directory, force)
+}
+
+#[cfg(not(windows))]
+fn stop_pty_host(_directory: &std::path::Path, _force: bool) -> Result<bool> {
+    Ok(false)
+}
 
 /// How long a signalled multiplexer is given to leave before it is killed.
 #[cfg(unix)]
@@ -667,23 +697,36 @@ const STOP_GRACE_PERIOD: std::time::Duration = std::time::Duration::from_secs(2)
 /// process id comes from the endpoint the daemon published for itself, and only
 /// after its socket has answered, so this signals the multiplexer for *this*
 /// directory and nothing else.
-#[cfg(unix)]
 pub fn stop(directory: &std::path::Path, force: bool) -> Result<StopOutcome> {
     use anyhow::Context as _;
 
     let Ok(endpoint) = transport::Endpoint::read(&server::endpoint_path(directory)) else {
-        return Ok(StopOutcome::NotRunning);
+        return Ok(if stop_pty_host(directory, force)? {
+            StopOutcome::Stopped
+        } else {
+            StopOutcome::NotRunning
+        });
     };
     // The endpoint file outlives the process that wrote it, so answering is
     // what "running" means here, not the file being there.
     if transport::Stream::connect(&endpoint.socket_path).is_err() {
-        return Ok(StopOutcome::NotRunning);
+        return Ok(if stop_pty_host(directory, force)? {
+            StopOutcome::Stopped
+        } else {
+            StopOutcome::NotRunning
+        });
     }
 
     let asked = if endpoint.protocol_version == messages::PROTOCOL_VERSION {
         match client::Client::connect_existing_at(directory)? {
             Some(client) => client.shutdown(),
-            None => return Ok(StopOutcome::NotRunning),
+            None => {
+                return Ok(if stop_pty_host(directory, force)? {
+                    StopOutcome::Stopped
+                } else {
+                    StopOutcome::NotRunning
+                });
+            }
         }
     } else {
         Err(anyhow::anyhow!(
@@ -703,6 +746,7 @@ pub fn stop(directory: &std::path::Path, force: bool) -> Result<StopOutcome> {
                     endpoint.process_id
                 )
             })?;
+            stop_pty_host(directory, false).context("stopping the Windows pseudoconsole host")?;
             Ok(StopOutcome::Stopped)
         }
         Err(refused) if !force => Err(refused.context(
@@ -711,6 +755,7 @@ pub fn stop(directory: &std::path::Path, force: bool) -> Result<StopOutcome> {
         )),
         Err(_) => {
             signal_until_stopped(&endpoint)?;
+            stop_pty_host(directory, true).context("stopping the Windows pseudoconsole host")?;
             Ok(StopOutcome::Signalled {
                 process_id: endpoint.process_id,
             })
@@ -747,12 +792,47 @@ fn signal_until_stopped(endpoint: &transport::Endpoint) -> Result<()> {
     })
 }
 
+#[cfg(windows)]
+fn signal_until_stopped(endpoint: &transport::Endpoint) -> Result<()> {
+    use anyhow::Context as _;
+
+    terminate_process(endpoint.process_id)
+        .with_context(|| format!("terminating multiplexer process {}", endpoint.process_id))?;
+    wait_until_stopped(endpoint, STOP_TIMEOUT).with_context(|| {
+        format!(
+            "the multiplexer (process {}) could not be stopped",
+            endpoint.process_id
+        )
+    })
+}
+
+#[cfg(windows)]
+pub(crate) fn terminate_process(process_id: u32) -> Result<()> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
+
+    anyhow::ensure!(
+        process_id > 0,
+        "the process published an unusable process id"
+    );
+    // SAFETY: the process ID came from a private endpoint that answered just
+    // before this function was called. The returned handle is closed below.
+    let process = unsafe { OpenProcess(PROCESS_TERMINATE, false, process_id) }
+        .with_context(|| format!("opening process {process_id} for termination"))?;
+    let result = unsafe { TerminateProcess(process, 1) }
+        .with_context(|| format!("terminating process {process_id}"));
+    // SAFETY: `process` is the handle returned by `OpenProcess` above.
+    unsafe {
+        let _ = CloseHandle(process);
+    }
+    result
+}
+
 /// Waits for the multiplexer's socket to stop answering.
 ///
 /// A reply to a shutdown says the request arrived, not that the process left;
 /// only its socket going quiet says that, and reporting "stopped" without
 /// checking would be a guess.
-#[cfg(unix)]
 fn wait_until_stopped(endpoint: &transport::Endpoint, timeout: std::time::Duration) -> Result<()> {
     let deadline = std::time::Instant::now() + timeout;
     loop {
@@ -773,7 +853,6 @@ fn wait_until_stopped(endpoint: &transport::Endpoint, timeout: std::time::Durati
 /// Asked so that sharing an already-protected session does not prompt for a new
 /// one: the secret it has is the secret its owner chose, and replacing it
 /// silently would lock out whoever knows it.
-#[cfg(unix)]
 fn session_is_protected(client: &client::Client, session_id: u64) -> Result<bool> {
     Ok(client
         .list()?
