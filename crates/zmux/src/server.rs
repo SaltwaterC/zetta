@@ -1096,21 +1096,22 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
                     ),
                 });
             }
-            // The daemon can leave its accept loop as soon as `running` is
-            // cleared. Ask the separate Windows host to exit before doing so;
-            // sending the daemon reply first let this process finish while
-            // the connection worker was still responsible for stopping the
-            // host, which stranded `zmux-pty` after an otherwise clean stop.
+            // Ask the separate Windows host to exit before acknowledging the
+            // request. The reply must be sent before `running` is cleared:
+            // once the accept loop is woken, this process can finish while
+            // this connection worker is still running, which would close the
+            // socket before the caller received the successful stop.
             #[cfg(windows)]
             if let Err(error) = daemon.pty_host.shutdown() {
                 return connection.send(&Response::Error {
                     message: format!("could not stop the pseudoconsole host: {error:#}"),
                 });
             }
+            let response = connection.send(&Response::Ok);
             daemon.running.store(false, Ordering::SeqCst);
             // Unblock the accept loop so it observes the flag.
             let _ = Stream::connect(socket_path(&session_catalog_dir()));
-            connection.send(&Response::Ok)
+            response
         }
     }
 }
