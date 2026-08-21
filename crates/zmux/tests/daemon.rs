@@ -2294,9 +2294,20 @@ fn a_shared_pane_that_received_no_input_reports_so() {
     let reporters = subscription.exits.clone();
     let revokes = subscription.revokes.clone();
 
-    let pane = client
-        .spawn(spawn_request(None, "printf ready; sleep 1; exit 3"))
-        .unwrap();
+    // Do not make the handover race a one-second sleep. Under a loaded or
+    // virtualized scheduler the child can finish that sleep before the second
+    // attach has made it through the daemon, which tests an already-ended pane
+    // rather than shared exit reporting.
+    let release_path = daemon.config.join("release-shared-exit");
+    let mut request = spawn_request(
+        None,
+        "printf ready; while [ ! -e \"$ZMUX_TEST_RELEASE\" ]; do sleep 0.05; done; exit 3",
+    );
+    request.env.insert(
+        "ZMUX_TEST_RELEASE".to_owned(),
+        release_path.to_string_lossy().into_owned(),
+    );
+    let pane = client.spawn(request).unwrap();
     let descriptor = std::fs::File::from(pane.descriptor);
     read_until(&descriptor, "ready");
 
@@ -2345,6 +2356,7 @@ fn a_shared_pane_that_received_no_input_reports_so() {
 
     let (exit_tx, exit_rx) = async_channel::unbounded();
     reporters.register_shared(pane.pane_id, exit_tx);
+    std::fs::write(&release_path, []).expect("releasing the pane to exit");
 
     match recv_timeout(&exit_rx, Duration::from_secs(15)) {
         Some(report) => {

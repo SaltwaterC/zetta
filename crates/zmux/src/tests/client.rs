@@ -66,3 +66,21 @@ fn an_independent_daemon_can_still_receive_a_retention_bootstrap() {
         ]
     );
 }
+
+#[test]
+fn an_exit_report_waits_for_a_late_shared_reporter() {
+    let reporters = ExitReporters::default();
+    let (sender, receiver) = async_channel::unbounded();
+
+    reporters.report(42, Some(1792), false);
+    reporters.register_shared(42, sender);
+
+    assert_eq!(
+        receiver.recv_blocking().unwrap(),
+        PaneExitReport {
+            raw_status: Some(1792),
+            input_sent: false,
+            disconnected: false,
+        }
+    );
+}

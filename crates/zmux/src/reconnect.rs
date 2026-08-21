@@ -597,7 +597,7 @@ mod platform {
 }
 
 #[cfg(any(unix, windows))]
-const CONTROL_CLIENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(16);
+const CONTROL_CLIENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 #[cfg(any(unix, windows))]
 const MAX_CONTROL_MESSAGE_BYTES: usize = 256 * 1024;
 

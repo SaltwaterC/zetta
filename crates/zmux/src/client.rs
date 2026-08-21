@@ -48,7 +48,7 @@ const STARTUP_POLL: Duration = Duration::from_millis(10);
 /// A request must not be able to leave the terminal-opening task waiting on a
 /// daemon forever. This also bounds a peer that accepted a connection but does
 /// not understand the request framing.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 pub struct Client {
     endpoint: Endpoint,
     /// Where this client found its multiplexer, so a subscription that is lost
@@ -1441,9 +1441,9 @@ pub struct PaneExitReport {
 /// polls; a shared terminal has no event loop, so its holder registers a
 /// channel and is woken directly.
 #[derive(Default)]
-pub struct ExitReporters {
-    reporters: Mutex<HashMap<u64, alacritty_terminal::tty::AttachedChildEvents>>,
-    shared: Mutex<HashMap<u64, async_channel::Sender<PaneExitReport>>>,
+struct ExitReporterState {
+    reporters: HashMap<u64, alacritty_terminal::tty::AttachedChildEvents>,
+    shared: HashMap<u64, async_channel::Sender<PaneExitReport>>,
     /// Exits reported for a pane that had no reporter yet.
     ///
     /// The multiplexer starts the process the moment it is asked, so a pane can
@@ -1451,18 +1451,40 @@ pub struct ExitReporters {
     /// failing `exec`, an instant command, a fast Ctrl-D. Dropping the report
     /// then left the terminal waiting for an event that had already happened,
     /// with nothing able to produce it a second time.
-    pending: Mutex<HashMap<u64, PaneExitReport>>,
+    pending: HashMap<u64, PaneExitReport>,
+}
+
+#[derive(Default)]
+pub struct ExitReporters {
+    /// Registration and pending delivery must be one atomic state transition:
+    /// otherwise a report can observe no reporter, registration can observe no
+    /// pending report, and the report can then be inserted after registration
+    /// has finished checking.
+    state: Mutex<ExitReporterState>,
 }
 
 impl ExitReporters {
     pub fn register(&self, pane_id: u64, reporter: alacritty_terminal::tty::AttachedChildEvents) {
-        self.reporters.lock().unwrap().insert(pane_id, reporter);
-        self.deliver_pending(pane_id);
+        let delivery = {
+            let mut state = self.state.lock().unwrap();
+            state.reporters.insert(pane_id, reporter);
+            state.pending.remove(&pane_id).map(|report| {
+                let reporter = state
+                    .reporters
+                    .remove(&pane_id)
+                    .expect("the attached reporter was just registered");
+                (reporter, report)
+            })
+        };
+        if let Some((reporter, report)) = delivery {
+            Self::deliver_attached(reporter, report);
+        }
     }
 
     pub fn forget(&self, pane_id: u64) {
-        self.reporters.lock().unwrap().remove(&pane_id);
-        self.pending.lock().unwrap().remove(&pane_id);
+        let mut state = self.state.lock().unwrap();
+        state.reporters.remove(&pane_id);
+        state.pending.remove(&pane_id);
     }
 
     /// The panes still waiting to be told their process ended.
@@ -1470,29 +1492,12 @@ impl ExitReporters {
     /// Both registries, because either kind of holder needs catching up after a
     /// subscription is re-established.
     pub fn registered(&self) -> Vec<u64> {
-        let mut ids = self
-            .reporters
-            .lock()
-            .unwrap()
-            .keys()
-            .copied()
-            .collect::<Vec<_>>();
-        ids.extend(self.shared.lock().unwrap().keys().copied());
+        let state = self.state.lock().unwrap();
+        let mut ids = state.reporters.keys().copied().collect::<Vec<_>>();
+        ids.extend(state.shared.keys().copied());
         ids.sort_unstable();
         ids.dedup();
         ids
-    }
-
-    /// Hands a pane whatever was reported for it before it had a reporter.
-    fn deliver_pending(&self, pane_id: u64) {
-        let Some(report) = self.pending.lock().unwrap().remove(&pane_id) else {
-            return;
-        };
-        if report.disconnected {
-            self.disconnect_one(pane_id);
-        } else {
-            self.report(pane_id, report.raw_status, report.input_sent);
-        }
     }
 
     /// Routes a shared pane's exit to a channel the pane's holder drains.
@@ -1502,79 +1507,95 @@ impl ExitReporters {
     /// [`async_channel::Sender::try_send`] cannot fail on an unbounded
     /// channel unless the receiver is gone.
     pub fn register_shared(&self, pane_id: u64, reporter: async_channel::Sender<PaneExitReport>) {
-        self.shared.lock().unwrap().insert(pane_id, reporter);
-        self.deliver_pending(pane_id);
+        let delivery = {
+            let mut state = self.state.lock().unwrap();
+            state.shared.insert(pane_id, reporter);
+            state.pending.remove(&pane_id).map(|report| {
+                let reporter = state
+                    .shared
+                    .remove(&pane_id)
+                    .expect("the shared reporter was just registered");
+                (reporter, report)
+            })
+        };
+        if let Some((reporter, report)) = delivery {
+            Self::deliver_shared(reporter, report);
+        }
     }
 
     pub fn forget_shared(&self, pane_id: u64) {
-        self.shared.lock().unwrap().remove(&pane_id);
-        self.pending.lock().unwrap().remove(&pane_id);
+        let mut state = self.state.lock().unwrap();
+        state.shared.remove(&pane_id);
+        state.pending.remove(&pane_id);
     }
 
     fn report(&self, pane_id: u64, raw_status: Option<i32>, input_sent: bool) {
-        let mut delivered = false;
-        let mut reporters = self.reporters.lock().unwrap();
-        if let Some(mut reporter) = reporters.remove(&pane_id) {
-            delivered = true;
-            let _ = match raw_status {
-                Some(status) => reporter.report_exit(status),
-                None => reporter.report_status_unavailable(),
-            };
+        let report = PaneExitReport {
+            raw_status,
+            input_sent,
+            disconnected: false,
+        };
+        let (reporter, shared) = {
+            let mut state = self.state.lock().unwrap();
+            let reporter = state.reporters.remove(&pane_id);
+            let shared = state.shared.remove(&pane_id);
+            if reporter.is_none() && shared.is_none() {
+                state.pending.insert(pane_id, report);
+            }
+            (reporter, shared)
+        };
+        if let Some(reporter) = reporter {
+            Self::deliver_attached(reporter, report);
         }
-        drop(reporters);
-        let mut shared = self.shared.lock().unwrap();
-        if let Some(reporter) = shared.remove(&pane_id) {
-            delivered = true;
-            let _ = reporter.try_send(PaneExitReport {
-                raw_status,
-                input_sent,
-                disconnected: false,
-            });
-        }
-        drop(shared);
-        if !delivered {
-            self.pending.lock().unwrap().insert(
-                pane_id,
-                PaneExitReport {
-                    raw_status,
-                    input_sent,
-                    disconnected: false,
-                },
-            );
-        }
-    }
-
-    /// Tells one pane that no report is coming, without touching the others.
-    fn disconnect_one(&self, pane_id: u64) {
-        let mut reporters = self.reporters.lock().unwrap();
-        if let Some(mut reporter) = reporters.remove(&pane_id) {
-            let _ = reporter.report_watcher_disconnected();
-        }
-        drop(reporters);
-        let mut shared = self.shared.lock().unwrap();
-        if let Some(reporter) = shared.remove(&pane_id) {
-            let _ = reporter.try_send(PaneExitReport {
-                raw_status: None,
-                input_sent: false,
-                disconnected: true,
-            });
+        if let Some(reporter) = shared {
+            Self::deliver_shared(reporter, report);
         }
     }
 
     fn report_all_disconnected(&self) {
-        let mut reporters = self.reporters.lock().unwrap();
-        for (_, mut reporter) in reporters.drain() {
+        let (reporters, shared) = {
+            let mut state = self.state.lock().unwrap();
+            (
+                state
+                    .reporters
+                    .drain()
+                    .map(|(_, reporter)| reporter)
+                    .collect::<Vec<_>>(),
+                state
+                    .shared
+                    .drain()
+                    .map(|(_, reporter)| reporter)
+                    .collect::<Vec<_>>(),
+            )
+        };
+        for mut reporter in reporters {
             let _ = reporter.report_watcher_disconnected();
         }
-        drop(reporters);
-        let mut shared = self.shared.lock().unwrap();
-        for (_, reporter) in shared.drain() {
+        for reporter in shared {
             let _ = reporter.try_send(PaneExitReport {
                 raw_status: None,
                 input_sent: false,
                 disconnected: true,
             });
         }
+    }
+
+    fn deliver_attached(
+        mut reporter: alacritty_terminal::tty::AttachedChildEvents,
+        report: PaneExitReport,
+    ) {
+        let _ = if report.disconnected {
+            reporter.report_watcher_disconnected()
+        } else {
+            match report.raw_status {
+                Some(status) => reporter.report_exit(status),
+                None => reporter.report_status_unavailable(),
+            }
+        };
+    }
+
+    fn deliver_shared(reporter: async_channel::Sender<PaneExitReport>, report: PaneExitReport) {
+        let _ = reporter.try_send(report);
     }
 }
 

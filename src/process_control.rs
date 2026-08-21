@@ -68,7 +68,7 @@ const CONTROL_CLIENT_TIMEOUT: Duration = Duration::from_secs(3);
 // is sized to keep an Argon2 verification under a quarter of it on slow
 // machines: memory-constrained VMs and debug builds can take seconds per
 // verification.
-const RECONNECT_COMPLETION_TIMEOUT: Duration = Duration::from_secs(12);
+const RECONNECT_COMPLETION_TIMEOUT: Duration = Duration::from_secs(16);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReconnectSessionResult {
