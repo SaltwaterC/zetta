@@ -2083,6 +2083,7 @@ fn take_exclusive(
             clients.pop().expect("exactly one client was matched")
         }
         _ => {
+            #[cfg(windows)]
             pane.pty.resume_reader();
             return connection.send(&Response::Error {
                 message: format!(
@@ -2124,6 +2125,7 @@ fn take_exclusive(
         // trusted to read the terminal either. Leave the pane unheld rather than
         // handing the descriptor to a client that is not reading.
         pane.attachment = Attachment::None;
+        #[cfg(windows)]
         pane.pty.resume_reader();
         drop(sessions);
         daemon.sessions_condvar.notify_all();
@@ -2356,10 +2358,10 @@ fn smallest_size(sizes: impl Iterator<Item = (u16, u16)>, fallback: TerminalSize
 }
 
 /// Applies a size to a pane's terminal, recording it as the pane's size.
-fn apply_size(daemon: &Daemon, pane: &mut Pane, columns: u16, lines: u16) {
+fn apply_size(_daemon: &Daemon, pane: &mut Pane, columns: u16, lines: u16) {
     use alacritty_terminal::event::OnResize as _;
     #[cfg(windows)]
-    if let Err(error) = daemon.pty_host.resize(pane.console_id, columns, lines) {
+    if let Err(error) = _daemon.pty_host.resize(pane.console_id, columns, lines) {
         log::warn!(
             "could not resize pseudoconsole {} to {columns}x{lines}: {error:#}",
             pane.console_id
@@ -4037,7 +4039,10 @@ fn reclaim_panes_from_departed_clients(daemon: &Arc<Daemon>) {
 /// anything ended.
 fn end_abandoned_sessions(sessions: &mut Vec<Session>) -> (bool, Vec<u64>) {
     let before = sessions.len();
+    #[cfg(windows)]
     let mut consoles = Vec::new();
+    #[cfg(not(windows))]
+    let consoles = Vec::new();
     sessions.retain(|session| {
         let abandoned = !session.keep && session.panes.iter().all(|pane| pane.attachment.is_none());
         if abandoned {
