@@ -59,6 +59,8 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         "Desktop notifications",
         #[cfg(feature = "clipboard")]
         "Clipboard access",
+        #[cfg(feature = "session-persistence")]
+        "Encrypted session retention",
     ];
 
     let serial_usage = if cfg!(feature = "serial-console") {

@@ -395,6 +395,7 @@ pub fn print_session_catalogs(directory: &Path, json: bool) -> Result<()> {
                 record.id,
                 record
                     .metadata_bytes
+                    .saturating_add(record.snapshot_bytes)
                     .saturating_add(record.scrollback_bytes),
                 record.updated_at
             );

@@ -1188,7 +1188,9 @@ pub enum ConfigTextField {
     FontSize,
     ScrollHistory,
     SessionRingBytes,
+    #[cfg(feature = "session-persistence")]
     SessionPersistenceRecipients,
+    #[cfg(feature = "session-persistence")]
     SessionPersistenceIdentity,
     #[cfg(feature = "http-server")]
     HttpServerPort,
@@ -1404,9 +1406,11 @@ impl ConfigurationForm {
             ConfigTextField::FontSize => Some(&mut self.terminal_font_size),
             ConfigTextField::ScrollHistory => Some(&mut self.max_scroll_history_lines),
             ConfigTextField::SessionRingBytes => Some(&mut self.session_ring_bytes),
+            #[cfg(feature = "session-persistence")]
             ConfigTextField::SessionPersistenceRecipients => {
                 Some(&mut self.session_persistence_recipients)
             }
+            #[cfg(feature = "session-persistence")]
             ConfigTextField::SessionPersistenceIdentity => {
                 Some(&mut self.session_persistence_identity)
             }

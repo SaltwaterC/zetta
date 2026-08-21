@@ -277,6 +277,7 @@ pub(crate) fn render_settings_pages(
                         ConfigTextField::SessionRingBytes,
                     ),
                 ),
+                #[cfg(feature = "session-persistence")]
                 setting_row(
                     "Disk recipients",
                     "Comma-separated age recipients or github:USER entries used for encrypted session retention",
@@ -290,6 +291,7 @@ pub(crate) fn render_settings_pages(
                         SettingsInput::Configuration(ConfigTextField::SessionPersistenceRecipients),
                     ),
                 ),
+                #[cfg(feature = "session-persistence")]
                 setting_row(
                     "Identity file",
                     "Optional default age identity path used when resuming encrypted sessions",

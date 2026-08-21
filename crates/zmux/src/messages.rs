@@ -14,7 +14,7 @@ use crate::protocol::{BackgroundSessionSummary, RestorableSessionRecord};
 /// The wire format, and what a client and a multiplexer compare before they
 /// trust each other to understand one another.
 ///
-/// Pinned at 2 while Zetta is under development: the protocol is not stabilised,
+/// Pinned at 1 while Zetta is under development: the protocol is not stabilised,
 /// so its shape changes freely and a numbered history of every change would be
 /// bookkeeping about versions nobody is running. What that costs is the guard —
 /// while the number stays put, two builds whose messages disagree both believe
@@ -26,7 +26,7 @@ use crate::protocol::{BackgroundSessionSummary, RestorableSessionRecord};
 /// When the protocol does stabilise, this becomes what it says: bumped whenever a
 /// message's shape changes, so a client and a daemon that cannot parse each other
 /// say so instead of failing obscurely.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 1;
 
 /// Every request carries the endpoint token, which authenticates the *channel*
 /// only. It says nothing about whether a protected session may be attached —
@@ -164,6 +164,16 @@ pub enum Request {
     /// continues running under the daemon but is no longer listed or
     /// attachable until the daemon restarts (at which point it is gone).
     Forget { session_id: u64 },
+    /// Applies the current client's session retention settings to the daemon.
+    ///
+    /// A daemon outlives the client that started it, so a later client must not
+    /// silently inherit whatever retention mode the earlier client selected.
+    /// The recipient strings have already been resolved by the client; they
+    /// are public age recipients, never identities or private keys.
+    Configure {
+        retention: crate::retention::Retention,
+        persistence_recipients: Vec<String>,
+    },
     /// Turns this connection into an event stream. No response follows; the
     /// daemon sends [`Event`]s until the connection is dropped.
     Subscribe,

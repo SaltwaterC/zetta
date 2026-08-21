@@ -173,6 +173,11 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
         assert!(!help.contains("Desktop notifications"));
         assert!(!help.contains("zetta notify"));
     }
+
+    #[cfg(feature = "session-persistence")]
+    assert!(help.contains("Encrypted session retention"));
+    #[cfg(not(feature = "session-persistence"))]
+    assert!(!help.contains("Encrypted session retention"));
 }
 
 #[test]

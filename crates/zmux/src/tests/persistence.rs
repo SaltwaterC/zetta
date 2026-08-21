@@ -40,6 +40,7 @@ fn classical_age_round_trip_is_interoperable_with_the_age_crate() {
     let recipient = identity.to_public().to_string();
     let recipients = RecipientSet::parse(&[recipient]).unwrap();
     let ciphertext = recipients.encrypt(b"classical session state").unwrap();
+    assert!(ciphertext.starts_with(b"age-encryption.org/v1\n"));
     let plaintext = age::decrypt(&identity, &ciphertext).unwrap();
     assert_eq!(plaintext, b"classical session state");
 }
@@ -127,7 +128,10 @@ fn disk_segments_are_encrypted_and_manifest_sizes_are_updated() {
             verifier: None,
             failed_authentications: 0,
             backoff_seconds: 0,
-            snapshots: Vec::new(),
+            snapshots: vec![PersistedSnapshot {
+                pane_id: 2,
+                bytes: b"private screen".to_vec(),
+            }],
         })
         .unwrap();
     store
@@ -150,6 +154,14 @@ fn disk_segments_are_encrypted_and_manifest_sizes_are_updated() {
     let manifest = fs::read_to_string(directory.path().join("persistence/manifest.json")).unwrap();
     assert!(!manifest.contains("secret title"));
     assert!(manifest.contains(r#""scrollback_bytes": 18"#));
+    let metadata = age::decrypt(
+        &identity,
+        &fs::read(directory.path().join("persistence/session-7.age")).unwrap(),
+    )
+    .unwrap();
+    let metadata: serde_json::Value = serde_json::from_slice(&metadata).unwrap();
+    assert!(metadata["snapshots"][0].get("bytes").is_none());
+    assert_eq!(metadata["snapshots"][0]["length"], 14);
     let segment = fs::read_dir(directory.path().join("persistence"))
         .unwrap()
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
@@ -157,7 +169,7 @@ fn disk_segments_are_encrypted_and_manifest_sizes_are_updated() {
             path.file_name()
                 .unwrap()
                 .to_string_lossy()
-                .contains("segment")
+                .contains("pane-1-segment")
         })
         .unwrap();
     let ciphertext = fs::read(segment).unwrap();
@@ -172,6 +184,10 @@ fn disk_segments_are_encrypted_and_manifest_sizes_are_updated() {
     assert_eq!(
         recovered.read_scrollback(7, &identities).unwrap(),
         b"private scrollback"
+    );
+    assert_eq!(
+        recovered.load_session(7, &identities).unwrap().snapshots[0].bytes,
+        b"private screen"
     );
 }
 
@@ -274,7 +290,7 @@ fn identity_file_loader_accepts_pq_age_keys() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("pq-identity.txt");
     let identity = MlKem768X25519Identity::generate();
-    std::fs::write(&path, format!("{}\n", identity.to_string())).unwrap();
+    std::fs::write(&path, format!("{identity}\n")).unwrap();
     let identities = IdentitySet::from_paths(std::slice::from_ref(&path)).unwrap();
     let recipients = RecipientSet::parse(&[identity.to_recipient().to_string()]).unwrap();
     let ciphertext = recipients.encrypt(b"pq identity file").unwrap();

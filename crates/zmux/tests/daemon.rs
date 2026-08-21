@@ -22,6 +22,9 @@ use zmux::{
     protocol::{BackgroundPaneLayout, BackgroundSessionSummary},
 };
 
+#[cfg(feature = "session-persistence")]
+use zmux::retention::Retention;
+
 /// A daemon with a private configuration directory, stopped when dropped.
 struct TestDaemon {
     process: Child,
@@ -350,6 +353,47 @@ fn disk_retention_without_recipients_writes_no_persistence_files() {
 
 #[cfg(feature = "session-persistence")]
 #[test]
+fn a_new_client_applies_disk_retention_to_an_existing_daemon() {
+    let identity = age::x25519::Identity::generate();
+    let daemon = TestDaemon::start();
+    let client = Client::connect_at_with_retention_and_persistence(
+        &daemon.sessions_dir(),
+        Retention::Disk,
+        zmux::persistence::PersistenceOptions {
+            recipients: vec![identity.to_public().to_string()],
+            identity: None,
+        },
+    )
+    .unwrap();
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; sleep 60"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+    drop(descriptor);
+
+    client
+        .detach(
+            pane.session_id,
+            summary(pane.session_id, pane.pane_id),
+            serde_json::json!({"configured_after_startup": true}),
+            None,
+            vec![(pane.pane_id, b"encrypted after reconfiguration".to_vec())],
+        )
+        .unwrap();
+
+    let persistence = daemon.sessions_dir().join("persistence");
+    assert!(persistence.join("manifest.json").is_file());
+    assert!(
+        persistence
+            .join(format!("session-{}.age", pane.session_id))
+            .is_file()
+    );
+    client.kill(pane.session_id).unwrap();
+}
+
+#[cfg(feature = "session-persistence")]
+#[test]
 fn disk_detach_encrypts_metadata_and_keeps_it_opaque_to_listing() {
     let identity = age::x25519::Identity::generate();
     let daemon = TestDaemon::start_with_recipient(&identity.to_public().to_string());
@@ -395,11 +439,25 @@ fn disk_detach_encrypts_metadata_and_keeps_it_opaque_to_listing() {
             .windows(b"metadata must stay encrypted".len())
             .any(|window| window == b"metadata must stay encrypted")
     );
-    let plaintext = age::decrypt(&identity, &ciphertext).unwrap();
-    let persisted: zmux::persistence::PersistedSession =
-        serde_json::from_slice(&plaintext).unwrap();
-    assert_eq!(persisted.state, state);
-    assert_eq!(persisted.snapshots[0].bytes, b"private screen");
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&age::decrypt(&identity, &ciphertext).unwrap()).unwrap();
+    assert_eq!(metadata["state"], state);
+    assert!(metadata["snapshots"][0].get("bytes").is_none());
+    assert_eq!(metadata["snapshots"][0]["length"], 14);
+    let snapshot_path = std::fs::read_dir(&persistence)
+        .unwrap()
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .find(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains("bytes-segment")
+        })
+        .unwrap();
+    assert_eq!(
+        age::decrypt(&identity, &std::fs::read(snapshot_path).unwrap()).unwrap(),
+        b"private screen"
+    );
 
     assert!(client.list_with_restorable().unwrap().1.is_empty());
     client.kill(pane.session_id).unwrap();
@@ -560,10 +618,10 @@ fn protected_disk_resume_preserves_failed_authentication_backoff() {
             .join(format!("persistence/session-{}.age", pane.session_id)),
     )
     .unwrap();
-    let persisted: zmux::persistence::PersistedSession =
+    let metadata: serde_json::Value =
         serde_json::from_slice(&age::decrypt(&identity, &ciphertext).unwrap()).unwrap();
-    assert_eq!(persisted.failed_authentications, 2);
-    assert!(persisted.backoff_seconds >= 2);
+    assert_eq!(metadata["failed_authentications"], 2);
+    assert!(metadata["backoff_seconds"].as_u64().unwrap() >= 2);
 
     daemon.restart_with_recovery();
     let client = daemon.client();

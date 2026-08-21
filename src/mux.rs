@@ -100,6 +100,25 @@ impl MuxRuntime {
         self.retention
     }
 
+    #[cfg(not(feature = "session-persistence"))]
+    pub(crate) fn reconfigure_with_retention(&mut self, retention: Retention) -> Result<()> {
+        self.client.configure(retention, Vec::new())?;
+        self.retention = retention;
+        Ok(())
+    }
+
+    #[cfg(feature = "session-persistence")]
+    pub(crate) fn reconfigure_with_retention_and_persistence(
+        &mut self,
+        retention: Retention,
+        persistence: PersistenceOptions,
+    ) -> Result<()> {
+        self.client
+            .configure_with_retention_and_persistence(retention, persistence)?;
+        self.retention = retention;
+        Ok(())
+    }
+
     pub(crate) fn client(&self) -> &Arc<Client> {
         &self.client
     }

@@ -15,7 +15,7 @@ name = "zmux"
 path = "src/main.rs"
 
 [features]
-default = ["scrollback-buffer"]
+default = ["scrollback-buffer", "session-persistence"]
 # Retains a bounded in-memory ring buffer of a detached pane's output, and the
 # snapshot exchange that makes a reattach look like the screen never went away.
 # Compiled out for memory-constrained targets that only need the session to stay

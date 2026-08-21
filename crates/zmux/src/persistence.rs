@@ -4,10 +4,10 @@
 //! concern: a daemon can write encrypted records without ever receiving the
 //! private keys that can read them back. The age files produced here are
 //! ordinary age v1 files, so the store does not introduce a second encrypted
-//! file format for metadata or scrollback.
+//! file format for metadata, snapshots, or scrollback.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, hash_map::Entry},
     fmt, fs,
     io::{self, BufReader, Cursor, Read as _, Write as _},
     path::{Path, PathBuf},
@@ -74,7 +74,11 @@ pub struct DaemonOptionsFile {
 /// An opaque record that is safe to show before an identity has been supplied.
 pub use crate::protocol::RestorableSessionRecord as RestorableRecord;
 
-/// The encrypted payload for one detached session.
+/// The decrypted session state used by the client and daemon protocol.
+///
+/// The on-disk representation is [`PersistedSessionMetadata`]; snapshot bytes
+/// are kept in the separate encrypted byte stream and are joined back onto
+/// this type only after the client has decrypted both files.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PersistedSession {
@@ -95,6 +99,33 @@ pub struct PersistedSession {
 pub struct PersistedSnapshot {
     pub pane_id: u64,
     pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedSessionMetadata {
+    id: u64,
+    created_at: u64,
+    updated_at: u64,
+    summary: BackgroundSessionSummary,
+    state: serde_json::Value,
+    verifier: Option<String>,
+    failed_authentications: u32,
+    backoff_seconds: u64,
+    snapshots: Vec<SnapshotLocation>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SnapshotLocation {
+    pane_id: u64,
+    segment: u64,
+    offset: u64,
+    length: u64,
+}
+
+fn snapshot_path(directory: &Path, session_id: u64, sequence: u64) -> PathBuf {
+    directory.join(format!("session-{session_id}-bytes-segment-{sequence}.age"))
 }
 
 /// A parsed collection of age recipients.
@@ -155,6 +186,8 @@ impl RecipientSet {
             !self.recipients.is_empty(),
             "no persistence recipients configured"
         );
+        // age v1's Encryptor provides both the recipient envelope and the
+        // standard ChaCha20-Poly1305 STREAM payload construction.
         let encryptor = age::Encryptor::with_recipients(
             self.recipients
                 .iter()
@@ -218,18 +251,78 @@ impl IdentitySet {
     }
 }
 
-/// Opens one encrypted session payload without opening the daemon's recipient
-/// side. This is the client-side half of resume.
+/// Opens encrypted session metadata and snapshot bytes without opening the
+/// daemon's recipient side. This is the client-side half of resume.
 pub fn load_session_from_directory(
     base: &Path,
     id: u64,
     identities: &IdentitySet,
 ) -> Result<PersistedSession> {
-    let path = base.join("persistence").join(format!("session-{id}.age"));
+    load_session_from_persistence_directory(&base.join("persistence"), id, identities)
+}
+
+fn load_session_from_persistence_directory(
+    directory: &Path,
+    id: u64,
+    identities: &IdentitySet,
+) -> Result<PersistedSession> {
+    let path = directory.join(format!("session-{id}.age"));
     let ciphertext = fs::read(&path)
         .with_context(|| format!("reading encrypted session record {}", path.display()))?;
     let plaintext = identities.decrypt(&ciphertext)?;
-    serde_json::from_slice(&plaintext).context("parsing encrypted session record")
+    let metadata: PersistedSessionMetadata =
+        serde_json::from_slice(&plaintext).context("parsing encrypted session metadata")?;
+    let snapshots = load_snapshots(directory, id, &metadata.snapshots, identities)?;
+    Ok(PersistedSession {
+        id: metadata.id,
+        created_at: metadata.created_at,
+        updated_at: metadata.updated_at,
+        summary: metadata.summary,
+        state: metadata.state,
+        verifier: metadata.verifier,
+        failed_authentications: metadata.failed_authentications,
+        backoff_seconds: metadata.backoff_seconds,
+        snapshots,
+    })
+}
+
+fn load_snapshots(
+    directory: &Path,
+    session_id: u64,
+    locations: &[SnapshotLocation],
+    identities: &IdentitySet,
+) -> Result<Vec<PersistedSnapshot>> {
+    let mut segments = HashMap::new();
+    locations
+        .iter()
+        .map(|location| {
+            if let Entry::Vacant(entry) = segments.entry(location.segment) {
+                let path = snapshot_path(directory, session_id, location.segment);
+                let ciphertext = fs::read(&path).with_context(|| {
+                    format!("reading encrypted session bytes {}", path.display())
+                })?;
+                entry.insert(identities.decrypt(&ciphertext)?);
+            }
+            let segment = segments
+                .get(&location.segment)
+                .expect("snapshot segment was inserted");
+            let offset =
+                usize::try_from(location.offset).context("snapshot offset is too large")?;
+            let length =
+                usize::try_from(location.length).context("snapshot length is too large")?;
+            let end = offset
+                .checked_add(length)
+                .context("snapshot range overflowed")?;
+            anyhow::ensure!(
+                end <= segment.len(),
+                "snapshot range exceeds encrypted session byte stream"
+            );
+            Ok(PersistedSnapshot {
+                pane_id: location.pane_id,
+                bytes: segment[offset..end].to_vec(),
+            })
+        })
+        .collect()
 }
 
 /// Parses one configured recipient. GitHub entries intentionally do not reach
@@ -461,8 +554,14 @@ impl MlKem768X25519Identity {
         }
     }
 
-    pub fn to_string(&self) -> String {
+    fn encoded(&self) -> String {
         bech32_encode(PQ_IDENTITY_HRP, &self.key.to_bytes(), true)
+    }
+}
+
+impl fmt::Display for MlKem768X25519Identity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.encoded())
     }
 }
 
@@ -559,10 +658,7 @@ fn bech32_decode(value: &str, expected_hrp: &str, uppercase: bool) -> Result<Vec
         value.len() <= MAX_BECH32_LENGTH,
         "Bech32 encoding is too long"
     );
-    anyhow::ensure!(
-        value.chars().all(|character| character.is_ascii()),
-        "invalid Bech32 encoding"
-    );
+    anyhow::ensure!(value.is_ascii(), "invalid Bech32 encoding");
     anyhow::ensure!(
         !(value
             .chars()
@@ -777,7 +873,7 @@ fn parse_identity_file_bytes(
     path: &Path,
 ) -> Result<Vec<Box<dyn age::Identity + Send + Sync>>> {
     let mut identities = Vec::new();
-    if std::str::from_utf8(&bytes).is_ok_and(|text| text.contains("-----BEGIN")) {
+    if std::str::from_utf8(bytes).is_ok_and(|text| text.contains("-----BEGIN")) {
         let ssh = age::ssh::Identity::from_buffer(
             BufReader::new(Cursor::new(bytes)),
             Some(path.display().to_string()),
@@ -788,7 +884,7 @@ fn parse_identity_file_bytes(
                 as Box<dyn age::Identity + Send + Sync>);
         return Ok(identities);
     }
-    let text = std::str::from_utf8(&bytes).context("identity file was not UTF-8")?;
+    let text = std::str::from_utf8(bytes).context("identity file was not UTF-8")?;
     for line in text.lines().map(str::trim) {
         if line.is_empty() || line.starts_with('#') {
             continue;
@@ -868,7 +964,7 @@ pub struct PersistenceStore {
     manifest_path: PathBuf,
     recipients: RecipientSet,
     manifest: Manifest,
-    segments: Mutex<HashMap<(u64, u64), SegmentBuffer>>,
+    segments: HashMap<(u64, u64), SegmentBuffer>,
 }
 
 impl fmt::Debug for PersistenceStore {
@@ -947,7 +1043,7 @@ impl PersistenceStore {
             manifest_path,
             recipients,
             manifest,
-            segments: Mutex::new(HashMap::new()),
+            segments: HashMap::new(),
         };
         if recovered {
             store.prune(&HashSet::new())?;
@@ -972,9 +1068,24 @@ impl PersistenceStore {
     }
 
     fn write_session(&mut self, session: &PersistedSession, restorable: bool) -> Result<()> {
-        let plaintext = serde_json::to_vec(session).context("serializing persisted session")?;
+        let (snapshots, snapshot_bytes) =
+            self.write_snapshot_stream(session.id, &session.snapshots)?;
+        let metadata = PersistedSessionMetadata {
+            id: session.id,
+            created_at: session.created_at,
+            updated_at: session.updated_at,
+            summary: session.summary.clone(),
+            state: session.state.clone(),
+            verifier: session.verifier.clone(),
+            failed_authentications: session.failed_authentications,
+            backoff_seconds: session.backoff_seconds,
+            snapshots,
+        };
+        let plaintext =
+            serde_json::to_vec(&metadata).context("serializing persisted session metadata")?;
         let ciphertext = self.recipients.encrypt(&plaintext)?;
         atomic_write(&self.session_path(session.id), &ciphertext)?;
+        self.remove_unreferenced_snapshot_segments(session.id, &metadata.snapshots)?;
         let now = unix_now();
         let created_at = self
             .manifest
@@ -991,6 +1102,7 @@ impl PersistenceStore {
         {
             record.updated_at = now.max(session.updated_at);
             record.metadata_bytes = ciphertext.len() as u64;
+            record.snapshot_bytes = snapshot_bytes;
             record.protected = protected;
             record.restorable = restorable;
         } else {
@@ -999,6 +1111,7 @@ impl PersistenceStore {
                 created_at,
                 updated_at: now.max(session.updated_at),
                 metadata_bytes: ciphertext.len() as u64,
+                snapshot_bytes,
                 scrollback_bytes: 0,
                 protected,
                 restorable,
@@ -1009,23 +1122,22 @@ impl PersistenceStore {
     }
 
     pub fn load_session(&self, id: u64, identities: &IdentitySet) -> Result<PersistedSession> {
-        let ciphertext = fs::read(self.session_path(id)).context("reading encrypted session")?;
-        let plaintext = identities.decrypt(&ciphertext)?;
-        serde_json::from_slice(&plaintext).context("parsing encrypted session")
+        load_session_from_persistence_directory(&self.directory, id, identities)
     }
 
     pub fn append_scrollback(&mut self, session_id: u64, pane_id: u64, bytes: &[u8]) -> Result<()> {
         if bytes.is_empty() {
             return Ok(());
         }
-        let mut segments = self.segments.lock().unwrap();
         let now = unix_now();
-        let segment = segments
+        let sequence = self.next_sequence(session_id, pane_id);
+        let segment = self
+            .segments
             .entry((session_id, pane_id))
             .or_insert_with(|| SegmentBuffer {
                 bytes: Vec::new(),
                 started_at: now,
-                sequence: self.next_sequence(session_id, pane_id),
+                sequence,
             });
         segment.bytes.extend_from_slice(bytes);
         if let Some(record) = self
@@ -1039,11 +1151,10 @@ impl PersistenceStore {
         let segment_to_flush = (segment.bytes.len() >= SEGMENT_BYTES
             || now.saturating_sub(segment.started_at) >= SEGMENT_INTERVAL.as_secs())
         .then(|| {
-            segments
+            self.segments
                 .remove(&(session_id, pane_id))
                 .expect("segment exists")
         });
-        drop(segments);
         if let Some(mut segment) = segment_to_flush {
             self.flush_segment(session_id, pane_id, &mut segment)?;
         }
@@ -1051,9 +1162,7 @@ impl PersistenceStore {
     }
 
     pub fn flush_segments(&mut self) -> Result<()> {
-        let mut pending = self.segments.lock().unwrap();
-        let segments = std::mem::take(&mut *pending);
-        drop(pending);
+        let segments = std::mem::take(&mut self.segments);
         for ((session_id, pane_id), mut segment) in segments {
             self.flush_segment(session_id, pane_id, &mut segment)?;
         }
@@ -1087,12 +1196,85 @@ impl PersistenceStore {
         Ok(output)
     }
 
+    /// Appends the current pane snapshots to the session's logical byte
+    /// stream. Each physical segment is a complete age v1 stream: age files
+    /// must be finalized before they can be reopened, so rotation is what
+    /// makes the logical stream append-only without inventing a second age
+    /// format.
+    fn write_snapshot_stream(
+        &mut self,
+        session_id: u64,
+        snapshots: &[PersistedSnapshot],
+    ) -> Result<(Vec<SnapshotLocation>, u64)> {
+        if snapshots.is_empty() {
+            return Ok((Vec::new(), 0));
+        }
+        let mut sequence = self.next_snapshot_sequence(session_id);
+        let mut segment = Vec::new();
+        let mut locations = Vec::with_capacity(snapshots.len());
+        let mut encrypted_bytes = 0;
+        for snapshot in snapshots {
+            anyhow::ensure!(
+                snapshot.bytes.len() <= SEGMENT_BYTES,
+                "snapshot is too large for an encrypted session byte stream segment"
+            );
+            if !segment.is_empty() && segment.len() + snapshot.bytes.len() > SEGMENT_BYTES {
+                encrypted_bytes += self.flush_snapshot_segment(session_id, sequence, &segment)?;
+                sequence = sequence.saturating_add(1);
+                segment.clear();
+            }
+            let offset = segment.len() as u64;
+            segment.extend_from_slice(&snapshot.bytes);
+            locations.push(SnapshotLocation {
+                pane_id: snapshot.pane_id,
+                segment: sequence,
+                offset,
+                length: snapshot.bytes.len() as u64,
+            });
+        }
+        encrypted_bytes += self.flush_snapshot_segment(session_id, sequence, &segment)?;
+        Ok((locations, encrypted_bytes))
+    }
+
+    fn flush_snapshot_segment(&self, session_id: u64, sequence: u64, bytes: &[u8]) -> Result<u64> {
+        let ciphertext = self.recipients.encrypt(bytes)?;
+        let path = snapshot_path(&self.directory, session_id, sequence);
+        atomic_write(&path, &ciphertext)?;
+        Ok(ciphertext.len() as u64)
+    }
+
+    fn remove_unreferenced_snapshot_segments(
+        &self,
+        session_id: u64,
+        locations: &[SnapshotLocation],
+    ) -> Result<()> {
+        let keep = locations
+            .iter()
+            .map(|location| location.segment)
+            .collect::<HashSet<_>>();
+        let prefix = format!("session-{session_id}-bytes-segment-");
+        for entry in fs::read_dir(&self.directory)? {
+            let path = entry?.path();
+            let Some(sequence) = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_prefix(&prefix))
+                .and_then(|name| name.strip_suffix(".age"))
+                .and_then(|sequence| sequence.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            if !keep.contains(&sequence) {
+                let _ = fs::remove_file(path);
+            }
+        }
+        Ok(())
+    }
+
     pub fn forget(&mut self, id: u64) -> Result<()> {
-        self.segments
-            .lock()
-            .unwrap()
-            .retain(|(session_id, _), _| *session_id != id);
+        self.segments.retain(|(session_id, _), _| *session_id != id);
         let _ = fs::remove_file(self.session_path(id));
+        self.remove_unreferenced_snapshot_segments(id, &[])?;
         let prefix = format!("session-{id}-pane-");
         for entry in fs::read_dir(&self.directory)? {
             let path = entry?.path();
@@ -1128,15 +1310,15 @@ impl PersistenceStore {
                 || total > MAX_STORAGE_BYTES
             {
                 remove.insert(record.id);
-                total = total.saturating_sub(record.metadata_bytes + record.scrollback_bytes);
+                total = total.saturating_sub(
+                    record.metadata_bytes + record.snapshot_bytes + record.scrollback_bytes,
+                );
             }
         }
         if remove.is_empty() {
             return Ok(());
         }
         self.segments
-            .lock()
-            .unwrap()
             .retain(|(session_id, _), _| !remove.contains(session_id));
         for id in &remove {
             self.remove_files(*id)?;
@@ -1149,6 +1331,24 @@ impl PersistenceStore {
 
     fn session_path(&self, id: u64) -> PathBuf {
         self.directory.join(format!("session-{id}.age"))
+    }
+
+    fn next_snapshot_sequence(&self, session_id: u64) -> u64 {
+        let prefix = format!("session-{session_id}-bytes-segment-");
+        fs::read_dir(&self.directory)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter_map(|name| {
+                name.strip_prefix(&prefix)
+                    .and_then(|name| name.strip_suffix(".age"))
+                    .and_then(|sequence| sequence.parse::<u64>().ok())
+            })
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
     }
 
     fn next_sequence(&self, session_id: u64, pane_id: u64) -> u64 {
@@ -1196,6 +1396,7 @@ impl PersistenceStore {
 
     fn remove_files(&self, id: u64) -> Result<()> {
         let _ = fs::remove_file(self.session_path(id));
+        self.remove_unreferenced_snapshot_segments(id, &[])?;
         let prefix = format!("session-{id}-pane-");
         for entry in fs::read_dir(&self.directory)? {
             let path = entry?.path();

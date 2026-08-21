@@ -181,6 +181,17 @@ impl Zetta {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+        #[cfg(feature = "session-persistence")]
+        if let Some(runtime) = self.mux.as_mut() {
+            runtime.reconfigure_with_retention_and_persistence(
+                config.sessions.to_zmux_retention()?,
+                config.sessions.to_zmux_persistence(),
+            )?;
+        }
+        #[cfg(not(feature = "session-persistence"))]
+        if let Some(runtime) = self.mux.as_mut() {
+            runtime.reconfigure_with_retention(config.sessions.to_zmux_retention()?)?;
+        }
         apply_config_settings(&config, cx)?;
         let profile_themes = config
             .profiles

@@ -260,6 +260,14 @@ fn is_closed(error: &anyhow::Error) -> bool {
     })
 }
 
+fn is_unsupported_configure(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        let message = cause.to_string();
+        message.contains("unknown variant `configure`")
+            || message.contains("unknown variant 'configure'")
+    })
+}
+
 /// Whether a connection insists that the multiplexer speaks this build's
 /// protocol.
 #[derive(Clone, Copy)]
@@ -280,16 +288,14 @@ impl Client {
     }
 
     /// Connects to the running multiplexer, starting one with `retention` if
-    /// there is none. The application resolves this before the first pane is
-    /// spawned, so a constrained build cannot silently start a daemon with a
+    /// there is none and applying the setting to an existing daemon. The
+    /// application resolves this before the first pane is spawned, so a
+    /// constrained build cannot silently start or reuse a daemon with a
     /// different retention policy.
     pub fn connect_with_retention(retention: Retention) -> Result<Self> {
         #[cfg(feature = "session-persistence")]
         {
-            return Self::connect_with_retention_and_persistence(
-                retention,
-                PersistenceOptions::default(),
-            );
+            Self::connect_with_retention_and_persistence(retention, PersistenceOptions::default())
         }
         #[cfg(not(feature = "session-persistence"))]
         {
@@ -362,7 +368,14 @@ impl Client {
         {
             retention.validate()?;
             if let Some(client) = Self::connect_existing_at(directory)? {
-                return Ok(client);
+                match client.configure(retention, Vec::new()) {
+                    Ok(()) => return Ok(client),
+                    Err(error) if is_unsupported_configure(&error) => {
+                        client.upgrade()?;
+                        return Self::connect_after_upgrade(directory, retention, Vec::new());
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             start_daemon(directory, retention)?;
             let deadline = Instant::now() + STARTUP_TIMEOUT;
@@ -386,10 +399,22 @@ impl Client {
         persistence: PersistenceOptions,
     ) -> Result<Self> {
         retention.validate()?;
+        let resolved_recipients = if matches!(retention, Retention::Disk) {
+            crate::persistence::resolve_recipient_strings(&persistence.recipients)?
+        } else {
+            Vec::new()
+        };
         if let Some(client) = Self::connect_existing_at(directory)? {
-            return Ok(client);
+            match client.configure(retention, resolved_recipients.clone()) {
+                Ok(()) => return Ok(client),
+                Err(error) if is_unsupported_configure(&error) => {
+                    client.upgrade()?;
+                    return Self::connect_after_upgrade(directory, retention, resolved_recipients);
+                }
+                Err(error) => return Err(error),
+            }
         }
-        start_daemon(directory, retention, Some(persistence))?;
+        start_daemon(directory, retention, Some(resolved_recipients))?;
         let deadline = Instant::now() + STARTUP_TIMEOUT;
         loop {
             if let Some(client) = Self::connect_existing_at(directory)? {
@@ -398,6 +423,36 @@ impl Client {
             anyhow::ensure!(
                 Instant::now() < deadline,
                 "the multiplexer did not start within {STARTUP_TIMEOUT:?}"
+            );
+            thread::sleep(STARTUP_POLL);
+        }
+    }
+
+    fn connect_after_upgrade(
+        directory: &std::path::Path,
+        retention: Retention,
+        persistence_recipients: Vec<String>,
+    ) -> Result<Self> {
+        let deadline = Instant::now() + STARTUP_TIMEOUT;
+        let mut last_error = None;
+        loop {
+            if let Some(client) = Self::connect_existing_at(directory)? {
+                match client.configure(retention, persistence_recipients.clone()) {
+                    Ok(()) => return Ok(client),
+                    Err(error) if is_closed(&error) || is_unsupported_configure(&error) => {
+                        last_error = Some(error);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            anyhow::ensure!(
+                Instant::now() < deadline,
+                "the multiplexer did not apply the new session retention settings within \
+                 {STARTUP_TIMEOUT:?}{}",
+                last_error
+                    .as_ref()
+                    .map(|error| format!(": {error:#}"))
+                    .unwrap_or_default()
             );
             thread::sleep(STARTUP_POLL);
         }
@@ -966,6 +1021,41 @@ impl Client {
         }
     }
 
+    /// Applies the retention settings selected by the current client to a
+    /// daemon that may have been started by an earlier client.
+    pub fn configure(
+        &self,
+        retention: Retention,
+        persistence_recipients: Vec<String>,
+    ) -> Result<()> {
+        let mut connection = self.open(Request::Configure {
+            retention,
+            persistence_recipients,
+        })?;
+        match connection.receive::<Response>()?.0 {
+            Response::Ok => Ok(()),
+            Response::Error { message } => anyhow::bail!("{message}"),
+            other => anyhow::bail!("unexpected response to daemon configuration: {other:?}"),
+        }
+    }
+
+    /// Resolves and applies the persistence settings from the current Zetta
+    /// configuration without creating a second client connection.
+    #[cfg(feature = "session-persistence")]
+    pub fn configure_with_retention_and_persistence(
+        &self,
+        retention: Retention,
+        persistence: PersistenceOptions,
+    ) -> Result<()> {
+        retention.validate()?;
+        let recipients = if matches!(retention, Retention::Disk) {
+            crate::persistence::resolve_recipient_strings(&persistence.recipients)?
+        } else {
+            Vec::new()
+        };
+        self.configure(retention, recipients)
+    }
+
     /// Asks the daemon to replace itself, keeping its sessions.
     pub fn upgrade(&self) -> Result<()> {
         let mut connection = self.open(Request::Upgrade)?;
@@ -1480,7 +1570,7 @@ impl PaneSignals {
 fn start_daemon(
     directory: &std::path::Path,
     retention: Retention,
-    #[cfg(feature = "session-persistence")] persistence: Option<PersistenceOptions>,
+    #[cfg(feature = "session-persistence")] persistence_recipients: Option<Vec<String>>,
 ) -> Result<()> {
     let (executable, mut arguments) = multiplexer_command()?;
     arguments.extend(["--retention".to_owned(), retention.name().to_owned()]);
@@ -1489,9 +1579,9 @@ fn start_daemon(
     }
     #[cfg(feature = "session-persistence")]
     if matches!(retention, Retention::Disk)
-        && let Some(persistence) = persistence
+        && let Some(recipients) = persistence_recipients
+        && !recipients.is_empty()
     {
-        let recipients = crate::persistence::resolve_recipient_strings(&persistence.recipients)?;
         crate::catalog::create_private_dir(directory)?;
         let options_path = directory.join(format!("daemon-options-{}.json", std::process::id()));
         let options = serde_json::to_vec(&DaemonOptionsFile { recipients })?;

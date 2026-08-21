@@ -247,11 +247,13 @@ fn prune_exited_panes(daemon: &Arc<Daemon>) -> bool {
     changed |= sessions.len() != before;
     drop(sessions);
     #[cfg(feature = "session-persistence")]
-    if let Some(persistence) = daemon.persistence.as_ref() {
-        let mut persistence = persistence.lock().unwrap();
-        for session_id in removed_session_ids {
-            if let Err(error) = persistence.forget(session_id) {
-                log::warn!("could not remove persisted session {session_id}: {error:#}");
+    {
+        let mut persistence = daemon.persistence.lock().unwrap();
+        if let Some(persistence) = persistence.as_mut() {
+            for session_id in removed_session_ids {
+                if let Err(error) = persistence.forget(session_id) {
+                    log::warn!("could not remove persisted session {session_id}: {error:#}");
+                }
             }
         }
     }
@@ -325,7 +327,7 @@ pub struct Daemon {
     /// again, replacing its earlier entry.
     subscribers: Mutex<HashMap<u32, Connection>>,
     catalog: Mutex<SessionCatalogPublisher>,
-    retention: Retention,
+    retention: Mutex<Retention>,
     running: AtomicBool,
     /// This multiplexer's own executable, resolved once at startup.
     ///
@@ -341,7 +343,9 @@ pub struct Daemon {
     /// Wakes the drain thread when a pane is attached or detached.
     drain_wake: Mutex<Option<Stream>>,
     #[cfg(feature = "session-persistence")]
-    persistence: Option<Mutex<PersistenceStore>>,
+    persistence: Mutex<Option<PersistenceStore>>,
+    #[cfg(feature = "session-persistence")]
+    persistence_enabled: AtomicBool,
     #[cfg(feature = "session-persistence")]
     restored: Mutex<Vec<RestoredSession>>,
 }
@@ -355,6 +359,8 @@ impl Daemon {
         generation: u64,
         #[cfg(unix)] listener_fd: RawFd,
     ) -> Self {
+        #[cfg(feature = "session-persistence")]
+        let persistence_enabled = persistence.is_some();
         Self {
             sessions: Mutex::new(Vec::new()),
             sessions_condvar: Condvar::new(),
@@ -364,14 +370,16 @@ impl Daemon {
             catalog: Mutex::new(SessionCatalogPublisher::with_generation(
                 directory, generation,
             )),
-            retention,
+            retention: Mutex::new(retention),
             running: AtomicBool::new(true),
             executable: resolve_own_executable(),
             #[cfg(unix)]
             listener_fd,
             drain_wake: Mutex::new(None),
             #[cfg(feature = "session-persistence")]
-            persistence: persistence.map(Mutex::new),
+            persistence: Mutex::new(persistence),
+            #[cfg(feature = "session-persistence")]
+            persistence_enabled: AtomicBool::new(persistence_enabled),
             #[cfg(feature = "session-persistence")]
             restored: Mutex::new(Vec::new()),
         }
@@ -562,10 +570,13 @@ pub fn run(
     }
 
     #[cfg(feature = "session-persistence")]
-    if let Some(persistence) = daemon.persistence.as_ref()
-        && let Err(error) = persistence.lock().unwrap().flush_segments()
     {
-        log::warn!("could not flush encrypted scrollback: {error:#}");
+        let mut persistence = daemon.persistence.lock().unwrap();
+        if let Some(persistence) = persistence.as_mut()
+            && let Err(error) = persistence.flush_segments()
+        {
+            log::warn!("could not flush encrypted scrollback: {error:#}");
+        }
     }
     let _ = std::fs::remove_file(&socket);
     let _ = std::fs::remove_file(&endpoint);
@@ -780,11 +791,11 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
             #[cfg(feature = "session-persistence")]
             let mut restorable: Vec<crate::protocol::RestorableSessionRecord> = daemon
                 .persistence
+                .lock()
+                .unwrap()
                 .as_ref()
                 .map(|persistence| {
                     persistence
-                        .lock()
-                        .unwrap()
                         .records()
                         .iter()
                         .filter(|record| record.restorable)
@@ -799,6 +810,7 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
                     created_at: restored.restored_at,
                     updated_at: restored.restored_at,
                     metadata_bytes: 0,
+                    snapshot_bytes: 0,
                     scrollback_bytes: 0,
                     protected: restored.request.verifier.is_some(),
                     restorable: false,
@@ -887,6 +899,15 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
                 }),
             }
         }
+        Request::Configure {
+            retention,
+            persistence_recipients,
+        } => match configure_daemon(daemon, retention, persistence_recipients) {
+            Ok(()) => connection.send(&Response::Ok),
+            Err(error) => connection.send(&Response::Error {
+                message: format!("{error:#}"),
+            }),
+        },
         Request::Upgrade => {
             #[cfg(unix)]
             {
@@ -936,6 +957,78 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
     }
 }
 
+/// Applies settings from a client that may have been started after this
+/// daemon. A daemon deliberately outlives its clients, so treating its startup
+/// arguments as permanent makes editing the configuration appear to work while
+/// leaving all subsequent sessions under the old retention policy.
+fn configure_daemon(
+    daemon: &Arc<Daemon>,
+    retention: Retention,
+    persistence_recipients: Vec<String>,
+) -> Result<()> {
+    retention.validate()?;
+    #[cfg(not(feature = "session-persistence"))]
+    let _ = persistence_recipients;
+
+    let old_retention = *daemon.retention.lock().unwrap();
+    let mut sessions = daemon.sessions.lock().unwrap();
+    if old_retention != retention {
+        for session in sessions.iter_mut() {
+            for pane in &mut session.panes {
+                let snapshot = pane.retained.snapshot();
+                let mut retained = retention.new_retained(pane.size.columns, pane.size.lines);
+                retained.seed(snapshot);
+                pane.retained = retained;
+            }
+        }
+    }
+    #[cfg(feature = "session-persistence")]
+    let persisted_sessions = sessions
+        .iter()
+        .filter(|session| session.keep || session.offered)
+        .map(persisted_live_session)
+        .collect::<Vec<_>>();
+    drop(sessions);
+
+    #[cfg(feature = "session-persistence")]
+    let mut next_persistence = {
+        let mut persistence = daemon.persistence.lock().unwrap();
+        if let Some(persistence) = persistence.as_mut() {
+            persistence
+                .flush_segments()
+                .context("flushing encrypted scrollback before changing retention")?;
+        }
+        if matches!(retention, Retention::Disk) && !persistence_recipients.is_empty() {
+            PersistenceStore::open_with_recovery_state(
+                &session_catalog_dir(),
+                Some(&persistence_recipients),
+                true,
+            )?
+        } else {
+            None
+        }
+    };
+
+    #[cfg(feature = "session-persistence")]
+    {
+        if let Some(persistence) = next_persistence.as_mut() {
+            for session in &persisted_sessions {
+                persistence.save_session(session)?;
+            }
+        }
+        let mut persistence = daemon.persistence.lock().unwrap();
+        let persistence_enabled = next_persistence.is_some();
+        *persistence = next_persistence;
+        daemon
+            .persistence_enabled
+            .store(persistence_enabled, Ordering::Release);
+    }
+    *daemon.retention.lock().unwrap() = retention;
+    wake_drain(daemon);
+    publish(daemon);
+    Ok(())
+}
+
 fn spawn(daemon: &Arc<Daemon>, request: SpawnRequest, connection: &mut Connection) -> Result<()> {
     let options = tty::Options {
         shell: request
@@ -955,6 +1048,7 @@ fn spawn(daemon: &Arc<Daemon>, request: SpawnRequest, connection: &mut Connectio
         .context("starting the terminal process")?;
     let child_pid = pty.child_pid();
     let pane_id = daemon.next_pane_id.fetch_add(1, Ordering::Relaxed);
+    let retention = *daemon.retention.lock().unwrap();
 
     let mut sessions = daemon.sessions.lock().unwrap();
     let session_id = match request.session_id {
@@ -1003,9 +1097,7 @@ fn spawn(daemon: &Arc<Daemon>, request: SpawnRequest, connection: &mut Connectio
         pty,
         attachment: exclusive_attachment(request.client_process_id),
         size: request.size,
-        retained: daemon
-            .retention
-            .new_retained(request.size.columns, request.size.lines),
+        retained: retention.new_retained(request.size.columns, request.size.lines),
         handed_over: None,
         exited: false,
         exit_status: None,
@@ -2188,14 +2280,17 @@ fn resume(
     {
         let mut request = request;
         anyhow::ensure!(
-            daemon.persistence.as_ref().is_some_and(|persistence| {
-                persistence
-                    .lock()
-                    .unwrap()
-                    .records()
-                    .iter()
-                    .any(|record| record.id == request.record_id && record.restorable)
-            }),
+            daemon
+                .persistence
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|persistence| {
+                    persistence
+                        .records()
+                        .iter()
+                        .any(|record| record.id == request.record_id && record.restorable)
+                }),
             "restorable session {} does not exist",
             request.record_id
         );
@@ -2225,11 +2320,8 @@ fn resume(
                     crate::auth::failed_authentication_delay(request.failed_authentications)
                         .as_secs();
                 request.updated_at = unix_now();
-                if let Some(persistence) = daemon.persistence.as_ref() {
-                    persistence
-                        .lock()
-                        .unwrap()
-                        .update_session(&persisted_from_resume_request(&request))?;
+                if let Some(persistence) = daemon.persistence.lock().unwrap().as_mut() {
+                    persistence.update_session(&persisted_from_resume_request(&request))?;
                 }
                 return connection.send(&Response::AuthenticationFailed);
             }
@@ -2237,8 +2329,8 @@ fn resume(
         // The secret is only a request credential. It must not survive in the
         // daemon's restored-session memory after the verifier has been checked.
         request.secret = None;
-        if let Some(persistence) = daemon.persistence.as_ref() {
-            persistence.lock().unwrap().forget(request.record_id)?;
+        if let Some(persistence) = daemon.persistence.lock().unwrap().as_mut() {
+            persistence.forget(request.record_id)?;
         }
         daemon.restored.lock().unwrap().push(RestoredSession {
             request,
@@ -2383,23 +2475,28 @@ fn detach(
         }
     }
     #[cfg(feature = "session-persistence")]
-    let persisted = daemon.persistence.as_ref().map(|_| PersistedSession {
-        id: session.id,
-        created_at: unix_now(),
-        updated_at: unix_now(),
-        summary: session.summary.clone(),
-        state: session.state.clone(),
-        verifier: session
-            .authentication
-            .as_ref()
-            .map(|authentication| authentication.verifier().to_owned()),
-        failed_authentications: session.failed_authentications,
-        backoff_seconds: session
-            .refuse_until
-            .map(|until| until.saturating_duration_since(Instant::now()).as_secs())
-            .unwrap_or_default(),
-        snapshots: persisted_snapshots,
-    });
+    let persisted = daemon
+        .persistence
+        .lock()
+        .unwrap()
+        .is_some()
+        .then(|| PersistedSession {
+            id: session.id,
+            created_at: unix_now(),
+            updated_at: unix_now(),
+            summary: session.summary.clone(),
+            state: session.state.clone(),
+            verifier: session
+                .authentication
+                .as_ref()
+                .map(|authentication| authentication.verifier().to_owned()),
+            failed_authentications: session.failed_authentications,
+            backoff_seconds: session
+                .refuse_until
+                .map(|until| until.saturating_duration_since(Instant::now()).as_secs())
+                .unwrap_or_default(),
+            snapshots: persisted_snapshots,
+        });
     #[cfg(feature = "session-persistence")]
     if let Some(persisted) = persisted {
         persist_session(daemon, &persisted)?;
@@ -2573,11 +2670,8 @@ fn set_session_scope(
     }
     session.offered = shared;
     #[cfg(feature = "session-persistence")]
-    if let Some(persistence) = daemon.persistence.as_ref() {
-        persistence
-            .lock()
-            .unwrap()
-            .save_session(&persisted_live_session(session))?;
+    if let Some(persistence) = daemon.persistence.lock().unwrap().as_mut() {
+        persistence.save_session(&persisted_live_session(session))?;
     }
     drop(sessions);
     publish(daemon);
@@ -2698,8 +2792,8 @@ fn kill(
     sessions.retain(|session| session.id != session_id);
     drop(sessions);
     #[cfg(feature = "session-persistence")]
-    if let Some(persistence) = daemon.persistence.as_ref() {
-        persistence.lock().unwrap().forget(session_id)?;
+    if let Some(persistence) = daemon.persistence.lock().unwrap().as_mut() {
+        persistence.forget(session_id)?;
     }
     Ok(())
 }
@@ -2719,8 +2813,8 @@ fn forget(
         sessions.retain(|session| session.id != session_id);
         drop(sessions);
         #[cfg(feature = "session-persistence")]
-        if let Some(persistence) = daemon.persistence.as_ref() {
-            persistence.lock().unwrap().forget(session_id)?;
+        if let Some(persistence) = daemon.persistence.lock().unwrap().as_mut() {
+            persistence.forget(session_id)?;
         }
         return Ok(());
     }
@@ -2728,15 +2822,21 @@ fn forget(
 
     #[cfg(feature = "session-persistence")]
     {
-        if let Some(persistence) = daemon.persistence.as_ref()
-            && persistence
-                .lock()
-                .unwrap()
-                .records()
-                .iter()
-                .any(|record| record.id == session_id)
-        {
-            persistence.lock().unwrap().forget(session_id)?;
+        let has_record = daemon
+            .persistence
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|persistence| {
+                persistence
+                    .records()
+                    .iter()
+                    .any(|record| record.id == session_id)
+            });
+        if has_record {
+            if let Some(persistence) = daemon.persistence.lock().unwrap().as_mut() {
+                persistence.forget(session_id)?;
+            }
             return Ok(());
         }
         let mut restored = daemon.restored.lock().unwrap();
@@ -2891,10 +2991,10 @@ fn publish(daemon: &Arc<Daemon>) {
 
 #[cfg(feature = "session-persistence")]
 fn persist_session(daemon: &Arc<Daemon>, session: &PersistedSession) -> Result<()> {
-    let Some(persistence) = daemon.persistence.as_ref() else {
-        return Ok(());
-    };
-    persistence.lock().unwrap().save_session(session)
+    if let Some(persistence) = daemon.persistence.lock().unwrap().as_mut() {
+        persistence.save_session(session)?;
+    }
+    Ok(())
 }
 
 #[cfg(feature = "session-persistence")]
@@ -2927,14 +3027,11 @@ fn persisted_live_session(session: &Session) -> PersistedSession {
 
 #[cfg(feature = "session-persistence")]
 fn forget_persisted_session(daemon: &Arc<Daemon>, session_id: u64) -> Result<()> {
-    let Some(persistence) = daemon.persistence.as_ref() else {
-        return Ok(());
-    };
-    let mut persistence = persistence.lock().unwrap();
-    if persistence
-        .records()
-        .iter()
-        .any(|record| record.id == session_id)
+    if let Some(persistence) = daemon.persistence.lock().unwrap().as_mut()
+        && persistence
+            .records()
+            .iter()
+            .any(|record| record.id == session_id)
     {
         persistence.forget(session_id)?;
     }
@@ -2943,13 +3040,16 @@ fn forget_persisted_session(daemon: &Arc<Daemon>, session_id: u64) -> Result<()>
 
 #[cfg(feature = "session-persistence")]
 fn record_persistence_output(daemon: &Arc<Daemon>, session_id: u64, pane_id: u64, bytes: &[u8]) {
-    let Some(persistence) = daemon.persistence.as_ref() else {
+    if !daemon.persistence_enabled.load(Ordering::Acquire) {
         return;
-    };
-    let result = persistence
+    }
+    let result = daemon
+        .persistence
         .lock()
         .unwrap()
-        .append_scrollback(session_id, pane_id, bytes);
+        .as_mut()
+        .map(|persistence| persistence.append_scrollback(session_id, pane_id, bytes))
+        .transpose();
     if let Err(error) = result {
         log::warn!("could not persist pane {pane_id} output: {error:#}");
     }
@@ -3717,10 +3817,8 @@ fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, std::fs::File)> {
     );
 
     #[cfg(feature = "session-persistence")]
-    if let Some(persistence) = daemon.persistence.as_ref() {
+    if let Some(persistence) = daemon.persistence.lock().unwrap().as_mut() {
         persistence
-            .lock()
-            .unwrap()
             .flush_segments()
             .context("flushing encrypted scrollback before replacing the daemon")?;
     }
@@ -3882,6 +3980,7 @@ fn adopt_attachment(attachment: crate::upgrade::AttachmentHandover) -> Attachmen
 fn adopt_handover(daemon: &Arc<Daemon>, handover: crate::upgrade::Handover) -> Result<usize> {
     use std::os::fd::FromRawFd as _;
 
+    let retention = *daemon.retention.lock().unwrap();
     let mut sessions = daemon.sessions.lock().unwrap();
     let now = std::time::Instant::now();
     for session in handover.sessions {
@@ -3919,7 +4018,7 @@ fn adopt_handover(daemon: &Arc<Daemon>, handover: crate::upgrade::Handover) -> R
             let pty = tty::reclaim(descriptor, pane.child_pid)?;
             // Rebuilt at the size the pane is running at, then given the screen
             // the previous image serialized for it.
-            let mut retained = daemon.retention.new_retained(pane.columns, pane.lines);
+            let mut retained = retention.new_retained(pane.columns, pane.lines);
             retained.seed(pane.retained);
             panes.push(Pane {
                 id: pane.id,

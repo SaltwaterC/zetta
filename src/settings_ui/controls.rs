@@ -140,9 +140,11 @@ impl Zetta {
                     SettingsControl::Dropdown(SettingsDropdown::PaneControlsDefaultVisibility),
                     SettingsControl::Dropdown(SettingsDropdown::SessionRetention),
                     SettingsControl::Numeric(NumericSetting::SessionRingBytes),
+                    #[cfg(feature = "session-persistence")]
                     SettingsControl::Input(SettingsInput::Configuration(
                         ConfigTextField::SessionPersistenceRecipients,
                     )),
+                    #[cfg(feature = "session-persistence")]
                     SettingsControl::Input(SettingsInput::Configuration(
                         ConfigTextField::SessionPersistenceIdentity,
                     )),

@@ -10,6 +10,7 @@ if not defined TFTP_CLIENT set "TFTP_CLIENT=%TFTP%"
 if not defined CLIPBOARD set "CLIPBOARD=1"
 if not defined NOTIFY set "NOTIFY=1"
 if not defined SYNTAX_HIGHLIGHTING set "SYNTAX_HIGHLIGHTING=1"
+if not defined SESSION_PERSISTENCE set "SESSION_PERSISTENCE=1"
 
 set "FEATURES=windows-gui"
 set "PROFILE_ARGS="
@@ -30,6 +31,7 @@ call :append_feature "%TFTP_CLIENT%" tftp-client
 call :append_feature "%CLIPBOARD%" clipboard
 call :append_feature "%NOTIFY%" notifications
 call :append_feature "%SYNTAX_HIGHLIGHTING%" syntax-highlighting
+call :append_feature "%SESSION_PERSISTENCE%" session-persistence
 
 if not defined VSCMD_VER (
     set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"

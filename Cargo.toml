@@ -124,7 +124,7 @@ ui = { path = "zed/crates/ui" }
 util = { path = "zed/crates/util" }
 zeroize = "1"
 zed_actions = { path = "zed/crates/zed_actions" }
-zmux = { path = "crates/zmux" }
+zmux = { path = "crates/zmux", default-features = false, features = ["scrollback-buffer"] }
 
 [target.'cfg(windows)'.dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }

@@ -703,7 +703,13 @@ impl Zetta {
                 self.prompt_to_resume_disk_session(session_id, window, cx);
                 return ReconnectSessionResult::AuthenticationFailed;
             }
-            return self.resume_disk_session(session_id, None, None, window, cx);
+            let result = self.resume_disk_session(session_id, None, None, window, cx);
+            if result == ReconnectSessionResult::Rejected
+                && let Some(error) = self.pane_output_error.take()
+            {
+                self.show_notice(error, cx);
+            }
+            return result;
         }
         if runner_id != self.background_sessions.runner_id() {
             let Some(source) = zetta_for_runner(runner_id, cx) else {
@@ -908,6 +914,11 @@ impl Zetta {
             window,
             cx,
         );
+        if result == ReconnectSessionResult::Rejected
+            && let Some(error) = self.pane_output_error.take()
+        {
+            self.show_notice(error, cx);
+        }
         let _ = completion.send(result);
     }
 

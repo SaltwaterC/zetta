@@ -167,9 +167,10 @@ the default client-side identity file for resuming a disk record; it is never
 sent to the daemon. With disk selected and no recipients, no persistence files
 are written.
 
-The setting is global to a daemon start: restart `zmux` after changing it if
-an existing daemon is still running. Use `zmux list` to see opaque restorable
-records and `zmux resume SESSION -i PATH` to decrypt one;
+The setting is global to the daemon and is applied when a Zetta process
+connects or reloads configuration; an already-running daemon does not need to
+be restarted. Use `zmux list` to see opaque restorable records and
+`zmux resume SESSION -i PATH` to decrypt one;
 `-i/--identity` may be repeated. `"persist"` is rejected with a migration
 hint to `"disk"`.
 
