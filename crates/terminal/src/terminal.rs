@@ -5485,11 +5485,13 @@ mod tests {
         fn set_console_palette(&self, _: ConsolePalette) {}
     }
 
+    #[cfg(windows)]
     #[derive(Default)]
     struct RecordingPtyControl {
         palettes: std::sync::Mutex<Vec<ConsolePalette>>,
     }
 
+    #[cfg(windows)]
     impl PtyControl for RecordingPtyControl {
         fn resize(&self, _: u16, _: u16) {}
 
