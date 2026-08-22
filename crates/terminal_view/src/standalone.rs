@@ -22,6 +22,7 @@ use terminal::{
     Clear, Copy, Event, HoveredWord, MaybeNavigationTarget, Modes, Paste, PasteText, PasteTrimmed,
     ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop,
     Search, ShowCharacterPalette, Terminal, TerminalBounds, ToggleViMode,
+    console_palette_for_theme,
     terminal_settings::{CursorShape, TerminalSettings},
 };
 use terminal_element::TerminalElement;
@@ -320,8 +321,11 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let effective_theme = theme.clone().unwrap_or_else(|| cx.theme().clone());
+        let console_palette = console_palette_for_theme(effective_theme.as_ref());
         terminal.update(cx, |terminal, _| {
             terminal.set_reported_theme(theme.clone());
+            terminal.set_console_palette(console_palette);
         });
         let focus_handle = cx.focus_handle();
         let search_focus_handle = cx.focus_handle();
@@ -575,8 +579,11 @@ impl TerminalView {
     }
 
     pub fn set_theme(&mut self, theme: Option<Arc<Theme>>, cx: &mut Context<Self>) {
+        let effective_theme = theme.clone().unwrap_or_else(|| cx.theme().clone());
+        let console_palette = console_palette_for_theme(effective_theme.as_ref());
         self.terminal.update(cx, |terminal, _| {
             terminal.set_reported_theme(theme.clone());
+            terminal.set_console_palette(console_palette);
         });
         self.theme = theme;
         cx.notify();

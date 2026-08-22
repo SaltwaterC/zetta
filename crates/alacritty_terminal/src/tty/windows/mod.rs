@@ -7,7 +7,7 @@ use std::sync::mpsc::TryRecvError;
 
 use crate::event::{OnResize, WindowSize};
 use crate::tty::windows::child::ChildExitWatcher;
-use crate::tty::{ChildEvent, EventedPty, EventedReadWrite, Options, Shell};
+use crate::tty::{ChildEvent, ConsolePalette, EventedPty, EventedReadWrite, Options, Shell};
 
 mod blocking;
 mod child;
@@ -200,6 +200,10 @@ impl PtyOwner {
     pub fn next_child_event(&mut self) -> Option<ChildEvent> {
         child_event_from_recv(self.child_watcher.event_rx().try_recv())
     }
+
+    pub fn set_console_palette(&self, palette: ConsolePalette) {
+        self.backend.set_console_palette(palette);
+    }
 }
 
 impl OnResize for PtyOwner {
@@ -244,6 +248,12 @@ impl Pty {
 
     pub fn child_watcher(&self) -> &ChildExitWatcher {
         &self.child_watcher
+    }
+
+    pub fn set_console_palette(&self, palette: ConsolePalette) {
+        if let PtyBackend::Owned(backend) = &self.backend {
+            backend.set_console_palette(palette);
+        }
     }
 
     /// Stop consuming the attached console's output until the daemon owns it
@@ -336,6 +346,10 @@ impl EventedPty for Pty {
 
     fn next_child_event(&mut self) -> Option<ChildEvent> {
         child_event_from_recv(self.child_watcher.event_rx().try_recv())
+    }
+
+    fn set_console_palette(&mut self, palette: ConsolePalette) {
+        Pty::set_console_palette(self, palette);
     }
 }
 
@@ -477,6 +491,8 @@ mod test {
             drain_on_exit: true,
             env: Default::default(),
             escape_args: false,
+            console_palette: Default::default(),
+            console_palette_helper: None,
         };
         assert_eq!(cmdline(&options), "echo hello world");
 
@@ -496,6 +512,8 @@ mod test {
             drain_on_exit: true,
             env: Default::default(),
             escape_args: true,
+            console_palette: Default::default(),
+            console_palette_helper: None,
         };
 
         let command_line = cmdline(&options);

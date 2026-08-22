@@ -81,6 +81,10 @@ pub enum Msg {
 
     /// Instruction to resize the PTY.
     Resize(WindowSize),
+
+    /// Updates the legacy Win32 colors associated with the pseudoconsole.
+    #[cfg(windows)]
+    SetConsolePalette(tty::ConsolePalette),
 }
 
 /// The main event loop.
@@ -137,6 +141,8 @@ where
             match msg {
                 Msg::Input(input) => state.write_list.push_back(input),
                 Msg::Resize(window_size) => self.pty.on_resize(window_size),
+                #[cfg(windows)]
+                Msg::SetConsolePalette(palette) => self.pty.set_console_palette(palette),
                 Msg::Shutdown => return false,
             }
         }
@@ -484,6 +490,7 @@ struct Writing {
     written: usize,
 }
 
+#[derive(Clone)]
 pub struct Notifier(pub EventLoopSender);
 
 impl event::Notify for Notifier {

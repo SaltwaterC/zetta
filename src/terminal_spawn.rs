@@ -255,7 +255,10 @@ impl Zetta {
                 return;
             }
         };
-        let builder = TerminalBuilder::new(
+        let effective_theme = terminal_theme.clone().unwrap_or_else(|| cx.theme().clone());
+        let initial_console_palette =
+            (!is_wsl).then(|| terminal::console_palette_for_theme(effective_theme.as_ref()));
+        let builder = TerminalBuilder::new_with_console_palette(
             working_directory,
             None,
             shell,
@@ -274,6 +277,7 @@ impl Zetta {
             mux_provider
                 .clone()
                 .map(|provider| provider as Arc<dyn terminal::PtyProvider>),
+            initial_console_palette,
         );
 
         let this = cx.entity().downgrade();
@@ -710,7 +714,10 @@ impl Zetta {
                 return;
             }
         };
-        let builder = TerminalBuilder::new(
+        let effective_theme = terminal_theme.clone().unwrap_or_else(|| cx.theme().clone());
+        let initial_console_palette =
+            (!is_wsl).then(|| terminal::console_palette_for_theme(effective_theme.as_ref()));
+        let builder = TerminalBuilder::new_with_console_palette(
             working_directory,
             Some(task_state),
             shell,
@@ -729,6 +736,7 @@ impl Zetta {
             mux_provider
                 .clone()
                 .map(|provider| provider as Arc<dyn terminal::PtyProvider>),
+            initial_console_palette,
         );
 
         let this = cx.entity().downgrade();

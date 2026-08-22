@@ -2266,7 +2266,7 @@ impl Zetta {
                 AttachedPaneKind::Exclusive(attached) => {
                     let mux_pane_id = attached.pane_id;
                     match TerminalBuilder::new_attached(
-                        crate::mux::attached_pane_handover(attached),
+                        crate::mux::attached_pane_handover(attached, runtime.client().clone()),
                         options,
                         cx.background_executor(),
                         PathStyle::local(),
@@ -2316,7 +2316,12 @@ impl Zetta {
                         cx.background_executor(),
                         PathStyle::local(),
                     )
-                    .with_replay(pane.replay.clone());
+                    .with_replay(pane.replay.clone())
+                    .with_pty_control(crate::mux::mux_pty_control(
+                        runtime.client().clone(),
+                        session_id,
+                        mux_pane_id,
+                    ));
                     (mux_pane_id, Some(built), None, Some(pane))
                 }
             };
@@ -2745,7 +2750,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let handover = crate::mux::attached_pane_handover(attached);
+        let handover = crate::mux::attached_pane_handover(attached, runtime.client().clone());
         let child_events = match terminal.update(cx, |terminal, cx| {
             terminal.attach_pty(handover, options, cx)
         }) {

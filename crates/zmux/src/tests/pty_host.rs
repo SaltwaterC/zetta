@@ -70,3 +70,44 @@ fn windows_shell_arguments_match_the_local_terminal_rules() {
     assert!(!escape_windows_shell_args(Some("cmd.bat")));
     assert!(escape_windows_shell_args(None));
 }
+
+#[test]
+fn colorref_uses_win32_bgr_packing() {
+    assert_eq!(colorref([0x12, 0x34, 0x56]).0, 0x0056_3412);
+}
+
+#[test]
+fn palette_attributes_preserve_unrelated_bits() {
+    let palette = ConsolePalette {
+        foreground_index: 3,
+        background_index: 12,
+        ..Default::default()
+    };
+    assert_eq!(palette_attributes(0xa55a, palette), 0xa5c3);
+}
+
+#[test]
+fn screen_buffer_update_changes_only_palette_color_bits_and_window_convention() {
+    use windows::Win32::System::Console::{
+        CONSOLE_CHARACTER_ATTRIBUTES, CONSOLE_SCREEN_BUFFER_INFOEX,
+    };
+
+    let palette = ConsolePalette {
+        colors: std::array::from_fn(|index| [index as u8, index as u8 + 1, index as u8 + 2]),
+        foreground_index: 14,
+        background_index: 1,
+    };
+    let mut info = CONSOLE_SCREEN_BUFFER_INFOEX::default();
+    info.wAttributes = CONSOLE_CHARACTER_ATTRIBUTES(0x5a7c);
+    info.wPopupAttributes = 0xa5c3;
+    info.srWindow.Right = 79;
+    info.srWindow.Bottom = 23;
+
+    update_screen_buffer_info(&mut info, palette);
+
+    assert_eq!(info.ColorTable[7].0, 0x0009_0807);
+    assert_eq!(info.wAttributes.0, 0x5a1e);
+    assert_eq!(info.wPopupAttributes, 0xa51e);
+    assert_eq!(info.srWindow.Right, 80);
+    assert_eq!(info.srWindow.Bottom, 24);
+}

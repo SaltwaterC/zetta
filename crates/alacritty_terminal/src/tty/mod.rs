@@ -6,6 +6,9 @@ use std::process::ExitStatus;
 use std::sync::Arc;
 use std::{env, io};
 
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
+
 use polling::{Event, PollMode, Poller};
 
 #[cfg(not(windows))]
@@ -45,6 +48,93 @@ pub struct Options {
     /// - When `false`: Arguments will be passed raw without additional escaping.
     #[cfg(target_os = "windows")]
     pub escape_args: bool,
+
+    /// Initial legacy Win32 console colors for the pseudoconsole.
+    #[cfg(target_os = "windows")]
+    pub console_palette: ConsolePalette,
+
+    /// Internal executable used to apply legacy colors inside the pseudoconsole.
+    #[cfg(target_os = "windows")]
+    pub console_palette_helper: Option<PathBuf>,
+}
+
+/// The legacy Win32 console color state associated with a pseudoconsole.
+///
+/// Colors are in ANSI order (normal 0-7, bright 8-15). The foreground and
+/// background are indices into that exact table because Win32 attributes can
+/// represent palette entries, not arbitrary RGB values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct ConsolePalette {
+    pub colors: [[u8; 3]; 16],
+    pub foreground_index: u8,
+    pub background_index: u8,
+}
+
+impl Default for ConsolePalette {
+    fn default() -> Self {
+        Self {
+            colors: [
+                [0, 0, 0],
+                [128, 0, 0],
+                [0, 128, 0],
+                [128, 128, 0],
+                [0, 0, 128],
+                [128, 0, 128],
+                [0, 128, 128],
+                [192, 192, 192],
+                [128, 128, 128],
+                [255, 0, 0],
+                [0, 255, 0],
+                [255, 255, 0],
+                [0, 0, 255],
+                [255, 0, 255],
+                [0, 255, 255],
+                [255, 255, 255],
+            ],
+            foreground_index: 7,
+            background_index: 0,
+        }
+    }
+}
+
+impl ConsolePalette {
+    /// Environment-safe fixed-width representation used only by the bundled
+    /// Windows helper. Fixed width makes malformed or partial payloads easy to
+    /// reject before any console state is touched.
+    pub fn to_private_payload(self) -> String {
+        use std::fmt::Write as _;
+
+        let mut payload = String::with_capacity(100);
+        for color in self.colors {
+            for channel in color {
+                write!(&mut payload, "{channel:02x}").expect("writing to a string cannot fail");
+            }
+        }
+        write!(&mut payload, "{:02x}{:02x}", self.foreground_index, self.background_index)
+            .expect("writing to a string cannot fail");
+        payload
+    }
+
+    pub fn from_private_payload(payload: &str) -> Option<Self> {
+        if payload.len() != 100 || !payload.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
+        let mut bytes = [0_u8; 50];
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&payload[index * 2..index * 2 + 2], 16).ok()?;
+        }
+        let mut colors = [[0_u8; 3]; 16];
+        for (color, channels) in colors.iter_mut().zip(bytes[..48].chunks_exact(3)) {
+            color.copy_from_slice(channels);
+        }
+        let foreground_index = bytes[48];
+        let background_index = bytes[49];
+        if foreground_index >= 16 || background_index >= 16 {
+            return None;
+        }
+        Some(Self { colors, foreground_index, background_index })
+    }
 }
 
 /// Shell options.
@@ -125,6 +215,9 @@ pub trait EventedPty: EventedReadWrite {
     fn child_is_foreign(&self) -> bool {
         false
     }
+
+    /// Updates legacy console colors where the platform exposes them.
+    fn set_console_palette(&mut self, _palette: ConsolePalette) {}
 }
 
 /// Setup environment variables.
@@ -182,4 +275,32 @@ fn terminfo_exists(terminfo: &str) -> bool {
 
     // No valid terminfo path has been found.
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn private_console_palette_payload_round_trips() {
+        let palette = ConsolePalette {
+            colors: std::array::from_fn(|index| [index as u8, 255 - index as u8, index as u8 * 3]),
+            foreground_index: 15,
+            background_index: 3,
+        };
+        assert_eq!(
+            ConsolePalette::from_private_payload(&palette.to_private_payload()),
+            Some(palette)
+        );
+    }
+
+    #[test]
+    fn private_console_palette_payload_rejects_malformed_values() {
+        assert_eq!(ConsolePalette::from_private_payload("00"), None);
+        let mut payload = ConsolePalette::default().to_private_payload();
+        payload.replace_range(96..98, "10");
+        assert_eq!(ConsolePalette::from_private_payload(&payload), None);
+        payload.replace_range(96..98, "zz");
+        assert_eq!(ConsolePalette::from_private_payload(&payload), None);
+    }
 }

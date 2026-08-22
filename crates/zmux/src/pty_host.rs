@@ -27,7 +27,7 @@ use std::{
 
 use alacritty_terminal::{
     event::{OnResize as _, WindowSize},
-    tty,
+    tty::{self, ConsolePalette},
 };
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
@@ -57,6 +57,138 @@ fn socket_path(directory: &Path) -> PathBuf {
 }
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
+const PALETTE_HELPER_ENV: &str = "ZETTA_INTERNAL_CONSOLE_PALETTE_V1";
+const PALETTE_READY_EVENT_ENV: &str = "ZETTA_INTERNAL_CONSOLE_PALETTE_READY_EVENT_V1";
+const PALETTE_PROBE_ENV: &str = "ZETTA_INTERNAL_CONSOLE_PALETTE_PROBE_V1";
+
+/// Runs the silent one-shot palette mode when the private payload is present.
+/// The return value is an exit code for the tiny `zmux-pty` entry point; no
+/// diagnostic is written into the user's terminal by this mode.
+pub fn run_palette_helper_from_env() -> Option<i32> {
+    let payload = std::env::var_os(PALETTE_HELPER_ENV)?;
+    unsafe { std::env::remove_var(PALETTE_HELPER_ENV) };
+    let Some(payload) = payload.to_str() else {
+        signal_palette_ready();
+        return Some(2);
+    };
+    let Some(palette) = ConsolePalette::from_private_payload(payload) else {
+        signal_palette_ready();
+        return Some(2);
+    };
+    let result = apply_current_console_palette(palette);
+    signal_palette_ready();
+    Some(if result.is_ok() { 0 } else { 1 })
+}
+
+fn signal_palette_ready() {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{EVENT_MODIFY_STATE, OpenEventW, SetEvent};
+    use windows::core::HSTRING;
+
+    let Some(name) = std::env::var_os(PALETTE_READY_EVENT_ENV) else {
+        return;
+    };
+    unsafe { std::env::remove_var(PALETTE_READY_EVENT_ENV) };
+    let Ok(event) = (unsafe { OpenEventW(EVENT_MODIFY_STATE, false, &HSTRING::from(name)) }) else {
+        return;
+    };
+    unsafe {
+        let _ = SetEvent(event);
+        let _ = CloseHandle(event);
+    }
+}
+
+/// Private integration probe used to verify the palette from inside ConPTY.
+/// It is environment-only so it cannot become part of the public CLI surface.
+pub fn run_palette_probe_from_env() -> Option<i32> {
+    std::env::var_os(PALETTE_PROBE_ENV)?;
+    unsafe { std::env::remove_var(PALETTE_PROBE_ENV) };
+    let print_palette = || -> Result<()> {
+        let info = current_console_info()?;
+        println!(
+            "PALETTE:{:08x},{:02x}",
+            info.ColorTable[3].0,
+            info.wAttributes.0 & 0xff
+        );
+        Ok(())
+    };
+    if print_palette().is_err() {
+        return Some(1);
+    }
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return Some(1);
+    }
+    Some(if print_palette().is_ok() { 0 } else { 1 })
+}
+
+fn apply_current_console_palette(palette: ConsolePalette) -> Result<()> {
+    use windows::Win32::System::Console::SetConsoleScreenBufferInfoEx;
+
+    let (output, handle, mut info) = current_console_info_with_handle()?;
+    update_screen_buffer_info(&mut info, palette);
+    unsafe { SetConsoleScreenBufferInfoEx(handle, &info) }
+        .context("writing console color state")?;
+    drop(output);
+    Ok(())
+}
+
+fn current_console_info() -> Result<windows::Win32::System::Console::CONSOLE_SCREEN_BUFFER_INFOEX> {
+    Ok(current_console_info_with_handle()?.2)
+}
+
+fn current_console_info_with_handle() -> Result<(
+    std::fs::File,
+    windows::Win32::Foundation::HANDLE,
+    windows::Win32::System::Console::CONSOLE_SCREEN_BUFFER_INFOEX,
+)> {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Console::{
+        CONSOLE_SCREEN_BUFFER_INFOEX, GetConsoleScreenBufferInfoEx,
+    };
+
+    let output = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("CONOUT$")
+        .context("opening CONOUT$")?;
+    let handle = HANDLE(output.as_raw_handle());
+    let mut info = CONSOLE_SCREEN_BUFFER_INFOEX::default();
+    info.cbSize = std::mem::size_of::<CONSOLE_SCREEN_BUFFER_INFOEX>() as u32;
+    unsafe { GetConsoleScreenBufferInfoEx(handle, &mut info) }
+        .context("reading console color state")?;
+    Ok((output, handle, info))
+}
+
+fn colorref([red, green, blue]: [u8; 3]) -> windows::Win32::Foundation::COLORREF {
+    windows::Win32::Foundation::COLORREF(
+        u32::from(red) | (u32::from(green) << 8) | (u32::from(blue) << 16),
+    )
+}
+
+fn palette_attributes(attributes: u16, palette: ConsolePalette) -> u16 {
+    (attributes & !0x00ff)
+        | u16::from(palette.foreground_index)
+        | (u16::from(palette.background_index) << 4)
+}
+
+fn update_screen_buffer_info(
+    info: &mut windows::Win32::System::Console::CONSOLE_SCREEN_BUFFER_INFOEX,
+    palette: ConsolePalette,
+) {
+    for (target, color) in info.ColorTable.iter_mut().zip(palette.colors) {
+        *target = colorref(color);
+    }
+    info.wAttributes = windows::Win32::System::Console::CONSOLE_CHARACTER_ATTRIBUTES(
+        palette_attributes(info.wAttributes.0, palette),
+    );
+    info.wPopupAttributes = palette_attributes(info.wPopupAttributes, palette);
+    // GetConsoleScreenBufferInfoEx reports inclusive edges, while the setter
+    // consumes exclusive right/bottom bounds.
+    info.srWindow.Right = info.srWindow.Right.saturating_add(1);
+    info.srWindow.Bottom = info.srWindow.Bottom.saturating_add(1);
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HostEnvelope {
@@ -80,6 +212,7 @@ pub enum HostRequest {
         env: HashMap<String, String>,
         working_directory: Option<PathBuf>,
         size: TerminalSize,
+        palette: ConsolePalette,
     },
     /// Duplicates an existing console's pipes into `target_process_id`, which
     /// is how a session is handed to a client after a daemon restart.
@@ -89,6 +222,10 @@ pub enum HostRequest {
         console_id: u64,
         columns: u16,
         lines: u16,
+    },
+    SetConsolePalette {
+        console_id: u64,
+        palette: ConsolePalette,
     },
     /// Ends the process and tears the console down.
     Close { console_id: u64 },
@@ -150,6 +287,7 @@ struct Console {
     /// Held until it is reported, so an exit that happens while the daemon is
     /// being replaced is delivered to its replacement rather than lost.
     pending_exit: Option<ConsoleExit>,
+    palette: ConsolePalette,
 }
 
 #[derive(Default)]
@@ -260,6 +398,7 @@ fn handle(host: &Arc<Host>, envelope: HostEnvelope) -> HostResponse {
             env,
             working_directory,
             size,
+            palette,
         } => match open_console(
             host,
             program,
@@ -267,6 +406,7 @@ fn handle(host: &Arc<Host>, envelope: HostEnvelope) -> HostResponse {
             env,
             working_directory,
             size,
+            palette,
             envelope.target_process_id,
         ) {
             Ok(response) => response,
@@ -295,6 +435,19 @@ fn handle(host: &Arc<Host>, envelope: HostEnvelope) -> HostResponse {
                     cell_width: 0,
                     cell_height: 0,
                 });
+            }
+            HostResponse::Ok
+        }
+        HostRequest::SetConsolePalette {
+            console_id,
+            palette,
+        } => {
+            let mut consoles = host.consoles.lock().unwrap();
+            if let Some(console) = consoles.iter_mut().find(|console| console.id == console_id)
+                && console.palette != palette
+            {
+                console.pty.set_console_palette(palette);
+                console.palette = palette;
             }
             HostResponse::Ok
         }
@@ -352,9 +505,12 @@ fn open_console(
     env: HashMap<String, String>,
     working_directory: Option<PathBuf>,
     size: TerminalSize,
+    palette: ConsolePalette,
     target_process_id: u32,
 ) -> Result<HostResponse> {
     let escape_args = escape_windows_shell_args(program.as_deref());
+    let console_palette_helper = (!is_wsl_program(program.as_deref()))
+        .then(|| std::env::current_exe().unwrap_or_else(|_| PathBuf::from("zmux-pty.exe")));
     let options = tty::Options {
         shell: program.map(|program| tty::Shell::new(program, args)),
         working_directory,
@@ -365,6 +521,8 @@ fn open_console(
         // command arguments have shell-specific quoting that the terminal
         // layer deliberately passes through raw.
         escape_args,
+        console_palette: palette,
+        console_palette_helper,
     };
     let pty = tty::new_host(
         &options,
@@ -387,12 +545,19 @@ fn open_console(
         pty,
         exited: false,
         pending_exit: None,
+        palette,
     });
     Ok(HostResponse::Opened {
         console_id,
         child_pid,
         handles,
     })
+}
+
+fn is_wsl_program(program: Option<&str>) -> bool {
+    program
+        .and_then(|program| Path::new(program).file_stem()?.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("wsl"))
 }
 
 fn escape_windows_shell_args(program: Option<&str>) -> bool {
@@ -653,6 +818,7 @@ impl HostClient {
         env: HashMap<String, String>,
         working_directory: Option<PathBuf>,
         size: TerminalSize,
+        palette: ConsolePalette,
         target_process_id: u32,
     ) -> Result<(u64, u32, Vec<i64>)> {
         match self.request(
@@ -662,6 +828,7 @@ impl HostClient {
                 env,
                 working_directory,
                 size,
+                palette,
             },
             target_process_id,
         )? {
@@ -689,6 +856,20 @@ impl HostClient {
                 console_id,
                 columns,
                 lines,
+            },
+            0,
+        )? {
+            HostResponse::Ok => Ok(()),
+            HostResponse::Error { message } => anyhow::bail!("{message}"),
+            other => anyhow::bail!("unexpected host response: {other:?}"),
+        }
+    }
+
+    pub fn set_console_palette(&self, console_id: u64, palette: ConsolePalette) -> Result<()> {
+        match self.request(
+            HostRequest::SetConsolePalette {
+                console_id,
+                palette,
             },
             0,
         )? {

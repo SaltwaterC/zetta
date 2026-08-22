@@ -19,7 +19,7 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use gpui::AppContext as _;
-use terminal::{PtyHandover, PtyProvider, PtySpawnRequest};
+use terminal::{ConsolePalette, PtyControl, PtyHandover, PtyProvider, PtySpawnRequest};
 #[cfg(feature = "session-persistence")]
 use zmux::persistence::PersistenceOptions;
 use zmux::{
@@ -224,33 +224,93 @@ impl PtyProvider for MuxPtyProvider {
                 cell_width: 0,
                 cell_height: 0,
             },
+            console_palette: request.console_palette,
         })?;
         self.session.set_id(pane.session_id);
         *self.opened.lock().unwrap() = Some(OpenedPane {
             session_id: pane.session_id,
             pane_id: pane.pane_id,
         });
-        Ok(attached_pane_handover(pane))
-    }
-
-    fn resize(&self, columns: u16, lines: u16) {
-        // Only the multiplexer can resize a console it created. On Unix the
-        // resize already happened through the descriptor, so this is a no-op
-        // there rather than a second, redundant round trip.
-        if cfg!(windows)
-            && let Some(opened) = self.opened()
-            && let Err(error) =
-                self.runtime
-                    .client
-                    .resize(opened.session_id, opened.pane_id, columns, lines)
-        {
-            log::debug!("could not resize the multiplexer's terminal: {error:#}");
-        }
+        Ok(attached_pane_handover(pane, self.runtime.client().clone()))
     }
 }
 
+#[cfg(windows)]
+enum PtyControlRequest {
+    Resize { columns: u16, lines: u16 },
+    Palette(ConsolePalette),
+}
+
+#[cfg(windows)]
+struct MuxPtyControl {
+    requests: std::sync::mpsc::Sender<PtyControlRequest>,
+}
+
+#[cfg(not(windows))]
+struct MuxPtyControl;
+
+impl MuxPtyControl {
+    #[cfg(windows)]
+    fn new(client: Arc<Client>, session_id: u64, pane_id: u64) -> Arc<Self> {
+        let (requests, receiver) = std::sync::mpsc::channel();
+        let _ = std::thread::Builder::new()
+            .name(format!("zmux-control-{pane_id}"))
+            .spawn(move || {
+                while let Ok(request) = receiver.recv() {
+                    let result = match request {
+                        PtyControlRequest::Resize { columns, lines } => {
+                            client.resize(session_id, pane_id, columns, lines)
+                        }
+                        PtyControlRequest::Palette(palette) => {
+                            client.set_console_palette(session_id, pane_id, palette)
+                        }
+                    };
+                    if let Err(error) = result {
+                        log::debug!("could not update multiplexer pane {pane_id}: {error:#}");
+                    }
+                }
+            });
+        Arc::new(Self { requests })
+    }
+
+    #[cfg(not(windows))]
+    fn new(_client: Arc<Client>, _session_id: u64, _pane_id: u64) -> Arc<Self> {
+        Arc::new(Self)
+    }
+}
+
+impl PtyControl for MuxPtyControl {
+    fn resize(&self, columns: u16, lines: u16) {
+        #[cfg(windows)]
+        let _ = self
+            .requests
+            .send(PtyControlRequest::Resize { columns, lines });
+        #[cfg(not(windows))]
+        let _ = (columns, lines);
+    }
+
+    fn set_console_palette(&self, palette: ConsolePalette) {
+        #[cfg(windows)]
+        let _ = self.requests.send(PtyControlRequest::Palette(palette));
+        #[cfg(not(windows))]
+        let _ = palette;
+    }
+}
+
+pub(crate) fn mux_pty_control(
+    client: Arc<Client>,
+    session_id: u64,
+    pane_id: u64,
+) -> Arc<dyn PtyControl> {
+    MuxPtyControl::new(client, session_id, pane_id)
+}
+
 /// Turns what the multiplexer handed over into what a terminal is built from.
-pub(crate) fn attached_pane_handover(pane: zmux::client::AttachedPane) -> PtyHandover {
+pub(crate) fn attached_pane_handover(
+    pane: zmux::client::AttachedPane,
+    client: Arc<Client>,
+) -> PtyHandover {
+    let control = mux_pty_control(client, pane.session_id, pane.pane_id);
     PtyHandover {
         #[cfg(unix)]
         descriptor: pane.descriptor,
@@ -260,6 +320,7 @@ pub(crate) fn attached_pane_handover(pane: zmux::client::AttachedPane) -> PtyHan
         conin: pane.conin,
         child_pid: pane.child_pid,
         replay: pane.replay,
+        control,
     }
 }
 

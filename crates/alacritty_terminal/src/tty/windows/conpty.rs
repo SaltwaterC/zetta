@@ -4,9 +4,11 @@ use std::ffi::OsStr;
 use std::io::{Error, Result};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{FromRawHandle, IntoRawHandle, OwnedHandle};
-use std::{mem, ptr};
+use std::{mem, ptr, time::Duration};
 
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, S_OK};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, DBG_CONTINUE, EXCEPTION_BREAKPOINT, HANDLE, S_OK, WAIT_OBJECT_0,
+};
 use windows_sys::Win32::System::Console::{
     COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole,
 };
@@ -14,16 +16,22 @@ use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows_sys::core::{HRESULT, PWSTR};
 use windows_sys::{s, w};
 
+use windows_sys::Win32::System::Diagnostics::Debug::{
+    CREATE_PROCESS_DEBUG_EVENT, ContinueDebugEvent, DEBUG_EVENT, DebugActiveProcessStop,
+    DebugSetProcessKillOnExit, EXCEPTION_DEBUG_EVENT, LOAD_DLL_DEBUG_EVENT, WaitForDebugEvent,
+};
 use windows_sys::Win32::System::Threading::{
-    CREATE_UNICODE_ENVIRONMENT, CreateProcessW, EXTENDED_STARTUPINFO_PRESENT,
-    InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION,
-    STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, UpdateProcThreadAttribute,
+    CREATE_UNICODE_ENVIRONMENT, CreateEventW, CreateProcessW, DEBUG_ONLY_THIS_PROCESS,
+    DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcessId,
+    GetExitCodeProcess, InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+    PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess,
+    UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
 use crate::event::{OnResize, WindowSize};
-use crate::tty::Options;
 use crate::tty::windows::child::ChildExitWatcher;
 use crate::tty::windows::{cmdline, normalize_working_directory, win32_string};
+use crate::tty::{ConsolePalette, Options};
 
 /// Visible to the parent module so an *attached* console is unblocked through
 /// the same buffer as one created here, by construction rather than by a
@@ -94,6 +102,7 @@ impl ConptyApi {
 pub struct Conpty {
     pub handle: HPCON,
     api: ConptyApi,
+    palette_helper: Option<std::path::PathBuf>,
 }
 
 impl Drop for Conpty {
@@ -140,110 +149,39 @@ pub(super) fn new(config: &Options, window_size: WindowSize) -> Result<SpawnedPt
 
     assert_eq!(result, S_OK);
 
-    let mut success;
-
-    // Prepare child process startup info.
-
-    let mut size: usize = 0;
-
-    let mut startup_info_ex: STARTUPINFOEXW = unsafe { mem::zeroed() };
-
-    startup_info_ex.StartupInfo.lpTitle = std::ptr::null_mut() as PWSTR;
-
-    startup_info_ex.StartupInfo.cb = mem::size_of::<STARTUPINFOEXW>() as u32;
-
-    // Setting this flag but leaving all the handles as default (null) ensures the
-    // PTY process does not inherit any handles from this Alacritty process.
-    startup_info_ex.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
-
-    // Create the appropriately sized thread attribute list.
-    unsafe {
-        let failure =
-            InitializeProcThreadAttributeList(ptr::null_mut(), 1, 0, &mut size as *mut usize) > 0;
-
-        // This call was expected to return false.
-        if failure {
-            return Err(Error::last_os_error());
+    // Stop a palette-enabled child at the loader's initial breakpoint. By
+    // then ConPTY has created the child's real screen buffer, but none of the
+    // program's instructions have run, so the helper can update exactly the
+    // buffer startup color queries will inspect.
+    let debug_palette_startup = config.console_palette_helper.is_some();
+    let mut proc_info = spawn_attached_process(pty_handle, config, debug_palette_startup)?;
+    let debug_pause = if debug_palette_startup {
+        match wait_for_initial_breakpoint(proc_info.dwProcessId) {
+            Ok(pause) => Some(pause),
+            Err(error) => {
+                warn!("could not pause the console child for palette initialization: {error}");
+                terminate_process(proc_info);
+                proc_info = spawn_attached_process(pty_handle, config, false)?;
+                None
+            },
         }
-    }
-
-    let mut attr_list: Box<[u8]> = vec![0; size].into_boxed_slice();
-
-    // Set startup info's attribute list & initialize it
-    //
-    // Lint failure is spurious; it's because winapi's definition of PROC_THREAD_ATTRIBUTE_LIST
-    // implies it is one pointer in size (32 or 64 bits) but really this is just a dummy value.
-    // Casting a *mut u8 (pointer to 8 bit type) might therefore not be aligned correctly in
-    // the compiler's eyes.
-    #[allow(clippy::cast_ptr_alignment)]
-    {
-        startup_info_ex.lpAttributeList = attr_list.as_mut_ptr() as _;
-    }
-
-    unsafe {
-        success = InitializeProcThreadAttributeList(
-            startup_info_ex.lpAttributeList,
-            1,
-            0,
-            &mut size as *mut usize,
-        ) > 0;
-
-        if !success {
-            return Err(Error::last_os_error());
-        }
-    }
-
-    // Set thread attribute list's Pseudo Console to the specified ConPTY.
-    unsafe {
-        success = UpdateProcThreadAttribute(
-            startup_info_ex.lpAttributeList,
-            0,
-            PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
-            pty_handle as *mut std::ffi::c_void,
-            mem::size_of::<HPCON>(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-        ) > 0;
-
-        if !success {
-            return Err(Error::last_os_error());
-        }
-    }
-
-    // Prepare child process creation arguments.
-    let cmdline = win32_string(&cmdline(config));
-    let cwd = config.working_directory.as_deref().map(|directory| {
-        let directory = normalize_working_directory(directory);
-        win32_string(directory.as_os_str())
-    });
-    let mut creation_flags = EXTENDED_STARTUPINFO_PRESENT;
-    let custom_env_block = convert_custom_env(&config.env);
-    let custom_env_block_pointer = match &custom_env_block {
-        Some(custom_env_block) => {
-            creation_flags |= CREATE_UNICODE_ENVIRONMENT;
-            custom_env_block.as_ptr() as *mut std::ffi::c_void
-        },
-        None => ptr::null_mut(),
+    } else {
+        None
     };
-
-    let mut proc_info: PROCESS_INFORMATION = unsafe { mem::zeroed() };
-    unsafe {
-        success = CreateProcessW(
-            ptr::null(),
-            cmdline.as_ptr() as PWSTR,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            false as i32,
-            creation_flags,
-            custom_env_block_pointer,
-            cwd.as_ref().map_or_else(ptr::null, |s| s.as_ptr()),
-            &mut startup_info_ex.StartupInfo as *mut STARTUPINFOW,
-            &mut proc_info as *mut PROCESS_INFORMATION,
-        ) > 0;
-
-        if !success {
-            return Err(Error::last_os_error());
+    if let Some(helper) = config.console_palette_helper.as_ref() {
+        match start_palette_helper(pty_handle, helper, config.console_palette)
+            .and_then(finish_palette_helper)
+        {
+            Ok(()) => {},
+            Err(error) => warn!("could not initialize pseudoconsole colors: {error}"),
         }
+    }
+    if let Some(pause) = debug_pause
+        && let Err(error) = resume_from_initial_breakpoint(pause)
+    {
+        warn!("could not resume the palette-initialized console child: {error}");
+        terminate_process(proc_info);
+        proc_info = spawn_attached_process(pty_handle, config, false)?;
     }
 
     // `ChildExitWatcher` takes ownership of the process handle. The thread
@@ -254,7 +192,11 @@ pub(super) fn new(config: &Options, window_size: WindowSize) -> Result<SpawnedPt
         CloseHandle(proc_info.hThread);
     }
     let child_watcher = child_watcher?;
-    let conpty = Conpty { handle: pty_handle as HPCON, api };
+    let conpty = Conpty {
+        handle: pty_handle as HPCON,
+        api,
+        palette_helper: config.console_palette_helper.clone(),
+    };
 
     // Keep the console pipes as raw handles until the caller decides whether
     // it is creating an ordinary terminal (which needs the unblocking reader
@@ -266,6 +208,227 @@ pub(super) fn new(config: &Options, window_size: WindowSize) -> Result<SpawnedPt
     let conin = unsafe { OwnedHandle::from_raw_handle(conin.into_raw_handle()) };
 
     Ok(SpawnedPty { backend: conpty, conout, conin, child_watcher })
+}
+
+const PALETTE_HELPER_ENV: &str = "ZETTA_INTERNAL_CONSOLE_PALETTE_V1";
+const PALETTE_READY_EVENT_ENV: &str = "ZETTA_INTERNAL_CONSOLE_PALETTE_READY_EVENT_V1";
+const PALETTE_HELPER_TIMEOUT: Duration = Duration::from_secs(2);
+const INITIAL_BREAKPOINT_TIMEOUT: Duration = Duration::from_secs(5);
+static PALETTE_EVENT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+struct DebugPause {
+    process_id: u32,
+    thread_id: u32,
+}
+
+fn wait_for_initial_breakpoint(process_id: u32) -> Result<DebugPause> {
+    unsafe {
+        let _ = DebugSetProcessKillOnExit(false as i32);
+    }
+    let deadline = std::time::Instant::now() + INITIAL_BREAKPOINT_TIMEOUT;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            unsafe {
+                let _ = DebugActiveProcessStop(process_id);
+            }
+            return Err(Error::other("the console child did not reach its initial breakpoint"));
+        }
+        let timeout = u32::try_from(remaining.as_millis()).unwrap_or(u32::MAX);
+        let mut event: DEBUG_EVENT = unsafe { mem::zeroed() };
+        if unsafe { WaitForDebugEvent(&mut event, timeout) } == 0 {
+            unsafe {
+                let _ = DebugActiveProcessStop(process_id);
+            }
+            return Err(Error::last_os_error());
+        }
+
+        if event.dwDebugEventCode == CREATE_PROCESS_DEBUG_EVENT {
+            let file = unsafe { event.u.CreateProcessInfo.hFile };
+            if !file.is_null() {
+                unsafe { CloseHandle(file) };
+            }
+        } else if event.dwDebugEventCode == LOAD_DLL_DEBUG_EVENT {
+            let file = unsafe { event.u.LoadDll.hFile };
+            if !file.is_null() {
+                unsafe { CloseHandle(file) };
+            }
+        } else if event.dwDebugEventCode == EXCEPTION_DEBUG_EVENT
+            && unsafe { event.u.Exception.ExceptionRecord.ExceptionCode } == EXCEPTION_BREAKPOINT
+        {
+            return Ok(DebugPause { process_id: event.dwProcessId, thread_id: event.dwThreadId });
+        }
+
+        if unsafe { ContinueDebugEvent(event.dwProcessId, event.dwThreadId, DBG_CONTINUE) } == 0 {
+            unsafe {
+                let _ = DebugActiveProcessStop(process_id);
+            }
+            return Err(Error::last_os_error());
+        }
+    }
+}
+
+fn resume_from_initial_breakpoint(pause: DebugPause) -> Result<()> {
+    if unsafe { ContinueDebugEvent(pause.process_id, pause.thread_id, DBG_CONTINUE) } == 0 {
+        return Err(Error::last_os_error());
+    }
+    if unsafe { DebugActiveProcessStop(pause.process_id) } == 0 {
+        return Err(Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn start_palette_helper(
+    pty_handle: HPCON,
+    helper: &std::path::Path,
+    palette: ConsolePalette,
+) -> Result<PROCESS_INFORMATION> {
+    let event_name = format!(
+        "Local\\ZettaPalette-{}-{}",
+        unsafe { GetCurrentProcessId() },
+        PALETTE_EVENT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let event_name_wide = win32_string(OsStr::new(&event_name));
+    let ready_event =
+        unsafe { CreateEventW(ptr::null(), true as i32, false as i32, event_name_wide.as_ptr()) };
+    if ready_event.is_null() {
+        return Err(Error::last_os_error());
+    }
+    let mut env = HashMap::new();
+    env.insert(PALETTE_HELPER_ENV.to_owned(), palette.to_private_payload());
+    env.insert(PALETTE_READY_EVENT_ENV.to_owned(), event_name);
+    let helper_config = Options {
+        shell: Some(crate::tty::Shell::new(helper.to_string_lossy().into_owned(), Vec::new())),
+        env,
+        escape_args: true,
+        ..Options::default()
+    };
+    let process = match spawn_attached_process(pty_handle, &helper_config, false) {
+        Ok(process) => process,
+        Err(error) => {
+            unsafe { CloseHandle(ready_event) };
+            return Err(error);
+        },
+    };
+    let timeout = u32::try_from(PALETTE_HELPER_TIMEOUT.as_millis()).unwrap_or(u32::MAX);
+    let wait = unsafe { WaitForSingleObject(ready_event, timeout) };
+    unsafe { CloseHandle(ready_event) };
+    if wait != WAIT_OBJECT_0 {
+        terminate_palette_helper(process);
+        return Err(Error::other("palette helper timed out"));
+    }
+    Ok(process)
+}
+
+fn finish_palette_helper(process: PROCESS_INFORMATION) -> Result<()> {
+    let timeout = u32::try_from(PALETTE_HELPER_TIMEOUT.as_millis()).unwrap_or(u32::MAX);
+    if unsafe { WaitForSingleObject(process.hProcess, timeout) } != WAIT_OBJECT_0 {
+        terminate_palette_helper(process);
+        return Err(Error::other("palette helper did not exit"));
+    }
+    let mut exit_code = 1;
+    let got_exit = unsafe { GetExitCodeProcess(process.hProcess, &mut exit_code) } > 0;
+    unsafe {
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+    }
+    if !got_exit {
+        return Err(Error::last_os_error());
+    }
+    if exit_code != 0 {
+        return Err(Error::other(format!("palette helper exited with status {exit_code}")));
+    }
+    Ok(())
+}
+
+fn terminate_palette_helper(process: PROCESS_INFORMATION) {
+    terminate_process(process);
+}
+
+fn terminate_process(process: PROCESS_INFORMATION) {
+    unsafe {
+        let _ = TerminateProcess(process.hProcess, 1);
+        WaitForSingleObject(process.hProcess, 1000);
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+    }
+}
+
+fn spawn_attached_process(
+    pty_handle: HPCON,
+    config: &Options,
+    debugged: bool,
+) -> Result<PROCESS_INFORMATION> {
+    let mut size = 0;
+    let mut startup_info_ex: STARTUPINFOEXW = unsafe { mem::zeroed() };
+    startup_info_ex.StartupInfo.lpTitle = ptr::null_mut() as PWSTR;
+    startup_info_ex.StartupInfo.cb = mem::size_of::<STARTUPINFOEXW>() as u32;
+    startup_info_ex.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
+
+    unsafe {
+        if InitializeProcThreadAttributeList(ptr::null_mut(), 1, 0, &mut size) > 0 {
+            return Err(Error::last_os_error());
+        }
+    }
+    let mut attr_list: Box<[u8]> = vec![0; size].into_boxed_slice();
+    #[allow(clippy::cast_ptr_alignment)]
+    {
+        startup_info_ex.lpAttributeList = attr_list.as_mut_ptr() as _;
+    }
+    unsafe {
+        if InitializeProcThreadAttributeList(startup_info_ex.lpAttributeList, 1, 0, &mut size) == 0
+        {
+            return Err(Error::last_os_error());
+        }
+        if UpdateProcThreadAttribute(
+            startup_info_ex.lpAttributeList,
+            0,
+            PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
+            pty_handle as *mut std::ffi::c_void,
+            mem::size_of::<HPCON>(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+        ) == 0
+        {
+            DeleteProcThreadAttributeList(startup_info_ex.lpAttributeList);
+            return Err(Error::last_os_error());
+        }
+    }
+
+    let mut command_line = win32_string(&cmdline(config));
+    let cwd = config.working_directory.as_deref().map(|directory| {
+        let directory = normalize_working_directory(directory);
+        win32_string(directory.as_os_str())
+    });
+    let mut creation_flags = EXTENDED_STARTUPINFO_PRESENT;
+    if debugged {
+        creation_flags |= DEBUG_ONLY_THIS_PROCESS;
+    }
+    let custom_env_block = convert_custom_env(&config.env);
+    let custom_env_block_pointer = custom_env_block.as_ref().map_or(ptr::null_mut(), |block| {
+        creation_flags |= CREATE_UNICODE_ENVIRONMENT;
+        block.as_ptr() as *mut std::ffi::c_void
+    });
+    let mut process: PROCESS_INFORMATION = unsafe { mem::zeroed() };
+    let success = unsafe {
+        CreateProcessW(
+            ptr::null(),
+            command_line.as_mut_ptr() as PWSTR,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            false as i32,
+            creation_flags,
+            custom_env_block_pointer,
+            cwd.as_ref().map_or_else(ptr::null, |value| value.as_ptr()),
+            &startup_info_ex.StartupInfo,
+            &mut process,
+        ) > 0
+    };
+    unsafe { DeleteProcThreadAttributeList(startup_info_ex.lpAttributeList) };
+    if !success {
+        return Err(Error::last_os_error());
+    }
+    Ok(process)
 }
 
 // Windows environment variables are case-insensitive, and the caller is responsible for
@@ -329,6 +492,19 @@ impl OnResize for Conpty {
     fn on_resize(&mut self, window_size: WindowSize) {
         let result = unsafe { (self.api.resize)(self.handle, window_size.into()) };
         assert_eq!(result, S_OK);
+    }
+}
+
+impl Conpty {
+    pub(super) fn set_console_palette(&self, palette: ConsolePalette) {
+        let Some(helper) = &self.palette_helper else {
+            return;
+        };
+        if let Err(error) =
+            start_palette_helper(self.handle, helper, palette).and_then(finish_palette_helper)
+        {
+            warn!("could not update pseudoconsole colors: {error}");
+        }
     }
 }
 

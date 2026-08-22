@@ -15,6 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use alacritty_terminal::tty::ConsolePalette;
 use anyhow::{Context as _, Result};
 
 #[cfg(unix)]
@@ -648,6 +649,48 @@ impl Client {
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to resize: {other:?}"),
         }
+    }
+
+    pub fn set_console_palette(
+        &self,
+        session_id: u64,
+        pane_id: u64,
+        palette: ConsolePalette,
+    ) -> Result<()> {
+        self.set_console_palette_as(session_id, pane_id, palette, std::process::id())
+    }
+
+    fn set_console_palette_as(
+        &self,
+        session_id: u64,
+        pane_id: u64,
+        palette: ConsolePalette,
+        client_process_id: u32,
+    ) -> Result<()> {
+        let mut connection = self.open_as(
+            Request::SetConsolePalette {
+                session_id,
+                pane_id,
+                palette,
+            },
+            client_process_id,
+        )?;
+        match connection.receive::<Response>()?.0 {
+            Response::Ok => Ok(()),
+            Response::Error { message } => anyhow::bail!("{message}"),
+            other => anyhow::bail!("unexpected palette response: {other:?}"),
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_console_palette_for_process(
+        &self,
+        session_id: u64,
+        pane_id: u64,
+        palette: ConsolePalette,
+        client_process_id: u32,
+    ) -> Result<()> {
+        self.set_console_palette_as(session_id, pane_id, palette, client_process_id)
     }
 
     /// Answers a revoke: the screen this process was showing a pane, handed

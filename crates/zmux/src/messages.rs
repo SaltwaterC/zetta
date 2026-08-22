@@ -7,6 +7,7 @@
 
 use std::{collections::HashMap, path::PathBuf};
 
+use alacritty_terminal::tty::ConsolePalette;
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::{BackgroundSessionSummary, RestorableSessionRecord};
@@ -140,6 +141,12 @@ pub enum Request {
         columns: u16,
         lines: u16,
     },
+    /// Updates the legacy Win32 colors for one pane's pseudoconsole.
+    SetConsolePalette {
+        session_id: u64,
+        pane_id: u64,
+        palette: ConsolePalette,
+    },
     /// The sessions being held, as published in the catalog.
     List,
     /// Ends a session and everything running in it.
@@ -217,6 +224,7 @@ pub struct SpawnRequest {
     pub env: HashMap<String, String>,
     pub working_directory: Option<PathBuf>,
     pub size: TerminalSize,
+    pub console_palette: ConsolePalette,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -95,6 +95,8 @@ use crate::alacritty::{
 use crate::mappings::colors::to_vte_rgb;
 use crate::mappings::keys::to_esc_str;
 
+pub use alacritty_terminal::tty::ConsolePalette;
+
 const PROCESS_KILL_GRACE_PERIOD: Duration = Duration::from_millis(100);
 
 /// Give the shell and its foreground job a short graceful-exit window, then
@@ -1518,10 +1520,12 @@ fn open_provided_pty(
     env: HashMap<String, String>,
     term: &Arc<AlacrittyTermLock>,
     output_processor: &mut Processor<StdSyncHandler>,
+    console_palette: ConsolePalette,
 ) -> Result<(
     AlacrittyPty,
     Option<alacritty_terminal::tty::AttachedChildEvents>,
     Vec<u8>,
+    Option<Arc<dyn PtyControl>>,
 )> {
     let _ = pty_options;
     let (program, args) = match shell {
@@ -1533,11 +1537,17 @@ fn open_provided_pty(
         args,
         env,
         working_directory,
+        console_palette,
     })?;
     let (pty, child_events) =
         alacritty_terminal::tty::attach(handover.descriptor, handover.child_pid)?;
     let _ = (term, output_processor);
-    Ok((pty, Some(child_events), handover.replay))
+    Ok((
+        pty,
+        Some(child_events),
+        handover.replay,
+        Some(handover.control),
+    ))
 }
 
 #[cfg(windows)]
@@ -1549,10 +1559,12 @@ fn open_provided_pty(
     env: HashMap<String, String>,
     term: &Arc<AlacrittyTermLock>,
     output_processor: &mut Processor<StdSyncHandler>,
+    console_palette: ConsolePalette,
 ) -> Result<(
     AlacrittyPty,
     Option<alacritty_terminal::tty::AttachedChildEvents>,
     Vec<u8>,
+    Option<Arc<dyn PtyControl>>,
 )> {
     let _ = pty_options;
     let (program, args) = match shell {
@@ -1564,6 +1576,7 @@ fn open_provided_pty(
         args,
         env,
         working_directory,
+        console_palette,
     })?;
     let (pty, child_events) =
         alacritty_terminal::tty::attach(handover.conout, handover.conin, handover.child_pid)?;
@@ -1572,7 +1585,7 @@ fn open_provided_pty(
     }
     // Windows has already replayed the retained output into the terminal,
     // unlike Unix, which defers it until the terminal has been laid out.
-    Ok((pty, Some(child_events), Vec::new()))
+    Ok((pty, Some(child_events), Vec::new(), Some(handover.control)))
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -1584,10 +1597,12 @@ fn open_provided_pty(
     _env: HashMap<String, String>,
     _term: &Arc<AlacrittyTermLock>,
     _output_processor: &mut Processor<StdSyncHandler>,
+    _console_palette: ConsolePalette,
 ) -> Result<(
     AlacrittyPty,
     Option<alacritty_terminal::tty::AttachedChildEvents>,
     Vec<u8>,
+    Option<Arc<dyn PtyControl>>,
 )> {
     anyhow::bail!("the multiplexer cannot hand over a console on this platform")
 }
@@ -1604,15 +1619,27 @@ fn open_provided_pty(
 /// to anything.
 pub trait PtyProvider: Send + Sync {
     fn open(&self, request: PtySpawnRequest) -> Result<PtyHandover>;
+}
 
-    /// Tells the owner that the terminal was resized.
-    ///
-    /// On Unix this is unnecessary — `TIOCSWINSZ` works from any holder of the
-    /// descriptor, so the resize has already happened by the time this is
-    /// called. On Windows only the pseudoconsole's creator can resize it, so
-    /// this is the resize.
+/// Operations that must be routed to the process which owns one specific PTY.
+///
+/// A handover carries this controller with the handles, so reattachments and
+/// shared panes never depend on mutable provider state from a previous open.
+pub trait PtyControl: Send + Sync {
+    fn resize(&self, columns: u16, lines: u16);
+    fn set_console_palette(&self, palette: ConsolePalette);
+}
+
+impl PtyControl for PtySender {
     fn resize(&self, columns: u16, lines: u16) {
-        let _ = (columns, lines);
+        self.resize_cells(columns, lines);
+    }
+
+    fn set_console_palette(&self, palette: ConsolePalette) {
+        #[cfg(windows)]
+        PtySender::set_console_palette(self, palette);
+        #[cfg(not(windows))]
+        let _ = palette;
     }
 }
 
@@ -1621,6 +1648,7 @@ pub struct PtySpawnRequest {
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
     pub working_directory: Option<PathBuf>,
+    pub console_palette: ConsolePalette,
 }
 
 /// A PTY opened elsewhere, handed to this process to read and write.
@@ -1639,6 +1667,7 @@ pub struct PtyHandover {
     /// Anything the provider retained before handing over, replayed into the
     /// grid before the terminal is shown.
     pub replay: Vec<u8>,
+    pub control: Arc<dyn PtyControl>,
 }
 
 /// What a terminal needs to know about a session the multiplexer resolved on
@@ -1710,6 +1739,9 @@ impl TerminalBuilder {
             terminal_type: TerminalType::DisplayOnly,
             subprocess: None,
             byte_stream: None,
+            pty_control: None,
+            console_palette_enabled: false,
+            last_console_palette: None,
             events_tx: events_tx.clone(),
             completion_tx: None,
             term,
@@ -1840,6 +1872,7 @@ impl TerminalBuilder {
         // mangled one.
         builder.terminal.pending_replay = (!handover.replay.is_empty()).then_some(handover.replay);
 
+        let control = handover.control.clone();
         #[cfg(unix)]
         let (pty, child_events) =
             alacritty_terminal::tty::attach(handover.descriptor, handover.child_pid)
@@ -1860,6 +1893,8 @@ impl TerminalBuilder {
             io: Some(io),
             info: Arc::new(info),
         };
+        builder.terminal.pty_control = Some(control);
+        builder.terminal.console_palette_enabled = cfg!(windows);
         builder.terminal.hyperlink_regex_searches =
             RegexSearches::new(&path_hyperlink_regexes, path_hyperlink_timeout_ms);
         // The daemon forked this child and is still its parent: this window is
@@ -1929,7 +1964,54 @@ impl TerminalBuilder {
         self
     }
 
+    /// Installs the fixed-pane controller for a byte-stream-backed shared pane.
+    pub fn with_pty_control(mut self, control: Arc<dyn PtyControl>) -> Self {
+        self.terminal.pty_control = Some(control);
+        self.terminal.console_palette_enabled = cfg!(windows);
+        self
+    }
+
     pub fn new(
+        working_directory: Option<PathBuf>,
+        task: Option<TaskState>,
+        shell: Shell,
+        env: HashMap<String, String>,
+        cursor_shape: SettingsCursorShape,
+        alternate_scroll: AlternateScroll,
+        max_scroll_history_lines: Option<usize>,
+        path_hyperlink_regexes: Vec<String>,
+        path_hyperlink_timeout_ms: u64,
+        is_remote_terminal: bool,
+        window_id: u64,
+        completion_tx: Option<Sender<Option<ExitStatus>>>,
+        cx: &App,
+        activation_script: Vec<String>,
+        path_style: PathStyle,
+        pty_provider: Option<Arc<dyn PtyProvider>>,
+    ) -> Task<Result<TerminalBuilder>> {
+        Self::new_with_console_palette(
+            working_directory,
+            task,
+            shell,
+            env,
+            cursor_shape,
+            alternate_scroll,
+            max_scroll_history_lines,
+            path_hyperlink_regexes,
+            path_hyperlink_timeout_ms,
+            is_remote_terminal,
+            window_id,
+            completion_tx,
+            cx,
+            activation_script,
+            path_style,
+            pty_provider,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_console_palette(
         working_directory: Option<PathBuf>,
         task: Option<TaskState>,
         shell: Shell,
@@ -1946,6 +2028,7 @@ impl TerminalBuilder {
         activation_script: Vec<String>,
         path_style: PathStyle,
         pty_provider: Option<Arc<dyn PtyProvider>>,
+        initial_console_palette: Option<ConsolePalette>,
     ) -> Task<Result<TerminalBuilder>> {
         let version = release_channel::AppVersion::global(cx);
         let background_executor = cx.background_executor().clone();
@@ -1953,6 +2036,11 @@ impl TerminalBuilder {
         let wsl_startup_started_at = Instant::now();
         #[cfg(windows)]
         let is_wsl_startup = matches!(posix_host(&shell), Some(PosixHost::Wsl));
+        #[cfg(windows)]
+        let console_palette_enabled = initial_console_palette.is_some() && !is_wsl_startup;
+        #[cfg(not(windows))]
+        let console_palette_enabled = false;
+        let console_palette = initial_console_palette.unwrap_or_default();
         // Headless hosts (e.g. the eval CLI) have no controlling TTY, so PTY
         // allocation / acquiring a controlling terminal fails with `ENOTTY`.
         // When set, run the command as a plain subprocess instead.
@@ -2091,7 +2179,7 @@ impl TerminalBuilder {
             // PTY path would feed.
             #[cfg(windows)]
             let mut wsl_startup_timing = None;
-            let (terminal_type, subprocess) = if no_pty {
+            let (terminal_type, subprocess, pty_control) = if no_pty {
                 let (program, args) = match &shell_params {
                     Some(params) => (
                         params.program.clone(),
@@ -2134,7 +2222,7 @@ impl TerminalBuilder {
                         pty_ready_at,
                     );
                 }
-                (TerminalType::DisplayOnly, Some(subprocess))
+                (TerminalType::DisplayOnly, Some(subprocess), None)
             } else {
                 let alacritty_shell = shell_params.as_ref().map(|params| {
                     (
@@ -2154,6 +2242,16 @@ impl TerminalBuilder {
                     child_signal_mask,
                     #[cfg(windows)]
                     shell_kind.tty_escape_args(),
+                    #[cfg(windows)]
+                    console_palette,
+                    #[cfg(windows)]
+                    console_palette_enabled
+                        .then(|| {
+                            std::env::current_exe().ok().and_then(|path| {
+                                path.parent().map(|parent| parent.join("zmux-pty.exe"))
+                            })
+                        })
+                        .flatten(),
                 );
 
                 //Setup the pty...
@@ -2169,9 +2267,10 @@ impl TerminalBuilder {
                         env.clone(),
                         &term,
                         &mut output_processor,
+                        console_palette,
                     ),
                     None => open_pty(&pty_options, TerminalBounds::default(), window_id)
-                        .map(|pty| (pty, None, Vec::new()))
+                        .map(|pty| (pty, None, Vec::new(), None))
                         .map_err(anyhow::Error::from),
                 };
                 // A multiplexer that cannot open the terminal must not stop it
@@ -2185,10 +2284,10 @@ impl TerminalBuilder {
                     );
                     multiplexer_error = Some(format!("{error:#}"));
                     opened = open_pty(&pty_options, TerminalBounds::default(), window_id)
-                        .map(|pty| (pty, None, Vec::new()))
+                        .map(|pty| (pty, None, Vec::new(), None))
                         .map_err(anyhow::Error::from);
                 }
-                let (pty, attached_child_events, replay) = match opened {
+                let (pty, attached_child_events, replay, provided_control) = match opened {
                     Ok(opened) => opened,
                     Err(error) => {
                         bail!(TerminalError {
@@ -2223,6 +2322,8 @@ impl TerminalBuilder {
                 //And connect them together
                 let (pty_tx, io) =
                     spawn_event_loop(term.clone(), listener, pty, pty_options.drain_on_exit)?;
+                let pty_control = provided_control
+                    .unwrap_or_else(|| Arc::new(pty_tx.clone()) as Arc<dyn PtyControl>);
 
                 (
                     TerminalType::Pty {
@@ -2231,6 +2332,7 @@ impl TerminalBuilder {
                         info: Arc::new(pty_info),
                     },
                     None,
+                    Some(pty_control),
                 )
             };
 
@@ -2240,6 +2342,9 @@ impl TerminalBuilder {
                 terminal_type,
                 subprocess,
                 byte_stream: None,
+                pty_control,
+                console_palette_enabled,
+                last_console_palette: console_palette_enabled.then_some(console_palette),
                 events_tx: events_tx.clone(),
                 completion_tx,
                 term,
@@ -2468,6 +2573,12 @@ pub struct Terminal {
     subprocess: Option<SubprocessHandle>,
     /// Set for terminals connected to a blocking bidirectional byte stream.
     byte_stream: Option<ByteStreamHandle>,
+    /// Operations routed to the owner of this specific PTY.
+    pty_control: Option<Arc<dyn PtyControl>>,
+    /// False for WSL and non-PTY streams, whose color state is intentionally unchanged.
+    console_palette_enabled: bool,
+    /// Suppresses repeated theme notifications carrying the same palette.
+    last_console_palette: Option<ConsolePalette>,
     /// Where this terminal's events go. Carried past construction so a
     /// terminal that is converted to a byte stream after it started (the
     /// multiplexer handover) can keep feeding the same channel.
@@ -2623,6 +2734,19 @@ impl Terminal {
 
     pub fn set_reported_theme(&mut self, theme: Option<Arc<Theme>>) {
         self.reported_theme = theme;
+    }
+
+    /// Synchronizes the legacy Win32 console palette with the rendered theme.
+    /// Identical updates are discarded before they reach either the local PTY
+    /// thread or the multiplexer worker.
+    pub fn set_console_palette(&mut self, palette: ConsolePalette) {
+        if !self.console_palette_enabled || self.last_console_palette == Some(palette) {
+            return;
+        }
+        self.last_console_palette = Some(palette);
+        if let Some(control) = &self.pty_control {
+            control.set_console_palette(palette);
+        }
     }
 
     pub fn reported_working_directory(&self) -> Option<&str> {
@@ -2802,16 +2926,17 @@ impl Terminal {
                 self.last_content.terminal_bounds = new_bounds;
 
                 if let TerminalType::Pty { pty_tx, .. } = &self.terminal_type {
-                    pty_tx.resize(new_bounds);
-                    // A pseudoconsole this process did not create cannot be
-                    // resized from here, so the owner is told as well. On Unix
-                    // the resize above already took effect and this is a no-op.
-                    if let Some(provider) = &self.template.pty_provider {
-                        provider.resize(
+                    #[cfg(windows)]
+                    if let Some(control) = &self.pty_control {
+                        control.resize(
                             new_bounds.num_columns() as u16,
                             new_bounds.num_lines() as u16,
                         );
+                    } else {
+                        pty_tx.resize(new_bounds);
                     }
+                    #[cfg(not(windows))]
+                    pty_tx.resize(new_bounds);
                 }
 
                 let reflow =
@@ -4558,6 +4683,7 @@ impl Terminal {
             handover.replay.is_empty(),
             "a pty handed back to its viewer must carry no replay: the viewer already has it"
         );
+        let control = handover.control.clone();
         // Everything the relay had already read, into the grid, before the pty can
         // add to it.
         if let Some(mut stream) = self.byte_stream.take() {
@@ -4590,6 +4716,11 @@ impl Terminal {
             io: Some(io),
             info: Arc::new(info),
         };
+        if let Some(palette) = self.last_console_palette {
+            control.set_console_palette(palette);
+        }
+        self.pty_control = Some(control);
+        self.console_palette_enabled = cfg!(windows);
         // Handed back rather than opened here: the daemon is still this child's
         // parent, so this window must not end it. A pane that joined a shared
         // session has no provider to say so, and closing its tab killed the
@@ -5217,6 +5348,84 @@ pub fn get_color_at_index(index: usize, theme: &Theme) -> Hsla {
     }
 }
 
+/// Builds the Win32 console palette from the same theme colors used for OSC
+/// replies. The default foreground/background attributes select the closest
+/// ANSI entry in OKLab, which tracks perceived color difference better than
+/// distance in gamma-encoded RGB.
+pub fn console_palette_for_theme(theme: &Theme) -> ConsolePalette {
+    console_palette_from_colors(
+        std::array::from_fn(|index| get_color_at_index(index, theme)),
+        get_color_at_index(256, theme),
+        get_color_at_index(257, theme),
+    )
+}
+
+fn console_palette_from_colors(
+    ansi: [Hsla; 16],
+    foreground: Hsla,
+    background: Hsla,
+) -> ConsolePalette {
+    let colors = ansi.map(color_bytes);
+    let foreground = color_bytes(foreground);
+    let background = color_bytes(background);
+    ConsolePalette {
+        colors,
+        foreground_index: nearest_palette_index(foreground, &colors),
+        background_index: nearest_palette_index(background, &colors),
+    }
+}
+
+fn color_bytes(color: Hsla) -> [u8; 3] {
+    let color = color.to_rgb();
+    [
+        ((color.r * color.a) * 255.) as u8,
+        ((color.g * color.a) * 255.) as u8,
+        ((color.b * color.a) * 255.) as u8,
+    ]
+}
+
+fn nearest_palette_index(target: [u8; 3], colors: &[[u8; 3]; 16]) -> u8 {
+    let target = rgb_to_oklab(target);
+    colors
+        .iter()
+        .enumerate()
+        .map(|(index, color)| {
+            let color = rgb_to_oklab(*color);
+            let distance = (target.0 - color.0).powi(2)
+                + (target.1 - color.1).powi(2)
+                + (target.2 - color.2).powi(2);
+            (index as u8, distance)
+        })
+        .min_by(|left, right| left.1.total_cmp(&right.1))
+        .map_or(0, |(index, _)| index)
+}
+
+fn rgb_to_oklab([red, green, blue]: [u8; 3]) -> (f32, f32, f32) {
+    fn linear(channel: u8) -> f32 {
+        let channel = f32::from(channel) / 255.;
+        if channel <= 0.04045 {
+            channel / 12.92
+        } else {
+            ((channel + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    let red = linear(red);
+    let green = linear(green);
+    let blue = linear(blue);
+    let l = 0.412_221_46 * red + 0.536_332_55 * green + 0.051_445_995 * blue;
+    let m = 0.211_903_5 * red + 0.680_699_5 * green + 0.107_396_96 * blue;
+    let s = 0.088_302_46 * red + 0.281_718_85 * green + 0.629_978_7 * blue;
+    let l = l.cbrt();
+    let m = m.cbrt();
+    let s = s.cbrt();
+    (
+        0.210_454_26 * l + 0.793_617_8 * m - 0.004_072_047 * s,
+        1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s,
+        0.025_904_037 * l + 0.782_771_77 * m - 0.808_675_77 * s,
+    )
+}
+
 /// Generates the RGB channels in [0, 5] for a given index into the 6x6x6 ANSI color cube.
 ///
 /// See: [8 bit ANSI color](https://en.wikipedia.org/wiki/ANSI_escape_code#8-bit).
@@ -5266,6 +5475,88 @@ mod tests {
     use parking_lot::Mutex;
     use rand::{Rng, distr, rngs::StdRng};
     use task::{Shell, ShellBuilder};
+
+    #[cfg(unix)]
+    struct NoopPtyControl;
+
+    #[cfg(unix)]
+    impl PtyControl for NoopPtyControl {
+        fn resize(&self, _: u16, _: u16) {}
+        fn set_console_palette(&self, _: ConsolePalette) {}
+    }
+
+    #[derive(Default)]
+    struct RecordingPtyControl {
+        palettes: std::sync::Mutex<Vec<ConsolePalette>>,
+    }
+
+    impl PtyControl for RecordingPtyControl {
+        fn resize(&self, _: u16, _: u16) {}
+
+        fn set_console_palette(&self, palette: ConsolePalette) {
+            self.palettes.lock().unwrap().push(palette);
+        }
+    }
+
+    #[cfg(windows)]
+    #[gpui::test]
+    fn console_palette_updates_are_fixed_to_a_handover_and_deduplicated(cx: &mut TestAppContext) {
+        let first = Arc::new(RecordingPtyControl::default());
+        let second = Arc::new(RecordingPtyControl::default());
+        let make_terminal = |control: Arc<RecordingPtyControl>| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                &cx.background_executor,
+                PathStyle::local(),
+            )
+            .with_pty_control(control)
+            .terminal
+        };
+        let mut first_terminal = make_terminal(first.clone());
+        let mut second_terminal = make_terminal(second.clone());
+        let palette = ConsolePalette::default();
+
+        first_terminal.set_console_palette(palette);
+        first_terminal.set_console_palette(palette);
+        second_terminal.set_console_palette(palette);
+
+        assert_eq!(first.palettes.lock().unwrap().as_slice(), &[palette]);
+        assert_eq!(second.palettes.lock().unwrap().as_slice(), &[palette]);
+    }
+
+    #[test]
+    fn console_palette_preserves_ansi_order_and_exact_rgb_bytes() {
+        let ansi = std::array::from_fn(|index| {
+            rgba_color(
+                index as u8,
+                (index as u8).wrapping_add(16),
+                255 - index as u8,
+            )
+        });
+        let palette = console_palette_from_colors(ansi, ansi[12], ansi[2]);
+
+        for (index, color) in palette.colors.iter().enumerate() {
+            let expected = to_vte_rgb(ansi[index]);
+            assert_eq!(*color, [expected.r, expected.g, expected.b]);
+        }
+        assert_eq!(palette.foreground_index, 12);
+        assert_eq!(palette.background_index, 2);
+    }
+
+    #[test]
+    fn console_palette_nearest_index_uses_oklab_and_lowest_tie() {
+        let mut colors = [[0, 0, 0]; 16];
+        colors[1] = [255, 0, 0];
+        colors[2] = [255, 255, 255];
+        assert_eq!(nearest_palette_index([245, 245, 245], &colors), 2);
+
+        colors[4] = [31, 47, 63];
+        colors[9] = colors[4];
+        assert_eq!(nearest_palette_index(colors[4], &colors), 4);
+    }
 
     #[test]
     fn terminal_sync_diagnostics_name_the_blocking_phase() {
@@ -5562,6 +5853,7 @@ mod tests {
                 descriptor: pty.file().try_clone().unwrap().into(),
                 child_pid,
                 replay: Vec::new(),
+                control: Arc::new(NoopPtyControl),
             },
             AttachedOptions {
                 shell: Shell::System,
@@ -5666,6 +5958,7 @@ mod tests {
             descriptor,
             child_pid,
             replay: Vec::new(),
+            control: Arc::new(NoopPtyControl),
         };
         let attached = TerminalBuilder::new_attached(
             handover,
@@ -5776,6 +6069,7 @@ mod tests {
                 descriptor,
                 child_pid,
                 replay: Vec::new(),
+                control: Arc::new(NoopPtyControl),
             },
             AttachedOptions {
                 shell: Shell::System,
@@ -5930,6 +6224,7 @@ mod tests {
             descriptor: pty.file().try_clone().unwrap().into(),
             child_pid,
             replay: Vec::new(),
+            control: Arc::new(NoopPtyControl),
         };
         let attached = TerminalBuilder::new_attached(
             handover,
@@ -6045,6 +6340,7 @@ mod tests {
             descriptor: pty.file().try_clone().unwrap().into(),
             child_pid,
             replay: Vec::new(),
+            control: Arc::new(NoopPtyControl),
         };
         // Held for as long as the pane is: it is the channel the multiplexer's
         // exit report arrives on, and dropping it tells the event loop its watcher
@@ -6148,6 +6444,7 @@ mod tests {
                 descriptor: pty.file().try_clone().unwrap().into(),
                 child_pid,
                 replay: Vec::new(),
+                control: Arc::new(NoopPtyControl),
             },
             AttachedOptions {
                 shell: Shell::System,

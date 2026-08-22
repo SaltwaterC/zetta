@@ -114,6 +114,7 @@ impl From<&AlacrittyPty> for ProcessIdGetter {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct PtySender {
     notifier: Notifier,
 }
@@ -130,6 +131,24 @@ impl PtySender {
             .send(Msg::Resize(window_size_from_terminal_bounds(bounds)))
         {
             log::error!("failed to resize alacritty pty: {error}");
+        }
+    }
+
+    pub(super) fn resize_cells(&self, columns: u16, lines: u16) {
+        if let Err(error) = self.notifier.0.send(Msg::Resize(WindowSize {
+            num_lines: lines,
+            num_cols: columns,
+            cell_width: 0,
+            cell_height: 0,
+        })) {
+            log::error!("failed to resize alacritty pty: {error}");
+        }
+    }
+
+    #[cfg(windows)]
+    pub(super) fn set_console_palette(&self, palette: tty::ConsolePalette) {
+        if let Err(error) = self.notifier.0.send(Msg::SetConsolePalette(palette)) {
+            log::debug!("failed to update alacritty pty palette: {error}");
         }
     }
 
@@ -221,6 +240,8 @@ pub(super) fn pty_options(
     env: impl IntoIterator<Item = (String, String)>,
     #[cfg(not(windows))] child_signal_mask: Option<tty::SignalMask>,
     #[cfg(windows)] escape_args: bool,
+    #[cfg(windows)] console_palette: tty::ConsolePalette,
+    #[cfg(windows)] console_palette_helper: Option<PathBuf>,
 ) -> tty::Options {
     tty::Options {
         shell: shell.map(|(program, args)| tty::Shell::new(program, args)),
@@ -231,6 +252,10 @@ pub(super) fn pty_options(
         child_signal_mask,
         #[cfg(windows)]
         escape_args,
+        #[cfg(windows)]
+        console_palette,
+        #[cfg(windows)]
+        console_palette_helper,
     }
 }
 

@@ -26,7 +26,7 @@ use std::{
 
 use alacritty_terminal::{
     event::WindowSize,
-    tty::{self, ChildEvent, EventedPty as _},
+    tty::{self, ChildEvent, ConsolePalette, EventedPty as _},
 };
 use anyhow::{Context as _, Result};
 
@@ -922,6 +922,23 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
                 }),
             }
         }
+        Request::SetConsolePalette {
+            session_id,
+            pane_id,
+            palette,
+        } => match set_console_palette(
+            daemon,
+            session_id,
+            pane_id,
+            palette,
+            envelope.client_process_id,
+            peer_process_id,
+        ) {
+            Ok(()) => connection.send(&Response::Ok),
+            Err(error) => connection.send(&Response::Error {
+                message: format!("{error:#}"),
+            }),
+        },
         Request::List => {
             // Sanitized exactly as the published catalog is. The endpoint token
             // authenticates the channel, not a session: listing must not reveal
@@ -1217,6 +1234,7 @@ fn spawn(daemon: &Arc<Daemon>, request: SpawnRequest, connection: &mut Connectio
             request.env,
             request.working_directory,
             request.size,
+            request.console_palette,
             std::process::id(),
         )?;
         let mut handles = crate::transport::claim_duplicated(&handles);
@@ -3002,7 +3020,14 @@ fn shared_viewer_count(attachment: &Attachment) -> usize {
 
 /// Whether this client is one of the clients showing any of the session's panes.
 fn session_is_held_by(session: &Session, client_process_id: u32) -> bool {
-    session.panes.iter().any(|pane| match &pane.attachment {
+    session
+        .panes
+        .iter()
+        .any(|pane| pane_is_held_by(pane, client_process_id))
+}
+
+fn pane_is_held_by(pane: &Pane, client_process_id: u32) -> bool {
+    match &pane.attachment {
         Attachment::Exclusive(holder)
         | Attachment::Revoking { holder }
         | Attachment::Granting { holder } => *holder == client_process_id,
@@ -3010,7 +3035,7 @@ fn session_is_held_by(session: &Session, client_process_id: u32) -> bool {
             .iter()
             .any(|client| client.process_id == client_process_id),
         Attachment::None => false,
-    })
+    }
 }
 
 /// Applies a client's new size to a pane's terminal, recording it as the
@@ -3066,6 +3091,34 @@ fn resize_pane(
     // What is kept of the pane wraps where the pane wraps, or a reattach would
     // show the session rewrapped at a width nothing was drawn at.
     pane.retained.resize(columns, lines);
+    Ok(())
+}
+
+fn set_console_palette(
+    daemon: &Arc<Daemon>,
+    session_id: u64,
+    pane_id: u64,
+    palette: ConsolePalette,
+    client_process_id: u32,
+    peer_process_id: Option<u32>,
+) -> Result<()> {
+    let sessions = daemon.sessions.lock().unwrap();
+    let Some(session) = sessions.iter().find(|session| session.id == session_id) else {
+        anyhow::bail!("session {session_id} does not exist");
+    };
+    let Some(pane) = session.panes.iter().find(|pane| pane.id == pane_id) else {
+        anyhow::bail!("session {session_id} has no pane {pane_id}");
+    };
+    if !pane_is_held_by(pane, control_process_id(client_process_id, peer_process_id)) {
+        anyhow::bail!("pane {pane_id} is not held by this client");
+    }
+    #[cfg(windows)]
+    daemon
+        .pty_host
+        .set_console_palette(pane.console_id, palette)
+        .context("updating the pseudoconsole palette")?;
+    #[cfg(not(windows))]
+    let _ = (daemon, pane, palette);
     Ok(())
 }
 

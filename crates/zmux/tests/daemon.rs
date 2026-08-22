@@ -256,6 +256,7 @@ fn spawn_request(session_id: Option<u64>, command: &str) -> SpawnRequest {
             cell_width: 8,
             cell_height: 16,
         },
+        console_palette: Default::default(),
     }
 }
 
