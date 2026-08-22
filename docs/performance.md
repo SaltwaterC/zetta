@@ -205,6 +205,27 @@ existing launch and shell-integration phases. Collect the debug records with
 the rest of the application's platform diagnostics when investigating slow or
 unexpected WSL terminal startup.
 
+## Windows shell-startup benchmark
+
+Build an optimized binary, then run the developer benchmark from PowerShell 7:
+
+```powershell
+cargo build --release
+./scripts/benchmark-shell-startup.ps1
+```
+
+The JSON report at `artifacts/shell-startup-performance.json` includes raw and
+summarized cold-order/warm measurements for direct `zetta init`, Windows
+PowerShell, PowerShell 7, Command Prompt, MSYS2 Bash and Zsh when installed,
+and WSL as an unchanged control. It records median and p95 wall and CPU time,
+process-tree I/O, child-process count, and the first `zetta-cwd` marker. Pass
+`-Msys2Bash` or `-Msys2Zsh` when MSYS2 is outside the usual locations, and
+`-SkipWsl` when no WSL control is needed.
+
+The script deliberately does not purge Windows' file cache. Its cold-order
+samples run before each case's explicit warmup and are useful for like-for-like
+comparisons on the same machine; they are not a hardware cold-cache claim.
+
 ## Pane stress workload
 
 Add `--profile-pane-stress` or `-s` to exercise multi-pane terminal rendering

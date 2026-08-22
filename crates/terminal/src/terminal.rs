@@ -1006,18 +1006,7 @@ const REPORTED_WORKING_DIRECTORY_TITLE_PREFIX: &str = "zetta-cwd:";
 const REPORTED_FOREGROUND_COMMAND_TITLE_PREFIX: &str = "zetta-cmd:";
 
 #[cfg(any(windows, test))]
-const POWERSHELL_CWD_TRACKER: &str = r#"$global:__ZettaOriginalPrompt = $function:prompt
-function global:prompt {
-    try {
-        $zettaDirectory = $ExecutionContext.SessionState.Path.CurrentFileSystemLocation.ProviderPath
-        [Console]::Write("$([char]27)]2;zetta-cwd:$zettaDirectory$([char]27)\")
-    } catch {}
-    if ($null -ne $global:__ZettaOriginalPrompt) {
-        & $global:__ZettaOriginalPrompt
-    } else {
-        "PS $($ExecutionContext.SessionState.Path.CurrentLocation)> "
-    }
-}"#;
+const POWERSHELL_CWD_TRACKER: &str = include_str!("terminal/powershell_cwd_tracker.ps1");
 
 #[cfg(any(windows, test))]
 fn visible_process_argv(argv: &[String]) -> &[String] {
@@ -6593,8 +6582,35 @@ mod tests {
         assert_eq!(arguments[..2], ["-NoExit", "-Command"]);
         assert_eq!(arguments[2], POWERSHELL_CWD_TRACKER);
         assert!(POWERSHELL_CWD_TRACKER.contains("CurrentFileSystemLocation.ProviderPath"));
+        assert!(POWERSHELL_CWD_TRACKER.contains("__ZettaCwdTrackerInstalled"));
         assert!(POWERSHELL_CWD_TRACKER.contains("__ZettaOriginalPrompt"));
         assert!(!POWERSHELL_CWD_TRACKER.contains("-NoProfile"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_powershell_preserves_existing_no_exit_argument() {
+        for program in ["powershell.exe", "pwsh.exe"] {
+            let mut arguments = Some(vec!["-NoLogo".to_owned(), "-NoExit".to_owned()]);
+            let mut environment = HashMap::default();
+
+            install_windows_cwd_tracking(program, &mut arguments, &mut environment);
+
+            let arguments = arguments.unwrap();
+            assert_eq!(
+                arguments,
+                ["-NoLogo", "-NoExit", "-Command", POWERSHELL_CWD_TRACKER],
+                "{program}"
+            );
+            assert_eq!(
+                arguments
+                    .iter()
+                    .filter(|argument| argument.eq_ignore_ascii_case("-NoExit"))
+                    .count(),
+                1,
+                "{program}"
+            );
+        }
     }
 
     #[test]
@@ -6625,17 +6641,25 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_powershell_commands_are_not_rewritten() {
-        let mut arguments = Some(vec![
-            "-NoExit".to_owned(),
-            "-Command".to_owned(),
-            "Get-Date".to_owned(),
-        ]);
-        let original = arguments.clone();
-        let mut environment = HashMap::default();
+        for program in ["powershell.exe", "pwsh.exe"] {
+            for user_arguments in [
+                vec!["-NoExit", "-Command", "Get-Date"],
+                vec!["-NoLogo", "-File", "startup.ps1", "argument"],
+            ] {
+                let mut arguments = Some(
+                    user_arguments
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>(),
+                );
+                let original = arguments.clone();
+                let mut environment = HashMap::default();
 
-        install_windows_cwd_tracking("powershell.exe", &mut arguments, &mut environment);
-        assert_eq!(arguments, original);
-        assert!(environment.is_empty());
+                install_windows_cwd_tracking(program, &mut arguments, &mut environment);
+                assert_eq!(arguments, original, "{program}");
+                assert!(environment.is_empty());
+            }
+        }
     }
 
     #[cfg(windows)]
@@ -6659,61 +6683,61 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_powershell_tracker_emits_the_current_filesystem_location() {
-        let directory = std::env::current_dir().unwrap();
-        let escaped_directory = directory.to_string_lossy().replace('\'', "''");
-        let script = format!(
-            "{POWERSHELL_CWD_TRACKER}\nSet-Location -LiteralPath '{escaped_directory}'\nprompt"
-        );
-        let output = std::process::Command::new("powershell.exe")
-            .args(["-NoLogo", "-NoProfile", "-Command", &script])
-            .output()
-            .unwrap();
+    fn windows_powershell_tracker_is_idempotent_with_profile_integration() {
+        const POWERSHELL_INTEGRATION: &str =
+            include_str!("../../../src/shell_integration/powershell.ps1");
 
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            stdout.contains(&format!(
-                "\u{1b}]2;zetta-cwd:{}\u{1b}\\",
-                directory.display()
-            )),
-            "PowerShell did not report its CWD: {stdout:?}"
-        );
+        let profile_tracker = POWERSHELL_INTEGRATION
+            .split_once("\n\nif (-not (Test-Path Env:EDITOR))")
+            .expect("the profile tracker must remain the integration preamble")
+            .0;
+        let directory = std::env::current_dir().unwrap().join("src");
+        let escaped_directory = directory.to_string_lossy().replace('\'', "''");
+        let expected_marker = format!("\u{1b}]2;zetta-cwd:{}\u{1b}\\", directory.display());
+
+        for program in ["powershell.exe", "pwsh.exe"] {
+            if std::process::Command::new(program)
+                .args(["-NoLogo", "-NoProfile", "-Command", "exit"])
+                .output()
+                .is_err()
+            {
+                continue;
+            }
+
+            for (profile_name, profile) in [("absent", ""), ("present", profile_tracker)] {
+                let script = format!(
+                    "function global:prompt {{ 'original-profile-prompt' }}\n{profile}\n{POWERSHELL_CWD_TRACKER}\nSet-Location -LiteralPath '{escaped_directory}'\nprompt"
+                );
+                let output = std::process::Command::new(program)
+                    .args(["-NoLogo", "-NoProfile", "-Command", &script])
+                    .output()
+                    .unwrap();
+
+                assert!(
+                    output.status.success(),
+                    "{program} with profile {profile_name} failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                assert_eq!(
+                    stdout.matches(&expected_marker).count(),
+                    1,
+                    "{program} with profile {profile_name} emitted the wrong marker count: {stdout:?}"
+                );
+                assert_eq!(
+                    stdout.matches("original-profile-prompt").count(),
+                    1,
+                    "{program} with profile {profile_name} did not preserve the original prompt: {stdout:?}"
+                );
+            }
+        }
     }
 
     #[cfg(windows)]
     #[test]
     fn windows_shell_trackers_report_the_directory_after_cd() {
         let directory = std::env::current_dir().unwrap().join("src");
-        let escaped_directory = directory.to_string_lossy().replace('\'', "''");
         let expected_marker = format!("\u{1b}]2;zetta-cwd:{}\u{1b}\\", directory.display());
-
-        for program in ["powershell.exe", "pwsh.exe"] {
-            let available = std::process::Command::new(program)
-                .args(["-NoLogo", "-NoProfile", "-Command", "exit"])
-                .output();
-            if available.is_err() {
-                continue;
-            }
-
-            let script = format!(
-                "{POWERSHELL_CWD_TRACKER}\nSet-Location -LiteralPath '{escaped_directory}'\nprompt"
-            );
-            let output = std::process::Command::new(program)
-                .args(["-NoLogo", "-NoProfile", "-Command", &script])
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{program} failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            assert!(
-                stdout.contains(&expected_marker),
-                "{program} did not report its CWD after cd: {stdout:?}"
-            );
-        }
 
         let mut arguments = None;
         let mut environment = HashMap::default();

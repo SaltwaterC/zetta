@@ -1100,8 +1100,7 @@ pub(crate) fn run() -> Result<()> {
         return Ok(());
     }
     if let StartupMode::PrintShellIntegration(shell) = args.mode {
-        let (config, _) = load_startup_config(None, None);
-        print!("{}", shell.script(&config.profiles));
+        print!("{}", shell.script());
         return Ok(());
     }
     if args.mode == StartupMode::ConfigureCurrentShellIntegration {

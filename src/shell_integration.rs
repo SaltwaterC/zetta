@@ -27,7 +27,7 @@ impl ShellIntegration {
         }
     }
 
-    pub(crate) fn script(self, _profiles: &[Profile]) -> String {
+    pub(crate) fn script(self) -> String {
         let template = match self {
             Self::Bash => BASH_INTEGRATION,
             Self::Fish => FISH_INTEGRATION,
