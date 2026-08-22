@@ -6,29 +6,8 @@ Set-Location -LiteralPath $repositoryRoot
 # Native build scripts track MSVC environment variables. Import the same
 # environment used by build-windows.cmd before lint and test so Cargo does not
 # alternate between incompatible fingerprints on successive stop-hook runs.
-function Set-VisualStudioLinker {
-    $vcToolsInstallPath = [Environment]::GetEnvironmentVariable("VCToolsInstallDir")
-    if ([string]::IsNullOrWhiteSpace($vcToolsInstallPath)) {
-        throw "The Visual Studio C++ tools environment was not initialized."
-    }
-
-    $linkerPath = Join-Path $vcToolsInstallPath "bin\HostX64\x64\link.exe"
-    if (-not (Test-Path -LiteralPath $linkerPath)) {
-        throw "The Visual Studio x64 linker was not found at $linkerPath."
-    }
-
-    # GNU Make selects a POSIX shell on Windows, whose PATH can put Git or
-    # Coreutils' link.exe ahead of MSVC's linker. Give Cargo an absolute path.
-    [Environment]::SetEnvironmentVariable(
-        "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER",
-        $linkerPath,
-        "Process"
-    )
-}
-
 function Import-VisualStudioEnvironment {
     if (-not [string]::IsNullOrWhiteSpace($env:VSCMD_VER)) {
-        Set-VisualStudioLinker
         return
     }
 
@@ -71,7 +50,10 @@ function Import-VisualStudioEnvironment {
         $name = $line.Substring(0, $separator)
         $value = $line.Substring($separator + 1)
         if ($name -ieq "PATH") {
-            if ($name.StartsWith("PATH", [StringComparison]::Ordinal)) {
+            # A Windows environment inherited from PowerShell can contain
+            # both PATH and Path. vcvars64.bat prepends its entries to the
+            # first one, so keep the first case-insensitive match.
+            if ($null -eq $path) {
                 $path = $value
             }
             continue
@@ -88,8 +70,6 @@ function Import-VisualStudioEnvironment {
     if ($null -ne $path) {
         [Environment]::SetEnvironmentVariable("PATH", $path, "Process")
     }
-
-    Set-VisualStudioLinker
 }
 
 if ($env:OS -eq "Windows_NT") {
@@ -101,6 +81,46 @@ function Invoke-MakeTarget {
         [Parameter(Mandatory)]
         [string] $Target
     )
+
+    if ($env:OS -eq "Windows_NT") {
+        $makeCommand = Get-Command make -CommandType Application -ErrorAction Stop |
+            Select-Object -First 1
+        $processStartInfo = [Diagnostics.ProcessStartInfo]::new()
+        $processStartInfo.FileName = $env:ComSpec
+        $processStartInfo.UseShellExecute = $false
+        $makeArguments = @()
+        $gitCommand = Get-Command git -CommandType Application -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($null -ne $gitCommand) {
+            $gitExecPath = & $gitCommand.Source --exec-path 2>$null
+            if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($gitExecPath)) {
+                $gitRoot = Split-Path (Split-Path (Split-Path ([string] $gitExecPath).Trim() -Parent) -Parent) -Parent
+                $bashPath = Join-Path $gitRoot "usr\bin\bash.exe"
+                if (Test-Path -LiteralPath $bashPath) {
+                    $makeArguments += ('SHELL="{0}"' -f $bashPath)
+                }
+            }
+        }
+        $makeArguments += $Target
+        $processStartInfo.Arguments = '/d /c ""{0}" {1} 1>&2"' -f `
+            $makeCommand.Source, `
+            ($makeArguments -join " ")
+
+        # GNU Make uses a POSIX shell on Windows. Give it a normalized
+        # environment so case-variant PATH entries cannot make its shell
+        # resolve Git or Coreutils' link.exe instead of MSVC's linker.
+        $processStartInfo.Environment.Clear()
+        foreach ($entry in [Environment]::GetEnvironmentVariables("Process").GetEnumerator()) {
+            if ($entry.Key -ine "PATH" -and $entry.Key -ine "Path") {
+                $processStartInfo.Environment[$entry.Key] = [string] $entry.Value
+            }
+        }
+        $processStartInfo.Environment["PATH"] = $env:PATH
+
+        $process = [Diagnostics.Process]::Start($processStartInfo)
+        $process.WaitForExit()
+        return $process.ExitCode
+    }
 
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
