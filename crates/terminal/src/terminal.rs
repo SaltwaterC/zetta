@@ -6681,6 +6681,117 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_shell_trackers_report_the_directory_after_cd() {
+        let directory = std::env::current_dir().unwrap().join("src");
+        let escaped_directory = directory.to_string_lossy().replace('\'', "''");
+        let expected_marker = format!("\u{1b}]2;zetta-cwd:{}\u{1b}\\", directory.display());
+
+        for program in ["powershell.exe", "pwsh.exe"] {
+            let available = std::process::Command::new(program)
+                .args(["-NoLogo", "-NoProfile", "-Command", "exit"])
+                .output();
+            if available.is_err() {
+                continue;
+            }
+
+            let script = format!(
+                "{POWERSHELL_CWD_TRACKER}\nSet-Location -LiteralPath '{escaped_directory}'\nprompt"
+            );
+            let output = std::process::Command::new(program)
+                .args(["-NoLogo", "-NoProfile", "-Command", &script])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{program} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                stdout.contains(&expected_marker),
+                "{program} did not report its CWD after cd: {stdout:?}"
+            );
+        }
+
+        let mut arguments = None;
+        let mut environment = HashMap::default();
+        install_windows_cwd_tracking("cmd.exe", &mut arguments, &mut environment);
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/d", "/q"])
+            .envs(environment)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(format!("cd /d \"{}\"\r\nexit\r\n", directory.display()).as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains(&expected_marker),
+            "Command Prompt did not report its CWD after cd: {stdout:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[gpui::test]
+    async fn windows_powershell_terminal_reports_cwd_after_cd(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        init_test(cx);
+
+        let directory = std::env::current_dir().unwrap().join("src");
+        let escaped_directory = directory.to_string_lossy().replace('\'', "''");
+        let command = format!("Set-Location -LiteralPath '{escaped_directory}'");
+        let mut available_shell = false;
+
+        for program in ["powershell.exe", "pwsh.exe"] {
+            if std::process::Command::new(program)
+                .args(["-NoLogo", "-NoProfile", "-Command", "exit"])
+                .output()
+                .is_err()
+            {
+                continue;
+            }
+            available_shell = true;
+
+            let (terminal, completion_rx) =
+                build_test_terminal_with_arguments(cx, program.to_owned(), vec!["-NoLogo".into()])
+                    .await;
+            terminal.update(cx, |terminal, _| {
+                terminal.input(format!("{command}\r").into_bytes());
+            });
+
+            let mut reported = None;
+            for _ in 0..200 {
+                reported = terminal.update(cx, |terminal, _| {
+                    terminal.reported_working_directory().map(PathBuf::from)
+                });
+                if reported.as_deref() == Some(directory.as_path()) {
+                    break;
+                }
+                cx.background_executor
+                    .timer(Duration::from_millis(10))
+                    .await;
+            }
+
+            terminal.update(cx, |terminal, _| terminal.input(b"exit\r".to_vec()));
+            let _ = completion_rx.recv().await;
+            assert_eq!(reported.as_deref(), Some(directory.as_path()), "{program}");
+        }
+
+        if !available_shell {
+            eprintln!("neither powershell.exe nor pwsh.exe is installed");
+        }
+    }
+
     #[test]
     fn test_init_command_startup_marker_commands_do_not_contain_marker() {
         let marker_id = 42;

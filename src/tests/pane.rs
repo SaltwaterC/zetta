@@ -1,5 +1,16 @@
 use super::*;
 
+#[cfg(windows)]
+#[test]
+fn tracked_windows_shells_prefer_their_reported_directory() {
+    for program in ["cmd.exe", "powershell.exe", "pwsh.exe"] {
+        assert!(shell_reports_current_directory(&Shell::Program(
+            program.to_owned()
+        )));
+    }
+    assert!(shell_reports_current_directory(&Shell::System));
+}
+
 #[test]
 fn terminal_size_label_uses_columns_before_rows() {
     assert_eq!(terminal_size_label(120, 40), "120 × 40");

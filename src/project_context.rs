@@ -359,7 +359,9 @@ impl Zetta {
             pane.wsl_working_directory(cx)
                 .and_then(|directory| wsl_reported_directory(&pane.profile, &directory))
         } else {
-            pane.working_directory(cx)
+            pane.current_directory(cx)
+                .filter(|(_, authoritative)| *authoritative)
+                .map(|(directory, _)| directory)
         };
         let Some(directory) = directory else {
             return;

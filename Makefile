@@ -133,6 +133,15 @@ export CARGO_BUILD_JOBS
 
 export CARGO
 
+ifeq ($(OS),Windows_NT)
+# Native build scripts fingerprint the Visual Studio environment. Route every
+# Cargo command through one initializer so lint, test, and build share cache
+# entries instead of alternately invalidating them.
+CARGO_RUN := "$(CURDIR)/scripts/cargo-windows.cmd"
+else
+CARGO_RUN := $(CARGO)
+endif
+
 APP_ID := Zetta
 BINDIR := $(DESTDIR)$(PREFIX)/bin
 DATADIR := $(DESTDIR)$(PREFIX)/share
@@ -154,13 +163,13 @@ LINUX_USER_CLI_PATH := $(LINUX_USER_BIN_DIR)/zetta
 	uninstall-binary uninstall-assets uninstall-user-path refresh-desktop-caches clean
 
 test:
-	$(CARGO) test --locked --quiet --no-default-features --features "$(BUILD_FEATURES)" -- --format=terse
+	$(CARGO_RUN) test --locked --quiet --no-default-features --features "$(BUILD_FEATURES)" -- --format=terse
 	for crate in $(ZETTA_TEST_CRATE_DIRS); do \
 		( cd "$$crate" && \
 			if [ "$$crate" = "crates/zmux" ]; then \
-				$(CARGO) build --locked --bin zmux; \
+				$(CARGO_RUN) build --locked --bin zmux; \
 			fi && \
-			$(CARGO) test --locked --quiet -- --format=terse \
+			$(CARGO_RUN) test --locked --quiet -- --format=terse \
 		) || exit 1; \
 	done
 
@@ -171,7 +180,7 @@ fmt:
 	done
 
 lint:
-	$(CARGO) clippy --locked --all-targets --no-default-features --features "$(BUILD_FEATURES)" -- -D warnings
+	$(CARGO_RUN) clippy --locked --all-targets --no-default-features --features "$(BUILD_FEATURES)" -- -D warnings
 
 ifeq ($(OS),Windows_NT)
 build:
@@ -204,7 +213,7 @@ uninstall-assets:
 refresh-desktop-caches:
 else ifeq ($(UNAME_S),Darwin)
 build:
-	$(ENV) -u DESTDIR $(CARGO) build $(CARGO_PROFILE_ARGS) --locked --no-default-features --features "$(BUILD_FEATURES)"
+	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --no-default-features --features "$(BUILD_FEATURES)"
 
 install:
 	@if [ "$$(id -u)" -eq 0 ]; then \
@@ -267,7 +276,7 @@ uninstall-assets:
 refresh-desktop-caches:
 else
 build:
-	$(ENV) -u DESTDIR $(CARGO) build $(CARGO_PROFILE_ARGS) --locked --no-default-features --features "$(BUILD_FEATURES)"
+	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --no-default-features --features "$(BUILD_FEATURES)"
 
 install:
 	@if [ "$$(id -u)" -eq 0 ]; then \

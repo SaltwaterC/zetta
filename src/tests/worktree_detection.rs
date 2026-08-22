@@ -100,7 +100,7 @@ fn reported_shell_directory_wins_while_a_child_is_foreground() {
     let child = std::path::PathBuf::from("/child/switched-source");
 
     assert_eq!(
-        select_worktree_detection_directory(Some(reported.clone()), Some(child), false),
+        select_current_directory(Some(reported.clone()), Some(child), false, false),
         Some((reported, true))
     );
 }
@@ -109,7 +109,7 @@ fn reported_shell_directory_wins_while_a_child_is_foreground() {
 fn process_directory_is_used_as_a_non_authoritative_fallback_while_a_child_is_foreground() {
     let child = std::path::PathBuf::from("/child/switched-source");
     assert_eq!(
-        select_worktree_detection_directory(None, Some(child.clone()), false),
+        select_current_directory(None, Some(child.clone()), false, false),
         Some((child, false))
     );
 }
@@ -118,7 +118,7 @@ fn process_directory_is_used_as_a_non_authoritative_fallback_while_a_child_is_fo
 fn process_directory_is_used_while_the_shell_is_foreground() {
     let shell = std::path::PathBuf::from("/shell/worktree");
     assert_eq!(
-        select_worktree_detection_directory(None, Some(shell.clone()), true),
+        select_current_directory(None, Some(shell.clone()), true, false),
         Some((shell, true))
     );
 }
@@ -129,8 +129,31 @@ fn process_directory_supersedes_a_stale_report_while_the_shell_is_foreground() {
     let shell = std::path::PathBuf::from("/shell/worktree");
 
     assert_eq!(
-        select_worktree_detection_directory(Some(reported), Some(shell.clone()), true),
+        select_current_directory(Some(reported), Some(shell.clone()), true, false),
         Some((shell, true))
+    );
+}
+
+#[test]
+fn msys2_reported_directories_are_normalized_before_selection() {
+    let root = Path::new(r"D:\Applications\MSYS2");
+    let reported = msys2_path_to_windows(root, "/c/Users/saltw/source/repos/zetta")
+        .expect("the MSYS2 path should be native-convertible");
+
+    assert_eq!(
+        select_current_directory(Some(reported.clone()), None, false, true),
+        Some((reported, true))
+    );
+}
+
+#[test]
+fn tracked_shell_directory_wins_over_a_stale_process_directory() {
+    let reported = PathBuf::from(r"C:\Users\saltw\source\repos\zetta");
+    let process = PathBuf::from(r"C:\Users\saltw");
+
+    assert_eq!(
+        select_current_directory(Some(reported.clone()), Some(process), true, true),
+        Some((reported, true))
     );
 }
 

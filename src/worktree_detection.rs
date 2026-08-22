@@ -132,22 +132,6 @@ fn canonicalize_gitdir(pointer_file: &Path, gitdir: &Path) -> Result<PathBuf> {
         .with_context(|| format!("canonicalizing Git directory {}", gitdir.display()))
 }
 
-fn select_worktree_detection_directory(
-    reported_directory: Option<PathBuf>,
-    process_directory: Option<PathBuf>,
-    foreground_process_is_shell: bool,
-) -> Option<(PathBuf, bool)> {
-    if foreground_process_is_shell {
-        process_directory
-            .or(reported_directory)
-            .map(|directory| (directory, true))
-    } else {
-        reported_directory
-            .map(|directory| (directory, true))
-            .or_else(|| process_directory.map(|directory| (directory, false)))
-    }
-}
-
 fn worktree_detection_directory_is_current(
     scheduled_directory: Option<&Path>,
     current_directory: Option<&Path>,
@@ -155,31 +139,6 @@ fn worktree_detection_directory_is_current(
 ) -> bool {
     scheduled_directory == Some(directory)
         && current_directory.is_none_or(|current| current == directory)
-}
-
-impl TerminalPane {
-    /// Returns the interactive shell's directory for automatic worktree
-    /// naming. Shell-reported markers are authoritative while a child is
-    /// running; the foreground process CWD is used as a fallback when no
-    /// shell marker is available.
-    fn worktree_detection_directory(&self, cx: &App) -> Option<(PathBuf, bool)> {
-        let terminal = self.terminal.as_ref()?.read(cx);
-        let reported_directory = terminal.reported_working_directory().and_then(|directory| {
-            if let Some((root, _)) = msys2_profile(&self.profile.command) {
-                msys2_path_to_windows(&root, directory)
-            } else {
-                let directory = PathBuf::from(directory);
-                directory.is_absolute().then_some(directory)
-            }
-        });
-        let foreground_process_is_shell = terminal.foreground_process_is_shell();
-        let process_directory = terminal.process_working_directory();
-        select_worktree_detection_directory(
-            reported_directory,
-            process_directory,
-            foreground_process_is_shell,
-        )
-    }
 }
 
 impl Zetta {
@@ -197,9 +156,7 @@ impl Zetta {
             .and_then(|tab| {
                 let pane = tab.pane(pane_id)?;
                 let is_wsl = is_wsl_shell(&pane.profile.command);
-                let directory = (!is_wsl)
-                    .then(|| pane.worktree_detection_directory(cx))
-                    .flatten();
+                let directory = (!is_wsl).then(|| pane.current_directory(cx)).flatten();
                 Some((directory, is_wsl))
             })
         else {
@@ -288,8 +245,7 @@ impl Zetta {
                     pane.worktree_detection_generation,
                     pane.worktree_detection_directory.as_deref(),
                     pane.worktree_detection_can_clear,
-                    pane.worktree_detection_directory(cx)
-                        .map(|(directory, _)| directory),
+                    pane.current_directory(cx).map(|(directory, _)| directory),
                 ))
             });
         let Some((current_generation, scheduled_directory, can_clear, current_directory)) =

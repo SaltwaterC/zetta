@@ -967,6 +967,21 @@ struct ZettaOverlays {
 }
 
 impl Zetta {
+    fn project_offer_banner(root: &Path, action_slot: impl IntoElement) -> Banner {
+        Banner::new()
+            .severity(Severity::Warning)
+            .wrap_content(true)
+            .child(
+                Label::new(format!(
+                    "Zetta project configuration found in {}. Add this project? Its pane layouts may run commands.",
+                    root.display()
+                ))
+                .size(LabelSize::Small)
+                .line_clamp(3),
+            )
+            .action_slot(action_slot)
+    }
+
     fn render_overlays(
         &mut self,
         colors: &ThemeColors,
@@ -1183,44 +1198,32 @@ impl Zetta {
             .when_some(self.projects.offer.clone(), |content, offer| {
                 let add_handle = handle.clone();
                 let dismiss_handle = handle.clone();
-                content.child(feedback_row(
-                    Banner::new()
-                        .severity(Severity::Warning)
+                content.child(feedback_row(Self::project_offer_banner(
+                    &offer.root,
+                    h_flex()
+                        .flex_none()
+                        .gap_1()
                         .child(
-                            Label::new(format!(
-                                "Zetta project configuration found in {}. Add this project? Its pane layouts may run commands.",
-                                offer.root.display()
-                            ))
-                            .size(LabelSize::Small)
-                            .line_clamp(3),
+                            Button::new("dismiss-project-offer", "Dismiss")
+                                .style(ButtonStyle::Outlined)
+                                .on_click(move |_, _, cx| {
+                                    dismiss_handle
+                                        .update(cx, |this, cx| this.dismiss_project_offer(cx))
+                                        .ok();
+                                }),
                         )
-                        .action_slot(
-                            h_flex()
-                                .gap_1()
-                                .child(
-                                    Button::new("dismiss-project-offer", "Dismiss")
-                                        .style(ButtonStyle::Outlined)
-                                        .on_click(move |_, _, cx| {
-                                            dismiss_handle
-                                                .update(cx, |this, cx| {
-                                                    this.dismiss_project_offer(cx)
-                                                })
-                                                .ok();
-                                        }),
-                                )
-                                .child(
-                                    Button::new("accept-project-offer", "Add project")
-                                        .style(ButtonStyle::Filled)
-                                        .on_click(move |_, window, cx| {
-                                            add_handle
-                                                .update(cx, |this, cx| {
-                                                    this.accept_project_offer(window, cx)
-                                                })
-                                                .ok();
-                                        }),
-                                ),
+                        .child(
+                            Button::new("accept-project-offer", "Add project")
+                                .style(ButtonStyle::Filled)
+                                .on_click(move |_, window, cx| {
+                                    add_handle
+                                        .update(cx, |this, cx| {
+                                            this.accept_project_offer(window, cx)
+                                        })
+                                        .ok();
+                                }),
                         ),
-                ))
+                )))
             })
             .when(self.configuration_reload_feedback.is_visible(), |content| {
                 content.child(feedback_row(

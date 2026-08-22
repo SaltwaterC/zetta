@@ -51,6 +51,41 @@ fn discovery_offers_an_unregistered_repository_and_an_unreachable_path_stays_lex
     assert!(result.offer_root.is_none());
 }
 
+#[test]
+fn discovery_does_not_offer_a_repository_without_a_project_config() {
+    let temporary = tempfile::tempdir().unwrap();
+    let child = temporary.path().join("src");
+    fs::create_dir_all(temporary.path().join(".git")).unwrap();
+    fs::create_dir(&child).unwrap();
+    let registry = ProjectRegistry::load_from(temporary.path().join("registry.json")).unwrap();
+    let base = Config::defaults(None, None);
+
+    let result = detect_project_for_directory(&child, &registry, &base, &[]);
+
+    assert!(result.registered_root.is_none());
+    assert!(result.config.is_none());
+    assert!(result.offer_root.is_none());
+}
+
+#[test]
+fn detection_leaves_a_registered_project_when_the_shell_moves_outside_it() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("project");
+    let outside = temporary.path().join("outside");
+    fs::create_dir_all(root.join(".zetta")).unwrap();
+    fs::create_dir(&outside).unwrap();
+    fs::write(ProjectConfig::path_for(&root), "{}\n").unwrap();
+    let mut registry = ProjectRegistry::load_from(temporary.path().join("registry.json")).unwrap();
+    registry.add(&root).unwrap();
+    let base = Config::defaults(None, None);
+
+    let result = detect_project_for_directory(&outside, &registry, &base, &[]);
+
+    assert!(result.registered_root.is_none());
+    assert!(result.config.is_none());
+    assert!(result.offer_root.is_none());
+}
+
 #[cfg(windows)]
 #[test]
 fn registered_wsl_roots_match_lexically_while_the_share_is_unreachable() {

@@ -580,6 +580,55 @@ pub(crate) struct TerminalPane {
     pub(crate) stack: PaneStack,
 }
 
+pub(crate) fn select_current_directory(
+    reported_directory: Option<PathBuf>,
+    process_directory: Option<PathBuf>,
+    foreground_process_is_shell: bool,
+    prefer_reported_directory: bool,
+) -> Option<(PathBuf, bool)> {
+    if prefer_reported_directory {
+        reported_directory
+            .map(|directory| (directory, true))
+            .or_else(|| process_directory.map(|directory| (directory, foreground_process_is_shell)))
+    } else if foreground_process_is_shell {
+        process_directory
+            .or(reported_directory)
+            .map(|directory| (directory, true))
+    } else {
+        reported_directory
+            .map(|directory| (directory, true))
+            .or_else(|| process_directory.map(|directory| (directory, false)))
+    }
+}
+
+#[cfg(windows)]
+fn shell_reports_current_directory(shell: &Shell) -> bool {
+    if msys2_profile(shell).is_some() {
+        return true;
+    }
+    let (Shell::Program(program) | Shell::WithArguments { program, .. }) = shell else {
+        // Shell::System is resolved to a tracked native shell before spawn.
+        return matches!(shell, Shell::System);
+    };
+    program.rsplit(['/', '\\']).next().is_some_and(|name| {
+        [
+            "cmd",
+            "cmd.exe",
+            "powershell",
+            "powershell.exe",
+            "pwsh",
+            "pwsh.exe",
+        ]
+        .iter()
+        .any(|candidate| name.eq_ignore_ascii_case(candidate))
+    })
+}
+
+#[cfg(not(windows))]
+fn shell_reports_current_directory(_shell: &Shell) -> bool {
+    false
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum PaneStackSelection {
     #[default]
@@ -967,15 +1016,45 @@ impl TerminalPane {
             .then(|| directory.to_owned())
     }
 
-    pub(crate) fn working_directory(&self, cx: &App) -> Option<PathBuf> {
+    /// Selects the native directory represented by this pane and whether that
+    /// directory is authoritative for shell-owned state.
+    ///
+    /// Tracked Windows shells report their provider directory explicitly. That
+    /// marker wins because PowerShell's Win32 process CWD can remain at the
+    /// launch directory after `Set-Location`; process inspection is the
+    /// fallback when no marker is available. For untracked shells, process CWD
+    /// is preferred while the shell owns the foreground. Once a child is
+    /// running, a process-only result is explicitly non-authoritative. MSYS2
+    /// reports POSIX paths even though the rest of the application operates on
+    /// native Windows paths.
+    pub(crate) fn current_directory(&self, cx: &App) -> Option<(PathBuf, bool)> {
         let terminal = self.terminal.as_ref()?.read(cx);
-        if let Some((root, _)) = msys2_profile(&self.profile.command)
-            && let Some(directory) = terminal.reported_working_directory()
-            && let Some(directory) = msys2_path_to_windows(&root, directory)
-        {
-            return Some(directory);
+        let reported_directory = terminal.reported_working_directory().and_then(|directory| {
+            if let Some((root, _)) = msys2_profile(&self.profile.command) {
+                msys2_path_to_windows(&root, directory)
+            } else {
+                let directory = PathBuf::from(directory);
+                directory.is_absolute().then_some(directory)
+            }
+        });
+        let process_directory = terminal.process_working_directory();
+        let foreground_process_is_shell = terminal.foreground_process_is_shell();
+        select_current_directory(
+            reported_directory,
+            process_directory,
+            foreground_process_is_shell,
+            shell_reports_current_directory(&self.profile.command),
+        )
+    }
+
+    pub(crate) fn working_directory(&self, cx: &App) -> Option<PathBuf> {
+        // Windows process inspection sees the CWD of wsl.exe, not the Linux
+        // shell. Keep the existing reported-WSL-path behavior for launch and
+        // inheritance; native shell consumers use `current_directory` above.
+        if is_wsl_shell(&self.profile.command) {
+            return self.terminal.as_ref()?.read(cx).working_directory();
         }
-        terminal.working_directory()
+        self.current_directory(cx).map(|(directory, _)| directory)
     }
 
     pub(crate) fn selected_view(&self) -> Option<Entity<TerminalView>> {

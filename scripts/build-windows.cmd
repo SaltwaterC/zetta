@@ -44,28 +44,7 @@ call :append_feature "%NOTIFY%" notifications
 call :append_feature "%SYNTAX_HIGHLIGHTING%" syntax-highlighting
 call :append_feature "%SESSION_PERSISTENCE%" session-persistence
 
-if not defined VSCMD_VER (
-    set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
-
-    if not exist "!VSWHERE!" (
-        echo Error: Visual Studio Installer's vswhere.exe was not found. 1>&2
-        echo Install the Visual Studio Desktop development with C++ workload. 1>&2
-        exit /b 1
-    )
-
-    for /f "usebackq delims=" %%I in (`"!VSWHERE!" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALL=%%I"
-
-    if not defined VSINSTALL (
-        echo Error: A Visual Studio installation with the C++ build tools was not found. 1>&2
-        echo Install the Visual Studio Desktop development with C++ workload. 1>&2
-        exit /b 1
-    )
-
-    call "!VSINSTALL!\VC\Auxiliary\Build\vcvars64.bat" >nul
-    if errorlevel 1 exit /b !errorlevel!
-)
-
-%CARGO% build %PROFILE_ARGS% --jobs %CARGO_BUILD_JOBS% --locked --no-default-features --features %FEATURES% --bin zetta --bin zetta-gui --bin zmux --bin zmux-pty
+call scripts\cargo-windows.cmd build %PROFILE_ARGS% --jobs %CARGO_BUILD_JOBS% --locked --no-default-features --features %FEATURES% --bin zetta --bin zetta-gui --bin zmux --bin zmux-pty
 if errorlevel 1 exit /b !errorlevel!
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\verify-windows-binary.ps1 -ConsoleBinaryPath !TARGET_DIR!\zetta.exe -GuiBinaryPath !TARGET_DIR!\zetta-gui.exe -MuxBinaryPath !TARGET_DIR!\zmux.exe -PtyBinaryPath !TARGET_DIR!\zmux-pty.exe

@@ -379,3 +379,54 @@ fn a_transient_notice_does_not_take_layout_space(cx: &mut TestAppContext) {
     let (in_column, _) = body_height(NoticePlacement::InColumn, cx);
     assert_eq!(in_column, without - NOTICE_HEIGHT);
 }
+
+struct ProjectOfferBannerHarness;
+
+impl Render for ProjectOfferBannerHarness {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let root = format!(
+            r"C:\Users\saltw\{}",
+            "nested-project-directory\\".repeat(20)
+        );
+        div().size_full().child(Zetta::project_offer_banner(
+            Path::new(&root),
+            h_flex()
+                .debug_selector(|| "project-offer-actions".to_owned())
+                .flex_none()
+                .gap_1()
+                .child(
+                    div()
+                        .debug_selector(|| "dismiss-project-offer".to_owned())
+                        .child(Button::new("dismiss", "Dismiss").style(ButtonStyle::Outlined)),
+                )
+                .child(
+                    div()
+                        .debug_selector(|| "accept-project-offer".to_owned())
+                        .child(Button::new("accept", "Add project").style(ButtonStyle::Filled)),
+                ),
+        ))
+    }
+}
+
+#[gpui::test]
+fn project_offer_actions_remain_visible_when_the_message_is_long(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        settings::init(cx);
+        theme_settings::init(theme::LoadThemes::All(Box::new(ZettaAssets)), cx);
+        let registry = ThemeRegistry::global(cx);
+        GlobalTheme::update_theme(cx, registry.get("One Light").unwrap());
+    });
+    let (_root, cx) = cx.add_window_view(|_, _| ProjectOfferBannerHarness);
+    cx.simulate_resize(size(px(520.), px(320.)));
+    cx.run_until_parked();
+
+    let actions = cx
+        .debug_bounds("project-offer-actions")
+        .expect("project offer actions should be laid out");
+    let accept = cx
+        .debug_bounds("accept-project-offer")
+        .expect("Add project should be laid out");
+    assert!(actions.size.width > px(0.));
+    assert!(accept.size.width > px(0.));
+    assert!(accept.origin.x + accept.size.width <= px(520.));
+}

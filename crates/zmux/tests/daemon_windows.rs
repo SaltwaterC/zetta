@@ -189,6 +189,21 @@ fn output_request() -> SpawnRequest {
     request
 }
 
+fn shell_state_request(working_directory: PathBuf) -> SpawnRequest {
+    let mut request = spawn_request();
+    request.args = vec![
+        "/D".to_owned(),
+        "/C".to_owned(),
+        "echo ZETTA_ENV=%ZETTA_TEST_VALUE% & cd & echo ZETTA_CWD_END".to_owned(),
+    ];
+    request.env.insert(
+        "ZETTA_TEST_VALUE".to_owned(),
+        "from-daemon-request".to_owned(),
+    );
+    request.working_directory = Some(working_directory);
+    request
+}
+
 fn detach_restore_request() -> SpawnRequest {
     let mut request = spawn_request();
     request.program = Some("powershell.exe".to_owned());
@@ -578,6 +593,45 @@ fn attached_client_receives_conpty_output_without_host_competing_for_it() {
         "unexpected pseudoconsole output: {:?}",
         String::from_utf8_lossy(&bytes)
     );
+}
+
+#[test]
+fn daemon_preserves_windows_shell_arguments_environment_and_working_directory() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let working_directory = daemon.config.clone();
+    let pane = client
+        .spawn(shell_state_request(working_directory.clone()))
+        .expect("creating a shell-state probe pane");
+    let session_id = pane.session_id;
+    let mut output_file = std::fs::File::from(pane.conout);
+    let mut input = std::fs::File::from(pane.conin);
+
+    let bytes = read_until(
+        &mut output_file,
+        &mut input,
+        b"ZETTA_CWD_END",
+        Duration::from_secs(5),
+    );
+    let output = String::from_utf8_lossy(&bytes);
+    let expected_directory = working_directory.to_string_lossy();
+    assert!(
+        output.contains("ZETTA_ENV=from-daemon-request"),
+        "the daemon did not preserve the requested environment: {output:?}"
+    );
+    assert!(
+        output.contains(expected_directory.as_ref()),
+        "the daemon did not preserve the requested working directory: {output:?}"
+    );
+    assert!(
+        output.contains("ZETTA_CWD_END"),
+        "the daemon did not preserve the requested shell arguments: {output:?}"
+    );
+
+    drop(output_file);
+    drop(input);
+    let _ = client.kill(session_id);
+    let _ = client.shutdown();
 }
 
 #[test]

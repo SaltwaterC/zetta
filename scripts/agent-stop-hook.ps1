@@ -3,9 +3,9 @@ $ErrorActionPreference = "Stop"
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 Set-Location -LiteralPath $repositoryRoot
 
-# Native build scripts track MSVC environment variables. Import the same
-# environment used by build-windows.cmd before lint and test so Cargo does not
-# alternate between incompatible fingerprints on successive stop-hook runs.
+# Import MSVC once for the whole hook. The Makefile's Cargo wrapper provides
+# the same environment for interactive targets, while this avoids repeatedly
+# running vcvars64 for each target and standalone crate in this process.
 function Import-VisualStudioEnvironment {
     if (-not [string]::IsNullOrWhiteSpace($env:VSCMD_VER)) {
         return

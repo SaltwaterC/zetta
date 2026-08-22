@@ -1,4 +1,5 @@
 use super::*;
+use std::{collections::HashMap, path::PathBuf};
 
 #[test]
 fn requests_are_tagged_by_name_on_the_wire() {
@@ -15,6 +16,43 @@ fn requests_are_tagged_by_name_on_the_wire() {
     .unwrap();
     assert_eq!(attach["request"], "attach");
     assert_eq!(attach["session_id"], 3);
+}
+
+#[test]
+fn spawn_requests_round_trip_shell_arguments_environment_and_working_directory() {
+    let mut environment = HashMap::new();
+    environment.insert("PROMPT".to_owned(), "zetta-prompt".to_owned());
+    environment.insert("ZETTA_TEST_VALUE".to_owned(), "from-request".to_owned());
+    let request = SpawnRequest {
+        session_id: Some(9),
+        client_process_id: 42,
+        program: Some("pwsh.exe".to_owned()),
+        args: vec![
+            "-NoExit".to_owned(),
+            "-Command".to_owned(),
+            "tracker".to_owned(),
+        ],
+        env: environment.clone(),
+        working_directory: Some(PathBuf::from(r"C:\source\zetta")),
+        size: TerminalSize {
+            columns: 120,
+            lines: 40,
+            cell_width: 8,
+            cell_height: 16,
+        },
+        console_palette: ConsolePalette::default(),
+    };
+
+    let wire = serde_json::to_string(&request).unwrap();
+    let parsed: SpawnRequest = serde_json::from_str(&wire).unwrap();
+
+    assert_eq!(parsed.session_id, request.session_id);
+    assert_eq!(parsed.client_process_id, request.client_process_id);
+    assert_eq!(parsed.program, request.program);
+    assert_eq!(parsed.args, request.args);
+    assert_eq!(parsed.env, environment);
+    assert_eq!(parsed.working_directory, request.working_directory);
+    assert_eq!(parsed.size, request.size);
 }
 
 #[test]
