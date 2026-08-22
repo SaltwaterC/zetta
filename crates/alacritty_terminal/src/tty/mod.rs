@@ -99,6 +99,18 @@ impl Default for ConsolePalette {
 }
 
 impl ConsolePalette {
+    /// Converts an ANSI palette index to the BGR bit order used by Win32
+    /// console attributes and color tables.
+    pub fn win32_index(index: u8) -> u8 {
+        (index & 0x08) | ((index & 0x01) << 2) | (index & 0x02) | ((index & 0x04) >> 2)
+    }
+
+    /// Foreground and background nibbles in Win32 console attribute order.
+    pub fn win32_attributes(self) -> u16 {
+        u16::from(Self::win32_index(self.foreground_index))
+            | (u16::from(Self::win32_index(self.background_index)) << 4)
+    }
+
     /// Environment-safe fixed-width representation used only by the bundled
     /// Windows helper. Fixed width makes malformed or partial payloads easy to
     /// reject before any console state is touched.
@@ -302,5 +314,16 @@ mod tests {
         assert_eq!(ConsolePalette::from_private_payload(&payload), None);
         payload.replace_range(96..98, "zz");
         assert_eq!(ConsolePalette::from_private_payload(&payload), None);
+    }
+
+    #[test]
+    fn console_palette_maps_ansi_indices_to_win32_attributes() {
+        let palette =
+            ConsolePalette { foreground_index: 3, background_index: 12, ..Default::default() };
+        assert_eq!(ConsolePalette::win32_index(1), 4);
+        assert_eq!(ConsolePalette::win32_index(4), 1);
+        assert_eq!(ConsolePalette::win32_index(9), 12);
+        assert_eq!(ConsolePalette::win32_index(12), 9);
+        assert_eq!(palette.win32_attributes(), 0x96);
     }
 }

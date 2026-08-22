@@ -37,7 +37,6 @@ piper = "0.2.1"
 miow = "0.6.0"
 windows-sys = { version = "0.59.0", features = [
     "Win32_System_Console",
-    "Win32_System_Diagnostics_Debug",
     "Win32_Foundation",
     "Win32_System_IO",
     "Win32_Security",

@@ -167,7 +167,7 @@ test:
 	for crate in $(ZETTA_TEST_CRATE_DIRS); do \
 		( cd "$$crate" && \
 			if [ "$$crate" = "crates/zmux" ]; then \
-				$(CARGO_RUN) build --locked --bin zmux; \
+				$(CARGO_RUN) build --locked --bin zmux --bin zmux-pty; \
 			fi && \
 			$(CARGO_RUN) test --locked --quiet -- --format=terse \
 		) || exit 1; \

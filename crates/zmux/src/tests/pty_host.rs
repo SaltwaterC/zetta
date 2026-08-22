@@ -1,6 +1,20 @@
 use super::*;
 
 #[test]
+fn bootstrap_command_validation_accepts_only_nonempty_bounded_payloads() {
+    assert_eq!(
+        validated_bootstrap_command(std::ffi::OsStr::new("cmd.exe /D")),
+        Some("cmd.exe /D\0".encode_utf16().collect())
+    );
+    assert_eq!(validated_bootstrap_command(std::ffi::OsStr::new("")), None);
+    let oversized = "x".repeat(32_767);
+    assert_eq!(
+        validated_bootstrap_command(std::ffi::OsStr::new(&oversized)),
+        None
+    );
+}
+
+#[test]
 fn the_host_protocol_is_additive_only() {
     // The host is the part that does not get upgraded: after a daemon replaces
     // itself it finds the *old* host still running, so the daemon must be able
@@ -83,7 +97,7 @@ fn palette_attributes_preserve_unrelated_bits() {
         background_index: 12,
         ..Default::default()
     };
-    assert_eq!(palette_attributes(0xa55a, palette), 0xa5c3);
+    assert_eq!(palette_attributes(0xa55a, palette), 0xa596);
 }
 
 #[test]
@@ -106,8 +120,10 @@ fn screen_buffer_update_changes_only_palette_color_bits_and_window_convention() 
     update_screen_buffer_info(&mut info, palette);
 
     assert_eq!(info.ColorTable[7].0, 0x0009_0807);
-    assert_eq!(info.wAttributes.0, 0x5a1e);
-    assert_eq!(info.wPopupAttributes, 0xa51e);
+    assert_eq!(info.ColorTable[1].0, 0x0006_0504);
+    assert_eq!(info.ColorTable[4].0, 0x0003_0201);
+    assert_eq!(info.wAttributes.0, 0x5a4b);
+    assert_eq!(info.wPopupAttributes, 0xa54b);
     assert_eq!(info.srWindow.Right, 80);
     assert_eq!(info.srWindow.Bottom, 24);
 }

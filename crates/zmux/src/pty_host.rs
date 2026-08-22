@@ -19,6 +19,8 @@
 
 use std::{
     collections::HashMap,
+    ffi::OsStr,
+    os::windows::ffi::OsStrExt as _,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
@@ -60,6 +62,148 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const PALETTE_HELPER_ENV: &str = "ZETTA_INTERNAL_CONSOLE_PALETTE_V1";
 const PALETTE_READY_EVENT_ENV: &str = "ZETTA_INTERNAL_CONSOLE_PALETTE_READY_EVENT_V1";
 const PALETTE_PROBE_ENV: &str = "ZETTA_INTERNAL_CONSOLE_PALETTE_PROBE_V1";
+const PALETTE_BOOTSTRAP_ENV: &str = "ZETTA_INTERNAL_CONSOLE_PALETTE_BOOTSTRAP_V1";
+const PALETTE_BOOTSTRAP_TIMEOUT_MS: u32 = 1_000;
+
+fn validated_bootstrap_command(command_line: &OsStr) -> Option<Vec<u16>> {
+    let command_line: Vec<_> = command_line.encode_wide().collect();
+    (!command_line.is_empty() && command_line.len() < 32_767)
+        .then(|| command_line.into_iter().chain(std::iter::once(0)).collect())
+}
+
+/// Launches the requested process and applies the initial palette at its
+/// loader breakpoint. Keeping this sequencing inside the attached bootstrap
+/// process lets the caller start servicing ConPTY immediately; some native
+/// shells query the terminal before the loader breakpoint is delivered.
+pub fn run_palette_bootstrap_from_env() -> Option<i32> {
+    use windows::Win32::Foundation::{
+        CloseHandle, DBG_CONTINUE, DBG_EXCEPTION_NOT_HANDLED, EXCEPTION_BREAKPOINT, WAIT_OBJECT_0,
+    };
+    use windows::Win32::System::Diagnostics::Debug::{
+        CREATE_PROCESS_DEBUG_EVENT, ContinueDebugEvent, DEBUG_EVENT, DebugActiveProcessStop,
+        DebugSetProcessKillOnExit, EXCEPTION_DEBUG_EVENT, EXIT_PROCESS_DEBUG_EVENT,
+        LOAD_DLL_DEBUG_EVENT, WaitForDebugEvent,
+    };
+    use windows::Win32::System::Threading::{
+        CreateProcessW, DEBUG_ONLY_THIS_PROCESS, GetExitCodeProcess, PROCESS_INFORMATION,
+        STARTUPINFOW, WaitForSingleObject,
+    };
+    use windows::core::PWSTR;
+
+    let command_line = std::env::var_os(PALETTE_BOOTSTRAP_ENV)?;
+    unsafe { std::env::remove_var(PALETTE_BOOTSTRAP_ENV) };
+    let Some(mut command_line) = validated_bootstrap_command(&command_line) else {
+        return Some(2);
+    };
+
+    let palette = std::env::var_os(PALETTE_HELPER_ENV)
+        .and_then(|payload| payload.into_string().ok())
+        .and_then(|payload| ConsolePalette::from_private_payload(&payload));
+    unsafe {
+        std::env::remove_var(PALETTE_HELPER_ENV);
+        std::env::remove_var(PALETTE_READY_EVENT_ENV);
+    }
+    if let Some(palette) = palette
+        && let Err(error) = apply_current_console_palette(palette)
+    {
+        eprintln!("zmux-pty: could not initialize pseudoconsole colors: {error:#}");
+    }
+
+    let startup = STARTUPINFOW {
+        cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+        ..Default::default()
+    };
+    let mut process = PROCESS_INFORMATION::default();
+    let spawned = unsafe {
+        CreateProcessW(
+            None,
+            Some(PWSTR(command_line.as_mut_ptr())),
+            None,
+            None,
+            true,
+            DEBUG_ONLY_THIS_PROCESS,
+            None,
+            None,
+            &startup,
+            &mut process,
+        )
+    };
+    if let Err(error) = spawned {
+        eprintln!("zmux-pty: could not start console child: {error}");
+        return Some(1);
+    }
+    unsafe {
+        let _ = DebugSetProcessKillOnExit(false);
+    }
+    let mut paused = None;
+    loop {
+        let mut event = DEBUG_EVENT::default();
+        if unsafe { WaitForDebugEvent(&mut event, PALETTE_BOOTSTRAP_TIMEOUT_MS) }.is_err() {
+            break;
+        }
+        if event.dwDebugEventCode == CREATE_PROCESS_DEBUG_EVENT {
+            // Keep the process and thread handles from PROCESS_INFORMATION:
+            // they are used below to detach from and wait for the child. The
+            // debug event's file handle is independent and can be closed here.
+            let info = unsafe { event.u.CreateProcessInfo };
+            let file = info.hFile;
+            if !file.is_invalid() {
+                unsafe {
+                    let _ = CloseHandle(file);
+                }
+            }
+        } else if event.dwDebugEventCode == LOAD_DLL_DEBUG_EVENT {
+            let file = unsafe { event.u.LoadDll.hFile };
+            if !file.is_invalid() {
+                unsafe {
+                    let _ = CloseHandle(file);
+                }
+            }
+        } else if event.dwDebugEventCode == EXCEPTION_DEBUG_EVENT
+            && unsafe { event.u.Exception.ExceptionRecord.ExceptionCode } == EXCEPTION_BREAKPOINT
+        {
+            paused = Some((event.dwProcessId, event.dwThreadId));
+            break;
+        }
+        let continue_status = if event.dwDebugEventCode == EXCEPTION_DEBUG_EVENT {
+            DBG_EXCEPTION_NOT_HANDLED
+        } else {
+            DBG_CONTINUE
+        };
+        if unsafe { ContinueDebugEvent(event.dwProcessId, event.dwThreadId, continue_status) }
+            .is_err()
+            || event.dwDebugEventCode == EXIT_PROCESS_DEBUG_EVENT
+        {
+            break;
+        }
+    }
+    if let Some((process_id, thread_id)) = paused {
+        if let Some(palette) = palette
+            && let Err(error) = apply_current_console_palette(palette)
+        {
+            eprintln!("zmux-pty: could not seed console child colors: {error:#}");
+        }
+        unsafe {
+            let _ = ContinueDebugEvent(process_id, thread_id, DBG_CONTINUE);
+            let _ = DebugActiveProcessStop(process_id);
+        }
+    } else {
+        unsafe {
+            let _ = DebugActiveProcessStop(process.dwProcessId);
+        }
+    }
+    unsafe {
+        let _ = CloseHandle(process.hThread);
+    }
+    let wait = unsafe { WaitForSingleObject(process.hProcess, u32::MAX) };
+    let mut exit_code = 1;
+    let got_exit = wait == WAIT_OBJECT_0
+        && unsafe { GetExitCodeProcess(process.hProcess, &mut exit_code) }.is_ok();
+    unsafe {
+        let _ = CloseHandle(process.hProcess);
+    }
+    Some(if got_exit { exit_code as i32 } else { 1 })
+}
 
 /// Runs the silent one-shot palette mode when the private payload is present.
 /// The return value is an exit code for the tiny `zmux-pty` entry point; no
@@ -101,6 +245,8 @@ fn signal_palette_ready() {
 /// Private integration probe used to verify the palette from inside ConPTY.
 /// It is environment-only so it cannot become part of the public CLI surface.
 pub fn run_palette_probe_from_env() -> Option<i32> {
+    use std::io::Write as _;
+
     std::env::var_os(PALETTE_PROBE_ENV)?;
     unsafe { std::env::remove_var(PALETTE_PROBE_ENV) };
     let print_palette = || -> Result<()> {
@@ -118,6 +264,13 @@ pub fn run_palette_probe_from_env() -> Option<i32> {
     let mut line = String::new();
     if std::io::stdin().read_line(&mut line).is_err() {
         return Some(1);
+    }
+    if line.trim() == "sgr" {
+        let mut stdout = std::io::stdout().lock();
+        if stdout.write_all(b"\x1b[39m\x1b[49m").is_err() || stdout.flush().is_err() {
+            return Some(1);
+        }
+        thread::sleep(Duration::from_millis(20));
     }
     Some(if print_palette().is_ok() { 0 } else { 1 })
 }
@@ -168,17 +321,16 @@ fn colorref([red, green, blue]: [u8; 3]) -> windows::Win32::Foundation::COLORREF
 }
 
 fn palette_attributes(attributes: u16, palette: ConsolePalette) -> u16 {
-    (attributes & !0x00ff)
-        | u16::from(palette.foreground_index)
-        | (u16::from(palette.background_index) << 4)
+    (attributes & !0x00ff) | palette.win32_attributes()
 }
 
 fn update_screen_buffer_info(
     info: &mut windows::Win32::System::Console::CONSOLE_SCREEN_BUFFER_INFOEX,
     palette: ConsolePalette,
 ) {
-    for (target, color) in info.ColorTable.iter_mut().zip(palette.colors) {
-        *target = colorref(color);
+    for (ansi_index, color) in palette.colors.into_iter().enumerate() {
+        let win32_index = usize::from(ConsolePalette::win32_index(ansi_index as u8));
+        info.ColorTable[win32_index] = colorref(color);
     }
     info.wAttributes = windows::Win32::System::Console::CONSOLE_CHARACTER_ATTRIBUTES(
         palette_attributes(info.wAttributes.0, palette),

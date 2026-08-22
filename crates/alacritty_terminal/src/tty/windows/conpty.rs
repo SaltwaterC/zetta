@@ -6,9 +6,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{FromRawHandle, IntoRawHandle, OwnedHandle};
 use std::{mem, ptr, time::Duration};
 
-use windows_sys::Win32::Foundation::{
-    CloseHandle, DBG_CONTINUE, EXCEPTION_BREAKPOINT, HANDLE, S_OK, WAIT_OBJECT_0,
-};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, S_OK, WAIT_OBJECT_0};
 use windows_sys::Win32::System::Console::{
     COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole,
 };
@@ -16,15 +14,11 @@ use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows_sys::core::{HRESULT, PWSTR};
 use windows_sys::{s, w};
 
-use windows_sys::Win32::System::Diagnostics::Debug::{
-    CREATE_PROCESS_DEBUG_EVENT, ContinueDebugEvent, DEBUG_EVENT, DebugActiveProcessStop,
-    DebugSetProcessKillOnExit, EXCEPTION_DEBUG_EVENT, LOAD_DLL_DEBUG_EVENT, WaitForDebugEvent,
-};
 use windows_sys::Win32::System::Threading::{
-    CREATE_UNICODE_ENVIRONMENT, CreateEventW, CreateProcessW, DEBUG_ONLY_THIS_PROCESS,
-    DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcessId,
-    GetExitCodeProcess, InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
-    PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess,
+    CREATE_UNICODE_ENVIRONMENT, CreateEventW, CreateProcessW, DeleteProcThreadAttributeList,
+    EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcessId, GetExitCodeProcess,
+    InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION,
+    STARTF_USEFILLATTRIBUTE, STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess,
     UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
@@ -149,40 +143,13 @@ pub(super) fn new(config: &Options, window_size: WindowSize) -> Result<SpawnedPt
 
     assert_eq!(result, S_OK);
 
-    // Stop a palette-enabled child at the loader's initial breakpoint. By
-    // then ConPTY has created the child's real screen buffer, but none of the
-    // program's instructions have run, so the helper can update exactly the
-    // buffer startup color queries will inspect.
-    let debug_palette_startup = config.console_palette_helper.is_some();
-    let mut proc_info = spawn_attached_process(pty_handle, config, debug_palette_startup)?;
-    let debug_pause = if debug_palette_startup {
-        match wait_for_initial_breakpoint(proc_info.dwProcessId) {
-            Ok(pause) => Some(pause),
-            Err(error) => {
-                warn!("could not pause the console child for palette initialization: {error}");
-                terminate_process(proc_info);
-                proc_info = spawn_attached_process(pty_handle, config, false)?;
-                None
-            },
-        }
-    } else {
-        None
-    };
-    if let Some(helper) = config.console_palette_helper.as_ref() {
-        match start_palette_helper(pty_handle, helper, config.console_palette)
-            .and_then(finish_palette_helper)
-        {
-            Ok(()) => {},
-            Err(error) => warn!("could not initialize pseudoconsole colors: {error}"),
-        }
-    }
-    if let Some(pause) = debug_pause
-        && let Err(error) = resume_from_initial_breakpoint(pause)
-    {
-        warn!("could not resume the palette-initialized console child: {error}");
-        terminate_process(proc_info);
-        proc_info = spawn_attached_process(pty_handle, config, false)?;
-    }
+    // Native children are launched by the bundled bootstrap. It performs the
+    // loader-breakpoint palette synchronization after this function returns,
+    // once the caller is already servicing ConPTY's terminal queries.
+    let proc_info = match config.console_palette_helper.as_ref() {
+        Some(helper) => spawn_palette_bootstrap(pty_handle, config, helper),
+        None => spawn_attached_process(pty_handle, config),
+    }?;
 
     // `ChildExitWatcher` takes ownership of the process handle. The thread
     // handle is not needed after CreateProcessW returns and must be closed
@@ -212,70 +179,29 @@ pub(super) fn new(config: &Options, window_size: WindowSize) -> Result<SpawnedPt
 
 const PALETTE_HELPER_ENV: &str = "ZETTA_INTERNAL_CONSOLE_PALETTE_V1";
 const PALETTE_READY_EVENT_ENV: &str = "ZETTA_INTERNAL_CONSOLE_PALETTE_READY_EVENT_V1";
+const PALETTE_BOOTSTRAP_ENV: &str = "ZETTA_INTERNAL_CONSOLE_PALETTE_BOOTSTRAP_V1";
 const PALETTE_HELPER_TIMEOUT: Duration = Duration::from_secs(2);
-const INITIAL_BREAKPOINT_TIMEOUT: Duration = Duration::from_secs(5);
 static PALETTE_EVENT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-struct DebugPause {
-    process_id: u32,
-    thread_id: u32,
-}
-
-fn wait_for_initial_breakpoint(process_id: u32) -> Result<DebugPause> {
-    unsafe {
-        let _ = DebugSetProcessKillOnExit(false as i32);
-    }
-    let deadline = std::time::Instant::now() + INITIAL_BREAKPOINT_TIMEOUT;
-    loop {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() {
-            unsafe {
-                let _ = DebugActiveProcessStop(process_id);
-            }
-            return Err(Error::other("the console child did not reach its initial breakpoint"));
-        }
-        let timeout = u32::try_from(remaining.as_millis()).unwrap_or(u32::MAX);
-        let mut event: DEBUG_EVENT = unsafe { mem::zeroed() };
-        if unsafe { WaitForDebugEvent(&mut event, timeout) } == 0 {
-            unsafe {
-                let _ = DebugActiveProcessStop(process_id);
-            }
-            return Err(Error::last_os_error());
-        }
-
-        if event.dwDebugEventCode == CREATE_PROCESS_DEBUG_EVENT {
-            let file = unsafe { event.u.CreateProcessInfo.hFile };
-            if !file.is_null() {
-                unsafe { CloseHandle(file) };
-            }
-        } else if event.dwDebugEventCode == LOAD_DLL_DEBUG_EVENT {
-            let file = unsafe { event.u.LoadDll.hFile };
-            if !file.is_null() {
-                unsafe { CloseHandle(file) };
-            }
-        } else if event.dwDebugEventCode == EXCEPTION_DEBUG_EVENT
-            && unsafe { event.u.Exception.ExceptionRecord.ExceptionCode } == EXCEPTION_BREAKPOINT
-        {
-            return Ok(DebugPause { process_id: event.dwProcessId, thread_id: event.dwThreadId });
-        }
-
-        if unsafe { ContinueDebugEvent(event.dwProcessId, event.dwThreadId, DBG_CONTINUE) } == 0 {
-            unsafe {
-                let _ = DebugActiveProcessStop(process_id);
-            }
-            return Err(Error::last_os_error());
-        }
-    }
-}
-
-fn resume_from_initial_breakpoint(pause: DebugPause) -> Result<()> {
-    if unsafe { ContinueDebugEvent(pause.process_id, pause.thread_id, DBG_CONTINUE) } == 0 {
-        return Err(Error::last_os_error());
-    }
-    if unsafe { DebugActiveProcessStop(pause.process_id) } == 0 {
-        return Err(Error::last_os_error());
-    }
-    Ok(())
+fn spawn_palette_bootstrap(
+    pty_handle: HPCON,
+    config: &Options,
+    helper: &std::path::Path,
+) -> Result<PROCESS_INFORMATION> {
+    let mut bootstrap = config.clone();
+    bootstrap.env.retain(|key, _| {
+        !key.eq_ignore_ascii_case(PALETTE_HELPER_ENV)
+            && !key.eq_ignore_ascii_case(PALETTE_READY_EVENT_ENV)
+            && !key.eq_ignore_ascii_case(PALETTE_BOOTSTRAP_ENV)
+    });
+    bootstrap.shell =
+        Some(crate::tty::Shell::new(helper.to_string_lossy().into_owned(), Vec::new()));
+    bootstrap.escape_args = true;
+    bootstrap
+        .env
+        .insert(PALETTE_HELPER_ENV.to_owned(), config.console_palette.to_private_payload());
+    bootstrap.env.insert(PALETTE_BOOTSTRAP_ENV.to_owned(), cmdline(config));
+    spawn_attached_process(pty_handle, &bootstrap)
 }
 
 fn start_palette_helper(
@@ -303,7 +229,7 @@ fn start_palette_helper(
         escape_args: true,
         ..Options::default()
     };
-    let process = match spawn_attached_process(pty_handle, &helper_config, false) {
+    let process = match spawn_attached_process(pty_handle, &helper_config) {
         Ok(process) => process,
         Err(error) => {
             unsafe { CloseHandle(ready_event) };
@@ -354,16 +280,20 @@ fn terminate_process(process: PROCESS_INFORMATION) {
     }
 }
 
-fn spawn_attached_process(
-    pty_handle: HPCON,
-    config: &Options,
-    debugged: bool,
-) -> Result<PROCESS_INFORMATION> {
+fn spawn_attached_process(pty_handle: HPCON, config: &Options) -> Result<PROCESS_INFORMATION> {
     let mut size = 0;
     let mut startup_info_ex: STARTUPINFOEXW = unsafe { mem::zeroed() };
     startup_info_ex.StartupInfo.lpTitle = ptr::null_mut() as PWSTR;
     startup_info_ex.StartupInfo.cb = mem::size_of::<STARTUPINFOEXW>() as u32;
     startup_info_ex.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
+    if config.console_palette_helper.is_some() {
+        // ConPTY remembers this separately from the current buffer
+        // attributes. SGR 39/49 restore it, so seed it before the console is
+        // initialized in addition to applying the full RGB table below.
+        startup_info_ex.StartupInfo.dwFlags |= STARTF_USEFILLATTRIBUTE;
+        startup_info_ex.StartupInfo.dwFillAttribute =
+            u32::from(config.console_palette.win32_attributes());
+    }
 
     unsafe {
         if InitializeProcThreadAttributeList(ptr::null_mut(), 1, 0, &mut size) > 0 {
@@ -401,9 +331,6 @@ fn spawn_attached_process(
         win32_string(directory.as_os_str())
     });
     let mut creation_flags = EXTENDED_STARTUPINFO_PRESENT;
-    if debugged {
-        creation_flags |= DEBUG_ONLY_THIS_PROCESS;
-    }
     let custom_env_block = convert_custom_env(&config.env);
     let custom_env_block_pointer = custom_env_block.as_ref().map_or(ptr::null_mut(), |block| {
         creation_flags |= CREATE_UNICODE_ENVIRONMENT;

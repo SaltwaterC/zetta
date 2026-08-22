@@ -294,12 +294,94 @@ fn read_until(
     bytes
 }
 
+fn assert_shell_starts_quickly(client: &Client, request: SpawnRequest, marker: &[u8]) {
+    let started = Instant::now();
+    let pane = client
+        .spawn(request)
+        .expect("creating the native shell pane");
+    let spawn_elapsed = started.elapsed();
+    let session_id = pane.session_id;
+    let mut output = std::fs::File::from(pane.conout);
+    let mut input = std::fs::File::from(pane.conin);
+    let bytes = read_until(&mut output, &mut input, marker, Duration::from_secs(10));
+    let elapsed = started.elapsed();
+    eprintln!(
+        "{} spawn: {spawn_elapsed:?}; startup: {elapsed:?}",
+        String::from_utf8_lossy(marker)
+    );
+    assert!(
+        spawn_elapsed < Duration::from_secs(1),
+        "palette initialization blocked the spawn request for {spawn_elapsed:?}"
+    );
+    assert!(
+        bytes.windows(marker.len()).any(|bytes| bytes == marker),
+        "native shell did not produce its startup marker within {elapsed:?}: {:?}",
+        String::from_utf8_lossy(&bytes)
+    );
+    drop(output);
+    drop(input);
+    let _ = client.kill(session_id);
+}
+
+#[test]
+fn palette_initialization_does_not_block_native_shell_startup() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+
+    let mut cmd = spawn_request();
+    cmd.args = vec![
+        "/D".to_owned(),
+        "/Q".to_owned(),
+        "/C".to_owned(),
+        "echo ZETTA_CMD_READY".to_owned(),
+    ];
+    assert_shell_starts_quickly(&client, cmd, b"ZETTA_CMD_READY");
+
+    let mut powershell = output_request();
+    powershell.args = vec![
+        "-NoLogo".to_owned(),
+        "-NoProfile".to_owned(),
+        "-Command".to_owned(),
+        "Write-Output ZETTA_POWERSHELL_READY".to_owned(),
+    ];
+    assert_shell_starts_quickly(&client, powershell, b"ZETTA_POWERSHELL_READY");
+
+    if let Ok(output) = Command::new("where.exe").arg("pwsh.exe").output()
+        && output.status.success()
+    {
+        let mut pwsh = output_request();
+        pwsh.program = Some("pwsh.exe".to_owned());
+        pwsh.args = vec![
+            "-NoLogo".to_owned(),
+            "-NoProfile".to_owned(),
+            "-Command".to_owned(),
+            "Write-Output ZETTA_PWSH_READY".to_owned(),
+        ];
+        assert_shell_starts_quickly(&client, pwsh, b"ZETTA_PWSH_READY");
+    }
+
+    let msys_bash = Path::new(r"C:\msys64\usr\bin\bash.exe");
+    if msys_bash.is_file() {
+        let mut msys = spawn_request();
+        msys.program = Some(msys_bash.to_string_lossy().into_owned());
+        msys.args = vec![
+            "--noprofile".to_owned(),
+            "--norc".to_owned(),
+            "-c".to_owned(),
+            "printf ZETTA_MSYS2_READY".to_owned(),
+        ];
+        assert_shell_starts_quickly(&client, msys, b"ZETTA_MSYS2_READY");
+    }
+
+    let _ = client.shutdown();
+}
+
 #[test]
 fn conpty_palette_is_ready_before_the_child_and_updates_while_attached() {
     let daemon = TestDaemon::start();
     let client = daemon.client();
     let mut initial = ConsolePalette::default();
-    initial.colors[3] = [0x01, 0x02, 0x03];
+    initial.colors[6] = [0x01, 0x02, 0x03];
     initial.foreground_index = 3;
     initial.background_index = 4;
     let pane = client
@@ -313,19 +395,19 @@ fn conpty_palette_is_ready_before_the_child_and_updates_while_attached() {
     let first = read_until(
         &mut output,
         &mut input,
-        b"PALETTE:00030201,43",
+        b"PALETTE:00030201,16",
         Duration::from_secs(10),
     );
     assert!(
         first
-            .windows(b"PALETTE:00030201,43".len())
-            .any(|bytes| bytes == b"PALETTE:00030201,43"),
+            .windows(b"PALETTE:00030201,16".len())
+            .any(|bytes| bytes == b"PALETTE:00030201,16"),
         "the child did not observe the initial palette: {:?}",
         String::from_utf8_lossy(&first)
     );
 
     let mut updated = initial;
-    updated.colors[3] = [0xaa, 0xbb, 0xcc];
+    updated.colors[6] = [0xaa, 0xbb, 0xcc];
     updated.foreground_index = 5;
     updated.background_index = 6;
     client
@@ -335,14 +417,48 @@ fn conpty_palette_is_ready_before_the_child_and_updates_while_attached() {
     let second = read_until(
         &mut output,
         &mut input,
-        b"PALETTE:00ccbbaa,65",
+        b"PALETTE:00ccbbaa,35",
         Duration::from_secs(5),
     );
     assert!(
         second
-            .windows(b"PALETTE:00ccbbaa,65".len())
-            .any(|bytes| bytes == b"PALETTE:00ccbbaa,65"),
+            .windows(b"PALETTE:00ccbbaa,35".len())
+            .any(|bytes| bytes == b"PALETTE:00ccbbaa,35"),
         "the child did not observe the updated palette: {:?}",
+        String::from_utf8_lossy(&second)
+    );
+
+    drop(output);
+    drop(input);
+    let _ = client.kill(session_id);
+    let _ = client.shutdown();
+}
+
+#[test]
+fn conpty_palette_attributes_survive_default_color_resets() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let mut palette = ConsolePalette::default();
+    palette.colors[6] = [0x01, 0x02, 0x03];
+    palette.foreground_index = 3;
+    palette.background_index = 4;
+    let pane = client
+        .spawn(palette_probe_request(palette))
+        .expect("creating the palette probe pane");
+    let session_id = pane.session_id;
+    let mut output = std::fs::File::from(pane.conout);
+    let mut input = std::fs::File::from(pane.conin);
+
+    let marker = b"PALETTE:00030201,16";
+    let first = read_until(&mut output, &mut input, marker, Duration::from_secs(10));
+    assert!(first.windows(marker.len()).any(|bytes| bytes == marker));
+    input
+        .write_all(b"sgr\r\n")
+        .expect("requesting default-color resets");
+    let second = read_until(&mut output, &mut input, marker, Duration::from_secs(5));
+    assert!(
+        second.windows(marker.len()).any(|bytes| bytes == marker),
+        "default-color resets changed the legacy attributes: {:?}",
         String::from_utf8_lossy(&second)
     );
 
@@ -360,7 +476,7 @@ fn shared_conpty_accepts_palette_updates_in_viewer_order() {
     let _exit_reporters = subscription.exits.clone();
     let revokes = subscription.revokes.clone();
     let mut initial = ConsolePalette::default();
-    initial.colors[3] = [0x01, 0x02, 0x03];
+    initial.colors[6] = [0x01, 0x02, 0x03];
     let pane = client
         .spawn(palette_probe_request(initial))
         .expect("creating the shared palette probe pane");
@@ -429,12 +545,12 @@ fn shared_conpty_accepts_palette_updates_in_viewer_order() {
     let holder = holder.join().expect("the holder handover failed");
 
     let mut second_palette = initial;
-    second_palette.colors[3] = [0x11, 0x22, 0x33];
+    second_palette.colors[6] = [0x11, 0x22, 0x33];
     client
         .set_console_palette_for_process(session_id, pane_id, second_palette, second_process_id)
         .expect("applying the second viewer's palette");
     let mut latest = second_palette;
-    latest.colors[3] = [0xaa, 0xbb, 0xcc];
+    latest.colors[6] = [0xaa, 0xbb, 0xcc];
     latest.foreground_index = 5;
     latest.background_index = 6;
     client
@@ -447,8 +563,8 @@ fn shared_conpty_accepts_palette_updates_in_viewer_order() {
     let mut second_output = Vec::new();
     while Instant::now() < deadline
         && !second_output
-            .windows(b"PALETTE:00ccbbaa,65".len())
-            .any(|bytes| bytes == b"PALETTE:00ccbbaa,65")
+            .windows(b"PALETTE:00ccbbaa,35".len())
+            .any(|bytes| bytes == b"PALETTE:00ccbbaa,35")
     {
         let mut buffer = [0; 512];
         match reader.read(&mut buffer) {
@@ -463,8 +579,8 @@ fn shared_conpty_accepts_palette_updates_in_viewer_order() {
     }
     assert!(
         second_output
-            .windows(b"PALETTE:00ccbbaa,65".len())
-            .any(|bytes| bytes == b"PALETTE:00ccbbaa,65"),
+            .windows(b"PALETTE:00ccbbaa,35".len())
+            .any(|bytes| bytes == b"PALETTE:00ccbbaa,35"),
         "the child did not observe the latest shared viewer's palette: {:?}",
         String::from_utf8_lossy(&second_output)
     );

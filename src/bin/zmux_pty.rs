@@ -2,6 +2,9 @@
 
 #[cfg(windows)]
 fn main() {
+    if let Some(code) = zmux::pty_host::run_palette_bootstrap_from_env() {
+        std::process::exit(code);
+    }
     if let Some(code) = zmux::pty_host::run_palette_probe_from_env() {
         std::process::exit(code);
     }
