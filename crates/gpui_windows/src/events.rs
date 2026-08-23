@@ -991,16 +991,16 @@ impl WindowsWindowInner {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> Option<isize> {
-        if let Some(mut func) = self.state.callbacks.input.take() {
-            let scale_factor = self.state.scale_factor.get();
-            let mut cursor_point = POINT {
-                x: lparam.signed_loword().into(),
-                y: lparam.signed_hiword().into(),
-            };
-            unsafe { ScreenToClient(handle, &mut cursor_point).ok().log_err() };
-            let physical_point = point(DevicePixels(cursor_point.x), DevicePixels(cursor_point.y));
-            let click_count = self.state.click_state.update(button, physical_point);
+        let scale_factor = self.state.scale_factor.get();
+        let mut cursor_point = POINT {
+            x: lparam.signed_loword().into(),
+            y: lparam.signed_hiword().into(),
+        };
+        unsafe { ScreenToClient(handle, &mut cursor_point).ok().log_err() };
+        let physical_point = point(DevicePixels(cursor_point.x), DevicePixels(cursor_point.y));
+        let click_count = self.state.click_state.update(button, physical_point);
 
+        if let Some(mut func) = self.state.callbacks.input.take() {
             let input = PlatformInput::MouseDown(MouseDownEvent {
                 button,
                 position: logical_point(cursor_point.x as f32, cursor_point.y as f32, scale_factor),
@@ -1014,8 +1014,7 @@ impl WindowsWindowInner {
             if handled {
                 return Some(0);
             }
-        } else {
-        };
+        }
 
         // Since these are handled in handle_nc_mouse_up_msg we must prevent the default window proc
         if button == MouseButton::Left {
@@ -1023,6 +1022,9 @@ impl WindowsWindowInner {
                 HTMINBUTTON => self.state.nc_button_pressed.set(Some(HTMINBUTTON)),
                 HTMAXBUTTON => self.state.nc_button_pressed.set(Some(HTMAXBUTTON)),
                 HTCLOSE => self.state.nc_button_pressed.set(Some(HTCLOSE)),
+                HTCAPTION if click_count == 2 => {
+                    return Some(0);
+                }
                 _ => return None,
             };
             Some(0)
@@ -1046,11 +1048,12 @@ impl WindowsWindowInner {
                 y: lparam.signed_hiword().into(),
             };
             unsafe { ScreenToClient(handle, &mut cursor_point).ok().log_err() };
+            let click_count = self.state.click_state.current_count.get();
             let input = PlatformInput::MouseUp(MouseUpEvent {
                 button,
                 position: logical_point(cursor_point.x as f32, cursor_point.y as f32, scale_factor),
                 modifiers: current_modifiers(),
-                click_count: 1,
+                click_count,
             });
             let handled = !func(input).propagate;
             self.state.callbacks.input.set(Some(func));
@@ -1087,6 +1090,7 @@ impl WindowsWindowInner {
                     };
                     true
                 }
+                (HTCAPTION, HTCAPTION) => true,
                 _ => false,
             };
             if handled {

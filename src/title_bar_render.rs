@@ -461,6 +461,7 @@ pub(crate) fn render_compact_drag_area(
     let down_handle = zetta_handle.clone();
     let up_handle = zetta_handle.clone();
     let out_handle = zetta_handle.clone();
+    let click_handle = zetta_handle.clone();
     div()
         .id("compact-title-bar-drag-area")
         .h(compact_height)
@@ -497,6 +498,16 @@ pub(crate) fn render_compact_drag_area(
                     }
                 })
                 .ok();
+        })
+        .on_click(move |event, window, cx| {
+            if event.click_count() == 2
+                && let Some(zetta) = click_handle.upgrade()
+            {
+                cx.stop_propagation();
+                zetta.update(cx, |_this, cx| {
+                    window.dispatch_action(Box::new(NewTab), cx);
+                });
+            }
         })
         .into_any_element()
 }

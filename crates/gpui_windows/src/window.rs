@@ -1293,8 +1293,8 @@ impl ClickState {
         let diff = self.last_position.get() - new_position;
 
         self.last_click.get().elapsed() < self.double_click_interval.get()
-            && diff.x.0.abs() <= self.double_click_spatial_tolerance_width.get()
-            && diff.y.0.abs() <= self.double_click_spatial_tolerance_height.get()
+            && diff.x.0.abs() <= self.double_click_spatial_tolerance_width.get() * 2
+            && diff.y.0.abs() <= self.double_click_spatial_tolerance_height.get() * 2
     }
 }
 
