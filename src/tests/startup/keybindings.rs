@@ -835,7 +835,7 @@ fn close_all_windows_does_not_claim_a_key_the_cut_shortcut_uses() {
     let keystrokes = [
         CLOSE_ALL_WINDOWS_KEYBINDING,
         #[cfg(target_os = "macos")]
-        macos::MACOS_CLOSE_ALL_WINDOWS_KEYBINDING,
+        macos_menu_keybindings::MACOS_CLOSE_ALL_WINDOWS_KEYBINDING,
     ];
     for binding in keystrokes {
         let keystroke = gpui::Keystroke::parse(binding).expect("a parseable binding");
