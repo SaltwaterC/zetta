@@ -477,12 +477,12 @@ _zetta_complete() {
     case "$command" in
         profile)
             if (( profile_command_index >= 0 && COMP_CWORD == profile_command_index + 1 )); then
-                _zetta_compgen 'list themes disable enable theme icon default add remove --help'
+                _zetta_compgen 'list themes disable enable theme dark-theme icon default add remove --help'
             elif [[ $current == -* ]]; then
                 case "$profile_operation" in
-                    theme) _zetta_compgen '--reset --config --help' ;;
+                    theme|dark-theme) _zetta_compgen '--reset --config --help' ;;
                     icon) _zetta_compgen '--reset --config --help' ;;
-                    add) _zetta_compgen '--program --arg --theme --icon --config --help' ;;
+                    add) _zetta_compgen '--program --arg --theme --dark-theme --icon --config --help' ;;
                     *) _zetta_compgen '--config --help' ;;
                 esac
             else
@@ -494,7 +494,7 @@ _zetta_complete() {
                             _zetta_compgen '--config --help'
                         fi
                         ;;
-                    theme)
+                    theme|dark-theme)
                         if [[ $current == -* ]]; then
                             _zetta_compgen '--reset --config --help'
                         else
@@ -528,10 +528,10 @@ _zetta_complete() {
                         fi
                         ;;
                     add)
-                        if [[ $previous == --theme || $previous == -t ]]; then
+                        if [[ $previous == --theme || $previous == -t || $previous == --dark-theme || $previous == -d ]]; then
                             _zetta_complete_profile_themes
                         else
-                            _zetta_compgen '--program --arg --theme --icon --config --help'
+                            _zetta_compgen '--program --arg --theme --dark-theme --icon --config --help'
                         fi
                         ;;
                     *)

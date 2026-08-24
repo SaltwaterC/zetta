@@ -20,6 +20,11 @@ const PROJECT_REGISTRY_VERSION: u32 = 1;
 pub(crate) struct ProjectConfig {
     pub(crate) root: PathBuf,
     pub(crate) effective: Config,
+    /// The fields explicitly present in the project file. `effective` also
+    /// contains inherited values, so it cannot be used to determine project
+    /// precedence when selecting a mode-specific theme.
+    pub(crate) theme: Option<String>,
+    pub(crate) dark_theme: Option<String>,
     pub(crate) environment: HashMap<String, String>,
     pub(crate) initial_split: Option<String>,
 }
@@ -67,6 +72,25 @@ impl ProjectConfig {
         let overlay_source = serde_json::to_string(&Value::Object(overlay))?;
         let mut effective = Config::parse_overlay(&overlay_source, base.clone(), &path)?;
 
+        let theme = object
+            .get("theme")
+            .map(|value| {
+                value
+                    .as_str()
+                    .context("theme must be a string")
+                    .map(str::to_owned)
+            })
+            .transpose()?;
+        let dark_theme = object
+            .get("dark_theme")
+            .map(|value| {
+                value
+                    .as_str()
+                    .context("dark_theme must be a string")
+                    .map(str::to_owned)
+            })
+            .transpose()?;
+
         effective.working_directory = Some(match object.get("working_directory") {
             Some(value) => resolve_project_working_directory(&root, value)?,
             None => root.clone(),
@@ -83,6 +107,8 @@ impl ProjectConfig {
         Ok(Self {
             root,
             effective,
+            theme,
+            dark_theme,
             environment,
             initial_split,
         })
@@ -92,6 +118,7 @@ impl ProjectConfig {
 pub(crate) fn validate_project_fields(object: &Map<String, Value>) -> Result<()> {
     const FIELDS: &[&str] = &[
         "theme",
+        "dark_theme",
         "working_directory",
         "default_profile",
         "profiles",

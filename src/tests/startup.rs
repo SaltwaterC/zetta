@@ -149,6 +149,35 @@ fn persistence_manifest_changes_invalidate_the_session_catalog_stamp() {
 fn defaults_to_light_theme_without_overriding_configuration() {
     assert_eq!(selected_theme_name(None), "One Light");
     assert_eq!(selected_theme_name(Some("One Dark")), "One Dark");
+    assert_eq!(selected_dark_theme_name(None), "One Dark");
+    assert_eq!(selected_dark_theme_name(Some("Dracula")), "Dracula");
+}
+
+#[gpui::test]
+fn selected_theme_follows_the_system_appearance_without_cross_mode_fallback(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(|cx| {
+        theme::init(theme::LoadThemes::All(Box::new(ZettaAssets)), cx);
+        let mut config = Config::defaults(None, None);
+        config.theme = Some("Solarized Light".to_owned());
+        config.dark_theme = Some("Solarized Dark".to_owned());
+
+        *SystemAppearance::global_mut(cx) = SystemAppearance(theme::Appearance::Light);
+        assert_eq!(
+            selected_theme_name_for_appearance(&config, cx),
+            "Solarized Light"
+        );
+
+        *SystemAppearance::global_mut(cx) = SystemAppearance(theme::Appearance::Dark);
+        assert_eq!(
+            selected_theme_name_for_appearance(&config, cx),
+            "Solarized Dark"
+        );
+
+        config.dark_theme = None;
+        assert_eq!(selected_theme_name_for_appearance(&config, cx), "One Dark");
+    });
 }
 
 #[test]

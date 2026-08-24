@@ -1712,7 +1712,16 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
         (
             "zetta profile ",
             &[
-                "list", "themes", "disable", "enable", "theme", "icon", "default", "add", "remove",
+                "list",
+                "themes",
+                "disable",
+                "enable",
+                "theme",
+                "dark-theme",
+                "icon",
+                "default",
+                "add",
+                "remove",
             ][..],
         ),
         ("zetta profile disable ", &["System", "WSL: Ubuntu"][..]),

@@ -36,6 +36,7 @@ fn an_absent_field_stays_absent_so_it_keeps_inheriting() {
     let form = parse("{}", &base_config());
 
     assert_eq!(form.theme, None);
+    assert_eq!(form.dark_theme, None);
     assert_eq!(form.default_profile, None);
     assert_eq!(form.default_tab_icon, ProjectTabIcon::Inherit);
     assert_eq!(form.inactive_pane_opacity, None);
@@ -62,13 +63,14 @@ fn an_empty_file_loads_as_an_empty_overlay() {
 fn every_curated_field_round_trips_through_the_form() {
     let source = json!({
         "theme": "One Dark",
+        "dark_theme": "Dracula",
         "working_directory": "crates/app",
         "default_profile": "Toolbox",
         "default_tab_icon": "terminal",
         "inactive_pane_opacity": 0.8,
         "env": { "RUST_LOG": "debug", "PROJECT_ENV": "development" },
         "initial_split": "user-pair",
-        "profiles": [{ "name": "Toolbox", "theme": "One Dark", "hidden": true }]
+        "profiles": [{ "name": "Toolbox", "theme": "One Dark", "dark_theme": "Dracula", "hidden": true }]
     });
     let form = parse(
         &serde_json::to_string(&source).unwrap(),
@@ -76,6 +78,7 @@ fn every_curated_field_round_trips_through_the_form() {
     );
 
     assert_eq!(form.theme.as_deref(), Some("One Dark"));
+    assert_eq!(form.dark_theme.as_deref(), Some("Dracula"));
     assert_eq!(form.working_directory.text, "crates/app");
     assert_eq!(form.default_profile.as_deref(), Some("Toolbox"));
     assert_eq!(
@@ -106,6 +109,7 @@ fn a_profile_program_serializes_with_its_arguments_and_icon() {
         program: TextField::new("/usr/bin/env"),
         arguments: TextField::new("bash, -l"),
         theme: None,
+        dark_theme: None,
         icon: Some(ProfileIcon::Bash),
         hidden: false,
     });
@@ -180,6 +184,7 @@ fn a_profile_needs_a_program_unless_it_overrides_an_inherited_one() {
         program: TextField::default(),
         arguments: TextField::new("-l"),
         theme: None,
+        dark_theme: None,
         icon: None,
         hidden: false,
     });
@@ -201,6 +206,7 @@ fn a_profile_needs_a_program_unless_it_overrides_an_inherited_one() {
         program: TextField::default(),
         arguments: TextField::default(),
         theme: Some("One Dark".to_owned()),
+        dark_theme: None,
         icon: None,
         hidden: false,
     };

@@ -720,6 +720,7 @@ impl Zetta {
                         .border_1()
                         .border_color(colors.border)
                         .bg(colors.elevated_surface_background)
+                        .text_color(colors.text)
                         .shadow_lg()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(
@@ -734,7 +735,8 @@ impl Zetta {
                                 }
                                 None => "Authenticate protected session",
                             })
-                            .size(LabelSize::Large),
+                            .size(LabelSize::Large)
+                            .color(Color::Custom(colors.text)),
                         )
                         .child(
                             div()
@@ -771,7 +773,8 @@ impl Zetta {
                                     } else {
                                         "Session secret"
                                     })
-                                    .size(LabelSize::Small),
+                                    .size(LabelSize::Small)
+                                    .color(Color::Custom(colors.text)),
                                 )
                                 .child(field(
                                     "session-authentication-secret",
@@ -790,7 +793,8 @@ impl Zetta {
                                     } else {
                                         "Confirm secret"
                                     })
-                                    .size(LabelSize::Small))
+                                    .size(LabelSize::Small)
+                                    .color(Color::Custom(colors.text)))
                                     .child(field(
                                         "session-authentication-confirmation",
                                         &prompt.confirmation,
@@ -814,6 +818,7 @@ impl Zetta {
                                 .child(
                                     Button::new("cancel-session-authentication", "Cancel")
                                         .style(ButtonStyle::Outlined)
+                                        .color(Color::Custom(colors.text))
                                         .on_click(move |_, window, cx| {
                                             cancel_handle
                                                 .update(cx, |this, cx| {
@@ -829,6 +834,7 @@ impl Zetta {
                                             "No authentication",
                                         )
                                         .style(ButtonStyle::Outlined)
+                                        .color(Color::Custom(colors.text))
                                         .disabled(prompt.working)
                                         .on_click(
                                             move |_, window, cx| {
@@ -852,6 +858,7 @@ impl Zetta {
                                         },
                                     )
                                     .style(ButtonStyle::Filled)
+                                    .color(Color::Custom(colors.text))
                                     .loading(prompt.working)
                                     .disabled(prompt.working)
                                     .on_click(

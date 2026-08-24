@@ -3,7 +3,8 @@
   "new_tab_profile": "default",
   "working_directory": "~",
   "working_directory_scope": "tab",
-  "theme": "One Dark",
+  "theme": "One Light",
+  "dark_theme": "One Dark",
   "default_tab_icon": "terminal",
   "terminal_font_size": 14,
   "terminal_font_family": "MesloLGS NF",
@@ -46,7 +47,7 @@
     }
   },
   "profiles": [
-    { "name": "System", "theme": "One Light" },
+    { "name": "System", "theme": "One Light", "dark_theme": "One Dark" },
     { "name": "Login Zsh", "program": "/bin/zsh", "args": ["-l"], "icon": "zsh" }
   ]
 }

@@ -112,6 +112,8 @@ impl Zetta {
             if removed.is_none() {
                 return;
             }
+            self.transient_pane_themes
+                .remove(&(pane_id, PaneStackSelection::Stacked(entry_id)));
             self.background_observed_panes.remove(&entry_id);
             if close_host {
                 self.close_pane(tab_id, pane_id, window, cx);
@@ -131,6 +133,8 @@ impl Zetta {
             .and_then(|tab| tab.pane_mut(pane_id))
             .and_then(|pane| pane.stack.remove(entry_id));
         if removed.is_some() {
+            self.transient_pane_themes
+                .remove(&(pane_id, PaneStackSelection::Stacked(entry_id)));
             self.background_observed_panes.remove(&entry_id);
             self.publish_background_session_catalog(cx);
         }

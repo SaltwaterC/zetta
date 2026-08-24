@@ -228,29 +228,36 @@ impl Zetta {
         theme_name: Option<String>,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some((profile, view)) = self
+        let Some((pane_id, selection, profile, view)) = self
             .tabs
             .get(self.active_tab)
             .and_then(Tab::active_pane)
             .and_then(|pane| {
                 pane.selected_view()
-                    .map(|view| (pane.profile.clone(), view))
+                    .map(|view| (pane.id, pane.stack.selected, pane.profile.clone(), view))
             })
         else {
             return false;
         };
         let theme = match theme_name {
             Some(name) => match ThemeRegistry::global(cx).get(&name) {
-                Ok(theme) => Some(theme),
+                Ok(theme) => {
+                    self.transient_pane_themes
+                        .insert((pane_id, selection), theme.clone());
+                    Some(theme)
+                }
                 Err(_) => return false,
             },
-            None => resolve_project_profile_theme(
-                &profile,
-                self.active_project_config().map(Arc::as_ref),
-                cx,
-            )
-            .ok()
-            .flatten(),
+            None => {
+                self.transient_pane_themes.remove(&(pane_id, selection));
+                resolve_project_profile_theme(
+                    &profile,
+                    self.active_project_config().map(Arc::as_ref),
+                    cx,
+                )
+                .ok()
+                .flatten()
+            }
         };
         view.update(cx, |view, cx| view.set_theme(theme, cx));
         cx.notify();
@@ -324,7 +331,7 @@ impl Zetta {
                                         row.child(
                                             Icon::new(IconName::Check)
                                                 .size(IconSize::Small)
-                                                .color(Color::Accent),
+                                                .color(Color::Custom(row_colors.text_accent)),
                                         )
                                     })
                                     .when(!is_current, |row| row.child(div().w_4()))
@@ -374,6 +381,7 @@ impl Zetta {
                         .border_1()
                         .border_color(colors.border)
                         .bg(colors.elevated_surface_background)
+                        .text_color(colors.text)
                         .shadow_lg()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(

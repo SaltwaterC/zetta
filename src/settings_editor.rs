@@ -235,6 +235,7 @@ pub struct PaneTemplatePaneForm {
     pub label: TextField,
     pub source: PaneTemplateSourceForm,
     pub theme: Option<String>,
+    pub dark_theme: Option<String>,
     pub environment: Vec<PaneTemplateEnvironmentForm>,
     pub overlay: Option<PaneTemplateOverlayForm>,
     /// Commands seeded as stacked entries in this pane.
@@ -337,6 +338,7 @@ impl Default for PaneTemplatePaneForm {
             label: TextField::default(),
             source: PaneTemplateSourceForm::Inherit,
             theme: None,
+            dark_theme: None,
             environment: Vec::new(),
             overlay: None,
             stack: Vec::new(),
@@ -499,6 +501,7 @@ impl PaneTemplateNodeForm {
                     PaneTemplateSourceForm::Inherit
                 },
                 theme: pane.theme.clone(),
+                dark_theme: pane.dark_theme.clone(),
                 environment: {
                     let mut environment = pane
                         .env
@@ -637,6 +640,11 @@ impl PaneTemplateNodeForm {
                     && !theme.is_empty()
                 {
                     object.insert("theme".into(), json!(theme));
+                }
+                if let Some(dark_theme) = &pane.dark_theme
+                    && !dark_theme.is_empty()
+                {
+                    object.insert("dark_theme".into(), json!(dark_theme));
                 }
                 if !pane.environment.is_empty() {
                     let mut environment = Map::new();
@@ -1207,6 +1215,7 @@ pub struct ProfileForm {
     pub program: TextField,
     pub arguments: TextField,
     pub theme: Option<String>,
+    pub dark_theme: Option<String>,
     /// An explicit configuration override. None means automatic inference.
     pub icon: Option<ProfileIcon>,
     pub automatic_icon: ProfileIcon,
@@ -1222,6 +1231,7 @@ pub struct ConfigurationForm {
     pub working_directory: TextField,
     pub working_directory_scope: WorkingDirectoryScope,
     pub theme: String,
+    pub dark_theme: String,
     pub default_tab_icon: Option<IconName>,
     pub terminal_font_size: TextField,
     pub terminal_font_family: String,
@@ -1302,6 +1312,11 @@ impl ConfigurationForm {
                         .and_then(Value::as_str)
                         .map(str::to_owned)
                         .or_else(|| resolved.theme.clone()),
+                    dark_theme: configured
+                        .and_then(|profile| profile.get("dark_theme"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .or_else(|| resolved.dark_theme.clone()),
                     icon,
                     automatic_icon: ProfileIcon::automatic_for_profile(
                         &resolved.name,
@@ -1365,6 +1380,10 @@ impl ConfigurationForm {
                 .theme
                 .clone()
                 .unwrap_or_else(|| crate::ZETTA_DEFAULT_THEME.to_owned()),
+            dark_theme: config
+                .dark_theme
+                .clone()
+                .unwrap_or_else(|| crate::ZETTA_DEFAULT_DARK_THEME.to_owned()),
             default_tab_icon: config.default_tab_icon,
             terminal_font_size: TextField::new(
                 config.terminal_font_size.unwrap_or(14.).to_string(),
@@ -1446,6 +1465,7 @@ impl ConfigurationForm {
             json!(self.working_directory_scope.as_str()),
         );
         root.insert("theme".into(), json!(self.theme));
+        root.insert("dark_theme".into(), json!(self.dark_theme));
         let default_tab_icon = self.default_tab_icon.map(|icon| {
             let name: &'static str = icon.into();
             Value::String(name.to_owned())
@@ -1571,6 +1591,7 @@ impl ConfigurationForm {
                         .filter(|profile| {
                             !profile.detected
                                 || profile.theme.is_some()
+                                || profile.dark_theme.is_some()
                                 || profile.icon.is_some()
                                 || profile.hidden
                         })
@@ -1595,6 +1616,9 @@ impl ConfigurationForm {
                             }
                             if let Some(theme) = &profile.theme {
                                 value.insert("theme".into(), json!(theme));
+                            }
+                            if let Some(dark_theme) = &profile.dark_theme {
+                                value.insert("dark_theme".into(), json!(dark_theme));
                             }
                             if let Some(icon) = &profile.icon
                                 && let Some(name) = icon.name()
@@ -1648,6 +1672,7 @@ fn strip_default_configuration_values(
             json!(WorkingDirectoryScope::default().as_str()),
         ),
         ("theme", json!(crate::ZETTA_DEFAULT_THEME)),
+        ("dark_theme", json!(crate::ZETTA_DEFAULT_DARK_THEME)),
         ("default_tab_icon", json!("terminal")),
         (
             "terminal_font_family",

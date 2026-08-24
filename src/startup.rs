@@ -161,9 +161,12 @@ pub(crate) fn bake_zetta_theme_overrides(registry: &ThemeRegistry) {
 }
 
 pub(crate) fn resolve_profile_theme(profile: &Profile, cx: &App) -> Result<Option<Arc<Theme>>> {
-    profile
-        .theme
-        .as_deref()
+    let configured_theme = if SystemAppearance::global(cx).is_light() {
+        profile.theme.as_deref()
+    } else {
+        profile.dark_theme.as_deref()
+    };
+    configured_theme
         .map(|name| {
             ThemeRegistry::global(cx)
                 .get(name)
@@ -175,7 +178,7 @@ pub(crate) fn resolve_profile_theme(profile: &Profile, cx: &App) -> Result<Optio
 pub(crate) fn apply_config_settings(config: &Config, cx: &mut App) -> Result<()> {
     let registry = ThemeRegistry::global(cx);
     bake_zetta_theme_overrides(&registry);
-    let theme_name = selected_theme_name(config.theme.as_deref());
+    let theme_name = selected_theme_name_for_appearance(config, cx);
     let theme = registry
         .get(theme_name)
         .with_context(|| format!("using Zed theme {theme_name:?}"))?;
@@ -194,6 +197,18 @@ pub(crate) fn apply_config_settings(config: &Config, cx: &mut App) -> Result<()>
 
 pub(crate) fn selected_theme_name(configured_theme: Option<&str>) -> &str {
     configured_theme.unwrap_or(ZETTA_DEFAULT_THEME)
+}
+
+pub(crate) fn selected_dark_theme_name(configured_theme: Option<&str>) -> &str {
+    configured_theme.unwrap_or(ZETTA_DEFAULT_DARK_THEME)
+}
+
+pub(crate) fn selected_theme_name_for_appearance<'a>(config: &'a Config, cx: &App) -> &'a str {
+    if SystemAppearance::global(cx).is_light() {
+        selected_theme_name(config.theme.as_deref())
+    } else {
+        selected_dark_theme_name(config.dark_theme.as_deref())
+    }
 }
 
 pub(crate) fn normalize_keymap_key_names(content: &str) -> String {
@@ -660,6 +675,7 @@ fn terminal_rendering_profile_config(executable: &Path, workload: PerformanceWor
             title_override: Some("Terminal rendering profiler".to_owned()),
         },
         theme: None,
+        dark_theme: None,
         icon: ProfileIcon::Zetta,
     }];
     config.default_profile = 0;

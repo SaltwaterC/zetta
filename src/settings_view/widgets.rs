@@ -147,6 +147,7 @@ pub(crate) fn action_button(
         })
         .when(!enabled, |button| button.opacity(0.5))
         .when(focused, |button| button.bg(colors.element_selected))
+        .text_color(colors.text)
         .child(label)
         .into_any_element()
 }
@@ -247,8 +248,12 @@ impl Zetta {
                 h_flex()
                     .w_full()
                     .justify_between()
-                    .child(Label::new(label))
-                    .child(Icon::new(IconName::ChevronDown).size(IconSize::XSmall)),
+                    .child(Label::new(label).color(Color::Custom(colors.text)))
+                    .child(
+                        Icon::new(IconName::ChevronDown)
+                            .size(IconSize::XSmall)
+                            .color(Color::Custom(colors.text_muted)),
+                    ),
             )
             .on_click(move |event, window, cx| {
                 let anchor = event.position();
@@ -363,6 +368,7 @@ impl Zetta {
                         .border_1()
                         .border_color(colors.border_focused)
                         .bg(colors.elevated_surface_background)
+                        .text_color(colors.text)
                         .shadow_lg()
                         .overflow_hidden()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -648,6 +654,7 @@ impl Zetta {
                                 )
                                 .style(ButtonStyle::Outlined)
                                 .size(ButtonSize::Compact)
+                                .color(Color::Custom(colors.text))
                                 .on_click(move |_, window, cx| {
                                     capture_handle
                                         .update(cx, |this, cx| {
@@ -692,6 +699,8 @@ impl Zetta {
                             icon,
                         )
                         .icon_size(IconSize::Small)
+                        .icon_color(Color::Custom(colors.icon))
+                        .selected_icon_color(Color::Custom(colors.icon))
                         .toggle_state(ctx.focused_control == Some(control_variant))
                         .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
                         .tooltip(Tooltip::text(tooltip_text))
@@ -769,6 +778,7 @@ impl Zetta {
                                 )
                                 .style(ButtonStyle::Outlined)
                                 .size(ButtonSize::Compact)
+                                .color(Color::Custom(colors.text))
                                 .disabled(true)
                                 .on_click(move |_, _, _| {}),
                             ),
@@ -786,6 +796,7 @@ impl Zetta {
                             IconName::RotateCw,
                         )
                         .icon_size(IconSize::Small)
+                        .icon_color(Color::Custom(colors.icon))
                         .tooltip(Tooltip::text("Restore binding"))
                         .on_click(move |_, _, cx| {
                             restore_handle
@@ -839,6 +850,8 @@ impl Zetta {
                             format!("Add binding for {context}"),
                         )
                         .style(ButtonStyle::Outlined)
+                        .color(Color::Custom(colors.text))
+                        .selected_label_color(Color::Custom(colors.text))
                         .toggle_state(focused)
                         .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
                         .on_click(move |_, _, cx| {
@@ -879,6 +892,8 @@ impl Zetta {
                     .child(
                         Button::new("add-keymap-section", "Add keymap context")
                             .style(ButtonStyle::Outlined)
+                            .color(Color::Custom(colors.text))
+                            .selected_label_color(Color::Custom(colors.text))
                             .toggle_state(focused)
                             .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
                             .on_click(move |_, _, cx| {

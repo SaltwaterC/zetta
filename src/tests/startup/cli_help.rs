@@ -34,12 +34,14 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
             name: "System".to_owned(),
             command: Shell::System,
             theme: None,
+            dark_theme: None,
             icon: ProfileIcon::Zetta,
         },
         Profile {
             name: "Operations".to_owned(),
             command: Shell::Program("zsh".to_owned()),
             theme: None,
+            dark_theme: None,
             icon: ProfileIcon::Zsh,
         },
     ];

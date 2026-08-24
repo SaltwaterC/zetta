@@ -1,5 +1,6 @@
 {
-  "theme": "One Dark",
+  "theme": "One Light",
+  "dark_theme": "One Dark",
   "working_directory": ".",
   "default_profile": "System",
   "default_tab_icon": "terminal",
@@ -27,6 +28,6 @@
     }
   },
   "profiles": [
-    { "name": "System", "theme": "One Dark" }
+    { "name": "System", "theme": "One Light", "dark_theme": "One Dark" }
   ]
 }

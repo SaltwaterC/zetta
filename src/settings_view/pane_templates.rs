@@ -379,7 +379,7 @@ fn render_pane_details(
         .unwrap_or_else(|| "Use profile/application theme".to_owned());
     rows.push(control_row(
         editor,
-        "Theme override",
+        "Light theme override",
         &[SettingsControl::Dropdown(
             SettingsDropdown::PaneTemplateTheme(path),
         )],
@@ -387,6 +387,26 @@ fn render_pane_details(
             format!("pane-template-theme-{path:?}"),
             theme_label,
             SettingsDropdown::PaneTemplateTheme(path),
+            editor,
+            colors,
+            handle,
+        ),
+        colors,
+    ));
+    let dark_theme_label = pane
+        .dark_theme
+        .clone()
+        .unwrap_or_else(|| "Use profile/application theme".to_owned());
+    rows.push(control_row(
+        editor,
+        "Dark theme override",
+        &[SettingsControl::Dropdown(
+            SettingsDropdown::PaneTemplateDarkTheme(path),
+        )],
+        dropdown_field(
+            format!("pane-template-dark-theme-{path:?}"),
+            dark_theme_label,
+            SettingsDropdown::PaneTemplateDarkTheme(path),
             editor,
             colors,
             handle,

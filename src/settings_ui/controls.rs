@@ -95,6 +95,7 @@ impl Zetta {
                 SettingsControl::Input(SettingsInput::ProfileDraft(ProfileDraftField::Program)),
                 SettingsControl::Input(SettingsInput::ProfileDraft(ProfileDraftField::Arguments)),
                 SettingsControl::Dropdown(SettingsDropdown::ProfileDraftTheme),
+                SettingsControl::Dropdown(SettingsDropdown::ProfileDraftDarkTheme),
                 SettingsControl::Dropdown(SettingsDropdown::ProfileDraftIcon),
                 SettingsControl::CreateProfile,
             ];
@@ -119,6 +120,7 @@ impl Zetta {
                     SettingsControl::Dropdown(SettingsDropdown::DefaultProfile),
                     SettingsControl::Dropdown(SettingsDropdown::NewTabProfile),
                     SettingsControl::Dropdown(SettingsDropdown::Theme),
+                    SettingsControl::Dropdown(SettingsDropdown::DarkTheme),
                     SettingsControl::DefaultTabIconPicker,
                     SettingsControl::Numeric(NumericSetting::FontSize),
                     SettingsControl::FontPicker,
@@ -398,6 +400,10 @@ impl Zetta {
                 Arc::from([String::from("Default"), String::from("Inherit")]),
             ),
             SettingsDropdown::Theme => (editor.configuration.theme.clone(), editor.themes.clone()),
+            SettingsDropdown::DarkTheme => (
+                editor.configuration.dark_theme.clone(),
+                editor.themes.clone(),
+            ),
             SettingsDropdown::WorkingDirectoryScope => (
                 editor
                     .configuration
@@ -462,11 +468,32 @@ impl Zetta {
                     Arc::from(["Automatic", "Zetta", "Bash", "Zsh", "Fish"].map(str::to_owned)),
                 )
             }
+            SettingsDropdown::ProfileDarkTheme(index) => (
+                editor
+                    .configuration
+                    .profiles
+                    .get(index)
+                    .and_then(|profile| profile.dark_theme.clone())
+                    .unwrap_or_else(|| "Use application theme".to_owned()),
+                std::iter::once("Use application theme".to_owned())
+                    .chain(editor.themes.iter().cloned())
+                    .collect(),
+            ),
             SettingsDropdown::ProfileDraftTheme => (
                 editor
                     .profile_draft
                     .as_ref()
                     .and_then(|profile| profile.theme.clone())
+                    .unwrap_or_else(|| "Use application theme".to_owned()),
+                std::iter::once("Use application theme".to_owned())
+                    .chain(editor.themes.iter().cloned())
+                    .collect(),
+            ),
+            SettingsDropdown::ProfileDraftDarkTheme => (
+                editor
+                    .profile_draft
+                    .as_ref()
+                    .and_then(|profile| profile.dark_theme.clone())
                     .unwrap_or_else(|| "Use application theme".to_owned()),
                 std::iter::once("Use application theme".to_owned())
                     .chain(editor.themes.iter().cloned())
@@ -525,13 +552,16 @@ impl Zetta {
             SettingsDropdown::PaneTemplateAxis(_)
             | SettingsDropdown::PaneTemplateSource(_)
             | SettingsDropdown::PaneTemplateTheme(_)
+            | SettingsDropdown::PaneTemplateDarkTheme(_)
             | SettingsDropdown::PaneTemplateOverlaySize(_) => {
                 pane_templates::pane_template_dropdown_options(editor, dropdown)
             }
             SettingsDropdown::ProjectTheme
+            | SettingsDropdown::ProjectDarkTheme
             | SettingsDropdown::ProjectDefaultProfile
             | SettingsDropdown::ProjectInitialSplit
             | SettingsDropdown::ProjectProfileTheme(_)
+            | SettingsDropdown::ProjectProfileDarkTheme(_)
             | SettingsDropdown::ProjectProfileIcon(_) => {
                 projects::project_dropdown_options(editor, dropdown)
             }
@@ -755,6 +785,7 @@ impl Zetta {
                         program: TextField::default(),
                         arguments: TextField::default(),
                         theme: None,
+                        dark_theme: None,
                         icon: None,
                         automatic_icon: ProfileIcon::Zetta,
                         hidden: false,
@@ -1037,6 +1068,7 @@ impl Zetta {
             SettingsDropdown::PaneTemplateAxis(_)
                 | SettingsDropdown::PaneTemplateSource(_)
                 | SettingsDropdown::PaneTemplateTheme(_)
+                | SettingsDropdown::PaneTemplateDarkTheme(_)
                 | SettingsDropdown::PaneTemplateOverlaySize(_)
         );
         let Some(editor) = self.settings_editor.as_mut() else {
@@ -1059,6 +1091,7 @@ impl Zetta {
                 };
             }
             SettingsDropdown::Theme => editor.configuration.theme = value,
+            SettingsDropdown::DarkTheme => editor.configuration.dark_theme = value,
             SettingsDropdown::WorkingDirectoryScope => {
                 editor.configuration.working_directory_scope = match value.as_str() {
                     "None" => WorkingDirectoryScope::None,
@@ -1088,6 +1121,11 @@ impl Zetta {
                     profile.theme = (value != "Use application theme").then_some(value);
                 }
             }
+            SettingsDropdown::ProfileDarkTheme(index) => {
+                if let Some(profile) = editor.configuration.profiles.get_mut(index) {
+                    profile.dark_theme = (value != "Use application theme").then_some(value);
+                }
+            }
             SettingsDropdown::ProfileIcon(index) => {
                 if let Some(profile) = editor.configuration.profiles.get_mut(index) {
                     profile.icon = if value == "Automatic" {
@@ -1102,6 +1140,11 @@ impl Zetta {
             SettingsDropdown::ProfileDraftTheme => {
                 if let Some(profile) = editor.profile_draft.as_mut() {
                     profile.theme = (value != "Use application theme").then_some(value);
+                }
+            }
+            SettingsDropdown::ProfileDraftDarkTheme => {
+                if let Some(profile) = editor.profile_draft.as_mut() {
+                    profile.dark_theme = (value != "Use application theme").then_some(value);
                 }
             }
             SettingsDropdown::ProfileDraftIcon => {
@@ -1177,15 +1220,18 @@ impl Zetta {
             SettingsDropdown::PaneTemplateAxis(_)
             | SettingsDropdown::PaneTemplateSource(_)
             | SettingsDropdown::PaneTemplateTheme(_)
+            | SettingsDropdown::PaneTemplateDarkTheme(_)
             | SettingsDropdown::PaneTemplateOverlaySize(_) => {
                 if !pane_templates::set_pane_template_dropdown(editor, dropdown, &value) {
                     return;
                 }
             }
             SettingsDropdown::ProjectTheme
+            | SettingsDropdown::ProjectDarkTheme
             | SettingsDropdown::ProjectDefaultProfile
             | SettingsDropdown::ProjectInitialSplit
             | SettingsDropdown::ProjectProfileTheme(_)
+            | SettingsDropdown::ProjectProfileDarkTheme(_)
             | SettingsDropdown::ProjectProfileIcon(_) => {
                 if !projects::set_project_dropdown(editor, dropdown, &value) {
                     return;
@@ -1199,11 +1245,14 @@ impl Zetta {
                 invalidate_controls_cache(editor);
             }
             SettingsDropdown::ProfileDraftTheme
+            | SettingsDropdown::ProfileDraftDarkTheme
             | SettingsDropdown::ProfileDraftIcon
             | SettingsDropdown::ProjectTheme
+            | SettingsDropdown::ProjectDarkTheme
             | SettingsDropdown::ProjectDefaultProfile
             | SettingsDropdown::ProjectInitialSplit
             | SettingsDropdown::ProjectProfileTheme(_)
+            | SettingsDropdown::ProjectProfileDarkTheme(_)
             | SettingsDropdown::ProjectProfileIcon(_) => {}
             _ => editor.configuration_dirty = true,
         }
@@ -1490,6 +1539,7 @@ fn profile_settings_controls(index: usize, detected: bool) -> Vec<SettingsContro
     controls.extend([
         SettingsControl::Toggle(SettingsToggle::ProfileVisibility(index)),
         SettingsControl::Dropdown(SettingsDropdown::ProfileTheme(index)),
+        SettingsControl::Dropdown(SettingsDropdown::ProfileDarkTheme(index)),
         SettingsControl::Dropdown(SettingsDropdown::ProfileIcon(index)),
     ]);
     controls

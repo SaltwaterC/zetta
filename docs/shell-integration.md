@@ -87,10 +87,11 @@ a Zetta pane to non-persistently change the active pane's theme;
 since it non-persistently overrides that profile's theme for the new window.
 
 Profile administration uses the non-GUI endpoint too. `zetta profile list`
-supplies root `--profile`/`-p` and the `disable`, `enable`, `theme`, `icon`,
+supplies root `--profile`/`-p` and the `disable`, `enable`, `theme`, `dark-theme`, `icon`,
 `default`, and `remove` profile arguments. `zetta profile themes` supplies
-profile theme values for `profile theme`, `profile add --theme`, and root
-`--theme`/`-t`. `profile icon` and `profile add --icon` complete the fixed
+theme values for `profile theme`, `profile dark-theme`, `profile add --theme`,
+`profile add --dark-theme`, and root `--theme`/`-t`. `profile icon` and
+`profile add --icon` complete the fixed
 values `auto`, `zetta`, `bash`, `zsh`, and `fish`.
 If a `-c`/`--config` value is present in the command line, completion passes it
 through to both endpoints. Endpoint output is processed one line at a time,
@@ -181,7 +182,7 @@ For example, `zetta init` from Zsh adds `eval "$(zetta init zsh)"` to
 `zetta init powershell | Out-String | Invoke-Expression` to `$PROFILE`. Start a new shell
 or source the file after editing it.
 
-Profile and theme changes are visible on the next completion request; there is
+Profile and light/dark theme changes are visible on the next completion request; there is
 no shell-integration regeneration step. A profile mutation also asks a running
 Zetta process using the same configuration path to reload all open and dormant
 entities. The persisted file remains authoritative if no matching process is

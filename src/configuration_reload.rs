@@ -193,6 +193,11 @@ impl Zetta {
             runtime.reconfigure_with_retention(config.sessions.to_zmux_retention()?)?;
         }
         apply_config_settings(&config, cx)?;
+        // A configuration reload is the boundary at which transient pane
+        // theme selections are intentionally discarded. Appearance changes
+        // preserve this map; reloading settings must restore configuration
+        // values instead.
+        self.transient_pane_themes.clear();
         let profile_themes = config
             .profiles
             .iter()
@@ -207,8 +212,13 @@ impl Zetta {
                 .find(|profile| profile.name.eq_ignore_ascii_case(&pane.profile.name))
             {
                 pane.profile = profile.clone();
+                crate::app::apply_launch_theme_override(
+                    &mut pane.profile,
+                    self.launch_theme_override.as_ref(),
+                );
             } else {
                 pane.profile.theme = None;
+                pane.profile.dark_theme = None;
             }
             for entry in &mut pane.stack.entries {
                 if let Some(profile) = config
@@ -217,8 +227,13 @@ impl Zetta {
                     .find(|profile| profile.name.eq_ignore_ascii_case(&entry.profile.name))
                 {
                     entry.profile = profile.clone();
+                    crate::app::apply_launch_theme_override(
+                        &mut entry.profile,
+                        self.launch_theme_override.as_ref(),
+                    );
                 } else {
                     entry.profile.theme = None;
+                    entry.profile.dark_theme = None;
                 }
             }
             let theme = profile_themes

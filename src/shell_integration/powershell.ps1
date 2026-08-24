@@ -264,13 +264,15 @@ $zettaCompletions = {
         @()
     } elseif ($subcommand -eq 'profile' -and $profileOperation -in 'add', 'icon' -and $previous -in '--icon', '-i') {
         'auto', 'zetta', 'bash', 'zsh', 'fish'
+    } elseif ($subcommand -eq 'profile' -and $profileOperation -eq 'add' -and $previous -in '--theme', '-t', '--dark-theme', '-d') {
+        & $zettaProfileThemes $configArguments
     } elseif ($subcommand -eq 'tabicon' -and (
         $previous -in '--icon', '-i' -or $wordToComplete -notlike '-*'
     )) {
         & $zettaTabIcons
     } elseif ($subcommand -eq 'panetheme' -and $wordToComplete -notlike '-*') {
         & $zettaPaneThemes
-    } elseif ($subcommand -eq 'profile' -and $profileOperation -eq 'theme' -and $wordToComplete -notlike '-*' -and $words -notcontains '--reset' -and $words -notcontains '-r' -and -not ($profileOperationIndex -eq ($words.Count - 1) -and -not [string]::IsNullOrEmpty($wordToComplete))) {
+    } elseif ($subcommand -eq 'profile' -and $profileOperation -in 'theme', 'dark-theme' -and $wordToComplete -notlike '-*' -and $words -notcontains '--reset' -and $words -notcontains '-r' -and -not ($profileOperationIndex -eq ($words.Count - 1) -and -not [string]::IsNullOrEmpty($wordToComplete))) {
         $profileArguments = @($words | Select-Object -Skip ($profileIndex + 2) | Where-Object { $_ -notlike '-*' -and -not [string]::IsNullOrEmpty($_) })
         if ($profileArguments.Count -ge 2 -or ($profileArguments.Count -eq 1 -and [string]::IsNullOrEmpty($wordToComplete))) { & $zettaProfileThemes $configArguments }
         else { & $zettaProfiles $configArguments }
@@ -312,13 +314,13 @@ $zettaCompletions = {
             'splits' { '--help' }
             'pane' { '--direction', '--label', '--pane', '--overlay', '--overlay-size', '--overlay-opacity', '--overlay-color', '--stack', '--list', '--help' }
             'profile' {
-                if ([string]::IsNullOrEmpty($profileOperation) -or ($profileOperationIndex -eq ($words.Count - 1) -and -not [string]::IsNullOrEmpty($wordToComplete)) -or $profileOperation -notin 'list', 'themes', 'disable', 'enable', 'theme', 'icon', 'default', 'add', 'remove') {
-                    'list', 'themes', 'disable', 'enable', 'theme', 'icon', 'default', 'add', 'remove', '--config', '--help'
+                if ([string]::IsNullOrEmpty($profileOperation) -or ($profileOperationIndex -eq ($words.Count - 1) -and -not [string]::IsNullOrEmpty($wordToComplete)) -or $profileOperation -notin 'list', 'themes', 'disable', 'enable', 'theme', 'dark-theme', 'icon', 'default', 'add', 'remove') {
+                    'list', 'themes', 'disable', 'enable', 'theme', 'dark-theme', 'icon', 'default', 'add', 'remove', '--config', '--help'
                 } elseif ($profileOperation -in 'disable', 'enable', 'default', 'remove') {
                     if ($previous -eq $profileOperation -or $last -eq $profileOperation) { & $zettaProfiles $configArguments } else { '--config', '--help' }
-                } elseif ($profileOperation -eq 'theme') {
+                } elseif ($profileOperation -in 'theme', 'dark-theme') {
                     if ($wordToComplete -like '-*') { '--reset', '--config', '--help' }
-                    elseif ($previous -eq 'theme' -or $last -eq 'theme') { & $zettaProfiles $configArguments }
+                    elseif ($previous -eq $profileOperation -or $last -eq $profileOperation) { & $zettaProfiles $configArguments }
                     elseif ($previous -in '--reset', '-r' -or $last -in '--reset', '-r') { '--config', '--help' }
                     else { & $zettaProfileThemes $configArguments }
                 } elseif ($profileOperation -eq 'icon') {
@@ -327,7 +329,7 @@ $zettaCompletions = {
                     elseif ($previous -in '--reset', '-r' -or $last -in '--reset', '-r') { '--config', '--help' }
                     else { 'auto', 'zetta', 'bash', 'zsh', 'fish' }
                 } elseif ($profileOperation -eq 'add') {
-                    '--program', '--arg', '--theme', '--icon', '--config', '--help'
+                    '--program', '--arg', '--theme', '--dark-theme', '--icon', '--config', '--help'
                 } else { '--config', '--help' }
             }
             'project' {

@@ -44,10 +44,12 @@ zetta profile disable "PROFILE"
 zetta profile enable "PROFILE"
 zetta profile theme "PROFILE" "THEME"
 zetta profile theme "PROFILE" --reset
+zetta profile dark-theme "PROFILE" "THEME"
+zetta profile dark-theme "PROFILE" --reset
 zetta profile icon "PROFILE" ICON
 zetta profile icon "PROFILE" --reset
 zetta profile default "PROFILE"
-zetta profile add "NAME" --program PROGRAM [--arg ARG ...] [--theme THEME] [--icon ICON]
+zetta profile add "NAME" --program PROGRAM [--arg ARG ...] [--theme THEME] [--dark-theme THEME] [--icon ICON]
 zetta profile remove "PROFILE"
 ```
 
@@ -535,7 +537,7 @@ stacked commands are edited in its **Stacked commands** list, and the layout
 preview shows how many each pane declares.
 
 Leaves can independently select a configured profile or direct command,
-override its theme, add string environment variables, show an overlay, and seed
+override its light and dark themes, add string environment variables, show an overlay, and seed
 stacked commands:
 
 ```json
@@ -548,7 +550,8 @@ stacked commands:
           {
             "label": "server",
             "profile": "Bash",
-            "theme": "One Dark",
+            "theme": "One Light",
+            "dark_theme": "One Dark",
             "env": { "ROLE": "server" },
             "overlay": {
               "text": "SERVER",

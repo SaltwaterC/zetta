@@ -7,6 +7,7 @@ fn profile(name: &str) -> Profile {
         name: name.to_owned(),
         command: task::Shell::System,
         theme: None,
+        dark_theme: None,
         icon: crate::ProfileIcon::default(),
     }
 }
@@ -178,6 +179,7 @@ fn a_profile_is_resolved_afresh_rather_than_frozen() {
     let restored = state
         .into_tab(1, |name| Profile {
             theme: Some("Edited Theme".to_owned()),
+            dark_theme: None,
             ..profile(name)
         })
         .unwrap();

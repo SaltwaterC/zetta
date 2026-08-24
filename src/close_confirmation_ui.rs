@@ -115,9 +115,14 @@ impl Zetta {
             .border_1()
             .border_color(colors.border)
             .bg(colors.elevated_surface_background)
+            .text_color(colors.text)
             .shadow_lg()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(Label::new("Close pinned tab?").size(LabelSize::Large))
+            .child(
+                Label::new("Close pinned tab?")
+                    .size(LabelSize::Large)
+                    .color(Color::Custom(colors.text)),
+            )
             .child(div().text_sm().text_color(colors.text_muted).child(format!(
                 "Close {title}? This tab will leave the pinned tab bar.{}",
                 if backgrounded {
@@ -139,6 +144,7 @@ impl Zetta {
                     .child(
                         Button::new("cancel-tab-close", "Cancel")
                             .style(ButtonStyle::Outlined)
+                            .color(Color::Custom(colors.text))
                             .on_click(move |_, window, cx| {
                                 cancel_handle
                                     .update(cx, |this, cx| {
@@ -150,6 +156,7 @@ impl Zetta {
                     .child(
                         Button::new("confirm-tab-close", "Close tab")
                             .style(ButtonStyle::Filled)
+                            .color(Color::Custom(colors.text))
                             .on_click(move |_, window, cx| {
                                 confirm_handle
                                     .update(cx, |this, cx| this.confirm_tab_close(window, cx))

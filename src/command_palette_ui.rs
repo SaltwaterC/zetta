@@ -773,6 +773,7 @@ impl Zetta {
                         .border_1()
                         .border_color(colors.border)
                         .bg(colors.elevated_surface_background)
+                        .text_color(colors.text)
                         .shadow_lg()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(

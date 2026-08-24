@@ -5,6 +5,7 @@ fn profile() -> Profile {
         name: "System".to_owned(),
         command: Shell::System,
         theme: None,
+        dark_theme: None,
         icon: ProfileIcon::Zetta,
     }
 }

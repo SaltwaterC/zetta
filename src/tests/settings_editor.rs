@@ -165,11 +165,13 @@ fn configuration_form_round_trip_uses_typed_values_and_profiles() {
         r#"{
             "default_profile": "System",
             "terminal_font_size": 13,
+            "dark_theme": "Solarized Dark",
             "profiles": [{
                 "name": "Login shell",
                 "program": "/bin/sh",
                 "args": ["-l"],
                 "theme": "One Dark",
+                "dark_theme": "Solarized Dark",
                 "icon": "fish"
             }]
         }"#,
@@ -214,6 +216,7 @@ fn configuration_form_round_trip_uses_typed_values_and_profiles() {
     fs::remove_file(root).unwrap();
 
     assert_eq!(output["terminal_font_size"], 16.);
+    assert_eq!(output["dark_theme"], "Solarized Dark");
     assert_eq!(output["default_tab_icon"], "folder");
     assert_eq!(output["max_scroll_history_lines"], 123_456_789);
     assert_eq!(output["inactive_pane_opacity"], 0.65);
@@ -239,6 +242,7 @@ fn configuration_form_round_trip_uses_typed_values_and_profiles() {
         .find(|profile| profile["name"] == "Login shell")
         .unwrap();
     assert_eq!(login_profile["icon"], "fish");
+    assert_eq!(login_profile["dark_theme"], "Solarized Dark");
 }
 
 #[test]
@@ -293,6 +297,7 @@ fn pane_template_form_round_trip_covers_nested_leaf_options() {
                 "label": "server",
                 "profile": profile,
                 "theme": "One Dark",
+                "dark_theme": "Solarized Dark",
                 "env": { "ROLE": "server", "EMPTY": "" },
                 "overlay": {
                     "text": "SERVER",
@@ -809,12 +814,14 @@ fn configuration_form_round_trip_serializes_the_resolved_homebrew_profile_name()
             name: "System".to_owned(),
             command: Shell::System,
             theme: None,
+            dark_theme: None,
             icon: ProfileIcon::Zetta,
         },
         Profile {
             name: "Fish (Homebrew)".to_owned(),
             command: Shell::Program("/opt/homebrew/bin/fish".to_owned()),
             theme: None,
+            dark_theme: None,
             icon: ProfileIcon::Fish,
         },
     ];

@@ -736,12 +736,14 @@ fn native_macos_menus_duplicate_the_title_bar_menus() {
             name: "System".to_owned(),
             command: Shell::System,
             theme: None,
+            dark_theme: None,
             icon: ProfileIcon::Zetta,
         },
         Profile {
             name: "Alternate".to_owned(),
             command: Shell::Program("alternate-shell".to_owned()),
             theme: None,
+            dark_theme: None,
             icon: ProfileIcon::Zetta,
         },
     ];

@@ -235,6 +235,7 @@ pub(crate) fn pane_template_dropdown_options(
         SettingsDropdown::PaneTemplateAxis(path)
         | SettingsDropdown::PaneTemplateSource(path)
         | SettingsDropdown::PaneTemplateTheme(path)
+        | SettingsDropdown::PaneTemplateDarkTheme(path)
         | SettingsDropdown::PaneTemplateOverlaySize(path) => path,
         _ => return (String::new(), Arc::from([])),
     };
@@ -271,6 +272,15 @@ pub(crate) fn pane_template_dropdown_options(
                 .collect::<Vec<_>>();
             (selected, options.into())
         }
+        SettingsDropdown::PaneTemplateDarkTheme(_) => {
+            let selected = selected_pane(editor, path)
+                .and_then(|pane| pane.dark_theme.clone())
+                .unwrap_or_else(|| "Use profile/application theme".to_owned());
+            let options = std::iter::once("Use profile/application theme".to_owned())
+                .chain(editor.themes.iter().cloned())
+                .collect::<Vec<_>>();
+            (selected, options.into())
+        }
         SettingsDropdown::PaneTemplateOverlaySize(_) => {
             let selected = selected_pane(editor, path)
                 .and_then(|pane| pane.overlay.as_ref())
@@ -292,6 +302,7 @@ pub(crate) fn set_pane_template_dropdown(
         SettingsDropdown::PaneTemplateAxis(path)
         | SettingsDropdown::PaneTemplateSource(path)
         | SettingsDropdown::PaneTemplateTheme(path)
+        | SettingsDropdown::PaneTemplateDarkTheme(path)
         | SettingsDropdown::PaneTemplateOverlaySize(path) => path,
         _ => return false,
     };
@@ -327,6 +338,13 @@ pub(crate) fn set_pane_template_dropdown(
                 return false;
             };
             pane.theme = (value != "Use profile/application theme").then(|| value.to_owned());
+            true
+        }
+        SettingsDropdown::PaneTemplateDarkTheme(_) => {
+            let Some(pane) = selected_pane_mut(editor, path) else {
+                return false;
+            };
+            pane.dark_theme = (value != "Use profile/application theme").then(|| value.to_owned());
             true
         }
         SettingsDropdown::PaneTemplateOverlaySize(_) => {
@@ -571,6 +589,7 @@ fn add_node_controls_with_template(
                 ))),
                 SettingsControl::Dropdown(SettingsDropdown::PaneTemplateSource(path)),
                 SettingsControl::Dropdown(SettingsDropdown::PaneTemplateTheme(path)),
+                SettingsControl::Dropdown(SettingsDropdown::PaneTemplateDarkTheme(path)),
             ]);
             if let PaneTemplateSourceForm::Command(command) = &pane.source {
                 controls.push(SettingsControl::Input(SettingsInput::PaneTemplate(

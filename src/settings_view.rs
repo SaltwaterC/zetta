@@ -253,6 +253,7 @@ impl Zetta {
                         .border_1()
                         .border_color(colors.border)
                         .bg(colors.elevated_surface_background)
+                        .text_color(colors.text)
                         .shadow_lg()
                         .child(
                             h_flex()
@@ -427,6 +428,7 @@ impl Zetta {
                                                 )
                                                 .cursor_pointer()
                                                 .bg(colors.element_selected)
+                                                .text_color(colors.text)
                                                 .hover(|style| style.bg(colors.element_hover))
                                                 .tooltip(Tooltip::text("Close settings (Esc)"))
                                                 .on_click(move |_, window, cx| {
@@ -455,6 +457,7 @@ impl Zetta {
                                                     },
                                                 )
                                                 .bg(colors.element_selected)
+                                                .text_color(colors.text)
                                                 .when(!settings_save_in_progress, |button| {
                                                     button
                                                         .cursor_pointer()

@@ -43,7 +43,8 @@ ancestor wins for nested projects.
 Project configuration is an overlay on the normal configuration and supports
 these deliberately scoped fields:
 
-- `theme`, `default_profile`, `profiles`, and `default_tab_icon`
+- `theme` (light appearance), `dark_theme` (dark appearance), `default_profile`,
+  `profiles`, and `default_tab_icon`
 - `working_directory`, as an existing project-relative directory that cannot
   escape the project root, defaulting to the project root itself
 - `env`, an object of string environment variables; reserved `ZETTA_*` names
@@ -217,7 +218,7 @@ the settings editor, and CLI arguments; for example, configure Fish as
 {
   "default_profile": "Fish (Homebrew)",
   "profiles": [
-    { "name": "Fish (Homebrew)", "theme": "One Dark" }
+    { "name": "Fish (Homebrew)", "theme": "One Light", "dark_theme": "One Dark" }
   ]
 }
 ```
@@ -294,12 +295,14 @@ zetta profile list
 zetta profile themes
 zetta profile disable "Bash"
 zetta profile enable "Bash"
-zetta profile theme "Bash" "One Dark"
+zetta profile theme "Bash" "One Light"
 zetta profile theme "Bash" --reset
+zetta profile dark-theme "Bash" "One Dark"
+zetta profile dark-theme "Bash" --reset
 zetta profile icon "Bash" fish
 zetta profile icon "Bash" --reset
 zetta profile default "Bash"
-zetta profile add "Project Shell" --program bash --arg -l --theme "One Dark" --icon bash
+zetta profile add "Project Shell" --program bash --arg -l --theme "One Light" --dark-theme "One Dark" --icon bash
 zetta profile remove "Project Shell"
 ```
 
@@ -332,8 +335,10 @@ only a Windows-side directory. On Windows, prompt integration similarly tracks
 the active filesystem directory for Windows PowerShell, PowerShell 7, and
 Command Prompt without replacing the user's prompt.
 
-Profiles may choose a Zed theme and icon independently from the application
-theme. A detected profile needs only its name, theme, or icon; its detected
+Profiles may choose separate Zed themes and an icon independently from the
+application themes. `theme` is used only for light appearance and `dark_theme`
+only for dark appearance; if a dark value is absent, the global `dark_theme`
+(or bundled `One Dark`) is used. A detected profile needs only its name, theme, or icon; its detected
 command is retained. New profiles require `program`. Each terminal pane uses
 its profile's theme, and each tab uses its active pane's theme for its background, text,
 icons, border, and active indicator:
@@ -342,12 +347,13 @@ icons, border, and active indicator:
 {
   "default_profile": "Zsh",
   "profiles": [
-    { "name": "Zsh", "theme": "Solarized Light" },
+    { "name": "Zsh", "theme": "Solarized Light", "dark_theme": "One Dark" },
     {
       "name": "Login Zsh",
       "program": "/bin/zsh",
       "args": ["-l"],
-      "theme": "One Dark"
+      "theme": "One Light",
+      "dark_theme": "One Dark"
     }
   ]
 }
@@ -392,12 +398,14 @@ AltGr on layouts that use it.
 
 ## Appearance and scrollback
 
-Zetta defaults to the bundled `One Light` theme and MesloLGS NF font. Common
-appearance settings include:
+Zetta follows the operating system's light/dark appearance. It defaults to the
+bundled `One Light` theme in light appearance and `One Dark` in dark appearance,
+with MesloLGS NF as the font. Common appearance settings include:
 
 ```json
 {
-  "theme": "One Dark",
+  "theme": "One Light",
+  "dark_theme": "One Dark",
   "default_tab_icon": "terminal",
   "terminal_font_size": 14,
   "terminal_font_family": "MesloLGS NF",

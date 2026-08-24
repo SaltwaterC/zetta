@@ -77,6 +77,7 @@ pub(crate) fn project_controls(editor: &SettingsEditor) -> Vec<SettingsControl> 
         SettingsControl::SaveProjectConfig,
         SettingsControl::OpenProjectConfigFile,
         SettingsControl::Dropdown(SettingsDropdown::ProjectTheme),
+        SettingsControl::Dropdown(SettingsDropdown::ProjectDarkTheme),
         SettingsControl::Input(SettingsInput::Project(ProjectTextField::WorkingDirectory)),
         SettingsControl::Dropdown(SettingsDropdown::ProjectDefaultProfile),
         SettingsControl::ProjectTabIconPicker,
@@ -108,6 +109,7 @@ pub(crate) fn project_controls(editor: &SettingsEditor) -> Vec<SettingsControl> 
                 index,
             ))),
             SettingsControl::Dropdown(SettingsDropdown::ProjectProfileTheme(index)),
+            SettingsControl::Dropdown(SettingsDropdown::ProjectProfileDarkTheme(index)),
             SettingsControl::Dropdown(SettingsDropdown::ProjectProfileIcon(index)),
             SettingsControl::Toggle(SettingsToggle::ProjectProfileVisibility(index)),
             SettingsControl::RemoveProjectProfile(index),
@@ -137,6 +139,12 @@ pub(crate) fn project_dropdown_options(
                 .chain(editor.themes.iter().cloned())
                 .collect(),
         ),
+        SettingsDropdown::ProjectDarkTheme => (
+            form.dark_theme.clone().unwrap_or_else(inherit),
+            std::iter::once(inherit())
+                .chain(editor.themes.iter().cloned())
+                .collect(),
+        ),
         SettingsDropdown::ProjectDefaultProfile => (
             form.default_profile.clone().unwrap_or_else(inherit),
             std::iter::once(inherit())
@@ -155,6 +163,15 @@ pub(crate) fn project_dropdown_options(
             form.profiles
                 .get(index)
                 .and_then(|profile| profile.theme.clone())
+                .unwrap_or_else(inherit),
+            std::iter::once(inherit())
+                .chain(editor.themes.iter().cloned())
+                .collect(),
+        ),
+        SettingsDropdown::ProjectProfileDarkTheme(index) => (
+            form.profiles
+                .get(index)
+                .and_then(|profile| profile.dark_theme.clone())
                 .unwrap_or_else(inherit),
             std::iter::once(inherit())
                 .chain(editor.themes.iter().cloned())
@@ -185,6 +202,7 @@ pub(crate) fn set_project_dropdown(
     let optional = |value: &str| (value != PROJECT_INHERIT_LABEL).then(|| value.to_owned());
     match dropdown {
         SettingsDropdown::ProjectTheme => form.theme = optional(value),
+        SettingsDropdown::ProjectDarkTheme => form.dark_theme = optional(value),
         SettingsDropdown::ProjectDefaultProfile => form.default_profile = optional(value),
         SettingsDropdown::ProjectInitialSplit => {
             form.initial_split = (value != "None").then(|| value.to_owned());
@@ -194,6 +212,12 @@ pub(crate) fn set_project_dropdown(
                 return false;
             };
             profile.theme = optional(value);
+        }
+        SettingsDropdown::ProjectProfileDarkTheme(index) => {
+            let Some(profile) = form.profiles.get_mut(index) else {
+                return false;
+            };
+            profile.dark_theme = optional(value);
         }
         SettingsDropdown::ProjectProfileIcon(index) => {
             let Some(profile) = form.profiles.get_mut(index) else {
@@ -635,6 +659,7 @@ impl Zetta {
                     program: TextField::default(),
                     arguments: TextField::default(),
                     theme: None,
+                    dark_theme: None,
                     icon: None,
                     hidden: false,
                 });

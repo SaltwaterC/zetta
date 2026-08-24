@@ -31,6 +31,7 @@ fn background_session_is_reaped_after_its_final_pane_exits() {
         name: "System".to_owned(),
         command: Shell::System,
         theme: None,
+        dark_theme: None,
         icon: ProfileIcon::Zetta,
     };
     let tab = Tab {
@@ -242,6 +243,7 @@ fn attached_tab_with_a_stacked_command() -> Tab {
         name: "System".to_owned(),
         command: Shell::System,
         theme: None,
+        dark_theme: None,
         icon: ProfileIcon::Zetta,
     };
     let mut pane = TerminalPane::new(11, profile.clone()).with_label_number(1);

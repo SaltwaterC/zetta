@@ -27,7 +27,8 @@ for active development.
   the fallback
 - Native command, path, and SSH-alias completion in a multi-command prompt
 - Stacked command panes that retain each command's PTY, output, and exit status
-- Typed settings and keymap editor, per-profile themes and icons, and
+- Typed settings and keymap editor, system-aware light/dark per-profile themes
+  and icons, and
   installable Zed themes
 - Registered projects with repository-local themes, environment, profiles,
   pane templates, initial layouts, live command-palette scoping, and a

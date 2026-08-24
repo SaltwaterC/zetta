@@ -14,6 +14,7 @@ fn project_config_overlays_curated_fields_and_defaults_to_project_root() {
     let project = ProjectConfig::parse(
         r#"{
             "theme": "One Dark",
+            "dark_theme": "Dracula",
             "working_directory": "work",
             "env": { "RUST_LOG": "debug" },
             "inactive_pane_opacity": 0.6,
@@ -26,6 +27,9 @@ fn project_config_overlays_curated_fields_and_defaults_to_project_root() {
 
     assert_eq!(project.root, fs::canonicalize(temporary.path()).unwrap());
     assert_eq!(project.effective.theme.as_deref(), Some("One Dark"));
+    assert_eq!(project.effective.dark_theme.as_deref(), Some("Dracula"));
+    assert_eq!(project.theme.as_deref(), Some("One Dark"));
+    assert_eq!(project.dark_theme.as_deref(), Some("Dracula"));
     assert_eq!(
         project.effective.working_directory.as_deref(),
         Some(fs::canonicalize(&work).unwrap().as_path())
@@ -35,6 +39,8 @@ fn project_config_overlays_curated_fields_and_defaults_to_project_root() {
     assert_eq!(project.initial_split.as_deref(), Some("three-right"));
 
     let defaulted = ProjectConfig::parse("{}", temporary.path(), &base_config()).unwrap();
+    assert_eq!(defaulted.theme, None);
+    assert_eq!(defaulted.dark_theme, None);
     assert_eq!(
         defaulted.effective.working_directory.as_deref(),
         Some(defaulted.root.as_path())

@@ -149,6 +149,7 @@ impl Zetta {
             .border_color(colors.element_selected)
             .cursor_pointer()
             .bg(colors.element_selected)
+            .text_color(colors.text)
             .hover(|style| style.bg(colors.element_hover))
             .tooltip(Tooltip::text("Close tab icon picker (Esc)"))
             .on_click(move |_, window, cx| {
@@ -221,14 +222,23 @@ impl Zetta {
                                     })
                                     .hover(|cell| cell.bg(row_colors.element_hover))
                                     .when_some(icon, |cell, icon| {
-                                        cell.child(Icon::new(icon).size(IconSize::Medium))
+                                        cell.child(
+                                            Icon::new(icon)
+                                                .size(IconSize::Medium)
+                                                .color(Color::Custom(row_colors.icon)),
+                                        )
                                     })
                                     .when(icon.is_none(), |cell| {
-                                        cell.child(Icon::new(IconName::Dash).size(IconSize::Medium))
+                                        cell.child(
+                                            Icon::new(IconName::Dash)
+                                                .size(IconSize::Medium)
+                                                .color(Color::Custom(row_colors.icon)),
+                                        )
                                     })
                                     .child(
                                         Label::new(label.clone())
                                             .size(LabelSize::XSmall)
+                                            .color(Color::Custom(row_colors.text))
                                             .truncate(),
                                     )
                                     .tooltip(Tooltip::text(label))
@@ -285,6 +295,7 @@ impl Zetta {
                         .border_1()
                         .border_color(colors.border)
                         .bg(colors.elevated_surface_background)
+                        .text_color(colors.text)
                         .shadow_lg()
                         .child(h_flex().mb_3().gap_2().child(search).child(close))
                         .child(
@@ -489,7 +500,10 @@ impl Zetta {
                                             .bg(preset.color()),
                                     )
                                     .child(
-                                        Label::new(preset.name).size(LabelSize::XSmall).truncate(),
+                                        Label::new(preset.name)
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Custom(colors.text))
+                                            .truncate(),
                                     )
                                     .tooltip(Tooltip::text(preset.name))
                                     .on_click(move |_, _, cx| {
@@ -639,6 +653,7 @@ impl Zetta {
                         .border_1()
                         .border_color(colors.border)
                         .bg(colors.elevated_surface_background)
+                        .text_color(colors.text)
                         .shadow_lg()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(
@@ -921,6 +936,7 @@ impl Zetta {
                                 .child(
                                     Button::new("cancel-overlay-style", "Cancel")
                                         .style(ButtonStyle::Outlined)
+                                        .color(Color::Custom(colors.text))
                                         .on_click(move |_, window, cx| {
                                             cancel_button_handle
                                                 .update(cx, |this, cx| {
@@ -932,6 +948,7 @@ impl Zetta {
                                 .child(
                                     Button::new("apply-overlay-style", "Apply")
                                         .style(ButtonStyle::Filled)
+                                        .color(Color::Custom(colors.text))
                                         .on_click(move |_, window, cx| {
                                             apply_handle
                                                 .update(cx, |this, cx| {
@@ -1206,6 +1223,7 @@ impl Zetta {
                         .child(
                             Button::new("dismiss-project-offer", "Dismiss")
                                 .style(ButtonStyle::Outlined)
+                                .color(Color::Custom(colors.text))
                                 .on_click(move |_, _, cx| {
                                     dismiss_handle
                                         .update(cx, |this, cx| this.dismiss_project_offer(cx))
@@ -1215,6 +1233,7 @@ impl Zetta {
                         .child(
                             Button::new("accept-project-offer", "Add project")
                                 .style(ButtonStyle::Filled)
+                                .color(Color::Custom(colors.text))
                                 .on_click(move |_, window, cx| {
                                     add_handle
                                         .update(cx, |this, cx| {
@@ -1238,6 +1257,7 @@ impl Zetta {
                         IconButton::new("reload-invalid-configuration", IconName::RotateCw)
                             .shape(IconButtonShape::Square)
                             .icon_size(IconSize::Small)
+                            .icon_color(Color::Custom(colors.icon))
                             .aria_label("Reload configuration")
                             .tooltip(Tooltip::text("Reload configuration"))
                             .on_click(|_, window, cx| {

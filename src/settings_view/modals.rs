@@ -105,6 +105,7 @@ pub(crate) fn render_font_modal(
                     .border_1()
                     .border_color(colors.border)
                     .bg(colors.elevated_surface_background)
+                    .text_color(colors.text)
                     .shadow_lg()
                     .child(
                         h_flex()
@@ -126,6 +127,7 @@ pub(crate) fn render_font_modal(
                                     .border_color(colors.element_selected)
                                     .cursor_pointer()
                                     .bg(colors.element_selected)
+                                    .text_color(colors.text)
                                     .hover(|style| style.bg(colors.element_hover))
                                     .tooltip(Tooltip::text("Close font picker (Esc)"))
                                     .on_click(move |_, _, cx| {
@@ -169,16 +171,25 @@ pub(crate) fn render_profile_modal(
                 .unwrap_or_else(|| "Use application theme".to_owned()),
             SettingsDropdown::ProfileDraftTheme,
         );
+        let profile_dark_theme = dropdown(
+            "settings-new-profile-dark-theme".to_owned(),
+            draft
+                .dark_theme
+                .clone()
+                .unwrap_or_else(|| "Use application theme".to_owned()),
+            SettingsDropdown::ProfileDraftDarkTheme,
+        );
         let automatic_icon = ProfileIcon::automatic_for_program(&draft.program.text);
         let profile_icon_value = draft.icon.as_ref().unwrap_or(&automatic_icon);
         let profile_icon = h_flex()
+            .w_full()
             .gap_2()
             .child(profile_icon_value.render(IconSize::Small))
-            .child(dropdown(
+            .child(div().min_w_0().flex_1().child(dropdown(
                 "settings-new-profile-icon".to_owned(),
                 ProfileIcon::selector_label(draft.icon.as_ref()).to_owned(),
                 SettingsDropdown::ProfileDraftIcon,
-            ));
+            )));
         let close_handle = handle.clone();
         let create_handle = handle.clone();
         div()
@@ -201,6 +212,7 @@ pub(crate) fn render_profile_modal(
                     .border_1()
                     .border_color(colors.border)
                     .bg(colors.elevated_surface_background)
+                    .text_color(colors.text)
                     .shadow_lg()
                     .child(
                         h_flex()
@@ -251,9 +263,18 @@ pub(crate) fn render_profile_modal(
                             .mb_1()
                             .text_xs()
                             .text_color(colors.text_muted)
-                            .child("Theme"),
+                            .child("Light theme"),
                     )
                     .child(profile_theme)
+                    .child(
+                        div()
+                            .mt_3()
+                            .mb_1()
+                            .text_xs()
+                            .text_color(colors.text_muted)
+                            .child("Dark theme"),
+                    )
+                    .child(profile_dark_theme)
                     .child(
                         div()
                             .mt_3()
@@ -288,6 +309,7 @@ pub(crate) fn render_profile_modal(
                                     .border_color(colors.element_selected)
                                     .cursor_pointer()
                                     .bg(colors.element_selected)
+                                    .text_color(colors.text)
                                     .hover(|style| style.bg(colors.element_hover))
                                     .tooltip(Tooltip::text("Close add profile (Esc)"))
                                     .on_click(move |_, _, cx| {
@@ -324,6 +346,7 @@ pub(crate) fn render_profile_modal(
                                     )
                                     .cursor_pointer()
                                     .bg(colors.element_selected)
+                                    .text_color(colors.text)
                                     .hover(|style| style.bg(colors.element_hover))
                                     .tooltip(Tooltip::text("Create profile (Enter)"))
                                     .child("Create profile")
@@ -408,6 +431,7 @@ pub(crate) fn render_keymap_capture_modal(
                         .border_1()
                         .border_color(colors.border_focused)
                         .bg(colors.elevated_surface_background)
+                        .text_color(colors.text)
                         .shadow_lg()
                         .child(
                             div()
@@ -456,6 +480,7 @@ pub(crate) fn render_keymap_capture_modal(
                                 .child(
                                     Button::new("cancel-keymap-capture", "Cancel")
                                         .style(ButtonStyle::Outlined)
+                                        .color(Color::Custom(colors.text))
                                         .on_click(move |_, window, cx| {
                                             cancel_handle
                                                 .update(cx, |this, cx| {
@@ -467,6 +492,7 @@ pub(crate) fn render_keymap_capture_modal(
                                 .child(
                                     Button::new("confirm-keymap-capture", "Use shortcut")
                                         .style(ButtonStyle::Filled)
+                                        .color(Color::Custom(colors.text))
                                         .disabled(!has_capture)
                                         .on_click(move |_, window, cx| {
                                             confirm_handle

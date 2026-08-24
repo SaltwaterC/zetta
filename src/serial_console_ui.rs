@@ -34,8 +34,16 @@ impl Zetta {
                         |row| row.bg(colors.element_selection_background),
                     )
                     .cursor_pointer()
-                    .child(Label::new(label).size(LabelSize::Small).color(Color::Muted))
-                    .child(Label::new(value).size(LabelSize::Small))
+                    .child(
+                        Label::new(label)
+                            .size(LabelSize::Small)
+                            .color(Color::Custom(colors.text_muted)),
+                    )
+                    .child(
+                        Label::new(value)
+                            .size(LabelSize::Small)
+                            .color(Color::Custom(colors.text)),
+                    )
                     .on_click(move |_, _, cx| {
                         click_handle
                             .update(cx, |this, cx| {
@@ -105,6 +113,7 @@ impl Zetta {
                         .border_1()
                         .border_color(colors.border)
                         .bg(colors.elevated_surface_background)
+                        .text_color(colors.text)
                         .shadow_lg()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(
@@ -112,7 +121,11 @@ impl Zetta {
                                 .flex()
                                 .items_center()
                                 .justify_between()
-                                .child(Label::new("Open serial console").size(LabelSize::Large))
+                                .child(
+                                    Label::new("Open serial console")
+                                        .size(LabelSize::Large)
+                                        .color(Color::Custom(colors.text)),
+                                )
                                 .child(
                                     Label::new(format!(
                                         "{} · {} baud",
@@ -120,7 +133,7 @@ impl Zetta {
                                         prompt.baud_rate
                                     ))
                                     .size(LabelSize::Small)
-                                    .color(Color::Muted),
+                                    .color(Color::Custom(colors.text_muted)),
                                 ),
                         )
                         .child(field_row("Device", device_value, SerialField::Device))

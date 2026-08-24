@@ -135,6 +135,7 @@ fn wsl_project_directories_are_lexical_but_cannot_escape_the_distribution() {
             title_override: None,
         },
         theme: None,
+        dark_theme: None,
         icon: ProfileIcon::default(),
     };
 
@@ -151,6 +152,8 @@ fn icon_test_project(icon: Option<IconName>) -> ProjectConfig {
     ProjectConfig {
         root: PathBuf::from("/project"),
         effective,
+        theme: None,
+        dark_theme: None,
         environment: HashMap::new(),
         initial_split: None,
     }
@@ -314,14 +317,18 @@ fn active_project_theme_overrides_a_profile_theme_it_never_mentioned(
             name: "bash".to_owned(),
             command: Shell::Program("bash".to_owned()),
             theme: Some("Solarized Light".to_owned()),
+            dark_theme: Some("One Dark".to_owned()),
             icon: ProfileIcon::default(),
         };
 
         let mut effective = Config::defaults(None, None);
         effective.theme = Some("Solarized Dark".to_owned());
+        effective.dark_theme = Some("Gruvbox Dark".to_owned());
         let project = ProjectConfig {
             root: PathBuf::from("/project"),
             effective,
+            theme: Some("Solarized Dark".to_owned()),
+            dark_theme: Some("Gruvbox Dark".to_owned()),
             environment: HashMap::new(),
             initial_split: None,
         };
@@ -337,13 +344,27 @@ fn active_project_theme_overrides_a_profile_theme_it_never_mentioned(
             .unwrap();
         assert_eq!(theme.name.as_ref(), "Solarized Light");
 
+        *SystemAppearance::global_mut(cx) = SystemAppearance(theme::Appearance::Dark);
+        let theme = resolve_project_profile_theme(&profile, Some(&project), cx)
+            .unwrap()
+            .unwrap();
+        assert_eq!(theme.name.as_ref(), "Gruvbox Dark");
+
         // A project that sets no theme of its own falls back to the profile.
         let project_without_theme = ProjectConfig {
             root: PathBuf::from("/project"),
             effective: Config::defaults(None, None),
+            theme: None,
+            dark_theme: None,
             environment: HashMap::new(),
             initial_split: None,
         };
+        let theme = resolve_project_profile_theme(&profile, Some(&project_without_theme), cx)
+            .unwrap()
+            .unwrap();
+        assert_eq!(theme.name.as_ref(), "One Dark");
+
+        *SystemAppearance::global_mut(cx) = SystemAppearance(theme::Appearance::Light);
         let theme = resolve_project_profile_theme(&profile, Some(&project_without_theme), cx)
             .unwrap()
             .unwrap();

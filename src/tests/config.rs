@@ -16,6 +16,49 @@ fn parses_profile_with_arguments() {
     ));
 }
 
+#[test]
+fn parses_dark_themes_for_global_profiles_and_pane_template_leaves() {
+    let config = Config::parse(
+        r##"{
+            "theme": "Solarized Light",
+            "dark_theme": "Solarized Dark",
+            "profiles": [
+                {
+                    "name": "Dark Shell",
+                    "program": "dark-shell",
+                    "theme": "One Light",
+                    "dark_theme": "Dracula"
+                }
+            ],
+            "pane_split_templates": {
+                "custom": {
+                    "layout": {
+                        "vertical": [
+                            { "profile": "Dark Shell", "dark_theme": "Gruvbox Dark" },
+                            {}
+                        ]
+                    }
+                }
+            }
+        }"##,
+        None,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(config.theme.as_deref(), Some("Solarized Light"));
+    assert_eq!(config.dark_theme.as_deref(), Some("Solarized Dark"));
+    let profile = config
+        .profiles
+        .iter()
+        .find(|profile| profile.name == "Dark Shell")
+        .unwrap();
+    assert_eq!(profile.theme.as_deref(), Some("One Light"));
+    assert_eq!(profile.dark_theme.as_deref(), Some("Dracula"));
+    let leaf = &config.pane_split_templates["custom"].pane_specifications()[0];
+    assert_eq!(leaf.dark_theme.as_deref(), Some("Gruvbox Dark"));
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn homebrew_shells_are_profiles_with_their_installed_program_paths() {
@@ -953,12 +996,14 @@ fn configured_profiles_extend_detected_profiles() {
             name: "System".to_owned(),
             command: Shell::System,
             theme: None,
+            dark_theme: None,
             icon: ProfileIcon::Zetta,
         },
         Profile {
             name: "Zsh".to_owned(),
             command: Shell::Program("zsh".to_owned()),
             theme: None,
+            dark_theme: None,
             icon: ProfileIcon::Zsh,
         },
     ];
@@ -969,6 +1014,7 @@ fn configured_profiles_extend_detected_profiles() {
             name: "Login Zsh".to_owned(),
             command: Some(Shell::Program("/bin/zsh".to_owned())),
             theme: None,
+            dark_theme: None,
             icon: None,
             hidden: None,
         }],
@@ -992,6 +1038,7 @@ fn configured_profiles_override_detected_profiles_by_name() {
         name: "Zsh".to_owned(),
         command: Shell::Program("zsh".to_owned()),
         theme: None,
+        dark_theme: None,
         icon: ProfileIcon::Zsh,
     }];
 
@@ -1005,6 +1052,7 @@ fn configured_profiles_override_detected_profiles_by_name() {
                 title_override: Some("zsh".to_owned()),
             }),
             theme: Some("Solarized Dark".to_owned()),
+            dark_theme: Some("Dracula".to_owned()),
             icon: None,
             hidden: None,
         }],
@@ -1017,6 +1065,7 @@ fn configured_profiles_override_detected_profiles_by_name() {
         Shell::WithArguments { ref args, .. } if args == &["-l"]
     ));
     assert_eq!(profiles[0].theme.as_deref(), Some("Solarized Dark"));
+    assert_eq!(profiles[0].dark_theme.as_deref(), Some("Dracula"));
 }
 
 #[test]
@@ -1025,6 +1074,7 @@ fn profile_theme_override_does_not_require_a_program() {
         name: "Zsh".to_owned(),
         command: Shell::Program("zsh".to_owned()),
         theme: None,
+        dark_theme: None,
         icon: ProfileIcon::Zsh,
     }];
     let profile = parse_profile(&serde_json::json!({
@@ -1065,18 +1115,21 @@ fn hidden_profiles_do_not_consume_visible_profile_slots() {
             name: "System".to_owned(),
             command: Shell::System,
             theme: None,
+            dark_theme: None,
             icon: ProfileIcon::Zetta,
         },
         Profile {
             name: "Hidden".to_owned(),
             command: Shell::Program("hidden-shell".to_owned()),
             theme: None,
+            dark_theme: None,
             icon: ProfileIcon::Zetta,
         },
         Profile {
             name: "Visible".to_owned(),
             command: Shell::Program("visible-shell".to_owned()),
             theme: None,
+            dark_theme: None,
             icon: ProfileIcon::Zetta,
         },
     ];

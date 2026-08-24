@@ -408,6 +408,7 @@ function __zetta_long_options
                 disable 'Hide a profile' \
                 enable 'Show a profile' \
                 theme 'Set or reset a profile theme' \
+                dark-theme 'Set or reset a profile dark theme' \
                 icon 'Set or reset a profile icon' \
                 default 'Set the default profile' \
                 add 'Add a custom profile' \
@@ -591,16 +592,21 @@ complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is rem
 complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is theme; and __zetta_profile_needs_profile' -a '(__zetta_profiles)' -d 'Profile to theme'
 complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is theme; and __zetta_profile_needs_theme' -a '(__zetta_profile_themes)' -d 'Profile theme'
 complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is theme' -l reset -d 'Remove the profile theme override'
+complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is dark-theme; and __zetta_profile_needs_profile' -a '(__zetta_profiles)' -d 'Profile to theme'
+complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is dark-theme; and __zetta_profile_needs_theme' -a '(__zetta_profile_themes)' -d 'Profile dark theme'
+complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is dark-theme' -l reset -d 'Remove the profile dark theme override'
 complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is icon; and __zetta_profile_needs_profile' -a '(__zetta_profiles)' -d 'Profile to set an icon for'
 complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is icon; and __zetta_profile_needs_icon' -a 'auto zetta bash zsh fish' -d 'Profile icon'
 complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is icon' -l reset -d 'Restore automatic profile icon inference'
 complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is add' -l program -r -d 'Program to launch'
 complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is add' -l arg -r -d 'Program argument'
 complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is add' -l theme -r -a '(__zetta_profile_themes)' -d 'Profile theme'
+complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is add' -l dark-theme -r -a '(__zetta_profile_themes)' -d 'Profile dark theme'
 complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is add' -l icon -r -a 'auto zetta bash zsh fish' -d 'Profile icon override'
 complete -c zetta -s p -r -n '__zetta_has_profile_subcommand; and __zetta_profile_is add; and __zetta_short_option -p'
 complete -c zetta -s a -r -n '__zetta_has_profile_subcommand; and __zetta_profile_is add; and __zetta_short_option -a'
 complete -c zetta -s t -r -a '(__zetta_profile_themes)' -n '__zetta_has_profile_subcommand; and __zetta_profile_is add; and __zetta_short_option -t'
+complete -c zetta -s d -r -a '(__zetta_profile_themes)' -n '__zetta_has_profile_subcommand; and __zetta_profile_is add; and __zetta_short_option -d'
 complete -c zetta -s r -n '__zetta_has_profile_subcommand; and __zetta_profile_is theme; and __zetta_short_option -r'
 complete -c zetta -s i -r -a 'auto zetta bash zsh fish' -n '__zetta_has_profile_subcommand; and __zetta_profile_is add; and __zetta_short_option -i'
 complete -c zetta -s r -n '__zetta_has_profile_subcommand; and __zetta_profile_is icon; and __zetta_short_option -r'

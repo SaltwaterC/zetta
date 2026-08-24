@@ -629,7 +629,7 @@ fn shell_reports_current_directory(_shell: &Shell) -> bool {
     false
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) enum PaneStackSelection {
     #[default]
     Base,

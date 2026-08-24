@@ -1,4 +1,5 @@
 {
   "theme": "One Light",
+  "dark_theme": "One Dark",
   "default_tab_icon": "tool_terminal"
 }

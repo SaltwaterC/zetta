@@ -14,6 +14,8 @@ fn profile_command_parser_accepts_repeatable_arguments_and_reset() {
             "-l".into(),
             "--arg".into(),
             "one two".into(),
+            "--dark-theme".into(),
+            "One Dark".into(),
             "--icon".into(),
             "fish".into(),
             "--config".into(),
@@ -30,6 +32,7 @@ fn profile_command_parser_accepts_repeatable_arguments_and_reset() {
             program: "bash".to_owned(),
             args: vec!["-l".to_owned(), "one two".to_owned()],
             theme: None,
+            dark_theme: Some("One Dark".to_owned()),
             icon: Some(ProfileIcon::Fish),
         }
     );
@@ -52,12 +55,16 @@ fn profile_command_parser_accepts_repeatable_arguments_and_reset() {
 fn profile_help_documents_icon_operations_and_values() {
     let help = profile_operation_help(None);
     assert!(help.contains("profile icon PROFILE ICON"));
+    assert!(help.contains("profile dark-theme PROFILE THEME"));
     assert!(help.contains("--icon ICON"));
     let add_help = profile_operation_help(Some("add"));
     assert!(add_help.contains("zetta, bash, zsh, fish, or auto"));
+    assert!(add_help.contains("-d, --dark-theme THEME"));
     let icon_help = profile_operation_help(Some("icon"));
     assert!(icon_help.contains("--reset"));
     assert!(icon_help.contains("auto, zetta, bash, zsh, or fish"));
+    let dark_theme_help = profile_operation_help(Some("dark-theme"));
+    assert!(dark_theme_help.contains("--reset"));
 }
 
 #[test]
@@ -72,6 +79,7 @@ fn adding_a_profile_preserves_unrelated_configuration_fields() {
             program: "bash".to_owned(),
             args: vec!["-l".to_owned(), "one two".to_owned()],
             theme: None,
+            dark_theme: None,
             icon: None,
         },
         Some(&path),
@@ -186,6 +194,31 @@ fn theme_mutation_sets_and_resets_a_profile_override() {
     let configured: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(configured["profiles"][0]["theme"], "One Dark");
 
+    let parsed = parse_profile_args(
+        &["dark-theme".into(), "Dev Shell".into(), "One Dark".into()],
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        parsed.command,
+        ProfileCommand::DarkTheme {
+            profile: "Dev Shell".to_owned(),
+            theme: Some("One Dark".to_owned()),
+        }
+    );
+    run(parsed.command, Some(&path)).unwrap();
+    let configured: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(configured["profiles"][0]["dark_theme"], "One Dark");
+
+    run(
+        ProfileCommand::DarkTheme {
+            profile: "Dev Shell".to_owned(),
+            theme: None,
+        },
+        Some(&path),
+    )
+    .unwrap();
+
     run(
         ProfileCommand::Theme {
             profile: "DEV SHELL".to_owned(),
@@ -196,6 +229,7 @@ fn theme_mutation_sets_and_resets_a_profile_override() {
     .unwrap();
     let reset: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
     assert!(reset["profiles"][0].get("theme").is_none());
+    assert!(reset["profiles"][0].get("dark_theme").is_none());
 }
 
 #[test]
@@ -256,6 +290,7 @@ fn adding_a_duplicate_profile_is_rejected() {
             program: "zsh".to_owned(),
             args: Vec::new(),
             theme: None,
+            dark_theme: None,
             icon: None,
         },
         Some(&path),
@@ -275,6 +310,7 @@ fn missing_configuration_is_created_for_a_profile_addition() {
             program: "bash".to_owned(),
             args: Vec::new(),
             theme: None,
+            dark_theme: None,
             icon: None,
         },
         Some(&path),
@@ -334,6 +370,7 @@ fn malformed_configuration_is_not_overwritten() {
                 program: "bash".to_owned(),
                 args: Vec::new(),
                 theme: None,
+                dark_theme: None,
                 icon: None,
             },
             Some(&path),

@@ -213,6 +213,7 @@ pub struct PaneSplitPane {
     pub profile: Option<Profile>,
     pub command: Option<PaneSplitCommand>,
     pub theme: Option<String>,
+    pub dark_theme: Option<String>,
     pub env: HashMap<String, String>,
     pub overlay: Option<PaneSplitOverlay>,
     /// Commands seeded as stacked entries in this pane, sharing its layout
@@ -395,6 +396,7 @@ pub struct Profile {
     pub name: String,
     pub command: Shell,
     pub theme: Option<String>,
+    pub dark_theme: Option<String>,
     pub icon: ProfileIcon,
 }
 
@@ -402,6 +404,7 @@ struct ProfileConfig {
     name: String,
     command: Option<Shell>,
     theme: Option<String>,
+    dark_theme: Option<String>,
     icon: Option<ProfileIcon>,
     hidden: Option<bool>,
 }
@@ -419,6 +422,7 @@ pub struct Config {
     pub working_directory_scope: WorkingDirectoryScope,
     pub keymap_path: PathBuf,
     pub theme: Option<String>,
+    pub dark_theme: Option<String>,
     pub default_tab_icon: Option<IconName>,
     pub terminal_font_size: Option<f32>,
     pub terminal_font_family: String,
@@ -455,6 +459,7 @@ impl Config {
             working_directory_scope: WorkingDirectoryScope::default(),
             keymap_path: keymap_path.unwrap_or_else(|| config_dir.join("keymap.json")),
             theme: None,
+            dark_theme: None,
             default_tab_icon: Some(IconName::Terminal),
             terminal_font_size: None,
             terminal_font_family: DEFAULT_TERMINAL_FONT_FAMILY.to_owned(),
@@ -549,6 +554,14 @@ impl Config {
         }
         if let Some(theme) = root.get("theme") {
             config.theme = Some(theme.as_str().context("theme must be a string")?.to_owned());
+        }
+        if let Some(dark_theme) = root.get("dark_theme") {
+            config.dark_theme = Some(
+                dark_theme
+                    .as_str()
+                    .context("dark_theme must be a string")?
+                    .to_owned(),
+            );
         }
         if let Some(icon) = root.get("default_tab_icon") {
             config.default_tab_icon = if icon.is_null() {
@@ -747,6 +760,7 @@ fn validate_config_fields(root: &Value) -> Result<()> {
         "working_directory",
         "working_directory_scope",
         "theme",
+        "dark_theme",
         "default_tab_icon",
         "terminal_font_size",
         "terminal_font_family",
@@ -942,7 +956,14 @@ fn parse_pane_split_pane(
     profiles: &[Profile],
 ) -> Result<PaneSplitPane> {
     const FIELDS: &[&str] = &[
-        "label", "profile", "command", "theme", "env", "overlay", "stack",
+        "label",
+        "profile",
+        "command",
+        "theme",
+        "dark_theme",
+        "env",
+        "overlay",
+        "stack",
     ];
     if let Some(field) = object
         .keys()
@@ -999,6 +1020,20 @@ fn parse_pane_split_pane(
         })
         .transpose()?;
 
+    let dark_theme = object
+        .get("dark_theme")
+        .map(|dark_theme| {
+            let dark_theme = dark_theme
+                .as_str()
+                .context("pane template dark_theme must be a string")?;
+            anyhow::ensure!(
+                !dark_theme.is_empty(),
+                "pane template dark_theme must not be empty"
+            );
+            Ok(dark_theme.to_owned())
+        })
+        .transpose()?;
+
     let env = object
         .get("env")
         .map(parse_pane_split_environment)
@@ -1021,6 +1056,7 @@ fn parse_pane_split_pane(
         profile,
         command,
         theme,
+        dark_theme,
         env,
         overlay,
         stack,
@@ -1216,6 +1252,9 @@ fn merge_profiles(
             if let Some(theme) = profile.theme.clone() {
                 profiles[index].theme = Some(theme);
             }
+            if let Some(dark_theme) = profile.dark_theme.clone() {
+                profiles[index].dark_theme = Some(dark_theme);
+            }
             profiles[index].icon = profile.icon.clone().unwrap_or_else(|| {
                 ProfileIcon::automatic_for_profile(&profiles[index].name, &profiles[index].command)
             });
@@ -1230,6 +1269,7 @@ fn merge_profiles(
                 name: profile.name.clone(),
                 command: command.clone(),
                 theme: profile.theme.clone(),
+                dark_theme: profile.dark_theme.clone(),
                 icon: profile
                     .icon
                     .clone()
@@ -1311,7 +1351,15 @@ fn parse_profile(value: &Value) -> Result<ProfileConfig> {
     let object = value
         .as_object()
         .context("each profile must be an object")?;
-    const FIELDS: &[&str] = &["name", "program", "args", "theme", "icon", "hidden"];
+    const FIELDS: &[&str] = &[
+        "name",
+        "program",
+        "args",
+        "theme",
+        "dark_theme",
+        "icon",
+        "hidden",
+    ];
     if let Some(field) = object
         .keys()
         .find(|field| !FIELDS.contains(&field.as_str()))
@@ -1371,6 +1419,15 @@ fn parse_profile(value: &Value) -> Result<ProfileConfig> {
                 .map(str::to_owned)
         })
         .transpose()?;
+    let dark_theme = object
+        .get("dark_theme")
+        .map(|dark_theme| {
+            dark_theme
+                .as_str()
+                .context("profile.dark_theme must be a string")
+                .map(str::to_owned)
+        })
+        .transpose()?;
     let icon = object
         .get("icon")
         .map(ProfileIcon::parse)
@@ -1384,6 +1441,7 @@ fn parse_profile(value: &Value) -> Result<ProfileConfig> {
         name,
         command,
         theme,
+        dark_theme,
         icon,
         hidden,
     })
@@ -1399,6 +1457,7 @@ fn discover_profiles() -> Vec<Profile> {
         name: "System".to_owned(),
         command: Shell::System,
         theme: None,
+        dark_theme: None,
         icon: ProfileIcon::automatic_for_shell(&Shell::System),
     }];
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1428,6 +1487,7 @@ fn discover_profiles() -> Vec<Profile> {
                     name: (*name).to_owned(),
                     command: Shell::Program((*program).to_owned()),
                     theme: None,
+                    dark_theme: None,
                     icon: ProfileIcon::automatic_for_program(program),
                 });
             #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -1435,6 +1495,7 @@ fn discover_profiles() -> Vec<Profile> {
                 name: (*name).to_owned(),
                 command: Shell::Program((*program).to_owned()),
                 theme: None,
+                dark_theme: None,
                 icon: ProfileIcon::automatic_for_program(program),
             };
             profiles.push(profile);
@@ -1506,6 +1567,7 @@ fn homebrew_profile(name: &str, path: PathBuf) -> Profile {
         name: format!("{name} (Homebrew)"),
         command: Shell::Program(command.clone()),
         theme: None,
+        dark_theme: None,
         icon: ProfileIcon::automatic_for_program(&command),
     }
 }
@@ -1741,6 +1803,7 @@ fn msys2_profiles(root: &Path) -> Vec<Profile> {
                     title_override: Some(name.to_owned()),
                 },
                 theme: None,
+                dark_theme: None,
                 icon: match shell {
                     "bash" => ProfileIcon::Bash,
                     "zsh" => ProfileIcon::Zsh,
@@ -1798,6 +1861,7 @@ fn wsl_profiles_from_output(program: &str, output: &[u8]) -> Vec<Profile> {
                     title_override: Some(name),
                 },
                 theme: None,
+                dark_theme: None,
                 icon: ProfileIcon::Tux,
             }
         })

@@ -873,6 +873,7 @@ impl Zetta {
                     name: name.to_owned(),
                     command: task::Shell::System,
                     theme: None,
+                    dark_theme: None,
                     icon: ProfileIcon::default(),
                 })
         }) {
@@ -1547,6 +1548,8 @@ impl Zetta {
             return;
         };
         for pane_id in removed_pane_ids {
+            self.transient_pane_themes
+                .retain(|(id, _), _| *id != pane_id);
             self.background_observed_panes.remove(&pane_id);
         }
         self.publish_background_session_catalog(cx);
@@ -2110,6 +2113,7 @@ impl Zetta {
                     name: name.to_owned(),
                     command: task::Shell::System,
                     theme: None,
+                    dark_theme: None,
                     icon: ProfileIcon::default(),
                 })
         })?;

@@ -5,6 +5,28 @@ use super::*;
 use crate::settings_ui::keymap::{compute_keymap_sticky_candidates, keymap_row_data};
 use ui::sticky_items;
 
+fn profile_field(
+    label: &'static str,
+    control: impl IntoElement,
+    colors: &ThemeColors,
+) -> AnyElement {
+    div()
+        .min_w_0()
+        .child(
+            div()
+                .mb_1()
+                .text_xs()
+                .text_color(colors.text_muted)
+                .child(label),
+        )
+        .child(control)
+        .into_any_element()
+}
+
+fn profile_fields_grid(fields: impl IntoIterator<Item = AnyElement>) -> Div {
+    div().mt_3().grid().grid_cols(2).gap_3().children(fields)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_settings_pages(
     editor: &SettingsEditor,
@@ -40,6 +62,11 @@ pub(crate) fn render_settings_pages(
                 "settings-theme".to_owned(),
                 configuration.theme.clone(),
                 SettingsDropdown::Theme,
+            );
+            let dark_theme = dropdown(
+                "settings-dark-theme".to_owned(),
+                configuration.dark_theme.clone(),
+                SettingsDropdown::DarkTheme,
             );
             let current_default_tab_icon = configuration.default_tab_icon;
             let default_tab_icon_handle = handle.clone();
@@ -176,11 +203,18 @@ pub(crate) fn render_settings_pages(
                     new_tab_profile,
                 ),
                 setting_row(
-                    "Theme",
-                    "Application color theme",
+                    "Light theme",
+                    "Application color theme used in light appearance",
                     editor.focused_control
                         == Some(SettingsControl::Dropdown(SettingsDropdown::Theme)),
                     theme,
+                ),
+                setting_row(
+                    "Dark theme",
+                    "Application color theme used in dark appearance",
+                    editor.focused_control
+                        == Some(SettingsControl::Dropdown(SettingsDropdown::DarkTheme)),
+                    dark_theme,
                 ),
                 setting_row(
                     "Default tab icon",
@@ -388,6 +422,7 @@ pub(crate) fn render_settings_pages(
                             Button::new("settings-request-focus-status-access", "Request access")
                                 .style(ButtonStyle::Outlined)
                                 .size(ButtonSize::Compact)
+                                .color(Color::Custom(colors.text))
                                 .aria_label("Request macOS Focus status access")
                                 .tooltip(Tooltip::for_action_title(
                                     "Request Focus Status Access",
@@ -482,6 +517,10 @@ pub(crate) fn render_settings_pages(
                             index,
                         )))
                     || editor.focused_control
+                        == Some(SettingsControl::Dropdown(
+                            SettingsDropdown::ProfileDarkTheme(index),
+                        ))
+                    || editor.focused_control
                         == Some(SettingsControl::Input(SettingsInput::Configuration(
                             ConfigTextField::ProfileName(index),
                         )))
@@ -507,15 +546,25 @@ pub(crate) fn render_settings_pages(
                     profile_theme,
                     SettingsDropdown::ProfileTheme(index),
                 );
+                let profile_dark_theme = profile
+                    .dark_theme
+                    .clone()
+                    .unwrap_or_else(|| "Use application theme".to_owned());
+                let profile_dark_theme = dropdown(
+                    format!("settings-profile-{index}-dark-theme"),
+                    profile_dark_theme,
+                    SettingsDropdown::ProfileDarkTheme(index),
+                );
                 let profile_icon_value = profile.icon.as_ref().unwrap_or(&profile.automatic_icon);
                 let profile_icon = h_flex()
+                    .w_full()
                     .gap_2()
                     .child(profile_icon_value.render(IconSize::Small))
-                    .child(dropdown(
+                    .child(div().min_w_0().flex_1().child(dropdown(
                         format!("settings-profile-{index}-icon"),
                         ProfileIcon::selector_label(profile.icon.as_ref()).to_owned(),
                         SettingsDropdown::ProfileIcon(index),
-                    ));
+                    )));
                 let visibility_handle = handle.clone();
                 let profile_visibility = switch(
                     format!("settings-profile-{index}-visibility"),
@@ -537,11 +586,9 @@ pub(crate) fn render_settings_pages(
                         .ok();
                 });
                 let card = if profile.detected {
-                    h_flex()
+                    div()
                         .p_3()
                         .mb_2()
-                        .gap_4()
-                        .justify_between()
                         .rounded(px(6.))
                         .border_1()
                         .border_color(if profile_focused {
@@ -578,15 +625,12 @@ pub(crate) fn render_settings_pages(
                                         ),
                                 ),
                         )
-                        .child(
-                            h_flex()
-                                .w(px(690.))
-                                .flex_none()
-                                .gap_3()
-                                .child(profile_visibility)
-                                .child(div().w(px(250.)).flex_none().child(profile_theme))
-                                .child(div().w(px(250.)).flex_none().child(profile_icon)),
-                        )
+                        .child(profile_fields_grid([
+                            profile_field("Shown in Profiles menu", profile_visibility, colors),
+                            profile_field("Icon", profile_icon, colors),
+                            profile_field("Light theme", profile_theme, colors),
+                            profile_field("Dark theme", profile_dark_theme, colors),
+                        ]))
                         .into_any_element()
                 } else {
                     let remove_handle = handle.clone();
@@ -634,6 +678,8 @@ pub(crate) fn render_settings_pages(
                                         IconName::Trash,
                                     )
                                     .icon_size(IconSize::Small)
+                                    .icon_color(Color::Custom(colors.icon))
+                                    .selected_icon_color(Color::Custom(colors.icon))
                                     .toggle_state(
                                         editor.focused_control
                                             == Some(SettingsControl::RemoveProfile(index)),
@@ -660,9 +706,10 @@ pub(crate) fn render_settings_pages(
                                 ),
                         )
                         .child(
-                            h_flex()
+                            div()
                                 .mt_2()
-                                .items_end()
+                                .grid()
+                                .grid_cols(2)
                                 .gap_2()
                                 .child(
                                     div()
@@ -703,51 +750,12 @@ pub(crate) fn render_settings_pages(
                                         )),
                                 ),
                         )
-                        .child(
-                            div().mt_2().child(
-                                h_flex()
-                                    .gap_4()
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .flex_1()
-                                            .child(
-                                                div()
-                                                    .mb_1()
-                                                    .text_xs()
-                                                    .text_color(colors.text_muted)
-                                                    .child("Shown in Profiles menu"),
-                                            )
-                                            .child(profile_visibility),
-                                    )
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .flex_1()
-                                            .child(
-                                                div()
-                                                    .mb_1()
-                                                    .text_xs()
-                                                    .text_color(colors.text_muted)
-                                                    .child("Theme"),
-                                            )
-                                            .child(profile_theme),
-                                    )
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .flex_1()
-                                            .child(
-                                                div()
-                                                    .mb_1()
-                                                    .text_xs()
-                                                    .text_color(colors.text_muted)
-                                                    .child("Icon"),
-                                            )
-                                            .child(profile_icon),
-                                    ),
-                            ),
-                        )
+                        .child(profile_fields_grid([
+                            profile_field("Shown in Profiles menu", profile_visibility, colors),
+                            profile_field("Icon", profile_icon, colors),
+                            profile_field("Light theme", profile_theme, colors),
+                            profile_field("Dark theme", profile_dark_theme, colors),
+                        ]))
                         .into_any_element()
                 };
                 rows.push(card);
@@ -763,6 +771,8 @@ pub(crate) fn render_settings_pages(
                     .child(
                         Button::new("add-settings-profile", "Add profile")
                             .style(ButtonStyle::Outlined)
+                            .color(Color::Custom(colors.text))
+                            .selected_label_color(Color::Custom(colors.text))
                             .toggle_state(add_focused)
                             .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
                             .on_click(move |_, window, cx| {
@@ -775,6 +785,7 @@ pub(crate) fn render_settings_pages(
                                                     program: TextField::default(),
                                                     arguments: TextField::default(),
                                                     theme: None,
+                                                    dark_theme: None,
                                                     icon: None,
                                                     automatic_icon: ProfileIcon::Zetta,
                                                     hidden: false,
@@ -857,6 +868,7 @@ pub(crate) fn render_settings_pages(
                                             |button| button.bg(colors.element_selected),
                                         )
                                         .cursor_pointer()
+                                        .text_color(colors.text)
                                         .hover(|style| style.bg(colors.element_hover))
                                         .on_click(move |_, window, cx| {
                                             search_handle
@@ -1205,3 +1217,7 @@ pub(crate) fn render_settings_pages(
         SettingsPage::Projects => render_projects_page(editor, colors, handle, opacity_slider),
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/settings_view/pages.rs"]
+mod tests;

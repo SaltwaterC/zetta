@@ -49,6 +49,7 @@ pub(crate) struct ProjectProfileForm {
     pub(crate) program: TextField,
     pub(crate) arguments: TextField,
     pub(crate) theme: Option<String>,
+    pub(crate) dark_theme: Option<String>,
     /// An explicit icon override. `None` means the profile keeps whichever icon
     /// the user configuration infers for it.
     pub(crate) icon: Option<ProfileIcon>,
@@ -90,6 +91,7 @@ pub(crate) const PROJECT_INHERIT_LABEL: &str = "Inherit";
 #[derive(Clone, Debug)]
 pub(crate) struct ProjectForm {
     pub(crate) theme: Option<String>,
+    pub(crate) dark_theme: Option<String>,
     /// A project-relative directory. Empty means the project root.
     pub(crate) working_directory: TextField,
     pub(crate) default_profile: Option<String>,
@@ -216,6 +218,7 @@ impl ProjectForm {
 
         Ok(Self {
             theme: string("theme"),
+            dark_theme: string("dark_theme"),
             working_directory: TextField::new(string("working_directory").unwrap_or_default()),
             default_profile: string("default_profile"),
             default_tab_icon,
@@ -366,6 +369,9 @@ impl ProjectForm {
         if let Some(theme) = self.theme.as_deref() {
             root.insert("theme".into(), json!(theme));
         }
+        if let Some(dark_theme) = self.dark_theme.as_deref() {
+            root.insert("dark_theme".into(), json!(dark_theme));
+        }
         if let Some(directory) = non_empty(&self.working_directory.text) {
             root.insert("working_directory".into(), json!(directory));
         }
@@ -437,7 +443,15 @@ fn parse_profile_form(value: &Value) -> Result<ProjectProfileForm> {
     let object = value
         .as_object()
         .context("each profile must be an object")?;
-    const FIELDS: &[&str] = &["name", "program", "args", "theme", "icon", "hidden"];
+    const FIELDS: &[&str] = &[
+        "name",
+        "program",
+        "args",
+        "theme",
+        "dark_theme",
+        "icon",
+        "hidden",
+    ];
     if let Some(field) = object
         .keys()
         .find(|field| !FIELDS.contains(&field.as_str()))
@@ -473,6 +487,10 @@ fn parse_profile_form(value: &Value) -> Result<ProjectProfileForm> {
             .get("theme")
             .and_then(Value::as_str)
             .map(str::to_owned),
+        dark_theme: object
+            .get("dark_theme")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         icon: object
             .get("icon")
             .map(ProfileIcon::parse)
@@ -502,6 +520,9 @@ fn profile_value(profile: &ProjectProfileForm) -> Value {
     }
     if let Some(theme) = profile.theme.as_deref() {
         value.insert("theme".into(), json!(theme));
+    }
+    if let Some(dark_theme) = profile.dark_theme.as_deref() {
+        value.insert("dark_theme".into(), json!(dark_theme));
     }
     if let Some(name) = profile.icon.as_ref().and_then(ProfileIcon::name) {
         value.insert("icon".into(), json!(name));

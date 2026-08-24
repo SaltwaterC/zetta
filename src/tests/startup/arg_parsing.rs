@@ -1553,6 +1553,7 @@ fn profile_commands_are_typed_and_accept_config_paths_in_each_position() {
             program: "bash".to_owned(),
             args: vec!["-l".to_owned(), "one two".to_owned()],
             theme: None,
+            dark_theme: None,
             icon: None,
         })
     );
@@ -1566,12 +1567,14 @@ fn launch_profile_selects_an_available_profile_without_changing_the_configured_d
             name: "System".to_owned(),
             command: Shell::System,
             theme: None,
+            dark_theme: None,
             icon: ProfileIcon::Zetta,
         },
         Profile {
             name: "WSL: Ubuntu".to_owned(),
             command: Shell::Program("wsl.exe".to_owned()),
             theme: None,
+            dark_theme: None,
             icon: ProfileIcon::Bash,
         },
     ];

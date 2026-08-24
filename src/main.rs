@@ -35,6 +35,7 @@ mod zetta_assets;
 
 const ZETTA_APP_ID: &str = "Zetta";
 const ZETTA_DEFAULT_THEME: &str = "One Light";
+const ZETTA_DEFAULT_DARK_THEME: &str = "One Dark";
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -107,7 +108,8 @@ use terminal_view::{
     TerminalInput, TerminalView, TerminalViewEvent,
 };
 use theme::{
-    ActiveTheme, ClientDecorationsExt as _, GlobalTheme, Theme, ThemeColors, ThemeRegistry,
+    ActiveTheme, ClientDecorationsExt as _, GlobalTheme, SystemAppearance, Theme, ThemeColors,
+    ThemeRegistry,
 };
 use theme_extensions::{InstalledThemeExtension, ThemeExtension};
 use ui::{

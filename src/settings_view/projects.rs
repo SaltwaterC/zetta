@@ -228,7 +228,7 @@ fn render_project_config(
             .into_any_element(),
         control_row(
             editor,
-            "Theme",
+            "Light theme",
             &[SettingsControl::Dropdown(SettingsDropdown::ProjectTheme)],
             dropdown_field(
                 "project-theme".to_owned(),
@@ -236,6 +236,24 @@ fn render_project_config(
                     .clone()
                     .unwrap_or_else(|| crate::project_form::PROJECT_INHERIT_LABEL.to_owned()),
                 SettingsDropdown::ProjectTheme,
+                editor,
+                colors,
+                handle,
+            ),
+            colors,
+        ),
+        control_row(
+            editor,
+            "Dark theme",
+            &[SettingsControl::Dropdown(
+                SettingsDropdown::ProjectDarkTheme,
+            )],
+            dropdown_field(
+                "project-dark-theme".to_owned(),
+                form.dark_theme
+                    .clone()
+                    .unwrap_or_else(|| crate::project_form::PROJECT_INHERIT_LABEL.to_owned()),
+                SettingsDropdown::ProjectDarkTheme,
                 editor,
                 colors,
                 handle,
@@ -490,7 +508,7 @@ fn render_project_config(
         ));
         content.push(control_row(
             editor,
-            format!("Profile {} · theme", index + 1),
+            format!("Profile {} · light theme", index + 1),
             &[SettingsControl::Dropdown(
                 SettingsDropdown::ProjectProfileTheme(index),
             )],
@@ -501,6 +519,25 @@ fn render_project_config(
                     .clone()
                     .unwrap_or_else(|| crate::project_form::PROJECT_INHERIT_LABEL.to_owned()),
                 SettingsDropdown::ProjectProfileTheme(index),
+                editor,
+                colors,
+                handle,
+            ),
+            colors,
+        ));
+        content.push(control_row(
+            editor,
+            format!("Profile {} · dark theme", index + 1),
+            &[SettingsControl::Dropdown(
+                SettingsDropdown::ProjectProfileDarkTheme(index),
+            )],
+            dropdown_field(
+                format!("project-profile-dark-theme-{index}"),
+                profile
+                    .dark_theme
+                    .clone()
+                    .unwrap_or_else(|| crate::project_form::PROJECT_INHERIT_LABEL.to_owned()),
+                SettingsDropdown::ProjectProfileDarkTheme(index),
                 editor,
                 colors,
                 handle,
