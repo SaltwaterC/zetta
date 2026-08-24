@@ -884,11 +884,9 @@ fn force_stopping_a_daemon_with_a_session_stops_its_pseudoconsole_host() {
 
 /// The verifier for a protected test session, as a client creates one before
 /// sharing.
-fn test_verifier() -> String {
+fn test_verifier() -> zmux::auth::SessionAuthentication {
     zmux::auth::SessionAuthentication::create("correct horse battery staple")
         .expect("creating the session verifier")
-        .verifier()
-        .to_owned()
 }
 
 /// Speaks the protocol directly, as any same-user process that can read the
@@ -946,35 +944,26 @@ fn protected_controls_reject_a_claimed_owner_without_peer_authority() {
 
     let daemon = TestDaemon::start();
     let client = daemon.client();
-    // A live process to impersonate. It has to exist: the daemon duplicates the
-    // challenge into it, and a dead process cannot be opened at all.
-    let mut owner = Command::new("cmd.exe")
-        .args(["/D", "/C", "ping 127.0.0.1 -n 60 >NUL"])
-        .stdout(Stdio::null())
-        .spawn()
-        .expect("starting the process to impersonate");
-    let owner_process_id = owner.id();
-
     let pane = client
         .spawn(spawn_request())
         .expect("creating a pseudoconsole pane");
     let session_id = pane.session_id;
     let pane_id = pane.pane_id;
     drop(pane);
-    // Detached under the other process's name, so the session's owner is a
-    // process this test is not, and then protected. The setup happens while the
-    // session is unprotected, so it does not depend on the boundary it tests.
+    // Protect the session while it is still owned by this process. The
+    // requests below claim that owner but deliberately fail the attestation,
+    // so the setup does not depend on the boundary it tests.
     client
-        .detach_as(
+        .detach(
             session_id,
             session_summary(session_id, pane_id),
             serde_json::Value::Null,
             None,
-            owner_process_id,
+            Vec::new(),
         )
-        .expect("backgrounding the session as another process");
+        .expect("backgrounding the session");
     client
-        .set_session_scope(session_id, true, Some(test_verifier()))
+        .set_session_scope(session_id, true, Some(&test_verifier()))
         .expect("protecting the session");
 
     for request in [
@@ -998,7 +987,7 @@ fn protected_controls_reject_a_claimed_owner_without_peer_authority() {
         },
     ] {
         let name = format!("{request:?}");
-        match impostor_request(&daemon, owner_process_id, request) {
+        match impostor_request(&daemon, std::process::id(), request) {
             Response::Error { message } => assert!(
                 message.contains("protected"),
                 "unexpected authorization error for {name}: {message}"
@@ -1008,7 +997,7 @@ fn protected_controls_reject_a_claimed_owner_without_peer_authority() {
     }
     match impostor_request(
         &daemon,
-        owner_process_id,
+        std::process::id(),
         Request::PaneStates {
             pane_ids: vec![pane_id],
         },
@@ -1025,8 +1014,6 @@ fn protected_controls_reject_a_claimed_owner_without_peer_authority() {
         "unauthorized controls changed the session"
     );
 
-    let _ = owner.kill();
-    let _ = owner.wait();
     let _ = client.shutdown();
 }
 
@@ -1053,7 +1040,7 @@ fn a_protected_sessions_own_window_still_controls_it() {
         )
         .expect("backgrounding the session");
     client
-        .set_session_scope(session_id, true, Some(test_verifier()))
+        .set_session_scope(session_id, true, Some(&test_verifier()))
         .expect("protecting the session");
 
     client
