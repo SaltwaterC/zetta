@@ -879,3 +879,269 @@ fn force_stopping_a_daemon_with_a_session_stops_its_pseudoconsole_host() {
         "force-stopping zmux must not leave zmux-pty process {host_process_id} running"
     );
 }
+
+/// The verifier for a protected test session, as a client creates one before
+/// sharing.
+fn test_verifier() -> String {
+    zmux::auth::SessionAuthentication::create("correct horse battery staple")
+        .expect("creating the session verifier")
+        .verifier()
+        .to_owned()
+}
+
+/// Speaks the protocol directly, as any same-user process that can read the
+/// endpoint token could, naming whichever process it likes as its own.
+fn impostor_request(
+    daemon: &TestDaemon,
+    claimed_process_id: u32,
+    request: zmux::messages::Request,
+) -> zmux::messages::Response {
+    use zmux::{
+        messages::{Envelope, PROTOCOL_VERSION, Request, Response},
+        transport::{Connection, Endpoint, Stream},
+    };
+
+    let endpoint = Endpoint::read(&daemon.sessions_dir().join("zmux.json"))
+        .expect("reading the multiplexer endpoint");
+    let stream = Stream::connect(&endpoint.socket_path).expect("connecting as an impostor");
+    let mut connection = Connection::new(stream);
+    connection
+        .send(&Envelope {
+            version: PROTOCOL_VERSION,
+            token: endpoint.token,
+            client_process_id: claimed_process_id,
+            request,
+        })
+        .expect("sending an impostor request");
+    let (response, _) = connection
+        .receive::<Response>()
+        .expect("reading the answer to an impostor request");
+    let Response::AttestationRequired { .. } = response else {
+        return response;
+    };
+    // The handle was duplicated into the process being impersonated, not into
+    // this one, so the nonce behind it cannot be read. Answering wrongly is the
+    // best an impostor can do.
+    connection
+        .send(&Request::Attested {
+            nonce: "0".repeat(64),
+        })
+        .expect("answering the attestation challenge");
+    connection
+        .receive::<Response>()
+        .expect("reading the answer after a failed attestation")
+        .0
+}
+
+/// Windows has no peer credentials for `AF_UNIX`, so the daemon proves whose
+/// connection this is by duplicating a nonce into the process the peer names.
+/// Without that, naming a protected session's owner was all it took to detach,
+/// kill or rescope it — the endpoint token would have been an administrator
+/// credential.
+#[test]
+fn protected_controls_reject_a_claimed_owner_without_peer_authority() {
+    use zmux::messages::{Request, Response};
+
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    // A live process to impersonate. It has to exist: the daemon duplicates the
+    // challenge into it, and a dead process cannot be opened at all.
+    let mut owner = Command::new("cmd.exe")
+        .args(["/D", "/C", "ping 127.0.0.1 -n 60 >NUL"])
+        .stdout(Stdio::null())
+        .spawn()
+        .expect("starting the process to impersonate");
+    let owner_process_id = owner.id();
+
+    let pane = client
+        .spawn(spawn_request())
+        .expect("creating a pseudoconsole pane");
+    let session_id = pane.session_id;
+    let pane_id = pane.pane_id;
+    drop(pane);
+    // Detached under the other process's name, so the session's owner is a
+    // process this test is not, and then protected. The setup happens while the
+    // session is unprotected, so it does not depend on the boundary it tests.
+    client
+        .detach_as(
+            session_id,
+            session_summary(session_id, pane_id),
+            serde_json::Value::Null,
+            None,
+            owner_process_id,
+        )
+        .expect("backgrounding the session as another process");
+    client
+        .set_session_scope(session_id, true, Some(test_verifier()))
+        .expect("protecting the session");
+
+    for request in [
+        Request::Kill { session_id },
+        Request::Forget { session_id },
+        Request::Resize {
+            session_id,
+            pane_id,
+            columns: 100,
+            lines: 30,
+        },
+        Request::ClosePane {
+            session_id,
+            pane_id,
+        },
+        Request::SetSessionScope {
+            session_id,
+            shared: false,
+            verifier: None,
+        },
+    ] {
+        let name = format!("{request:?}");
+        match impostor_request(&daemon, owner_process_id, request) {
+            Response::Error { message } => assert!(
+                message.contains("protected"),
+                "unexpected authorization error for {name}: {message}"
+            ),
+            other => panic!("{name} was not refused: {other:?}"),
+        }
+    }
+    match impostor_request(
+        &daemon,
+        owner_process_id,
+        Request::PaneStates {
+            pane_ids: vec![pane_id],
+        },
+    ) {
+        Response::PaneStates { panes } => assert!(
+            panes[0].unknown,
+            "protected pane state leaked to a peer claiming to be its owner"
+        ),
+        other => panic!("unexpected pane state answer: {other:?}"),
+    }
+    assert_eq!(
+        client.list().expect("listing sessions").len(),
+        1,
+        "unauthorized controls changed the session"
+    );
+
+    let _ = owner.kill();
+    let _ = owner.wait();
+    let _ = client.shutdown();
+}
+
+/// The other half of the same boundary: a client that really is the process it
+/// names still gets through, because it can read the nonce the daemon
+/// duplicated into it.
+#[test]
+fn a_protected_sessions_own_window_still_controls_it() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let pane = client
+        .spawn(spawn_request())
+        .expect("creating a pseudoconsole pane");
+    let session_id = pane.session_id;
+    let pane_id = pane.pane_id;
+    drop(pane);
+    client
+        .detach(
+            session_id,
+            session_summary(session_id, pane_id),
+            serde_json::Value::Null,
+            None,
+            Vec::new(),
+        )
+        .expect("backgrounding the session");
+    client
+        .set_session_scope(session_id, true, Some(test_verifier()))
+        .expect("protecting the session");
+
+    client
+        .kill(session_id)
+        .expect("the owning process must still be able to end its own session");
+    assert!(
+        client.list().expect("listing sessions").is_empty(),
+        "the session outlived its owner ending it"
+    );
+    let _ = client.shutdown();
+}
+
+/// An exclusively attached Windows client reads the pseudoconsole itself, so
+/// only the daemon — which owns the child through the host — can tell it how
+/// that child ended.
+#[test]
+fn an_attached_client_learns_that_its_console_child_exited() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let subscription = client.subscribe().expect("subscribing to pane exits");
+    let exits = subscription.exits.clone();
+    let _revokes = subscription.revokes.clone();
+
+    let mut request = spawn_request();
+    request.args = vec![
+        "/D".to_owned(),
+        "/C".to_owned(),
+        "echo ready & exit 7".to_owned(),
+    ];
+    let pane = client
+        .spawn(request)
+        .expect("creating a pane that exits by itself");
+    let (reports, receiver) = async_channel::unbounded();
+    exits.register_shared(pane.pane_id, reports);
+    let mut output = std::fs::File::from(pane.conout);
+    let mut input = std::fs::File::from(pane.conin);
+    read_until(&mut output, &mut input, b"ready", Duration::from_secs(10));
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let report = loop {
+        match receiver.try_recv() {
+            Ok(report) => break report,
+            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            Err(_) => panic!("the pane's exit was never reported"),
+        }
+    };
+    assert!(!report.disconnected, "the exit arrived as a disconnection");
+    assert_eq!(
+        report.raw_status,
+        Some(7),
+        "the multiplexer reported the wrong exit status"
+    );
+
+    drop(output);
+    drop(input);
+    let _ = client.shutdown();
+}
+
+/// The endpoint token authenticates the channel on Windows exactly as it does
+/// on Unix, where the socket's mode is the first line of defence and there is
+/// no mode to rely on here.
+#[test]
+fn a_windows_connection_with_the_wrong_token_gets_nothing() {
+    use zmux::{
+        messages::{Envelope, PROTOCOL_VERSION, Request, Response},
+        transport::{Connection, Endpoint, Stream},
+    };
+
+    let daemon = TestDaemon::start();
+    let endpoint = Endpoint::read(&daemon.sessions_dir().join("zmux.json"))
+        .expect("reading the multiplexer endpoint");
+    let stream = Stream::connect(&endpoint.socket_path).expect("connecting to the multiplexer");
+    let mut connection = Connection::new(stream);
+    connection
+        .send(&Envelope {
+            version: PROTOCOL_VERSION,
+            token: "0".repeat(64),
+            client_process_id: std::process::id(),
+            request: Request::List,
+        })
+        .expect("sending a request with the wrong token");
+
+    match connection
+        .receive::<Response>()
+        .expect("reading the refusal")
+        .0
+    {
+        Response::Error { message } => assert!(
+            message.contains("invalid multiplexer token"),
+            "unexpected refusal: {message}"
+        ),
+        other => panic!("the wrong token was not refused: {other:?}"),
+    }
+}

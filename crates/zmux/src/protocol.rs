@@ -9,6 +9,12 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// The schema version written into every published catalog.
+///
+/// A catalog carrying any other version is skipped, and removed once the process
+/// that published it is gone. That is what becomes of the versions up to 4 that
+/// Zetta published from its own process before sessions moved into the
+/// multiplexer: same directory, same `zetta-PROCESS-GENERATION.json` name.
 pub const CATALOG_VERSION: u32 = 1;
 
 /// A disk-retained session record before its encrypted payload has been

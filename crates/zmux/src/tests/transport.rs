@@ -197,3 +197,26 @@ fn an_endpoint_written_before_versioning_is_unreadable_rather_than_version_zero(
 
     assert!(Endpoint::read(&path).is_err());
 }
+
+/// The Windows stand-in for peer credentials, exercised against this very
+/// process: the nonce is duplicated in, read back out, and matched.
+#[cfg(windows)]
+#[test]
+fn an_attestation_is_answerable_only_by_the_process_it_was_issued_to() {
+    let challenge = PeerChallenge::issue(std::process::id())
+        .expect("issuing a challenge to this process must succeed");
+    let answer = answer_challenge(challenge.handle())
+        .expect("this process must be able to read a handle in its own table");
+
+    assert_eq!(answer.len(), PeerChallenge::NONCE_BYTES * 2);
+    assert!(challenge.matches(&answer));
+    assert!(
+        !challenge.matches(&"0".repeat(PeerChallenge::NONCE_BYTES * 2)),
+        "a wrong nonce must not attest anything"
+    );
+    assert!(!challenge.matches(""), "an empty answer must not attest");
+
+    // A second challenge is a different nonce, so an answer cannot be replayed.
+    let next = PeerChallenge::issue(std::process::id()).expect("issuing a second challenge");
+    assert!(!next.matches(&answer));
+}

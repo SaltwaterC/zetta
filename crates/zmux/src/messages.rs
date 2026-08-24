@@ -100,6 +100,20 @@ pub enum Request {
         /// Length of the raw bytes that follow the message on the connection.
         length: usize,
     },
+    /// Asks to be identified before the real request is sent, answered with
+    /// [`Response::Ok`] once the exchange is over — successfully or not.
+    ///
+    /// How a request that streams raw bytes after its message gets an identity:
+    /// the daemon cannot interject a challenge into one of those, because the
+    /// bytes would arrive where it was expecting the answer.
+    Attest,
+    /// Proves, where the platform has no peer credentials, that this connection
+    /// really belongs to the process its envelope named: the nonce read back
+    /// from the handle in [`Response::AttestationRequired`].
+    ///
+    /// Sent only in answer to that response, on the same connection, after
+    /// which the request that prompted it is dispatched.
+    Attested { nonce: String },
     /// Gives a session back to the multiplexer to hold. The client has already
     /// stopped reading the panes' terminals by the time this is sent.
     Detach(DetachRequest),
@@ -395,6 +409,15 @@ pub enum Response {
         panes: Vec<PaneStateReport>,
     },
     Ok,
+    /// Asks the client to prove it is the process its envelope named, before a
+    /// request that would act on a protected session someone else may own is
+    /// dispatched. Sent only where the platform has no peer credentials.
+    ///
+    /// `handle` is a pipe holding a nonce, already duplicated into the named
+    /// process; the client reads it and answers with [`Request::Attested`].
+    AttestationRequired {
+        handle: i64,
+    },
     /// The session exists but is protected and no secret was offered.
     AuthenticationRequired,
     /// The secret was wrong, or the session is inside its backoff window.

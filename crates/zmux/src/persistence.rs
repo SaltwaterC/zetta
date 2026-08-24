@@ -247,7 +247,10 @@ impl IdentitySet {
         Ok(Self { identities })
     }
 
-    fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>> {
+    /// Opens an age file with whichever of these identities fits it, armored or
+    /// binary. The counterpart of [`Self::from_paths`], and the only way in to
+    /// anything this store wrote.
+    pub fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>> {
         let decryptor =
             age::Decryptor::new_buffered(age::armor::ArmoredReader::new(Cursor::new(ciphertext)))
                 .context("parsing age ciphertext")?;

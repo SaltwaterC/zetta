@@ -581,8 +581,35 @@ protection entirely against any code running as your user. Values of `2` or `3`
 are stronger still.
 
 macOS restricts `task_for_pid` to root or specially entitled processes by
-default, which provides the equivalent guarantee. Windows requires
-`SeDebugPrivilege` or matching ownership to open a process for memory access.
+default, which provides the equivalent guarantee. Windows does not: a process
+running as you may open another of your processes for memory access and for
+handle duplication without any additional privilege, so on Windows the
+assumption above holds only against code running as a *different* user.
+
+### How the multiplexer knows who is asking
+
+Session protection distinguishes the window that owns a session from every other
+process, so it needs an answer to "which process is on the other end of this
+connection" that the other end cannot choose for itself. The endpoint token
+cannot supply it: the token authenticates the channel, and every process running
+as you can read it.
+
+On Linux, macOS and FreeBSD the kernel answers, about the socket itself —
+`SO_PEERCRED`, `LOCAL_PEERPID` and `LOCAL_PEERCRED` respectively. Windows has no
+such call for `AF_UNIX`, and nothing the peer sends can substitute: any of your
+processes can open another and duplicate that one's handles, so a handle
+*arriving* from the peer shows only that the peer could open something. What
+only the named process can do is read a handle that exists in its own table, so
+the multiplexer writes a nonce into a pipe, duplicates the read end into the
+process the connection claims to be, and asks for the nonce back. An impostor is
+handed a handle valid only inside its victim.
+
+Where no answer is available, protected-session controls — detach, kill, forget,
+resize, scope changes and pane-state observation — are refused rather than
+granted on the strength of a claim. Note what this does and does not buy on
+Windows: it closes the impersonation route through the multiplexer's own
+protocol, while the paragraph above still applies, so same-user code there can
+reach a session's terminals by other means regardless.
 
 Two things remain outside the boundary on every platform. Root can always read
 any process, so protection is against other unprivileged code, not against a

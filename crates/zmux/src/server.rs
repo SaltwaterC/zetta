@@ -749,20 +749,12 @@ fn restrict_socket(_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
-    // A terminal must never cross a user boundary. The socket's permissions
-    // already restrict this; checking the peer as well means a mistake in the
-    // directory's access control is not on its own enough.
-    anyhow::ensure!(
-        peer_is_this_user(&stream)?,
-        "refusing a connection from another user"
-    );
-    let peer_process_id = crate::transport::peer_process_id(&stream)?;
-
-    let mut connection = Connection::new(stream);
-    // Every refusal below answers before it returns. A connection that simply
-    // closes tells the client nothing, and the client has to decide whether to
-    // fall back — which it cannot do sensibly without a reason.
+/// Reads one request and checks that it may be served at all.
+///
+/// Every refusal answers before it returns. A connection that simply closes
+/// tells the client nothing, and the client has to decide whether to fall back
+/// — which it cannot do sensibly without a reason.
+fn read_request(connection: &mut Connection, token: &str) -> Result<Envelope> {
     let envelope: Envelope = match connection.receive() {
         Ok((envelope, _)) => envelope,
         Err(error) => {
@@ -800,6 +792,70 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
         })?;
         anyhow::bail!("refused a client speaking protocol {}", envelope.version);
     }
+    Ok(envelope)
+}
+
+fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
+    // A terminal must never cross a user boundary. The socket's permissions
+    // already restrict this; checking the peer as well means a mistake in the
+    // directory's access control is not on its own enough.
+    anyhow::ensure!(
+        peer_is_this_user(&stream)?,
+        "refusing a connection from another user"
+    );
+    let peer_process_id = crate::transport::peer_process_id(&stream)?;
+
+    let mut connection = Connection::new(stream);
+    let mut envelope = read_request(&mut connection, token)?;
+
+    // A client may ask to be identified before it sends the request that needs
+    // it, which is how a request that streams raw bytes after its message gets
+    // an identity: the daemon cannot interject a challenge there, because the
+    // bytes would arrive where it was expecting the answer.
+    #[cfg(windows)]
+    let peer_process_id = if matches!(envelope.request, Request::Attest) {
+        let attested = match peer_process_id {
+            attested @ Some(_) => attested,
+            None => {
+                attest_peer(&mut connection, envelope.client_process_id).unwrap_or_else(|error| {
+                    log::debug!("peer attestation failed: {error:#}");
+                    None
+                })
+            }
+        };
+        connection.send(&Response::Ok)?;
+        envelope = read_request(&mut connection, token)?;
+        attested
+    } else {
+        peer_process_id
+    };
+    // Nothing to establish where the kernel already answered the question, but
+    // the exchange still has to be answered so a portable client can ask.
+    #[cfg(unix)]
+    if matches!(envelope.request, Request::Attest) {
+        connection.send(&Response::Ok)?;
+        envelope = read_request(&mut connection, token)?;
+    }
+
+    // Where the platform reports no peer credentials, a request whose answer
+    // depends on who is asking has to establish that first — see
+    // `transport::PeerChallenge`. A peer that will not or cannot answer is not
+    // refused here: it simply proceeds without an identity, and the checks that
+    // needed one refuse it with their own message.
+    #[cfg(windows)]
+    let peer_process_id = match peer_process_id {
+        attested @ Some(_) => attested,
+        None if attestation_needed(daemon, &envelope.request) => {
+            match attest_peer(&mut connection, envelope.client_process_id) {
+                Ok(attested) => attested,
+                Err(error) => {
+                    log::debug!("peer attestation failed: {error:#}");
+                    None
+                }
+            }
+        }
+        None => None,
+    };
 
     match envelope.request {
         Request::Subscribe => {
@@ -860,6 +916,9 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
         Request::Input { .. } => connection.send(&Response::Error {
             message: "input belongs on a shared connection".to_owned(),
         }),
+        Request::Attested { .. } | Request::Attest => connection.send(&Response::Error {
+            message: "an attestation precedes a request, it does not replace one".to_owned(),
+        }),
         Request::Detach(request) => match detach(
             daemon,
             request,
@@ -906,22 +965,12 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
             pane_id,
             columns,
             lines,
-        } => {
-            match resize_pane(
-                daemon,
-                session_id,
-                pane_id,
-                columns,
-                lines,
-                envelope.client_process_id,
-                peer_process_id,
-            ) {
-                Ok(()) => connection.send(&Response::Ok),
-                Err(error) => connection.send(&Response::Error {
-                    message: format!("{error:#}"),
-                }),
-            }
-        }
+        } => match resize_pane(daemon, session_id, pane_id, columns, lines, peer_process_id) {
+            Ok(()) => connection.send(&Response::Ok),
+            Err(error) => connection.send(&Response::Error {
+                message: format!("{error:#}"),
+            }),
+        },
         Request::SetConsolePalette {
             session_id,
             pane_id,
@@ -988,12 +1037,7 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
             })
         }
         Request::PaneStates { pane_ids } => {
-            let panes = pane_states(
-                daemon,
-                &pane_ids,
-                envelope.client_process_id,
-                peer_process_id,
-            );
+            let panes = pane_states(daemon, &pane_ids, peer_process_id);
             connection.send(&Response::PaneStates { panes })
         }
         Request::ClosePane {
@@ -1013,22 +1057,15 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
                 }),
             }
         }
-        Request::Kill { session_id } => {
-            match kill(
-                daemon,
-                session_id,
-                envelope.client_process_id,
-                peer_process_id,
-            ) {
-                Ok(()) => {
-                    publish(daemon);
-                    connection.send(&Response::Ok)
-                }
-                Err(error) => connection.send(&Response::Error {
-                    message: format!("{error:#}"),
-                }),
+        Request::Kill { session_id } => match kill(daemon, session_id, peer_process_id) {
+            Ok(()) => {
+                publish(daemon);
+                connection.send(&Response::Ok)
             }
-        }
+            Err(error) => connection.send(&Response::Error {
+                message: format!("{error:#}"),
+            }),
+        },
         Request::SetSessionScope {
             session_id,
             shared,
@@ -1038,7 +1075,6 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
             session_id,
             shared,
             verifier,
-            envelope.client_process_id,
             peer_process_id,
             &mut connection,
         ) {
@@ -1047,22 +1083,15 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
                 message: format!("{error:#}"),
             }),
         },
-        Request::Forget { session_id } => {
-            match forget(
-                daemon,
-                session_id,
-                envelope.client_process_id,
-                peer_process_id,
-            ) {
-                Ok(()) => {
-                    publish(daemon);
-                    connection.send(&Response::Ok)
-                }
-                Err(error) => connection.send(&Response::Error {
-                    message: format!("{error:#}"),
-                }),
+        Request::Forget { session_id } => match forget(daemon, session_id, peer_process_id) {
+            Ok(()) => {
+                publish(daemon);
+                connection.send(&Response::Ok)
             }
-        }
+            Err(error) => connection.send(&Response::Error {
+                message: format!("{error:#}"),
+            }),
+        },
         Request::Configure {
             retention,
             persistence_recipients,
@@ -2729,7 +2758,7 @@ fn detach(
         });
     };
     anyhow::ensure!(
-        session_control_authorized(session, client_process_id, peer_process_id),
+        session_control_authorized(session, peer_process_id),
         "session {} is protected and can only be detached by its owner or current holder",
         request.session_id
     );
@@ -2845,12 +2874,15 @@ fn share(
     // is not displaying, and this request rewrites the verifier, so letting any
     // client send it would be a way to reprotect a session without knowing the
     // secret it already has.
+    // A protected session's holder has to be an identity something vouched
+    // for. Taking the client's word for it would let anyone who can reach the
+    // socket name the real holder and rewrite the verifier from there.
     let holder_process_id = if session.authentication.is_some() {
-        control_process_id(client_process_id, peer_process_id)
+        peer_process_id
     } else {
-        client_process_id
+        Some(client_process_id)
     };
-    if !session_is_held_by(session, holder_process_id) {
+    if !holder_process_id.is_some_and(|process_id| session_is_held_by(session, process_id)) {
         return connection.send(&Response::Error {
             message: format!(
                 "session {} cannot be shared by a client that is not showing it",
@@ -2934,7 +2966,6 @@ fn set_session_scope(
     session_id: u64,
     shared: bool,
     verifier: Option<String>,
-    client_process_id: u32,
     peer_process_id: Option<u32>,
     connection: &mut Connection,
 ) -> Result<()> {
@@ -2956,7 +2987,7 @@ fn set_session_scope(
         });
     }
     anyhow::ensure!(
-        session_control_authorized(session, client_process_id, peer_process_id),
+        session_control_authorized(session, peer_process_id),
         "session {session_id} is protected and can only be changed by its owner or current holder"
     );
     if let Some(verifier) = verifier {
@@ -2986,24 +3017,106 @@ fn set_session_scope(
     connection.send(&Response::Ok)
 }
 
-/// Uses the kernel's peer PID when the local transport exposes one. The
-/// envelope value remains useful for handle duplication and for transports
-/// without peer credentials, but it must not be the sole proof of ownership
-/// for a protected session.
+/// The identity a control request acts as: what the transport vouched for, or
+/// the envelope's own claim where nothing could.
+///
+/// Only for checks whose failure is inconvenient rather than a privilege
+/// boundary — "are you the window holding this pane" for a session with no
+/// secret, which any same-user process could attach for itself anyway. A
+/// protected session's controls go through [`session_control_authorized`] or
+/// [`protected_holder_authorized`], neither of which accepts a claim.
 fn control_process_id(client_process_id: u32, peer_process_id: Option<u32>) -> u32 {
     peer_process_id.unwrap_or(client_process_id)
 }
 
-fn session_control_authorized(
-    session: &Session,
-    client_process_id: u32,
-    peer_process_id: Option<u32>,
-) -> bool {
+/// Whether a protected session may be acted on by this peer as one of the
+/// clients currently showing it.
+///
+/// Distinct from [`session_control_authorized`] in refusing the owner: resizing
+/// a pane or repainting its palette is something only a window displaying it
+/// can sensibly ask for.
+fn protected_holder_authorized(session: &Session, peer_process_id: Option<u32>) -> bool {
+    peer_process_id.is_some_and(|process_id| session_is_held_by(session, process_id))
+}
+
+fn session_control_authorized(session: &Session, peer_process_id: Option<u32>) -> bool {
     if session.authentication.is_none() {
         return true;
     }
-    let process_id = control_process_id(client_process_id, peer_process_id);
+    // Nothing vouched for this peer, so there is no identity to authorize. The
+    // envelope's own value is not a fallback: a same-user process can read the
+    // endpoint token and would otherwise only have to *name* the owner of a
+    // protected session to act as it.
+    let Some(process_id) = peer_process_id else {
+        return false;
+    };
     session.owner == Some(process_id) || session_is_held_by(session, process_id)
+}
+
+/// Whether this request's answer could depend on who the peer is, on a platform
+/// that cannot tell without asking.
+///
+/// Narrow on purpose, because asking costs a round trip: only requests that can
+/// act on a session somebody else owns, and only when the session they name is
+/// actually protected. Nothing else has an authorization decision to make — a
+/// session with no secret can be attached by any same-user process for itself,
+/// so confirming which process is asking would protect nothing.
+/// `Detach` and `Resume` are absent on purpose: they stream raw bytes after
+/// their message, so there is nowhere to interject a challenge. Those ask to be
+/// identified first, with [`Request::Attest`].
+#[cfg(windows)]
+fn attestation_needed(daemon: &Arc<Daemon>, request: &Request) -> bool {
+    let session_id = match request {
+        Request::Share(request) => Some(request.session_id),
+        Request::Resize { session_id, .. }
+        | Request::SetConsolePalette { session_id, .. }
+        | Request::ClosePane { session_id, .. }
+        | Request::Kill { session_id }
+        | Request::SetSessionScope { session_id, .. }
+        | Request::Forget { session_id } => Some(*session_id),
+        // Names panes rather than a session, and whose sessions those are is
+        // exactly what it must not disclose, so it is decided against whatever
+        // protected sessions exist.
+        Request::PaneStates { .. } => None,
+        _ => return false,
+    };
+    let sessions = daemon.sessions.lock().unwrap();
+    match session_id {
+        Some(session_id) => sessions
+            .iter()
+            .any(|session| session.id == session_id && session.authentication.is_some()),
+        None => sessions
+            .iter()
+            .any(|session| session.authentication.is_some()),
+    }
+}
+
+/// Asks the peer to prove it is the process its envelope named.
+///
+/// Answered means the identity is as good as a kernel-reported one for this
+/// connection; unanswered, or answered wrongly, means the request goes ahead
+/// with no identity and every protected-session check refuses it.
+#[cfg(windows)]
+fn attest_peer(connection: &mut Connection, client_process_id: u32) -> Result<Option<u32>> {
+    /// Bounded, unlike most of the daemon's reads: until the answer arrives or
+    /// the attempt is abandoned, the challenge is holding a handle inside
+    /// another process. A client that names somebody else and then says nothing
+    /// must not be able to leave it there.
+    const ANSWER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+    let challenge = crate::transport::PeerChallenge::issue(client_process_id)?;
+    connection.send(&Response::AttestationRequired {
+        handle: challenge.handle(),
+    })?;
+    connection.set_read_timeout(Some(ANSWER_TIMEOUT))?;
+    let answer = connection
+        .receive::<Request>()
+        .context("reading a peer attestation answer");
+    connection.set_read_timeout(None)?;
+    let Request::Attested { nonce } = answer?.0 else {
+        anyhow::bail!("expected an attestation answer");
+    };
+    Ok(challenge.matches(&nonce).then_some(client_process_id))
 }
 
 /// How many windows are being relayed this pane. Zero for a pane one window holds
@@ -3046,7 +3159,6 @@ fn resize_pane(
     pane_id: u64,
     columns: u16,
     lines: u16,
-    client_process_id: u32,
     peer_process_id: Option<u32>,
 ) -> Result<()> {
     use alacritty_terminal::event::OnResize as _;
@@ -3054,12 +3166,7 @@ fn resize_pane(
     let Some(session) = sessions.iter().find(|session| session.id == session_id) else {
         anyhow::bail!("session {session_id} does not exist");
     };
-    if session.authentication.is_some()
-        && !session_is_held_by(
-            session,
-            control_process_id(client_process_id, peer_process_id),
-        )
-    {
+    if session.authentication.is_some() && !protected_holder_authorized(session, peer_process_id) {
         anyhow::bail!(
             "session {session_id} is protected and can only be resized by its current holder"
         );
@@ -3109,7 +3216,14 @@ fn set_console_palette(
     let Some(pane) = session.panes.iter().find(|pane| pane.id == pane_id) else {
         anyhow::bail!("session {session_id} has no pane {pane_id}");
     };
-    if !pane_is_held_by(pane, control_process_id(client_process_id, peer_process_id)) {
+    // As with resizing: for a protected session only a vouched-for holder, and
+    // for one with no secret the claim it always was.
+    let holder_process_id = if session.authentication.is_some() {
+        peer_process_id
+    } else {
+        Some(control_process_id(client_process_id, peer_process_id))
+    };
+    if !holder_process_id.is_some_and(|process_id| pane_is_held_by(pane, process_id)) {
         anyhow::bail!("pane {pane_id} is not held by this client");
     }
     #[cfg(windows)]
@@ -3122,18 +3236,13 @@ fn set_console_palette(
     Ok(())
 }
 
-fn kill(
-    daemon: &Arc<Daemon>,
-    session_id: u64,
-    client_process_id: u32,
-    peer_process_id: Option<u32>,
-) -> Result<()> {
+fn kill(daemon: &Arc<Daemon>, session_id: u64, peer_process_id: Option<u32>) -> Result<()> {
     let mut sessions = daemon.sessions.lock().unwrap();
     let Some(session) = sessions.iter().find(|session| session.id == session_id) else {
         anyhow::bail!("session {session_id} does not exist");
     };
     anyhow::ensure!(
-        session_control_authorized(session, client_process_id, peer_process_id),
+        session_control_authorized(session, peer_process_id),
         "session {session_id} is protected and can only be ended by its owner or current holder"
     );
     // Dropping the panes drops their PTYs, which hangs up the children.
@@ -3156,16 +3265,11 @@ fn kill(
     Ok(())
 }
 
-fn forget(
-    daemon: &Arc<Daemon>,
-    session_id: u64,
-    client_process_id: u32,
-    peer_process_id: Option<u32>,
-) -> Result<()> {
+fn forget(daemon: &Arc<Daemon>, session_id: u64, peer_process_id: Option<u32>) -> Result<()> {
     let mut sessions = daemon.sessions.lock().unwrap();
     if let Some(session) = sessions.iter().find(|session| session.id == session_id) {
         anyhow::ensure!(
-            session_control_authorized(session, client_process_id, peer_process_id),
+            session_control_authorized(session, peer_process_id),
             "session {session_id} is protected and can only be forgotten by its owner or current holder"
         );
         #[cfg(windows)]
@@ -3229,7 +3333,6 @@ fn forget(
 fn pane_states(
     daemon: &Arc<Daemon>,
     pane_ids: &[u64],
-    client_process_id: u32,
     peer_process_id: Option<u32>,
 ) -> Vec<crate::messages::PaneStateReport> {
     let sessions = daemon.sessions.lock().unwrap();
@@ -3241,7 +3344,7 @@ fn pane_states(
                 .find(|session| session.panes.iter().any(|pane| pane.id == pane_id));
             if session.is_some_and(|session| {
                 session.authentication.is_some()
-                    && !session_control_authorized(session, client_process_id, peer_process_id)
+                    && !session_control_authorized(session, peer_process_id)
             }) {
                 return crate::messages::PaneStateReport {
                     pane_id,
@@ -3294,7 +3397,7 @@ fn close_pane(
         anyhow::bail!("session {session_id} does not exist");
     };
     anyhow::ensure!(
-        session_control_authorized(session, client_process_id, peer_process_id),
+        session_control_authorized(session, peer_process_id),
         "session {session_id} is protected and can only be changed by its owner or current holder"
     );
     let Some(pane) = session.panes.iter_mut().find(|pane| pane.id == pane_id) else {

@@ -21,6 +21,14 @@ use anyhow::{Context as _, Result};
 #[cfg(unix)]
 use std::os::fd::OwnedFd;
 
+/// What a received message may carry alongside it: terminal descriptors on
+/// Unix, and nothing on Windows, where handles travel inside the message
+/// already duplicated into this process.
+#[cfg(unix)]
+type Descriptors = Vec<OwnedFd>;
+#[cfg(windows)]
+type Descriptors = Vec<()>;
+
 use crate::{
     messages::{
         DetachRequest, Envelope, Event, PROTOCOL_VERSION, PaneSnapshot, PaneStateReport, Request,
@@ -549,7 +557,7 @@ impl Client {
             },
             client_process_id,
         )?;
-        let (response, mut descriptors) = connection.receive::<Response>()?;
+        let (response, mut descriptors) = Self::receive(&mut connection)?;
         match response {
             Response::Attached {
                 pane_id,
@@ -612,6 +620,52 @@ impl Client {
         self.open_as(request, std::process::id())
     }
 
+    /// Opens a connection whose peer identity is settled before the request
+    /// goes out.
+    ///
+    /// For the requests that stream raw bytes after their message: the
+    /// multiplexer cannot interject a challenge into one of those, because the
+    /// bytes would arrive where it was expecting the answer. Windows-only in
+    /// effect — elsewhere the kernel identifies the peer from the socket and the
+    /// exchange is a single round trip that changes nothing.
+    fn open_attested(&self, request: Request, client_process_id: u32) -> Result<Connection> {
+        #[cfg(windows)]
+        {
+            let mut connection = self.open_as(Request::Attest, client_process_id)?;
+            match Self::receive(&mut connection)?.0 {
+                Response::Ok => {}
+                Response::Error { message } => anyhow::bail!("{message}"),
+                other => anyhow::bail!("unexpected response to attestation: {other:?}"),
+            }
+            connection.send(&Envelope {
+                version: PROTOCOL_VERSION,
+                token: self.endpoint.token.clone(),
+                client_process_id,
+                request,
+            })?;
+            Ok(connection)
+        }
+        #[cfg(unix)]
+        self.open_as(request, client_process_id)
+    }
+
+    /// Receives a response, answering an attestation challenge first if the
+    /// multiplexer asks for one.
+    ///
+    /// Only Windows ever asks: everywhere else the kernel already answers
+    /// "which process is on the other end of this socket" about the socket
+    /// itself. See [`crate::transport::PeerChallenge`].
+    fn receive(connection: &mut Connection) -> Result<(Response, Descriptors)> {
+        let received = connection.receive::<Response>()?;
+        #[cfg(windows)]
+        if let Response::AttestationRequired { handle } = received.0 {
+            let nonce = crate::transport::answer_challenge(handle)?;
+            connection.send(&Request::Attested { nonce })?;
+            return Ok(connection.receive::<Response>()?);
+        }
+        Ok(received)
+    }
+
     fn open_as(&self, request: Request, client_process_id: u32) -> Result<Connection> {
         let stream =
             Stream::connect(&self.endpoint.socket_path).context("connecting to the multiplexer")?;
@@ -644,7 +698,7 @@ impl Client {
             columns,
             lines,
         })?;
-        match connection.receive::<Response>()?.0 {
+        match Self::receive(&mut connection)?.0 {
             Response::Ok => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to resize: {other:?}"),
@@ -675,7 +729,7 @@ impl Client {
             },
             client_process_id,
         )?;
-        match connection.receive::<Response>()?.0 {
+        match Self::receive(&mut connection)?.0 {
             Response::Ok => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected palette response: {other:?}"),
@@ -715,7 +769,7 @@ impl Client {
             lines,
         })?;
         connection.write_all(&bytes)?;
-        match connection.receive::<Response>()?.0 {
+        match Self::receive(&mut connection)?.0 {
             Response::Ok => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to snapshot: {other:?}"),
@@ -725,7 +779,7 @@ impl Client {
     /// Starts a process under the multiplexer and takes its terminal.
     pub fn spawn(&self, request: SpawnRequest) -> Result<AttachedPane> {
         let mut connection = self.open(Request::Spawn(request))?;
-        let (response, mut descriptors) = connection.receive::<Response>()?;
+        let (response, mut descriptors) = Self::receive(&mut connection)?;
         match response {
             Response::Spawned {
                 session_id,
@@ -767,7 +821,7 @@ impl Client {
             pane_id,
             secret,
         })?;
-        let (response, mut descriptors) = connection.receive::<Response>()?;
+        let (response, mut descriptors) = Self::receive(&mut connection)?;
         match response {
             Response::Attached {
                 pane_id,
@@ -852,11 +906,11 @@ impl Client {
                 })
                 .collect(),
         };
-        let mut connection = self.open(Request::Detach(request))?;
+        let mut connection = self.open_attested(Request::Detach(request), std::process::id())?;
         for (_, bytes) in &snapshots {
             connection.write_all(bytes)?;
         }
-        match connection.receive::<Response>()?.0 {
+        match Self::receive(&mut connection)?.0 {
             Response::Detached => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to detach: {other:?}"),
@@ -884,8 +938,8 @@ impl Client {
             verifier,
             snapshots: Vec::new(),
         };
-        let mut connection = self.open_as(Request::Detach(request), client_process_id)?;
-        match connection.receive::<Response>()?.0 {
+        let mut connection = self.open_attested(Request::Detach(request), client_process_id)?;
+        match Self::receive(&mut connection)?.0 {
             Response::Detached => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to detach: {other:?}"),
@@ -913,7 +967,7 @@ impl Client {
             verifier,
             offered,
         }))?;
-        match connection.receive::<Response>()?.0 {
+        match Self::receive(&mut connection)?.0 {
             Response::Ok => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to share: {other:?}"),
@@ -922,7 +976,7 @@ impl Client {
 
     pub fn list(&self) -> Result<Vec<BackgroundSessionSummary>> {
         let mut connection = self.open(Request::List)?;
-        match connection.receive::<Response>()?.0 {
+        match Self::receive(&mut connection)?.0 {
             Response::Sessions { sessions, .. } => Ok(sessions),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to list: {other:?}"),
@@ -933,7 +987,7 @@ impl Client {
         &self,
     ) -> Result<(Vec<BackgroundSessionSummary>, Vec<RestorableSessionRecord>)> {
         let mut connection = self.open(Request::List)?;
-        match connection.receive::<Response>()?.0 {
+        match Self::receive(&mut connection)?.0 {
             Response::Sessions {
                 sessions,
                 restorable,
@@ -1024,11 +1078,11 @@ impl Client {
                 })
                 .collect(),
         });
-        let mut connection = self.open(request)?;
+        let mut connection = self.open_attested(request, std::process::id())?;
         for snapshot in &persisted.snapshots {
             connection.write_all(&snapshot.bytes)?;
         }
-        match connection.receive::<Response>()?.0 {
+        match Self::receive(&mut connection)?.0 {
             Response::Resumed { .. } => Ok(persisted),
             Response::AuthenticationRequired => {
                 anyhow::bail!("the encrypted session is protected and needs its session secret")
@@ -1041,7 +1095,7 @@ impl Client {
 
     pub fn kill(&self, session_id: u64) -> Result<()> {
         let mut connection = self.open(Request::Kill { session_id })?;
-        match connection.receive::<Response>()?.0 {
+        match Self::receive(&mut connection)?.0 {
             Response::Ok => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to kill: {other:?}"),
@@ -1064,7 +1118,7 @@ impl Client {
             shared,
             verifier,
         })?;
-        match connection.receive::<Response>()?.0 {
+        match Self::receive(&mut connection)?.0 {
             Response::Ok => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to a session scope change: {other:?}"),
@@ -1073,7 +1127,7 @@ impl Client {
 
     pub fn forget(&self, session_id: u64) -> Result<()> {
         let mut connection = self.open(Request::Forget { session_id })?;
-        match connection.receive::<Response>()?.0 {
+        match Self::receive(&mut connection)?.0 {
             Response::Ok => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to forget: {other:?}"),
@@ -1129,7 +1183,7 @@ impl Client {
             retention,
             persistence_recipients,
         })?;
-        match connection.receive::<Response>()?.0 {
+        match Self::receive(&mut connection)?.0 {
             Response::Ok => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to daemon configuration: {other:?}"),
@@ -1156,7 +1210,7 @@ impl Client {
     /// Asks the daemon to replace itself, keeping its sessions.
     pub fn upgrade(&self) -> Result<()> {
         let mut connection = self.open(Request::Upgrade)?;
-        let response = connection.receive::<Response>()?.0;
+        let response = Self::receive(&mut connection)?.0;
         match response {
             Response::Ok => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
@@ -1166,7 +1220,7 @@ impl Client {
 
     pub fn shutdown(&self) -> Result<()> {
         let mut connection = self.open(Request::Shutdown)?;
-        match connection.receive::<Response>()?.0 {
+        match Self::receive(&mut connection)?.0 {
             Response::Ok => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to shutdown: {other:?}"),
@@ -1176,7 +1230,7 @@ impl Client {
     /// Asks what the multiplexer currently knows about these panes.
     pub fn pane_states(&self, pane_ids: Vec<u64>) -> Result<Vec<PaneStateReport>> {
         let mut connection = self.open(Request::PaneStates { pane_ids })?;
-        match connection.receive::<Response>()?.0 {
+        match Self::receive(&mut connection)?.0 {
             Response::PaneStates { panes } => Ok(panes),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to pane states: {other:?}"),
@@ -1189,7 +1243,7 @@ impl Client {
             session_id,
             pane_id,
         })?;
-        match connection.receive::<Response>()?.0 {
+        match Self::receive(&mut connection)?.0 {
             Response::Ok => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to close pane: {other:?}"),
@@ -1243,7 +1297,7 @@ impl Client {
             session_id,
             pane_id,
         })?;
-        let (response, mut descriptors) = connection.receive::<Response>()?;
+        let (response, mut descriptors) = Self::receive(&mut connection)?;
         match response {
             Response::Attached {
                 pane_id,

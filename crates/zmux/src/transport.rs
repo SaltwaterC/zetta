@@ -222,13 +222,20 @@ pub fn peer_is_this_user(stream: &Stream) -> Result<bool> {
     Ok(peer_uid(stream)? == unsafe { libc::geteuid() })
 }
 
+/// FreeBSD's spelling of the option that answers with a `struct xucred`.
+/// `libc` defines the neighbouring `LOCAL_CREDS` values but not this one.
+#[cfg(target_os = "freebsd")]
+const LOCAL_PEERCRED: libc::c_int = 1;
+
 /// The kernel-reported process on the other end of a local socket.
 ///
 /// The envelope still carries a process id because Windows handle duplication
-/// needs a target and because test/remote transports may not expose one. On
-/// Linux, however, administrative authorization must not trust that field: a
-/// same-user client can read the endpoint token and otherwise claim to be the
-/// owner of a protected session.
+/// needs a target and because test/remote transports may not expose one.
+/// Administrative authorization must not trust that field: a same-user client
+/// can read the endpoint token and otherwise claim to be the owner of a
+/// protected session. `None` therefore means "nothing vouched for this peer",
+/// and the daemon treats it as an identity it will not act on rather than
+/// falling back to what the peer said about itself.
 #[cfg(unix)]
 pub fn peer_process_id(stream: &Stream) -> Result<Option<u32>> {
     #[cfg(target_os = "linux")]
@@ -254,7 +261,61 @@ pub fn peer_process_id(stream: &Stream) -> Result<Option<u32>> {
         // SAFETY: getsockopt filled the structure after returning zero.
         Ok(Some(unsafe { credentials.assume_init() }.pid as u32))
     }
-    #[cfg(not(target_os = "linux"))]
+    // Darwin answers the same question under its own name, on a socket-local
+    // option level. `LOCAL_PEERPID` is the process that created the socket,
+    // which is the one whose authority is being asked about; `LOCAL_PEEREPID`
+    // is the *effective* pid a process can have set on its own behalf, and is
+    // therefore not usable as proof.
+    #[cfg(target_vendor = "apple")]
+    {
+        let mut process_id: libc::pid_t = 0;
+        let mut length = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+        // SAFETY: the socket is connected, and the destination and its length
+        // describe the same `pid_t`.
+        let result = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_LOCAL,
+                libc::LOCAL_PEERPID,
+                (&raw mut process_id).cast(),
+                &mut length,
+            )
+        };
+        anyhow::ensure!(
+            result == 0,
+            "reading peer process credentials: {}",
+            last_error()
+        );
+        Ok(u32::try_from(process_id).ok().filter(|pid| *pid > 0))
+    }
+    #[cfg(target_os = "freebsd")]
+    {
+        let mut credentials = std::mem::MaybeUninit::<libc::xucred>::zeroed();
+        let mut length = std::mem::size_of::<libc::xucred>() as libc::socklen_t;
+        // SAFETY: the socket is connected, and the destination and its length
+        // describe the same `xucred`.
+        let result = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_LOCAL,
+                LOCAL_PEERCRED,
+                credentials.as_mut_ptr().cast(),
+                &mut length,
+            )
+        };
+        anyhow::ensure!(
+            result == 0,
+            "reading peer process credentials: {}",
+            last_error()
+        );
+        // SAFETY: getsockopt filled the structure after returning zero, and the
+        // union was zeroed beforehand so reading the pid arm is defined even on
+        // a kernel too old to fill it — where it reads as zero and is rejected
+        // below rather than being trusted.
+        let process_id = unsafe { credentials.assume_init().cr_pid__c_anonymous_union.cr_pid };
+        Ok(u32::try_from(process_id).ok().filter(|pid| *pid > 0))
+    }
+    #[cfg(not(any(target_os = "linux", target_vendor = "apple", target_os = "freebsd")))]
     {
         let _ = stream;
         Ok(None)
@@ -464,6 +525,18 @@ impl Connection {
             stream,
             leftover: Vec::new(),
         }
+    }
+
+    /// Bounds how long a read on this connection waits.
+    ///
+    /// The daemon deliberately leaves most connections unbounded: a
+    /// subscription and a shared relay are supposed to sit idle for as long as
+    /// the client lives. It is for the exchanges where a peer that never
+    /// answers costs something more than its own thread.
+    pub fn set_read_timeout(&self, timeout: Option<std::time::Duration>) -> Result<()> {
+        self.stream
+            .set_read_timeout(timeout)
+            .context("setting a multiplexer read timeout")
     }
 
     pub fn stream(&self) -> &Stream {
@@ -676,6 +749,145 @@ fn user_sid(process: windows::Win32::Foundation::HANDLE) -> Result<Vec<u8>> {
         let _ = CloseHandle(token);
     }
     sid
+}
+
+/// Proof that the peer of a connection really is the process it named.
+///
+/// Windows has no peer credentials for `AF_UNIX`, and nothing the peer *sends*
+/// can establish its identity: any same-user process may open another and
+/// duplicate that one's handles, so a handle arriving from the peer shows only
+/// that the peer could open something. What only the named process can do is
+/// read a handle that exists in its own table. So the daemon writes a nonce
+/// into a pipe, duplicates the read end into the process the peer claims to be,
+/// and asks for the nonce back. An impostor is handed a handle that is valid
+/// only inside its victim, and cannot read it.
+///
+/// The handle is closed again inside the target when this drops, answered or
+/// not, so naming somebody else's process repeatedly cannot fill that
+/// process's handle table.
+#[cfg(windows)]
+pub struct PeerChallenge {
+    process_id: u32,
+    handle: i64,
+    nonce: String,
+}
+
+#[cfg(windows)]
+impl PeerChallenge {
+    /// Bytes of randomness behind the nonce, which travels as hex.
+    pub const NONCE_BYTES: usize = 32;
+
+    pub fn issue(process_id: u32) -> Result<Self> {
+        use std::os::windows::io::{AsHandle as _, FromRawHandle as _, OwnedHandle};
+        use windows::Win32::{Foundation::HANDLE, System::Pipes::CreatePipe};
+
+        let mut read = HANDLE::default();
+        let mut write = HANDLE::default();
+        // SAFETY: both destinations are valid writable slots, and a default
+        // buffer size is what an anonymous pipe carrying one nonce needs.
+        unsafe { CreatePipe(&mut read, &mut write, None, 0) }
+            .context("creating a peer attestation pipe")?;
+        // SAFETY: `CreatePipe` succeeded, so each handle is owned here exactly
+        // once and closed when its wrapper drops.
+        let read = unsafe { OwnedHandle::from_raw_handle(read.0.cast()) };
+        // SAFETY: as above, for the other end.
+        let write = unsafe { OwnedHandle::from_raw_handle(write.0.cast()) };
+
+        let nonce = random_hex(Self::NONCE_BYTES)?;
+        {
+            // Dropped before the handle is handed over, so the reader sees the
+            // end of the nonce instead of waiting for a writer that never
+            // writes again.
+            let mut writer = std::fs::File::from(write);
+            writer
+                .write_all(nonce.as_bytes())
+                .context("writing a peer attestation nonce")?;
+        }
+
+        // Duplicating is also where the peer's user is checked: this refuses a
+        // target belonging to another user.
+        let handle = *duplicate_to(process_id, &[read.as_handle()])?
+            .first()
+            .context("no attestation handle was duplicated")?;
+        Ok(Self {
+            process_id,
+            handle,
+            nonce,
+        })
+    }
+
+    /// The handle value, meaningful only inside the process it was issued to.
+    pub fn handle(&self) -> i64 {
+        self.handle
+    }
+
+    /// Constant-time, like every other secret comparison here.
+    pub fn matches(&self, answer: &str) -> bool {
+        token_matches(answer, &self.nonce)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for PeerChallenge {
+    fn drop(&mut self) {
+        if let Err(error) = close_in_process(self.process_id, self.handle) {
+            log::debug!(
+                "could not close attestation handle in process {}: {error:#}",
+                self.process_id
+            );
+        }
+    }
+}
+
+/// Closes a handle that lives in another process, which `DuplicateHandle` does
+/// when it is asked to duplicate *from* that process into nowhere.
+#[cfg(windows)]
+fn close_in_process(process_id: u32, handle: i64) -> Result<()> {
+    use windows::Win32::Foundation::{
+        CloseHandle, DUPLICATE_CLOSE_SOURCE, DUPLICATE_HANDLE_OPTIONS, DuplicateHandle, HANDLE,
+    };
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_DUP_HANDLE};
+
+    // SAFETY: the access right is valid for `OpenProcess`, and the returned
+    // handle is closed below on every path.
+    let target = unsafe { OpenProcess(PROCESS_DUP_HANDLE, false, process_id) }
+        .with_context(|| format!("opening process {process_id} to close a handle in it"))?;
+    // SAFETY: `target` is open with duplication access; a null destination
+    // process with `DUPLICATE_CLOSE_SOURCE` is how a handle is closed in
+    // another process without duplicating it anywhere.
+    let closed = unsafe {
+        DuplicateHandle(
+            target,
+            HANDLE(handle as *mut _),
+            HANDLE::default(),
+            std::ptr::null_mut(),
+            0,
+            false,
+            DUPLICATE_HANDLE_OPTIONS(DUPLICATE_CLOSE_SOURCE.0),
+        )
+    };
+    // SAFETY: `target` came from `OpenProcess` and is closed exactly once.
+    unsafe {
+        let _ = CloseHandle(target);
+    }
+    closed.context("closing a handle in the client")
+}
+
+/// Answers a [`PeerChallenge`] by reading the nonce the multiplexer duplicated
+/// into this process. Only the process it was issued to can do this.
+#[cfg(windows)]
+pub fn answer_challenge(handle: i64) -> Result<String> {
+    use std::io::Read as _;
+
+    let handle = claim_duplicated(&[handle])
+        .pop()
+        .context("the multiplexer sent no attestation handle")?;
+    let mut answer = String::new();
+    std::fs::File::from(handle)
+        .take((PeerChallenge::NONCE_BYTES * 2) as u64)
+        .read_to_string(&mut answer)
+        .context("reading the multiplexer's attestation nonce")?;
+    Ok(answer)
 }
 
 /// Claims handles the multiplexer duplicated into this process.

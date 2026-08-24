@@ -174,6 +174,48 @@ like-for-like optimized builds, workload settings, platforms, and GPU backends;
 do not compare headless or software-rendered results with an interactive
 hardware-rendered baseline.
 
+## Multiplexer footprint
+
+A flash-constrained host that only needs its sessions to stay alive is an
+explicit use case for `zmux`, so the size of its minimal build is a property
+worth measuring rather than assuming. Both optional paths — the retained
+scrollback grid and the encrypted-on-disk store — are Cargo features, and the
+`age` dependency tree is absent from a build without the second.
+
+Measure from the standalone workspace, which is how a stripped-down daemon is
+produced:
+
+```sh
+cd crates/zmux
+cargo build --release --no-default-features --bin zmux
+cargo build --release --no-default-features -F scrollback-buffer --bin zmux
+cargo build --release --bin zmux
+```
+
+Record the stripped size of each — `strip` a copy, then `ls -l`, and
+`size -A` for the `.text` figure. `cargo bloat` gives the per-crate breakdown
+where it is installed.
+
+Linux x86-64, Rust 1.95.0, recorded 2026-08-24:
+
+| build | stripped | `.text` |
+| --- | --- | --- |
+| `--no-default-features` | 1.79 MiB | 1.28 MiB |
+| `-F scrollback-buffer` | 2.13 MiB | 1.53 MiB |
+| default (`scrollback-buffer`, `session-persistence`) | 6.43 MiB | 4.37 MiB |
+
+The step from the second row to the third is the encryption stack — `age`,
+`hpke` and the HTTP client that resolves `github:` recipients — which is the
+cost persistence is opt-in to avoid. A regression in the first row is a
+regression in the feature's purpose, so compare like-for-like release builds on
+one platform, as with the frame-timing reports above.
+
+The retained grid's own budget is separate from the binary: `sessions.retention`
+of `memory` keeps at most `sessions.ring_bytes` per pane, 256 KiB by default, so
+a daemon holding ten detached panes accounts for about 2.5 MiB of retained
+screen plus each pane's PTY and metadata record. `none` allocates no grid at
+all.
+
 ## WSL2 startup diagnostics
 
 On Windows, WSL-backed terminals emit debug-level startup timing records. The

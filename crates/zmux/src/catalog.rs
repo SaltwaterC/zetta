@@ -204,6 +204,21 @@ fn runner_id_from_path(path: &Path) -> Option<u64> {
     path.file_stem()?.to_str()?.rsplit('-').next()?.parse().ok()
 }
 
+/// The publishing process, read from the file name rather than the contents.
+///
+/// `zetta-PROCESS-GENERATION.json` is the one part of the format that has not
+/// changed across schema versions, which is what makes it usable for deciding
+/// whether a file nobody can parse belongs to a process that is still running.
+fn process_id_from_path(path: &Path) -> Option<u32> {
+    path.file_stem()?
+        .to_str()?
+        .strip_prefix("zetta-")?
+        .split('-')
+        .next()?
+        .parse()
+        .ok()
+}
+
 pub fn read_session_catalogs(directory: &Path) -> Result<Vec<BackgroundSessionCatalog>> {
     let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
@@ -214,6 +229,7 @@ pub fn read_session_catalogs(directory: &Path) -> Result<Vec<BackgroundSessionCa
         }
     };
     let mut catalogs = Vec::new();
+    let mut unusable = Vec::new();
     for entry in entries {
         let entry = entry.context("reading session catalog entry")?;
         let path = entry.path();
@@ -225,17 +241,35 @@ pub fn read_session_catalogs(directory: &Path) -> Result<Vec<BackgroundSessionCa
         {
             continue;
         }
-        let contents = fs::read(&path)
-            .with_context(|| format!("reading session catalog {}", path.display()))?;
-        let catalog: BackgroundSessionCatalog = serde_json::from_slice(&contents)
-            .with_context(|| format!("parsing session catalog {}", path.display()))?;
-        if catalog.version == CATALOG_VERSION {
-            catalogs.push((path, catalog));
+        // A file this build cannot use must not fail the whole read. It is
+        // either written under another schema or truncated by something that
+        // died mid-write, and in both cases one stale file would otherwise
+        // break `zmux list` and every reconnect until somebody deleted it by
+        // hand. The owning process comes from the file name, because the
+        // contents are exactly what cannot be trusted here.
+        let named_process_id = process_id_from_path(&path);
+        let Ok(contents) = fs::read(&path) else {
+            unusable.push((path, named_process_id));
+            continue;
+        };
+        match serde_json::from_slice::<BackgroundSessionCatalog>(&contents) {
+            Ok(catalog) if catalog.version == CATALOG_VERSION => catalogs.push((path, catalog)),
+            Ok(catalog) => unusable.push((path, Some(catalog.process_id))),
+            Err(_) => unusable.push((path, named_process_id)),
         }
     }
+    // Deduplicated, and not merely for the work it saves: `refresh_processes`
+    // reports *nothing* for a process whose identifier appears in the list
+    // twice, so a repeat turns a running process into a dead one. Two catalogs
+    // share an identifier whenever one process publishes more than one runner
+    // generation, which is what `SessionCatalogPublisher::new` counts.
     let process_ids = catalogs
         .iter()
-        .map(|(_, catalog)| Pid::from_u32(catalog.process_id))
+        .map(|(_, catalog)| catalog.process_id)
+        .chain(unusable.iter().filter_map(|(_, process_id)| *process_id))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .map(Pid::from_u32)
         .collect::<Vec<_>>();
     let mut system = System::new();
     system.refresh_processes(ProcessesToUpdate::Some(&process_ids), true);
@@ -247,6 +281,18 @@ pub fn read_session_catalogs(directory: &Path) -> Result<Vec<BackgroundSessionCa
             false
         }
     });
+    // An unusable file is dropped on the same rule as a usable one: its process
+    // is gone, so nothing can reattach through it and it would otherwise
+    // outlive every process that knew what it meant. One whose process is still
+    // running is left alone — this build cannot read it, but the build that
+    // wrote it can — and so is one whose owner cannot be identified at all,
+    // since removing a file on a guess is worse than skipping it.
+    for (path, process_id) in unusable {
+        if process_id.is_some_and(|process_id| system.process(Pid::from_u32(process_id)).is_none())
+        {
+            let _ = fs::remove_file(path);
+        }
+    }
     let mut catalogs = catalogs
         .into_iter()
         .map(|(_, catalog)| catalog)

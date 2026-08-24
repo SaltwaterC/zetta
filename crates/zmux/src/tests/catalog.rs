@@ -204,6 +204,103 @@ fn legacy_catalogs_are_ignored_after_the_schema_bump() {
     assert!(read_session_catalogs(directory.path()).unwrap().is_empty());
 }
 
+/// A process identifier nothing is using: started, exited, and reaped, since an
+/// unreaped child is a zombie and a zombie still reports as an existing process.
+fn reaped_process_id() -> u32 {
+    #[cfg(unix)]
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", "exit 0"])
+        .spawn()
+        .unwrap();
+    #[cfg(windows)]
+    let mut child = std::process::Command::new("cmd.exe")
+        .args(["/c", "exit", "0"])
+        .spawn()
+        .unwrap();
+    let process_id = child.id();
+    child.wait().unwrap();
+    process_id
+}
+
+#[test]
+fn an_unreadable_catalog_does_not_hide_the_readable_ones() {
+    // One stale file used to fail the whole read, which took `zmux list` and
+    // every reconnect with it until somebody deleted that file by hand.
+    let directory = tempfile::tempdir().unwrap();
+    let dead = reaped_process_id();
+
+    let truncated = directory.path().join(format!("zetta-{dead}-3.json"));
+    fs::write(&truncated, r#"{"version": 1, "process_id":"#).unwrap();
+    let legacy = directory.path().join(format!("zetta-{dead}-4.json"));
+    fs::write(
+        &legacy,
+        format!(r#"{{"version": 4, "process_id": {dead}, "runner_id": 4, "sessions": []}}"#),
+    )
+    .unwrap();
+    // Unparseable, but owned by a process that is still running: this build
+    // cannot read it, the build that wrote it can, so it stays.
+    let live = directory
+        .path()
+        .join(format!("zetta-{}-5.json", std::process::id()));
+    fs::write(&live, "{ not json").unwrap();
+    // Held for the rest of the test: dropping a publisher clears what it
+    // published, which would remove the very file being looked for.
+    let usable = directory
+        .path()
+        .join(format!("zetta-{}-6.json", std::process::id()));
+    let mut publisher = SessionCatalogPublisher::at_path(usable.clone());
+    publisher
+        .publish(&catalog_with_session_ids(std::process::id(), 6, &[1]))
+        .unwrap();
+
+    let catalogs = read_session_catalogs(directory.path()).unwrap();
+
+    assert_eq!(catalogs.len(), 1, "readable catalog was not returned");
+    assert_eq!(catalogs[0].runner_id, 6);
+    assert!(!truncated.exists(), "a dead process's file was kept");
+    assert!(!legacy.exists(), "a legacy catalog was kept forever");
+    assert!(live.exists(), "a live process's file was removed");
+    assert!(usable.is_file());
+}
+
+#[test]
+fn two_catalogs_from_one_process_are_both_kept() {
+    // `refresh_processes` reports nothing for a process identifier it is asked
+    // about twice, so asking once per catalog made a process publishing two
+    // runner generations look dead — and deleted both of its catalogs.
+    let directory = tempfile::tempdir().unwrap();
+    let mut publishers = (7..9)
+        .map(|runner_id| {
+            let mut publisher = SessionCatalogPublisher::at_path(
+                directory
+                    .path()
+                    .join(format!("zetta-{}-{runner_id}.json", std::process::id())),
+            );
+            publisher
+                .publish(&catalog_with_session_ids(
+                    std::process::id(),
+                    runner_id,
+                    &[runner_id],
+                ))
+                .unwrap();
+            publisher
+        })
+        .collect::<Vec<_>>();
+
+    let catalogs = read_session_catalogs(directory.path()).unwrap();
+
+    assert_eq!(
+        catalogs
+            .iter()
+            .map(|catalog| catalog.runner_id)
+            .collect::<Vec<_>>(),
+        vec![7, 8]
+    );
+    for publisher in &mut publishers {
+        assert!(publisher.path.is_file(), "a live catalog was removed");
+    }
+}
+
 #[test]
 fn protected_catalog_entries_do_not_publish_session_details_or_verifiers() {
     let directory = tempfile::tempdir().unwrap();
