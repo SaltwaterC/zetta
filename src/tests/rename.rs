@@ -12,6 +12,7 @@ fn tab(attention_id: u64, custom_title: Option<&str>) -> Tab {
     };
     let pane = TerminalPane {
         id: 1,
+        routing_id: 1,
         label_number: 1,
         generated_label: None,
         custom_label: None,

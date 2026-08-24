@@ -536,6 +536,9 @@ pub(crate) fn normalize_overlay_color_hex(value: &str) -> String {
 
 pub(crate) struct TerminalPane {
     pub(crate) id: u64,
+    /// Stable subprocess routing identity. Unlike `id`, this is not changed
+    /// when a tab moves to a window whose pane-id namespace must be remapped.
+    pub(crate) routing_id: u64,
     pub(crate) label_number: usize,
     pub(crate) generated_label: Option<String>,
     pub(crate) custom_label: Option<String>,
@@ -818,6 +821,7 @@ pub(crate) enum StackedPaneState {
 
 pub(crate) struct StackedPane {
     pub(crate) id: u64,
+    pub(crate) routing_id: u64,
     pub(crate) command: String,
     pub(crate) profile: Profile,
     pub(crate) terminal: Option<Entity<Terminal>>,
@@ -839,6 +843,7 @@ impl StackedPane {
     ) -> Self {
         Self {
             id,
+            routing_id: id,
             command,
             profile,
             terminal: None,
@@ -940,6 +945,7 @@ impl TerminalPane {
     pub(crate) fn new(id: u64, profile: Profile) -> Self {
         Self {
             id,
+            routing_id: id,
             label_number: 0,
             generated_label: None,
             custom_label: None,
@@ -2235,6 +2241,20 @@ impl Tab {
 
     pub(crate) fn active_view(&self) -> Option<Entity<TerminalView>> {
         self.active_pane().and_then(TerminalPane::selected_view)
+    }
+
+    pub(crate) fn view_by_routing_id(&self, id: u64) -> Option<Entity<TerminalView>> {
+        self.panes
+            .iter()
+            .find(|pane| pane.routing_id == id)
+            .and_then(|pane| pane.view.clone())
+            .or_else(|| {
+                self.panes
+                    .iter()
+                    .flat_map(|pane| &pane.stack.entries)
+                    .find(|entry| entry.routing_id == id)
+                    .and_then(|entry| entry.view.clone())
+            })
     }
 
     pub(crate) fn active_terminal(&self) -> Option<Entity<Terminal>> {

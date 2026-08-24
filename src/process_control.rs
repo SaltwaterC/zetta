@@ -156,6 +156,11 @@ pub(crate) enum ProcessControlCommand {
     ListPaneThemes {
         completion: Sender<Vec<String>>,
     },
+    GetPaneTheme {
+        attention_id: u64,
+        pane_id: u64,
+        completion: Sender<std::result::Result<String, String>>,
+    },
     SetPaneOverlay {
         text: Option<String>,
         font_size: Option<OverlayFontSize>,
@@ -223,6 +228,10 @@ enum ControlRequestCommand {
         theme: Option<String>,
     },
     ListPaneThemes,
+    GetPaneTheme {
+        attention_id: u64,
+        pane_id: u64,
+    },
     SetPaneOverlay {
         text: Option<String>,
         font_size: Option<OverlayFontSize>,
@@ -268,6 +277,8 @@ struct ControlRequest {
     secret: Option<String>,
     icon: Option<String>,
     pane_theme: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pane_id: Option<u64>,
     pane_overlay: Option<String>,
     pane_overlay_font_size: Option<String>,
     pane_overlay_opacity: Option<u8>,
@@ -422,6 +433,8 @@ struct ControlResponse {
     status: String,
     #[serde(default)]
     themes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pane_theme: Option<String>,
     #[serde(default)]
     silent_mode: bool,
     #[serde(default)]
@@ -487,6 +500,7 @@ impl ProcessControlServer {
                     let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
                     let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
                     let mut response_themes = Vec::new();
+                    let mut response_pane_theme = None;
                     let mut response_silent_mode = false;
                     let mut response_pane_labels = Vec::new();
                     let mut response_error = None;
@@ -688,6 +702,37 @@ impl ProcessControlServer {
                                 None => "rejected",
                             }
                         }
+                        Some(ControlRequestCommand::GetPaneTheme {
+                            attention_id,
+                            pane_id,
+                        }) => {
+                            let (completion, completed) = channel();
+                            if commands
+                                .unbounded_send(ProcessControlCommand::GetPaneTheme {
+                                    attention_id,
+                                    pane_id,
+                                    completion,
+                                })
+                                .is_err()
+                            {
+                                "rejected"
+                            } else {
+                                match wait_for_result_completion(&completed, &stopping_for_thread) {
+                                    Some(Ok(theme)) => {
+                                        response_pane_theme = Some(theme);
+                                        "ok"
+                                    }
+                                    Some(Err(message)) => {
+                                        response_error = Some(ControlError {
+                                            code: "pane_theme_unavailable".to_owned(),
+                                            message,
+                                        });
+                                        "rejected"
+                                    }
+                                    None => "rejected",
+                                }
+                            }
+                        }
                         Some(ControlRequestCommand::SetPaneOverlay {
                             text,
                             font_size,
@@ -791,6 +836,7 @@ impl ProcessControlServer {
                         &ControlResponse {
                             status: status.to_owned(),
                             themes: response_themes,
+                            pane_theme: response_pane_theme,
                             silent_mode: response_silent_mode,
                             pane_labels: response_pane_labels,
                             error: response_error,
@@ -992,6 +1038,10 @@ fn decode_control_request(
         zeroize_control_request_secrets(request);
         return None;
     }
+    if request.command != "get_pane_theme" && request.pane_id.is_some() {
+        zeroize_control_request_secrets(request);
+        return None;
+    }
     if (!matches!(
         request.command.as_str(),
         "set_tab_attention"
@@ -999,6 +1049,7 @@ fn decode_control_request(
             | "set_tab_name"
             | "set_worktree_name"
             | "get_silent_mode"
+            | "get_pane_theme"
             | "reconnect_session"
     ) && request.attention_id.is_some())
         || (request.command != "set_tab_attention"
@@ -1296,6 +1347,29 @@ fn decode_control_request(
                 && request.pane_theme.is_none() =>
         {
             Some(ControlRequestCommand::ListPaneThemes)
+        }
+        "get_pane_theme"
+            if request.runner_id.is_none()
+                && request.session_id.is_none()
+                && request.secret.is_none()
+                && request.icon.is_none()
+                && request.pane_theme.is_none()
+                && request.pane_overlay.is_none()
+                && request.pane_overlay_font_size.is_none()
+                && request.pane_overlay_opacity.is_none()
+                && request.pane_overlay_color.is_none()
+                && request.attention_summary.is_none()
+                && request.attention_body.is_none()
+                && request.tab_name.is_none()
+                && request.worktree_name.is_none()
+                && request.split.is_none()
+                && request.profile.is_none()
+                && request.theme.is_none() =>
+        {
+            Some(ControlRequestCommand::GetPaneTheme {
+                attention_id: request.attention_id.take().filter(|id| *id != 0)?,
+                pane_id: request.pane_id.take().filter(|id| *id != 0)?,
+            })
         }
         "set_overlay"
             if request.runner_id.is_none()
@@ -1855,6 +1929,31 @@ pub(crate) fn request_process_tab_attention(
     send_set_tab_attention_request(&endpoint, &request)
 }
 
+#[cfg(feature = "syntax-highlighting")]
+pub(crate) fn request_process_pane_theme_name(
+    process_id: u32,
+    attention_id: u64,
+    pane_id: u64,
+) -> Result<Option<String>> {
+    anyhow::ensure!(process_id != 0, "process ID must be positive");
+    anyhow::ensure!(attention_id != 0, "attention ID must be positive");
+    anyhow::ensure!(pane_id != 0, "pane ID must be positive");
+    let endpoint_path = control_endpoint_path(process_id);
+    let contents = fs::read(&endpoint_path).with_context(|| {
+        format!(
+            "reading Zetta process control endpoint {}",
+            endpoint_path.display()
+        )
+    })?;
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&contents).context("parsing Zetta process control endpoint")?;
+    anyhow::ensure!(
+        endpoint.version == CONTROL_VERSION && endpoint.process_id == process_id,
+        "Zetta process control endpoint is outdated"
+    );
+    send_get_pane_theme_request(&endpoint, attention_id, pane_id)
+}
+
 #[cfg(feature = "notifications")]
 pub(crate) fn request_process_silent_mode(
     process_id: u32,
@@ -1955,6 +2054,7 @@ fn send_open_window_request(endpoint: &ControlEndpoint) -> Result<bool> {
             secret: None,
             icon: None,
             pane_theme: None,
+            pane_id: None,
             pane_overlay: None,
             pane_overlay_font_size: None,
             pane_overlay_opacity: None,
@@ -1989,6 +2089,7 @@ fn send_open_project_request(endpoint: &ControlEndpoint, root: &Path) -> Result<
             secret: None,
             icon: None,
             pane_theme: None,
+            pane_id: None,
             pane_overlay: None,
             pane_overlay_font_size: None,
             pane_overlay_opacity: None,
@@ -2023,6 +2124,7 @@ fn send_reload_projects_request(endpoint: &ControlEndpoint) -> Result<bool> {
             secret: None,
             icon: None,
             pane_theme: None,
+            pane_id: None,
             pane_overlay: None,
             pane_overlay_font_size: None,
             pane_overlay_opacity: None,
@@ -2061,6 +2163,7 @@ fn send_get_silent_mode_request(
             secret: None,
             icon: None,
             pane_theme: None,
+            pane_id: None,
             pane_overlay: None,
             pane_overlay_font_size: None,
             pane_overlay_opacity: None,
@@ -2102,6 +2205,7 @@ fn send_set_tab_attention_request(
             secret: None,
             icon: None,
             pane_theme: None,
+            pane_id: None,
             pane_overlay: None,
             pane_overlay_font_size: None,
             pane_overlay_opacity: None,
@@ -2137,6 +2241,7 @@ fn send_set_tab_name_request(endpoint: &ControlEndpoint, request: &TabNameReques
             secret: None,
             icon: None,
             pane_theme: None,
+            pane_id: None,
             pane_overlay: None,
             pane_overlay_font_size: None,
             pane_overlay_opacity: None,
@@ -2174,6 +2279,7 @@ fn send_set_worktree_name_request(
             secret: None,
             icon: None,
             pane_theme: None,
+            pane_id: None,
             pane_overlay: None,
             pane_overlay_font_size: None,
             pane_overlay_opacity: None,
@@ -2210,6 +2316,7 @@ fn send_focus_tab_request(endpoint: &ControlEndpoint, attention_id: u64) -> Resu
             secret: None,
             icon: None,
             pane_theme: None,
+            pane_id: None,
             pane_overlay: None,
             pane_overlay_font_size: None,
             pane_overlay_opacity: None,
@@ -2244,6 +2351,7 @@ fn send_run_pane_request(endpoint: &ControlEndpoint, request: &PaneCommand) -> R
             secret: None,
             icon: None,
             pane_theme: None,
+            pane_id: None,
             pane_overlay: None,
             pane_overlay_font_size: None,
             pane_overlay_opacity: None,
@@ -2284,6 +2392,7 @@ fn send_list_pane_labels_request(endpoint: &ControlEndpoint) -> Result<Option<Ve
             secret: None,
             icon: None,
             pane_theme: None,
+            pane_id: None,
             pane_overlay: None,
             pane_overlay_font_size: None,
             pane_overlay_opacity: None,
@@ -2327,6 +2436,7 @@ fn send_replace_pane_request(
             secret: None,
             icon: None,
             pane_theme: None,
+            pane_id: None,
             pane_overlay: None,
             pane_overlay_font_size: None,
             pane_overlay_opacity: None,
@@ -2364,6 +2474,7 @@ fn send_reload_configuration_request(
             secret: None,
             icon: None,
             pane_theme: None,
+            pane_id: None,
             pane_overlay: None,
             pane_overlay_font_size: None,
             pane_overlay_opacity: None,
@@ -2401,6 +2512,7 @@ fn send_set_tab_icon_request(endpoint: &ControlEndpoint, icon: Option<IconName>)
                 name.to_owned()
             }),
             pane_theme: None,
+            pane_id: None,
             pane_overlay: None,
             pane_overlay_font_size: None,
             pane_overlay_opacity: None,
@@ -2435,6 +2547,7 @@ fn send_set_pane_theme_request(endpoint: &ControlEndpoint, theme: Option<String>
             secret: None,
             icon: None,
             pane_theme: theme,
+            pane_id: None,
             pane_overlay: None,
             pane_overlay_font_size: None,
             pane_overlay_opacity: None,
@@ -2469,6 +2582,7 @@ fn send_list_pane_themes_request(endpoint: &ControlEndpoint) -> Result<Option<Ve
             secret: None,
             icon: None,
             pane_theme: None,
+            pane_id: None,
             pane_overlay: None,
             pane_overlay_font_size: None,
             pane_overlay_opacity: None,
@@ -2489,6 +2603,48 @@ fn send_list_pane_themes_request(endpoint: &ControlEndpoint) -> Result<Option<Ve
     Ok((response.status == "ok").then_some(response.themes))
 }
 
+#[cfg(feature = "syntax-highlighting")]
+fn send_get_pane_theme_request(
+    endpoint: &ControlEndpoint,
+    attention_id: u64,
+    pane_id: u64,
+) -> Result<Option<String>> {
+    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
+    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    write_message(
+        &mut stream,
+        &ControlRequest {
+            token: endpoint.token.clone(),
+            command: "get_pane_theme".to_owned(),
+            runner_id: None,
+            session_id: None,
+            secret: None,
+            icon: None,
+            pane_theme: None,
+            pane_id: Some(pane_id),
+            pane_overlay: None,
+            pane_overlay_font_size: None,
+            pane_overlay_opacity: None,
+            pane_overlay_color: None,
+            attention_id: Some(attention_id),
+            attention_summary: None,
+            attention_body: None,
+            tab_name: None,
+            worktree_name: None,
+            config_path: None,
+            split: None,
+            profile: None,
+            theme: None,
+            pane_request: None,
+        },
+    )?;
+    let response = read_message::<ControlResponse>(&mut stream)?;
+    Ok((response.status == "ok")
+        .then_some(response.pane_theme)
+        .flatten())
+}
+
 fn send_set_overlay_request(
     endpoint: &ControlEndpoint,
     request: &PaneOverlayRequest,
@@ -2506,6 +2662,7 @@ fn send_set_overlay_request(
             secret: None,
             icon: None,
             pane_theme: None,
+            pane_id: None,
             pane_overlay: request.text.clone(),
             pane_overlay_font_size: request
                 .font_size

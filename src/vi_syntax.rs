@@ -1,7 +1,7 @@
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
-    fs,
+    env, fs,
     ops::Range,
     path::{Path, PathBuf},
     sync::{
@@ -24,7 +24,10 @@ use serde::Deserialize;
 use theme::{SyntaxTheme, Theme, ThemeRegistry};
 use tree_sitter_highlight::{Highlight, HighlightConfiguration, HighlightEvent, Highlighter};
 
-use crate::{startup::selected_theme_name, zetta_assets::ZettaAssets};
+use crate::{
+    process_control::request_process_pane_theme_name, startup::selected_theme_name,
+    zetta_assets::ZettaAssets,
+};
 
 #[derive(RustEmbed)]
 #[folder = "zed/crates/grammars/src/"]
@@ -749,6 +752,11 @@ pub(crate) fn run(arguments: Vec<String>) -> i32 {
         .flatten()
         .map(|project| project.effective)
         .unwrap_or(base);
+    // The editor runs in a subprocess, so configuration alone cannot tell it
+    // which theme its pane is actually showing. Ask the originating window to
+    // preserve project/profile, launch, pane-template, transient, and live
+    // appearance choices. A standalone invocation keeps the light-theme
+    // configuration fallback it had before.
     let configured_theme = config.theme.clone();
     // Built on the first editor rather than up front, so `vi --help` and
     // argument errors do not pay for grammars they never use. Every file in one
@@ -759,7 +767,11 @@ pub(crate) fn run(arguments: Vec<String>) -> i32 {
         let grammars = grammars.get_or_init(|| {
             // Resolving the theme is independent of the grammar work, so it
             // starts here and is joined only once styles are actually needed.
-            let theme = SyntaxThemeHandle::spawn(configured_theme.clone());
+            let theme = SyntaxThemeHandle::spawn(selected_vi_theme(
+                configured_theme.clone(),
+                inherited_pane_theme(),
+                inherited_terminal_theme(),
+            ));
             match GrammarSet::new(theme) {
                 Ok(grammars) => Some(grammars),
                 Err(error) => {
@@ -772,6 +784,29 @@ pub(crate) fn run(arguments: Vec<String>) -> i32 {
             install_background(editor, Arc::clone(grammars));
         }
     })
+}
+
+fn selected_vi_theme(
+    configured_theme: Option<String>,
+    pane_theme: Option<String>,
+    terminal_theme: Option<String>,
+) -> Option<String> {
+    pane_theme.or(terminal_theme).or(configured_theme)
+}
+
+fn inherited_terminal_theme() -> Option<String> {
+    env::var("ZETTA_THEME")
+        .ok()
+        .filter(|theme| !theme.is_empty())
+}
+
+fn inherited_pane_theme() -> Option<String> {
+    let process_id = env::var("ZETTA_PROCESS_ID").ok()?.parse().ok()?;
+    let attention_id = env::var("ZETTA_ATTENTION_ID").ok()?.parse().ok()?;
+    let pane_id = env::var("ZETTA_PANE_ID").ok()?.parse().ok()?;
+    request_process_pane_theme_name(process_id, attention_id, pane_id)
+        .ok()
+        .flatten()
 }
 
 #[cfg(test)]

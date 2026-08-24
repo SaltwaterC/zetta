@@ -11,6 +11,7 @@ fn request(token: &str, command: &str) -> ControlRequest {
         secret: None,
         icon: None,
         pane_theme: None,
+        pane_id: None,
         pane_overlay: None,
         pane_overlay_font_size: None,
         pane_overlay_opacity: None,
@@ -48,6 +49,7 @@ fn send_reconnect_session_request(
         secret: secret.as_ref().map(|secret| secret.expose().to_owned()),
         icon: None,
         pane_theme: None,
+        pane_id: None,
         pane_overlay: None,
         pane_overlay_font_size: None,
         pane_overlay_opacity: None,
@@ -313,6 +315,7 @@ fn pane_control_responses_round_trip_labels_and_structured_errors() {
     let response = ControlResponse {
         status: "rejected".to_owned(),
         themes: Vec::new(),
+        pane_theme: None,
         silent_mode: false,
         pane_labels: vec!["Pane 1".to_owned(), "api".to_owned()],
         error: Some(ControlError {
@@ -374,6 +377,7 @@ fn silent_mode_response_round_trips_its_state() {
     let response = ControlResponse {
         status: "ok".to_owned(),
         themes: Vec::new(),
+        pane_theme: None,
         silent_mode: true,
         pane_labels: Vec::new(),
         error: None,
@@ -704,6 +708,34 @@ fn pane_theme_list_requests_carry_no_arguments() {
 }
 
 #[test]
+fn pane_theme_query_requires_an_attention_target() {
+    let mut theme_request = request("token", "get_pane_theme");
+    theme_request.attention_id = Some(42);
+    theme_request.pane_id = Some(9);
+    assert_eq!(
+        decode_control_request(&mut theme_request, "token"),
+        Some(ControlRequestCommand::GetPaneTheme {
+            attention_id: 42,
+            pane_id: 9,
+        })
+    );
+
+    assert_eq!(
+        decode_control_request(&mut request("token", "get_pane_theme"), "token"),
+        None
+    );
+    let mut zero = request("token", "get_pane_theme");
+    zero.attention_id = Some(0);
+    zero.pane_id = Some(9);
+    assert_eq!(decode_control_request(&mut zero, "token"), None);
+    let mut unexpected = request("token", "get_pane_theme");
+    unexpected.attention_id = Some(42);
+    unexpected.pane_id = Some(9);
+    unexpected.profile = Some("System".to_owned());
+    assert_eq!(decode_control_request(&mut unexpected, "token"), None);
+}
+
+#[test]
 fn pane_overlay_control_requests_decode_text_and_allow_clearing() {
     let mut overlay_request = request("token", "set_overlay");
     overlay_request.pane_overlay = Some("Prod".to_owned());
@@ -803,6 +835,7 @@ fn reconnect_requests_carry_a_session_target_and_optional_secret() {
         secret: Some("not-an-argument".to_owned()),
         icon: None,
         pane_theme: None,
+        pane_id: None,
         pane_overlay: None,
         pane_overlay_font_size: None,
         pane_overlay_opacity: None,
@@ -1164,6 +1197,32 @@ fn control_server_delivers_the_registered_theme_names() {
         client.join().unwrap(),
         Some(vec!["Dracula".to_owned(), "One Light".to_owned()])
     );
+}
+
+#[test]
+#[cfg(feature = "syntax-highlighting")]
+fn control_server_delivers_the_originating_pane_theme() {
+    let directory = tempfile::tempdir().unwrap();
+    let endpoint_path = directory.path().join("control.json");
+    let (commands, mut received) = futures::channel::mpsc::unbounded();
+    let _server = ProcessControlServer::start_at(commands, endpoint_path.clone()).unwrap();
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&fs::read(endpoint_path).unwrap()).unwrap();
+
+    let client = thread::spawn(move || send_get_pane_theme_request(&endpoint, 42, 9).unwrap());
+    let command = futures::executor::block_on(received.next()).unwrap();
+    let ProcessControlCommand::GetPaneTheme {
+        attention_id,
+        pane_id,
+        completion,
+    } = command
+    else {
+        panic!("unexpected process control command");
+    };
+    assert_eq!(attention_id, 42);
+    assert_eq!(pane_id, 9);
+    completion.send(Ok("One Dark".to_owned())).unwrap();
+    assert_eq!(client.join().unwrap().as_deref(), Some("One Dark"));
 }
 
 #[test]

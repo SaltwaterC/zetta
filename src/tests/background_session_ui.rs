@@ -40,6 +40,7 @@ fn background_session_is_reaped_after_its_final_pane_exits() {
         attention: None,
         panes: vec![TerminalPane {
             id: 3,
+            routing_id: 3,
             label_number: 1,
             generated_label: None,
             custom_label: None,

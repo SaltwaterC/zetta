@@ -1720,6 +1720,35 @@ pub(crate) fn run() -> Result<()> {
                             });
                             let _ = completion.send(themes);
                         }
+                        ProcessControlCommand::GetPaneTheme {
+                            attention_id,
+                            pane_id,
+                            completion,
+                        } => {
+                            let theme = cx.update(|cx| {
+                                if !cx
+                                    .global::<ZettaProcessState>()
+                                    .control_server
+                                    .is_accepting()
+                                {
+                                    return Err("Zetta is shutting down".to_owned());
+                                }
+                                process_zetta_entities(cx)
+                                    .into_iter()
+                                    .find_map(|zetta| {
+                                        zetta.read(cx).pane_theme_by_attention_id(
+                                            attention_id,
+                                            pane_id,
+                                            cx,
+                                        )
+                                    })
+                                    .ok_or_else(|| {
+                                        "the originating Zetta pane is no longer available"
+                                            .to_owned()
+                                    })
+                            });
+                            let _ = completion.send(theme);
+                        }
                         ProcessControlCommand::SetPaneOverlay {
                             text,
                             font_size,

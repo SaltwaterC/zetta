@@ -26,6 +26,51 @@ fn syntax_theme(capture_names: &[&str]) -> Arc<SyntaxTheme> {
 }
 
 #[test]
+fn one_dark_uses_the_readable_dark_syntax_palette() {
+    let dark = active_syntax_theme_for(Some("One Dark"));
+    let light = active_syntax_theme_for(Some("One Light"));
+
+    assert_eq!(
+        style_for_capture(&dark, "variable").and_then(|style| style.foreground),
+        Some(HighlightColor::Rgb {
+            red: 0xac,
+            green: 0xb2,
+            blue: 0xbe,
+        })
+    );
+    assert_eq!(
+        style_for_capture(&light, "variable").and_then(|style| style.foreground),
+        Some(HighlightColor::Rgb {
+            red: 0x24,
+            green: 0x25,
+            blue: 0x29,
+        })
+    );
+}
+
+#[test]
+fn vi_theme_prefers_the_live_pane_then_the_spawned_terminal_theme() {
+    assert_eq!(
+        selected_vi_theme(
+            Some("One Light".to_owned()),
+            Some("Dracula".to_owned()),
+            Some("One Dark".to_owned()),
+        )
+        .as_deref(),
+        Some("Dracula")
+    );
+    assert_eq!(
+        selected_vi_theme(
+            Some("One Light".to_owned()),
+            None,
+            Some("One Dark".to_owned()),
+        )
+        .as_deref(),
+        Some("One Dark")
+    );
+}
+
+#[test]
 fn highlights_a_rust_file_with_zed_queries_and_theme_styles() {
     let mut highlighter = highlighter(&["keyword", "function"]);
 

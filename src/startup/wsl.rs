@@ -61,6 +61,8 @@ where
     for variable in [
         "ZETTA_PROCESS_ID/u",
         "ZETTA_ATTENTION_ID/u",
+        "ZETTA_PANE_ID/u",
+        "ZETTA_THEME/u",
         "ZETTA_NO_MUX/u",
     ] {
         add_wslenv_entry(&mut wslenv, variable);

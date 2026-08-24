@@ -2579,6 +2579,20 @@ impl Zetta {
         self.tabs.iter().any(|tab| tab.attention_id == attention_id)
     }
 
+    pub(crate) fn pane_theme_by_attention_id(
+        &self,
+        attention_id: u64,
+        pane_id: u64,
+        cx: &App,
+    ) -> Option<String> {
+        self.tabs
+            .iter()
+            .find(|tab| tab.attention_id == attention_id)
+            .and_then(|tab| tab.view_by_routing_id(pane_id))
+            .and_then(|view| view.read(cx).theme())
+            .map(|theme| theme.name.to_string())
+    }
+
     pub(crate) fn focus_tab_by_attention_id(
         &mut self,
         attention_id: u64,

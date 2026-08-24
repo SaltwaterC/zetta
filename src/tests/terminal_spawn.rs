@@ -31,13 +31,14 @@ fn pane_template_environment_overrides_merge_without_replacing_zetta_variables()
         ("ZETTA_PROCESS_ID".to_owned(), "spoofed".to_owned()),
     ]);
 
-    apply_terminal_environment_overrides(&mut environment, &overrides, 42, 7, false);
+    apply_terminal_environment_overrides(&mut environment, &overrides, 42, 7, 9, false);
 
     assert_eq!(environment["PATH"], "custom-path");
     assert_eq!(environment["ROLE"], "server");
     assert_eq!(environment["ZETTA_HOST_EXECUTABLE"], "host");
     assert_eq!(environment["ZETTA_PROCESS_ID"], "42");
     assert_eq!(environment["ZETTA_ATTENTION_ID"], "7");
+    assert_eq!(environment["ZETTA_PANE_ID"], "9");
     assert_eq!(environment["ZETTA_NO_MUX"], "0");
 }
 
@@ -46,7 +47,7 @@ fn no_mux_terminal_environment_is_explicit_and_cannot_be_overridden() {
     let mut environment = HashMap::new();
     let overrides = HashMap::from([("ZETTA_NO_MUX".to_owned(), "0".to_owned())]);
 
-    apply_terminal_environment_overrides(&mut environment, &overrides, 42, 7, true);
+    apply_terminal_environment_overrides(&mut environment, &overrides, 42, 7, 9, true);
 
     assert_eq!(environment["ZETTA_NO_MUX"], "1");
 }

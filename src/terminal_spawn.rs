@@ -224,13 +224,16 @@ impl Zetta {
         if is_wsl {
             wsl_terminal_environment(&mut environment, wsl_cwd_file.as_deref());
         }
+        let effective_theme = terminal_theme.clone().unwrap_or_else(|| cx.theme().clone());
         apply_terminal_environment_overrides(
             &mut environment,
             &combined_environment,
             std::process::id(),
             attention_id,
+            pane_id,
             self.no_mux,
         );
+        environment.insert("ZETTA_THEME".to_owned(), effective_theme.name.to_string());
         if is_wsl {
             add_wsl_environment_variable_names(
                 &mut environment,
@@ -255,7 +258,6 @@ impl Zetta {
                 return;
             }
         };
-        let effective_theme = terminal_theme.clone().unwrap_or_else(|| cx.theme().clone());
         let initial_console_palette =
             (!is_wsl).then(|| terminal::console_palette_for_theme(effective_theme.as_ref()));
         let builder = TerminalBuilder::new_with_console_palette(
@@ -509,6 +511,7 @@ pub(crate) fn apply_terminal_environment_overrides<S>(
     overrides: &HashMap<String, String>,
     process_id: u32,
     attention_id: u64,
+    pane_id: u64,
     no_mux: bool,
 ) where
     S: std::hash::BuildHasher,
@@ -523,6 +526,7 @@ pub(crate) fn apply_terminal_environment_overrides<S>(
     }
     environment.insert("ZETTA_PROCESS_ID".to_owned(), process_id.to_string());
     environment.insert("ZETTA_ATTENTION_ID".to_owned(), attention_id.to_string());
+    environment.insert("ZETTA_PANE_ID".to_owned(), pane_id.to_string());
     environment.insert(
         zmux::NO_MUX_ENVIRONMENT_VARIABLE.to_owned(),
         if no_mux { "1" } else { "0" }.to_owned(),
@@ -656,13 +660,16 @@ impl Zetta {
                 .collect()
         };
         let project_environment = self.project_environment_for_tab(tab_id);
+        let effective_theme = terminal_theme.clone().unwrap_or_else(|| cx.theme().clone());
         apply_terminal_environment_overrides(
             &mut environment,
             &project_environment,
             std::process::id(),
             attention_id,
+            entry_id,
             self.no_mux,
         );
+        environment.insert("ZETTA_THEME".to_owned(), effective_theme.name.to_string());
         if is_wsl {
             add_wsl_environment_variable_names(
                 &mut environment,
@@ -714,7 +721,6 @@ impl Zetta {
                 return;
             }
         };
-        let effective_theme = terminal_theme.clone().unwrap_or_else(|| cx.theme().clone());
         let initial_console_palette =
             (!is_wsl).then(|| terminal::console_palette_for_theme(effective_theme.as_ref()));
         let builder = TerminalBuilder::new_with_console_palette(

@@ -530,6 +530,7 @@ fn tab_pane_index_resolves_panes_without_scanning() {
         .into_iter()
         .map(|id| TerminalPane {
             id,
+            routing_id: id,
             label_number: id as usize,
             generated_label: None,
             custom_label: None,
@@ -596,6 +597,7 @@ fn tab_pane_index_resolves_panes_without_scanning() {
     assert_eq!(tab.pane(3).map(|pane| pane.id), Some(3));
     tab.push_pane(TerminalPane {
         id: 4,
+        routing_id: 4,
         label_number: 0,
         generated_label: None,
         custom_label: None,
@@ -703,6 +705,7 @@ fn split_profile_comes_from_the_active_pane() {
         panes: vec![
             TerminalPane {
                 id: 1,
+                routing_id: 1,
                 label_number: 1,
                 generated_label: None,
                 custom_label: None,
@@ -727,6 +730,7 @@ fn split_profile_comes_from_the_active_pane() {
             },
             TerminalPane {
                 id: 2,
+                routing_id: 2,
                 label_number: 2,
                 generated_label: None,
                 custom_label: None,
@@ -800,6 +804,7 @@ fn closing_active_pane_restores_previous_focus() {
     };
     let pane = |id| TerminalPane {
         id,
+        routing_id: id,
         label_number: id as usize,
         generated_label: None,
         custom_label: None,
@@ -874,6 +879,7 @@ fn closing_inactive_pane_preserves_focus() {
     };
     let pane = |id| TerminalPane {
         id,
+        routing_id: id,
         label_number: id as usize,
         generated_label: None,
         custom_label: None,
@@ -1270,6 +1276,7 @@ fn pane_management_tab() -> Tab {
     };
     let pane = |id| TerminalPane {
         id,
+        routing_id: id,
         label_number: id as usize,
         generated_label: None,
         custom_label: None,
@@ -1387,6 +1394,13 @@ fn transferred_tabs_receive_target_window_ids_consistently() {
         tab.panes.iter().map(|pane| pane.id).collect::<Vec<_>>(),
         [20, 21, 22]
     );
+    assert_eq!(
+        tab.panes
+            .iter()
+            .map(|pane| pane.routing_id)
+            .collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
     assert_eq!(tab.active_pane, 21);
     assert_eq!(tab.focus_history, [20, 22, 21]);
     assert_eq!(tab.maximized_pane, Some(21));
@@ -1401,6 +1415,16 @@ fn transferred_tabs_receive_target_window_ids_consistently() {
             .map(|entry| entry.id)
             .collect::<Vec<_>>(),
         [23, 24]
+    );
+    assert_eq!(
+        tab.pane(21)
+            .unwrap()
+            .stack
+            .entries
+            .iter()
+            .map(|entry| entry.routing_id)
+            .collect::<Vec<_>>(),
+        [7, 8]
     );
     assert_eq!(
         tab.pane(21).unwrap().stack.selected,
@@ -1483,6 +1507,7 @@ fn pane_labels_remain_stable_and_are_not_reused() {
     tab.remove_pane(2);
     tab.push_pane(TerminalPane {
         id: 4,
+        routing_id: 4,
         label_number: 0,
         generated_label: None,
         custom_label: None,
