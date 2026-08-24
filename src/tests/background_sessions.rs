@@ -26,6 +26,7 @@ fn scoped_catalog(
                 panes: Vec::new(),
                 held: false,
                 scoped_to,
+                key_envelope: None,
             })
             .collect(),
     }

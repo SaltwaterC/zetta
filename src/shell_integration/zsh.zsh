@@ -545,8 +545,14 @@ _zetta() {
                 return
             elif [[ ${words[3]} == stop ]]; then
                 _zetta_options --force --help
+            elif [[ ${words[3]} == reconnect && $words[CURRENT] != -* ]]; then
+                if [[ $words[CURRENT-1] == --identity ]]; then
+                    _files
+                else
+                    _zmux_session_ids
+                fi
             elif [[ ${words[3]} == reconnect ]]; then
-                _zmux_session_ids
+                _zetta_options --identity --help
             elif [[ ${words[3]} == resume && $words[CURRENT] != -* ]]; then
                 if [[ $words[CURRENT-1] == --identity ]]; then
                     _files

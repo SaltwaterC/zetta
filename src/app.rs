@@ -249,6 +249,51 @@ impl Zetta {
     /// For anything the user does not have to act on: a confirmation that a
     /// toggle took effect, or a note that the thing they asked for has to be
     /// done somewhere else.
+    /// Resolves automatic session protection again after configuration changed,
+    /// or for the first time when doing it inline would have meant waiting on
+    /// the network.
+    ///
+    /// The window is left without automatic protection while a fetch is in
+    /// flight, which means a tab detached in that window asks for a secret
+    /// instead. That is the safe direction to fail: the session is still
+    /// protected, just by something the user typed.
+    #[cfg(feature = "session-persistence")]
+    pub(crate) fn refresh_auto_protect(&mut self, cx: &mut Context<Self>) {
+        self.auto_protect_generation = self.auto_protect_generation.wrapping_add(1);
+        let generation = self.auto_protect_generation;
+        let persistence = self.launch_config.sessions.persistence.clone();
+        if !crate::session_auto_protect::SessionAutoProtect::resolution_is_blocking(&persistence) {
+            let mut error = None;
+            self.auto_protect = resolve_auto_protect(&self.launch_config, &mut error);
+            if let Some(error) = error {
+                self.configuration_error = Some(error);
+            }
+            return;
+        }
+        self.auto_protect = None;
+        cx.spawn(async move |this, cx| {
+            let resolved = cx
+                .background_spawn(async move {
+                    crate::session_auto_protect::SessionAutoProtect::resolve(&persistence)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.auto_protect_generation != generation {
+                    return;
+                }
+                match resolved {
+                    Ok(auto_protect) => this.auto_protect = auto_protect.map(std::sync::Arc::new),
+                    Err(error) => this.show_notice(
+                        format!("Could not set up automatic session protection: {error:#}"),
+                        cx,
+                    ),
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     pub(crate) fn show_notice(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
         let generation = self.transient_notice.show(message.into());
         let executor = cx.background_executor().clone();
@@ -462,8 +507,47 @@ pub(crate) fn enforce_minimum_window_size(window: &mut Window) {
     }
 }
 
+/// Resolves automatic session protection, folding a failure into the
+/// configuration error the window already shows.
+///
+/// A failure is surfaced rather than ignored because it changes what happens the
+/// next time a tab is detached: without it, the secret dialog appears for a user
+/// who asked never to see it again, and the reason would otherwise be invisible.
+#[cfg(feature = "session-persistence")]
+pub(crate) fn resolve_auto_protect(
+    config: &Config,
+    configuration_error: &mut Option<String>,
+) -> Option<std::sync::Arc<crate::session_auto_protect::SessionAutoProtect>> {
+    match crate::session_auto_protect::SessionAutoProtect::resolve(&config.sessions.persistence) {
+        Ok(auto_protect) => auto_protect.map(std::sync::Arc::new),
+        Err(error) => {
+            let message = format!("Could not set up automatic session protection: {error:#}");
+            *configuration_error = Some(match configuration_error.take() {
+                Some(existing) => format!("{existing}\n{message}"),
+                None => message,
+            });
+            None
+        }
+    }
+}
+
 pub(crate) struct Zetta {
     pub(crate) launch_config: Config,
+    /// The recipients and identity that protect a background session with the
+    /// user's age key rather than a dialog. `None` when automatic protection is
+    /// off, or configured without something it needs.
+    ///
+    /// Resolved when configuration is loaded and kept, because a `github:`
+    /// recipient is a network fetch and detaching a tab is not the moment to
+    /// make one. Behind an `Arc` so the background thread that runs Argon2id can
+    /// hold it without borrowing the window.
+    #[cfg(feature = "session-persistence")]
+    pub(crate) auto_protect:
+        Option<std::sync::Arc<crate::session_auto_protect::SessionAutoProtect>>,
+    /// Bumped by every refresh, so a resolution that went to the network cannot
+    /// land after a later configuration reload and reinstate what it replaced.
+    #[cfg(feature = "session-persistence")]
+    pub(crate) auto_protect_generation: u64,
     pub(crate) project_detection_base: Arc<Config>,
     pub(crate) projects: ProjectState,
     /// A `--profile`/`--theme` launch override: (profile name lowercased,
@@ -706,8 +790,22 @@ impl Zetta {
                 ProjectState::new(ProjectRegistry::empty())
             }
         };
+        // Resolved inline only when that costs nothing. A `github:` recipient is
+        // an HTTP fetch, and a window must not wait on one to open, so that case
+        // starts without automatic protection and fills it in below.
+        #[cfg(feature = "session-persistence")]
+        let auto_protect =
+            (!crate::session_auto_protect::SessionAutoProtect::resolution_is_blocking(
+                &config.sessions.persistence,
+            ))
+            .then(|| resolve_auto_protect(&config, &mut configuration_error))
+            .flatten();
         let mut this = Self {
             launch_config: config.clone(),
+            #[cfg(feature = "session-persistence")]
+            auto_protect,
+            #[cfg(feature = "session-persistence")]
+            auto_protect_generation: 0,
             project_detection_base: Arc::new(config.clone()),
             projects,
             launch_theme_override,
@@ -845,6 +943,12 @@ impl Zetta {
             .detach();
 
         this.load_multi_command_catalog(cx);
+        // Only does anything when resolving needed the network, which is why it
+        // was skipped above; the cheap case is already resolved.
+        #[cfg(feature = "session-persistence")]
+        if this.auto_protect.is_none() {
+            this.refresh_auto_protect(cx);
+        }
         if let Some(project) = initial_project {
             let project = this.projects.insert_config(project);
             let profile = initial_profile.or_else(|| {

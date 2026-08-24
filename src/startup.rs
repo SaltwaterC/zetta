@@ -1174,30 +1174,18 @@ pub(crate) fn run() -> Result<()> {
         return Ok(());
     }
     if let StartupMode::Mux(arguments) = &args.mode {
+        // The same reader `src/bin/zmux.rs` uses, so `zetta mux` and `zmux`
+        // resolve the identity identically.
         #[cfg(feature = "session-persistence")]
-        if arguments
-            .first()
-            .is_some_and(|argument| argument == "resume")
-            && !arguments.iter().any(|argument| {
-                argument == "-i"
-                    || argument == "--identity"
-                    || argument.to_string_lossy().starts_with("--identity=")
-            })
-        {
-            let (config, _) =
-                load_startup_config(args.config_path.as_deref(), args.keymap_path.clone());
-            if let Some(identity) = config.sessions.persistence.identity {
-                let identity = if let Some(relative) =
-                    identity.to_str().and_then(|path| path.strip_prefix("~/"))
-                {
-                    util::paths::home_dir().join(relative)
-                } else {
-                    identity
-                };
-                let mut arguments = arguments.clone();
-                arguments.extend([OsString::from("--identity"), identity.into_os_string()]);
-                return zmux::run(&arguments);
-            }
+        if crate::mux_identity::command_uses_an_identity(arguments) {
+            return zmux::run_with_defaults(
+                arguments,
+                zmux::ClientDefaults {
+                    identity_paths: crate::mux_identity::configured_identity_paths(
+                        args.config_path.clone(),
+                    ),
+                },
+            );
         }
         return zmux::run(arguments);
     }

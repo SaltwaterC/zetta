@@ -69,6 +69,12 @@ pub struct SessionHandover {
     /// The Argon2id verifier, so a protected session stays protected across an
     /// upgrade.
     pub verifier: Option<String>,
+    /// The sealed session key that goes with `verifier`, so an automatically
+    /// protected session stays *openable* across an upgrade. Losing it would
+    /// leave the session protected by a key nobody can recover, which is
+    /// indistinguishable from having killed it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_envelope: Option<String>,
     /// Consecutive wrong secrets, and what is left of the window they opened.
     ///
     /// Carried rather than reset: dropping them would make `--upgrade` a way to

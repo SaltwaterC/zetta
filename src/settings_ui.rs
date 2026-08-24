@@ -79,6 +79,11 @@ pub(crate) enum SettingsToggle {
     TitleBarLabels,
     TitleBarButtons,
     ProfileVisibility(usize),
+    /// Protect background sessions with the configured age key instead of a
+    /// typed secret. Offered only when a recipient and an identity are both set,
+    /// because without them it would mint sessions nobody can reattach.
+    #[cfg(feature = "session-persistence")]
+    SessionAutoProtect,
     #[cfg(target_os = "macos")]
     TitleBarMenus,
     ProjectOpacityOverride,

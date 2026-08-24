@@ -1460,3 +1460,66 @@ fn toggling_the_selected_root_node_clears_the_selection_without_panicking() {
         Some(PaneTemplateNodePath::ROOT)
     );
 }
+
+/// The automatic-protection toggle appears only once there is both something to
+/// seal a session key to and something to open it with. The page and the tab
+/// order both ask this, so a control that is not drawn is never a stop the
+/// keyboard lands on with nothing to show for it.
+#[cfg(feature = "session-persistence")]
+#[test]
+fn the_automatic_protection_toggle_is_offered_only_with_a_recipient_and_an_identity() {
+    let root = settings_test_path("zetta-auto-protect-offered");
+    let config = Config::defaults(Some(&root), None);
+    let mut form = ConfigurationForm::load(&root, &config).unwrap();
+    assert!(!form.session_auto_protect_is_offered());
+
+    form.session_persistence_recipients = TextField::new("age1example".to_owned());
+    assert!(!form.session_auto_protect_is_offered());
+
+    form.session_persistence_identity = TextField::new("   ".to_owned());
+    assert!(!form.session_auto_protect_is_offered());
+
+    form.session_persistence_identity = TextField::new("~/keys/zetta.txt".to_owned());
+    assert!(form.session_auto_protect_is_offered());
+
+    form.session_persistence_recipients = TextField::new(String::new());
+    assert!(!form.session_auto_protect_is_offered());
+}
+
+#[cfg(feature = "session-persistence")]
+#[test]
+fn automatic_protection_round_trips_through_the_configuration_form() {
+    let root = settings_test_path("zetta-auto-protect-round-trip");
+    fs::write(
+        &root,
+        serde_json::to_string(&json!({
+            "sessions": {
+                "persistence": {
+                    "recipients": ["age1example"],
+                    "identity": "~/keys/zetta.txt",
+                    "auto_protect": true,
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let config = Config::load(Some(&root), None).unwrap();
+    let mut form = ConfigurationForm::load(&root, &config).unwrap();
+    assert!(form.session_persistence_auto_protect);
+
+    form.session_persistence_auto_protect = false;
+    let output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
+    fs::remove_file(root).unwrap();
+
+    assert_eq!(
+        output["sessions"]["persistence"]["auto_protect"],
+        json!(false)
+    );
+    // Written back beside what it depends on, so a reload cannot end up with the
+    // flag set and nothing to seal to.
+    assert_eq!(
+        output["sessions"]["persistence"]["recipients"],
+        json!(["age1example"])
+    );
+}

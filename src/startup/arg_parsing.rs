@@ -35,9 +35,9 @@ pub(crate) enum StartupMode {
         resize: Option<TerminalResize>,
     },
     /// `zetta mux ...`, forwarded to the multiplexer so the subcommand and the
-    /// `zmux` binary cannot accept different arguments. Startup may append the
-    /// configured default identity for `resume` when no `-i/--identity` was
-    /// supplied.
+    /// `zmux` binary cannot accept different arguments. Startup supplies the
+    /// configured identity as a default for the commands that can need one; an
+    /// explicit `-i/--identity` adds to it rather than replacing it.
     Mux(Vec<OsString>),
     SetTabIcon {
         icon: Option<IconName>,

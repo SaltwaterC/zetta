@@ -174,6 +174,9 @@ objc2-intents = { version = "0.3", default-features = false, features = ["INFocu
 embed-resource = "3"
 
 [dev-dependencies]
+# Already in the graph through zmux; a dev-dependency here so tests can generate
+# a throwaway key pair to seal a session key to.
+age = { version = "0.11.1", default-features = false, features = ["armor", "ssh"] }
 gpui = { path = "zed/crates/gpui", features = ["test-support"] }
 
 [patch.crates-io]

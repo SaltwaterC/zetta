@@ -24,6 +24,19 @@ pub(crate) enum SessionAuthenticationPromptMode {
     ResumeDisk {
         session_id: u64,
     },
+    /// Asking for the passphrase that unlocks an encrypted *identity* file, so
+    /// an automatically protected session's sealed key can be opened.
+    ///
+    /// Not a session secret: nobody chose the key this recovers, and there is
+    /// nothing about the session to type. It exists because `age` otherwise
+    /// falls back to reading the passphrase from a controlling terminal, which a
+    /// window does not have — leaving the identity undecrypted and the failure
+    /// reported as "No matching keys found".
+    #[cfg(feature = "session-persistence")]
+    UnlockSealedSession {
+        runner_id: u64,
+        session_id: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -200,6 +213,91 @@ impl Zetta {
         result
     }
 
+    /// Asks for the passphrase of the encrypted identity file, so an
+    /// automatically protected session's sealed key can be opened.
+    ///
+    /// The counterpart of the identity-passphrase half of
+    /// [`Self::prompt_to_resume_disk_session`], which is where this behaviour
+    /// already worked; a live session had no equivalent, so an encrypted identity
+    /// failed with `age`'s own "No matching keys found".
+    #[cfg(feature = "session-persistence")]
+    pub(crate) fn prompt_to_unlock_sealed_session(
+        &mut self,
+        runner_id: u64,
+        session_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_session_authentication_prompt(
+            SessionAuthenticationPromptMode::UnlockSealedSession {
+                runner_id,
+                session_id,
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Without age there are no sealed sessions to unlock, so nothing reaches
+    /// this; it degrades to the ordinary secret prompt rather than being absent
+    /// and forcing every call site to spell the feature out.
+    #[cfg(not(feature = "session-persistence"))]
+    pub(crate) fn prompt_to_unlock_sealed_session(
+        &mut self,
+        runner_id: u64,
+        session_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.prompt_to_reconnect_session(runner_id, session_id, window, cx);
+    }
+
+    /// Retries the reconnect with the typed identity passphrase.
+    ///
+    /// Deliberately the same entry point the reconnect took the first time, so
+    /// the multiplexer-held, other-process and own-process cases stay in one
+    /// place rather than being re-implemented behind the prompt.
+    #[cfg(feature = "session-persistence")]
+    fn submit_sealed_session_passphrase(
+        &mut self,
+        runner_id: u64,
+        session_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(prompt) = self.session_authentication.as_mut() else {
+            return;
+        };
+        let passphrase = Zeroizing::new(prompt.secret.text.clone());
+        if passphrase.is_empty() {
+            prompt.error = Some("Enter the identity passphrase.".into());
+            cx.notify();
+            return;
+        }
+        prompt.secret.text.zeroize();
+        prompt.error = None;
+        let passphrase = SessionSecret::from_zeroizing(passphrase);
+        let result = self.reconnect_process_background_session(
+            runner_id,
+            session_id,
+            Some(passphrase),
+            window,
+            cx,
+        );
+        if result == ReconnectSessionResult::Reconnected {
+            self.session_authentication = None;
+        } else if let Some(prompt) = self.session_authentication.as_mut() {
+            prompt.working = false;
+            prompt.secret = TextField::default();
+            prompt.error = Some(
+                self.pane_output_error
+                    .take()
+                    .unwrap_or_else(|| "Could not open the identity file.".to_owned()),
+            );
+        }
+        cx.notify();
+    }
+
     fn open_session_authentication_prompt(
         &mut self,
         mode: SessionAuthenticationPromptMode,
@@ -235,6 +333,10 @@ impl Zetta {
             }
             SessionAuthenticationPromptMode::Reconnect { .. }
             | SessionAuthenticationPromptMode::ResumeDisk { .. } => {}
+            // There is no "without": the identity file is encrypted and its
+            // passphrase is the only way to read it.
+            #[cfg(feature = "session-persistence")]
+            SessionAuthenticationPromptMode::UnlockSealedSession { .. } => {}
         }
     }
 
@@ -271,6 +373,15 @@ impl Zetta {
                 prompt.error = Some("Too many failed attempts. Try again shortly.".into());
             }
             cx.notify();
+            return;
+        }
+        #[cfg(feature = "session-persistence")]
+        if let SessionAuthenticationPromptMode::UnlockSealedSession {
+            runner_id,
+            session_id,
+        } = mode
+        {
+            self.submit_sealed_session_passphrase(runner_id, session_id, window, cx);
             return;
         }
         let Some(prompt) = self.session_authentication.as_mut() else {
@@ -316,6 +427,10 @@ impl Zetta {
                 }
             }
             SessionAuthenticationPromptMode::Reconnect { .. } => {}
+            #[cfg(feature = "session-persistence")]
+            SessionAuthenticationPromptMode::UnlockSealedSession { .. } => {
+                unreachable!("the identity passphrase is handled before the verifier")
+            }
         }
         #[cfg(feature = "session-persistence")]
         if let SessionAuthenticationPromptMode::ResumeDisk { session_id } = mode {
@@ -372,6 +487,10 @@ impl Zetta {
                 session_id,
             } => self.process_background_session_authentication(runner_id, session_id, cx),
             SessionAuthenticationPromptMode::ResumeDisk { .. } => None,
+            #[cfg(feature = "session-persistence")]
+            SessionAuthenticationPromptMode::UnlockSealedSession { .. } => {
+                unreachable!("the identity passphrase is handled before the verifier")
+            }
         };
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
@@ -385,6 +504,10 @@ impl Zetta {
                             .map(|verifier| Outcome::Verified(verifier.verify(&secret))),
                         SessionAuthenticationPromptMode::ResumeDisk { .. } => {
                             unreachable!("disk resume is handled before the background verifier")
+                        }
+                        #[cfg(feature = "session-persistence")]
+                        SessionAuthenticationPromptMode::UnlockSealedSession { .. } => {
+                            unreachable!("the identity passphrase is handled before the verifier")
                         }
                     }
                 })
@@ -558,6 +681,9 @@ impl Zetta {
         let can_tab_between_fields = match prompt.mode {
             SessionAuthenticationPromptMode::Protect { .. } => true,
             SessionAuthenticationPromptMode::Reconnect { .. } => false,
+            // One field: the identity's passphrase, and nothing else to type.
+            #[cfg(feature = "session-persistence")]
+            SessionAuthenticationPromptMode::UnlockSealedSession { .. } => false,
             SessionAuthenticationPromptMode::ResumeDisk { .. } => {
                 prompt.disk_protected && prompt.disk_identity_index.is_some()
             }
@@ -681,7 +807,16 @@ impl Zetta {
             SessionAuthenticationPromptMode::Protect { action, .. } => Some(action),
             SessionAuthenticationPromptMode::Reconnect { .. }
             | SessionAuthenticationPromptMode::ResumeDisk { .. } => None,
+            #[cfg(feature = "session-persistence")]
+            SessionAuthenticationPromptMode::UnlockSealedSession { .. } => None,
         };
+        #[cfg(feature = "session-persistence")]
+        let unlocking_sealed_session = matches!(
+            prompt.mode,
+            SessionAuthenticationPromptMode::UnlockSealedSession { .. }
+        );
+        #[cfg(not(feature = "session-persistence"))]
+        let unlocking_sealed_session = false;
         #[cfg(feature = "session-persistence")]
         let disk_identity_required = matches!(
             prompt.mode,
@@ -726,6 +861,7 @@ impl Zetta {
                         .child(
                             Label::new(match action {
                                 Some(action) => action.title(self.no_mux),
+                                None if unlocking_sealed_session => "Unlock your age identity",
                                 None if matches!(
                                     prompt.mode,
                                     SessionAuthenticationPromptMode::ResumeDisk { .. }
@@ -744,6 +880,11 @@ impl Zetta {
                                 .text_color(colors.text_muted)
                                 .child(match action {
                                     Some(action) => action.description(self.no_mux),
+                                    None if unlocking_sealed_session => {
+                                        "This session is protected by your age key. Enter the \
+                                         passphrase for your identity file to open it; the \
+                                         session's own key was generated and is never typed."
+                                    }
                                     None if matches!(
                                         prompt.mode,
                                         SessionAuthenticationPromptMode::ResumeDisk { .. }
@@ -768,11 +909,15 @@ impl Zetta {
                                 .flex_col()
                                 .gap_1()
                                 .child(
-                                    Label::new(if disk_identity_required && !disk_protected {
-                                        "Identity passphrase"
-                                    } else {
-                                        "Session secret"
-                                    })
+                                    Label::new(
+                                        if unlocking_sealed_session
+                                            || (disk_identity_required && !disk_protected)
+                                        {
+                                            "Identity passphrase"
+                                        } else {
+                                            "Session secret"
+                                        },
+                                    )
                                     .size(LabelSize::Small)
                                     .color(Color::Custom(colors.text)),
                                 )
@@ -854,6 +999,7 @@ impl Zetta {
                                         "submit-session-authentication",
                                         match action {
                                             Some(action) => action.submit_label(self.no_mux),
+                                            None if unlocking_sealed_session => "Unlock",
                                             None => "Authenticate",
                                         },
                                     )

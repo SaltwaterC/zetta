@@ -47,6 +47,10 @@ use crate::messages::{ResumeRequest, ResumeSnapshot};
 #[cfg(feature = "session-persistence")]
 use crate::persistence::{DaemonOptionsFile, PersistenceOptions};
 
+// Unconditional: what protects a session is a verifier and, when it was sealed
+// rather than typed, an envelope this crate only ever passes along. Neither
+// needs age, so detach, share and scope carry them in every build.
+use crate::auth::SessionAuthentication;
 #[cfg(feature = "session-persistence")]
 use crate::{auth::SessionSecret, secret_prompt};
 
@@ -890,14 +894,16 @@ impl Client {
         session_id: u64,
         summary: BackgroundSessionSummary,
         state: serde_json::Value,
-        verifier: Option<String>,
+        protection: Option<&SessionAuthentication>,
         snapshots: Vec<(u64, Vec<u8>)>,
     ) -> Result<()> {
         let request = DetachRequest {
             session_id,
             summary,
             state,
-            verifier,
+            verifier: protection.map(|protection| protection.verifier().to_owned()),
+            key_envelope: protection
+                .and_then(|protection| protection.key_envelope().map(str::to_owned)),
             snapshots: snapshots
                 .iter()
                 .map(|(pane_id, bytes)| PaneSnapshot {
@@ -928,14 +934,16 @@ impl Client {
         session_id: u64,
         summary: BackgroundSessionSummary,
         state: serde_json::Value,
-        verifier: Option<String>,
+        protection: Option<&SessionAuthentication>,
         client_process_id: u32,
     ) -> Result<()> {
         let request = DetachRequest {
             session_id,
             summary,
             state,
-            verifier,
+            verifier: protection.map(|protection| protection.verifier().to_owned()),
+            key_envelope: protection
+                .and_then(|protection| protection.key_envelope().map(str::to_owned)),
             snapshots: Vec::new(),
         };
         let mut connection = self.open_attested(Request::Detach(request), client_process_id)?;
@@ -957,14 +965,16 @@ impl Client {
         session_id: u64,
         summary: BackgroundSessionSummary,
         state: serde_json::Value,
-        verifier: Option<String>,
+        protection: Option<&SessionAuthentication>,
         offered: bool,
     ) -> Result<()> {
         let mut connection = self.open(Request::Share(crate::messages::ShareRequest {
             session_id,
             summary,
             state,
-            verifier,
+            verifier: protection.map(|protection| protection.verifier().to_owned()),
+            key_envelope: protection
+                .and_then(|protection| protection.key_envelope().map(str::to_owned)),
             offered,
         }))?;
         match Self::receive(&mut connection)?.0 {
@@ -1009,12 +1019,16 @@ impl Client {
             record_id,
             &identities,
         )?;
+        // Only asked for when the record's protection is a typed secret. An
+        // automatically protected one is opened by `resume_loaded` from the
+        // envelope inside the record, using the identity that just decrypted it.
         let secret = persisted
             .verifier
             .as_ref()
+            .filter(|_| persisted.key_envelope.is_none())
             .map(|_| secret_prompt::prompt_for_reconnect_secret())
             .transpose()?;
-        self.resume_loaded(persisted, secret.as_ref())
+        self.resume_loaded(persisted, secret.as_ref(), &identities)
     }
 
     /// Resumes a record after the caller has handled any UI-specific secret
@@ -1041,7 +1055,9 @@ impl Client {
         identity_passphrases: &[Option<SessionSecret>],
         secret: Option<&SessionSecret>,
     ) -> Result<crate::persistence::PersistedSession> {
-        let identities = crate::persistence::IdentitySet::from_paths_with_passphrases(
+        // Only what the caller collected: this is the entry point a window uses,
+        // and `age`'s own fallback would read `/dev/tty` from the UI thread.
+        let identities = crate::persistence::IdentitySet::from_supplied_passphrases(
             identity_paths,
             identity_passphrases,
         )?;
@@ -1050,20 +1066,34 @@ impl Client {
             record_id,
             &identities,
         )?;
-        self.resume_loaded(persisted, secret)
+        self.resume_loaded(persisted, secret, &identities)
     }
 
+    /// Sends a decrypted record to the daemon, settling its secret first.
+    ///
+    /// A record protected automatically carries its own way in, and the
+    /// identities that opened the record are the identities that open that too —
+    /// so the secret is recovered here rather than asked for by every caller. A
+    /// caller that already has one (a typed secret, or one it recovered itself)
+    /// keeps it: this fills a gap, it does not overrule.
     #[cfg(feature = "session-persistence")]
     fn resume_loaded(
         &self,
         persisted: crate::persistence::PersistedSession,
         secret: Option<&SessionSecret>,
+        identities: &crate::persistence::IdentitySet,
     ) -> Result<crate::persistence::PersistedSession> {
+        let recovered = match (secret, persisted.key_envelope.as_deref()) {
+            (None, Some(envelope)) => Some(crate::auto_protect::open(envelope, identities)?),
+            _ => None,
+        };
+        let secret = secret.or(recovered.as_ref());
         let request = Request::Resume(ResumeRequest {
             record_id: persisted.id,
             summary: persisted.summary.clone(),
             state: persisted.state.clone(),
             verifier: persisted.verifier.clone(),
+            key_envelope: persisted.key_envelope.clone(),
             failed_authentications: persisted.failed_authentications,
             backoff_seconds: persisted.backoff_seconds,
             created_at: persisted.created_at,
@@ -1105,18 +1135,20 @@ impl Client {
     /// Removes a session from the catalog without killing it.
     /// Scopes a backgrounded session to one process, or shares it with all.
     ///
-    /// `verifier` is the secret a joining process will have to present, and is
+    /// `protection` is what a joining process will have to present, and is
     /// required when sharing a session that has none.
     pub fn set_session_scope(
         &self,
         session_id: u64,
         shared: bool,
-        verifier: Option<String>,
+        protection: Option<&SessionAuthentication>,
     ) -> Result<()> {
         let mut connection = self.open(Request::SetSessionScope {
             session_id,
             shared,
-            verifier,
+            verifier: protection.map(|protection| protection.verifier().to_owned()),
+            key_envelope: protection
+                .and_then(|protection| protection.key_envelope().map(str::to_owned)),
         })?;
         match Self::receive(&mut connection)?.0 {
             Response::Ok => Ok(()),

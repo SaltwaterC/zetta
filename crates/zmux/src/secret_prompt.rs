@@ -73,7 +73,10 @@ fn read_secret(prompt: &str) -> Result<Zeroizing<String>> {
         .read(true)
         .write(true)
         .open("/dev/tty")
-        .context("opening the terminal to ask for the session secret")?;
+        // Deliberately not "session secret": this helper also asks for an
+        // identity passphrase, and naming the wrong thing is how the last
+        // failure in this area sent someone looking at the wrong key.
+        .context("opening the terminal to ask for a secret")?;
     write!(terminal, "{prompt}").and_then(|()| terminal.flush())?;
     let echo = EchoOff::disable(&terminal)?;
     let mut reader = BufReader::new(

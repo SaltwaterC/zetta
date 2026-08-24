@@ -45,6 +45,9 @@ pub struct SessionHandover {
     #[serde(default)]
     pub owner: Option<u32>,
     pub verifier: Option<String>,
+    /// As [`crate::upgrade::SessionHandover::key_envelope`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_envelope: Option<String>,
     pub failed_authentications: u32,
     pub refuse_for: Option<Duration>,
     pub panes: Vec<PaneHandover>,

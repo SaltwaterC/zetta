@@ -603,9 +603,9 @@ _zetta_complete() {
                 _zetta_complete_mux_restorable_ids
             elif [[ ${ZETTA_NO_MUX:-0} != 1 && ( ${COMP_WORDS[2]} == share || ${COMP_WORDS[2]} == unshare || ${COMP_WORDS[2]} == kill || ${COMP_WORDS[2]} == forget ) ]] && (( COMP_CWORD == 3 )); then
                 _zetta_complete_mux_session_ids
-            elif [[ ${COMP_WORDS[2]} == resume && ${COMP_WORDS[COMP_CWORD-1]} == --identity ]]; then
+            elif [[ ( ${COMP_WORDS[2]} == resume || ${COMP_WORDS[2]} == reconnect ) && ${COMP_WORDS[COMP_CWORD-1]} == --identity ]]; then
                 COMPREPLY=( $(compgen -f -- "$current") )
-            elif [[ ${COMP_WORDS[2]} == resume ]]; then
+            elif [[ ${COMP_WORDS[2]} == resume || ${COMP_WORDS[2]} == reconnect ]]; then
                 _zetta_compgen '--identity --help'
             else
                 _zetta_compgen '--json --identity --help'

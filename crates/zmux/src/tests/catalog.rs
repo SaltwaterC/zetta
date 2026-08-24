@@ -53,6 +53,7 @@ fn catalog_round_trips_pane_process_details() {
         }],
         held: false,
         scoped_to: None,
+        key_envelope: None,
     };
     publisher
         .publish(&BackgroundSessionCatalog {
@@ -123,6 +124,7 @@ fn catalog_with_session_ids(
                 panes: Vec::new(),
                 held: false,
                 scoped_to: None,
+                key_envelope: None,
             })
             .collect(),
     }
@@ -329,6 +331,7 @@ fn protected_catalog_entries_do_not_publish_session_details_or_verifiers() {
             }],
             held: false,
             scoped_to: None,
+            key_envelope: None,
         }])
         .unwrap();
 
@@ -359,6 +362,7 @@ fn empty_catalog_removes_the_published_file() {
                 panes: Vec::new(),
                 held: false,
                 scoped_to: None,
+                key_envelope: None,
             }],
         })
         .unwrap();

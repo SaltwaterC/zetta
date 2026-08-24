@@ -121,6 +121,7 @@ fn an_ambiguous_bare_session_id_requires_the_full_identifier() {
             panes: Vec::new(),
             held: false,
             scoped_to: None,
+            key_envelope: None,
         }],
     };
 

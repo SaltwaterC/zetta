@@ -17,6 +17,7 @@ fn catalog(process_id: u32, runner_id: u64, session_ids: &[u64]) -> BackgroundSe
                 panes: Vec::new(),
                 held: false,
                 scoped_to: None,
+                key_envelope: None,
             })
             .collect(),
     }

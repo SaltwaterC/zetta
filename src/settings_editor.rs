@@ -97,6 +97,15 @@ impl TextField {
         self.select_all = !self.text.is_empty();
     }
 
+    /// This field as the borrowed shape the shared clipboard shortcuts act on.
+    ///
+    /// `TextField` is one of several ways a surface stores a single-line field;
+    /// see [`crate::text_edit`] for why they all present the same view rather
+    /// than each answering the shortcuts themselves.
+    pub(crate) fn edit(&mut self) -> crate::text_edit::TextEdit<'_> {
+        crate::text_edit::TextEdit::new(&mut self.text, &mut self.cursor, &mut self.select_all)
+    }
+
     fn delete_selection(&mut self) -> bool {
         if !self.select_all {
             return false;
@@ -1249,6 +1258,10 @@ pub struct ConfigurationForm {
     pub session_ring_bytes: TextField,
     pub session_persistence_recipients: TextField,
     pub session_persistence_identity: TextField,
+    /// Whether background sessions are protected with the configured age key
+    /// instead of a secret typed into a dialog. Only meaningful, and only
+    /// offered, alongside a recipient and an identity.
+    pub session_persistence_auto_protect: bool,
     #[cfg(feature = "http-server")]
     pub http_server_port: TextField,
     #[cfg(feature = "tftp-server")]
@@ -1258,6 +1271,18 @@ pub struct ConfigurationForm {
 }
 
 impl ConfigurationForm {
+    /// Whether the automatic-protection toggle should be shown at all.
+    ///
+    /// Read from the form rather than the loaded configuration, so the toggle
+    /// appears as soon as a recipient and an identity have been typed, and goes
+    /// away again if either is cleared. Both the page and the tab order ask this,
+    /// so a control that is not drawn is never a stop the focus ring lands on.
+    #[cfg(feature = "session-persistence")]
+    pub fn session_auto_protect_is_offered(&self) -> bool {
+        !self.session_persistence_recipients.text.trim().is_empty()
+            && !self.session_persistence_identity.text.trim().is_empty()
+    }
+
     pub fn load(path: &Path, config: &Config) -> Result<Self> {
         let root = read_json_or(path, json!({}))?
             .as_object()
@@ -1409,6 +1434,7 @@ impl ConfigurationForm {
             session_ring_bytes: TextField::new(session_ring_bytes.to_string()),
             session_persistence_recipients: TextField::new(session_persistence_recipients),
             session_persistence_identity: TextField::new(session_persistence_identity),
+            session_persistence_auto_protect: config.sessions.persistence.auto_protect,
             #[cfg(feature = "http-server")]
             http_server_port: TextField::new(config.http_server_port.to_string()),
             #[cfg(feature = "tftp-server")]
@@ -1555,6 +1581,7 @@ impl ConfigurationForm {
                 "persistence": {
                     "recipients": recipients,
                     "identity": (!identity.is_empty()).then_some(identity),
+                    "auto_protect": self.session_persistence_auto_protect,
                 },
             }),
         );
@@ -1707,6 +1734,7 @@ fn strip_default_configuration_values(
                 "persistence": {
                     "recipients": [],
                     "identity": null,
+                    "auto_protect": false,
                 },
             }),
         ),

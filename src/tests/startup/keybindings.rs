@@ -824,3 +824,24 @@ fn sharing_a_tab_has_its_own_shortcut() {
         "sharing and detaching are different requests"
     );
 }
+
+/// Cut deliberately avoids the spellings Close All Windows already owns, and
+/// this is what notices if those move: a cut chord that collides with a binding
+/// never reaches the text field — key bindings are dispatched before key-down
+/// listeners — so the collision shows up as a closed window, not a missing
+/// shortcut.
+#[test]
+fn close_all_windows_does_not_claim_a_key_the_cut_shortcut_uses() {
+    let keystrokes = [
+        CLOSE_ALL_WINDOWS_KEYBINDING,
+        #[cfg(target_os = "macos")]
+        macos::MACOS_CLOSE_ALL_WINDOWS_KEYBINDING,
+    ];
+    for binding in keystrokes {
+        let keystroke = gpui::Keystroke::parse(binding).expect("a parseable binding");
+        assert!(
+            !crate::text_edit::is_cut_chord(&keystroke),
+            "{binding} closes all windows, so cut must not answer to it"
+        );
+    }
+}

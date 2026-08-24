@@ -127,6 +127,7 @@ fn protected_sessions_are_redacted_in_the_reconnect_picker() {
         }],
         held: false,
         scoped_to: None,
+        key_envelope: None,
     }]);
 
     assert_eq!(
@@ -187,6 +188,7 @@ fn failed_sessions_show_the_exit_reason_in_the_reconnect_picker() {
         ],
         held: false,
         scoped_to: None,
+        key_envelope: None,
     }]);
 
     assert_eq!(entries.len(), 1);

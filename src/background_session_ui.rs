@@ -216,6 +216,30 @@ impl ProtectedSessionAction {
     }
 }
 
+/// What opening a multiplexer-held session's sealed key produced.
+///
+/// The passphrase case is a state, not an error, because it is answerable: the
+/// window asks for the identity's passphrase and comes back. Collapsing it into
+/// a failure is what made an encrypted SSH identity look like the wrong key.
+#[cfg_attr(not(feature = "session-persistence"), allow(dead_code))]
+pub(crate) enum SealedKeyRecovery {
+    /// Not protected this way, or not something this window can open — the
+    /// caller attaches without a secret and lets the daemon decide.
+    NotSealed,
+    /// The identity file is itself encrypted and no passphrase was supplied yet.
+    NeedsIdentityPassphrase,
+    Recovered(SessionSecret),
+}
+
+/// As [`SealedKeyRecovery`], for a session another Zetta process is holding,
+/// where the proof rather than the secret is what the caller needs.
+#[cfg_attr(not(feature = "session-persistence"), allow(dead_code))]
+pub(crate) enum SealedKeyAuthorization {
+    NotSealed,
+    NeedsIdentityPassphrase,
+    Authorized(VerifiedSession),
+}
+
 impl Zetta {
     pub(crate) fn detach_tab(
         &mut self,
@@ -246,8 +270,64 @@ impl Zetta {
             Some(authentication) => {
                 self.apply_protected_session_action(tab_id, action, authentication, window, cx)
             }
+            #[cfg(feature = "session-persistence")]
+            None if self.auto_protect.is_some() => {
+                self.protect_automatically_and_then(tab_id, action, window, cx)
+            }
             None => self.prompt_for_session_secret(tab_id, action, window, cx),
         }
+    }
+
+    /// Protects a session with the user's age key and then acts, without asking
+    /// for anything.
+    ///
+    /// The dialog exists to settle a secret; here the secret is generated, so
+    /// there is nothing to settle and nothing to show. Argon2id and the age seal
+    /// run on a background thread — the same reason the dialog hashes off the UI
+    /// thread — which is why this is spawned rather than done inline.
+    ///
+    /// A failure falls back to the dialog rather than proceeding: the user asked
+    /// for the session to be protected, and quietly leaving it open to any
+    /// process that can reach the multiplexer is the one outcome they did not
+    /// ask for.
+    #[cfg(feature = "session-persistence")]
+    fn protect_automatically_and_then(
+        &mut self,
+        tab_id: u64,
+        action: ProtectedSessionAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(auto_protect) = self.auto_protect.clone() else {
+            self.prompt_for_session_secret(tab_id, action, window, cx);
+            return;
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            let sealed = cx
+                .background_spawn(async move { auto_protect.seal() })
+                .await;
+            this.update_in(cx, |this, window, cx| match sealed {
+                Ok(sealed) => this.apply_protected_session_action(
+                    tab_id,
+                    action,
+                    Some(sealed.authentication),
+                    window,
+                    cx,
+                ),
+                Err(error) => {
+                    this.show_notice(
+                        format!(
+                            "Could not protect this session with your age key: {error:#}. \
+                             Choose a secret instead."
+                        ),
+                        cx,
+                    );
+                    this.prompt_for_session_secret(tab_id, action, window, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// What already protects this tab's session, if anything.
@@ -281,6 +361,134 @@ impl Zetta {
             .any(|(_, session)| session.id == session_id && session.authentication_required)
         });
         protected.then_some(None)
+    }
+
+    /// The sealed session key a multiplexer-held session publishes, if it has
+    /// one.
+    ///
+    /// Read from the same catalog `existing_protection` reads. The envelope is
+    /// public ciphertext, so finding it here reveals nothing; opening it is what
+    /// needs the private key.
+    #[cfg(feature = "session-persistence")]
+    fn multiplexer_session_key_envelope(&self, session_id: u64) -> Option<String> {
+        crate::background_sessions::read_session_catalogs(
+            &crate::background_sessions::session_catalog_dir(),
+        )
+        .ok()
+        .and_then(|catalogs| {
+            crate::background_sessions::multiplexer_held_catalog_sessions(
+                &catalogs,
+                crate::background_sessions::process_is_zetta,
+                std::process::id(),
+            )
+            .find(|(_, session)| session.id == session_id)
+            .and_then(|(_, session)| session.key_envelope.clone())
+        })
+    }
+
+    /// The secret for a multiplexer-held session this window is about to attach,
+    /// recovered from its sealed key.
+    ///
+    /// `Ok(None)` covers everything that is not automatically protected: an
+    /// unprotected session, a session protected by a typed secret, and — when
+    /// automatic protection is not configured here — one this window simply
+    /// cannot open, which is left to the dialog to report as a failed attempt.
+    /// An `Err` is a configured identity that could not open an envelope, which
+    /// is worth saying plainly rather than turning into an unanswerable prompt.
+    #[cfg(feature = "session-persistence")]
+    fn recovered_session_secret(
+        &self,
+        session_id: u64,
+        passphrase: Option<SessionSecret>,
+    ) -> anyhow::Result<SealedKeyRecovery> {
+        // Checked before the catalog is read. Finding the envelope means reading
+        // and parsing every catalog file, and a window with no automatic
+        // protection configured could do nothing with what it found — so every
+        // reconnect would have paid for it and thrown the answer away.
+        let Some(auto_protect) = self.auto_protect.as_ref() else {
+            return Ok(SealedKeyRecovery::NotSealed);
+        };
+        let Some(envelope) = self.multiplexer_session_key_envelope(session_id) else {
+            return Ok(SealedKeyRecovery::NotSealed);
+        };
+        if passphrase.is_none() && auto_protect.identity_passphrase_required()? {
+            return Ok(SealedKeyRecovery::NeedsIdentityPassphrase);
+        }
+        Ok(SealedKeyRecovery::Recovered(
+            auto_protect.open(&envelope, passphrase)?,
+        ))
+    }
+
+    #[cfg(not(feature = "session-persistence"))]
+    fn recovered_session_secret(
+        &self,
+        _: u64,
+        _: Option<SessionSecret>,
+    ) -> anyhow::Result<SealedKeyRecovery> {
+        Ok(SealedKeyRecovery::NotSealed)
+    }
+
+    /// Proof of authentication for a session another Zetta process — or this one
+    /// — is holding, obtained by opening its sealed key rather than by asking.
+    ///
+    /// The verifier is checked as always, so this is the same proof a typed
+    /// secret produces; only where the secret came from differs. Argon2id runs
+    /// inline here, unlike the dialog's background check, because this whole
+    /// reconnect path already reads catalogs and decrypts, and it answers its
+    /// caller synchronously. That is one hash per reconnect, not per frame.
+    ///
+    /// `None` for anything not protected this way, and for a failure to open —
+    /// the caller falls back to the dialog, which is the right answer for a
+    /// session whose secret really was typed by someone.
+    #[cfg(feature = "session-persistence")]
+    fn authorization_from_sealed_key(
+        &mut self,
+        authentication: &SessionAuthentication,
+        passphrase: Option<SessionSecret>,
+        cx: &mut Context<Self>,
+    ) -> SealedKeyAuthorization {
+        let Some(auto_protect) = self.auto_protect.as_ref() else {
+            return SealedKeyAuthorization::NotSealed;
+        };
+        let Some(envelope) = authentication.key_envelope() else {
+            return SealedKeyAuthorization::NotSealed;
+        };
+        if passphrase.is_none() {
+            match auto_protect.identity_passphrase_required() {
+                Ok(true) => return SealedKeyAuthorization::NeedsIdentityPassphrase,
+                Ok(false) => {}
+                Err(error) => {
+                    self.show_notice(
+                        format!("Could not inspect your age identity: {error:#}"),
+                        cx,
+                    );
+                    return SealedKeyAuthorization::NotSealed;
+                }
+            }
+        }
+        match auto_protect.open(envelope, passphrase) {
+            Ok(secret) => match authentication.verify(secret.expose()) {
+                Some(authorization) => SealedKeyAuthorization::Authorized(authorization),
+                None => SealedKeyAuthorization::NotSealed,
+            },
+            Err(error) => {
+                self.show_notice(
+                    format!("Could not open that session with your age identity: {error:#}"),
+                    cx,
+                );
+                SealedKeyAuthorization::NotSealed
+            }
+        }
+    }
+
+    #[cfg(not(feature = "session-persistence"))]
+    fn authorization_from_sealed_key(
+        &mut self,
+        _: &SessionAuthentication,
+        _: Option<SessionSecret>,
+        _: &mut Context<Self>,
+    ) -> SealedKeyAuthorization {
+        SealedKeyAuthorization::NotSealed
     }
 
     /// Carries out an action once the session's secret is settled.
@@ -435,11 +643,12 @@ impl Zetta {
         // The verifier is what makes sharing safe, and the multiplexer refuses to
         // offer a session that has none: a window joining one is handed whatever
         // its terminals can already do. Scoping a session back needs none, and
-        // leaves the secret it has in place.
-        let verifier = authentication.map(|authentication| authentication.verifier().to_owned());
+        // leaves the secret it has in place. The sealed key, when there is one,
+        // travels inside the authentication so it cannot be separated from the
+        // verifier it belongs to.
         runtime
             .client()
-            .share(session_id, summary, state, verifier, offered)?;
+            .share(session_id, summary, state, authentication.as_ref(), offered)?;
         Ok(true)
     }
 
@@ -637,7 +846,13 @@ impl Zetta {
             ReconnectRequest::None => {}
             ReconnectRequest::Immediate(index) => {
                 let (runner_id, session_id, _, _) = &entries[index];
-                self.reconnect_process_background_session(*runner_id, *session_id, window, cx);
+                self.reconnect_process_background_session(
+                    *runner_id,
+                    *session_id,
+                    None,
+                    window,
+                    cx,
+                );
             }
             ReconnectRequest::Choose => self.reconnect_menu_handle.show(window, cx),
         }
@@ -652,7 +867,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.reconnect_process_background_session(runner_id, session_id, window, cx);
+        self.reconnect_process_background_session(runner_id, session_id, None, window, cx);
     }
 
     #[cfg(feature = "session-persistence")]
@@ -660,23 +875,16 @@ impl Zetta {
         self.launch_config
             .sessions
             .persistence
-            .identity
-            .clone()
-            .map(|path| {
-                if let Some(relative) = path.to_str().and_then(|path| path.strip_prefix("~/")) {
-                    util::paths::home_dir().join(relative)
-                } else {
-                    path
-                }
-            })
+            .resolved_identity()
             .into_iter()
             .collect()
     }
 
-    fn reconnect_process_background_session(
+    pub(crate) fn reconnect_process_background_session(
         &mut self,
         runner_id: u64,
         session_id: u64,
+        identity_passphrase: Option<SessionSecret>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> ReconnectSessionResult {
@@ -700,7 +908,30 @@ impl Zetta {
                 );
                 return ReconnectSessionResult::Rejected;
             }
-            return match self.attach_multiplexer_session(session_id, None, window, cx) {
+            // A session protected with the user's age key publishes the sealed
+            // key beside it, so this window opens that instead of asking for a
+            // secret nobody chose. Recovered before the attach rather than after
+            // an `AuthenticationRequired`, which would cost a second round trip
+            // to learn what the catalog already said.
+            let secret = match self.recovered_session_secret(session_id, identity_passphrase) {
+                Ok(SealedKeyRecovery::Recovered(secret)) => Some(secret),
+                Ok(SealedKeyRecovery::NotSealed) => None,
+                Ok(SealedKeyRecovery::NeedsIdentityPassphrase) => {
+                    // Answerable, so it is asked rather than reported: the
+                    // identity file is encrypted and only its passphrase is
+                    // missing. The session's own key is still never typed.
+                    self.prompt_to_unlock_sealed_session(runner_id, session_id, window, cx);
+                    return ReconnectSessionResult::AuthenticationFailed;
+                }
+                Err(error) => {
+                    self.pane_output_error = Some(format!(
+                        "Could not open that session with your age identity: {error:#}"
+                    ));
+                    cx.notify();
+                    return ReconnectSessionResult::Rejected;
+                }
+            };
+            return match self.attach_multiplexer_session(session_id, secret, window, cx) {
                 Ok(AttachOutcomeSummary::Attached) => ReconnectSessionResult::Reconnected,
                 Ok(AttachOutcomeSummary::AuthenticationRequired)
                 | Ok(AttachOutcomeSummary::AuthenticationFailed) => {
@@ -717,12 +948,17 @@ impl Zetta {
         }
         #[cfg(feature = "session-persistence")]
         if runner_id == crate::background_sessions::RESTORABLE_RUNNER_ID {
-            let protected = zmux::persistence::read_opaque_records(
+            let record = zmux::persistence::read_opaque_records(
                 &crate::background_sessions::session_catalog_dir(),
             )
             .ok()
-            .and_then(|records| records.into_iter().find(|record| record.id == session_id))
-            .is_some_and(|record| record.protected);
+            .and_then(|records| records.into_iter().find(|record| record.id == session_id));
+            // An automatically protected record needs no secret asked for: its
+            // key is sealed inside the very ciphertext the resume is about to
+            // open, and the client recovers it there with the identity that
+            // decrypted the record. The flag is public because this decision has
+            // to be made before anything is decrypted.
+            let protected = record.is_some_and(|record| record.protected && !record.auto_protected);
             return self.prompt_to_resume_disk_session(session_id, protected, window, cx);
         }
         if runner_id != self.background_sessions.runner_id() {
@@ -743,7 +979,26 @@ impl Zetta {
             let verifier = source
                 .read(cx)
                 .background_session_authentication(session_id);
-            if verifier.is_some() {
+            if let Some(verifier) = verifier.as_ref() {
+                // Opened here when the holder protected it with the user's age
+                // key, which this window has too; otherwise it is a secret only a
+                // person knows, so the dialog is the only way through.
+                match self.authorization_from_sealed_key(verifier, identity_passphrase, cx) {
+                    SealedKeyAuthorization::Authorized(authorization) => {
+                        return self.complete_authenticated_reconnect(
+                            runner_id,
+                            session_id,
+                            &authorization,
+                            window,
+                            cx,
+                        );
+                    }
+                    SealedKeyAuthorization::NeedsIdentityPassphrase => {
+                        self.prompt_to_unlock_sealed_session(runner_id, session_id, window, cx);
+                        return ReconnectSessionResult::AuthenticationFailed;
+                    }
+                    SealedKeyAuthorization::NotSealed => {}
+                }
                 self.prompt_to_reconnect_session(runner_id, session_id, window, cx);
                 return ReconnectSessionResult::AuthenticationFailed;
             }
@@ -767,8 +1022,25 @@ impl Zetta {
         let Some(tab) = self.background_sessions.iter().nth(index) else {
             return ReconnectSessionResult::SessionNotFound;
         };
-        if self.background_sessions.authentication_at(index).is_some() {
-            self.prompt_to_reconnect_session(runner_id, tab.id, window, cx);
+        if let Some(verifier) = self.background_sessions.authentication_at(index).cloned() {
+            let tab_id = tab.id;
+            match self.authorization_from_sealed_key(&verifier, identity_passphrase, cx) {
+                SealedKeyAuthorization::Authorized(authorization) => {
+                    return self.complete_authenticated_reconnect(
+                        runner_id,
+                        tab_id,
+                        &authorization,
+                        window,
+                        cx,
+                    );
+                }
+                SealedKeyAuthorization::NeedsIdentityPassphrase => {
+                    self.prompt_to_unlock_sealed_session(runner_id, tab_id, window, cx);
+                    return ReconnectSessionResult::AuthenticationFailed;
+                }
+                SealedKeyAuthorization::NotSealed => {}
+            }
+            self.prompt_to_reconnect_session(runner_id, tab_id, window, cx);
             return ReconnectSessionResult::AuthenticationFailed;
         }
         let session_id = tab.id;
@@ -989,7 +1261,7 @@ impl Zetta {
         let verifier = self.process_background_session_authentication(runner_id, session_id, cx);
         if verifier.is_none() {
             let result = if secret.is_none() {
-                self.reconnect_process_background_session(runner_id, session_id, window, cx)
+                self.reconnect_process_background_session(runner_id, session_id, None, window, cx)
             } else {
                 ReconnectSessionResult::AuthenticationFailed
             };
@@ -1697,6 +1969,9 @@ impl Zetta {
             // The multiplexer decides whose a session is; a client describing
             // one only says what it contains.
             scoped_to: None,
+            // As with the scope: the multiplexer publishes the sealed key from
+            // the protection it was given, so a summary never carries one.
+            key_envelope: None,
         }
     }
 
@@ -1982,13 +2257,9 @@ impl Zetta {
 
         let (summary, state) =
             self.session_publication(tab, session_id, authentication.is_some(), cx)?;
-        runtime.client().detach(
-            session_id,
-            summary,
-            state,
-            authentication.map(|authentication| authentication.verifier().to_owned()),
-            snapshots,
-        )?;
+        runtime
+            .client()
+            .detach(session_id, summary, state, authentication, snapshots)?;
         Ok(true)
     }
 

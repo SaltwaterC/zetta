@@ -74,6 +74,18 @@ impl PartialEq for SessionSecret {
 #[derive(Clone)]
 pub struct SessionAuthentication {
     verifier: Arc<str>,
+    /// The sealed session key, when the secret was generated rather than typed —
+    /// see [`crate::auto_protect`].
+    ///
+    /// Held here rather than passed alongside because the two are only
+    /// meaningful together: a verifier whose envelope went missing is a session
+    /// nobody can open, and an envelope whose verifier was replaced is a way in
+    /// that opens nothing. Every path that carries protection from one process to
+    /// another therefore carries both without having to remember to.
+    ///
+    /// Never read by this module. It is public ciphertext, and opening it needs
+    /// an age identity that the process holding a session deliberately lacks.
+    key_envelope: Option<Arc<str>>,
 }
 
 /// Proof that a secret was checked against a session's verifier. It can only be
@@ -99,7 +111,20 @@ impl SessionAuthentication {
             .map_err(|error| anyhow::anyhow!("hashing session authentication: {error}"))?
             .to_string()
             .into();
-        Ok(Self { verifier })
+        Ok(Self {
+            verifier,
+            key_envelope: None,
+        })
+    }
+
+    /// Records the sealed session key that can give this verifier's secret back
+    /// to whoever holds the matching age identity.
+    ///
+    /// Consuming rather than assigning, so an envelope can only be attached at
+    /// the point a verifier is built from a key that was actually sealed.
+    pub fn with_key_envelope(mut self, envelope: impl Into<Arc<str>>) -> Self {
+        self.key_envelope = Some(envelope.into());
+        self
     }
 
     /// Rebuilds a verifier created elsewhere — the application hashes the
@@ -114,6 +139,7 @@ impl SessionAuthentication {
             .map_err(|error| anyhow::anyhow!("unusable session verifier: {error}"))?;
         Ok(Self {
             verifier: verifier.into(),
+            key_envelope: None,
         })
     }
 
@@ -122,6 +148,14 @@ impl SessionAuthentication {
     /// in the catalog.
     pub fn verifier(&self) -> &str {
         &self.verifier
+    }
+
+    /// The sealed session key, when this session was protected automatically.
+    ///
+    /// `None` for a typed secret: there is nothing to recover, because only the
+    /// person who chose it knows it.
+    pub fn key_envelope(&self) -> Option<&str> {
+        self.key_envelope.as_deref()
     }
 
     /// Checks `secret` against this verifier, returning proof of the check on

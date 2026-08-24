@@ -11753,6 +11753,7 @@ dependencies = [
 name = "zetta"
 version = "0.1.0"
 dependencies = [
+ "age",
  "anyhow",
  "arboard",
  "argon2",

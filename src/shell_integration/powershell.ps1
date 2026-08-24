@@ -308,7 +308,7 @@ $zettaCompletions = {
                 }
                 elseif ($noMux -and $words[2] -notin 'list', 'reconnect') { @() }
                 elseif ($words[2] -eq 'stop') { '--force', '--help' }
-                elseif ($words[2] -eq 'resume') { '--identity', '--help' }
+                elseif ($words[2] -in 'resume', 'reconnect') { '--identity', '--help' }
                 else { '--json', '--help' }
             }
             'splits' { '--help' }

@@ -88,6 +88,16 @@ pub struct PersistedSession {
     pub summary: BackgroundSessionSummary,
     pub state: serde_json::Value,
     pub verifier: Option<String>,
+    /// The sealed session key that goes with `verifier`, when the secret was
+    /// generated rather than typed. See
+    /// [`crate::protocol::BackgroundSessionSummary::key_envelope`].
+    ///
+    /// Kept inside the record's own ciphertext, which is doubly encrypted and
+    /// deliberately so: the record and the envelope are sealed to the same
+    /// recipients, so one routine opens a session key wherever it is found and
+    /// the disk path needs no special case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_envelope: Option<String>,
     pub failed_authentications: u32,
     pub backoff_seconds: u64,
     pub snapshots: Vec<PersistedSnapshot>,
@@ -110,6 +120,10 @@ struct PersistedSessionMetadata {
     summary: BackgroundSessionSummary,
     state: serde_json::Value,
     verifier: Option<String>,
+    /// As [`PersistedSession::key_envelope`]. Defaulted so a record written
+    /// before automatic protection existed still loads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    key_envelope: Option<String>,
     failed_authentications: u32,
     backoff_seconds: u64,
     snapshots: Vec<SnapshotLocation>,
@@ -181,7 +195,7 @@ impl RecipientSet {
         self.post_quantum
     }
 
-    fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
+    pub(crate) fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
         anyhow::ensure!(
             !self.recipients.is_empty(),
             "no persistence recipients configured"
@@ -220,20 +234,59 @@ impl fmt::Debug for IdentitySet {
     }
 }
 
+/// Where a passphrase comes from when an identity file turns out to be
+/// encrypted and the caller supplied none.
+///
+/// A command line may ask at the controlling terminal. A window may not: `age`'s
+/// callbacks read `/dev/tty` directly, so in a window that either finds nothing
+/// or — when the window was launched from a terminal — blocks on input nobody
+/// can see they are being asked for, with the UI thread waiting on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PassphraseSource {
+    /// Ask at the controlling terminal when nothing was supplied.
+    Terminal,
+    /// Use only what the caller supplied; a missing passphrase is a failure.
+    ///
+    /// This is what every caller inside a window wants, and it is what makes an
+    /// undetected encrypted identity a prompt error rather than a hang.
+    SuppliedOnly,
+}
+
 impl IdentitySet {
     /// Loads native age, PQ, and SSH identity files. Files may be repeated by
     /// callers in the same way `age -i` is repeatable.
+    ///
+    /// An encrypted file is asked about at the controlling terminal, so this is
+    /// for command lines only — see [`Self::from_supplied_passphrases`].
     pub fn from_paths(paths: &[PathBuf]) -> Result<Self> {
         Self::from_paths_with_passphrases(paths, &[])
     }
 
-    /// Loads identity files with positional passphrases collected by a caller.
-    /// A missing passphrase keeps the normal terminal prompt for standalone
-    /// clients; GUI callers can therefore provide passphrases without making
-    /// the daemon or the GUI depend on a controlling terminal.
+    /// Loads identity files with positional passphrases collected by a caller,
+    /// asking at the controlling terminal for any that are missing.
     pub fn from_paths_with_passphrases(
         paths: &[PathBuf],
         passphrases: &[Option<SessionSecret>],
+    ) -> Result<Self> {
+        Self::load(paths, passphrases, PassphraseSource::Terminal)
+    }
+
+    /// Loads identity files using only the passphrases the caller collected.
+    ///
+    /// The loader for a window: an encrypted identity with no passphrase fails
+    /// here instead of reaching for a terminal that either is not there or is
+    /// not being watched.
+    pub fn from_supplied_passphrases(
+        paths: &[PathBuf],
+        passphrases: &[Option<SessionSecret>],
+    ) -> Result<Self> {
+        Self::load(paths, passphrases, PassphraseSource::SuppliedOnly)
+    }
+
+    fn load(
+        paths: &[PathBuf],
+        passphrases: &[Option<SessionSecret>],
+        source: PassphraseSource,
     ) -> Result<Self> {
         let mut identities = Vec::new();
         for (index, path) in paths.iter().enumerate() {
@@ -241,7 +294,7 @@ impl IdentitySet {
                 .get(index)
                 .and_then(Option::as_ref)
                 .map(|passphrase| age::secrecy::SecretString::from(passphrase.expose()));
-            load_identity_file(path, &mut identities, passphrase)?;
+            load_identity_file(path, &mut identities, passphrase, source)?;
         }
         anyhow::ensure!(!identities.is_empty(), "no identities were found");
         Ok(Self { identities })
@@ -298,6 +351,7 @@ fn load_session_from_persistence_directory(
         summary: metadata.summary,
         state: metadata.state,
         verifier: metadata.verifier,
+        key_envelope: metadata.key_envelope,
         failed_authentications: metadata.failed_authentications,
         backoff_seconds: metadata.backoff_seconds,
         snapshots,
@@ -771,6 +825,7 @@ fn bech32_polymod(hrp: &[u8], values: &[u8]) -> u32 {
 #[derive(Clone)]
 struct PromptCallbacks {
     passphrase: Option<age::secrecy::SecretString>,
+    source: PassphraseSource,
 }
 
 impl age::Callbacks for PromptCallbacks {
@@ -786,6 +841,11 @@ impl age::Callbacks for PromptCallbacks {
 
     fn request_passphrase(&self, description: &str) -> Option<age::secrecy::SecretString> {
         self.passphrase.clone().or_else(|| {
+            // A window must never end up here: the read is on `/dev/tty` and the
+            // caller is on the UI thread.
+            if self.source == PassphraseSource::SuppliedOnly {
+                return None;
+            }
             secret_prompt::prompt_for_passphrase(description)
                 .ok()
                 .map(|secret| age::secrecy::SecretString::from(secret.as_str().to_owned()))
@@ -798,6 +858,7 @@ enum PassphraseIdentityState {
         bytes: Vec<u8>,
         filename: String,
         passphrase: Option<age::secrecy::SecretString>,
+        source: PassphraseSource,
     },
     Loaded(Vec<Box<dyn age::Identity + Send + Sync>>),
     Failed(age::DecryptError),
@@ -812,12 +873,14 @@ impl PassphraseIdentity {
         bytes: Vec<u8>,
         filename: String,
         passphrase: Option<age::secrecy::SecretString>,
+        source: PassphraseSource,
     ) -> Self {
         Self {
             state: Mutex::new(PassphraseIdentityState::Encrypted {
                 bytes,
                 filename,
                 passphrase,
+                source,
             }),
         }
     }
@@ -838,7 +901,13 @@ impl PassphraseIdentity {
                 bytes,
                 filename,
                 passphrase,
-            } => match decrypt_passphrase_identity_file(&bytes, &filename, passphrase.as_ref()) {
+                source,
+            } => match decrypt_passphrase_identity_file(
+                &bytes,
+                &filename,
+                passphrase.as_ref(),
+                source,
+            ) {
                 Ok(identities) => {
                     *state = PassphraseIdentityState::Loaded(identities);
                 }
@@ -916,6 +985,7 @@ fn load_identity_file(
     path: &Path,
     identities: &mut Vec<Box<dyn age::Identity + Send + Sync>>,
     passphrase: Option<age::secrecy::SecretString>,
+    source: PassphraseSource,
 ) -> Result<()> {
     let bytes = read_identity_file(path)?;
     if bytes.starts_with(b"age-encryption.org/v1")
@@ -925,10 +995,11 @@ fn load_identity_file(
             bytes,
             path.display().to_string(),
             passphrase,
+            source,
         )));
         return Ok(());
     }
-    identities.extend(parse_identity_file_bytes(&bytes, path, passphrase)?);
+    identities.extend(parse_identity_file_bytes(&bytes, path, passphrase, source)?);
     Ok(())
 }
 
@@ -936,6 +1007,7 @@ fn parse_identity_file_bytes(
     bytes: &[u8],
     path: &Path,
     passphrase: Option<age::secrecy::SecretString>,
+    source: PassphraseSource,
 ) -> Result<Vec<Box<dyn age::Identity + Send + Sync>>> {
     let mut identities = Vec::new();
     if std::str::from_utf8(bytes).is_ok_and(|text| text.contains("-----BEGIN")) {
@@ -944,8 +1016,10 @@ fn parse_identity_file_bytes(
             Some(path.display().to_string()),
         )
         .with_context(|| format!("parsing SSH identity file {}", path.display()))?;
-        identities.push(Box::new(ssh.with_callbacks(PromptCallbacks { passphrase }))
-            as Box<dyn age::Identity + Send + Sync>);
+        identities.push(
+            Box::new(ssh.with_callbacks(PromptCallbacks { passphrase, source }))
+                as Box<dyn age::Identity + Send + Sync>,
+        );
         return Ok(identities);
     }
     let text = std::str::from_utf8(bytes).context("identity file was not UTF-8")?;
@@ -975,12 +1049,17 @@ fn decrypt_passphrase_identity_file(
     bytes: &[u8],
     filename: &str,
     passphrase: Option<&age::secrecy::SecretString>,
+    source: PassphraseSource,
 ) -> std::result::Result<Vec<Box<dyn age::Identity + Send + Sync>>, age::DecryptError> {
     let decryptor =
         age::Decryptor::new_buffered(age::armor::ArmoredReader::new(Cursor::new(bytes)))?;
     let passphrase = passphrase
         .cloned()
         .or_else(|| {
+            // As in `PromptCallbacks`: a window has no terminal to ask at.
+            if source == PassphraseSource::SuppliedOnly {
+                return None;
+            }
             secret_prompt::prompt_for_passphrase(&format!(
                 "Enter passphrase for encrypted identity file {filename}:"
             ))
@@ -999,8 +1078,13 @@ fn decrypt_passphrase_identity_file(
     reader
         .read_to_end(&mut plaintext)
         .map_err(age::DecryptError::Io)?;
-    parse_identity_file_bytes(&plaintext, Path::new(filename), None)
-        .map_err(|_| age::DecryptError::InvalidHeader)
+    parse_identity_file_bytes(
+        &plaintext,
+        Path::new(filename),
+        None,
+        PassphraseSource::SuppliedOnly,
+    )
+    .map_err(|_| age::DecryptError::InvalidHeader)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1146,6 +1230,7 @@ impl PersistenceStore {
             summary: session.summary.clone(),
             state: session.state.clone(),
             verifier: session.verifier.clone(),
+            key_envelope: session.key_envelope.clone(),
             failed_authentications: session.failed_authentications,
             backoff_seconds: session.backoff_seconds,
             snapshots,
@@ -1163,6 +1248,7 @@ impl PersistenceStore {
             .find(|record| record.id == session.id)
             .map_or(session.created_at, |record| record.created_at);
         let protected = session.verifier.is_some() || session.summary.authentication_required;
+        let auto_protected = session.key_envelope.is_some();
         if let Some(record) = self
             .manifest
             .records
@@ -1173,6 +1259,7 @@ impl PersistenceStore {
             record.metadata_bytes = ciphertext.len() as u64;
             record.snapshot_bytes = snapshot_bytes;
             record.protected = protected;
+            record.auto_protected = auto_protected;
             record.restorable = restorable;
         } else {
             self.manifest.records.push(RestorableRecord {
@@ -1183,6 +1270,7 @@ impl PersistenceStore {
                 snapshot_bytes,
                 scrollback_bytes: 0,
                 protected,
+                auto_protected,
                 restorable,
             });
         }

@@ -270,6 +270,7 @@ fn summary(session_id: u64, pane_id: u64) -> BackgroundSessionSummary {
         panes: Vec::new(),
         held: false,
         scoped_to: None,
+        key_envelope: None,
     }
 }
 
@@ -390,11 +391,8 @@ fn configure_retries_once_after_an_unsupported_request() {
 /// to the process that made it until somebody says otherwise, and the
 /// multiplexer refuses an attach from anywhere else.
 /// The verifier for [`TEST_SECRET`], as a client creates one before sharing.
-fn test_verifier() -> String {
-    zmux::auth::SessionAuthentication::create(TEST_SECRET)
-        .expect("creating the session verifier")
-        .verifier()
-        .to_owned()
+fn test_verifier() -> zmux::auth::SessionAuthentication {
+    zmux::auth::SessionAuthentication::create(TEST_SECRET).expect("creating the session verifier")
 }
 
 fn share_session(client: &Client, session_id: u64, pane_id: u64) {
@@ -404,7 +402,7 @@ fn share_session(client: &Client, session_id: u64, pane_id: u64) {
             session_id,
             summary(session_id, pane_id),
             serde_json::Value::Null,
-            Some(verifier),
+            Some(&verifier),
             true,
         )
         .expect("sharing the session");
@@ -694,16 +692,13 @@ fn protected_disk_resume_preserves_failed_authentication_backoff() {
     let descriptor = std::fs::File::from(pane.descriptor);
     read_until(&descriptor, "ready");
     drop(descriptor);
-    let verifier = zmux::auth::SessionAuthentication::create("correct secret")
-        .unwrap()
-        .verifier()
-        .to_owned();
+    let verifier = zmux::auth::SessionAuthentication::create("correct secret").unwrap();
     client
         .detach(
             pane.session_id,
             summary(pane.session_id, pane.pane_id),
             serde_json::json!({"protected": true}),
-            Some(verifier),
+            Some(&verifier),
             Vec::new(),
         )
         .unwrap();
@@ -715,11 +710,14 @@ fn protected_disk_resume_preserves_failed_authentication_backoff() {
     std::fs::write(&identity_path, format!("{}\n", encoded.expose_secret())).unwrap();
     let client = daemon.client();
     let (_, records) = client.list_with_restorable().unwrap();
-    assert!(
-        records
-            .iter()
-            .any(|record| record.id == pane.session_id && record.protected)
-    );
+    let record = records
+        .iter()
+        .find(|record| record.id == pane.session_id)
+        .expect("the protected record survives the daemon");
+    assert!(record.protected);
+    // The other half of what `auto_protected` means: a secret someone typed is
+    // not something a key can be recovered for, so a caller must still ask.
+    assert!(!record.auto_protected);
 
     let wrong = client.resume_with_secret(
         pane.session_id,
@@ -970,16 +968,13 @@ fn a_protected_session_needs_its_secret() {
     read_until(&descriptor, "ready");
     drop(descriptor);
 
-    let verifier = zmux::auth::SessionAuthentication::create("correct horse")
-        .unwrap()
-        .verifier()
-        .to_owned();
+    let verifier = zmux::auth::SessionAuthentication::create("correct horse").unwrap();
     client
         .detach(
             pane.session_id,
             summary(pane.session_id, pane.pane_id),
             serde_json::Value::Null,
-            Some(verifier),
+            Some(&verifier),
             Vec::new(),
         )
         .unwrap();
@@ -1321,16 +1316,13 @@ fn an_upgrade_keeps_the_sessions_and_their_processes() {
     read_until(&descriptor, "ready");
     drop(descriptor);
 
-    let verifier = zmux::auth::SessionAuthentication::create("correct horse")
-        .unwrap()
-        .verifier()
-        .to_owned();
+    let verifier = zmux::auth::SessionAuthentication::create("correct horse").unwrap();
     client
         .detach(
             pane.session_id,
             summary(pane.session_id, pane.pane_id),
             serde_json::json!({"tab": "state"}),
-            Some(verifier),
+            Some(&verifier),
             Vec::new(),
         )
         .unwrap();
@@ -2733,7 +2725,7 @@ fn a_client_joining_a_shared_session_gets_its_layout_as_it_is_now() {
                     session_id,
                     summary(session_id, pane_id),
                     serde_json::json!({"panes": 2}),
-                    Some(test_verifier()),
+                    Some(&test_verifier()),
                     true,
                 )
                 .expect("refreshing the shared session");
@@ -4080,7 +4072,7 @@ fn protected_controls_reject_a_claimed_owner_without_peer_authority() {
         )
         .unwrap();
     client
-        .set_session_scope(pane.session_id, true, Some(test_verifier()))
+        .set_session_scope(pane.session_id, true, Some(&test_verifier()))
         .unwrap();
 
     for error in [
@@ -4477,4 +4469,386 @@ fn an_upgrade_connects_to_a_multiplexer_of_another_protocol_version() {
         "the session was dropped; log:\n{}",
         daemon.log()
     );
+}
+
+/// A session protected with a key sealed to the user's recipients is attached by
+/// opening that key, with nothing typed. The daemon is unchanged by this: it
+/// checks an Argon2id verifier exactly as it does for a secret someone chose.
+#[cfg(feature = "session-persistence")]
+#[test]
+fn an_automatically_protected_session_is_attached_by_opening_its_sealed_key() {
+    let identity = age::x25519::Identity::generate();
+    let recipients =
+        zmux::persistence::RecipientSet::parse(&[identity.to_public().to_string()]).unwrap();
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; sleep 60"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+    drop(descriptor);
+
+    let sealed = zmux::auto_protect::seal(&recipients).unwrap();
+    client
+        .detach(
+            pane.session_id,
+            summary(pane.session_id, pane.pane_id),
+            serde_json::json!({"sealed": true}),
+            Some(&sealed.authentication),
+            Vec::new(),
+        )
+        .unwrap();
+
+    // The envelope is published, because it is public ciphertext and the party
+    // it helps is the one holding the private key.
+    let listed = client
+        .list()
+        .unwrap()
+        .into_iter()
+        .find(|session| session.id == pane.session_id)
+        .expect("the detached session is listed");
+    assert!(listed.authentication_required);
+    let envelope = listed
+        .key_envelope
+        .expect("an automatically protected session publishes its sealed key");
+
+    // Nothing typed: the key comes out of the envelope with the identity.
+    let identity_path = daemon.config.join("identity.txt");
+    std::fs::write(
+        &identity_path,
+        format!("{}\n", identity.to_string().expose_secret()),
+    )
+    .unwrap();
+    let identities =
+        zmux::persistence::IdentitySet::from_paths(std::slice::from_ref(&identity_path)).unwrap();
+    let secret = zmux::auto_protect::open(&envelope, &identities).unwrap();
+
+    assert!(
+        matches!(
+            client
+                .attach(
+                    pane.session_id,
+                    Some(pane.pane_id),
+                    Some(secret.expose().to_owned())
+                )
+                .unwrap(),
+            AttachOutcome::Attached { .. }
+        ),
+        "the recovered key should attach the session"
+    );
+}
+
+/// Without the sealed key the session is exactly as closed as any other
+/// protected one — the envelope being published does not weaken it.
+#[cfg(feature = "session-persistence")]
+#[test]
+fn a_published_envelope_does_not_let_an_unopened_session_be_attached() {
+    let identity = age::x25519::Identity::generate();
+    let recipients =
+        zmux::persistence::RecipientSet::parse(&[identity.to_public().to_string()]).unwrap();
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; sleep 60"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+    drop(descriptor);
+
+    let sealed = zmux::auto_protect::seal(&recipients).unwrap();
+    client
+        .detach(
+            pane.session_id,
+            summary(pane.session_id, pane.pane_id),
+            serde_json::json!({}),
+            Some(&sealed.authentication),
+            Vec::new(),
+        )
+        .unwrap();
+
+    let listed = client
+        .list()
+        .unwrap()
+        .into_iter()
+        .find(|session| session.id == pane.session_id)
+        .unwrap();
+    let envelope = listed.key_envelope.unwrap();
+
+    // A stranger holds the envelope but not the key it was sealed to.
+    let other = age::x25519::Identity::generate();
+    let stranger_path = daemon.config.join("stranger.txt");
+    std::fs::write(
+        &stranger_path,
+        format!("{}\n", other.to_string().expose_secret()),
+    )
+    .unwrap();
+    let strangers =
+        zmux::persistence::IdentitySet::from_paths(std::slice::from_ref(&stranger_path)).unwrap();
+    assert!(zmux::auto_protect::open(&envelope, &strangers).is_err());
+
+    // And the envelope itself is not a secret the daemon will take.
+    assert!(
+        matches!(
+            client
+                .attach(pane.session_id, Some(pane.pane_id), Some(envelope))
+                .unwrap(),
+            AttachOutcome::AuthenticationFailed
+        ),
+        "the envelope must not authenticate"
+    );
+}
+
+/// A disk record carries its own way in, so resuming it needs no secret — and
+/// the manifest says so before anything is decrypted, which is what lets a
+/// caller decide not to prompt.
+#[cfg(feature = "session-persistence")]
+#[test]
+fn an_automatically_protected_disk_record_resumes_without_a_secret() {
+    let identity = age::x25519::Identity::generate();
+    let recipient = identity.to_public().to_string();
+    let recipients =
+        zmux::persistence::RecipientSet::parse(std::slice::from_ref(&recipient)).unwrap();
+    let mut daemon = TestDaemon::start_with_recipient(&recipient);
+    let client = daemon.client();
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; sleep 60"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+    drop(descriptor);
+
+    let sealed = zmux::auto_protect::seal(&recipients).unwrap();
+    client
+        .detach(
+            pane.session_id,
+            summary(pane.session_id, pane.pane_id),
+            serde_json::json!({"resumed": true}),
+            Some(&sealed.authentication),
+            Vec::new(),
+        )
+        .unwrap();
+    drop(client);
+    daemon.restart_with_recovery();
+
+    let client = daemon.client();
+    let record = client
+        .list_with_restorable()
+        .unwrap()
+        .1
+        .into_iter()
+        .find(|record| record.id == pane.session_id)
+        .expect("the record survives the daemon");
+    assert!(record.protected);
+    assert!(
+        record.auto_protected,
+        "the manifest has to say so before the record can be opened"
+    );
+
+    let identity_path = daemon.config.join("identity.txt");
+    std::fs::write(
+        &identity_path,
+        format!("{}\n", identity.to_string().expose_secret()),
+    )
+    .unwrap();
+    let restored = client
+        .resume_with_secret(pane.session_id, std::slice::from_ref(&identity_path), None)
+        .expect("the sealed key inside the record opens it");
+    assert_eq!(restored.state, serde_json::json!({"resumed": true}));
+}
+
+/// The deadlock automatic protection created: a protected session whose window
+/// has exited could not be reached at all.
+///
+/// Attaching it refuses because it is still scoped to that window and says to
+/// share it — which is what `attach` tells the user to do — and sharing refused
+/// in turn because the owner it named was gone. Before every backgrounded
+/// session was protected this was rare; afterwards it was the ordinary outcome
+/// of closing a window, and the session and its processes were stranded.
+#[test]
+fn a_protected_session_whose_window_exited_can_still_be_offered() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    // A real process, so the daemon's liveness check is exercised rather than a
+    // pid that never existed; it is reaped before the session is shared.
+    let owner = Command::new("/bin/sleep").arg("120").spawn().unwrap();
+    let owner_pid = owner.id();
+    let pane = client
+        .spawn(spawn_request_as(None, "printf ready; sleep 120", owner_pid))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+    drop(descriptor);
+    client
+        .detach_as(
+            pane.session_id,
+            summary(pane.session_id, pane.pane_id),
+            serde_json::Value::Null,
+            Some(&test_verifier()),
+            owner_pid,
+        )
+        .unwrap();
+
+    // While that window is alive its scope is its own business, and a stranger
+    // must not override it.
+    let refused = client
+        .set_session_scope(pane.session_id, true, None)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.contains("protected"),
+        "a live owner's scope must stand: {refused}"
+    );
+
+    reap(owner);
+
+    // With the window gone, offering it is the documented way out and now works.
+    client
+        .set_session_scope(pane.session_id, true, None)
+        .unwrap();
+
+    // Offering changed no secret: the session is still gated by the one it had.
+    assert!(
+        matches!(
+            client
+                .attach(pane.session_id, Some(pane.pane_id), None)
+                .unwrap(),
+            AttachOutcome::AuthenticationRequired
+        ),
+        "sharing a stranded session must not unprotect it"
+    );
+    assert!(
+        matches!(
+            client
+                .attach(
+                    pane.session_id,
+                    Some(pane.pane_id),
+                    Some(TEST_SECRET.to_owned())
+                )
+                .unwrap(),
+            AttachOutcome::Attached { .. }
+        ),
+        "the session's own secret still opens it"
+    );
+}
+
+/// The half that stays with the owner: offering a stranded session may not carry
+/// a new verifier, or anyone could seize a protected session by replacing the
+/// secret that gates it and then attaching with their own.
+#[test]
+fn a_stranded_session_cannot_be_seized_by_replacing_its_verifier() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let owner = Command::new("/bin/sleep").arg("120").spawn().unwrap();
+    let owner_pid = owner.id();
+    let pane = client
+        .spawn(spawn_request_as(None, "printf ready; sleep 120", owner_pid))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+    drop(descriptor);
+    client
+        .detach_as(
+            pane.session_id,
+            summary(pane.session_id, pane.pane_id),
+            serde_json::Value::Null,
+            Some(&test_verifier()),
+            owner_pid,
+        )
+        .unwrap();
+    reap(owner);
+
+    let seized = zmux::auth::SessionAuthentication::create("attacker's secret").unwrap();
+    let refused = client
+        .set_session_scope(pane.session_id, true, Some(&seized))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.contains("protected"),
+        "replacing the verifier is not part of the escape hatch: {refused}"
+    );
+
+    // And the original secret is untouched.
+    client
+        .set_session_scope(pane.session_id, true, None)
+        .unwrap();
+    assert!(matches!(
+        client
+            .attach(
+                pane.session_id,
+                Some(pane.pane_id),
+                Some("attacker's secret".to_owned())
+            )
+            .unwrap(),
+        AttachOutcome::AuthenticationFailed
+    ));
+}
+
+/// A pane's remembered size is a stand-in on Unix: a client resizes through the
+/// descriptor it holds and tells the multiplexer nothing, so only the pty knows
+/// the real geometry. `--upgrade` recorded the stand-in and rebuilt the retained
+/// screen from it in the next image, re-wrapping a full-screen program's screen
+/// at a width it was never drawn at — htop came back as fragments of itself.
+#[cfg(all(unix, feature = "scrollback-buffer"))]
+#[test]
+fn an_upgrade_keeps_the_retained_screen_at_the_width_it_was_drawn_at() {
+    use std::os::fd::AsRawFd as _;
+
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; sleep 60"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+
+    // What a window does after its first layout, and what the multiplexer never
+    // hears about: the spawn asked for the stand-in geometry, this is the real
+    // one.
+    let size = libc::winsize {
+        ws_row: 40,
+        ws_col: 120,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    assert_eq!(
+        unsafe { libc::ioctl(descriptor.as_raw_fd(), libc::TIOCSWINSZ, &size) },
+        0,
+        "resizing the pty"
+    );
+
+    // Wider than the stand-in, so a grid rebuilt at the wrong width has to wrap
+    // it and the damage is visible in the replay.
+    let line = "W".repeat(100);
+    drop(descriptor);
+    client
+        .detach(
+            pane.session_id,
+            summary(pane.session_id, pane.pane_id),
+            serde_json::Value::Null,
+            None,
+            vec![(pane.pane_id, line.clone().into_bytes())],
+        )
+        .unwrap();
+
+    client.upgrade().unwrap();
+    let client = daemon.client();
+
+    match client
+        .attach(
+            pane.session_id,
+            Some(pane.pane_id),
+            Some(TEST_SECRET.to_owned()),
+        )
+        .unwrap()
+    {
+        AttachOutcome::Attached { pane, .. } => {
+            let replay = String::from_utf8_lossy(&pane.replay).into_owned();
+            assert!(
+                replay.contains(&line),
+                "the retained screen was re-wrapped by the upgrade: {replay:?}"
+            );
+        }
+        _ => panic!("attach failed"),
+    }
 }

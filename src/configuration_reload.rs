@@ -266,6 +266,11 @@ impl Zetta {
         self.profiles = config.profiles.clone();
         self.working_directory = config.working_directory.clone();
         self.launch_config = config;
+        // Rebuilt here rather than lazily at the next detach: the recipients may
+        // have changed, and a `github:` alias among them is a network fetch that
+        // must not land on the keystroke that detaches a tab.
+        #[cfg(feature = "session-persistence")]
+        self.refresh_auto_protect(cx);
         self.project_detection_base = project_detection_base;
         self.projects.configs.clear();
         for project in project_configs {

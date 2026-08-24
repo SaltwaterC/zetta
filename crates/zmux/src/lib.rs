@@ -10,6 +10,8 @@
 //! `zetta mux`, which forwards to [`run`].
 
 pub mod auth;
+#[cfg(feature = "session-persistence")]
+pub mod auto_protect;
 pub mod catalog;
 pub mod paths;
 #[cfg(feature = "session-persistence")]
@@ -69,7 +71,9 @@ Options:
   -j, --json            Print machine-readable JSON (with list)
   -r, --retention MODE  What to keep of a detached pane's output:
                         none, memory (default), or disk
-  -i, --identity PATH  Identity file for resume; may be repeated
+  -i, --identity PATH   Age identity file for resuming a disk record and for
+                        opening a session protected by your key; may be
+                        repeated. Defaults to the configured identity.
   -h, --help            Print help
   -v, --version         Print the version, and the protocol it speaks";
 
@@ -236,8 +240,27 @@ fn ensure_unambiguous_session_id(
     Ok(())
 }
 
+/// Client-side settings that only the caller can know.
+///
+/// `zmux` is deliberately free of Zetta's configuration format — a session
+/// holder on a small remote host has no business parsing it — but the identity
+/// a user configured once should not have to be retyped as `--identity` on every
+/// command. So the binaries built beside Zetta pass what they have already
+/// parsed, and the standalone one passes nothing.
+#[derive(Clone, Debug, Default)]
+pub struct ClientDefaults {
+    /// Age identity files, as `--identity` would have given them. Used to open a
+    /// session protected by the user's key, and to decrypt a disk record.
+    pub identity_paths: Vec<std::path::PathBuf>,
+}
+
 /// The entry point shared by the `zmux` binary and `zetta mux`.
 pub fn run(arguments: &[OsString]) -> Result<()> {
+    run_with_defaults(arguments, ClientDefaults::default())
+}
+
+/// [`run`], with the client-side settings the caller has already resolved.
+pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Result<()> {
     let no_mux = no_mux_environment();
     let mut json = false;
     let mut daemon = false;
@@ -253,7 +276,11 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
     let mut resume_from: Option<std::path::PathBuf> = None;
     #[cfg(feature = "session-persistence")]
     let mut daemon_options = None;
-    let mut identity_paths = Vec::new();
+    // Explicit paths append to the configured ones rather than replacing them,
+    // which is how `age -i` composes and what lets a second key be tried without
+    // having to restate the first.
+    let mut identity_paths = defaults.identity_paths;
+    let configured_identity_count = identity_paths.len();
     let mut expect_identity = false;
     #[cfg(not(feature = "session-persistence"))]
     let daemon_options = None;
@@ -445,8 +472,9 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
     anyhow::ensure!(!expect_retention, "--retention requires a mode");
     anyhow::ensure!(!expect_identity, "--identity requires a path");
     anyhow::ensure!(
-        identity_paths.is_empty() || command.as_deref() == Some("resume"),
-        "--identity is only valid with the resume command"
+        identity_paths.len() == configured_identity_count
+            || matches!(command.as_deref(), Some("resume") | Some("reconnect")),
+        "--identity is only valid with the resume and reconnect commands"
     );
     anyhow::ensure!(
         !expect_retention_bytes,
@@ -511,7 +539,7 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
     match command.as_deref() {
         Some("reconnect") => {
             let session = session.context_missing()?;
-            reconnect::run_reconnect_session(&session.to_string())
+            reconnect::run_reconnect_session(&session.to_string(), &identity_paths)
         }
         Some("stop") => {
             match stop(&paths::session_catalog_dir(), force)? {
@@ -579,14 +607,13 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
             // required, as the dialog in a window offers it — and not offered
             // at all for a session that already has one, because a second
             // secret would replace the one whoever knows it is expecting.
-            let verifier = match (shared, session_is_protected(&client, session)?) {
+            let protection = match (shared, session_is_protected(&client, session)?) {
                 (true, false) => secret_prompt::prompt_for_optional_secret()?
                     .map(|secret| auth::SessionAuthentication::create(secret.expose()))
-                    .transpose()?
-                    .map(|authentication| authentication.verifier().to_owned()),
+                    .transpose()?,
                 _ => None,
             };
-            client.set_session_scope(session, shared, verifier)?;
+            client.set_session_scope(session, shared, protection.as_ref())?;
             if shared {
                 println!("Shared session {session} with every Zetta process.");
             } else {

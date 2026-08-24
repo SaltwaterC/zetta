@@ -381,6 +381,30 @@ impl Zetta {
         let Some(prompt) = self.multi_command.as_mut() else {
             return;
         };
+        // Settled before this prompt's own keys, so `Ctrl-X` cuts rather than
+        // typing an `x` and `Shift-Delete` cuts rather than forward-deleting.
+        let edit = TextEdit::new(
+            &mut prompt.query,
+            &mut prompt.cursor,
+            &mut prompt.select_all,
+        );
+        match apply_clipboard_shortcut(edit, &event.keystroke, cx) {
+            ClipboardOutcome::Ignored => {}
+            ClipboardOutcome::Unchanged => {
+                cx.notify();
+                return;
+            }
+            ClipboardOutcome::Edited => {
+                // The same bookkeeping typing does: a stale completion no longer
+                // describes the query, and a previous error no longer describes
+                // what is in the field.
+                prompt.clear_completion();
+                prompt.error = None;
+                prompt.mark_query_changed();
+                cx.notify();
+                return;
+            }
+        }
         match event.keystroke.key.as_str() {
             "escape" => self.dismiss_multi_command(window, cx),
             "enter" if prompt.accept_completion() => cx.notify(),

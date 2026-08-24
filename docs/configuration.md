@@ -149,7 +149,8 @@ screen retained while a pane is detached or shared with:
         "age1example...",
         "github:example-user"
       ],
-      "identity": "~/.config/age/zetta-identity.txt"
+      "identity": "~/.config/age/zetta-identity.txt",
+      "auto_protect": false
     }
   }
 }
@@ -178,6 +179,32 @@ hint to `"disk"`.
 If an SSH identity produces an `unknown cipher "aes256-gcm@openssh.com"` error
 when it is passed to `age`, see [SSH identity cipher
 compatibility](background-sessions.md#ssh-identity-cipher-compatibility).
+
+### Protecting sessions with your key instead of a secret
+
+`persistence.auto_protect` replaces the secret dialog with your age key pair.
+Detaching, keeping, or sharing a tab then generates a 256-bit session key,
+protects the session with it exactly as a typed secret would, and seals that key
+to `persistence.recipients`. Reattaching opens the sealed key with
+`persistence.identity`, so no secret is asked for in either direction — in a
+window, or from `zmux reconnect` and `zmux resume`.
+
+The session is still protected: attaching requires opening the sealed key, which
+requires the private key. The multiplexer is unchanged by this — it stores the
+same Argon2id verifier and never sees the identity.
+
+It needs both a recipient and an identity, and the settings page only offers the
+toggle once both are set, because either one missing would create sessions that
+cannot be reattached. It applies under every `sessions.retention` mode; only the
+recipients matter, not disk persistence.
+
+**Lose the identity and automatically protected sessions cannot be reattached.**
+There is no recovery path by design: the key exists only inside the envelope.
+Keep a backup of the identity file, or add a second recipient you control.
+
+Automatically protected sessions are listed as `Protected session` with no pane
+details, the same as any other protected session, so the reconnect picker shows
+less about them than it does for an unprotected detach.
 
 The `--retention` option is a bootstrap option for an independently launched
 `zmux --daemon`; it is not a live-state report. Zetta starts its daemon with

@@ -244,6 +244,7 @@ fn session_summary(session_id: u64, pane_id: u64) -> BackgroundSessionSummary {
         panes: Vec::new(),
         held: false,
         scoped_to: None,
+        key_envelope: None,
     }
 }
 
@@ -783,6 +784,7 @@ fn detached_conpty_reader_stops_before_exclusive_reattach() {
                 panes: Vec::new(),
                 held: false,
                 scoped_to: Some(std::process::id()),
+                key_envelope: None,
             },
             serde_json::Value::Null,
             None,
@@ -992,6 +994,7 @@ fn protected_controls_reject_a_claimed_owner_without_peer_authority() {
             session_id,
             shared: false,
             verifier: None,
+            key_envelope: None,
         },
     ] {
         let name = format!("{request:?}");

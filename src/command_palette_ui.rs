@@ -269,6 +269,27 @@ impl Zetta {
             }
             return;
         };
+        // Settled before the palette's own keys, so `Ctrl-X` cuts rather than
+        // typing an `x` and `Shift-Delete` cuts rather than forward-deleting.
+        let edit = TextEdit::new(
+            &mut palette.query,
+            &mut palette.cursor,
+            &mut palette.select_all,
+        );
+        match apply_clipboard_shortcut(edit, &event.keystroke, cx) {
+            ClipboardOutcome::Ignored => {}
+            ClipboardOutcome::Unchanged => {
+                cx.notify();
+                return;
+            }
+            ClipboardOutcome::Edited => {
+                // The query is the filter, so a cut or a paste has to rebuild the
+                // match list rather than only redraw it.
+                palette.refresh_matches();
+                cx.notify();
+                return;
+            }
+        }
         match event.keystroke.key.as_str() {
             "escape" => self.dismiss_command_palette(window, cx),
             "up" => {
@@ -385,6 +406,20 @@ impl Zetta {
         let Some(buffer) = tab.rename_buffer.as_mut() else {
             return;
         };
+        // Settled before this prompt's own keys, so `Ctrl-X` cuts rather than
+        // typing an `x` and `Shift-Delete` cuts rather than forward-deleting.
+        let edit = TextEdit::new(buffer, &mut tab.rename_cursor, &mut tab.rename_select_all);
+        match apply_clipboard_shortcut(edit, &event.keystroke, cx) {
+            ClipboardOutcome::Ignored => {}
+            ClipboardOutcome::Unchanged | ClipboardOutcome::Edited => {
+                cx.notify();
+                cx.stop_propagation();
+                return;
+            }
+        }
+        let Some(buffer) = tab.rename_buffer.as_mut() else {
+            return;
+        };
         match event.keystroke.key.as_str() {
             "enter" => {
                 let title = buffer.trim().to_string();
@@ -490,6 +525,20 @@ impl Zetta {
         let Some(tab) = self.tabs.get_mut(self.active_tab) else {
             return;
         };
+        let Some(buffer) = tab.overlay_buffer.as_mut() else {
+            return;
+        };
+        // Settled before this prompt's own keys, so `Ctrl-X` cuts rather than
+        // typing an `x` and `Shift-Delete` cuts rather than forward-deleting.
+        let edit = TextEdit::new(buffer, &mut tab.overlay_cursor, &mut tab.overlay_select_all);
+        match apply_clipboard_shortcut(edit, &event.keystroke, cx) {
+            ClipboardOutcome::Ignored => {}
+            ClipboardOutcome::Unchanged | ClipboardOutcome::Edited => {
+                cx.notify();
+                cx.stop_propagation();
+                return;
+            }
+        }
         let Some(buffer) = tab.overlay_buffer.as_mut() else {
             return;
         };

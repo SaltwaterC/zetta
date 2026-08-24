@@ -7,6 +7,8 @@ mod config;
 #[cfg(feature = "http-server")]
 mod http_server;
 mod mux;
+#[cfg(feature = "session-persistence")]
+mod mux_identity;
 #[cfg(feature = "notifications")]
 mod notification_sounds;
 mod process_control;
@@ -20,10 +22,13 @@ mod serial_console;
 #[cfg(servers_enabled)]
 mod server_ui;
 mod session_auth_ui;
+#[cfg(feature = "session-persistence")]
+mod session_auto_protect;
 mod session_state;
 mod settings_editor;
 mod shell_integration;
 mod silent_mode;
+mod text_edit;
 #[cfg(tftp_enabled)]
 mod tftp;
 mod theme_extensions;
@@ -107,6 +112,7 @@ use terminal_view::{
     SearchNextMatch, SearchPreviousMatch, SearchScrollback, SelectAll, SelectAllSearchText,
     TerminalInput, TerminalView, TerminalViewEvent,
 };
+use text_edit::{ClipboardOutcome, TextEdit, apply_clipboard_shortcut, is_copy_chord};
 use theme::{
     ActiveTheme, ClientDecorationsExt as _, GlobalTheme, SystemAppearance, Theme, ThemeColors,
     ThemeRegistry,

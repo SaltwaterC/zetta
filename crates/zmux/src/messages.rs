@@ -181,6 +181,11 @@ pub enum Request {
         /// process can join unchallenged hands it whatever its terminals can
         /// already do, which for a shell that has answered `sudo` is root.
         verifier: Option<String>,
+        /// The sealed session key that goes with `verifier`, when the secret was
+        /// generated rather than typed. See
+        /// [`crate::protocol::BackgroundSessionSummary::key_envelope`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key_envelope: Option<String>,
     },
     /// Removes a session from the catalog without killing it. The session
     /// continues running under the daemon but is no longer listed or
@@ -263,6 +268,11 @@ pub struct DetachRequest {
     /// An Argon2id verifier, when reattaching is to require a secret. Absent
     /// leaves an already-protected session's verifier as it is.
     pub verifier: Option<String>,
+    /// The sealed session key that goes with `verifier`, when the secret was
+    /// generated rather than typed. See
+    /// [`crate::protocol::BackgroundSessionSummary::key_envelope`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_envelope: Option<String>,
     /// Per pane, the screen the client was showing, replayed on the next
     /// attach so reattaching does not start from a blank terminal.
     pub snapshots: Vec<PaneSnapshot>,
@@ -275,6 +285,10 @@ pub struct ResumeRequest {
     pub summary: BackgroundSessionSummary,
     pub state: serde_json::Value,
     pub verifier: Option<String>,
+    /// As [`DetachRequest::key_envelope`], read back out of the record the
+    /// client has just decrypted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_envelope: Option<String>,
     pub failed_authentications: u32,
     pub backoff_seconds: u64,
     pub created_at: u64,
@@ -317,6 +331,9 @@ pub struct ShareRequest {
     pub state: serde_json::Value,
     /// As [`DetachRequest::verifier`].
     pub verifier: Option<String>,
+    /// As [`DetachRequest::key_envelope`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_envelope: Option<String>,
     /// Whether the session is being offered or withdrawn.
     ///
     /// Withdrawing stops the session being listed and attachable; it does not

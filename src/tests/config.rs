@@ -458,6 +458,69 @@ fn disk_session_persistence_round_trips_as_an_overlay() {
         config.sessions.persistence.identity,
         Some(PathBuf::from("~/.config/age/identity.txt"))
     );
+    assert!(!config.sessions.persistence.auto_protect);
+}
+
+#[cfg(feature = "session-persistence")]
+#[test]
+fn automatic_session_protection_parses_and_is_off_by_default() {
+    let with_flag = Config::parse(
+        r#"{"sessions":{"persistence":{"recipients":["age1example"],"auto_protect":true}}}"#,
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(with_flag.sessions.persistence.auto_protect);
+
+    let without = Config::parse(r#"{"sessions":{"persistence":{}}}"#, None, None).unwrap();
+    assert!(!without.sessions.persistence.auto_protect);
+
+    let error = Config::parse(
+        r#"{"sessions":{"persistence":{"auto_protect":"yes"}}}"#,
+        None,
+        None,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("auto_protect"));
+}
+
+/// The flag on its own is never enough: without a recipient there is nothing to
+/// seal a key to, and without an identity there is nothing to open it again.
+/// Either way the session would be protected by something nobody can produce.
+#[cfg(feature = "session-persistence")]
+#[test]
+fn automatic_protection_is_only_configured_with_a_recipient_and_an_identity() {
+    let configured = |document| {
+        Config::parse(document, None, None)
+            .unwrap()
+            .sessions
+            .persistence
+            .auto_protect_is_configured()
+    };
+    assert!(configured(
+        r#"{"sessions":{"persistence":{"recipients":["age1example"],"identity":"/keys/id.txt","auto_protect":true}}}"#
+    ));
+    assert!(!configured(
+        r#"{"sessions":{"persistence":{"recipients":["age1example"],"identity":"/keys/id.txt"}}}"#
+    ));
+    assert!(!configured(
+        r#"{"sessions":{"persistence":{"identity":"/keys/id.txt","auto_protect":true}}}"#
+    ));
+    assert!(!configured(
+        r#"{"sessions":{"persistence":{"recipients":["age1example"],"auto_protect":true}}}"#
+    ));
+}
+
+#[cfg(feature = "session-persistence")]
+#[test]
+fn an_unrecognized_persistence_field_is_still_rejected() {
+    let error = Config::parse(
+        r#"{"sessions":{"persistence":{"auto_protct":true}}}"#,
+        None,
+        None,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("auto_protct"));
 }
 
 #[cfg(not(feature = "session-persistence"))]
@@ -1347,4 +1410,58 @@ fn validates_inactive_pane_opacity() {
     assert!(parse_inactive_pane_opacity(&serde_json::json!(-0.1)).is_err());
     assert!(parse_inactive_pane_opacity(&serde_json::json!(1.1)).is_err());
     assert!(parse_inactive_pane_opacity(&serde_json::json!("dim")).is_err());
+}
+
+/// `src/mux_identity.rs` reads `sessions.persistence.identity` on its own so the
+/// `zmux` binary need not parse a whole configuration. This is what keeps the
+/// two readers agreeing about what that field means, including the `~/` shorthand
+/// they both have to expand.
+#[cfg(feature = "session-persistence")]
+#[test]
+fn the_command_line_identity_reader_agrees_with_the_configuration_parser() {
+    let directory = tempfile::tempdir().unwrap();
+    for identity in ["/keys/zetta.txt", "~/keys/zetta.txt"] {
+        let path = directory.path().join("config.json");
+        let document = format!(r#"{{"sessions":{{"persistence":{{"identity":"{identity}"}}}}}}"#);
+        std::fs::write(&path, &document).unwrap();
+
+        let parsed = Config::parse(&document, None, None)
+            .unwrap()
+            .sessions
+            .persistence
+            .resolved_identity();
+        let read = crate::mux_identity::configured_identity_paths(Some(path));
+
+        assert_eq!(read, parsed.into_iter().collect::<Vec<_>>(), "{identity}");
+    }
+}
+
+/// And they agree about absence, which is the case that decides whether a
+/// command asks for an identity at all.
+#[cfg(feature = "session-persistence")]
+#[test]
+fn both_identity_readers_treat_an_unset_identity_the_same_way() {
+    let directory = tempfile::tempdir().unwrap();
+    for document in [
+        r#"{"sessions":{"persistence":{}}}"#,
+        r#"{"sessions":{"persistence":{"identity":null}}}"#,
+        r#"{}"#,
+    ] {
+        let path = directory.path().join("config.json");
+        std::fs::write(&path, document).unwrap();
+
+        assert!(
+            Config::parse(document, None, None)
+                .unwrap()
+                .sessions
+                .persistence
+                .resolved_identity()
+                .is_none(),
+            "{document}"
+        );
+        assert!(
+            crate::mux_identity::configured_identity_paths(Some(path)).is_empty(),
+            "{document}"
+        );
+    }
 }

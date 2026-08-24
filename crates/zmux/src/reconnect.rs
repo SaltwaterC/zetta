@@ -29,6 +29,11 @@ struct SessionTarget {
     runner_id: u64,
     session_id: u64,
     authentication_required: bool,
+    /// The sealed session key, when this session was protected with the user's
+    /// age key rather than a typed secret. Opening it is what stands in for the
+    /// prompt, so a build without age has nothing to do with it.
+    #[cfg_attr(not(feature = "session-persistence"), allow(dead_code))]
+    key_envelope: Option<String>,
     /// Whether the multiplexer holds this session rather than a Zetta
     /// process. The published process is then the multiplexer's, which has no
     /// Zetta control endpoint to receive a reconnect request.
@@ -55,27 +60,24 @@ enum ReconnectSessionResult {
 }
 
 /// Opens a catalogued session in a Zetta window.
-pub fn run_reconnect_session(identifier: &str) -> Result<()> {
+pub fn run_reconnect_session(identifier: &str, identity_paths: &[PathBuf]) -> Result<()> {
     #[cfg(any(unix, windows))]
     {
-        run_reconnect_session_supported(identifier)
+        run_reconnect_session_supported(identifier, identity_paths)
     }
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = identifier;
+        let _ = (identifier, identity_paths);
         anyhow::bail!("session reconnect is not supported on this platform");
     }
 }
 
 #[cfg(any(unix, windows))]
-fn run_reconnect_session_supported(identifier: &str) -> Result<()> {
+fn run_reconnect_session_supported(identifier: &str, identity_paths: &[PathBuf]) -> Result<()> {
     let catalogs = read_session_catalogs(&paths::session_catalog_dir())?;
     let target = find_session(&catalogs, identifier)?;
     let origin = reconnect_origin();
-    let secret = target
-        .authentication_required
-        .then(crate::secret_prompt::prompt_for_reconnect_secret)
-        .transpose()?;
+    let secret = session_secret_for(&target, identity_paths)?;
     // A session the multiplexer holds is published under its process, which
     // has no Zetta control endpoint. Route through the originating Zetta
     // process when this command came from a Zetta terminal; asking the
@@ -118,6 +120,45 @@ fn run_reconnect_session_supported(identifier: &str) -> Result<()> {
     }
 }
 
+/// What this session needs to be opened: nothing, a key recovered from its
+/// envelope, or a secret typed at the terminal.
+///
+/// A protected session that carries an envelope is one the user's age key can
+/// open, so asking them for a passphrase would be asking for something they
+/// never chose and could not know — the secret is 256 random bits. A failure to
+/// open it is therefore reported rather than fallen back on, because falling
+/// back would land on an unanswerable prompt.
+#[cfg(any(unix, windows))]
+fn session_secret_for(
+    target: &SessionTarget,
+    identity_paths: &[PathBuf],
+) -> Result<Option<SessionSecret>> {
+    if !target.authentication_required {
+        return Ok(None);
+    }
+    #[cfg(feature = "session-persistence")]
+    if let Some(envelope) = target.key_envelope.as_deref() {
+        anyhow::ensure!(
+            !identity_paths.is_empty(),
+            "session {} is protected by your age key, but no identity is configured; \
+             set sessions.persistence.identity or pass --identity PATH",
+            target.session_id
+        );
+        // The same helper the disk resume uses, so an encrypted identity is asked
+        // about by name and once, rather than through `age`'s own callback with
+        // whatever description it happens to pass.
+        let passphrases = prompt_for_identity_passphrases(identity_paths)?;
+        let identities = crate::persistence::IdentitySet::from_paths_with_passphrases(
+            identity_paths,
+            &passphrases,
+        )?;
+        return crate::auto_protect::open(envelope, &identities).map(Some);
+    }
+    #[cfg(not(feature = "session-persistence"))]
+    let _ = identity_paths;
+    crate::secret_prompt::prompt_for_reconnect_secret().map(Some)
+}
+
 fn find_session(catalogs: &[BackgroundSessionCatalog], identifier: &str) -> Result<SessionTarget> {
     let target = if identifier.contains(':') {
         let identifier = parse_session_identifier(identifier)?;
@@ -136,6 +177,7 @@ fn find_session(catalogs: &[BackgroundSessionCatalog], identifier: &str) -> Resu
                     runner_id: identifier.runner_id,
                     session_id: identifier.session_id,
                     authentication_required: session.authentication_required,
+                    key_envelope: session.key_envelope.clone(),
                     multiplexer_held: !process_is_zetta(identifier.process_id),
                     scoped_to: session.scoped_to,
                 })
@@ -153,6 +195,7 @@ fn find_session(catalogs: &[BackgroundSessionCatalog], identifier: &str) -> Resu
                         runner_id: catalog.runner_id,
                         session_id,
                         authentication_required: session.authentication_required,
+                        key_envelope: session.key_envelope.clone(),
                         multiplexer_held: !process_is_zetta(catalog.process_id),
                         scoped_to: session.scoped_to,
                     })
@@ -312,10 +355,13 @@ pub fn try_run_resume_disk_session(identifier: &str, identity_paths: &[PathBuf])
 
         let directory = paths::session_catalog_dir();
         let records = crate::persistence::read_opaque_records(&directory)?;
-        let protected = records
-            .iter()
-            .find(|record| record.id == session_id)
-            .is_some_and(|record| record.protected);
+        let record = records.iter().find(|record| record.id == session_id);
+        // An automatically protected record carries its own key, sealed inside
+        // the ciphertext the resuming window is about to open with the same
+        // identity. Nothing to ask for — and nothing that could be answered,
+        // since that key was never typed.
+        let protected = record.is_some_and(|record| record.protected)
+            && !record.is_some_and(|record| record.auto_protected);
         let secret = protected
             .then(crate::secret_prompt::prompt_for_reconnect_secret)
             .transpose()?;

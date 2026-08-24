@@ -96,6 +96,28 @@ impl Zetta {
         let Some(picker) = self.theme_picker.as_mut() else {
             return;
         };
+        // Settled before this picker's own keys, so `Ctrl-X` cuts rather than
+        // typing an `x` and `Shift-Delete` cuts rather than forward-deleting.
+        let edit = TextEdit::new(
+            &mut picker.query,
+            &mut picker.cursor,
+            &mut picker.select_all,
+        );
+        match apply_clipboard_shortcut(edit, &event.keystroke, cx) {
+            ClipboardOutcome::Ignored => {}
+            ClipboardOutcome::Unchanged => {
+                cx.notify();
+                return;
+            }
+            ClipboardOutcome::Edited => {
+                // The query filters the theme list, so a cut or a paste rebuilds
+                // it rather than only redrawing.
+                picker.refresh_matches();
+                picker.selected = 0;
+                cx.notify();
+                return;
+            }
+        }
         match event.keystroke.key.as_str() {
             "escape" => self.dismiss_pane_theme_picker(window, cx),
             "up" => {

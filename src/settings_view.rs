@@ -40,9 +40,9 @@ impl Zetta {
         };
         let setting_row = |label: &'static str,
                            description: &'static str,
-                           focused: bool,
+                           control_id: SettingsControl,
                            control: gpui::AnyElement| {
-            widgets.setting_row(label, description, focused, control)
+            widgets.setting_row(label, description, control_id, control)
         };
         let setting_toggle = |id: &'static str, value: bool, toggle: SettingsToggle| {
             widgets.setting_toggle(id, value, toggle)

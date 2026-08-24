@@ -60,13 +60,30 @@ pub(crate) fn track_focus_scroll(
     editor: &SettingsEditor,
     controls: &[SettingsControl],
 ) -> Div {
-    let Some((target, requested_offset)) = editor.focus_scroll_request.as_ref() else {
+    track_focus_scroll_from(
+        element,
+        editor.focus_scroll_request.as_ref(),
+        &editor.settings_scroll,
+        controls,
+    )
+}
+
+/// [`track_focus_scroll`] for a builder that snapshots what it needs rather than
+/// holding the editor — see [`super::form_widgets::SettingsFormWidgets`], which
+/// renders the Configuration page in its own view.
+pub(crate) fn track_focus_scroll_from(
+    element: Div,
+    request: Option<&(SettingsControl, Pixels)>,
+    settings_scroll: &ScrollHandle,
+    controls: &[SettingsControl],
+) -> Div {
+    let Some((target, requested_offset)) = request else {
         return element;
     };
     if !controls.iter().any(|candidate| candidate == target) {
         return element;
     }
-    let scroll = editor.settings_scroll.clone();
+    let scroll = settings_scroll.clone();
     let requested_offset = *requested_offset;
     element.on_children_prepainted(move |bounds, window, _| {
         let Some(control) = bounds

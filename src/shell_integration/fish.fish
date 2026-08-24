@@ -470,7 +470,7 @@ function __zetta_long_options
             if test "$ZETTA_NO_MUX" = 1
                 printf '%s\t%s\n' --json 'Print machine-readable JSON' --help 'Print help' --version 'Print version'
             else
-                printf '%s\t%s\n' --json 'Print machine-readable JSON' --force 'Stop even while sessions are running' --upgrade 'Replace the multiplexer, keeping its sessions' --identity 'Identity file for resume' --help 'Print help' --version 'Print version'
+                printf '%s\t%s\n' --json 'Print machine-readable JSON' --force 'Stop even while sessions are running' --upgrade 'Replace the multiplexer, keeping its sessions' --identity 'Age identity file for resume and reconnect' --help 'Print help' --version 'Print version'
             end
         case benchmark-output
             printf '%s\t%s\n' \
@@ -634,7 +634,7 @@ complete -c zetta -n '__fish_seen_subcommand_from mux; and __fish_seen_subcomman
 complete -c zetta -n '__fish_seen_subcommand_from mux; and __zetta_mux_daemon_commands' -l force -d 'Stop even while sessions are running'
 complete -c zetta -n '__fish_seen_subcommand_from mux; and __zetta_mux_daemon_commands' -l upgrade -d 'Replace the multiplexer, keeping its sessions'
 complete -c zetta -n '__fish_seen_subcommand_from mux' -l json -d 'Print machine-readable JSON'
-complete -c zetta -n '__fish_seen_subcommand_from mux; and __zetta_mux_daemon_commands' -l identity -r -F -d 'Identity file for resume'
+complete -c zetta -n '__fish_seen_subcommand_from mux; and __zetta_mux_daemon_commands' -l identity -r -F -d 'Age identity file for resume and reconnect'
 complete -c zetta -n '__fish_seen_subcommand_from mux' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from mux' -a '(__zetta_long_options mux)'
 complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l resize -d 'Resize the current pane'
@@ -814,7 +814,7 @@ complete -c zmux -n '__fish_seen_subcommand_from share unshare kill forget; and 
 complete -c zmux -n '__zetta_mux_daemon_commands' -l force -d 'Stop even while sessions are running'
 complete -c zmux -n '__zetta_mux_daemon_commands' -l upgrade -d 'Replace the multiplexer, keeping its sessions'
 complete -c zmux -l json -d 'Print machine-readable JSON'
-complete -c zmux -l identity -r -F -d 'Identity file for resume'
+complete -c zmux -l identity -r -F -d 'Age identity file for resume and reconnect'
 complete -c zmux -l help -d 'Print help'
 complete -c zmux -l version -d 'Print version'
 complete -c zmux -a '(__zetta_long_options mux)'

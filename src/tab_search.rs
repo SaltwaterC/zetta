@@ -315,6 +315,28 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Settled before this overlay's own keys, so `Ctrl-X` cuts rather than
+        // typing an `x` and `Shift-Delete` cuts rather than forward-deleting.
+        if let Some(search) = self.tab_search.as_mut() {
+            let edit = TextEdit::new(
+                &mut search.query,
+                &mut search.cursor,
+                &mut search.select_all,
+            );
+            match apply_clipboard_shortcut(edit, &event.keystroke, cx) {
+                ClipboardOutcome::Ignored => {}
+                ClipboardOutcome::Unchanged => {
+                    cx.notify();
+                    return;
+                }
+                ClipboardOutcome::Edited => {
+                    // The query drives the match list, so a cut or a paste has to
+                    // run the search again rather than only redraw.
+                    self.refresh_tab_search(cx);
+                    return;
+                }
+            }
+        }
         match event.keystroke.key.as_str() {
             "escape" => self.dismiss_tab_search(window, cx),
             "enter" | "f3" if event.keystroke.modifiers.shift => self.navigate_tab_search(true, cx),
@@ -387,11 +409,6 @@ impl Zetta {
                     search.select_all = !search.query.is_empty();
                 }
                 cx.notify();
-            }
-            "v" if event.keystroke.modifiers.control || event.keystroke.modifiers.platform => {
-                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                    self.insert_tab_search_text(&text, cx);
-                }
             }
             _ if !event.keystroke.modifiers.control
                 && !event.keystroke.modifiers.platform

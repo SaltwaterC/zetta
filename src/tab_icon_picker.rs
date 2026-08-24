@@ -357,6 +357,27 @@ impl Zetta {
             return;
         }
         cx.stop_propagation();
+        // Settled before this picker's own keys, so `Ctrl-X` cuts rather than
+        // typing an `x` and `Shift-Delete` cuts rather than forward-deleting.
+        if let Some(picker) = self.tab_icon_picker.as_mut() {
+            match apply_clipboard_shortcut(picker.query.edit(), &event.keystroke, cx) {
+                ClipboardOutcome::Ignored => {}
+                ClipboardOutcome::Unchanged => {
+                    cx.notify();
+                    return;
+                }
+                ClipboardOutcome::Edited => {
+                    // The query filters the icon grid, so the selection returns
+                    // to the first match rather than pointing into the old one.
+                    picker.selected = 0;
+                    picker
+                        .scroll
+                        .scroll_to_item(tab_icon_row(picker.selected), ScrollStrategy::Nearest);
+                    cx.notify();
+                    return;
+                }
+            }
+        }
         if event.keystroke.key == "escape" {
             self.dismiss_tab_icon_picker(window, cx);
             return;

@@ -129,6 +129,32 @@ impl Zetta {
                     )),
                     SettingsControl::Dropdown(SettingsDropdown::WorkingDirectoryScope),
                     SettingsControl::Numeric(NumericSetting::ScrollHistory),
+                    // The background-session block, in the order the page draws
+                    // it: between the scrollback setting and the appearance
+                    // toggles. It used to be listed after the pane-control
+                    // dropdowns, which put it late in the tab order and early on
+                    // the page — and since `scroll_settings_control_into_view`
+                    // maps tab position onto the scroll range, focusing one of
+                    // these fields scrolled it out of view.
+                    SettingsControl::Dropdown(SettingsDropdown::SessionRetention),
+                    SettingsControl::Numeric(NumericSetting::SessionRingBytes),
+                    #[cfg(feature = "session-persistence")]
+                    SettingsControl::Input(SettingsInput::Configuration(
+                        ConfigTextField::SessionPersistenceRecipients,
+                    )),
+                    #[cfg(feature = "session-persistence")]
+                    SettingsControl::Input(SettingsInput::Configuration(
+                        ConfigTextField::SessionPersistenceIdentity,
+                    )),
+                ]);
+                // Only in the tab order while the page is actually drawing it —
+                // a control that cannot be seen but can still be tabbed to is a
+                // stop where the focus ring lands on nothing.
+                #[cfg(feature = "session-persistence")]
+                if editor.configuration.session_auto_protect_is_offered() {
+                    controls.push(SettingsControl::Toggle(SettingsToggle::SessionAutoProtect));
+                }
+                controls.extend([
                     SettingsControl::Opacity,
                     SettingsControl::Toggle(SettingsToggle::CompactMode),
                     SettingsControl::Toggle(SettingsToggle::PaneSize),
@@ -140,16 +166,6 @@ impl Zetta {
                     SettingsControl::RequestFocusStatusAccess,
                     SettingsControl::Dropdown(SettingsDropdown::PaneControlsPosition),
                     SettingsControl::Dropdown(SettingsDropdown::PaneControlsDefaultVisibility),
-                    SettingsControl::Dropdown(SettingsDropdown::SessionRetention),
-                    SettingsControl::Numeric(NumericSetting::SessionRingBytes),
-                    #[cfg(feature = "session-persistence")]
-                    SettingsControl::Input(SettingsInput::Configuration(
-                        ConfigTextField::SessionPersistenceRecipients,
-                    )),
-                    #[cfg(feature = "session-persistence")]
-                    SettingsControl::Input(SettingsInput::Configuration(
-                        ConfigTextField::SessionPersistenceIdentity,
-                    )),
                 ]);
                 #[cfg(feature = "http-server")]
                 controls.push(SettingsControl::Numeric(NumericSetting::HttpServerPort));
@@ -741,6 +757,10 @@ impl Zetta {
                     SettingsToggle::PaneSize => editor.configuration.hide_pane_size,
                     SettingsToggle::TitleBarLabels => editor.configuration.hide_title_bar_labels,
                     SettingsToggle::TitleBarButtons => editor.configuration.hide_title_bar_buttons,
+                    #[cfg(feature = "session-persistence")]
+                    SettingsToggle::SessionAutoProtect => {
+                        editor.configuration.session_persistence_auto_protect
+                    }
                     SettingsToggle::ProfileVisibility(index) => editor
                         .configuration
                         .profiles
@@ -989,31 +1009,68 @@ impl Zetta {
         let Some(field) = field else {
             return;
         };
-        match event.keystroke.key.as_str() {
-            "backspace" => field.backspace(),
-            "delete" => field.delete(),
-            "left" => field.move_left(),
-            "right" => field.move_right(),
-            "home" => {
-                field.cursor = 0;
-                field.select_all = false;
-            }
-            "end" => {
-                field.cursor = field.text.len();
-                field.select_all = false;
-            }
-            "a" if command => field.select_all(),
-            "v" if command => {
-                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                    field.insert(&text);
+        let key = event.keystroke.key.as_str();
+        // Settled before the surface's own keys, so `Ctrl-X` cuts rather than
+        // typing an `x` and `Shift-Delete` cuts rather than forward-deleting.
+        let clipboard = apply_clipboard_shortcut(field.edit(), &event.keystroke, cx);
+        // Whether the keystroke changed the text. Moving the cursor, selecting
+        // and copying do not, and used to be treated as edits all the same: an
+        // arrow key was enough to make the dialog believe it had unsaved changes,
+        // rebuild the control cache and clear whatever it was showing.
+        let edited = match clipboard {
+            ClipboardOutcome::Edited => true,
+            ClipboardOutcome::Unchanged => false,
+            ClipboardOutcome::Ignored => match key {
+                "backspace" => {
+                    field.backspace();
+                    true
                 }
-            }
-            _ if !command && !event.keystroke.modifiers.alt => {
-                if let Some(text) = event.keystroke.key_char.as_ref() {
-                    field.insert(text);
+                "delete" => {
+                    field.delete();
+                    true
                 }
+                "left" => {
+                    field.move_left();
+                    false
+                }
+                "right" => {
+                    field.move_right();
+                    false
+                }
+                "home" => {
+                    field.cursor = 0;
+                    field.select_all = false;
+                    false
+                }
+                "end" => {
+                    field.cursor = field.text.len();
+                    field.select_all = false;
+                    false
+                }
+                _ if command && key.eq_ignore_ascii_case("a") => {
+                    field.select_all();
+                    false
+                }
+                _ if !command && !event.keystroke.modifiers.alt => {
+                    match event.keystroke.key_char.as_ref() {
+                        Some(text) => {
+                            field.insert(text);
+                            true
+                        }
+                        None => false,
+                    }
+                }
+                _ => false,
+            },
+        };
+        if !edited {
+            // Copying is otherwise silent, and a clipboard that may or may not
+            // have been written is the thing worth saying something about.
+            if is_copy_chord(&event.keystroke) {
+                editor.message = Some((false, "Copied the field to the clipboard.".to_owned()));
             }
-            _ => {}
+            cx.notify();
+            return;
         }
         match input {
             SettingsInput::Configuration(_) => {
@@ -1280,6 +1337,10 @@ impl Zetta {
             SettingsToggle::PaneSize => editor.configuration.hide_pane_size = value,
             SettingsToggle::TitleBarLabels => editor.configuration.hide_title_bar_labels = value,
             SettingsToggle::TitleBarButtons => editor.configuration.hide_title_bar_buttons = value,
+            #[cfg(feature = "session-persistence")]
+            SettingsToggle::SessionAutoProtect => {
+                editor.configuration.session_persistence_auto_protect = value
+            }
             SettingsToggle::ProfileVisibility(index) => {
                 if let Some(profile) = editor.configuration.profiles.get_mut(index) {
                     profile.hidden = !value;

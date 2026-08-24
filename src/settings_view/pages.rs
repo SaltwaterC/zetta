@@ -37,7 +37,7 @@ pub(crate) fn render_settings_pages(
     scroll_indicator: &impl Fn(String, &ScrollHandle) -> AnyElement,
     text_input: &impl Fn(String, TextField, SettingsInput) -> AnyElement,
     dropdown: &impl Fn(String, String, SettingsDropdown) -> AnyElement,
-    setting_row: &impl Fn(&'static str, &'static str, bool, AnyElement) -> AnyElement,
+    setting_row: &impl Fn(&'static str, &'static str, SettingsControl, AnyElement) -> AnyElement,
     setting_toggle: &impl Fn(&'static str, bool, SettingsToggle) -> AnyElement,
     numeric: &impl Fn(&'static str, TextField, NumericSetting, ConfigTextField) -> AnyElement,
     opacity_slider: &impl Fn(f32, OpacityTarget) -> AnyElement,
@@ -191,42 +191,37 @@ pub(crate) fn render_settings_pages(
                 setting_row(
                     "Default profile",
                     "Profile selected when Zetta starts",
-                    editor.focused_control
-                        == Some(SettingsControl::Dropdown(SettingsDropdown::DefaultProfile)),
+                    SettingsControl::Dropdown(SettingsDropdown::DefaultProfile),
                     default_profile,
                 ),
                 setting_row(
                     "New Tab profile",
                     "Default uses the Default profile above; Inherit reuses the active tab's profile",
-                    editor.focused_control
-                        == Some(SettingsControl::Dropdown(SettingsDropdown::NewTabProfile)),
+                    SettingsControl::Dropdown(SettingsDropdown::NewTabProfile),
                     new_tab_profile,
                 ),
                 setting_row(
                     "Light theme",
                     "Application color theme used in light appearance",
-                    editor.focused_control
-                        == Some(SettingsControl::Dropdown(SettingsDropdown::Theme)),
+                    SettingsControl::Dropdown(SettingsDropdown::Theme),
                     theme,
                 ),
                 setting_row(
                     "Dark theme",
                     "Application color theme used in dark appearance",
-                    editor.focused_control
-                        == Some(SettingsControl::Dropdown(SettingsDropdown::DarkTheme)),
+                    SettingsControl::Dropdown(SettingsDropdown::DarkTheme),
                     dark_theme,
                 ),
                 setting_row(
                     "Default tab icon",
                     "Icon shown on new tabs; choose None to hide it",
-                    editor.focused_control == Some(SettingsControl::DefaultTabIconPicker),
+                    SettingsControl::DefaultTabIconPicker,
                     default_tab_icon,
                 ),
                 setting_row(
                     "Terminal font size",
                     "Point size from 6 through 100",
-                    editor.focused_control
-                        == Some(SettingsControl::Numeric(NumericSetting::FontSize)),
+                    SettingsControl::Numeric(NumericSetting::FontSize),
                     numeric(
                         "settings-font-size",
                         configuration.terminal_font_size.clone(),
@@ -237,16 +232,15 @@ pub(crate) fn render_settings_pages(
                 setting_row(
                     "Terminal font family",
                     "Search bundled and system-installed font families",
-                    editor.focused_control == Some(SettingsControl::FontPicker),
+                    SettingsControl::FontPicker,
                     font_family,
                 ),
                 setting_row(
                     "Working directory",
                     "Initial directory; ~ expands to your home directory",
-                    editor.focused_control
-                        == Some(SettingsControl::Input(SettingsInput::Configuration(
-                            ConfigTextField::WorkingDirectory,
-                        ))),
+                    SettingsControl::Input(SettingsInput::Configuration(
+                        ConfigTextField::WorkingDirectory,
+                    )),
                     text_input(
                         "settings-working-directory".to_owned(),
                         configuration.working_directory.clone(),
@@ -256,17 +250,13 @@ pub(crate) fn render_settings_pages(
                 setting_row(
                     "Inherit working directory scope",
                     "Choose which new shells inherit the active pane's current directory",
-                    editor.focused_control
-                        == Some(SettingsControl::Dropdown(
-                            SettingsDropdown::WorkingDirectoryScope,
-                        )),
+                    SettingsControl::Dropdown(SettingsDropdown::WorkingDirectoryScope),
                     working_directory_scope,
                 ),
                 setting_row(
                     "Scrollback history",
                     "Enter 0 through Max; steppers accelerate across the range",
-                    editor.focused_control
-                        == Some(SettingsControl::Numeric(NumericSetting::ScrollHistory)),
+                    SettingsControl::Numeric(NumericSetting::ScrollHistory),
                     numeric(
                         "settings-scroll-history",
                         configuration.max_scroll_history_lines.clone(),
@@ -293,17 +283,13 @@ pub(crate) fn render_settings_pages(
                 setting_row(
                     "Detached session retention",
                     "Keep no screen, or a bounded in-memory screen for background sessions",
-                    editor.focused_control
-                        == Some(SettingsControl::Dropdown(
-                            SettingsDropdown::SessionRetention,
-                        )),
+                    SettingsControl::Dropdown(SettingsDropdown::SessionRetention),
                     session_retention,
                 ),
                 setting_row(
                     "Detached session ring bytes",
                     "Memory budget for the bounded screen retained by background sessions",
-                    editor.focused_control
-                        == Some(SettingsControl::Numeric(NumericSetting::SessionRingBytes)),
+                    SettingsControl::Numeric(NumericSetting::SessionRingBytes),
                     numeric(
                         "settings-session-ring-bytes",
                         configuration.session_ring_bytes.clone(),
@@ -315,10 +301,9 @@ pub(crate) fn render_settings_pages(
                 setting_row(
                     "Disk recipients",
                     "Comma-separated age recipients or github:USER entries used for encrypted session retention",
-                    editor.focused_control
-                        == Some(SettingsControl::Input(SettingsInput::Configuration(
-                            ConfigTextField::SessionPersistenceRecipients,
-                        ))),
+                    SettingsControl::Input(SettingsInput::Configuration(
+                        ConfigTextField::SessionPersistenceRecipients,
+                    )),
                     text_input(
                         "settings-session-persistence-recipients".to_owned(),
                         configuration.session_persistence_recipients.clone(),
@@ -329,20 +314,38 @@ pub(crate) fn render_settings_pages(
                 setting_row(
                     "Identity file",
                     "Optional default age identity path used when resuming encrypted sessions",
-                    editor.focused_control
-                        == Some(SettingsControl::Input(SettingsInput::Configuration(
-                            ConfigTextField::SessionPersistenceIdentity,
-                        ))),
+                    SettingsControl::Input(SettingsInput::Configuration(
+                        ConfigTextField::SessionPersistenceIdentity,
+                    )),
                     text_input(
                         "settings-session-persistence-identity".to_owned(),
                         configuration.session_persistence_identity.clone(),
                         SettingsInput::Configuration(ConfigTextField::SessionPersistenceIdentity),
                     ),
                 ),
+            ];
+            // Drawn only with a recipient and an identity to hand, under the same
+            // predicate that decides whether it is a tab stop, so what is on
+            // screen and what the keyboard reaches cannot disagree.
+            #[cfg(feature = "session-persistence")]
+            if configuration.session_auto_protect_is_offered() {
+                rows.push(setting_row(
+                    "Protect sessions with your key",
+                    "Detach, keep and share without a secret prompt: the session key is sealed to \
+                     the recipients above and reopened with the identity file",
+                    SettingsControl::Toggle(SettingsToggle::SessionAutoProtect),
+                    setting_toggle(
+                        "settings-session-persistence-auto-protect",
+                        configuration.session_persistence_auto_protect,
+                        SettingsToggle::SessionAutoProtect,
+                    ),
+                ));
+            }
+            rows.extend([
                 setting_row(
                     "Inactive pane opacity",
                     "Dimming level as a percentage",
-                    editor.focused_control == Some(SettingsControl::Opacity),
+                    SettingsControl::Opacity,
                     opacity_slider(
                         configuration.inactive_pane_opacity,
                         OpacityTarget::Configuration,
@@ -351,8 +354,7 @@ pub(crate) fn render_settings_pages(
                 setting_row(
                     "Compact mode",
                     "Move tabs into the title bar and reduce its controls",
-                    editor.focused_control
-                        == Some(SettingsControl::Toggle(SettingsToggle::CompactMode)),
+                    SettingsControl::Toggle(SettingsToggle::CompactMode),
                     setting_toggle(
                         "settings-compact-mode",
                         configuration.compact_mode,
@@ -362,8 +364,7 @@ pub(crate) fn render_settings_pages(
                 setting_row(
                     "Hide pane size",
                     "Hide the active pane dimensions from the title bar",
-                    editor.focused_control
-                        == Some(SettingsControl::Toggle(SettingsToggle::PaneSize)),
+                    SettingsControl::Toggle(SettingsToggle::PaneSize),
                     setting_toggle(
                         "settings-hide-pane-size",
                         configuration.hide_pane_size,
@@ -373,8 +374,7 @@ pub(crate) fn render_settings_pages(
                 setting_row(
                     "Hide title bar labels",
                     "Hide text such as Menu, Profile, and Keep running",
-                    editor.focused_control
-                        == Some(SettingsControl::Toggle(SettingsToggle::TitleBarLabels)),
+                    SettingsControl::Toggle(SettingsToggle::TitleBarLabels),
                     setting_toggle(
                         "settings-hide-title-bar-labels",
                         configuration.hide_title_bar_labels,
@@ -384,8 +384,7 @@ pub(crate) fn render_settings_pages(
                 setting_row(
                     "Hide title bar buttons",
                     "Hide title bar buttons such as Keep running and Detach",
-                    editor.focused_control
-                        == Some(SettingsControl::Toggle(SettingsToggle::TitleBarButtons)),
+                    SettingsControl::Toggle(SettingsToggle::TitleBarButtons),
                     setting_toggle(
                         "settings-hide-title-bar-buttons",
                         configuration.hide_title_bar_buttons,
@@ -396,8 +395,7 @@ pub(crate) fn render_settings_pages(
                 setting_row(
                     "Hide title bar menus",
                     "Hide the Menu and Profile menus from the title bar",
-                    editor.focused_control
-                        == Some(SettingsControl::Toggle(SettingsToggle::TitleBarMenus)),
+                    SettingsControl::Toggle(SettingsToggle::TitleBarMenus),
                     setting_toggle(
                         "settings-hide-title-bar-menus",
                         configuration.hide_title_bar_menus,
@@ -408,7 +406,7 @@ pub(crate) fn render_settings_pages(
                 setting_row(
                     "macOS Focus status",
                     "Allow Zetta to follow Focus status; manual Silent Mode remains available",
-                    editor.focused_control == Some(SettingsControl::RequestFocusStatusAccess),
+                    SettingsControl::RequestFocusStatusAccess,
                     h_flex()
                         .justify_between()
                         .gap_2()
@@ -437,22 +435,16 @@ pub(crate) fn render_settings_pages(
                 setting_row(
                     "Pane controls position",
                     "Keep pane overlay controls on the right or move them to the left",
-                    editor.focused_control
-                        == Some(SettingsControl::Dropdown(
-                            SettingsDropdown::PaneControlsPosition,
-                        )),
+                    SettingsControl::Dropdown(SettingsDropdown::PaneControlsPosition),
                     pane_controls_position,
                 ),
                 setting_row(
                     "Pane controls by default",
                     "Start new panes with overlay controls visible or hidden",
-                    editor.focused_control
-                        == Some(SettingsControl::Dropdown(
-                            SettingsDropdown::PaneControlsDefaultVisibility,
-                        )),
+                    SettingsControl::Dropdown(SettingsDropdown::PaneControlsDefaultVisibility),
                     pane_controls_default_visibility,
                 ),
-            ];
+            ]);
             #[cfg(any(feature = "http-server", feature = "tftp-server"))]
             rows.push(
                 div()
@@ -476,8 +468,7 @@ pub(crate) fn render_settings_pages(
             rows.push(setting_row(
                 "HTTP server port",
                 "TCP port used when starting the static HTTP server",
-                editor.focused_control
-                    == Some(SettingsControl::Numeric(NumericSetting::HttpServerPort)),
+                SettingsControl::Numeric(NumericSetting::HttpServerPort),
                 numeric(
                     "settings-http-server-port",
                     configuration.http_server_port.clone(),
@@ -489,8 +480,7 @@ pub(crate) fn render_settings_pages(
             rows.push(setting_row(
                 "TFTP server port",
                 "UDP port used when starting the TFTP server",
-                editor.focused_control
-                    == Some(SettingsControl::Numeric(NumericSetting::TftpServerPort)),
+                SettingsControl::Numeric(NumericSetting::TftpServerPort),
                 numeric(
                     "settings-tftp-server-port",
                     configuration.tftp_server_port.clone(),

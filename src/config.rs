@@ -70,6 +70,39 @@ impl SessionRetention {
 pub struct SessionPersistenceConfig {
     pub recipients: Vec<String>,
     pub identity: Option<PathBuf>,
+    /// Protect background sessions with a key sealed to `recipients` instead of
+    /// asking for a secret.
+    ///
+    /// Only meaningful with both a recipient and an identity: the recipient is
+    /// what a session key is sealed to, and the identity is the only thing that
+    /// can open it again. Set without them it would mint sessions nobody can
+    /// reattach, which is why nothing reads this flag on its own — see
+    /// [`Self::auto_protect_is_configured`].
+    pub auto_protect: bool,
+}
+
+/// Automatic protection is an age feature, so these have no callers in a build
+/// without one; the configuration itself is still parsed and round-tripped, so
+/// the fields stay.
+#[cfg_attr(not(feature = "session-persistence"), allow(dead_code))]
+impl SessionPersistenceConfig {
+    /// Whether automatic protection is asked for *and* has the two things it
+    /// needs. Deliberately free of I/O, because the settings page asks it while
+    /// deciding what to draw; whether the identity file is actually there is
+    /// settled once, when the recipients are resolved.
+    pub fn auto_protect_is_configured(&self) -> bool {
+        self.auto_protect && !self.recipients.is_empty() && self.identity.is_some()
+    }
+
+    /// The configured identity with a leading `~/` expanded, which is how it is
+    /// written in configuration and how every reader of it has to resolve it.
+    pub fn resolved_identity(&self) -> Option<PathBuf> {
+        let path = self.identity.clone()?;
+        let Some(relative) = path.to_str().and_then(|path| path.strip_prefix("~/")) else {
+            return Some(path);
+        };
+        Some(util::paths::home_dir().join(relative))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -679,10 +712,9 @@ impl Config {
                 let persistence = persistence
                     .as_object()
                     .context("sessions.persistence must be an object")?;
-                if let Some(field) = persistence
-                    .keys()
-                    .find(|field| !matches!(field.as_str(), "recipients" | "identity"))
-                {
+                if let Some(field) = persistence.keys().find(|field| {
+                    !matches!(field.as_str(), "recipients" | "identity" | "auto_protect")
+                }) {
                     anyhow::bail!("unrecognized sessions.persistence field {field:?}");
                 }
                 if let Some(recipients) = persistence.get("recipients") {
@@ -708,6 +740,11 @@ impl Config {
                             "sessions.persistence.identity must be a path string or null"
                         ),
                     };
+                }
+                if let Some(auto_protect) = persistence.get("auto_protect") {
+                    config.sessions.persistence.auto_protect = auto_protect
+                        .as_bool()
+                        .context("sessions.persistence.auto_protect must be a boolean")?;
                 }
             }
             config.sessions.to_zmux_retention()?;

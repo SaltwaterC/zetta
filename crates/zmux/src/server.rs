@@ -287,6 +287,11 @@ struct Session {
     summary: BackgroundSessionSummary,
     state: serde_json::Value,
     authentication: Option<SessionAuthentication>,
+    /// The sealed session key that goes with `authentication`, when the secret
+    /// was generated rather than typed. Held beside the verifier and published
+    /// with the summary, never read here: opening it needs an age identity, and
+    /// the daemon deliberately has none.
+    key_envelope: Option<String>,
     failed_authentications: u32,
     refuse_until: Option<std::time::Instant>,
     panes: Vec<Pane>,
@@ -1026,6 +1031,7 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
                     snapshot_bytes: 0,
                     scrollback_bytes: 0,
                     protected: restored.request.verifier.is_some(),
+                    auto_protected: restored.request.key_envelope.is_some(),
                     restorable: false,
                 });
             }
@@ -1070,11 +1076,13 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
             session_id,
             shared,
             verifier,
+            key_envelope,
         } => match set_session_scope(
             daemon,
             session_id,
             shared,
             verifier,
+            key_envelope,
             peer_process_id,
             &mut connection,
         ) {
@@ -1300,9 +1308,11 @@ fn spawn(daemon: &Arc<Daemon>, request: SpawnRequest, connection: &mut Connectio
                     panes: Vec::new(),
                     held: false,
                     scoped_to: None,
+                    key_envelope: None,
                 },
                 state: serde_json::Value::Null,
                 authentication: None,
+                key_envelope: None,
                 failed_authentications: 0,
                 refuse_until: None,
                 panes: Vec::new(),
@@ -2466,9 +2476,18 @@ fn terminal_size(pane: &Pane) -> Option<(u16, u16)> {
 ///
 /// The two have to agree: a snapshot is lines of text with no width of their own,
 /// so a grid of a different width wraps them somewhere the program never did.
+///
+/// The remembered size is brought along for the same reason. On Unix a client
+/// resizes through the descriptor it holds and tells the multiplexer nothing, so
+/// `pane.size` is still the stand-in the spawn carried — and an upgrade records
+/// *that* for the pane and rebuilds the retained screen from it in the next
+/// image. A screen drawn at the real width, rebuilt at the stand-in's, comes back
+/// as a full-screen program wrapped into fragments of itself.
 fn seed_retained_screen(pane: &mut Pane, snapshot: Vec<u8>) {
     if let Some((columns, lines)) = terminal_size(pane) {
         pane.retained.resize(columns, lines);
+        pane.size.columns = columns;
+        pane.size.lines = lines;
     }
     pane.retained.seed(snapshot);
 }
@@ -2687,6 +2706,7 @@ fn persisted_from_resume_request(
         summary: request.summary.clone(),
         state: request.state.clone(),
         verifier: request.verifier.clone(),
+        key_envelope: request.key_envelope.clone(),
         failed_authentications: request.failed_authentications,
         backoff_seconds: request.backoff_seconds,
         snapshots: request
@@ -2781,6 +2801,10 @@ fn detach(
     }
     if let Some(verifier) = request.verifier {
         session.authentication = Some(SessionAuthentication::from_verifier(verifier)?);
+        // Paired with the verifier it arrived beside, so a session reprotected
+        // with a typed secret loses the stale envelope rather than keeping a way
+        // in that no longer opens anything.
+        session.key_envelope = request.key_envelope;
         session.failed_authentications = 0;
         session.refuse_until = None;
     }
@@ -2827,6 +2851,7 @@ fn detach(
                 .authentication
                 .as_ref()
                 .map(|authentication| authentication.verifier().to_owned()),
+            key_envelope: session.key_envelope.clone(),
             failed_authentications: session.failed_authentications,
             backoff_seconds: session
                 .refuse_until
@@ -2929,6 +2954,7 @@ fn share(
     }
     if let Some(verifier) = request.verifier {
         session.authentication = Some(SessionAuthentication::from_verifier(verifier)?);
+        session.key_envelope = request.key_envelope;
         session.failed_authentications = 0;
         session.refuse_until = None;
     }
@@ -2966,6 +2992,7 @@ fn set_session_scope(
     session_id: u64,
     shared: bool,
     verifier: Option<String>,
+    key_envelope: Option<String>,
     peer_process_id: Option<u32>,
     connection: &mut Connection,
 ) -> Result<()> {
@@ -2987,11 +3014,13 @@ fn set_session_scope(
         });
     }
     anyhow::ensure!(
-        session_control_authorized(session, peer_process_id),
+        session_control_authorized(session, peer_process_id)
+            || stranded_session_may_be_offered(session, shared, verifier.is_some()),
         "session {session_id} is protected and can only be changed by its owner or current holder"
     );
     if let Some(verifier) = verifier {
         session.authentication = Some(SessionAuthentication::from_verifier(verifier)?);
+        session.key_envelope = key_envelope;
         session.failed_authentications = 0;
         session.refuse_until = None;
         session.summary.authentication_required = true;
@@ -3037,6 +3066,30 @@ fn control_process_id(client_process_id: u32, peer_process_id: Option<u32>) -> u
 /// can sensibly ask for.
 fn protected_holder_authorized(session: &Session, peer_process_id: Option<u32>) -> bool {
     peer_process_id.is_some_and(|process_id| session_is_held_by(session, process_id))
+}
+
+/// Whether a peer that is neither the owner nor a holder may still *offer* a
+/// protected session.
+///
+/// The way out of a deadlock that would otherwise be permanent. Attaching a
+/// scoped session refuses and says to share it — see `attach`, which spells out
+/// that a window which has exited cannot share it itself — and sharing refused
+/// in turn because the owner it named no longer exists. A live session, and
+/// whatever is still running inside it, was unreachable for good.
+///
+/// Safe because offering changes no secret. It makes the session *listed* and
+/// attachable; whoever attaches still has to present the secret already set, and
+/// a protected session's catalog entry is stripped either way. Replacing the
+/// verifier is the half that hands a session over, and that stays with the owner.
+///
+/// Restricted to an owner that is gone, so it can never overrule a window that
+/// is running and has deliberately kept its session to itself.
+fn stranded_session_may_be_offered(
+    session: &Session,
+    shared: bool,
+    replaces_verifier: bool,
+) -> bool {
+    shared && !replaces_verifier && !session.owner.is_some_and(process_is_running)
 }
 
 fn session_control_authorized(session: &Session, peer_process_id: Option<u32>) -> bool {
@@ -3442,6 +3495,10 @@ fn close_pane(
 fn catalog_summary(session: &Session) -> BackgroundSessionSummary {
     let mut summary = session.summary.clone();
     summary.held = session.is_held();
+    // Taken from the session rather than trusted from the stored summary, so it
+    // follows the verifier: a share or scope request that republishes a summary
+    // without it does not silently drop the way in to a protected session.
+    summary.key_envelope = session.key_envelope.clone();
     // Whose it is, so a process reading the one shared catalog can tell its own
     // sessions from another window's. An offered session is nobody's in
     // particular and carries no scope at all.
@@ -3484,6 +3541,7 @@ fn persisted_live_session(session: &Session) -> PersistedSession {
             .authentication
             .as_ref()
             .map(|authentication| authentication.verifier().to_owned()),
+        key_envelope: session.key_envelope.clone(),
         failed_authentications: session.failed_authentications,
         backoff_seconds: session
             .refuse_until
@@ -4341,6 +4399,7 @@ fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, std::fs::File)> {
                         .authentication
                         .as_ref()
                         .map(|authentication| authentication.verifier().to_owned()),
+                    key_envelope: session.key_envelope.clone(),
                     failed_authentications: session.failed_authentications,
                     // A monotonic deadline means nothing in another image, so
                     // what is carried is how much of the window is left.
@@ -4457,6 +4516,7 @@ fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, PathBuf, PathBuf)> 
                     .authentication
                     .as_ref()
                     .map(|authentication| authentication.verifier().to_owned()),
+                key_envelope: session.key_envelope.clone(),
                 failed_authentications: session.failed_authentications,
                 refuse_for: session
                     .refuse_until
@@ -4644,6 +4704,7 @@ fn adopt_handover(daemon: &Arc<Daemon>, handover: crate::upgrade::Handover) -> R
                 .verifier
                 .map(SessionAuthentication::from_verifier)
                 .transpose()?,
+            key_envelope: session.key_envelope,
             failed_authentications: session.failed_authentications,
             // Restored as a deadline again, from what was left of the window.
             refuse_until: session.refuse_for.and_then(|left| now.checked_add(left)),
@@ -4742,6 +4803,7 @@ fn adopt_handover(daemon: &Arc<Daemon>, handover: crate::upgrade::Handover) -> R
                 .verifier
                 .map(SessionAuthentication::from_verifier)
                 .transpose()?,
+            key_envelope: session.key_envelope,
             failed_authentications: session.failed_authentications,
             refuse_until: session.refuse_for.and_then(|left| now.checked_add(left)),
             panes,

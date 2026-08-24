@@ -43,8 +43,30 @@ stable form for `share`, `reconnect`, `unshare`, `kill`, and `forget`.
 With disk retention, zmux list also shows opaque restorable records. They
 contain only an ID, timestamps, byte sizes, and protection state until an age
 identity decrypts the record. zmux resume SESSION -i PATH accepts repeatable
-identity files; the configured identity path is used by the Zetta picker when
-one is set.
+identity files; the configured identity path is used by the Zetta picker, and
+by `zmux resume` and `zmux reconnect`, when one is set. An explicit `--identity`
+adds to the configured one rather than replacing it.
+
+### Protecting a session without a secret
+
+A session is normally protected by a secret someone chooses and types back in
+when they reattach. With
+[`sessions.persistence.auto_protect`](configuration.md#protecting-sessions-with-your-key-instead-of-a-secret)
+the secret is generated instead: a 256-bit key, whose Argon2id verifier gates the
+session in the usual way, sealed to the configured recipients as an age v1 file.
+Reattaching opens that envelope with the configured identity and presents the
+key, so no prompt appears in a window or at a terminal.
+
+The envelope travels with the verifier — in the published catalog, and inside the
+encrypted record — because a key that could not be recovered after the daemon
+restarted would take its session with it. Publishing it costs nothing: it is
+ciphertext, and opening it needs the private key. Its presence is what marks a
+live session as automatically protected; a disk record additionally carries an
+`auto_protected` flag in its manifest, because whether to ask for anything has to
+be decided before the record is decrypted.
+
+The multiplexer is unchanged by any of this. It stores the same verifier, checks
+the same way, and never receives an identity.
 
 ### SSH identity cipher compatibility
 
@@ -176,6 +198,11 @@ terminal's buffer filled — but how much is *kept* is configurable:
 | `memory` (default) | the screen as it was, plus output since, up to `sessions.ring_bytes` |
 | `none` | a cleared screen and whatever the program redraws |
 | `disk` | the in-memory screen plus encrypted detached state and scrollback when recipients are configured |
+
+Protection is separate from retention: `sessions.persistence.auto_protect` seals
+a session key to the configured recipients under any of these modes, because it
+needs the recipients rather than the on-disk records.
+
 
 `none` is for hosts where memory matters more than scrollback. The
 `scrollback-buffer` feature compiles the buffer out altogether. Disk mode

@@ -365,6 +365,22 @@ impl Zetta {
         let Some(prompt) = self.serial_console.as_mut() else {
             return false;
         };
+        // Only the baud rate is typed into; the other rows are cycled with the
+        // arrow keys and have no text a clipboard could carry.
+        if prompt.field == SerialField::BaudRate {
+            let edit = TextEdit::new(
+                &mut prompt.baud_rate,
+                &mut prompt.baud_cursor,
+                &mut prompt.baud_select_all,
+            );
+            match apply_clipboard_shortcut(edit, &event.keystroke, cx) {
+                ClipboardOutcome::Ignored => {}
+                ClipboardOutcome::Unchanged | ClipboardOutcome::Edited => {
+                    cx.notify();
+                    return true;
+                }
+            }
+        }
         match event.keystroke.key.as_str() {
             "escape" => self.dismiss_serial_console(window, cx),
             "enter" => self.submit_serial_console(cx),

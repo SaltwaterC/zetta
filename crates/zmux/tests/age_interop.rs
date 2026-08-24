@@ -105,9 +105,11 @@ fn store_session(directory: &Path, recipient: &str) {
                 panes: Vec::new(),
                 held: false,
                 scoped_to: None,
+                key_envelope: None,
             },
             state: serde_json::json!({"cwd": "/interop"}),
             verifier: None,
+            key_envelope: None,
             failed_authentications: 0,
             backoff_seconds: 0,
             snapshots: vec![PersistedSnapshot {

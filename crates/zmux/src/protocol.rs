@@ -31,6 +31,16 @@ pub struct RestorableSessionRecord {
     pub snapshot_bytes: u64,
     pub scrollback_bytes: u64,
     pub protected: bool,
+    /// Whether the protection is a key sealed to the configured age recipients
+    /// rather than a secret someone typed.
+    ///
+    /// The envelope itself is inside the ciphertext, and the decision of whether
+    /// to ask a person for anything has to be made before the record is opened —
+    /// so unlike a live session, where the envelope travels in the catalog and
+    /// its presence is the whole marker, a record needs this flag. It discloses
+    /// no more than `protected` beside it already does.
+    #[serde(default)]
+    pub auto_protected: bool,
     pub restorable: bool,
 }
 
@@ -71,11 +81,27 @@ pub struct BackgroundSessionSummary {
     /// session that cannot be attached from being offered in the first place.
     #[serde(default)]
     pub scoped_to: Option<u32>,
+    /// The session key sealed to the configured age recipients, when this
+    /// session was protected automatically rather than with a typed secret.
+    ///
+    /// Published deliberately. It is an age v1 file — public ciphertext — so the
+    /// only party it helps is one holding a matching private key, which is the
+    /// party being let in. Carrying it here rather than keeping it in the
+    /// daemon's memory is what lets a session outlive the daemon: a key nobody
+    /// can recover afterwards would take its session with it.
+    ///
+    /// Its presence is what marks a session as automatically protected; there is
+    /// no separate flag to keep in step with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_envelope: Option<String>,
 }
 
 impl BackgroundSessionSummary {
     /// Strips everything a protected session must not reveal while detached.
     /// Applied on the publishing side, so no caller can forget it.
+    ///
+    /// The key envelope survives this on purpose: a protected session is exactly
+    /// when it is needed, and it reveals nothing to a reader who cannot open it.
     pub(crate) fn for_public_catalog(mut self) -> Self {
         if self.authentication_required {
             self.title = "Protected session".to_owned();

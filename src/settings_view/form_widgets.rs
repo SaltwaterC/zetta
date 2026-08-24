@@ -16,6 +16,12 @@ pub(crate) struct SettingsFormWidgets {
     handle: WeakEntity<Zetta>,
     focused_input: Option<SettingsInput>,
     focused_control: Option<SettingsControl>,
+    /// What `scroll_settings_control_into_view` last aimed at, and the offset it
+    /// aimed from, so a row can finish that scroll from where it actually laid
+    /// out. Snapshotted like the focus above, because this builder renders in its
+    /// own view and cannot hold the editor.
+    focus_scroll_request: Option<(SettingsControl, Pixels)>,
+    settings_scroll: ScrollHandle,
 }
 
 impl SettingsFormWidgets {
@@ -29,6 +35,8 @@ impl SettingsFormWidgets {
             handle,
             focused_input: editor.focused_input,
             focused_control: editor.focused_control.clone(),
+            focus_scroll_request: editor.focus_scroll_request.clone(),
+            settings_scroll: editor.settings_scroll.clone(),
         }
     }
 
@@ -127,41 +135,57 @@ impl SettingsFormWidgets {
         )
     }
 
+    /// A labelled row of the Configuration page.
+    ///
+    /// Takes the control it hosts rather than a precomputed flag, for the same
+    /// reason [`super::widgets::control_row`] does: the row is what shows focus,
+    /// and it is also what reports its laid-out position so the scroll that
+    /// brought the keyboard here can be finished accurately. Passing only a
+    /// `bool` left the page with the estimate alone, which maps a control's
+    /// position in the *tab* order onto the scroll range — and this page's tab
+    /// order does not follow its draw order, so clicking a field near the end of
+    /// it scrolled the field out of view.
     pub(crate) fn setting_row(
         &self,
         label: &'static str,
         description: &'static str,
-        focused: bool,
+        control_id: SettingsControl,
         control: gpui::AnyElement,
     ) -> gpui::AnyElement {
-        h_flex()
-            .w_full()
-            .min_h(px(54.))
-            .px_2()
-            .py_2()
-            .gap_4()
-            .justify_between()
-            .border_b_1()
-            .border_color(if focused {
-                self.colors.border_focused
-            } else {
-                self.colors.border_variant
-            })
-            .when(focused, |row| row.bg(self.colors.element_selected))
-            .child(
-                div()
-                    .min_w_0()
-                    .flex_1()
-                    .child(div().text_sm().text_color(self.colors.text).child(label))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(self.colors.text_muted)
-                            .child(description),
-                    ),
-            )
-            .child(div().w(px(330.)).flex_none().child(control))
-            .into_any_element()
+        let focused = self.focused_control.as_ref() == Some(&control_id);
+        super::widgets::track_focus_scroll_from(
+            h_flex(),
+            self.focus_scroll_request.as_ref(),
+            &self.settings_scroll,
+            std::slice::from_ref(&control_id),
+        )
+        .w_full()
+        .min_h(px(54.))
+        .px_2()
+        .py_2()
+        .gap_4()
+        .justify_between()
+        .border_b_1()
+        .border_color(if focused {
+            self.colors.border_focused
+        } else {
+            self.colors.border_variant
+        })
+        .when(focused, |row| row.bg(self.colors.element_selected))
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .child(div().text_sm().text_color(self.colors.text).child(label))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(self.colors.text_muted)
+                        .child(description),
+                ),
+        )
+        .child(div().w(px(330.)).flex_none().child(control))
+        .into_any_element()
     }
 
     pub(crate) fn setting_toggle(
