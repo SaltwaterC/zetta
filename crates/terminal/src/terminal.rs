@@ -5609,7 +5609,16 @@ mod tests {
     fn restored_working_directory_is_available_until_live_metadata_replaces_it(
         cx: &mut TestAppContext,
     ) {
-        let restored = std::path::PathBuf::from("/saved/project");
+        let restored = PathBuf::from(if cfg!(windows) {
+            r"C:\saved\project"
+        } else {
+            "/saved/project"
+        });
+        let live = if cfg!(windows) {
+            r"C:\live\project"
+        } else {
+            "/live/project"
+        };
         let builder = cx.update(|cx| {
             TerminalBuilder::new_display_only(
                 SettingsCursorShape::Block,
@@ -5628,11 +5637,11 @@ mod tests {
             Some(restored)
         );
         terminal.update(cx, |terminal, _| {
-            terminal.reported_working_directory = Some("/live/project".to_owned());
+            terminal.reported_working_directory = Some(live.to_owned());
         });
         assert_eq!(
             terminal.read_with(cx, |terminal, _| terminal.working_directory()),
-            Some(std::path::PathBuf::from("/live/project"))
+            Some(PathBuf::from(live))
         );
     }
 
