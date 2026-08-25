@@ -68,7 +68,7 @@ impl ProjectState {
         config
     }
 
-    fn mark_entered(&mut self, tab_id: u64, root: &Path) -> bool {
+    pub(crate) fn mark_entered(&mut self, tab_id: u64, root: &Path) -> bool {
         self.entered.insert((tab_id, project_key(root)))
     }
 
@@ -229,7 +229,7 @@ fn wsl_distribution(profile: &Profile) -> Option<&str> {
     profile.name.strip_prefix("WSL: ")
 }
 
-fn wsl_reported_directory(profile: &Profile, directory: &str) -> Option<PathBuf> {
+pub(crate) fn wsl_reported_directory(profile: &Profile, directory: &str) -> Option<PathBuf> {
     let distribution = wsl_distribution(profile)?;
     if distribution.is_empty()
         || distribution
@@ -584,26 +584,26 @@ impl Zetta {
     }
 
     pub(crate) fn apply_effective_themes_to_tab(&mut self, tab_id: u64, cx: &mut Context<Self>) {
-        let project = self
-            .tabs
-            .iter()
-            .find(|tab| tab.id == tab_id)
-            .and_then(|tab| self.projects.config_for_pane(tab.active_pane))
-            .cloned();
         let Some(tab_index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
             return;
         };
-        let pane_ids = self.tabs[tab_index]
+        let projects = self.tabs[tab_index]
             .panes
             .iter()
-            .map(|pane| pane.id)
-            .collect::<Vec<_>>();
-        self.transient_pane_themes
-            .retain(|(pane_id, _), _| !pane_ids.contains(pane_id));
+            .flat_map(|pane| {
+                std::iter::once(pane.id).chain(pane.stack.entries.iter().map(|entry| entry.id))
+            })
+            .filter_map(|pane_id| {
+                self.projects
+                    .config_for_pane(pane_id)
+                    .cloned()
+                    .map(|project| (pane_id, project))
+            })
+            .collect::<HashMap<_, _>>();
         let tab = &mut self.tabs[tab_index];
         for pane in &mut tab.panes {
+            let project = projects.get(&pane.id);
             let configured_profiles = project
-                .as_ref()
                 .map(|project| &project.effective.profiles)
                 .unwrap_or(&self.launch_config.profiles);
             let configured_profile = configured_profiles
@@ -620,13 +620,22 @@ impl Zetta {
                 &mut pane.profile,
                 self.launch_theme_override.as_ref(),
             );
-            let theme = resolve_project_profile_theme(&pane.profile, project.as_deref(), cx)
-                .ok()
-                .flatten();
+            let theme = resolve_terminal_theme(
+                pane.theme_override.as_deref(),
+                &pane.profile,
+                project.map(Arc::as_ref),
+                cx,
+            )
+            .ok()
+            .flatten();
             if let Some(view) = pane.view.clone() {
                 view.update(cx, |view, cx| view.set_theme(theme.clone(), cx));
             }
             for entry in &mut pane.stack.entries {
+                let project = projects.get(&entry.id);
+                let configured_profiles = project
+                    .map(|project| &project.effective.profiles)
+                    .unwrap_or(&self.launch_config.profiles);
                 let configured_profile = configured_profiles
                     .iter()
                     .find(|profile| profile.name.eq_ignore_ascii_case(&entry.profile.name));
@@ -641,9 +650,14 @@ impl Zetta {
                     &mut entry.profile,
                     self.launch_theme_override.as_ref(),
                 );
-                let theme = resolve_project_profile_theme(&entry.profile, project.as_deref(), cx)
-                    .ok()
-                    .flatten();
+                let theme = resolve_terminal_theme(
+                    entry.theme_override.as_deref(),
+                    &entry.profile,
+                    project.map(Arc::as_ref),
+                    cx,
+                )
+                .ok()
+                .flatten();
                 if let Some(view) = entry.view.clone() {
                     view.update(cx, |view, cx| view.set_theme(theme, cx));
                 }
@@ -656,29 +670,18 @@ impl Zetta {
         // when each pane was opened. Keep those values intact here: pane
         // template leaf overrides live on the pane profile, while the
         // appearance change only selects which of its two fields is active.
-        let transient_pane_themes = self.transient_pane_themes.clone();
-
         for index in 0..self.tabs.len() {
-            let project = self
-                .tabs
-                .get(index)
-                .and_then(|tab| self.projects.config_for_pane(tab.active_pane))
-                .cloned();
-            refresh_terminal_themes_in_tab(
-                &mut self.tabs[index],
-                project.as_deref(),
-                &transient_pane_themes,
-                cx,
-            );
+            let projects = terminal_projects_for_tab(&self.tabs[index], &self.projects);
+            refresh_terminal_themes_in_tab(&mut self.tabs[index], &projects, cx);
         }
 
         let background_projects = self
             .background_sessions
             .iter()
-            .map(|tab| self.projects.config_for_pane(tab.active_pane).cloned())
+            .map(|tab| terminal_projects_for_tab(tab, &self.projects))
             .collect::<Vec<_>>();
-        for (tab, project) in self.background_sessions.iter_mut().zip(background_projects) {
-            refresh_terminal_themes_in_tab(tab, project.as_deref(), &transient_pane_themes, cx);
+        for (tab, projects) in self.background_sessions.iter_mut().zip(background_projects) {
+            refresh_terminal_themes_in_tab(tab, &projects, cx);
         }
     }
 
@@ -960,6 +963,24 @@ pub(crate) fn resolve_project_profile_theme(
     resolve_profile_theme(profile, cx)
 }
 
+/// Resolves terminal content styling in one place. Explicit pane state wins
+/// over project and profile configuration; an absent result means the
+/// application theme selected by the caller/view remains in effect.
+pub(crate) fn resolve_terminal_theme(
+    theme_override: Option<&str>,
+    profile: &Profile,
+    project: Option<&ProjectConfig>,
+    cx: &App,
+) -> Result<Option<Arc<Theme>>> {
+    if let Some(name) = theme_override {
+        return ThemeRegistry::global(cx)
+            .get(name)
+            .with_context(|| format!("using pane theme {name:?}"))
+            .map(Some);
+    }
+    resolve_project_profile_theme(profile, project, cx)
+}
+
 fn project_theme_name<'a>(project: &'a ProjectConfig, cx: &App) -> Option<&'a str> {
     if SystemAppearance::global(cx).is_light() {
         project.theme.as_deref()
@@ -968,60 +989,59 @@ fn project_theme_name<'a>(project: &'a ProjectConfig, cx: &App) -> Option<&'a st
     }
 }
 
-struct TerminalThemeRefresh<'a> {
-    project: Option<&'a ProjectConfig>,
-    transient_pane_themes: &'a HashMap<(u64, PaneStackSelection), Arc<Theme>>,
-}
-
 fn refresh_terminal_themes_in_tab(
     tab: &mut Tab,
-    project: Option<&ProjectConfig>,
-    transient_pane_themes: &HashMap<(u64, PaneStackSelection), Arc<Theme>>,
+    projects: &HashMap<u64, Arc<ProjectConfig>>,
     cx: &mut Context<Zetta>,
 ) {
-    let refresh = TerminalThemeRefresh {
-        project,
-        transient_pane_themes,
-    };
     for pane in &mut tab.panes {
         refresh_terminal_theme_for_profile(
-            pane.id,
-            PaneStackSelection::Base,
+            pane.theme_override.as_deref(),
             &mut pane.profile,
             pane.view.clone(),
-            &refresh,
+            projects.get(&pane.id).map(Arc::as_ref),
             cx,
         );
         for entry in &mut pane.stack.entries {
             refresh_terminal_theme_for_profile(
-                pane.id,
-                PaneStackSelection::Stacked(entry.id),
+                entry.theme_override.as_deref(),
                 &mut entry.profile,
                 entry.view.clone(),
-                &refresh,
+                projects.get(&entry.id).map(Arc::as_ref),
                 cx,
             );
         }
     }
 }
 
+fn terminal_projects_for_tab(
+    tab: &Tab,
+    projects: &ProjectState,
+) -> HashMap<u64, Arc<ProjectConfig>> {
+    tab.panes
+        .iter()
+        .flat_map(|pane| {
+            std::iter::once(pane.id).chain(pane.stack.entries.iter().map(|entry| entry.id))
+        })
+        .filter_map(|pane_id| {
+            projects
+                .config_for_pane(pane_id)
+                .cloned()
+                .map(|project| (pane_id, project))
+        })
+        .collect()
+}
+
 fn refresh_terminal_theme_for_profile(
-    pane_id: u64,
-    selection: PaneStackSelection,
+    theme_override: Option<&str>,
     profile: &mut Profile,
     view: Option<Entity<TerminalView>>,
-    refresh: &TerminalThemeRefresh<'_>,
+    project: Option<&ProjectConfig>,
     cx: &mut Context<Zetta>,
 ) {
-    let theme = refresh
-        .transient_pane_themes
-        .get(&(pane_id, selection))
-        .cloned()
-        .or_else(|| {
-            resolve_project_profile_theme(profile, refresh.project, cx)
-                .ok()
-                .flatten()
-        });
+    let theme = resolve_terminal_theme(theme_override, profile, project, cx)
+        .ok()
+        .flatten();
     if let Some(view) = view {
         view.update(cx, |view, cx| view.set_theme(theme, cx));
     }

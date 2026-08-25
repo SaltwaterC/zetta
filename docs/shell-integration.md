@@ -81,8 +81,10 @@ Pane-theme completion works the same way: completing `zetta panetheme` runs
 process, so the generated script does not embed a theme list and always
 offers whatever that process has registered, including user-installed
 themes. Use `zetta panetheme THEME` (or `zetta panetheme --theme THEME`) from
-a Zetta pane to non-persistently change the active pane's theme;
-`zetta panetheme --reset` restores the profile's configured theme. `--theme`
+a Zetta pane to set its session-scoped theme. The choice survives
+backgrounding, reconnect, and encrypted disk resume, but not pane close or a
+configuration reload. `zetta panetheme --reset` restores the profile's
+configured theme. `--theme`
 (or `-t`) also completes profile themes when typed after `--profile` at launch,
 since it non-persistently overrides that profile's theme for the new window.
 

@@ -553,6 +553,10 @@ pub(crate) struct TerminalPane {
     /// Text color for `overlay_text`; falls back to the theme's text color.
     pub(crate) overlay_color: Option<gpui::Hsla>,
     pub(crate) profile: Profile,
+    /// A session-scoped theme selected explicitly for this pane. Kept on the
+    /// logical pane rather than in window state so transfers and id remapping
+    /// cannot detach the choice from the terminal it belongs to.
+    pub(crate) theme_override: Option<String>,
     /// Environment overrides requested by a pane split template. Keeping the
     /// unexpanded overrides on the pane lets template application determine
     /// whether the active terminal actually needs to be restarted.
@@ -824,6 +828,7 @@ pub(crate) struct StackedPane {
     pub(crate) routing_id: u64,
     pub(crate) command: String,
     pub(crate) profile: Profile,
+    pub(crate) theme_override: Option<String>,
     pub(crate) terminal: Option<Entity<Terminal>>,
     pub(crate) view: Option<Entity<TerminalView>>,
     pub(crate) state: StackedPaneState,
@@ -846,6 +851,7 @@ impl StackedPane {
             routing_id: id,
             command,
             profile,
+            theme_override: None,
             terminal: None,
             view: None,
             state: StackedPaneState::Starting,
@@ -954,6 +960,7 @@ impl TerminalPane {
             overlay_opacity: None,
             overlay_color: None,
             profile,
+            theme_override: None,
             environment_overrides: HashMap::new(),
             terminal: None,
             view: None,
@@ -1069,6 +1076,18 @@ impl TerminalPane {
 
     pub(crate) fn selected_terminal(&self) -> Option<Entity<Terminal>> {
         self.stack.selected_terminal(self.terminal.as_ref())
+    }
+
+    pub(crate) fn theme_override(&self, selection: PaneStackSelection) -> Option<&str> {
+        match selection {
+            PaneStackSelection::Base => self.theme_override.as_deref(),
+            PaneStackSelection::Stacked(id) => self
+                .stack
+                .entries
+                .iter()
+                .find(|entry| entry.id == id)
+                .and_then(|entry| entry.theme_override.as_deref()),
+        }
     }
 
     /// Returns the stack entry represented by the focused terminal view. The

@@ -193,18 +193,22 @@ impl Zetta {
             runtime.reconfigure_with_retention(config.sessions.to_zmux_retention()?)?;
         }
         apply_config_settings(&config, cx)?;
-        // A configuration reload is the boundary at which transient pane
-        // theme selections are intentionally discarded. Appearance changes
-        // preserve this map; reloading settings must restore configuration
-        // values instead.
-        self.transient_pane_themes.clear();
-        let profile_themes = config
-            .profiles
-            .iter()
-            .map(|profile| {
-                resolve_profile_theme(profile, cx).map(|theme| (profile.name.to_lowercase(), theme))
-            })
-            .collect::<Result<HashMap<_, _>>>()?;
+        // A configuration reload is the boundary at which session-scoped pane
+        // theme selections are intentionally discarded. Clear both visible
+        // and process-local detached tabs, and advance the generation used to
+        // reject older live multiplexer state from this same process.
+        self.configuration_generation = self.configuration_generation.wrapping_add(1);
+        for pane in self
+            .tabs
+            .iter_mut()
+            .chain(self.background_sessions.iter_mut())
+            .flat_map(|tab| &mut tab.panes)
+        {
+            pane.theme_override = None;
+            for entry in &mut pane.stack.entries {
+                entry.theme_override = None;
+            }
+        }
         for pane in self.tabs.iter_mut().flat_map(|tab| &mut tab.panes) {
             if let Some(profile) = config
                 .profiles
@@ -235,13 +239,6 @@ impl Zetta {
                     entry.profile.theme = None;
                     entry.profile.dark_theme = None;
                 }
-            }
-            let theme = profile_themes
-                .get(&pane.profile.name.to_lowercase())
-                .cloned()
-                .flatten();
-            for view in pane.all_views().cloned().collect::<Vec<_>>() {
-                view.update(cx, |view, cx| view.set_theme(theme.clone(), cx));
             }
         }
         let profile_count = visible_profile_count(&config.profiles, &config.hidden_profiles);
@@ -279,13 +276,8 @@ impl Zetta {
         self.projects.invalidate_active_context();
         let active_project = self.active_project_config().cloned();
         self.refresh_active_project_tab_icon(active_project.as_deref());
-        let project_tab_ids = self
-            .tabs
-            .iter()
-            .filter(|tab| self.projects.config_for_pane(tab.active_pane).is_some())
-            .map(|tab| tab.id)
-            .collect::<Vec<_>>();
-        for tab_id in project_tab_ids {
+        let tab_ids = self.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>();
+        for tab_id in tab_ids {
             self.apply_effective_themes_to_tab(tab_id, cx);
         }
         let (effective_profiles, effective_working_directory) = {

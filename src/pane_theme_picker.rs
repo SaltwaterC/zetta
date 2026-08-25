@@ -240,9 +240,10 @@ impl Zetta {
         self.set_active_pane_theme(None, cx);
     }
 
-    /// Applies `theme_name` to the active pane's terminal view only: it never
-    /// touches `pane.profile`, `self.profiles`, or the configuration file, so
-    /// the change is lost on tab close or the next configuration reload.
+    /// Applies `theme_name` to the active logical pane only: it never touches
+    /// `pane.profile`, `self.profiles`, or the configuration file. The choice
+    /// follows the pane through session transfers and is cleared by reset,
+    /// pane close, or the next configuration reload.
     /// `None` restores whatever theme the pane's profile is configured with.
     /// Shared by the interactive picker and the `panetheme` CLI command.
     pub(crate) fn set_active_pane_theme(
@@ -250,13 +251,25 @@ impl Zetta {
         theme_name: Option<String>,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some((pane_id, selection, profile, view)) = self
+        let Some((pane_id, selection, project_pane_id, profile, view)) = self
             .tabs
             .get(self.active_tab)
             .and_then(Tab::active_pane)
             .and_then(|pane| {
+                let (project_pane_id, profile) = match pane.stack.selected {
+                    PaneStackSelection::Base => (pane.id, pane.profile.clone()),
+                    PaneStackSelection::Stacked(id) => (
+                        id,
+                        pane.stack
+                            .entries
+                            .iter()
+                            .find(|entry| entry.id == id)?
+                            .profile
+                            .clone(),
+                    ),
+                };
                 pane.selected_view()
-                    .map(|view| (pane.id, pane.stack.selected, pane.profile.clone(), view))
+                    .map(|view| (pane.id, pane.stack.selected, project_pane_id, profile, view))
             })
         else {
             return false;
@@ -264,17 +277,44 @@ impl Zetta {
         let theme = match theme_name {
             Some(name) => match ThemeRegistry::global(cx).get(&name) {
                 Ok(theme) => {
-                    self.transient_pane_themes
-                        .insert((pane_id, selection), theme.clone());
+                    let pane = self.tabs[self.active_tab]
+                        .pane_mut(pane_id)
+                        .expect("the active pane still exists");
+                    match selection {
+                        PaneStackSelection::Base => pane.theme_override = Some(name),
+                        PaneStackSelection::Stacked(id) => {
+                            let Some(entry) =
+                                pane.stack.entries.iter_mut().find(|entry| entry.id == id)
+                            else {
+                                return false;
+                            };
+                            entry.theme_override = Some(name);
+                        }
+                    }
                     Some(theme)
                 }
                 Err(_) => return false,
             },
             None => {
-                self.transient_pane_themes.remove(&(pane_id, selection));
+                let pane = self.tabs[self.active_tab]
+                    .pane_mut(pane_id)
+                    .expect("the active pane still exists");
+                match selection {
+                    PaneStackSelection::Base => pane.theme_override = None,
+                    PaneStackSelection::Stacked(id) => {
+                        let Some(entry) =
+                            pane.stack.entries.iter_mut().find(|entry| entry.id == id)
+                        else {
+                            return false;
+                        };
+                        entry.theme_override = None;
+                    }
+                }
                 resolve_project_profile_theme(
                     &profile,
-                    self.active_project_config().map(Arc::as_ref),
+                    self.projects
+                        .config_for_pane(project_pane_id)
+                        .map(Arc::as_ref),
                     cx,
                 )
                 .ok()

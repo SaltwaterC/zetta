@@ -9,6 +9,23 @@ fn reconnect_is_immediate_only_for_one_background_session() {
 }
 
 #[test]
+fn only_older_live_state_from_this_process_loses_pane_theme_overrides() {
+    let source = Some(crate::session_state::PaneThemeSource {
+        process_id: 42,
+        runner_id: 7,
+        configuration_generation: 2,
+    });
+
+    assert!(pane_theme_source_is_stale(source, 42, 3));
+    assert!(!pane_theme_source_is_stale(source, 42, 2));
+    assert!(
+        !pane_theme_source_is_stale(source, 43, 3),
+        "a new process must restore the saved session-scoped override"
+    );
+    assert!(!pane_theme_source_is_stale(None, 42, 3));
+}
+
+#[test]
 fn no_mux_keep_running_is_explicitly_process_local() {
     let action = ProtectedSessionAction::KeepRunning;
 
@@ -49,6 +66,7 @@ fn background_session_is_reaped_after_its_final_pane_exits() {
             overlay_opacity: None,
             overlay_color: None,
             profile,
+            theme_override: None,
             environment_overrides: HashMap::new(),
             terminal: None,
             view: None,
@@ -340,6 +358,53 @@ fn a_tab_arriving_from_elsewhere_inherits_this_windows_project() {
     );
     inherit_project_for_panes(&mut empty, 7, &tab);
     assert!(empty.root_for_pane(11).is_none());
+}
+
+#[test]
+fn restored_directories_are_correlated_with_base_and_stacked_routing_ids() {
+    let mut tab = attached_tab_with_a_stacked_command();
+    tab.panes[0].stack.entries[0].working_directory =
+        Some(std::path::PathBuf::from("/work/zetta/task"));
+    let state = crate::session_state::TabState::from_tab(&tab, &HashMap::new());
+    let summary = BackgroundSessionSummary {
+        id: 5,
+        title: "session".to_owned(),
+        authentication_required: false,
+        active_pane: 11,
+        layout: BackgroundPaneLayout::Pane { pane_id: 11 },
+        panes: vec![BackgroundPaneSummary {
+            id: 11,
+            label: "shell".to_owned(),
+            profile: "System".to_owned(),
+            configured_command: "sh".to_owned(),
+            application: "sh".to_owned(),
+            foreground_command: None,
+            terminal_title: None,
+            working_directory: Some(std::path::PathBuf::from("/work/zetta")),
+            state: BackgroundPaneState::Running,
+            exit: None,
+        }],
+        held: false,
+        scoped_to: None,
+        key_envelope: None,
+    };
+
+    let restored = restored_pane_metadata(&state, &summary);
+    assert_eq!(
+        restored,
+        vec![
+            (
+                11,
+                "System".to_owned(),
+                Some(std::path::PathBuf::from("/work/zetta"))
+            ),
+            (
+                12,
+                "System".to_owned(),
+                Some(std::path::PathBuf::from("/work/zetta/task"))
+            )
+        ]
+    );
 }
 
 #[test]

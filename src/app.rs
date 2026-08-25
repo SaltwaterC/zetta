@@ -555,10 +555,10 @@ pub(crate) struct Zetta {
     /// with that profile for the rest of this process, never written back to
     /// `launch_config`/`profiles` or the settings UI.
     pub(crate) launch_theme_override: Option<(String, String)>,
-    /// Explicit themes selected from the per-pane picker. The values are
-    /// intentionally independent of light/dark resolution so an appearance
-    /// change never replaces a transient user choice.
-    pub(crate) transient_pane_themes: HashMap<(u64, PaneStackSelection), Arc<Theme>>,
+    /// Incremented by successful configuration reloads. Serialized live
+    /// sessions from an older generation in this process must not restore
+    /// pane-theme overrides that the reload cleared.
+    pub(crate) configuration_generation: u64,
     pub(crate) configuration_error: Option<String>,
     pub(crate) configuration_reload_feedback: ConfigurationReloadFeedback,
     pub(crate) pane_output_error: Option<String>,
@@ -809,7 +809,7 @@ impl Zetta {
             project_detection_base: Arc::new(config.clone()),
             projects,
             launch_theme_override,
-            transient_pane_themes: HashMap::new(),
+            configuration_generation: 0,
             configuration_error,
             configuration_reload_feedback: ConfigurationReloadFeedback::default(),
             pane_output_error: None,
@@ -1199,8 +1199,6 @@ impl Zetta {
             self.drop_shared_pane(*pane_id);
             self.release_mux_pane(tab_id, *pane_id, cx);
         }
-        self.transient_pane_themes
-            .retain(|(pane_id, _), _| !closed_pane_ids.contains(pane_id));
         self.mux_panes.forget_tab(tab_id);
         self.forget_pane_controls(closed_pane_ids);
         self.tabs.remove(index);
@@ -1418,8 +1416,6 @@ impl Zetta {
         };
         self.projects.forget_pane(pane_id);
         self.forget_pane_controls([pane_id]);
-        self.transient_pane_themes
-            .retain(|(id, _), _| *id != pane_id);
         self.drop_shared_pane(pane_id);
         self.release_mux_pane(tab_id, pane_id, cx);
         self.retain_open_visible_terminals();
@@ -2693,13 +2689,14 @@ impl Zetta {
             .tabs
             .iter()
             .find(|tab| tab.attention_id == attention_id)?;
-        let (pane, selection, profile, view) = match pane_id {
+        let (pane, selection, profile, project_pane_id, view) = match pane_id {
             Some(routing_id) => tab.panes.iter().find_map(|pane| {
                 if pane.routing_id == routing_id {
                     return Some((
                         pane,
                         PaneStackSelection::Base,
                         &pane.profile,
+                        pane.id,
                         pane.view.clone(),
                     ));
                 }
@@ -2709,6 +2706,7 @@ impl Zetta {
                             pane,
                             PaneStackSelection::Stacked(entry.id),
                             &entry.profile,
+                            entry.id,
                             entry.view.clone(),
                         )
                     })
@@ -2721,6 +2719,7 @@ impl Zetta {
                         pane,
                         PaneStackSelection::Base,
                         &pane.profile,
+                        pane.id,
                         pane.view.clone(),
                     ),
                     PaneStackSelection::Stacked(entry_id) => {
@@ -2733,6 +2732,7 @@ impl Zetta {
                             pane,
                             PaneStackSelection::Stacked(entry.id),
                             &entry.profile,
+                            entry.id,
                             entry.view.clone(),
                         )
                     }
@@ -2743,15 +2743,14 @@ impl Zetta {
         let theme = view
             .and_then(|view| view.read(cx).theme().cloned())
             .or_else(|| {
-                self.transient_pane_themes
-                    .get(&(pane.id, selection))
-                    .cloned()
+                pane.theme_override(selection)
+                    .and_then(|name| ThemeRegistry::global(cx).get(name).ok())
             })
             .or_else(|| {
                 resolve_project_profile_theme(
                     profile,
                     self.projects
-                        .config_for_pane(pane.id)
+                        .config_for_pane(project_pane_id)
                         .map(|project| project.as_ref()),
                     cx,
                 )

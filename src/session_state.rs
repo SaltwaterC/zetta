@@ -37,6 +37,12 @@ where
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TabState {
+    /// Identifies the live Zetta configuration generation that published this
+    /// state. A process that reloaded after detaching the session must not
+    /// resurrect pane-theme choices that reload intentionally cleared. Other
+    /// processes, and disk resume, still restore the saved choices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pane_theme_source: Option<PaneThemeSource>,
     /// Stable across a move between visible and background storage, which is
     /// what lets process control keep addressing the same tab.
     pub(crate) attention_id: u64,
@@ -89,6 +95,8 @@ pub(crate) struct PaneState {
     pub(crate) generated_label: Option<String>,
     pub(crate) custom_label: Option<String>,
     pub(crate) profile: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) theme_override: Option<String>,
     pub(crate) environment_overrides: HashMap<String, String>,
     pub(crate) overlay: Option<OverlayState>,
     pub(crate) exit: Option<BackgroundPaneExit>,
@@ -122,11 +130,21 @@ pub(crate) struct StackedPaneState {
     pub(crate) mux_pane_id: Option<u64>,
     pub(crate) command: String,
     pub(crate) profile: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) theme_override: Option<String>,
     pub(crate) state: crate::pane::StackedPaneState,
     pub(crate) exit_code: Option<i32>,
     pub(crate) error: Option<String>,
     pub(crate) working_directory: Option<std::path::PathBuf>,
     pub(crate) wsl_directory: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PaneThemeSource {
+    pub(crate) process_id: u32,
+    pub(crate) runner_id: u64,
+    pub(crate) configuration_generation: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -257,7 +275,7 @@ impl LayoutState {
 fn restore_stack(
     entries: Vec<StackedPaneState>,
     selected: Option<u64>,
-    resolve_profile: &impl Fn(&str) -> Profile,
+    resolve_profile: &impl Fn(u64, &str) -> Profile,
 ) -> PaneStack {
     let entries = entries
         .into_iter()
@@ -265,10 +283,11 @@ fn restore_stack(
             let mut restored = StackedPane::new(
                 entry.id,
                 entry.command,
-                resolve_profile(&entry.profile),
+                resolve_profile(entry.id, &entry.profile),
                 entry.working_directory,
                 entry.wsl_directory,
             );
+            restored.theme_override = entry.theme_override;
             let was_running = matches!(
                 entry.state,
                 crate::pane::StackedPaneState::Starting | crate::pane::StackedPaneState::Running
@@ -301,6 +320,7 @@ fn restore_stack(
 impl TabState {
     pub(crate) fn from_tab(tab: &Tab, mux_pane_ids: &HashMap<u64, u64>) -> Self {
         Self {
+            pane_theme_source: None,
             attention_id: tab.attention_id,
             next_pane_label: tab.next_pane_label,
             layout: LayoutState::from_layout(&tab.layout),
@@ -339,6 +359,7 @@ impl TabState {
                     generated_label: pane.generated_label.clone(),
                     custom_label: pane.custom_label.clone(),
                     profile: pane.profile.name.clone(),
+                    theme_override: pane.theme_override.clone(),
                     environment_overrides: pane.environment_overrides.clone(),
                     overlay: pane.overlay_text.as_ref().map(|text| OverlayState {
                         text: text.clone(),
@@ -363,6 +384,7 @@ impl TabState {
                             mux_pane_id: mux_pane_ids.get(&entry.id).copied(),
                             command: entry.command.clone(),
                             profile: entry.profile.name.clone(),
+                            theme_override: entry.theme_override.clone(),
                             state: entry.state,
                             exit_code: entry.exit_code,
                             error: entry.error.clone(),
@@ -386,10 +408,19 @@ impl TabState {
     /// exist has no sensible rendering, and silently dropping the difference
     /// would lose a running terminal from the user's view while leaving it
     /// running in the multiplexer.
+    #[cfg(test)]
     pub(crate) fn into_tab(
         self,
         tab_id: u64,
         resolve_profile: impl Fn(&str) -> Profile,
+    ) -> anyhow::Result<Tab> {
+        self.into_tab_by_pane(tab_id, |_, name| resolve_profile(name))
+    }
+
+    pub(crate) fn into_tab_by_pane(
+        self,
+        tab_id: u64,
+        resolve_profile: impl Fn(u64, &str) -> Profile,
     ) -> anyhow::Result<Tab> {
         let mut layout_panes = Vec::new();
         self.layout.pane_ids(&mut layout_panes);
@@ -432,8 +463,10 @@ impl TabState {
             .panes
             .into_iter()
             .map(|pane| {
-                let mut restored = TerminalPane::new(pane.id, resolve_profile(&pane.profile))
-                    .with_label_number(pane.label_number);
+                let mut restored =
+                    TerminalPane::new(pane.id, resolve_profile(pane.id, &pane.profile))
+                        .with_label_number(pane.label_number);
+                restored.theme_override = pane.theme_override;
                 restored.generated_label = pane.generated_label;
                 restored.custom_label = pane.custom_label;
                 restored.environment_overrides = pane.environment_overrides;

@@ -236,9 +236,10 @@ filter, use the arrow keys and `Enter` to apply, or `Escape` to cancel. The
 list always shows a checkmark next to the pane's current theme and pins
 **Reset to profile default** at the top to clear the override and go back to
 the profile's configured theme (or the global default, if the profile has
-none). The override is not saved: it is not written to `config.json`, the
-profile, or the settings view, so it disappears when the pane closes or the
-configuration reloads.
+none). The override is session-scoped rather than configuration: it is not
+written to `config.json`, the profile, or the settings view. It follows the
+logical pane through backgrounding, reconnect, and encrypted disk resume, and
+disappears when the pane closes or configuration reloads.
 
 The same change is available from any Zetta pane, or a script, with
 `zetta panetheme THEME`; `zetta panetheme --reset` clears the override, and

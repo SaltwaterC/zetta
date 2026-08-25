@@ -172,6 +172,61 @@ fn a_panes_appearance_and_configuration_survive() {
 }
 
 #[test]
+fn base_and_stacked_pane_theme_overrides_survive_json_and_id_reassignment() {
+    let mut original = populated_tab();
+    original.pane_mut(10).unwrap().theme_override = Some("Dracula".to_owned());
+    let mut stacked = StackedPane::new(
+        70,
+        "cargo test".to_owned(),
+        profile("System"),
+        Some(std::path::PathBuf::from("/work/zetta")),
+        None,
+    );
+    stacked.theme_override = Some("Ayu Dark".to_owned());
+    stacked.state = crate::pane::StackedPaneState::Completed;
+    original.pane_mut(10).unwrap().stack.entries.push(stacked);
+
+    let mut restored = round_trip(&original);
+    let mut next_pane_id = 100;
+    restored.reassign_ids(9, &mut next_pane_id);
+
+    let pane = restored
+        .panes
+        .iter()
+        .find(|pane| pane.routing_id == 10)
+        .unwrap();
+    assert_eq!(pane.theme_override.as_deref(), Some("Dracula"));
+    assert_eq!(
+        pane.stack.entries[0].theme_override.as_deref(),
+        Some("Ayu Dark")
+    );
+}
+
+#[test]
+fn pane_theme_fields_are_backward_compatible() {
+    let mut encoded =
+        serde_json::to_value(TabState::from_tab(&populated_tab(), &HashMap::new())).unwrap();
+    encoded.as_object_mut().unwrap().remove("pane_theme_source");
+    for pane in encoded["panes"].as_array_mut().unwrap() {
+        pane.as_object_mut().unwrap().remove("theme_override");
+        for entry in pane["stack"].as_array_mut().unwrap() {
+            entry.as_object_mut().unwrap().remove("theme_override");
+        }
+    }
+
+    let restored = serde_json::from_value::<TabState>(encoded)
+        .unwrap()
+        .into_tab(1, profile)
+        .unwrap();
+    assert!(
+        restored
+            .panes
+            .iter()
+            .all(|pane| pane.theme_override.is_none())
+    );
+}
+
+#[test]
 fn a_profile_is_resolved_afresh_rather_than_frozen() {
     // A profile is user configuration. A session restored after the user
     // edited one should follow the edit.
@@ -238,6 +293,7 @@ fn a_layout_that_does_not_match_its_panes_is_refused() {
         generated_label: None,
         custom_label: None,
         profile: "System".to_owned(),
+        theme_override: None,
         environment_overrides: HashMap::new(),
         overlay: None,
         exit: None,

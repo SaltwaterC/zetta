@@ -67,6 +67,84 @@ fn inherit_project_for_panes(
     }
 }
 
+#[derive(Clone, Debug, Default)]
+struct RestoredPaneMetadata {
+    panes: HashMap<u64, RestoredPaneInfo>,
+}
+
+#[derive(Clone, Debug)]
+struct RestoredPaneInfo {
+    working_directory: Option<PathBuf>,
+    project_root: Option<PathBuf>,
+}
+
+impl RestoredPaneMetadata {
+    fn working_directory(&self, routing_id: u64) -> Option<PathBuf> {
+        self.panes
+            .get(&routing_id)
+            .and_then(|pane| pane.working_directory.clone())
+    }
+
+    fn project_root(&self, routing_id: u64) -> Option<&PathBuf> {
+        self.panes
+            .get(&routing_id)
+            .and_then(|pane| pane.project_root.as_ref())
+    }
+}
+
+fn restored_pane_metadata(
+    state: &crate::session_state::TabState,
+    summary: &BackgroundSessionSummary,
+) -> Vec<(u64, String, Option<PathBuf>)> {
+    state
+        .panes
+        .iter()
+        .flat_map(|pane| {
+            let base = std::iter::once((
+                pane.id,
+                pane.profile.clone(),
+                summary
+                    .panes
+                    .iter()
+                    .find(|summary| summary.id == pane.id)
+                    .and_then(|summary| summary.working_directory.clone()),
+            ));
+            let stacked = pane.stack.iter().map(|entry| {
+                (
+                    entry.id,
+                    entry.profile.clone(),
+                    entry
+                        .working_directory
+                        .clone()
+                        .or_else(|| entry.wsl_directory.as_deref().map(PathBuf::from)),
+                )
+            });
+            base.chain(stacked)
+        })
+        .collect()
+}
+
+fn restored_project_directory(profile: &Profile, directory: &Path) -> PathBuf {
+    if is_wsl_shell(&profile.command)
+        && let Some(directory) = directory.to_str()
+        && let Some(native) = wsl_reported_directory(profile, directory)
+    {
+        return native;
+    }
+    directory.to_path_buf()
+}
+
+fn pane_theme_source_is_stale(
+    source: Option<crate::session_state::PaneThemeSource>,
+    process_id: u32,
+    configuration_generation: u64,
+) -> bool {
+    source.is_some_and(|source| {
+        source.process_id == process_id
+            && source.configuration_generation != configuration_generation
+    })
+}
+
 /// What to do with the size the multiplexer arbitrated for a shared pane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SharedSizeAction {
@@ -1105,6 +1183,7 @@ impl Zetta {
         // the UI cannot keep offering a record that no longer exists.
         cx.defer(refresh_process_background_sessions);
         let summary_title = persisted.summary.title.clone();
+        let persisted_summary = persisted.summary;
         let snapshots = persisted.snapshots;
         let mut state: crate::session_state::TabState =
             match serde_json::from_value(persisted.state).context("reading restored tab state") {
@@ -1117,6 +1196,15 @@ impl Zetta {
                     return ReconnectSessionResult::Rejected;
                 }
             };
+        let restored_panes = restored_pane_metadata(&state, &persisted_summary);
+        let restored_metadata = self.prepare_restored_panes(restored_panes.clone());
+        let restored_profiles = self.restored_profiles(&restored_panes, &restored_metadata);
+        let snapshot_routing_ids = state
+            .panes
+            .iter()
+            .filter_map(|pane| Some((pane.mux_pane_id?, pane.id)))
+            .collect::<HashMap<_, _>>();
+
         // A disk record may have been written by a daemon that was alive when
         // the tab detached. Its pane IDs and exit details describe that old
         // process tree, not a process this restore is allowed to revive.
@@ -1135,11 +1223,9 @@ impl Zetta {
         }
         let tab_id = self.next_tab_id;
         self.next_tab_id += 1;
-        let profiles = self.profiles.clone();
-        let mut tab = match state.into_tab(tab_id, |name| {
-            profiles
-                .iter()
-                .find(|profile| profile.name == name)
+        let mut tab = match state.into_tab_by_pane(tab_id, |routing_id, name| {
+            restored_profiles
+                .get(&routing_id)
                 .cloned()
                 .unwrap_or_else(|| Profile {
                     name: name.to_owned(),
@@ -1179,9 +1265,22 @@ impl Zetta {
                 cx.background_executor(),
                 PathStyle::local(),
             )
+            .with_working_directory(
+                snapshot_routing_ids
+                    .get(&snapshot.pane_id)
+                    .and_then(|routing_id| restored_metadata.working_directory(*routing_id)),
+            )
             .with_replay(snapshot.bytes);
             let terminal = cx.new(|cx| builder.subscribe(cx));
-            if let Some(pane) = tab.pane_mut(snapshot.pane_id) {
+            let routing_id = snapshot_routing_ids
+                .get(&snapshot.pane_id)
+                .copied()
+                .unwrap_or(snapshot.pane_id);
+            if let Some(pane) = tab
+                .panes
+                .iter_mut()
+                .find(|pane| pane.routing_id == routing_id)
+            {
                 pane.terminal = Some(terminal);
                 pane.error = None;
                 pane.base_exited = true;
@@ -1193,7 +1292,7 @@ impl Zetta {
                 pane.error = Some(format!("Run: profile {}", pane.profile.name));
             }
         }
-        self.attach_reconnected_tab(tab, true, window, cx);
+        self.attach_reconnected_tab_with_metadata(tab, true, Some(restored_metadata), window, cx);
         ReconnectSessionResult::Reconnected
     }
 
@@ -1516,10 +1615,221 @@ impl Zetta {
         inherit_project_for_panes(&mut self.projects, source, tab);
     }
 
+    /// Resolves saved pane directories before any terminal view is built.
+    /// Each distinct registered root is read once, so all panes in a restore
+    /// see the same latest project configuration without multiplying I/O by
+    /// pane count.
+    fn prepare_restored_panes(
+        &mut self,
+        panes: Vec<(u64, String, Option<PathBuf>)>,
+    ) -> RestoredPaneMetadata {
+        let destination_root = self
+            .active_project_config()
+            .map(|project| project.root.clone());
+        let mut metadata = RestoredPaneMetadata::default();
+        for (routing_id, profile_name, working_directory) in panes {
+            let profile = self
+                .launch_config
+                .profiles
+                .iter()
+                .find(|profile| profile.name.eq_ignore_ascii_case(&profile_name))
+                .cloned()
+                .unwrap_or_else(|| Profile {
+                    name: profile_name,
+                    command: task::Shell::System,
+                    theme: None,
+                    dark_theme: None,
+                    icon: ProfileIcon::default(),
+                });
+            let project_root = match working_directory.as_deref() {
+                Some(directory) => self
+                    .projects
+                    .registry
+                    .matching_root(&restored_project_directory(&profile, directory))
+                    .cloned(),
+                None => destination_root.clone(),
+            };
+            metadata.panes.insert(
+                routing_id,
+                RestoredPaneInfo {
+                    working_directory,
+                    project_root,
+                },
+            );
+        }
+
+        let roots = metadata
+            .panes
+            .values()
+            .filter_map(|pane| pane.project_root.clone())
+            .collect::<HashSet<_>>();
+        let mut unavailable = HashSet::new();
+        for root in roots {
+            match ProjectConfig::load(&root, &self.launch_config) {
+                Ok(project) => {
+                    self.projects.insert_config(project);
+                }
+                Err(error) => {
+                    unavailable.insert(root.clone());
+                    self.projects.configs.remove(&root);
+                    self.configuration_error = Some(format!(
+                        "Could not restore project configuration {}: {error:#}",
+                        ProjectConfig::path_for(&root).display()
+                    ));
+                }
+            }
+        }
+        for pane in metadata.panes.values_mut() {
+            if pane
+                .project_root
+                .as_ref()
+                .is_some_and(|root| unavailable.contains(root))
+            {
+                pane.project_root = None;
+            }
+        }
+        metadata
+    }
+
+    fn restored_profiles(
+        &self,
+        panes: &[(u64, String, Option<PathBuf>)],
+        metadata: &RestoredPaneMetadata,
+    ) -> HashMap<u64, Profile> {
+        panes
+            .iter()
+            .map(|(routing_id, name, _)| {
+                let profiles = metadata
+                    .project_root(*routing_id)
+                    .and_then(|root| self.projects.configs.get(root))
+                    .map(|project| &project.effective.profiles)
+                    .unwrap_or(&self.launch_config.profiles);
+                let mut profile = profiles
+                    .iter()
+                    .find(|profile| profile.name.eq_ignore_ascii_case(name))
+                    .cloned()
+                    .unwrap_or_else(|| Profile {
+                        name: name.clone(),
+                        command: task::Shell::System,
+                        theme: None,
+                        dark_theme: None,
+                        icon: ProfileIcon::default(),
+                    });
+                crate::app::apply_launch_theme_override(
+                    &mut profile,
+                    self.launch_theme_override.as_ref(),
+                );
+                (*routing_id, profile)
+            })
+            .collect()
+    }
+
+    fn bind_restored_projects(&mut self, tab: &Tab, metadata: &RestoredPaneMetadata) {
+        let mut roots = HashSet::new();
+        for pane in &tab.panes {
+            if let Some(root) = metadata.project_root(pane.routing_id) {
+                self.projects.pane_roots.insert(pane.id, root.clone());
+                roots.insert(root.clone());
+            }
+            for entry in &pane.stack.entries {
+                if let Some(root) = metadata.project_root(entry.routing_id) {
+                    self.projects.pane_roots.insert(entry.id, root.clone());
+                    roots.insert(root.clone());
+                }
+            }
+        }
+        for root in roots {
+            self.projects.mark_entered(tab.id, &root);
+        }
+    }
+
+    fn restored_terminal_theme(
+        &mut self,
+        theme_override: Option<&str>,
+        profile: &Profile,
+        project: Option<&ProjectConfig>,
+        cx: &App,
+    ) -> Option<Arc<Theme>> {
+        if let Some(name) = theme_override {
+            match ThemeRegistry::global(cx).get(name) {
+                Ok(theme) => return Some(theme),
+                Err(error) => {
+                    self.configuration_error =
+                        Some(format!("Could not restore pane theme {name:?}: {error:#}"));
+                }
+            }
+        }
+        match resolve_project_profile_theme(profile, project, cx) {
+            Ok(theme) => theme.or_else(|| Some(self.application_theme(cx))),
+            Err(error) => {
+                self.configuration_error = Some(format!(
+                    "Could not restore configured terminal theme: {error:#}"
+                ));
+                resolve_profile_theme(profile, cx)
+                    .ok()
+                    .flatten()
+                    .or_else(|| Some(self.application_theme(cx)))
+            }
+        }
+    }
+
     pub(crate) fn attach_reconnected_tab(
         &mut self,
         mut tab: Tab,
         transferred: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let restored_panes = tab
+            .panes
+            .iter()
+            .flat_map(|pane| {
+                let base = std::iter::once((
+                    pane.routing_id,
+                    pane.profile.name.clone(),
+                    pane.working_directory(cx),
+                ));
+                let stacked = pane.stack.entries.iter().map(|entry| {
+                    (
+                        entry.routing_id,
+                        entry.profile.name.clone(),
+                        entry
+                            .terminal
+                            .as_ref()
+                            .and_then(|terminal| terminal.read(cx).working_directory())
+                            .or_else(|| entry.working_directory.clone())
+                            .or_else(|| entry.wsl_directory.as_deref().map(PathBuf::from)),
+                    )
+                });
+                base.chain(stacked)
+            })
+            .collect::<Vec<_>>();
+        let restored_metadata = self.prepare_restored_panes(restored_panes.clone());
+        let profiles = self.restored_profiles(&restored_panes, &restored_metadata);
+        for pane in &mut tab.panes {
+            if let Some(profile) = profiles.get(&pane.routing_id) {
+                pane.profile = profile.clone();
+            }
+            for entry in &mut pane.stack.entries {
+                if let Some(profile) = profiles.get(&entry.routing_id) {
+                    entry.profile = profile.clone();
+                }
+            }
+        }
+        self.attach_reconnected_tab_with_metadata(
+            tab,
+            transferred,
+            Some(restored_metadata),
+            window,
+            cx,
+        );
+    }
+
+    fn attach_reconnected_tab_with_metadata(
+        &mut self,
+        mut tab: Tab,
+        transferred: bool,
+        restored: Option<RestoredPaneMetadata>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1538,7 +1848,11 @@ impl Zetta {
                 .max(tab.attention_id.saturating_add(1));
         }
         let tab_id = tab.id;
-        self.inherit_project_for_incoming_panes(&tab);
+        if let Some(restored) = restored.as_ref() {
+            self.bind_restored_projects(&tab, restored);
+        } else {
+            self.inherit_project_for_incoming_panes(&tab);
+        }
         let panes = tab
             .panes
             .iter()
@@ -1553,7 +1867,9 @@ impl Zetta {
                             pane.id,
                             None,
                             terminal,
-                            resolve_project_profile_theme(&pane.profile, project.as_deref(), cx),
+                            pane.theme_override.clone(),
+                            pane.profile.clone(),
+                            project.clone(),
                         )
                     });
                 let stacked = pane
@@ -1561,11 +1877,14 @@ impl Zetta {
                     .entries
                     .iter()
                     .filter_map(|entry| {
+                        let project = self.projects.config_for_pane(entry.id).cloned();
                         Some((
                             pane.id,
                             Some(entry.id),
                             entry.terminal.clone()?,
-                            resolve_project_profile_theme(&entry.profile, project.as_deref(), cx),
+                            entry.theme_override.clone(),
+                            entry.profile.clone(),
+                            project,
                         ))
                     })
                     .collect::<Vec<_>>();
@@ -1574,44 +1893,23 @@ impl Zetta {
             .collect::<Vec<_>>();
         self.active_tab = insert_tab_in_pin_order(&mut self.tabs, tab);
 
-        for (pane_id, stack_id, terminal, terminal_theme) in panes {
-            match terminal_theme {
-                Ok(theme) => {
-                    let display_only = !terminal.read(cx).is_pty();
-                    let view = cx.new(|cx| {
-                        TerminalView::new_with_theme(terminal.clone(), theme, window, cx)
-                    });
-                    if display_only {
-                        view.update(cx, |view, cx| view.set_input_enabled(false, cx));
-                    }
-                    if let Some(entry_id) = stack_id {
-                        self.connect_stacked_terminal_view(
-                            tab_id, pane_id, entry_id, view, window, cx,
-                        );
-                    } else {
-                        self.connect_terminal_view(tab_id, pane_id, view, window, cx);
-                    }
-                }
-                Err(error) => {
-                    if let Some(entry_id) = stack_id {
-                        if let Some(entry) =
-                            self.tabs[self.active_tab]
-                                .pane_mut(pane_id)
-                                .and_then(|pane| {
-                                    pane.stack
-                                        .entries
-                                        .iter_mut()
-                                        .find(|entry| entry.id == entry_id)
-                                })
-                        {
-                            entry.error =
-                                Some(format!("Could not reattach terminal view: {error:#}"));
-                            entry.state = StackedPaneState::Failed;
-                        }
-                    } else if let Some(pane) = self.tabs[self.active_tab].pane_mut(pane_id) {
-                        pane.error = Some(format!("Could not reattach terminal view: {error:#}"));
-                    }
-                }
+        for (pane_id, stack_id, terminal, theme_override, profile, project) in panes {
+            let theme = self.restored_terminal_theme(
+                theme_override.as_deref(),
+                &profile,
+                project.as_deref(),
+                cx,
+            );
+            let display_only = !terminal.read(cx).is_pty();
+            let view =
+                cx.new(|cx| TerminalView::new_with_theme(terminal.clone(), theme, window, cx));
+            if display_only {
+                view.update(cx, |view, cx| view.set_input_enabled(false, cx));
+            }
+            if let Some(entry_id) = stack_id {
+                self.connect_stacked_terminal_view(tab_id, pane_id, entry_id, view, window, cx);
+            } else {
+                self.connect_terminal_view(tab_id, pane_id, view, window, cx);
             }
         }
         self.focus_active(window, cx);
@@ -1820,8 +2118,6 @@ impl Zetta {
             return;
         };
         for pane_id in removed_pane_ids {
-            self.transient_pane_themes
-                .retain(|(id, _), _| *id != pane_id);
             self.background_observed_panes.remove(&pane_id);
         }
         self.publish_background_session_catalog(cx);
@@ -2283,7 +2579,12 @@ impl Zetta {
         // tab id instead made the catalog list a session the daemon would then
         // claim did not exist, because it looks sessions up under the mux id.
         summary.id = session_id;
-        let state = crate::session_state::TabState::from_tab(tab, self.mux_panes.ids());
+        let mut state = crate::session_state::TabState::from_tab(tab, self.mux_panes.ids());
+        state.pane_theme_source = Some(crate::session_state::PaneThemeSource {
+            process_id: std::process::id(),
+            runner_id: self.background_sessions.runner_id(),
+            configuration_generation: self.configuration_generation,
+        });
         let state = serde_json::to_value(state).context("serializing the session's tab state")?;
         Ok((summary, state))
     }
@@ -2366,21 +2667,30 @@ impl Zetta {
             "session {session_id} has not published a layout, so it cannot be attached; share or \
              detach it from the window showing it first"
         );
-        let state: crate::session_state::TabState =
+        let mut state: crate::session_state::TabState =
             serde_json::from_value(state).context("reading the session's tab state")?;
+        if pane_theme_source_is_stale(
+            state.pane_theme_source,
+            std::process::id(),
+            self.configuration_generation,
+        ) {
+            for pane in &mut state.panes {
+                pane.theme_override = None;
+                for entry in &mut pane.stack {
+                    entry.theme_override = None;
+                }
+            }
+        }
+        let restored_panes = restored_pane_metadata(&state, &summary);
+        let restored_metadata = self.prepare_restored_panes(restored_panes.clone());
+        let restored_profiles = self.restored_profiles(&restored_panes, &restored_metadata);
         let tab_id = self.next_tab_id;
         self.next_tab_id += 1;
-        let profiles = self.profiles.clone();
-        let mut tab = state.clone().into_tab(tab_id, |name| {
-            profiles
-                .iter()
-                .find(|profile| profile.name == name)
+        let mut tab = state.clone().into_tab_by_pane(tab_id, |routing_id, name| {
+            restored_profiles
+                .get(&routing_id)
                 .cloned()
                 .unwrap_or_else(|| Profile {
-                    // A profile the configuration no longer describes. Keeping
-                    // the name means the pane still reports what it was
-                    // started with rather than silently claiming another
-                    // profile's command.
                     name: name.to_owned(),
                     command: task::Shell::System,
                     theme: None,
@@ -2446,9 +2756,17 @@ impl Zetta {
             .into_iter()
             .filter_map(|(pane_id, kind)| Some((pane_ids.get(&pane_id).copied()?, kind)))
             .collect::<Vec<_>>();
-        self.inherit_project_for_incoming_panes(&tab);
+        self.bind_restored_projects(&tab, &restored_metadata);
 
-        self.build_attached_panes(&mut tab, session_id, attached, &runtime, window, cx);
+        self.build_attached_panes(
+            &mut tab,
+            session_id,
+            attached,
+            &restored_metadata,
+            &runtime,
+            window,
+            cx,
+        );
         self.active_tab = insert_tab_in_pin_order(&mut self.tabs, tab);
         // The pane views were built before the tab was inserted. Wire them up
         // now that it is: without the view subscription, the terminal's
@@ -2501,11 +2819,13 @@ impl Zetta {
     /// Each becomes an ordinary terminal view: from here on the pane behaves
     /// exactly like one this process spawned, because it is reading the same
     /// kind of descriptor through the same event loop.
+    #[allow(clippy::too_many_arguments)]
     fn build_attached_panes(
         &mut self,
         tab: &mut Tab,
         session_id: u64,
         attached: Vec<(u64, AttachedPaneKind)>,
+        restored: &RestoredPaneMetadata,
         runtime: &MuxRuntime,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -2516,16 +2836,16 @@ impl Zetta {
                 continue;
             };
             let profile = pane.profile.clone();
+            let theme_override = pane.theme_override.clone();
+            let routing_id = pane.routing_id;
             let project = self.projects.config_for_pane(pane_id).cloned();
-            let theme = match resolve_project_profile_theme(&profile, project.as_deref(), cx) {
-                Ok(theme) => theme,
-                Err(error) => {
-                    if let Some(pane) = tab.pane_mut(pane_id) {
-                        pane.error = Some(format!("Could not apply the pane's theme: {error:#}"));
-                    }
-                    continue;
-                }
-            };
+            let theme = self.restored_terminal_theme(
+                theme_override.as_deref(),
+                &profile,
+                project.as_deref(),
+                cx,
+            );
+            let working_directory = restored.working_directory(routing_id);
 
             let options = terminal::AttachedOptions {
                 shell: profile.command.clone(),
@@ -2546,12 +2866,17 @@ impl Zetta {
                         cx.background_executor(),
                         PathStyle::local(),
                     ) {
-                        Ok(built) => (
-                            mux_pane_id,
-                            Some(built.builder),
-                            Some(built.child_events),
-                            None::<Arc<zmux::client::SharedPane>>,
-                        ),
+                        Ok(mut built) => {
+                            built.builder = built
+                                .builder
+                                .with_working_directory(working_directory.clone());
+                            (
+                                mux_pane_id,
+                                Some(built.builder),
+                                Some(built.child_events),
+                                None::<Arc<zmux::client::SharedPane>>,
+                            )
+                        }
                         Err(error) => {
                             if let Some(pane) = tab.pane_mut(pane_id) {
                                 pane.error =
@@ -2591,6 +2916,7 @@ impl Zetta {
                         cx.background_executor(),
                         PathStyle::local(),
                     )
+                    .with_working_directory(working_directory.clone())
                     .with_replay(pane.replay.clone())
                     .with_pty_control(crate::mux::mux_pty_control(
                         runtime.client().clone(),

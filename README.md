@@ -85,8 +85,10 @@ still display notifications but do not route clicks.
 From a Zetta pane, `zetta tabicon ICON` sets a per-tab icon override on the
 active tab (`none` explicitly hides its icon); it is kept with the logical tab
 but is not written to user or project configuration. `zetta panetheme THEME`
-non-persistently changes the active pane's theme
-(`zetta panetheme --reset` restores the profile's configured theme).
+sets a session-scoped theme on the active pane
+(`zetta panetheme --reset` restores the profile's configured theme). It follows
+the pane through backgrounding, reconnect, and encrypted disk resume, but is
+cleared when the pane closes or configuration reloads.
 `zetta overlay TEXT` non-persistently shows text over the active pane's
 terminal content, with `--size`, `--opacity`, and `--color` options
 (`--color` accepts the named presets `black`, `white`, `gray`, `red`,

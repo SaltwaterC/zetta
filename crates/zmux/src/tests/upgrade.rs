@@ -23,12 +23,26 @@ fn handover() -> Handover {
                 authentication_required: true,
                 active_pane: 2,
                 layout: crate::protocol::BackgroundPaneLayout::Pane { pane_id: 2 },
-                panes: Vec::new(),
+                panes: vec![crate::protocol::BackgroundPaneSummary {
+                    id: 2,
+                    label: "shell".to_owned(),
+                    profile: "System".to_owned(),
+                    configured_command: "sh".to_owned(),
+                    application: "sh".to_owned(),
+                    foreground_command: None,
+                    terminal_title: None,
+                    working_directory: Some(std::path::PathBuf::from("/work/zetta")),
+                    state: crate::protocol::BackgroundPaneState::Running,
+                    exit: None,
+                }],
                 held: false,
                 scoped_to: None,
                 key_envelope: None,
             },
-            state: serde_json::json!({"tab": 1}),
+            state: serde_json::json!({
+                "tab": 1,
+                "panes": [{"id": 2, "theme_override": "Dracula"}]
+            }),
             keep: true,
             offered: true,
             owner: None,
@@ -66,6 +80,14 @@ fn a_handover_round_trips_through_its_anonymous_file() {
     assert_eq!(restored.next_session_id, 5);
     assert_eq!(restored.sessions[0].panes[0].descriptor, 7);
     assert_eq!(restored.sessions[0].panes[0].retained, b"output");
+    assert_eq!(
+        restored.sessions[0].summary.panes[0].working_directory,
+        Some(std::path::PathBuf::from("/work/zetta"))
+    );
+    assert_eq!(
+        restored.sessions[0].state["panes"][0]["theme_override"],
+        "Dracula"
+    );
 }
 
 #[test]

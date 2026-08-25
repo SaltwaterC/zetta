@@ -254,7 +254,7 @@ pub(crate) fn parse_tab_icon_args(args: &[OsString]) -> Result<StartupMode> {
 }
 
 pub(crate) fn pane_theme_help() -> &'static str {
-    "Non-persistently change the active pane's theme through the running Zetta process\n\nUsage: zetta panetheme [OPTIONS] THEME\n       zetta panetheme --reset\n       zetta panetheme --list\n\nTHEME is a theme name registered in the running Zetta process (built-in or user-installed). The theme list is fetched dynamically with --list. The change is never written to the configuration file: it is lost when the pane closes or the configuration reloads.\n\nOptions:\n  -t, --theme NAME  Set the theme by option instead of as a positional argument\n  -r, --reset       Restore the active pane's profile-configured theme\n  -l, --list        Print the running process's registered theme names\n  -h, --help        Print help"
+    "Non-persistently change the active pane's theme through the running Zetta process\n\nUsage: zetta panetheme [OPTIONS] THEME\n       zetta panetheme --reset\n       zetta panetheme --list\n\nTHEME is a theme name registered in the running Zetta process (built-in or user-installed). The theme list is fetched dynamically with --list. The session-scoped change is never written to configuration: it is preserved across backgrounding, reconnect, and encrypted disk resume, and is lost when the pane closes or configuration reloads.\n\nOptions:\n  -t, --theme NAME  Set the theme by option instead of as a positional argument\n  -r, --reset       Restore the active pane's profile-configured theme\n  -l, --list        Print the running process's registered theme names\n  -h, --help        Print help"
 }
 
 pub(crate) fn pane_splits_help() -> &'static str {

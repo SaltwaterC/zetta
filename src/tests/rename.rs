@@ -21,6 +21,7 @@ fn tab(attention_id: u64, custom_title: Option<&str>) -> Tab {
         overlay_opacity: None,
         overlay_color: None,
         profile,
+        theme_override: None,
         environment_overrides: HashMap::new(),
         terminal: None,
         view: None,

@@ -1791,6 +1791,7 @@ impl TerminalBuilder {
             path_style,
             reported_theme: None,
             reported_working_directory: None,
+            restored_working_directory: None,
             reported_foreground_command: None,
             reported_shell_command: None,
             #[cfg(any(test, feature = "test-support"))]
@@ -1950,6 +1951,14 @@ impl TerminalBuilder {
     /// for a shared pane replays through this instead.
     pub fn with_replay(mut self, bytes: Vec<u8>) -> Self {
         self.terminal.pending_replay = (!bytes.is_empty()).then_some(bytes);
+        self
+    }
+
+    /// Seeds the last known directory of a restored session. Live shell OSC
+    /// metadata or foreground-process inspection takes precedence as soon as
+    /// either becomes available, so this fills only the reconstruction gap.
+    pub fn with_working_directory(mut self, directory: Option<PathBuf>) -> Self {
+        self.terminal.restored_working_directory = directory.filter(|path| path.is_absolute());
         self
     }
 
@@ -2396,6 +2405,7 @@ impl TerminalBuilder {
                 path_style,
                 reported_theme: None,
                 reported_working_directory: None,
+                restored_working_directory: None,
                 reported_foreground_command: None,
                 reported_shell_command: None,
                 #[cfg(any(test, feature = "test-support"))]
@@ -2634,6 +2644,7 @@ pub struct Terminal {
     path_style: PathStyle,
     reported_theme: Option<Arc<Theme>>,
     reported_working_directory: Option<String>,
+    restored_working_directory: Option<PathBuf>,
     reported_foreground_command: Option<String>,
     /// The first command reported by the WSL/MSYS2 shell integration is its
     /// idle shell marker. Later markers can then be classified without a
@@ -4434,8 +4445,9 @@ impl Terminal {
                 .read()
                 .as_ref()
                 .map(|process| process.cwd.clone())
-                .filter(|directory| !directory.as_os_str().is_empty()),
-            TerminalType::DisplayOnly => None,
+                .filter(|directory| !directory.as_os_str().is_empty())
+                .or_else(|| self.restored_working_directory.clone()),
+            TerminalType::DisplayOnly => self.restored_working_directory.clone(),
         }
     }
 
@@ -5591,6 +5603,37 @@ mod tests {
                 Some(r"\\server\share\zetta".to_owned())
             );
         }
+    }
+
+    #[gpui::test]
+    fn restored_working_directory_is_available_until_live_metadata_replaces_it(
+        cx: &mut TestAppContext,
+    ) {
+        let restored = std::path::PathBuf::from("/saved/project");
+        let builder = cx.update(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::Block,
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .with_working_directory(Some(restored.clone()))
+        });
+        let terminal = cx.new(|cx| builder.subscribe(cx));
+
+        assert_eq!(
+            terminal.read_with(cx, |terminal, _| terminal.working_directory()),
+            Some(restored)
+        );
+        terminal.update(cx, |terminal, _| {
+            terminal.reported_working_directory = Some("/live/project".to_owned());
+        });
+        assert_eq!(
+            terminal.read_with(cx, |terminal, _| terminal.working_directory()),
+            Some(std::path::PathBuf::from("/live/project"))
+        );
     }
 
     #[gpui::test]

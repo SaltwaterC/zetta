@@ -338,6 +338,11 @@ fn active_project_theme_overrides_a_profile_theme_it_never_mentioned(
             .unwrap();
         assert_eq!(theme.name.as_ref(), "Solarized Dark");
 
+        let explicit = resolve_terminal_theme(Some("One Dark"), &profile, Some(&project), cx)
+            .unwrap()
+            .unwrap();
+        assert_eq!(explicit.name.as_ref(), "One Dark");
+
         // With no project active, the profile's own theme still applies.
         let theme = resolve_project_profile_theme(&profile, None, cx)
             .unwrap()
@@ -349,6 +354,10 @@ fn active_project_theme_overrides_a_profile_theme_it_never_mentioned(
             .unwrap()
             .unwrap();
         assert_eq!(theme.name.as_ref(), "Gruvbox Dark");
+        let explicit = resolve_terminal_theme(Some("One Dark"), &profile, Some(&project), cx)
+            .unwrap()
+            .unwrap();
+        assert_eq!(explicit.name.as_ref(), "One Dark");
 
         // A project that sets no theme of its own falls back to the profile.
         let project_without_theme = ProjectConfig {
