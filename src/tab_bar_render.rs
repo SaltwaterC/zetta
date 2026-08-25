@@ -285,6 +285,7 @@ fn render_tabs_row(chrome: TabBarChrome) -> impl IntoElement {
                         render_tab(
                             TabChrome {
                                 index,
+                                selected_tab_index: this.active_tab,
                                 selected,
                                 next_selected,
                                 tab_count,
@@ -385,6 +386,7 @@ fn render_tabs_row(chrome: TabBarChrome) -> impl IntoElement {
 /// Everything a single tab needs that the enclosing measured row already knows.
 struct TabChrome<'a> {
     index: usize,
+    selected_tab_index: usize,
     selected: bool,
     next_selected: bool,
     tab_count: usize,
@@ -407,6 +409,19 @@ struct TabChrome<'a> {
 
 fn active_tab_shape_visible(compact_mode: bool, selected: bool) -> bool {
     compact_mode && selected
+}
+
+fn tab_drop_surface_needs_deferred_paint(
+    compact_mode: bool,
+    target_tab_index: usize,
+    selected_tab_index: usize,
+    insert_after: bool,
+    compact_tab_bottom_left: bool,
+) -> bool {
+    compact_mode
+        && insert_after
+        && compact_tab_bottom_left
+        && target_tab_index.checked_add(1) == Some(selected_tab_index)
 }
 
 fn active_tab_transition_backgrounds(
@@ -588,6 +603,7 @@ fn render_active_tab_shape(
 fn render_tab(chrome: TabChrome<'_>, tab: &Tab, tab_theme: Arc<Theme>, cx: &App) -> AnyElement {
     let TabChrome {
         index,
+        selected_tab_index,
         selected,
         next_selected,
         tab_count,
@@ -890,28 +906,58 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, tab_theme: Arc<Theme>, cx: &App)
         )
     };
     let tab_element = if cx.has_active_drag() {
+        let defer_after_surface = tab_drop_surface_needs_deferred_paint(
+            compact_mode,
+            index,
+            selected_tab_index,
+            true,
+            compact_tab_bottom_left,
+        );
         tab_element
             .relative()
-            .child(render_tab_drop_surface(
-                tab.id,
-                tab.pinned,
+            .child(tab_drop_surface_paint_layer(
+                render_tab_drop_surface(
+                    tab.id,
+                    tab.pinned,
+                    false,
+                    tab_colors.drop_target_background,
+                    tab_colors.drop_target_border,
+                    handle.clone(),
+                ),
                 false,
-                tab_colors.drop_target_background,
-                tab_colors.drop_target_border,
-                handle.clone(),
             ))
-            .child(render_tab_drop_surface(
-                tab.id,
-                tab.pinned,
-                true,
-                tab_colors.drop_target_background,
-                tab_colors.drop_target_border,
-                handle.clone(),
+            .child(tab_drop_surface_paint_layer(
+                render_tab_drop_surface(
+                    tab.id,
+                    tab.pinned,
+                    true,
+                    tab_colors.drop_target_background,
+                    tab_colors.drop_target_border,
+                    handle.clone(),
+                ),
+                defer_after_surface,
             ))
     } else {
         tab_element
     };
     tab_element.into_any_element()
+}
+
+fn tab_drop_surface_paint_layer(
+    surface: gpui::Stateful<gpui::Div>,
+    defer_paint: bool,
+) -> AnyElement {
+    if defer_paint {
+        // The selected compact tab's rounded lower-left transition is painted
+        // after the preceding tab. Restore the overlapping drop target on the
+        // same deferred chrome layer as neighboring title-bar controls, below
+        // popovers and modal overlays.
+        deferred(surface)
+            .with_priority(crate::app_render::TITLE_BAR_CONTROL_PAINT_PRIORITY)
+            .into_any_element()
+    } else {
+        surface.into_any_element()
+    }
 }
 
 fn render_tab_drop_surface(

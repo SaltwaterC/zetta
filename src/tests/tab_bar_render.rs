@@ -1,4 +1,5 @@
 use super::*;
+use gpui::{MouseButton, MouseDownEvent, MouseUpEvent, PlatformInput, TestAppContext, point, size};
 
 #[test]
 fn tab_move_context_menu_is_only_available_with_two_tabs() {
@@ -43,6 +44,25 @@ fn active_tab_shape_requires_compact_mode_and_selection() {
     assert!(active_tab_shape_visible(true, true));
     assert!(!active_tab_shape_visible(false, true));
     assert!(!active_tab_shape_visible(true, false));
+}
+
+#[test]
+fn only_the_drop_surface_under_the_compact_lower_left_transition_is_deferred() {
+    assert!(tab_drop_surface_needs_deferred_paint(
+        true, 1, 2, true, true,
+    ));
+    assert!(!tab_drop_surface_needs_deferred_paint(
+        false, 1, 2, true, true,
+    ));
+    assert!(!tab_drop_surface_needs_deferred_paint(
+        true, 0, 2, true, true,
+    ));
+    assert!(!tab_drop_surface_needs_deferred_paint(
+        true, 1, 2, false, true,
+    ));
+    assert!(!tab_drop_surface_needs_deferred_paint(
+        true, 1, 2, true, false,
+    ));
 }
 
 #[test]
@@ -172,4 +192,95 @@ fn active_tab_bottom_transitions_stay_on_the_expanded_canvas_edges() {
 
     assert_eq!(left.style().inset.left, Some(zero));
     assert_eq!(right.style().inset.right, Some(zero));
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OverlappingTabLayer {
+    DropSurface,
+    ActiveTabWing,
+}
+
+struct DropSurfacePaintOrderView {
+    clicked: Option<OverlappingTabLayer>,
+}
+
+impl DropSurfacePaintOrderView {
+    fn layer(
+        id: &'static str,
+        layer: OverlappingTabLayer,
+        color: u32,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id(id)
+            .absolute()
+            .inset_0()
+            .bg(gpui::rgb(color))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.clicked = Some(layer);
+                cx.stop_propagation();
+            }))
+    }
+}
+
+impl Render for DropSurfacePaintOrderView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let drop_surface = Self::layer(
+            "overlapping-drop-surface",
+            OverlappingTabLayer::DropSurface,
+            0xff0000,
+            cx,
+        );
+        let active_tab_wing = Self::layer(
+            "overlapping-active-tab-wing",
+            OverlappingTabLayer::ActiveTabWing,
+            0x0000ff,
+            cx,
+        );
+
+        div()
+            .relative()
+            .size_full()
+            .child(tab_drop_surface_paint_layer(drop_surface, true))
+            // Matches the real sibling order: the selected tab and its
+            // expanded wing are rendered after the preceding tab's surface.
+            .child(active_tab_wing)
+    }
+}
+
+#[gpui::test]
+fn deferred_drop_surface_paints_over_a_later_active_tab_wing(cx: &mut TestAppContext) {
+    let window = cx.open_window(size(px(100.), px(100.)), |_, _| DropSurfacePaintOrderView {
+        clicked: None,
+    });
+    cx.run_until_parked();
+
+    cx.update(|cx| {
+        cx.update_window(window.into(), |_, window, cx| {
+            let position = point(px(50.), px(50.));
+            window.dispatch_event(
+                PlatformInput::MouseDown(MouseDownEvent {
+                    position,
+                    button: MouseButton::Left,
+                    ..Default::default()
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                PlatformInput::MouseUp(MouseUpEvent {
+                    position,
+                    button: MouseButton::Left,
+                    ..Default::default()
+                }),
+                cx,
+            );
+        })
+        .unwrap();
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        window.update(cx, |view, _, _| view.clicked).unwrap(),
+        Some(OverlappingTabLayer::DropSurface)
+    );
 }
