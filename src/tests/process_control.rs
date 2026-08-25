@@ -708,7 +708,7 @@ fn pane_theme_list_requests_carry_no_arguments() {
 }
 
 #[test]
-fn pane_theme_query_requires_an_attention_target() {
+fn pane_theme_query_requires_an_attention_target_and_allows_legacy_panes() {
     let mut theme_request = request("token", "get_pane_theme");
     theme_request.attention_id = Some(42);
     theme_request.pane_id = Some(9);
@@ -716,7 +716,17 @@ fn pane_theme_query_requires_an_attention_target() {
         decode_control_request(&mut theme_request, "token"),
         Some(ControlRequestCommand::GetPaneTheme {
             attention_id: 42,
-            pane_id: 9,
+            pane_id: Some(9),
+        })
+    );
+
+    let mut legacy_request = request("token", "get_pane_theme");
+    legacy_request.attention_id = Some(42);
+    assert_eq!(
+        decode_control_request(&mut legacy_request, "token"),
+        Some(ControlRequestCommand::GetPaneTheme {
+            attention_id: 42,
+            pane_id: None,
         })
     );
 
@@ -728,6 +738,10 @@ fn pane_theme_query_requires_an_attention_target() {
     zero.attention_id = Some(0);
     zero.pane_id = Some(9);
     assert_eq!(decode_control_request(&mut zero, "token"), None);
+    let mut zero_pane = request("token", "get_pane_theme");
+    zero_pane.attention_id = Some(42);
+    zero_pane.pane_id = Some(0);
+    assert_eq!(decode_control_request(&mut zero_pane, "token"), None);
     let mut unexpected = request("token", "get_pane_theme");
     unexpected.attention_id = Some(42);
     unexpected.pane_id = Some(9);
@@ -1209,7 +1223,9 @@ fn control_server_delivers_the_originating_pane_theme() {
     let endpoint: ControlEndpoint =
         serde_json::from_slice(&fs::read(endpoint_path).unwrap()).unwrap();
 
-    let client = thread::spawn(move || send_get_pane_theme_request(&endpoint, 42, 9).unwrap());
+    let client_endpoint = endpoint.clone();
+    let client =
+        thread::spawn(move || send_get_pane_theme_request(&client_endpoint, 42, Some(9)).unwrap());
     let command = futures::executor::block_on(received.next()).unwrap();
     let ProcessControlCommand::GetPaneTheme {
         attention_id,
@@ -1220,9 +1236,25 @@ fn control_server_delivers_the_originating_pane_theme() {
         panic!("unexpected process control command");
     };
     assert_eq!(attention_id, 42);
-    assert_eq!(pane_id, 9);
+    assert_eq!(pane_id, Some(9));
     completion.send(Ok("One Dark".to_owned())).unwrap();
     assert_eq!(client.join().unwrap().as_deref(), Some("One Dark"));
+
+    let legacy_client =
+        thread::spawn(move || send_get_pane_theme_request(&endpoint, 42, None).unwrap());
+    let command = futures::executor::block_on(received.next()).unwrap();
+    let ProcessControlCommand::GetPaneTheme {
+        attention_id,
+        pane_id,
+        completion,
+    } = command
+    else {
+        panic!("unexpected process control command");
+    };
+    assert_eq!(attention_id, 42);
+    assert_eq!(pane_id, None);
+    completion.send(Ok("One Dark".to_owned())).unwrap();
+    assert_eq!(legacy_client.join().unwrap().as_deref(), Some("One Dark"));
 }
 
 #[test]

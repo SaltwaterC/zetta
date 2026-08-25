@@ -2686,15 +2686,80 @@ impl Zetta {
     pub(crate) fn pane_theme_by_attention_id(
         &self,
         attention_id: u64,
-        pane_id: u64,
+        pane_id: Option<u64>,
         cx: &App,
     ) -> Option<String> {
-        self.tabs
+        let tab = self
+            .tabs
             .iter()
-            .find(|tab| tab.attention_id == attention_id)
-            .and_then(|tab| tab.view_by_routing_id(pane_id))
-            .and_then(|view| view.read(cx).theme())
-            .map(|theme| theme.name.to_string())
+            .find(|tab| tab.attention_id == attention_id)?;
+        let (pane, selection, profile, view) = match pane_id {
+            Some(routing_id) => tab.panes.iter().find_map(|pane| {
+                if pane.routing_id == routing_id {
+                    return Some((
+                        pane,
+                        PaneStackSelection::Base,
+                        &pane.profile,
+                        pane.view.clone(),
+                    ));
+                }
+                pane.stack.entries.iter().find_map(|entry| {
+                    (entry.routing_id == routing_id).then(|| {
+                        (
+                            pane,
+                            PaneStackSelection::Stacked(entry.id),
+                            &entry.profile,
+                            entry.view.clone(),
+                        )
+                    })
+                })
+            })?,
+            None => {
+                let pane = tab.active_pane()?;
+                match pane.stack.selected {
+                    PaneStackSelection::Base => (
+                        pane,
+                        PaneStackSelection::Base,
+                        &pane.profile,
+                        pane.view.clone(),
+                    ),
+                    PaneStackSelection::Stacked(entry_id) => {
+                        let entry = pane
+                            .stack
+                            .entries
+                            .iter()
+                            .find(|entry| entry.id == entry_id)?;
+                        (
+                            pane,
+                            PaneStackSelection::Stacked(entry.id),
+                            &entry.profile,
+                            entry.view.clone(),
+                        )
+                    }
+                }
+            }
+        };
+
+        let theme = view
+            .and_then(|view| view.read(cx).theme().cloned())
+            .or_else(|| {
+                self.transient_pane_themes
+                    .get(&(pane.id, selection))
+                    .cloned()
+            })
+            .or_else(|| {
+                resolve_project_profile_theme(
+                    profile,
+                    self.projects
+                        .config_for_pane(pane.id)
+                        .map(|project| project.as_ref()),
+                    cx,
+                )
+                .ok()
+                .flatten()
+            })
+            .unwrap_or_else(|| self.application_theme(cx));
+        Some(theme.name.to_string())
     }
 
     pub(crate) fn focus_tab_by_attention_id(

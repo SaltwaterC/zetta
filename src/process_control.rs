@@ -158,7 +158,7 @@ pub(crate) enum ProcessControlCommand {
     },
     GetPaneTheme {
         attention_id: u64,
-        pane_id: u64,
+        pane_id: Option<u64>,
         completion: Sender<std::result::Result<String, String>>,
     },
     SetPaneOverlay {
@@ -230,7 +230,7 @@ enum ControlRequestCommand {
     ListPaneThemes,
     GetPaneTheme {
         attention_id: u64,
-        pane_id: u64,
+        pane_id: Option<u64>,
     },
     SetPaneOverlay {
         text: Option<String>,
@@ -1364,11 +1364,12 @@ fn decode_control_request(
                 && request.worktree_name.is_none()
                 && request.split.is_none()
                 && request.profile.is_none()
-                && request.theme.is_none() =>
+                && request.theme.is_none()
+                && request.pane_id != Some(0) =>
         {
             Some(ControlRequestCommand::GetPaneTheme {
                 attention_id: request.attention_id.take().filter(|id| *id != 0)?,
-                pane_id: request.pane_id.take().filter(|id| *id != 0)?,
+                pane_id: request.pane_id.take(),
             })
         }
         "set_overlay"
@@ -1930,28 +1931,41 @@ pub(crate) fn request_process_tab_attention(
 }
 
 #[cfg(feature = "syntax-highlighting")]
-pub(crate) fn request_process_pane_theme_name(
-    process_id: u32,
+pub(crate) struct ProcessPaneThemeQuery {
+    endpoint: ControlEndpoint,
     attention_id: u64,
-    pane_id: u64,
-) -> Result<Option<String>> {
-    anyhow::ensure!(process_id != 0, "process ID must be positive");
-    anyhow::ensure!(attention_id != 0, "attention ID must be positive");
-    anyhow::ensure!(pane_id != 0, "pane ID must be positive");
-    let endpoint_path = control_endpoint_path(process_id);
-    let contents = fs::read(&endpoint_path).with_context(|| {
-        format!(
-            "reading Zetta process control endpoint {}",
-            endpoint_path.display()
-        )
-    })?;
-    let endpoint: ControlEndpoint =
-        serde_json::from_slice(&contents).context("parsing Zetta process control endpoint")?;
-    anyhow::ensure!(
-        endpoint.version == CONTROL_VERSION && endpoint.process_id == process_id,
-        "Zetta process control endpoint is outdated"
-    );
-    send_get_pane_theme_request(&endpoint, attention_id, pane_id)
+    pane_id: Option<u64>,
+}
+
+#[cfg(feature = "syntax-highlighting")]
+impl ProcessPaneThemeQuery {
+    pub(crate) fn new(process_id: u32, attention_id: u64, pane_id: Option<u64>) -> Result<Self> {
+        anyhow::ensure!(process_id != 0, "process ID must be positive");
+        anyhow::ensure!(attention_id != 0, "attention ID must be positive");
+        anyhow::ensure!(pane_id != Some(0), "pane ID must be positive");
+        let endpoint_path = control_endpoint_path(process_id);
+        let contents = fs::read(&endpoint_path).with_context(|| {
+            format!(
+                "reading Zetta process control endpoint {}",
+                endpoint_path.display()
+            )
+        })?;
+        let endpoint: ControlEndpoint =
+            serde_json::from_slice(&contents).context("parsing Zetta process control endpoint")?;
+        anyhow::ensure!(
+            endpoint.version == CONTROL_VERSION && endpoint.process_id == process_id,
+            "Zetta process control endpoint is outdated"
+        );
+        Ok(Self {
+            endpoint,
+            attention_id,
+            pane_id,
+        })
+    }
+
+    pub(crate) fn theme_name(&self) -> Result<Option<String>> {
+        send_get_pane_theme_request(&self.endpoint, self.attention_id, self.pane_id)
+    }
 }
 
 #[cfg(feature = "notifications")]
@@ -2607,7 +2621,7 @@ fn send_list_pane_themes_request(endpoint: &ControlEndpoint) -> Result<Option<Ve
 fn send_get_pane_theme_request(
     endpoint: &ControlEndpoint,
     attention_id: u64,
-    pane_id: u64,
+    pane_id: Option<u64>,
 ) -> Result<Option<String>> {
     let mut stream = UnixStream::connect(&endpoint.socket_path)?;
     stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
@@ -2622,7 +2636,7 @@ fn send_get_pane_theme_request(
             secret: None,
             icon: None,
             pane_theme: None,
-            pane_id: Some(pane_id),
+            pane_id,
             pane_overlay: None,
             pane_overlay_font_size: None,
             pane_overlay_opacity: None,

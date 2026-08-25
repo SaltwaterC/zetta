@@ -6,10 +6,11 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc::{self, Receiver, Sender, TryRecvError},
     },
     thread,
+    time::Duration,
 };
 
 #[cfg(test)]
@@ -25,8 +26,7 @@ use theme::{SyntaxTheme, Theme, ThemeRegistry};
 use tree_sitter_highlight::{Highlight, HighlightConfiguration, HighlightEvent, Highlighter};
 
 use crate::{
-    process_control::request_process_pane_theme_name, startup::selected_theme_name,
-    zetta_assets::ZettaAssets,
+    process_control::ProcessPaneThemeQuery, startup::selected_theme_name, zetta_assets::ZettaAssets,
 };
 
 #[derive(RustEmbed)]
@@ -146,6 +146,79 @@ struct SyntaxThemeHandle {
     theme: OnceLock<Arc<SyntaxTheme>>,
 }
 
+const PANE_THEME_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Watches the originating pane without putting control-socket I/O or theme
+/// parsing on vi's input thread. The receiver is checked from the editor's
+/// existing idle poll, so a changed palette causes a redraw even when the
+/// buffer and terminal size are otherwise unchanged.
+struct SyntaxThemeWatcher {
+    updates: Mutex<Receiver<Arc<SyntaxTheme>>>,
+    shutdown: Arc<AtomicBool>,
+}
+
+impl SyntaxThemeWatcher {
+    fn spawn(query: ProcessPaneThemeQuery, mut current_name: Option<String>) -> Option<Self> {
+        let (updates, receiver) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let worker_shutdown = Arc::clone(&shutdown);
+        thread::Builder::new()
+            .name("zetta-vi-theme-watch".to_owned())
+            .spawn(move || {
+                while !worker_shutdown.load(Ordering::Acquire) {
+                    thread::sleep(PANE_THEME_POLL_INTERVAL);
+                    if worker_shutdown.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let Ok(Some(name)) = query.theme_name() else {
+                        continue;
+                    };
+                    if current_name.as_deref() == Some(name.as_str()) {
+                        continue;
+                    }
+                    let theme = active_syntax_theme_for(Some(&name));
+                    if updates.send(theme).is_err() {
+                        break;
+                    }
+                    current_name = Some(name);
+                }
+            })
+            .ok()?;
+        Some(Self {
+            updates: Mutex::new(receiver),
+            shutdown,
+        })
+    }
+
+    #[cfg(test)]
+    fn from_receiver(receiver: Receiver<Arc<SyntaxTheme>>) -> Self {
+        Self {
+            updates: Mutex::new(receiver),
+            shutdown: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn latest(&self) -> Option<Arc<SyntaxTheme>> {
+        let receiver = self
+            .updates
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut latest = None;
+        loop {
+            match receiver.try_recv() {
+                Ok(theme) => latest = Some(theme),
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => return latest,
+            }
+        }
+    }
+}
+
+impl Drop for SyntaxThemeWatcher {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Release);
+    }
+}
+
 impl SyntaxThemeHandle {
     fn spawn(configured_theme: Option<String>) -> Self {
         let worker_configured_theme = configured_theme.clone();
@@ -204,20 +277,29 @@ impl SyntaxThemeHandle {
 /// Compiling one grammar's queries costs tens of milliseconds, so the visible
 /// preview on the main thread and the background full-buffer parse must reach
 /// the same [`HighlightConfiguration`] rather than each compiling their own.
-/// Configurations are immutable once compiled, which is what makes sharing them
-/// across threads sound.
+/// Configurations are immutable once compiled. Theme styles are a separate,
+/// replaceable snapshot so changing appearance never recompiles them.
 pub(crate) struct GrammarSet {
     languages: Vec<LanguageEntry>,
     language_names: HashMap<String, usize>,
     capture_names: Vec<String>,
     first_line_patterns: OnceLock<Vec<(usize, Regex)>>,
     theme: SyntaxThemeHandle,
-    styles: OnceLock<Vec<Option<HighlightStyle>>>,
+    theme_watcher: Option<SyntaxThemeWatcher>,
+    styles: Mutex<Option<Arc<[Option<HighlightStyle>]>>>,
     configurations: Mutex<Vec<Option<Arc<HighlightConfiguration>>>>,
 }
 
 impl GrammarSet {
+    #[cfg(test)]
     fn new(theme: SyntaxThemeHandle) -> anyhow::Result<Arc<Self>> {
+        Self::new_with_theme_watcher(theme, None)
+    }
+
+    fn new_with_theme_watcher(
+        theme: SyntaxThemeHandle,
+        theme_watcher: Option<SyntaxThemeWatcher>,
+    ) -> anyhow::Result<Arc<Self>> {
         let mut languages = Vec::new();
         let mut language_names = HashMap::new();
         let mut grammar_ids = Vec::new();
@@ -257,7 +339,8 @@ impl GrammarSet {
             capture_names,
             first_line_patterns: OnceLock::new(),
             theme,
-            styles: OnceLock::new(),
+            theme_watcher,
+            styles: Mutex::new(None),
             configurations,
         }))
     }
@@ -339,14 +422,34 @@ impl GrammarSet {
     }
 
     /// The capture-name to style table, resolved once the theme is available.
-    fn styles(&self) -> &[Option<HighlightStyle>] {
-        self.styles.get_or_init(|| {
-            let theme = self.theme.get();
-            self.capture_names
-                .iter()
-                .map(|capture_name| style_for_capture(&theme, capture_name))
-                .collect()
-        })
+    fn styles(&self) -> Arc<[Option<HighlightStyle>]> {
+        let mut styles = self
+            .styles
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        Arc::clone(styles.get_or_insert_with(|| self.styles_for_theme(&self.theme.get())))
+    }
+
+    fn styles_for_theme(&self, theme: &SyntaxTheme) -> Arc<[Option<HighlightStyle>]> {
+        self.capture_names
+            .iter()
+            .map(|capture_name| style_for_capture(theme, capture_name))
+            .collect()
+    }
+
+    fn refresh_theme(&self) -> bool {
+        let Some(theme) = self
+            .theme_watcher
+            .as_ref()
+            .and_then(SyntaxThemeWatcher::latest)
+        else {
+            return false;
+        };
+        *self
+            .styles
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(self.styles_for_theme(&theme));
+        true
     }
 
     /// Compile a grammar's Zed queries the first time that grammar is used.
@@ -631,7 +734,7 @@ impl ZedSyntaxHighlighter {
                                 }
                             }
                         });
-                let spans = highlight_spans(events.expect("highlight failed"), styles);
+                let spans = highlight_spans(events.expect("highlight failed"), &styles);
                 (spans, missing_languages.into_inner())
             };
 
@@ -755,8 +858,8 @@ pub(crate) fn run(arguments: Vec<String>) -> i32 {
     // The editor runs in a subprocess, so configuration alone cannot tell it
     // which theme its pane is actually showing. Ask the originating window to
     // preserve project/profile, launch, pane-template, transient, and live
-    // appearance choices. A standalone invocation keeps the light-theme
-    // configuration fallback it had before.
+    // appearance choices. The pane identity is optional for compatibility
+    // with shells started before pane IDs were added to the environment.
     let configured_theme = config.theme.clone();
     // Built on the first editor rather than up front, so `vi --help` and
     // argument errors do not pay for grammars they never use. Every file in one
@@ -767,12 +870,18 @@ pub(crate) fn run(arguments: Vec<String>) -> i32 {
         let grammars = grammars.get_or_init(|| {
             // Resolving the theme is independent of the grammar work, so it
             // starts here and is joined only once styles are actually needed.
-            let theme = SyntaxThemeHandle::spawn(selected_vi_theme(
+            let pane_theme_query = inherited_pane_theme_query();
+            let selected_theme = selected_vi_theme(
                 configured_theme.clone(),
-                inherited_pane_theme(),
+                pane_theme_query
+                    .as_ref()
+                    .and_then(|query| query.theme_name().ok().flatten()),
                 inherited_terminal_theme(),
-            ));
-            match GrammarSet::new(theme) {
+            );
+            let theme = SyntaxThemeHandle::spawn(selected_theme.clone());
+            let watcher =
+                pane_theme_query.and_then(|query| SyntaxThemeWatcher::spawn(query, selected_theme));
+            match GrammarSet::new_with_theme_watcher(theme, watcher) {
                 Ok(grammars) => Some(grammars),
                 Err(error) => {
                     eprintln!("zetta vi: syntax highlighting unavailable: {error:#}");
@@ -800,13 +909,13 @@ fn inherited_terminal_theme() -> Option<String> {
         .filter(|theme| !theme.is_empty())
 }
 
-fn inherited_pane_theme() -> Option<String> {
+fn inherited_pane_theme_query() -> Option<ProcessPaneThemeQuery> {
     let process_id = env::var("ZETTA_PROCESS_ID").ok()?.parse().ok()?;
     let attention_id = env::var("ZETTA_ATTENTION_ID").ok()?.parse().ok()?;
-    let pane_id = env::var("ZETTA_PANE_ID").ok()?.parse().ok()?;
-    request_process_pane_theme_name(process_id, attention_id, pane_id)
+    let pane_id = env::var("ZETTA_PANE_ID")
         .ok()
-        .flatten()
+        .and_then(|pane_id| pane_id.parse().ok());
+    ProcessPaneThemeQuery::new(process_id, attention_id, pane_id).ok()
 }
 
 #[cfg(test)]
@@ -819,7 +928,7 @@ pub(crate) fn new_shared(
 
 struct SyntaxJob {
     revision: usize,
-    buffer: Vec<u8>,
+    buffer: Arc<[u8]>,
 }
 
 const SYNTAX_PREVIEW_CONTEXT_BYTES: usize = 16 * 1024;
@@ -839,6 +948,7 @@ struct BackgroundZedSyntaxHighlighter {
     latest_revision: Arc<AtomicUsize>,
     path: Option<PathBuf>,
     preview_highlighter: ZedSyntaxHighlighter,
+    latest_buffer: Option<Arc<[u8]>>,
     revision: usize,
     in_flight: bool,
     pending: Option<SyntaxJob>,
@@ -876,6 +986,7 @@ impl BackgroundZedSyntaxHighlighter {
             latest_revision,
             path,
             preview_highlighter: ZedSyntaxHighlighter::new(grammars),
+            latest_buffer: None,
             revision: 0,
             in_flight: false,
             pending: None,
@@ -883,6 +994,12 @@ impl BackgroundZedSyntaxHighlighter {
     }
 
     fn request(&mut self, buffer: &[u8]) {
+        let buffer: Arc<[u8]> = Arc::from(buffer);
+        self.latest_buffer = Some(Arc::clone(&buffer));
+        self.request_snapshot(buffer);
+    }
+
+    fn request_snapshot(&mut self, buffer: Arc<[u8]>) {
         self.revision = self.revision.wrapping_add(1);
         self.latest_revision.store(self.revision, Ordering::Release);
         // Discard a result for the previous revision before queuing this
@@ -891,7 +1008,7 @@ impl BackgroundZedSyntaxHighlighter {
         let _ = self.drain_results();
         let job = SyntaxJob {
             revision: self.revision,
-            buffer: buffer.to_vec(),
+            buffer,
         };
         if self.in_flight {
             self.cancellation.store(1, Ordering::Release);
@@ -967,6 +1084,12 @@ impl SyntaxHighlighter for BackgroundZedSyntaxHighlighter {
     }
 
     fn poll(&mut self) -> Option<Vec<HighlightSpan>> {
+        if self.preview_highlighter.grammars.refresh_theme() {
+            self.preview_highlighter.invalidate_visible();
+            if let Some(buffer) = self.latest_buffer.clone() {
+                self.request_snapshot(buffer);
+            }
+        }
         let completed = self.drain_results();
         self.dispatch_pending();
         completed

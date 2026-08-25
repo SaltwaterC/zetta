@@ -1,6 +1,6 @@
 use super::*;
 use busy_v::Editor;
-use gpui::{HighlightStyle as ZedHighlightStyle, red};
+use gpui::{HighlightStyle as ZedHighlightStyle, blue, red};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -171,6 +171,70 @@ fn background_highlighter_returns_the_current_revision() {
     };
 
     assert!(spans.iter().any(|span| span.start == 0 && span.end == 2));
+}
+
+#[test]
+fn background_highlighter_recolors_an_unchanged_buffer_after_a_theme_update() {
+    let (updates, receiver) = mpsc::channel();
+    let watcher = SyntaxThemeWatcher::from_receiver(receiver);
+    let grammars = GrammarSet::new_with_theme_watcher(
+        SyntaxThemeHandle::ready(syntax_theme(&["keyword", "function"])),
+        Some(watcher),
+    )
+    .expect("load Zed grammars");
+    let mut highlighter =
+        BackgroundZedSyntaxHighlighter::new(Some(PathBuf::from("main.rs")), Arc::clone(&grammars))
+            .expect("start syntax worker");
+    let source = b"fn main() {}\n";
+
+    assert!(highlighter.highlight(source).is_empty());
+    let initial = wait_for_syntax_result(&mut highlighter);
+    assert_eq!(
+        foreground_for_range(&initial, 0..2),
+        Some(to_terminal_color(red()))
+    );
+
+    let blue_theme = Arc::new(SyntaxTheme::new([
+        (
+            "keyword".to_owned(),
+            ZedHighlightStyle {
+                color: Some(blue()),
+                ..Default::default()
+            },
+        ),
+        (
+            "function".to_owned(),
+            ZedHighlightStyle {
+                color: Some(blue()),
+                ..Default::default()
+            },
+        ),
+    ]));
+    updates.send(blue_theme).expect("send changed syntax theme");
+
+    let recolored = wait_for_syntax_result(&mut highlighter);
+    assert_eq!(
+        foreground_for_range(&recolored, 0..2),
+        Some(to_terminal_color(blue()))
+    );
+}
+
+fn wait_for_syntax_result(highlighter: &mut BackgroundZedSyntaxHighlighter) -> Vec<HighlightSpan> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(spans) = highlighter.poll() {
+            return spans;
+        }
+        assert!(Instant::now() < deadline, "syntax worker did not respond");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn foreground_for_range(spans: &[HighlightSpan], range: Range<usize>) -> Option<HighlightColor> {
+    spans
+        .iter()
+        .find(|span| span.start == range.start && span.end == range.end)
+        .and_then(|span| span.style.foreground)
 }
 
 #[test]

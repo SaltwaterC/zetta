@@ -2243,20 +2243,6 @@ impl Tab {
         self.active_pane().and_then(TerminalPane::selected_view)
     }
 
-    pub(crate) fn view_by_routing_id(&self, id: u64) -> Option<Entity<TerminalView>> {
-        self.panes
-            .iter()
-            .find(|pane| pane.routing_id == id)
-            .and_then(|pane| pane.view.clone())
-            .or_else(|| {
-                self.panes
-                    .iter()
-                    .flat_map(|pane| &pane.stack.entries)
-                    .find(|entry| entry.routing_id == id)
-                    .and_then(|entry| entry.view.clone())
-            })
-    }
-
     pub(crate) fn active_terminal(&self) -> Option<Entity<Terminal>> {
         self.active_pane().and_then(TerminalPane::selected_terminal)
     }
