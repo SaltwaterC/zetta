@@ -402,8 +402,9 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
                     .filter(|path| !path.as_os_str().is_empty());
                 anyhow::ensure!(resume_from.is_some(), "unusable --resume-from path");
             }
-            // Hidden: inherited by the replacement so the listening socket is
-            // not rebound during an upgrade.
+            // Hidden: inherited by the replacement on platforms where the
+            // listening socket's peer credentials survive an upgrade. macOS
+            // omits this argument and rebinds the socket in the new image.
             #[cfg(unix)]
             value if value.starts_with("--resume-listener=") => {
                 resume_listener = value

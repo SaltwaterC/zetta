@@ -9,8 +9,11 @@
 //! decides how the replacement rebuilds each pane: it reaps its own children, so
 //! it must never treat one as though it belonged to somebody else.
 //!
-//! The listening socket survives as an inherited descriptor, so clients never
-//! see a rebind window while the daemon is replaced.
+//! On platforms whose local-socket credentials survive `execv`, the listening
+//! socket survives as an inherited descriptor, so clients never see a rebind
+//! window while the daemon is replaced. macOS rebinds the listener in the new
+//! image because inheriting it loses the peer credentials used to authorize
+//! requests.
 //!
 //! Two rules follow from `execv` being irreversible, and both are enforced
 //! here. The replacement is checked before it is run, so a daemon that cannot
@@ -35,9 +38,11 @@ pub const HANDOVER_VERSION: u32 = 5;
 
 /// Everything the next image needs to carry on.
 ///
-/// The listening socket is passed separately as an inherited descriptor. It is
-/// not serialized in this blob because it is already an operating-system
-/// object; the replacement receives its number in `--resume-listener`.
+/// The listening socket is passed separately as an inherited descriptor on
+/// platforms that preserve its local peer-credential state across `execv`. It
+/// is not serialized in this blob because it is already an operating-system
+/// object. macOS rebinds it in the replacement instead, because inheriting a
+/// Darwin local socket loses the peer credentials used to authorize requests.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Handover {
@@ -254,20 +259,20 @@ pub fn replacement_accepts_handover(executable: &std::path::Path) -> Result<bool
 pub fn exec_replacement(
     executable: &std::path::Path,
     handover: RawFd,
-    listener: RawFd,
+    listener: Option<RawFd>,
 ) -> Result<std::convert::Infallible> {
     let program = CString::new(executable.as_os_str().as_encoded_bytes())
         .context("the multiplexer's own path is not a valid C string")?;
     let resume = CString::new(format!("--resume-from={handover}"))?;
-    let resume_listener = CString::new(format!("--resume-listener={listener}"))?;
     let daemon = CString::new("--daemon")?;
-    let arguments = [
-        program.as_ptr(),
-        daemon.as_ptr(),
-        resume.as_ptr(),
-        resume_listener.as_ptr(),
-        std::ptr::null(),
-    ];
+    let resume_listener = listener
+        .map(|listener| CString::new(format!("--resume-listener={listener}")))
+        .transpose()?;
+    let mut arguments = vec![program.as_ptr(), daemon.as_ptr(), resume.as_ptr()];
+    if let Some(resume_listener) = resume_listener.as_ref() {
+        arguments.push(resume_listener.as_ptr());
+    }
+    arguments.push(std::ptr::null());
     // SAFETY: both pointers outlive the call, and the argument vector is
     // null-terminated as execv requires.
     unsafe {

@@ -30,8 +30,12 @@ use alacritty_terminal::{
 };
 use anyhow::{Context as _, Result};
 
+#[cfg(all(unix, not(target_os = "macos")))]
+use std::os::fd::BorrowedFd;
+#[cfg(all(unix, not(target_os = "macos")))]
+use std::os::fd::RawFd;
 #[cfg(unix)]
-use std::os::fd::{AsRawFd as _, BorrowedFd, FromRawFd as _, RawFd};
+use std::os::fd::{AsRawFd as _, FromRawFd as _};
 
 use crate::{
     auth::SessionAuthentication,
@@ -367,9 +371,9 @@ pub struct Daemon {
     /// The process that owns every Windows pseudoconsole across daemon
     /// replacements.
     pty_host: crate::pty_host::HostClient,
-    #[cfg(unix)]
-    /// The listener is inherited during an upgrade so clients never observe a
-    /// rebind gap.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    /// The listener is inherited during an upgrade where the platform preserves
+    /// local-socket peer credentials across `execv`; macOS rebinds it instead.
     listener_fd: RawFd,
     /// Wakes the drain thread when a pane is attached or detached.
     drain_wake: Mutex<Option<Stream>>,
@@ -388,7 +392,7 @@ impl Daemon {
         #[cfg(feature = "session-persistence")] persistence: Option<PersistenceStore>,
         next_session_id: u64,
         generation: u64,
-        #[cfg(unix)] listener_fd: RawFd,
+        #[cfg(all(unix, not(target_os = "macos")))] listener_fd: RawFd,
         #[cfg(windows)] pty_host: crate::pty_host::HostClient,
     ) -> Self {
         #[cfg(feature = "session-persistence")]
@@ -407,7 +411,7 @@ impl Daemon {
             executable: resolve_own_executable(),
             #[cfg(windows)]
             pty_host,
-            #[cfg(unix)]
+            #[cfg(all(unix, not(target_os = "macos")))]
             listener_fd,
             drain_wake: Mutex::new(None),
             #[cfg(feature = "session-persistence")]
@@ -522,6 +526,17 @@ pub fn run(
             existing.socket_path.display()
         );
     }
+    #[cfg(target_os = "macos")]
+    let resume_listener = {
+        if let Some(descriptor) = resume_listener {
+            // An older image may still have passed its listener through. It is
+            // unusable after a Darwin exec, so close it before binding the
+            // replacement's fresh listener.
+            // SAFETY: the descriptor was inherited from the previous image.
+            unsafe { libc::close(descriptor) };
+        }
+        None::<i32>
+    };
     #[cfg(unix)]
     let listener = if let Some(descriptor) = resume_listener {
         anyhow::ensure!(
@@ -536,6 +551,7 @@ pub fn run(
         // claimed by this listener exactly once.
         unsafe { Listener::from_raw_fd(descriptor) }
     } else {
+        #[cfg(not(target_os = "macos"))]
         anyhow::ensure!(
             resumed_handover.is_none(),
             "an upgrade did not carry its listening socket"
@@ -588,7 +604,7 @@ pub fn run(
         persistence,
         next_session_id,
         generation,
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_os = "macos")))]
         listener.as_raw_fd(),
         #[cfg(windows)]
         pty_host,
@@ -4345,7 +4361,11 @@ fn prepare_and_exec(
 
     // Past this point the process becomes the replacement, so anything that
     // was going to fail had to have failed already.
-    match crate::upgrade::exec_replacement(&executable, file.as_raw_fd(), daemon.listener_fd) {
+    #[cfg(target_os = "macos")]
+    let listener = None;
+    #[cfg(not(target_os = "macos"))]
+    let listener = Some(daemon.listener_fd);
+    match crate::upgrade::exec_replacement(&executable, file.as_raw_fd(), listener) {
         Ok(_) => Ok(()),
         Err(error) => Err(UpgradeRefused::AfterAnswering(error)),
     }
@@ -4438,11 +4458,15 @@ fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, std::fs::File)> {
             crate::upgrade::keep_across_exec(pane.pty.file())?;
         }
     }
-    // Keep the listener together with the PTY masters. Rebinding it after exec
-    // introduced a refusal window in which clients could mistake an orderly
-    // upgrade for a dead daemon.
-    let listener = unsafe { BorrowedFd::borrow_raw(daemon.listener_fd) };
-    crate::upgrade::keep_across_exec(&listener)?;
+    // Keep the listener together with the PTY masters where the platform
+    // preserves its local peer-credential state across exec. macOS has to
+    // rebind: inheriting a Darwin local listener makes every new connection
+    // fail the credential lookup in the replacement.
+    #[cfg(not(target_os = "macos"))]
+    {
+        let listener = unsafe { BorrowedFd::borrow_raw(daemon.listener_fd) };
+        crate::upgrade::keep_across_exec(&listener)?;
+    }
     let file = crate::upgrade::write_handover(&handover)?;
     drop(sessions);
     Ok((executable, file))

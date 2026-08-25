@@ -1515,9 +1515,13 @@ fn an_upgrade_is_accepted_from_a_client_that_disagrees_about_the_protocol() {
         .unwrap();
     drop(descriptor);
 
+    #[cfg(not(target_os = "macos"))]
     use std::os::unix::fs::MetadataExt as _;
+    #[cfg(not(target_os = "macos"))]
     let socket_path = daemon.sessions_dir().join("zmux.sock");
+    #[cfg(not(target_os = "macos"))]
     let socket_metadata = std::fs::metadata(&socket_path).unwrap();
+    #[cfg(not(target_os = "macos"))]
     let before_socket_identity = (socket_metadata.dev(), socket_metadata.ino());
     let before_runner_id = zmux::catalog::read_session_catalogs(&daemon.sessions_dir())
         .unwrap()
@@ -1556,12 +1560,15 @@ fn an_upgrade_is_accepted_from_a_client_that_disagrees_about_the_protocol() {
         process_is_alive(pane.child_pid),
         "the replacement lost the session's process"
     );
-    let socket_metadata = std::fs::metadata(&socket_path).unwrap();
-    assert_eq!(
-        before_socket_identity,
-        (socket_metadata.dev(), socket_metadata.ino()),
-        "Unix upgrade must keep the listening socket rather than rebind it"
-    );
+    #[cfg(not(target_os = "macos"))]
+    {
+        let socket_metadata = std::fs::metadata(&socket_path).unwrap();
+        assert_eq!(
+            before_socket_identity,
+            (socket_metadata.dev(), socket_metadata.ino()),
+            "this platform's upgrade must keep the listening socket rather than rebind it"
+        );
+    }
     let after_catalogs = zmux::catalog::read_session_catalogs(&daemon.sessions_dir()).unwrap();
     assert_eq!(
         after_catalogs.first().map(|catalog| catalog.runner_id),
@@ -4832,7 +4839,10 @@ fn an_upgrade_keeps_the_retained_screen_at_the_width_it_was_drawn_at() {
         .unwrap();
 
     client.upgrade().unwrap();
-    let client = daemon.client();
+    // macOS rebinds the listener after exec so its peer-credential state is
+    // rebuilt; wait for an answered request rather than only a successful
+    // connect during that short gap.
+    let client = wait_for_multiplexer(&daemon);
 
     match client
         .attach(
