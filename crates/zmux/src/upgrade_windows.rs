@@ -165,7 +165,10 @@ pub fn spawn_replacement(executable: &Path, handover: &Path, ready: &Path) -> Re
         .creation_flags(0x0800_0000)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        // Keep replacement diagnostics on the daemon's stderr. Test harnesses
+        // redirect that stream to their per-daemon log, and normal detached
+        // launches retain their existing stderr policy through inheritance.
+        .stderr(Stdio::inherit())
         .spawn()
         .with_context(|| format!("starting replacement multiplexer {}", executable.display()))
 }

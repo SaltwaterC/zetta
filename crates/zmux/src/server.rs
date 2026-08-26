@@ -574,15 +574,6 @@ pub fn run(
         Some(endpoint) => endpoint.token,
         None => random_hex(32)?,
     };
-    Endpoint {
-        version: crate::transport::ENDPOINT_VERSION,
-        protocol_version: PROTOCOL_VERSION,
-        process_id: std::process::id(),
-        socket_path: socket.clone(),
-        token: token.clone(),
-    }
-    .write(&endpoint)?;
-
     #[cfg(feature = "session-persistence")]
     let persistence = if matches!(retention, Retention::Disk) {
         PersistenceStore::open_with_recovery_state(
@@ -642,6 +633,19 @@ pub fn run(
     }
     start_reaper(daemon.clone())?;
     start_drain(daemon.clone())?;
+
+    // Publish only after recovery, daemon construction, handover adoption, and
+    // worker setup have completed. A bound socket can accept a connection
+    // before any of those steps are done, so the endpoint is not itself a
+    // readiness signal; clients use `Request::Ping` as the final probe.
+    Endpoint {
+        version: crate::transport::ENDPOINT_VERSION,
+        protocol_version: PROTOCOL_VERSION,
+        process_id: std::process::id(),
+        socket_path: socket.clone(),
+        token: token.clone(),
+    }
+    .write(&endpoint)?;
 
     log::info!("zmux listening on {}", socket.display());
     for stream in listener.incoming() {
@@ -879,6 +883,7 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
     };
 
     match envelope.request {
+        Request::Ping => connection.send(&Response::Ok),
         Request::Subscribe => {
             // Keyed by process so a revoke can be sent to the one client that
             // holds a pane rather than broadcast to every subscriber. A client

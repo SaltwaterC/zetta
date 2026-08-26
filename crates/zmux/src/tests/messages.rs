@@ -19,6 +19,14 @@ fn requests_are_tagged_by_name_on_the_wire() {
 }
 
 #[test]
+fn ping_requests_are_tagged_by_name_on_the_wire() {
+    assert_eq!(
+        serde_json::to_value(Request::Ping).unwrap(),
+        serde_json::json!({"request": "ping"})
+    );
+}
+
+#[test]
 fn spawn_requests_round_trip_shell_arguments_environment_and_working_directory() {
     let mut environment = HashMap::new();
     environment.insert("PROMPT".to_owned(), "zetta-prompt".to_owned());

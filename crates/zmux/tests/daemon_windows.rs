@@ -60,37 +60,33 @@ impl TestDaemon {
     }
 
     fn wait_for_endpoint(&self) {
-        let endpoint = self.sessions_dir().join("zmux.json");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while Instant::now() < deadline {
-            if endpoint.is_file()
-                && Client::connect_existing_at(&self.sessions_dir())
-                    .ok()
-                    .flatten()
-                    .is_some()
-            {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        panic!("the daemon never published {}", endpoint.display());
+        let _ = self.wait_for_ready();
     }
 
     fn client(&self) -> Client {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        self.wait_for_ready()
+    }
+
+    fn wait_for_ready(&self) -> Client {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let endpoint = self.sessions_dir().join("zmux.json");
+        let mut last_error = None;
         loop {
-            match Client::connect_existing_at(&self.sessions_dir()) {
+            match Client::connect_ready_at(&self.sessions_dir()) {
                 Ok(Some(client)) => return client,
-                Ok(None) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                Ok(None) => panic!(
-                    "the daemon endpoint is not live (process: {}; log: {})",
-                    self.process.id(),
-                    std::fs::read_to_string(self.config.join("daemon.log")).unwrap_or_default()
-                ),
-                Err(error) => panic!("looking for the daemon: {error:#}"),
+                Ok(None) => {}
+                Err(error) => last_error = Some(format!("{error:#}")),
             }
+            if Instant::now() >= deadline {
+                panic!(
+                    "the daemon was not ready within 10s (process: {}; endpoint: {}; last error: {})\ndaemon log:\n{}",
+                    self.process.id(),
+                    endpoint.display(),
+                    last_error.as_deref().unwrap_or("none"),
+                    std::fs::read_to_string(self.config.join("daemon.log")).unwrap_or_default()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
         }
     }
 }

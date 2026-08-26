@@ -497,6 +497,21 @@ impl Client {
         Self::connect_endpoint(directory, VersionCheck::Required)
     }
 
+    /// Connects to a multiplexer only after it has answered a request.
+    ///
+    /// A socket can accept a connection before the daemon has finished its
+    /// startup work. The ping makes readiness mean that the request loop is
+    /// actually serving the current protocol, rather than merely that a
+    /// listener has been bound. `connect_for_upgrade_at` deliberately remains
+    /// liveness-only so it can reach a daemon across a protocol boundary.
+    pub fn connect_ready_at(directory: &std::path::Path) -> Result<Option<Self>> {
+        let Some(client) = Self::connect_endpoint(directory, VersionCheck::Required)? else {
+            return Ok(None);
+        };
+        client.ping()?;
+        Ok(Some(client))
+    }
+
     /// The process ID published by the daemon endpoint. It is part of a
     /// session's stable catalog identifier and lets administrative commands
     /// reject an identifier belonging to a different catalog in the same
@@ -689,6 +704,15 @@ impl Client {
             request,
         })?;
         Ok(connection)
+    }
+
+    fn ping(&self) -> Result<()> {
+        let mut connection = self.open(Request::Ping)?;
+        match Self::receive(&mut connection)?.0 {
+            Response::Ok => Ok(()),
+            Response::Error { message } => anyhow::bail!("{message}"),
+            other => anyhow::bail!("unexpected response to ping: {other:?}"),
+        }
     }
 
     /// Tells the multiplexer that an attached pane was resized.

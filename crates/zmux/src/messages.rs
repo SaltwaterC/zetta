@@ -14,19 +14,6 @@ use crate::protocol::{BackgroundSessionSummary, RestorableSessionRecord};
 
 /// The wire format, and what a client and a multiplexer compare before they
 /// trust each other to understand one another.
-///
-/// Pinned at 1 while Zetta is under development: the protocol is not stabilised,
-/// so its shape changes freely and a numbered history of every change would be
-/// bookkeeping about versions nobody is running. What that costs is the guard —
-/// while the number stays put, two builds whose messages disagree both believe
-/// they are compatible, and the failure is whatever the mismatch produces rather
-/// than a version error. So after changing a message's shape, replace the running
-/// multiplexer (`zmux --upgrade`) or stop it (`zmux stop`); a stale one is the
-/// only way a mismatch can arise on one machine.
-///
-/// When the protocol does stabilise, this becomes what it says: bumped whenever a
-/// message's shape changes, so a client and a daemon that cannot parse each other
-/// say so instead of failing obscurely.
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// Every request carries the endpoint token, which authenticates the *channel*
@@ -59,6 +46,8 @@ pub struct Envelope {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
 pub enum Request {
+    /// Confirms that the daemon has completed startup and can answer requests.
+    Ping,
     /// Starts a process under the multiplexer and hands its terminal back.
     Spawn(SpawnRequest),
     /// Takes over a pane's terminal from the multiplexer.

@@ -1,5 +1,82 @@
 use super::*;
 
+#[cfg(unix)]
+#[test]
+fn ready_connection_requires_a_successful_ping() {
+    use std::os::unix::net::UnixListener;
+
+    let directory = tempfile::tempdir().unwrap();
+    let socket_path = directory.path().join("zmux.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    Endpoint {
+        version: crate::transport::ENDPOINT_VERSION,
+        protocol_version: PROTOCOL_VERSION,
+        process_id: 4242,
+        socket_path,
+        token: "test-token".to_owned(),
+    }
+    .write(&directory.path().join("zmux.json"))
+    .unwrap();
+
+    let server = std::thread::spawn(move || {
+        // `connect_endpoint` checks socket liveness first. The readiness probe
+        // is the next connection and is the one that must receive a response.
+        let _ = listener.accept().unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        let mut connection = Connection::new(stream);
+        let (envelope, _) = connection.receive::<Envelope>().unwrap();
+        assert!(matches!(envelope.request, Request::Ping));
+        connection.send(&Response::Ok).unwrap();
+    });
+
+    assert!(
+        Client::connect_ready_at(directory.path())
+            .unwrap()
+            .is_some()
+    );
+    server.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn ready_connection_rejects_a_failed_ping() {
+    use std::os::unix::net::UnixListener;
+
+    let directory = tempfile::tempdir().unwrap();
+    let socket_path = directory.path().join("zmux.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    Endpoint {
+        version: crate::transport::ENDPOINT_VERSION,
+        protocol_version: PROTOCOL_VERSION,
+        process_id: 4242,
+        socket_path,
+        token: "test-token".to_owned(),
+    }
+    .write(&directory.path().join("zmux.json"))
+    .unwrap();
+
+    let server = std::thread::spawn(move || {
+        let _ = listener.accept().unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        let mut connection = Connection::new(stream);
+        let (envelope, _) = connection.receive::<Envelope>().unwrap();
+        assert!(matches!(envelope.request, Request::Ping));
+        connection
+            .send(&Response::Error {
+                message: "not ready".to_owned(),
+            })
+            .unwrap();
+    });
+
+    let error = match Client::connect_ready_at(directory.path()) {
+        Err(error) => error,
+        Ok(Some(_)) => panic!("a failed ping was accepted"),
+        Ok(None) => panic!("the readiness endpoint disappeared"),
+    };
+    assert!(error.to_string().contains("not ready"), "{error:#}");
+    server.join().unwrap();
+}
+
 #[test]
 fn the_multiplexer_is_resolved_beside_this_executable_not_from_the_path() {
     // Resolving through PATH would let an unrelated `zmux` earlier in it be

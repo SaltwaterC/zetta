@@ -82,20 +82,7 @@ impl TestDaemon {
     }
 
     fn wait_for_endpoint(&self) {
-        let endpoint = self.sessions_dir().join("zmux.json");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while Instant::now() < deadline {
-            if endpoint.is_file()
-                && Client::connect_existing_at(&self.sessions_dir())
-                    .ok()
-                    .flatten()
-                    .is_some()
-            {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        panic!("the daemon never published {}", endpoint.display());
+        let _ = self.wait_for_ready();
     }
 
     fn process_id(&self) -> u32 {
@@ -109,9 +96,30 @@ impl TestDaemon {
     /// A client pointed at this daemon. The directory is passed explicitly so
     /// tests running in parallel do not fight over an environment variable.
     fn client(&self) -> Client {
-        Client::connect_existing_at(&self.sessions_dir())
-            .expect("looking for the daemon")
-            .expect("the daemon should be running")
+        self.wait_for_ready()
+    }
+
+    fn wait_for_ready(&self) -> Client {
+        let endpoint = self.sessions_dir().join("zmux.json");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut last_error = None;
+        loop {
+            match Client::connect_ready_at(&self.sessions_dir()) {
+                Ok(Some(client)) => return client,
+                Ok(None) => {}
+                Err(error) => last_error = Some(format!("{error:#}")),
+            }
+            if Instant::now() >= deadline {
+                panic!(
+                    "the daemon was not ready within 10s (process: {}; endpoint: {}; last error: {})\ndaemon log:\n{}",
+                    self.process.id(),
+                    endpoint.display(),
+                    last_error.as_deref().unwrap_or("none"),
+                    self.log()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[cfg(feature = "session-persistence")]
@@ -135,7 +143,7 @@ impl TestDaemon {
             .env("XDG_CONFIG_HOME", &config)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(std::fs::File::create(config.join("zmux.log")).unwrap())
             .spawn()
             .expect("starting disk-retention zmux");
         let daemon = Self {
@@ -156,7 +164,13 @@ impl TestDaemon {
             .env("XDG_CONFIG_HOME", &self.config)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(self.config.join("zmux.log"))
+                    .unwrap(),
+            )
             .spawn()
             .expect("restarting disk-retention zmux");
         self.wait_for_endpoint();
@@ -1138,7 +1152,7 @@ fn a_connection_with_the_wrong_token_gets_nothing() {
 
     let mut stream = std::os::unix::net::UnixStream::connect(socket).unwrap();
     let request = serde_json::json!({
-        "version": 1,
+        "version": zmux::messages::PROTOCOL_VERSION,
         "token": "0".repeat(64),
         "request": {"request": "list"},
     });
@@ -1352,14 +1366,15 @@ fn an_upgrade_keeps_the_sessions_and_their_processes() {
     // was enough to make a ten-second bound report a failure that was not one.
     let deadline = Instant::now() + Duration::from_secs(60);
     let client = loop {
-        if let Ok(Some(connected)) = Client::connect_existing_at(&daemon.sessions_dir())
+        if let Ok(Some(connected)) = Client::connect_ready_at(&daemon.sessions_dir())
             && connected.list().is_ok()
         {
             break connected;
         }
         assert!(
             Instant::now() < deadline,
-            "the replacement never came back; daemon log:\n{}",
+            "the replacement never came back (process: {}); daemon log:\n{}",
+            daemon.process.id(),
             daemon.log()
         );
         std::thread::sleep(Duration::from_millis(20));
@@ -1425,7 +1440,7 @@ fn a_dead_multiplexers_endpoint_does_not_block_starting_a_new_one() {
         sessions.join("zmux.json"),
         serde_json::json!({
             "version": 1,
-            "protocol_version": 0,
+            "protocol_version": zmux::messages::PROTOCOL_VERSION - 1,
             "process_id": 999_999,
             "socket_path": sessions.join("zmux.sock"),
             "token": "00",
@@ -1719,7 +1734,18 @@ fn replacing_the_binary_out_from_under_the_daemon_does_not_lose_its_sessions() {
         std::thread::sleep(Duration::from_millis(20));
     }
 
-    let client = Client::connect_existing_at(&sessions).unwrap().unwrap();
+    let client = loop {
+        if let Ok(Some(client)) = Client::connect_ready_at(&sessions) {
+            break client;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the copied daemon never became ready; process: {}; log:\n{}",
+            process.id(),
+            std::fs::read_to_string(config.path().join("zmux.log")).unwrap_or_default()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
     let pane = client
         .spawn(spawn_request(None, "printf ready; sleep 60"))
         .unwrap();
@@ -1915,14 +1941,15 @@ fn upgrading_twice_does_not_duplicate_a_session() {
 fn wait_for_multiplexer(daemon: &TestDaemon) -> Client {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
-        if let Ok(Some(client)) = Client::connect_existing_at(&daemon.sessions_dir())
+        if let Ok(Some(client)) = Client::connect_ready_at(&daemon.sessions_dir())
             && client.list().is_ok()
         {
             return client;
         }
         assert!(
             Instant::now() < deadline,
-            "the multiplexer never came back; log:\n{}",
+            "the multiplexer never came back (process: {}); log:\n{}",
+            daemon.process.id(),
             daemon.log()
         );
         std::thread::sleep(Duration::from_millis(20));
@@ -3446,7 +3473,7 @@ fn spawn_copied_daemon(binary: &Path, config: &Path) -> Child {
             .env("XDG_CONFIG_HOME", config)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(std::fs::File::create(config.join("zmux.log")).unwrap())
             .spawn()
         {
             Ok(process) => return process,
@@ -3774,7 +3801,7 @@ fn the_multiplexer_can_be_asked_to_stop() {
     assert!(error.contains("holding 1 session"), "{error}");
     assert!(error.contains("--force"), "{error}");
     assert!(
-        Client::connect_existing_at(&daemon.sessions_dir())
+        Client::connect_ready_at(&daemon.sessions_dir())
             .unwrap()
             .is_some(),
         "a refused stop must leave the multiplexer running"
@@ -3790,7 +3817,7 @@ fn the_multiplexer_can_be_asked_to_stop() {
         },
     );
     assert!(
-        Client::connect_existing_at(&daemon.sessions_dir())
+        Client::connect_ready_at(&daemon.sessions_dir())
             .unwrap()
             .is_none(),
         "the multiplexer must be gone once it says it stopped: {}",
@@ -4448,7 +4475,7 @@ fn an_upgrade_connects_to_a_multiplexer_of_another_protocol_version() {
     let endpoint_path = daemon.sessions_dir().join("zmux.json");
     let mut endpoint: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&endpoint_path).unwrap()).unwrap();
-    endpoint["protocol_version"] = serde_json::json!(999);
+    endpoint["protocol_version"] = serde_json::json!(zmux::messages::PROTOCOL_VERSION - 1);
     std::fs::write(&endpoint_path, serde_json::to_vec(&endpoint).unwrap()).unwrap();
 
     // Every other command says so, and says what to do about it.
@@ -4456,7 +4483,13 @@ fn an_upgrade_connects_to_a_multiplexer_of_another_protocol_version() {
         Err(error) => error.to_string(),
         Ok(_) => panic!("an ordinary connection must refuse the version"),
     };
-    assert!(error.contains("protocol version 999"), "{error}");
+    assert!(
+        error.contains(&format!(
+            "protocol version {}",
+            zmux::messages::PROTOCOL_VERSION - 1
+        )),
+        "{error}"
+    );
     assert!(error.contains("--upgrade"), "{error}");
 
     // The upgrade goes through, and the session it was holding survives it.
