@@ -251,7 +251,7 @@ the settings editor, and CLI arguments; for example, configure Fish as
 ```
 
 On Windows this includes Windows PowerShell,
-PowerShell 7, Command Prompt, MSYS2, and registered WSL distributions. The
+PowerShell 7, Command Prompt, MSYS2, Cygwin, and registered WSL distributions. The
 MSYS2 Start Menu shortcut is used to find current custom installation paths;
 legacy uninstall registration is also checked, with `C:\msys64` as a fallback.
 Zetta launches `msys2_shell.cmd` in the MSYS environment so the normal MSYS2
@@ -261,13 +261,28 @@ commands are immediately available inside the profile. Bash and Zsh profiles
 also report their current MSYS2 directory to Zetta, so new tabs, split panes,
 multi-command panes, and local server actions inherit the directory after `cd`.
 
+Cygwin is discovered from its per-user or machine-wide installation registry
+entries (including 32-bit registry views), Cygwin paths found in `PATH`, and
+the conventional `C:\cygwin64` and `C:\cygwin` roots. A custom installation
+does not need to be on `PATH` when it is registered. The first root containing
+`bin\cygwin1.dll` supplies the stable profiles `Cygwin`, `Cygwin: Zsh`,
+`Cygwin: Fish`, and `Cygwin: Nushell`; a profile is omitted when its matching
+`bin\*.exe` is not installed. These profiles launch the shell executable
+directly from `bin` with `-l`, rather than through `Cygwin.bat`, so each shell
+remains distinct. Cygwin's `/cygdrive/c/...` and UNC paths are converted to
+native Windows paths for tracked directories and pane inheritance. Cygwin
+startup keeps the inherited `PATH`, prepends the installation's `bin`, and
+sets `CHERE_INVOKING=1` so configured or inherited native working directories
+survive login startup.
+
 Each profile also has an icon. When `icon` is omitted, `null`, or `"auto"`,
 Zetta infers it from the shell executable on macOS and Linux (`bash`, `zsh`,
 and `fish` get their bundled artwork; other programs use the Zetta fallback).
 Windows profiles use the executable's native icon when it can be resolved and
 extracted. WSL distributions use generic Tux artwork because WSL discovery does
 not expose the distribution's default shell, while MSYS2 Bash and Zsh use the
-corresponding bundled artwork. Set `icon` explicitly to `"zetta"`, `"bash"`,
+corresponding bundled artwork. Cygwin Bash, Zsh, and Fish use the matching
+bundled artwork; Cygwin Nushell uses the Zetta fallback. Set `icon` explicitly to `"zetta"`, `"bash"`,
 `"zsh"`, or `"fish"` to override automatic selection. Explicit icons are
 shown in the settings editor and profile menu; automatic selections are not
 written back to the configuration file.
@@ -280,6 +295,15 @@ Zsh without relying on `chsh`:
 ```json
 {
   "default_profile": "MSYS2: Zsh"
+}
+```
+
+Cygwin profiles use the same stable names on every installation. For example,
+select `Cygwin: Fish` as the default without including the installation path:
+
+```json
+{
+  "default_profile": "Cygwin: Fish"
 }
 ```
 
@@ -360,7 +384,10 @@ tracks the Linux directory for bash, fish, and zsh, with a fallback for other
 shells, so same-profile tabs and splits inherit it even though `wsl.exe` exposes
 only a Windows-side directory. On Windows, prompt integration similarly tracks
 the active filesystem directory for Windows PowerShell, PowerShell 7, and
-Command Prompt without replacing the user's prompt.
+Command Prompt without replacing the user's prompt. Cygwin Bash, Zsh, Fish,
+and Nushell profiles report their Cygwin directory after `cd`; `/cygdrive` and
+root-relative paths are converted before native project, worktree, and pane
+inheritance decisions are made.
 
 Profiles may choose separate Zed themes and an icon independently from the
 application themes. `theme` is used only for light appearance and `dark_theme`

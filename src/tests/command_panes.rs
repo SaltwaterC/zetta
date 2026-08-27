@@ -130,3 +130,57 @@ fn wsl_split_commands_preserve_the_launcher_and_working_directory() {
         ]
     );
 }
+
+#[cfg(windows)]
+fn cygwin_profile(shell: &str, title: &str) -> Shell {
+    Shell::WithArguments {
+        program: format!(r"C:\cygwin64\bin\{shell}.exe"),
+        args: vec!["-l".to_owned()],
+        title_override: Some(title.to_owned()),
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn cygwin_split_commands_use_the_direct_profile_shell() {
+    let profile = cygwin_profile("bash", "Cygwin");
+    let shell = exact_pane_command_shell(
+        &profile,
+        &["printf".to_owned(), "hello world".to_owned()],
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(
+        shell,
+        Shell::WithArguments {
+            program: r"C:\cygwin64\bin\bash.exe".to_owned(),
+            args: vec![
+                "-l".to_owned(),
+                "-i".to_owned(),
+                "-c".to_owned(),
+                "exec printf 'hello world'".to_owned(),
+            ],
+            title_override: None,
+        }
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn cygwin_split_commands_use_shell_specific_quoting() {
+    let command = [
+        "echo".to_owned(),
+        "hello world".to_owned(),
+        "$HOME".to_owned(),
+    ];
+    let bash = quote_pane_command_for_shell(&cygwin_profile("bash", "Cygwin"), &command).unwrap();
+    let fish =
+        quote_pane_command_for_shell(&cygwin_profile("fish", "Cygwin: Fish"), &command).unwrap();
+    let nu =
+        quote_pane_command_for_shell(&cygwin_profile("nu", "Cygwin: Nushell"), &command).unwrap();
+
+    assert_eq!(bash, "echo 'hello world' '$HOME'");
+    assert_eq!(fish, "echo 'hello world' '$HOME'");
+    assert_eq!(nu, "echo 'hello world' '$HOME'");
+}

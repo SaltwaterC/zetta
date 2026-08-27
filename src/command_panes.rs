@@ -170,6 +170,18 @@ pub(crate) fn exact_pane_command_shell(
         });
     }
 
+    #[cfg(windows)]
+    if cygwin_profile(profile).is_some() {
+        let command = quote_pane_command_for_shell(profile, command)?;
+        let (program, args) =
+            ShellBuilder::new(profile, true).build(Some(format!("exec {command}")), &[]);
+        return Ok(Shell::WithArguments {
+            program,
+            args,
+            title_override: None,
+        });
+    }
+
     Ok(Shell::WithArguments {
         program: command[0].clone(),
         args: command[1..].to_vec(),

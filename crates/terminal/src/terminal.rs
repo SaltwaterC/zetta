@@ -30,6 +30,8 @@ use task::{HideStrategy, Shell, ShellKind, SpawnInTerminal};
 use terminal_settings::{AlternateScroll, CursorShape as SettingsCursorShape, TerminalSettings};
 use theme::{ActiveTheme, Theme};
 use urlencoding;
+#[cfg(windows)]
+use util::paths::PathWithPosition;
 use util::{ResultExt as _, paths::PathStyle, truncate_and_trailoff};
 
 use alacritty_terminal::grid::Dimensions as _;
@@ -846,8 +848,12 @@ fn editor_path_argument(
 ) -> Option<String> {
     let path = path.to_str()?;
     #[cfg(windows)]
-    if matches!(posix_host(shell), Some(PosixHost::Wsl)) {
-        return wsl_editor_path_argument(path, path_style);
+    match posix_host(shell) {
+        Some(PosixHost::Wsl) => return wsl_editor_path_argument(path, path_style),
+        Some(PosixHost::Cygwin) => {
+            return cygwin_editor_path_argument(path, path_style, shell_kind);
+        }
+        _ => {}
     }
     #[cfg(not(windows))]
     let _ = (shell, path_style);
@@ -885,10 +891,57 @@ fn wsl_relative_editor_path_argument(path: &str) -> Option<String> {
     ))
 }
 
+#[cfg(windows)]
+fn cygwin_editor_path_argument(
+    path: &str,
+    path_style: PathStyle,
+    shell_kind: ShellKind,
+) -> Option<String> {
+    if path.starts_with('/') {
+        let path = shell_kind.try_quote(path)?;
+        return Some(match shell_kind {
+            ShellKind::Nushell => format!("(cygpath -w {path})"),
+            ShellKind::Fish => format!("(cygpath -w {path})"),
+            _ => format!("\"$(cygpath -w {path})\""),
+        });
+    }
+
+    if path_style.is_posix() && !PathStyle::Windows.is_absolute(path) {
+        if path == "~" {
+            return Some(match shell_kind {
+                ShellKind::Nushell => "(cygpath -w $env.HOME)".to_owned(),
+                ShellKind::Fish => "(cygpath -w $HOME)".to_owned(),
+                _ => "\"$(cygpath -w \"$HOME\")\"".to_owned(),
+            });
+        }
+        if let Some(path) = path.strip_prefix("~/") {
+            let path = shell_kind.try_quote(path)?;
+            return Some(match shell_kind {
+                ShellKind::Nushell => format!("(cygpath -w ($env.HOME | path join {path}))"),
+                ShellKind::Fish => {
+                    format!("(cygpath -w (string join / $HOME {path}))")
+                }
+                _ => format!("\"$(cygpath -w \"$HOME/$(printf %s {path})\")\""),
+            });
+        }
+        let path = shell_kind.try_quote(path)?;
+        return Some(match shell_kind {
+            ShellKind::Nushell => format!("(cygpath -w ((pwd) | path join {path}))"),
+            ShellKind::Fish => format!("(cygpath -w (string join / (pwd -P) {path}))"),
+            _ => format!("\"$(cygpath -w \"$(pwd -P)/$(printf %s {path})\")\""),
+        });
+    }
+
+    shell_kind.try_quote(path).map(Into::into)
+}
+
 fn interaction_shell_kind(shell: &Shell, path_style: PathStyle) -> ShellKind {
     #[cfg(windows)]
-    if posix_host(shell).is_some() {
-        return ShellKind::Posix;
+    if let Some(host) = posix_host(shell) {
+        return match host {
+            PosixHost::Cygwin => cygwin_shell_kind(shell),
+            PosixHost::Msys2 | PosixHost::Wsl => ShellKind::Posix,
+        };
     }
     shell.shell_kind(path_style.is_windows())
 }
@@ -898,24 +951,93 @@ fn interaction_shell_kind(shell: &Shell, path_style: PathStyle) -> ShellKind {
 enum PosixHost {
     Msys2,
     Wsl,
+    Cygwin,
+}
+
+#[cfg(windows)]
+fn cygwin_root_from_program(program: &str) -> Option<PathBuf> {
+    let program = Path::new(program);
+    let bin = program.parent()?;
+    if !bin
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("bin"))
+    {
+        return None;
+    }
+    bin.parent().map(Path::to_path_buf)
+}
+
+#[cfg(windows)]
+fn cygwin_program_name(program: &str) -> bool {
+    let name = windows_shell_program_name(program);
+    [
+        "bash",
+        "bash.exe",
+        "zsh",
+        "zsh.exe",
+        "fish",
+        "fish.exe",
+        "nu",
+        "nu.exe",
+        "nushell",
+        "nushell.exe",
+    ]
+    .iter()
+    .any(|candidate| name.eq_ignore_ascii_case(candidate))
+}
+
+#[cfg(windows)]
+fn cygwin_title(title: Option<&str>) -> bool {
+    title.is_some_and(|title| {
+        ["Cygwin", "Cygwin: Zsh", "Cygwin: Fish", "Cygwin: Nushell"]
+            .iter()
+            .any(|candidate| title.eq_ignore_ascii_case(candidate))
+    })
+}
+
+#[cfg(windows)]
+fn cygwin_shell_kind(shell: &Shell) -> ShellKind {
+    let program = shell.program();
+    let name = windows_shell_program_name(&program);
+    let name = name.to_ascii_lowercase();
+    match name.strip_suffix(".exe").unwrap_or(&name) {
+        "fish" => ShellKind::Fish,
+        "nu" | "nushell" => ShellKind::Nushell,
+        _ => ShellKind::Posix,
+    }
 }
 
 #[cfg(windows)]
 fn posix_host(shell: &Shell) -> Option<PosixHost> {
-    let (program, arguments) = match shell {
+    let (program, arguments, title) = match shell {
         Shell::System => return None,
-        Shell::Program(program) => (program, &[][..]),
-        Shell::WithArguments { program, args, .. } => (program, args.as_slice()),
+        Shell::Program(program) => (program, &[][..], None),
+        Shell::WithArguments {
+            program,
+            args,
+            title_override,
+        } => (program, args.as_slice(), title_override.as_deref()),
     };
     if program.rsplit(['/', '\\']).next().is_some_and(|name| {
         name.eq_ignore_ascii_case("wsl.exe") || name.eq_ignore_ascii_case("wsl")
     }) {
         return Some(PosixHost::Wsl);
     }
-    arguments
+    if arguments
         .iter()
         .any(|argument| argument.to_ascii_lowercase().contains("msys2_shell.cmd"))
-        .then_some(PosixHost::Msys2)
+    {
+        return Some(PosixHost::Msys2);
+    }
+
+    let root = cygwin_root_from_program(program)?;
+    if cygwin_program_name(program)
+        && (cygwin_title(title) || root.join("bin").join("cygwin1.dll").is_file())
+    {
+        Some(PosixHost::Cygwin)
+    } else {
+        None
+    }
 }
 
 fn zetta_command_for_shell(shell: &Shell) -> Option<String> {
@@ -924,6 +1046,15 @@ fn zetta_command_for_shell(shell: &Shell) -> Option<String> {
         return match host {
             PosixHost::Wsl => Some("\"$ZETTA_HOST_EXECUTABLE\"".to_owned()),
             PosixHost::Msys2 => native_zetta_command_for_msys2(&std::env::current_exe().ok()?),
+            PosixHost::Cygwin => {
+                let executable = std::env::current_exe().ok()?;
+                let shell_kind = interaction_shell_kind(shell, PathStyle::local());
+                if shell_kind == ShellKind::Posix {
+                    native_zetta_command_for_cygwin(&executable)
+                } else {
+                    native_zetta_command_for_cygwin_with_shell(&executable, shell_kind)
+                }
+            }
         };
     }
     #[cfg(not(windows))]
@@ -933,8 +1064,25 @@ fn zetta_command_for_shell(shell: &Shell) -> Option<String> {
 
 #[cfg(windows)]
 fn native_zetta_command_for_msys2(executable: &Path) -> Option<String> {
+    native_zetta_command_for_cygwin_with_shell(executable, ShellKind::Posix)
+}
+
+#[cfg(windows)]
+fn native_zetta_command_for_cygwin(executable: &Path) -> Option<String> {
+    native_zetta_command_for_cygwin_with_shell(executable, ShellKind::Posix)
+}
+
+#[cfg(windows)]
+fn native_zetta_command_for_cygwin_with_shell(
+    executable: &Path,
+    shell_kind: ShellKind,
+) -> Option<String> {
     let executable = ShellKind::Posix.try_quote(executable.to_str()?)?;
-    Some(format!("\"$(cygpath -u {executable})\""))
+    Some(match shell_kind {
+        ShellKind::Nushell => format!("let zetta = (^cygpath -u {executable}); ^$zetta"),
+        ShellKind::Fish => format!("(cygpath -u {executable})"),
+        _ => format!("\"$(cygpath -u {executable})\""),
+    })
 }
 
 #[cfg(windows)]
@@ -945,6 +1093,71 @@ fn wsl_editor_working_directory(shell: &Shell, directory: Option<&str>) -> Optio
     directory
         .filter(|directory| directory.starts_with('/'))
         .map(PathBuf::from)
+}
+
+#[cfg(windows)]
+fn cygwin_path_to_windows(root: &Path, directory: &str) -> Option<PathBuf> {
+    if !directory.starts_with('/') || directory.chars().any(char::is_control) {
+        return None;
+    }
+    let parts = directory
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts
+        .iter()
+        .any(|part| matches!(*part, "." | "..") || part.contains(['\\', ':']))
+    {
+        return None;
+    }
+    if directory.starts_with("//") {
+        return (parts.len() >= 2)
+            .then(|| PathBuf::from(format!(r"\\{}\{}", parts[0], parts[1..].join(r"\"))));
+    }
+    if parts
+        .first()
+        .is_some_and(|part| part.eq_ignore_ascii_case("cygdrive"))
+    {
+        let drive = parts.get(1)?;
+        if drive.len() != 1 || !drive.as_bytes()[0].is_ascii_alphabetic() {
+            return None;
+        }
+        let mut path = PathBuf::from(format!(r"{}:\", drive.to_ascii_uppercase()));
+        path.extend(&parts[2..]);
+        return Some(path);
+    }
+    let mut path = root.to_path_buf();
+    path.extend(parts);
+    Some(path)
+}
+
+#[cfg(windows)]
+fn cygwin_path_like_to_windows(shell: &Shell, value: &str) -> Option<String> {
+    if !matches!(posix_host(shell), Some(PosixHost::Cygwin)) {
+        return None;
+    }
+    let root = cygwin_root_from_program(&shell.program())?;
+    let value = PathWithPosition::parse_str(value);
+    let path = value.path.to_str()?;
+    let path = cygwin_path_to_windows(&root, path)?;
+    Some(
+        PathWithPosition {
+            path,
+            row: value.row,
+            column: value.column,
+        }
+        .to_string(&|path| path.to_string_lossy().into_owned()),
+    )
+}
+
+#[cfg(windows)]
+fn cygwin_editor_working_directory(shell: &Shell, directory: Option<&str>) -> Option<PathBuf> {
+    if !matches!(posix_host(shell), Some(PosixHost::Cygwin)) {
+        return None;
+    }
+    let program = shell.program();
+    let root = cygwin_root_from_program(&program)?;
+    cygwin_path_to_windows(&root, directory?)
 }
 
 /// Whether the modifiers should activate a terminal hyperlink.
@@ -1118,7 +1331,7 @@ fn reported_working_directory_from_title(title: &str) -> Option<String> {
     (is_unix_absolute || is_native_absolute).then(|| directory.to_owned())
 }
 
-/// Parses the `zetta-cmd:<command>` marker that WSL and MSYS2 sessions report
+/// Parses the `zetta-cmd:<command>` marker that WSL, MSYS2, and Cygwin sessions report
 /// via prompt/preexec shell hooks. Windows-side process inspection cannot see
 /// into WSL and does not reliably represent MSYS2's POSIX process hierarchy.
 fn reported_foreground_command_from_title(title: &str) -> Option<String> {
@@ -3053,12 +3266,13 @@ impl Terminal {
                     self.last_content.terminal_bounds,
                     display_offset(term),
                 );
+                let path_style = self.hyperlink_path_style();
 
                 match find_from_terminal_point(
                     term,
                     point,
                     &mut self.hyperlink_regex_searches,
-                    self.path_style,
+                    path_style,
                 ) {
                     Some(hyperlink) => {
                         self.process_hyperlink(hyperlink, *open, cx);
@@ -3082,9 +3296,22 @@ impl Terminal {
             range,
         } = hyperlink;
         let prev_hovered_word = self.last_content.last_hovered_word.take();
+        let target_path = if !is_url {
+            #[cfg(windows)]
+            {
+                cygwin_path_like_to_windows(&self.template.shell, &maybe_url_or_path)
+                    .unwrap_or_else(|| maybe_url_or_path.clone())
+            }
+            #[cfg(not(windows))]
+            {
+                maybe_url_or_path.clone()
+            }
+        } else {
+            maybe_url_or_path.clone()
+        };
 
         let target = if is_url {
-            if let Some(path) = maybe_url_or_path.strip_prefix("file://") {
+            if let Some(path) = target_path.strip_prefix("file://") {
                 let decoded_path = urlencoding::decode(path)
                     .map(|decoded| decoded.into_owned())
                     .unwrap_or(path.to_owned());
@@ -3095,11 +3322,11 @@ impl Terminal {
                     path_style: self.path_style,
                 })
             } else {
-                MaybeNavigationTarget::Url(maybe_url_or_path.clone())
+                MaybeNavigationTarget::Url(target_path)
             }
         } else {
             MaybeNavigationTarget::PathLike(PathLikeTarget {
-                maybe_path: maybe_url_or_path.clone(),
+                maybe_path: target_path,
                 terminal_dir: self.working_directory(),
                 path_style: self.path_style,
             })
@@ -3127,7 +3354,7 @@ impl Terminal {
     }
 
     fn find_hyperlink_at_point(&mut self, point: Point) -> Option<HyperlinkMatch> {
-        self.find_hyperlink_at_point_with_path_style(point, self.path_style)
+        self.find_hyperlink_at_point_with_path_style(point, self.hyperlink_path_style())
     }
 
     fn update_selected_word(
@@ -3953,7 +4180,7 @@ impl Terminal {
             self.last_content.display_offset,
         );
         let hyperlink =
-            self.find_hyperlink_at_point_with_path_style(point, self.editor_path_style())?;
+            self.find_hyperlink_at_point_with_path_style(point, self.hyperlink_path_style())?;
         let maybe_path = if hyperlink.is_url {
             let path = hyperlink.text.strip_prefix("file://")?;
             urlencoding::decode(path)
@@ -3962,6 +4189,9 @@ impl Terminal {
         } else {
             hyperlink.text
         };
+        #[cfg(windows)]
+        let maybe_path =
+            cygwin_path_like_to_windows(&self.template.shell, &maybe_path).unwrap_or(maybe_path);
 
         Some(PathLikeTarget {
             maybe_path,
@@ -3972,11 +4202,20 @@ impl Terminal {
 
     fn editor_path_working_directory(&self) -> Option<PathBuf> {
         #[cfg(windows)]
-        if matches!(posix_host(&self.template.shell), Some(PosixHost::Wsl)) {
-            return wsl_editor_working_directory(
-                &self.template.shell,
-                self.reported_working_directory.as_deref(),
-            );
+        match posix_host(&self.template.shell) {
+            Some(PosixHost::Wsl) => {
+                return wsl_editor_working_directory(
+                    &self.template.shell,
+                    self.reported_working_directory.as_deref(),
+                );
+            }
+            Some(PosixHost::Cygwin) => {
+                return cygwin_editor_working_directory(
+                    &self.template.shell,
+                    self.reported_working_directory.as_deref(),
+                );
+            }
+            _ => {}
         }
         self.working_directory()
     }
@@ -3984,6 +4223,14 @@ impl Terminal {
     fn editor_path_style(&self) -> PathStyle {
         #[cfg(windows)]
         if matches!(posix_host(&self.template.shell), Some(PosixHost::Wsl)) {
+            return PathStyle::Unix;
+        }
+        self.path_style
+    }
+
+    fn hyperlink_path_style(&self) -> PathStyle {
+        #[cfg(windows)]
+        if matches!(posix_host(&self.template.shell), Some(PosixHost::Cygwin)) {
             return PathStyle::Unix;
         }
         self.path_style
@@ -4434,6 +4681,14 @@ impl Terminal {
     /// remote host, in case Zed is connected to a remote host.
     fn client_side_working_directory(&self) -> Option<PathBuf> {
         if let Some(directory) = self.reported_working_directory.as_deref() {
+            #[cfg(windows)]
+            if matches!(posix_host(&self.template.shell), Some(PosixHost::Cygwin)) {
+                if let Some(root) = cygwin_root_from_program(&self.template.shell.program())
+                    && let Some(directory) = cygwin_path_to_windows(&root, directory)
+                {
+                    return Some(directory);
+                }
+            }
             let directory = PathBuf::from(directory);
             if directory.is_absolute() {
                 return Some(directory);
@@ -4461,7 +4716,7 @@ impl Terminal {
                     task_state.spawned_task.full_label.clone()
                 }
             }
-            // A profile's `title_override` (e.g. WSL/MSYS2's static "WSL: Ubuntu")
+            // A profile's `title_override` (e.g. WSL/MSYS2/Cygwin's static profile title)
             // is only a placeholder for before any live info is available - it must
             // not mask a live-reported or foreground-process-derived title once one
             // exists, or the tab name would never update to reflect what's running.
@@ -6962,6 +7217,45 @@ mod tests {
             interaction_shell_kind(&msys2, PathStyle::local()),
             ShellKind::Posix
         );
+        let cygwin_bash = Shell::WithArguments {
+            program: r"C:\cygwin64\bin\bash.exe".to_owned(),
+            args: vec!["-l".to_owned()],
+            title_override: Some("Cygwin".to_owned()),
+        };
+        assert_eq!(posix_host(&cygwin_bash), Some(PosixHost::Cygwin));
+        assert_eq!(
+            interaction_shell_kind(&cygwin_bash, PathStyle::local()),
+            ShellKind::Posix
+        );
+        assert_eq!(
+            native_zetta_command_for_cygwin(executable),
+            Some("\"$(cygpath -u \"C:\\\\Program Files\\\\Zetta\\\\zetta.exe\")\"".to_owned())
+        );
+        let cygwin_fish = Shell::WithArguments {
+            program: r"C:\cygwin64\bin\fish.exe".to_owned(),
+            args: vec!["-l".to_owned()],
+            title_override: Some("Cygwin: Fish".to_owned()),
+        };
+        assert_eq!(
+            interaction_shell_kind(&cygwin_fish, PathStyle::local()),
+            ShellKind::Fish
+        );
+        let cygwin_nu = Shell::WithArguments {
+            program: r"C:\cygwin64\bin\nu.exe".to_owned(),
+            args: vec!["-l".to_owned()],
+            title_override: Some("Cygwin: Nushell".to_owned()),
+        };
+        assert_eq!(
+            interaction_shell_kind(&cygwin_nu, PathStyle::local()),
+            ShellKind::Nushell
+        );
+        assert_eq!(
+            cygwin_path_like_to_windows(
+                &cygwin_bash,
+                "/cygdrive/c/Users/saltw/source/zetta/main.rs:12:4"
+            ),
+            Some(r"C:\Users\saltw\source\zetta\main.rs:12:4".to_owned())
+        );
         let wsl_path_argument = editor_path_argument(
             ShellKind::Posix,
             &wsl,
@@ -7046,6 +7340,48 @@ mod tests {
             r#""$ZETTA_HOST_EXECUTABLE" edit --delete-after -- "C:\\Users\\saltw\\AppData\\Local\\Temp\\zetta\\scrollback.txt""#
         );
         assert!(!scrollback_command.contains("wslpath"));
+        let cygwin_bash_path = editor_path_argument(
+            ShellKind::Posix,
+            &cygwin_bash,
+            Path::new("/cygdrive/c/Users/saltw/source/zetta/file with spaces.txt"),
+            PathStyle::Unix,
+        )
+        .unwrap();
+        assert_eq!(
+            cygwin_bash_path,
+            "\"$(cygpath -w '/cygdrive/c/Users/saltw/source/zetta/file with spaces.txt')\""
+        );
+        let cygwin_fish_path = editor_path_argument(
+            ShellKind::Fish,
+            &cygwin_fish,
+            Path::new("/cygdrive/c/Users/saltw/file.txt"),
+            PathStyle::Unix,
+        )
+        .unwrap();
+        assert_eq!(
+            cygwin_fish_path,
+            "(cygpath -w /cygdrive/c/Users/saltw/file.txt)"
+        );
+        let cygwin_nu_path = editor_path_argument(
+            ShellKind::Nushell,
+            &cygwin_nu,
+            Path::new("/cygdrive/c/Users/saltw/file.txt"),
+            PathStyle::Unix,
+        )
+        .unwrap();
+        assert_eq!(
+            cygwin_nu_path,
+            "(cygpath -w /cygdrive/c/Users/saltw/file.txt)"
+        );
+        assert_eq!(
+            editor_path_argument(
+                ShellKind::Fish,
+                &cygwin_fish,
+                Path::new("~/source with spaces/file.txt"),
+                PathStyle::Unix,
+            ),
+            Some("(cygpath -w (string join / $HOME 'source with spaces/file.txt'))".to_owned())
+        );
     }
 
     #[gpui::test]

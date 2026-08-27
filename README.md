@@ -14,8 +14,8 @@ for active development.
   pane rotation, pane templates, pane minimization, input broadcasting, and
   modal keyboard or mouse pane resizing and moving
 - Automatically detected shells, including Homebrew-installed shells on
-  macOS and Linux, plus first-class WSL/MSYS2 profiles with working directory
-  tracking
+  macOS and Linux, plus first-class WSL/MSYS2/Cygwin profiles with working
+  directory tracking
 - Detachable background sessions, held by the `zmux` multiplexer so they
   outlive Zetta itself,
   with retained diagnostics for unexpected terminal exits

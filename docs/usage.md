@@ -18,7 +18,8 @@ unchanged. Programs can make the same request with the standard xterm sequence
 
 Zetta creates profiles for common installed command interpreters. On Windows,
 these include Windows PowerShell, PowerShell 7, Command Prompt, and registered
-WSL distributions. Select a profile in the top bar, then open a new tab.
+WSL distributions, and installed Cygwin shells. Select a profile in the top
+bar, then open a new tab.
 New tabs use the configured default profile unless `new_tab_profile` is set to
 `"inherit"`.
 

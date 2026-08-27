@@ -168,9 +168,12 @@ profile. If process inspection cannot identify a supported shell, Zetta falls
 back to `$SHELL`. It prints the file it writes, or reports that the integration
 is already present without changing the file.
 
-When run from MSYS2 on Windows, Zetta resolves its Unix-style `$HOME` with
-`cygpath` before writing `.bashrc` or `.zshrc`, including for MSYS2 installed
-outside `C:\msys64`.
+When run from MSYS2 or Cygwin on Windows, Zetta resolves its Unix-style `$HOME`
+with `cygpath` before writing `.bashrc` or `.zshrc`, including for installations
+outside their conventional roots. Cygwin profiles also install session-local
+prompt and foreground-command hooks for Bash, Zsh, Fish, and Nushell; these
+hooks report `zetta-cwd:` and `zetta-cmd:` markers without changing the user's
+shell startup files. Native editor dispatch uses `cygpath` for Cygwin paths.
 
 The startup files and commands are:
 

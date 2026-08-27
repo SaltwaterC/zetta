@@ -1321,6 +1321,100 @@ fn omits_msys2_zsh_profile_when_zsh_is_not_installed() {
     assert_eq!(profiles[0].name, "MSYS2");
 }
 
+#[test]
+fn creates_cygwin_profiles_for_installed_shells_with_direct_commands() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(root.path().join("bin")).unwrap();
+    fs::write(root.path().join("bin/cygwin1.dll"), "").unwrap();
+    for shell in ["bash", "zsh", "fish", "nu"] {
+        fs::write(root.path().join("bin").join(format!("{shell}.exe")), "").unwrap();
+    }
+
+    let profiles = cygwin_profiles(root.path());
+
+    assert_eq!(
+        profiles
+            .iter()
+            .map(|profile| profile.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Cygwin", "Cygwin: Zsh", "Cygwin: Fish", "Cygwin: Nushell"]
+    );
+    for (profile, (shell, icon)) in profiles.iter().zip([
+        ("bash", ProfileIcon::Bash),
+        ("zsh", ProfileIcon::Zsh),
+        ("fish", ProfileIcon::Fish),
+        ("nu", ProfileIcon::Zetta),
+    ]) {
+        assert_eq!(profile.icon, icon);
+        assert!(matches!(
+            &profile.command,
+            Shell::WithArguments {
+                program,
+                args,
+                title_override,
+            } if program == &root.path().join("bin").join(format!("{shell}.exe")).display().to_string()
+                && args == &["-l"]
+                && title_override.as_deref() == Some(profile.name.as_str())
+        ));
+    }
+}
+
+#[test]
+fn omits_cygwin_profiles_for_missing_shell_executables() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(root.path().join("bin")).unwrap();
+    fs::write(root.path().join("bin/cygwin1.dll"), "").unwrap();
+    fs::write(root.path().join("bin/bash.exe"), "").unwrap();
+    fs::write(root.path().join("bin/nu.exe"), "").unwrap();
+
+    let profiles = cygwin_profiles(root.path());
+
+    assert_eq!(
+        profiles
+            .iter()
+            .map(|profile| profile.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Cygwin", "Cygwin: Nushell"]
+    );
+}
+
+#[test]
+fn skips_incomplete_cygwin_roots_when_a_later_root_has_shells() {
+    let incomplete = tempfile::tempdir().unwrap();
+    fs::create_dir_all(incomplete.path().join("bin")).unwrap();
+    fs::write(incomplete.path().join("bin/cygwin1.dll"), "").unwrap();
+
+    let complete = tempfile::tempdir().unwrap();
+    fs::create_dir_all(complete.path().join("bin")).unwrap();
+    fs::write(complete.path().join("bin/cygwin1.dll"), "").unwrap();
+    fs::write(complete.path().join("bin/bash.exe"), "").unwrap();
+
+    assert_eq!(
+        select_cygwin_installation_root([
+            incomplete.path().to_path_buf(),
+            complete.path().to_path_buf(),
+        ]),
+        Some(complete.path().to_path_buf())
+    );
+}
+
+#[test]
+fn normalizes_cygwin_registry_installation_paths() {
+    assert_eq!(
+        normalize_cygwin_registry_path(r"\??\C:\cygwin64"),
+        Some(PathBuf::from(r"C:\cygwin64"))
+    );
+    assert_eq!(
+        normalize_cygwin_registry_path(r"\\??\D:\Tools\cygwin"),
+        Some(PathBuf::from(r"D:\Tools\cygwin"))
+    );
+    assert_eq!(
+        normalize_cygwin_registry_path(r"\??\UNC\server\share\cygwin"),
+        Some(PathBuf::from(r"\\server\share\cygwin"))
+    );
+    assert_eq!(normalize_cygwin_registry_path("relative\npath"), None);
+}
+
 #[cfg(windows)]
 #[test]
 fn msys2_launcher_command_supports_custom_paths_with_spaces() {

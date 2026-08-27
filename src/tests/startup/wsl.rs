@@ -18,6 +18,19 @@ fn msys2_shell(root: &Path, shell: &str) -> Shell {
 }
 
 #[cfg(windows)]
+fn cygwin_shell(root: &Path, shell: &str, title: &str) -> Shell {
+    Shell::WithArguments {
+        program: root
+            .join("bin")
+            .join(format!("{shell}.exe"))
+            .display()
+            .to_string(),
+        args: vec!["-l".to_owned()],
+        title_override: Some(title.to_owned()),
+    }
+}
+
+#[cfg(windows)]
 #[test]
 fn recognizes_detected_msys2_profiles_and_their_custom_root() {
     let root = Path::new(r"D:\Applications with spaces\MSYS2");
@@ -107,6 +120,154 @@ fn configures_zsh_to_report_directories_and_commands_without_changing_user_files
     assert!(integration.contains("zetta-cmd:%s"));
     assert!(integration.contains("zetta-cmd:zsh"));
     assert!(integration.contains("source \"$original_zdotdir/.zshenv\""));
+}
+
+#[cfg(windows)]
+#[test]
+fn recognizes_cygwin_profiles_and_direct_shell_executables() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    fs::create_dir_all(root.join("bin")).unwrap();
+    fs::write(root.join("bin/cygwin1.dll"), "").unwrap();
+    for shell in ["bash", "zsh", "fish", "nu"] {
+        fs::write(root.join("bin").join(format!("{shell}.exe")), "").unwrap();
+    }
+
+    for (shell, title, kind) in [
+        ("bash", "Cygwin", CygwinShell::Bash),
+        ("zsh", "Cygwin: Zsh", CygwinShell::Zsh),
+        ("fish", "Cygwin: Fish", CygwinShell::Fish),
+        ("nu", "Cygwin: Nushell", CygwinShell::Nushell),
+    ] {
+        assert_eq!(
+            cygwin_profile(&cygwin_shell(root, shell, title)),
+            Some((root.to_path_buf(), kind))
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn converts_cygwin_paths_in_both_directions() {
+    let root = Path::new(r"D:\Applications\Cygwin");
+
+    assert_eq!(
+        cygwin_path_to_windows(root, "/cygdrive/c/Users/saltw/source/zetta"),
+        Some(PathBuf::from(r"C:\Users\saltw\source\zetta"))
+    );
+    assert_eq!(
+        cygwin_path_to_windows(root, "/home/saltw/project"),
+        Some(root.join("home").join("saltw").join("project"))
+    );
+    assert_eq!(
+        cygwin_path_to_windows(root, "//server/share/project"),
+        Some(PathBuf::from(r"\\server\share\project"))
+    );
+    assert_eq!(cygwin_path_to_windows(root, "/../Windows"), None);
+    assert_eq!(cygwin_path_to_windows(root, "/tmp/with\nnewline"), None);
+
+    assert_eq!(
+        windows_path_to_cygwin(root, Path::new(r"D:\Applications\Cygwin\home\saltw")),
+        Some("/home/saltw".to_owned())
+    );
+    assert_eq!(
+        windows_path_to_cygwin(root, Path::new(r"C:\Users\saltw\source\zetta")),
+        Some("/cygdrive/c/Users/saltw/source/zetta".to_owned())
+    );
+    assert_eq!(
+        windows_path_to_cygwin(root, Path::new(r"\\server\share\project")),
+        Some("//server/share/project".to_owned())
+    );
+    assert_eq!(
+        windows_path_to_cygwin(root, Path::new(r"\\?\UNC\server\share\project")),
+        Some("//server/share/project".to_owned())
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn configures_cygwin_shell_tracking_and_preserves_the_inherited_path() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    fs::create_dir_all(root.join("bin")).unwrap();
+    fs::write(root.join("bin/cygwin1.dll"), "").unwrap();
+    fs::write(root.join("bin/bash.exe"), "").unwrap();
+    let profile = cygwin_shell(root, "bash", "Cygwin");
+    let environment = cygwin_cwd_tracking_environment_with_path(
+        &profile,
+        7,
+        temporary.path(),
+        Some(r"C:\Windows\System32;C:\Tools"),
+    )
+    .unwrap();
+
+    let path = environment
+        .iter()
+        .find_map(|(name, value)| (name == "PATH").then_some(value))
+        .unwrap();
+    assert!(path.starts_with(&format!(r"{}\bin", root.display())));
+    assert!(path.contains(r"C:\Windows\System32"));
+    assert!(path.contains(r"C:\Tools"));
+    assert_eq!(
+        environment
+            .iter()
+            .find_map(|(name, value)| (name == "CHERE_INVOKING").then_some(value.as_str())),
+        Some("1")
+    );
+    assert!(
+        environment
+            .iter()
+            .find_map(|(name, value)| (name == "PROMPT_COMMAND").then_some(value.as_str()))
+            .is_some_and(|value| value.contains("zetta-cwd:%s") && value.contains("zetta-cmd:bash"))
+    );
+
+    let mut final_environment = HashMap::from([
+        ("PATH".to_owned(), r"C:\Project\bin".to_owned()),
+        ("PROMPT_COMMAND".to_owned(), "project_prompt".to_owned()),
+    ]);
+    ensure_cygwin_environment(&profile, &mut final_environment);
+    assert!(final_environment["PATH"].starts_with(&format!(r"{}\bin", root.display())));
+    assert!(final_environment["PATH"].contains(r"C:\Project\bin"));
+    assert!(final_environment["PROMPT_COMMAND"].contains("project_prompt"));
+    assert!(final_environment["PROMPT_COMMAND"].contains("__zetta_precmd"));
+}
+
+#[cfg(windows)]
+#[test]
+fn configures_cygwin_fish_and_nushell_startup_hooks() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    fs::create_dir_all(root.join("bin")).unwrap();
+    fs::write(root.join("bin/cygwin1.dll"), "").unwrap();
+    fs::write(root.join("bin/fish.exe"), "").unwrap();
+    fs::write(root.join("bin/nu.exe"), "").unwrap();
+
+    let fish = cygwin_shell(root, "fish", "Cygwin: Fish");
+    let Shell::WithArguments { args, .. } = cygwin_shell_with_tracking(fish, 3, root).unwrap()
+    else {
+        panic!("expected Cygwin Fish arguments");
+    };
+    assert!(args.iter().any(|arg| arg == "-C"));
+    assert!(args.iter().any(|arg| arg.contains("fish_prompt")));
+    assert!(args.iter().any(|arg| arg.contains("fish_preexec")));
+
+    let nu = cygwin_shell(root, "nu", "Cygwin: Nushell");
+    let Shell::WithArguments { args, .. } = cygwin_shell_with_tracking(nu, 4, root).unwrap() else {
+        panic!("expected Cygwin Nushell arguments");
+    };
+    let config = args
+        .windows(2)
+        .find_map(|args| (args[0] == "--config").then_some(&args[1]))
+        .unwrap();
+    assert!(config.starts_with("/"));
+    let config = cygwin_path_to_windows(root, config).unwrap();
+    let contents = fs::read_to_string(config).unwrap();
+    assert!(contents.contains("source $zetta_user_config"));
+    assert!(contents.contains("pre_prompt"));
+    assert!(contents.contains("pre_execution"));
+    assert!(contents.contains("commandline"));
+    assert!(contents.contains("zetta-cwd:"));
+    assert!(contents.contains("zetta-cmd:"));
 }
 
 #[test]

@@ -116,10 +116,7 @@ impl ShellIntegration {
     }
 
     fn current(shell_path: Option<&OsStr>) -> Result<Self> {
-        #[cfg(not(windows))]
-        let active_shell_path = active_posix_shell_path();
-        #[cfg(windows)]
-        let active_shell_path: Option<PathBuf> = None;
+        let active_shell_path = active_shell_path();
 
         Self::current_with_active_shell(active_shell_path.as_deref(), shell_path)
     }
@@ -150,8 +147,7 @@ impl ShellIntegration {
     }
 }
 
-#[cfg(not(windows))]
-fn active_posix_shell_path() -> Option<PathBuf> {
+fn active_shell_path() -> Option<PathBuf> {
     let mut system = sysinfo::System::new();
     let mut pid = sysinfo::get_current_pid().ok()?;
 
@@ -173,6 +169,40 @@ fn active_posix_shell_path() -> Option<PathBuf> {
         }
 
         pid = parent_pid;
+    }
+}
+
+#[cfg(windows)]
+fn cygwin_tool_from_active_shell(tool: &str) -> PathBuf {
+    active_shell_path()
+        .map(|path| cygwin_tool_for_path(&path, tool))
+        .unwrap_or_else(|| PathBuf::from(tool))
+}
+
+#[cfg(windows)]
+fn cygwin_tool_for_path(path: &Path, tool: &str) -> PathBuf {
+    cygwin_root_for_path(path)
+        .map(|root| root.join("bin").join(tool))
+        .filter(|tool_path| tool_path.is_file())
+        .unwrap_or_else(|| PathBuf::from(tool))
+}
+
+#[cfg(windows)]
+fn cygwin_tool_for_path_or_active_shell(path: &Path, tool: &str) -> PathBuf {
+    active_shell_path()
+        .map(|shell| cygwin_tool_for_path(&shell, tool))
+        .filter(|tool_path| tool_path.is_file())
+        .unwrap_or_else(|| cygwin_tool_for_path(path, tool))
+}
+
+#[cfg(windows)]
+fn cygwin_root_for_path(path: &Path) -> Option<PathBuf> {
+    let mut candidate = path;
+    loop {
+        if candidate.join("bin").join("cygwin1.dll").is_file() {
+            return Some(candidate.to_path_buf());
+        }
+        candidate = candidate.parent()?;
     }
 }
 
@@ -202,7 +232,7 @@ fn current_posix_shell_home() -> Result<PathBuf> {
             env::var_os("USERPROFILE").map(PathBuf::from),
             |home| {
                 const CREATE_NO_WINDOW: u32 = 0x08000000;
-                let output = Command::new("cygpath.exe")
+                let output = Command::new(cygwin_tool_from_active_shell("cygpath.exe"))
                     .args(["-w", "--"])
                     .arg(home)
                     .creation_flags(CREATE_NO_WINDOW)
@@ -250,6 +280,8 @@ fn configure_shell_integration(
     let path = shell.startup_file(home);
     #[cfg(windows)]
     let path = resolve_msys2_link_startup_file(&path, resolve_msys2_link)?;
+    #[cfg(windows)]
+    let path = resolve_cygwin_link_startup_file(&path)?;
     configure_shell_integration_file(shell, &path)
 }
 
@@ -268,6 +300,97 @@ fn resolve_msys2_link_startup_file(
         return Ok(path.to_path_buf());
     }
     resolve_link(&link)
+}
+
+#[cfg(windows)]
+fn resolve_cygwin_link_startup_file(path: &Path) -> Result<PathBuf> {
+    resolve_cygwin_link_startup_file_with(
+        path,
+        |path| path.exists(),
+        |path| fs::symlink_metadata(path).is_ok(),
+        resolve_cygwin_link,
+    )
+}
+
+#[cfg(windows)]
+fn resolve_cygwin_link_startup_file_with(
+    path: &Path,
+    is_accessible: impl Fn(&Path) -> bool,
+    has_metadata: impl Fn(&Path) -> bool,
+    resolve_link: impl FnOnce(&Path) -> Result<Option<PathBuf>>,
+) -> Result<PathBuf> {
+    // Cygwin stores POSIX symlinks as a reparse-point format that native
+    // Windows file APIs cannot follow. `exists` is false for those paths even
+    // though Cygwin can read them, while symlink_metadata still exposes the
+    // reparse point without following it.
+    if is_accessible(path) || !has_metadata(path) {
+        return Ok(path.to_path_buf());
+    }
+
+    match resolve_link(path)? {
+        Some(path) => Ok(path),
+        None => Ok(path.to_path_buf()),
+    }
+}
+
+#[cfg(windows)]
+fn resolve_cygwin_link(path: &Path) -> Result<Option<PathBuf>> {
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let resolved = match Command::new(cygwin_tool_for_path_or_active_shell(path, "readlink.exe"))
+        .args(["-f", "--"])
+        .arg(path)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to resolve the Cygwin startup-file link {}",
+                    path.display()
+                )
+            });
+        }
+    };
+    if !resolved.status.success() {
+        return Ok(None);
+    }
+    let resolved = String::from_utf8(resolved.stdout)
+        .context("readlink.exe returned a Cygwin path that was not UTF-8")?;
+    let resolved = resolved.trim().trim_start_matches('\u{feff}');
+    anyhow::ensure!(
+        !resolved.is_empty(),
+        "readlink.exe returned an empty path for {}",
+        path.display()
+    );
+
+    let native = Command::new(cygwin_tool_for_path_or_active_shell(path, "cygpath.exe"))
+        .args(["-w", "--", resolved])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to convert the Cygwin startup-file link {}",
+                path.display()
+            )
+        })?;
+    anyhow::ensure!(
+        native.status.success(),
+        "cygpath.exe could not convert {}: {}",
+        resolved,
+        String::from_utf8_lossy(&native.stderr).trim()
+    );
+    let native = String::from_utf8(native.stdout)
+        .context("cygpath.exe returned a path that was not UTF-8")?;
+    let native = native.trim().trim_start_matches('\u{feff}');
+    anyhow::ensure!(
+        !native.is_empty(),
+        "cygpath.exe returned an empty path for {}",
+        path.display()
+    );
+    Ok(Some(PathBuf::from(native)))
 }
 
 #[cfg(windows)]
@@ -446,7 +569,7 @@ fn render_overlay_color_names(shell: ShellIntegration) -> String {
 }
 
 pub(crate) fn shell_integration_help() -> String {
-    let help = "Configure or generate shell integration\n\nUsage: zetta init [SHELL]\n\nWithout SHELL, detects the active supported shell process (falling back to SHELL when process inspection cannot identify it) and adds the integration command to its startup file. On Windows, Unix-style HOME paths from MSYS2 and similar environments are resolved with cygpath; when SHELL is unavailable, Zetta detects the launching PowerShell and writes to its $PROFILE. Running it again leaves an existing integration unchanged. With SHELL, prints the integration script for use in a shell startup file.\n\nSupported shells:\n  bash        Bash\n  fish        Fish\n  powershell  PowerShell (also accepted as pwsh)\n  zsh         Z shell\n\nThe generated script adds completion, including dynamic profile and theme values from `zetta profile list` and `zetta profile themes`, live serial-device, tab-icon, pane-split, pane-label, and --replace-pane completion, the attention command's notification options, the zvi shortcut for the built-in vi editor, the ztftp shortcut when the TFTP client is enabled, and the zntfy and zcopy/zpaste shortcuts when desktop notifications and clipboard access are enabled. `zetta pane --direction` completes left, right, up, and down, while `zetta pane --pane` fetches labels from the active process, and new-pane overlay sizes and colors are offered as fixed values. zcopy/zpaste are also available as pbcopy/pbpaste on platforms other than macOS, taking priority over any existing pbcopy/pbpaste alias so pbcopy/pbpaste muscle memory keeps working there too.";
+    let help = "Configure or generate shell integration\n\nUsage: zetta init [SHELL]\n\nWithout SHELL, detects the active supported shell process (falling back to SHELL when process inspection cannot identify it) and adds the integration command to its startup file. On Windows, Unix-style HOME paths from MSYS2 and Cygwin are resolved with cygpath; when neither an active shell nor SHELL identifies a POSIX shell, Zetta detects the launching PowerShell and writes to its $PROFILE. Running it again leaves an existing integration unchanged. With SHELL, prints the integration script for use in a shell startup file.\n\nSupported shells:\n  bash        Bash\n  fish        Fish\n  powershell  PowerShell (also accepted as pwsh)\n  zsh         Z shell\n\nThe generated script adds completion, including dynamic profile and theme values from `zetta profile list` and `zetta profile themes`, live serial-device, tab-icon, pane-split, pane-label, and --replace-pane completion, the attention command's notification options, the zvi shortcut for the built-in vi editor, the ztftp shortcut when the TFTP client is enabled, and the zntfy and zcopy/zpaste shortcuts when desktop notifications and clipboard access are enabled. `zetta pane --direction` completes left, right, up, and down, while `zetta pane --pane` fetches labels from the active process, and new-pane overlay sizes and colors are offered as fixed values. zcopy/zpaste are also available as pbcopy/pbpaste on platforms other than macOS, taking priority over any existing pbcopy/pbpaste alias so pbcopy/pbpaste muscle memory keeps working there too.";
     format!(
         "{help}\n\nThe generated integration also provides the zwt wrapper for zetta wt new and zetta wt done; it changes directory only after a successful operation. Worktree completion includes the repeatable --copy path option and filesystem path arguments. Profile administration also completes the fixed icon values auto, zetta, bash, zsh, and fish."
     )

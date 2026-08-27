@@ -142,6 +142,30 @@ impl Zetta {
                 wsl_directory.as_deref(),
                 wsl_cwd_file.as_deref(),
             )
+        } else if cfg!(windows) && cygwin_profile(&profile.command).is_some() {
+            #[cfg(windows)]
+            {
+                match cygwin_shell_with_tracking(profile.command.clone(), pane_id, &env::temp_dir())
+                {
+                    Ok(shell) => shell,
+                    Err(error) => {
+                        if let Some(pane) = self
+                            .tabs
+                            .iter_mut()
+                            .find(|tab| tab.id == tab_id)
+                            .and_then(|tab| tab.pane_mut(pane_id))
+                        {
+                            pane.error = Some(format!(
+                                "Could not configure Cygwin CWD tracking: {error:#}"
+                            ));
+                        }
+                        cx.notify();
+                        return;
+                    }
+                }
+            }
+            #[cfg(not(windows))]
+            unreachable!()
         } else {
             profile.command.clone()
         };
@@ -199,6 +223,12 @@ impl Zetta {
         let mut environment = if is_wsl {
             HashMap::default()
         } else {
+            let native_environment = native_terminal_environment();
+            #[cfg(windows)]
+            let inherited_path = native_environment
+                .iter()
+                .find(|(name, _)| name == "PATH")
+                .map(|(_, value)| value.clone());
             let msys2_environment =
                 match msys2_cwd_tracking_environment(&profile.command, pane_id, &env::temp_dir()) {
                     Ok(environment) => environment,
@@ -216,9 +246,35 @@ impl Zetta {
                         return;
                     }
                 };
-            native_terminal_environment()
+            #[cfg(windows)]
+            let cygwin_environment = match cygwin_cwd_tracking_environment_with_path(
+                &profile.command,
+                pane_id,
+                &env::temp_dir(),
+                inherited_path.as_deref(),
+            ) {
+                Ok(environment) => environment,
+                Err(error) => {
+                    if let Some(pane) = self
+                        .tabs
+                        .iter_mut()
+                        .find(|tab| tab.id == tab_id)
+                        .and_then(|tab| tab.pane_mut(pane_id))
+                    {
+                        pane.error = Some(format!(
+                            "Could not configure Cygwin CWD tracking: {error:#}"
+                        ));
+                    }
+                    cx.notify();
+                    return;
+                }
+            };
+            #[cfg(not(windows))]
+            let cygwin_environment = Vec::new();
+            native_environment
                 .into_iter()
                 .chain(msys2_environment)
+                .chain(cygwin_environment)
                 .collect()
         };
         if is_wsl {
@@ -233,6 +289,8 @@ impl Zetta {
             pane_id,
             self.no_mux,
         );
+        #[cfg(windows)]
+        ensure_cygwin_environment(&profile.command, &mut environment);
         environment.insert("ZETTA_THEME".to_owned(), effective_theme.name.to_string());
         if is_wsl {
             add_wsl_environment_variable_names(
@@ -534,9 +592,9 @@ pub(crate) fn apply_terminal_environment_overrides<S>(
 }
 
 /// Builds the shell invocation used by a stacked command. Native profiles go
-/// through the same shell-aware builder as Zed tasks. WSL and MSYS2 profiles
-/// need their launcher arguments preserved so the command runs inside the
-/// configured POSIX environment rather than in the Windows command shell.
+/// through the same shell-aware builder as Zed tasks. WSL, MSYS2, and Cygwin
+/// profiles preserve their launcher or executable so the command runs inside
+/// the configured POSIX environment rather than in the Windows command shell.
 pub(crate) fn stacked_task_shell(
     profile: &Shell,
     command: &str,
@@ -581,6 +639,17 @@ pub(crate) fn stacked_task_shell(
         );
         let (program, args) =
             ShellBuilder::new(&shell, true).build_no_quote(Some(command.to_owned()), &[]);
+        return Shell::WithArguments {
+            program,
+            args,
+            title_override: None,
+        };
+    }
+
+    #[cfg(windows)]
+    if cygwin_profile(profile).is_some() {
+        let (program, args) =
+            ShellBuilder::new(profile, true).build_no_quote(Some(command.to_owned()), &[]);
         return Shell::WithArguments {
             program,
             args,
@@ -637,6 +706,12 @@ impl Zetta {
             wsl_terminal_environment(&mut environment, None);
             environment
         } else {
+            let native_environment = native_terminal_environment();
+            #[cfg(windows)]
+            let inherited_path = native_environment
+                .iter()
+                .find(|(name, _)| name == "PATH")
+                .map(|(_, value)| value.clone());
             let msys2_environment = match msys2_cwd_tracking_environment(
                 &profile.command,
                 entry_id,
@@ -654,9 +729,31 @@ impl Zetta {
                     return;
                 }
             };
-            native_terminal_environment()
+            #[cfg(windows)]
+            let cygwin_environment = match cygwin_cwd_tracking_environment_with_path(
+                &profile.command,
+                entry_id,
+                &env::temp_dir(),
+                inherited_path.as_deref(),
+            ) {
+                Ok(environment) => environment,
+                Err(error) => {
+                    self.stacked_terminal_failed(
+                        tab_id,
+                        pane_id,
+                        entry_id,
+                        format!("Could not configure Cygwin CWD tracking: {error:#}"),
+                        cx,
+                    );
+                    return;
+                }
+            };
+            #[cfg(not(windows))]
+            let cygwin_environment = Vec::new();
+            native_environment
                 .into_iter()
                 .chain(msys2_environment)
+                .chain(cygwin_environment)
                 .collect()
         };
         let project_environment = self.project_environment_for_tab(tab_id);
@@ -669,6 +766,8 @@ impl Zetta {
             entry_id,
             self.no_mux,
         );
+        #[cfg(windows)]
+        ensure_cygwin_environment(&profile.command, &mut environment);
         environment.insert("ZETTA_THEME".to_owned(), effective_theme.name.to_string());
         if is_wsl {
             add_wsl_environment_variable_names(

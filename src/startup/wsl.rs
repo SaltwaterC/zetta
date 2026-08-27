@@ -1,4 +1,5 @@
 use super::*;
+use std::ffi::OsStr;
 
 pub(crate) fn is_wsl_shell(shell: &Shell) -> bool {
     let program = match shell {
@@ -203,6 +204,70 @@ pub(crate) fn msys2_profile(shell: &Shell) -> Option<(PathBuf, Msys2Shell)> {
     Some((launcher.parent()?.to_path_buf(), shell))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CygwinShell {
+    Bash,
+    Zsh,
+    Fish,
+    Nushell,
+}
+
+fn cygwin_shell_name(name: &str) -> Option<CygwinShell> {
+    let name = name.to_ascii_lowercase();
+    match name.strip_suffix(".exe").unwrap_or(&name) {
+        "bash" => Some(CygwinShell::Bash),
+        "zsh" => Some(CygwinShell::Zsh),
+        "fish" => Some(CygwinShell::Fish),
+        "nu" | "nushell" => Some(CygwinShell::Nushell),
+        _ => None,
+    }
+}
+
+fn cygwin_shell_name_from_title(title: Option<&str>) -> Option<CygwinShell> {
+    match title?.to_ascii_lowercase().as_str() {
+        "cygwin" => Some(CygwinShell::Bash),
+        "cygwin: zsh" => Some(CygwinShell::Zsh),
+        "cygwin: fish" => Some(CygwinShell::Fish),
+        "cygwin: nushell" => Some(CygwinShell::Nushell),
+        _ => None,
+    }
+}
+
+fn cygwin_root_from_program(program: &str) -> Option<PathBuf> {
+    let program = Path::new(program);
+    let bin = program.parent()?;
+    if !bin
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case(OsStr::new("bin")))
+    {
+        return None;
+    }
+    bin.parent().map(Path::to_path_buf)
+}
+
+pub(crate) fn cygwin_profile(shell: &Shell) -> Option<(PathBuf, CygwinShell)> {
+    let (program, title) = match shell {
+        Shell::Program(program) => (program, None),
+        Shell::WithArguments {
+            program,
+            title_override,
+            ..
+        } => (program, title_override.as_deref()),
+        Shell::System => return None,
+    };
+    let root = cygwin_root_from_program(program)?;
+    let program_shell = Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(cygwin_shell_name)?;
+    let title_shell = cygwin_shell_name_from_title(title);
+    let shell = title_shell.unwrap_or(program_shell);
+    if title_shell.is_none() && !root.join("bin").join("cygwin1.dll").is_file() {
+        return None;
+    }
+    Some((root, shell))
+}
+
 pub(crate) fn msys2_path_to_windows(root: &Path, directory: &str) -> Option<PathBuf> {
     if !directory.starts_with('/') || directory.chars().any(char::is_control) {
         return None;
@@ -232,6 +297,42 @@ pub(crate) fn msys2_path_to_windows(root: &Path, directory: &str) -> Option<Path
     Some(path)
 }
 
+pub(crate) fn cygwin_path_to_windows(root: &Path, directory: &str) -> Option<PathBuf> {
+    if !directory.starts_with('/') || directory.chars().any(char::is_control) {
+        return None;
+    }
+    let parts = directory
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts
+        .iter()
+        .any(|part| matches!(*part, "." | "..") || part.contains(['\\', ':']))
+    {
+        return None;
+    }
+    if directory.starts_with("//") {
+        return (parts.len() >= 2)
+            .then(|| PathBuf::from(format!(r"\\{}\{}", parts[0], parts[1..].join(r"\"))));
+    }
+    if parts
+        .first()
+        .is_some_and(|part| part.eq_ignore_ascii_case("cygdrive"))
+    {
+        let drive = parts.get(1)?;
+        if drive.len() != 1 || !drive.as_bytes()[0].is_ascii_alphabetic() {
+            return None;
+        }
+        let drive = drive.to_ascii_uppercase();
+        let mut path = PathBuf::from(format!(r"{drive}:\"));
+        path.extend(&parts[2..]);
+        return Some(path);
+    }
+    let mut path = root.to_path_buf();
+    path.extend(parts);
+    Some(path)
+}
+
 #[cfg(windows)]
 fn windows_path_to_msys(path: &Path) -> Option<String> {
     let path = path.to_string_lossy().replace('\\', "/");
@@ -248,9 +349,64 @@ fn windows_path_to_msys(path: &Path) -> Option<String> {
         .or_else(|| path.starts_with('/').then_some(path))
 }
 
+#[cfg(any(windows, test))]
+pub(crate) fn windows_path_to_cygwin(root: &Path, path: &Path) -> Option<String> {
+    let mut path = path.to_string_lossy().replace('\\', "/");
+    if path.chars().any(char::is_control) {
+        return None;
+    }
+    if let Some(stripped) = path.strip_prefix("//?/") {
+        path = stripped.to_owned();
+    }
+    if path
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("UNC/"))
+    {
+        path = format!("//{}", &path[4..]);
+    }
+
+    let mut root = root.to_string_lossy().replace('\\', "/");
+    while root.ends_with('/') {
+        root.pop();
+    }
+    if path.eq_ignore_ascii_case(&root) {
+        return Some("/".to_owned());
+    }
+    if path.len() > root.len()
+        && path[root.len()..].starts_with('/')
+        && path[..root.len()].eq_ignore_ascii_case(&root)
+    {
+        return Some(format!("/{}", &path[root.len() + 1..]));
+    }
+    let bytes = path.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        let suffix = path[2..].trim_start_matches('/');
+        return if suffix.is_empty() {
+            Some(format!(
+                "/cygdrive/{}",
+                (bytes[0] as char).to_ascii_lowercase()
+            ))
+        } else {
+            Some(format!(
+                "/cygdrive/{}/{}",
+                (bytes[0] as char).to_ascii_lowercase(),
+                suffix
+            ))
+        };
+    }
+    if path.starts_with("//") {
+        return Some(path);
+    }
+    path.starts_with('/').then_some(path)
+}
+
 fn path_for_external_editor(path: &str) -> String {
     #[cfg(windows)]
     {
+        if let Some(root) = env::var_os("ZETTA_CYGWIN_ROOT") {
+            return windows_path_to_cygwin(Path::new(&root), Path::new(path))
+                .unwrap_or_else(|| path.to_owned());
+        }
         if env::var_os("MSYSTEM").is_some() {
             return windows_path_to_msys(Path::new(path)).unwrap_or_else(|| path.to_owned());
         }
@@ -301,6 +457,135 @@ add-zsh-hook preexec __zetta_report_preexec
 command rm -rf -- "$ZETTA_INTEGRATION_ZDOTDIR"
 unset ZETTA_ORIGINAL_ZDOTDIR ZETTA_INTEGRATION_ZDOTDIR original_zdotdir
 "#;
+
+#[cfg(windows)]
+const CYGWIN_BASH_TRACKER: &str = r#"__zetta_preexec() {
+    [[ "$__zetta_at_prompt" == 1 ]] || return
+    __zetta_at_prompt=0
+    printf '\033]2;zetta-cmd:%s\033\\' "$BASH_COMMAND"
+}
+__zetta_precmd() {
+    case "$PWD" in
+        /*) printf '\033]7;file://localhost%s\033\\\033]2;zetta-cwd:%s\033\\' "$PWD" "$PWD" ;;
+    esac
+    printf '\033]2;zetta-cmd:bash\033\\'
+    __zetta_at_prompt=1
+}
+trap '__zetta_preexec' DEBUG"#;
+
+#[cfg(windows)]
+const CYGWIN_ZSH_TRACKER: &str = r#"if [[ -n ${ZETTA_ORIGINAL_ZDOTDIR+x} ]]; then
+    ZDOTDIR="$ZETTA_ORIGINAL_ZDOTDIR"
+    export ZDOTDIR
+else
+    unset ZDOTDIR
+fi
+original_zdotdir="${ZDOTDIR:-$HOME}"
+[[ -r "$original_zdotdir/.zshenv" ]] && source "$original_zdotdir/.zshenv"
+
+function __zetta_report_cwd() {
+    [[ "$PWD" == /* ]] && printf '\033]7;file://localhost%s\033\\\033]2;zetta-cwd:%s\033\\' "$PWD" "$PWD"
+    printf '\033]2;zetta-cmd:zsh\033\\'
+}
+function __zetta_report_preexec() {
+    printf '\033]2;zetta-cmd:%s\033\\' "$1"
+}
+autoload -Uz add-zsh-hook
+add-zsh-hook precmd __zetta_report_cwd
+add-zsh-hook preexec __zetta_report_preexec
+command rm -rf -- "$ZETTA_INTEGRATION_ZDOTDIR"
+unset ZETTA_ORIGINAL_ZDOTDIR ZETTA_INTEGRATION_ZDOTDIR original_zdotdir
+"#;
+
+#[cfg(windows)]
+const CYGWIN_FISH_TRACKER: &str = r#"function __zetta_report_cwd --on-event fish_prompt; if string match -qr '^/' -- "$PWD"; printf '\033]7;file://localhost%s\033\\' "$PWD"; printf '\033]2;zetta-cwd:%s\033\\' "$PWD"; end; printf '\033]2;zetta-cmd:fish\033\\'; end; function __zetta_report_preexec --on-event fish_preexec; printf '\033]2;zetta-cmd:%s\033\\' "$argv[1]"; end"#;
+
+#[cfg(windows)]
+fn cygwin_nushell_tracker(config_path: &str) -> String {
+    format!(
+        r#"let zetta_user_config = ($nu.default-config-dir | path join 'config.nu')
+if ($zetta_user_config | path exists) {{ source $zetta_user_config }}
+$env.config.hooks.pre_prompt = ($env.config.hooks.pre_prompt | append {{||
+    print -n $"\e]7;file://localhost($env.PWD)\e\\"
+    print -n $"\e]2;zetta-cwd:($env.PWD)\e\\"
+    print -n "\e]2;zetta-cmd:nu\e\\"
+}})
+$env.config.hooks.pre_execution = ($env.config.hooks.pre_execution | append {{||
+    let command = (commandline)
+    print -n $"\e]2;zetta-cmd:($command)\e\\"
+}})
+^rm -f -- '{}'
+"#,
+        config_path.replace('\'', "''")
+    )
+}
+
+#[cfg(windows)]
+pub(crate) fn cygwin_shell_with_tracking(
+    shell: Shell,
+    pane_id: u64,
+    temporary_directory: &Path,
+) -> Result<Shell> {
+    let Some((root, shell_kind)) = cygwin_profile(&shell) else {
+        return Ok(shell);
+    };
+
+    let make_nushell_config = || -> Result<String> {
+        let path = temporary_directory.join(format!(
+            "zetta-cygwin-nu-{}-{pane_id}.nu",
+            std::process::id()
+        ));
+        let cygwin_path = windows_path_to_cygwin(&root, &path)
+            .context("temporary Nushell config cannot be represented as a Cygwin path")?;
+        fs::write(&path, cygwin_nushell_tracker(&cygwin_path)).with_context(|| {
+            format!(
+                "writing Cygwin Nushell CWD integration in {}",
+                path.display()
+            )
+        })?;
+        Ok(cygwin_path)
+    };
+
+    let add_tracking_arguments = |args: &mut Vec<String>| -> Result<()> {
+        match shell_kind {
+            CygwinShell::Fish => {
+                if !args.iter().any(|arg| arg == "-C" || arg == "--command") {
+                    args.extend(["-C".to_owned(), CYGWIN_FISH_TRACKER.to_owned()]);
+                }
+            }
+            CygwinShell::Nushell => {
+                args.extend(["--config".to_owned(), make_nushell_config()?]);
+            }
+            CygwinShell::Bash | CygwinShell::Zsh => {}
+        }
+        Ok(())
+    };
+
+    match shell {
+        Shell::Program(program) => {
+            let mut args = Vec::new();
+            add_tracking_arguments(&mut args)?;
+            Ok(Shell::WithArguments {
+                program,
+                args,
+                title_override: None,
+            })
+        }
+        Shell::WithArguments {
+            program,
+            mut args,
+            title_override,
+        } => {
+            add_tracking_arguments(&mut args)?;
+            Ok(Shell::WithArguments {
+                program,
+                args,
+                title_override,
+            })
+        }
+        Shell::System => unreachable!(),
+    }
+}
 
 #[cfg(windows)]
 pub(crate) fn msys2_cwd_tracking_environment(
@@ -364,6 +649,156 @@ pub(crate) fn msys2_cwd_tracking_environment(
     _temporary_directory: &Path,
 ) -> Result<Vec<(String, String)>> {
     Ok(Vec::new())
+}
+
+#[cfg(windows)]
+fn cygwin_path_environment_value(root: &Path, inherited_path: Option<&str>) -> String {
+    let inherited_path = inherited_path
+        .map(OsString::from)
+        .or_else(|| env::var_os("PATH"));
+    let inherited_text = inherited_path
+        .as_ref()
+        .map(|path| path.to_string_lossy().into_owned());
+    let cygwin_bin = root.join("bin");
+    let cygwin_bin_key = cygwin_bin
+        .to_string_lossy()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_ascii_lowercase();
+    let mut paths = vec![cygwin_bin.clone()];
+    if let Some(inherited_path) = inherited_path.as_ref() {
+        paths.extend(env::split_paths(&inherited_path).filter(|path| {
+            path.to_string_lossy()
+                .replace('\\', "/")
+                .trim_end_matches('/')
+                .to_ascii_lowercase()
+                != cygwin_bin_key
+        }));
+    }
+    env::join_paths(paths)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| {
+            let separator = if cfg!(windows) { ";" } else { ":" };
+            let root = cygwin_bin.to_string_lossy().into_owned();
+            inherited_text
+                .map(|path| format!("{root}{separator}{path}"))
+                .unwrap_or(root)
+        })
+}
+
+#[cfg(windows)]
+pub(crate) fn cygwin_cwd_tracking_environment_with_path(
+    shell: &Shell,
+    pane_id: u64,
+    temporary_directory: &Path,
+    inherited_path: Option<&str>,
+) -> Result<Vec<(String, String)>> {
+    let Some((root, shell_kind)) = cygwin_profile(shell) else {
+        return Ok(Vec::new());
+    };
+
+    let mut environment = vec![
+        (
+            "PATH".to_owned(),
+            cygwin_path_environment_value(&root, inherited_path),
+        ),
+        ("CHERE_INVOKING".to_owned(), "1".to_owned()),
+        (
+            "ZETTA_CYGWIN_ROOT".to_owned(),
+            root.to_string_lossy().into_owned(),
+        ),
+    ];
+    match shell_kind {
+        CygwinShell::Bash => {
+            environment.push((
+                "PROMPT_COMMAND".to_owned(),
+                cygwin_bash_prompt_command(env::var("PROMPT_COMMAND").ok().as_deref()),
+            ));
+        }
+        CygwinShell::Zsh => {
+            let directory = temporary_directory
+                .join(format!("zetta-cygwin-zsh-{}-{pane_id}", std::process::id()));
+            fs::create_dir_all(&directory)
+                .with_context(|| format!("creating {}", directory.display()))?;
+            fs::write(directory.join(".zshenv"), CYGWIN_ZSH_TRACKER).with_context(|| {
+                format!(
+                    "writing Cygwin Zsh CWD integration in {}",
+                    directory.display()
+                )
+            })?;
+            let cygwin_directory = windows_path_to_cygwin(&root, &directory)
+                .context("temporary directory cannot be represented as a Cygwin path")?;
+            let mut zdotdir = vec![
+                ("ZDOTDIR".to_owned(), cygwin_directory.clone()),
+                ("ZETTA_INTEGRATION_ZDOTDIR".to_owned(), cygwin_directory),
+            ];
+            if let Some(original) = env::var_os("ZDOTDIR") {
+                let original = PathBuf::from(original);
+                let original = if original.is_absolute() {
+                    windows_path_to_cygwin(&root, &original)
+                        .context("ZDOTDIR cannot be represented as a Cygwin path")?
+                } else {
+                    original.to_string_lossy().into_owned()
+                };
+                zdotdir.push(("ZETTA_ORIGINAL_ZDOTDIR".to_owned(), original));
+            }
+            environment.extend(zdotdir);
+        }
+        CygwinShell::Fish | CygwinShell::Nushell => {}
+    }
+    Ok(environment)
+}
+
+#[cfg(windows)]
+pub(crate) fn ensure_cygwin_environment<S>(
+    shell: &Shell,
+    environment: &mut HashMap<String, String, S>,
+) where
+    S: std::hash::BuildHasher,
+{
+    let Some((root, shell_kind)) = cygwin_profile(shell) else {
+        return;
+    };
+    let inherited_path = environment.get("PATH").map(String::as_str);
+    environment.insert(
+        "PATH".to_owned(),
+        cygwin_path_environment_value(&root, inherited_path),
+    );
+    environment.insert("CHERE_INVOKING".to_owned(), "1".to_owned());
+    environment.insert(
+        "ZETTA_CYGWIN_ROOT".to_owned(),
+        root.to_string_lossy().into_owned(),
+    );
+    if matches!(shell_kind, CygwinShell::Zsh)
+        && let Some(integration_directory) = environment.get("ZETTA_INTEGRATION_ZDOTDIR").cloned()
+    {
+        environment.insert("ZDOTDIR".to_owned(), integration_directory);
+    }
+    if matches!(shell_kind, CygwinShell::Bash)
+        && !environment
+            .get("PROMPT_COMMAND")
+            .is_some_and(|command| command.contains("__zetta_precmd"))
+    {
+        let existing = environment
+            .get("PROMPT_COMMAND")
+            .map(String::as_str)
+            .filter(|command| !command.is_empty());
+        environment.insert(
+            "PROMPT_COMMAND".to_owned(),
+            cygwin_bash_prompt_command(existing),
+        );
+    }
+}
+
+#[cfg(windows)]
+fn cygwin_bash_prompt_command(existing: Option<&str>) -> String {
+    format!(
+        "{CYGWIN_BASH_TRACKER}{};__zetta_precmd",
+        existing
+            .filter(|command| !command.is_empty())
+            .map(|command| format!(";{command}"))
+            .unwrap_or_default()
+    )
 }
 
 pub(crate) fn launch_working_directory(

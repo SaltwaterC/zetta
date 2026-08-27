@@ -1299,6 +1299,36 @@ fn shell_detection_prefers_the_active_profile_shell_over_shell_environment() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn shell_detection_prefers_an_active_cygwin_shell_over_windows_fallback() {
+    for (path, shell) in [
+        (r"C:\cygwin64\bin\bash.exe", ShellIntegration::Bash),
+        (r"C:\cygwin64\bin\fish.exe", ShellIntegration::Fish),
+        (r"C:\cygwin64\bin\zsh.exe", ShellIntegration::Zsh),
+    ] {
+        assert_eq!(
+            ShellIntegration::current_with_active_shell(Some(Path::new(path)), None).unwrap(),
+            shell
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn shell_detection_prefers_an_active_powershell_process_over_shell_environment() {
+    assert_eq!(
+        ShellIntegration::current_with_active_shell(
+            Some(Path::new(
+                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+            )),
+            Some(OsStr::new("/bin/bash")),
+        )
+        .unwrap(),
+        ShellIntegration::PowerShell
+    );
+}
+
 #[test]
 fn shell_detection_falls_back_to_shell_environment_without_an_active_shell() {
     assert_eq!(
@@ -1311,7 +1341,7 @@ fn shell_detection_falls_back_to_shell_environment_without_an_active_shell() {
 #[test]
 fn missing_shell_defaults_to_powershell_on_windows() {
     assert_eq!(
-        ShellIntegration::current(None).unwrap(),
+        ShellIntegration::current_with_active_shell(None, None).unwrap(),
         ShellIntegration::PowerShell
     );
 }
@@ -1379,6 +1409,48 @@ fn msys2_link_startup_file_is_resolved_without_creating_a_shadow_file() {
     assert_eq!(
         fs::read_to_string(target).unwrap(),
         "# existing configuration\neval \"$(zetta init zsh)\"\n"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn cygwin_startup_file_links_are_resolved_before_native_file_access() {
+    let startup_file = Path::new(r"C:\cygwin64\home\alice\.zshrc");
+    let target = PathBuf::from(r"C:\cygwin64\home\alice\.zprezto\runcoms\zshrc");
+
+    let resolved = resolve_cygwin_link_startup_file_with(
+        startup_file,
+        |_| false,
+        |_| true,
+        |_| Ok(Some(target.clone())),
+    )
+    .unwrap();
+
+    assert_eq!(resolved, target);
+}
+
+#[cfg(windows)]
+#[test]
+fn cygwin_tools_use_the_installation_root_containing_the_startup_file() {
+    let root = tempfile::tempdir().unwrap();
+    let bin = root.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(bin.join("cygwin1.dll"), []).unwrap();
+    fs::write(bin.join("cygpath.exe"), []).unwrap();
+    fs::write(bin.join("readlink.exe"), []).unwrap();
+    let startup_file = root.path().join("home").join("alice").join(".zshrc");
+
+    assert_eq!(
+        cygwin_root_for_path(&startup_file),
+        Some(root.path().to_path_buf())
+    );
+    assert_eq!(
+        cygwin_tool_for_path(&startup_file, "cygpath.exe"),
+        bin.join("cygpath.exe")
+    );
+    assert_eq!(
+        cygwin_tool_for_path(&startup_file, "readlink.exe"),
+        bin.join("readlink.exe")
     );
 }
 

@@ -146,6 +146,20 @@ fn msys2_reported_directories_are_normalized_before_selection() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn cygwin_reported_directories_are_normalized_before_selection() {
+    let root = Path::new(r"D:\Applications\Cygwin");
+    let reported = cygwin_path_to_windows(root, "/cygdrive/c/Users/saltw/source/repos/zetta")
+        .expect("the Cygwin path should be native-convertible");
+    let process = PathBuf::from(r"C:\Users\saltw");
+
+    assert_eq!(
+        select_current_directory(Some(reported.clone()), Some(process), true, true),
+        Some((reported, true))
+    );
+}
+
 #[test]
 fn tracked_shell_directory_wins_over_a_stale_process_directory() {
     let reported = PathBuf::from(r"C:\Users\saltw\source\repos\zetta");

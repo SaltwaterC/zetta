@@ -106,6 +106,18 @@ impl ProfileIcon {
             }
             return Self::Bash;
         }
+        if name.eq_ignore_ascii_case("cygwin") || lowercase.starts_with("cygwin: ") {
+            if lowercase.contains("zsh") {
+                return Self::Zsh;
+            }
+            if lowercase.contains("fish") {
+                return Self::Fish;
+            }
+            if lowercase == "cygwin" || lowercase.contains("bash") {
+                return Self::Bash;
+            }
+            return Self::Zetta;
+        }
         Self::automatic_for_shell(shell)
     }
 
@@ -396,6 +408,27 @@ mod tests {
                 },
             ),
             ProfileIcon::Zsh
+        );
+        assert_eq!(
+            ProfileIcon::automatic_for_profile(
+                "Cygwin",
+                &Shell::Program(r"C:\cygwin64\bin\bash.exe".into()),
+            ),
+            ProfileIcon::Bash
+        );
+        assert_eq!(
+            ProfileIcon::automatic_for_profile(
+                "Cygwin: Fish",
+                &Shell::Program(r"C:\cygwin64\bin\fish.exe".into()),
+            ),
+            ProfileIcon::Fish
+        );
+        assert_eq!(
+            ProfileIcon::automatic_for_profile(
+                "Cygwin: Nushell",
+                &Shell::Program(r"C:\cygwin64\bin\nu.exe".into()),
+            ),
+            ProfileIcon::Zetta
         );
     }
 }

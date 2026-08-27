@@ -63,9 +63,15 @@ pub(crate) use keybindings::{install_native_macos_menus, update_native_macos_men
 pub(crate) use wsl::Msys2Shell;
 use wsl::paths_for_external_editor;
 pub(crate) use wsl::{
-    add_wsl_environment_variable_names, add_wsl_environment_variables, is_wsl_shell,
-    launch_working_directory, msys2_cwd_tracking_environment, msys2_path_to_windows, msys2_profile,
-    wsl_cwd_tracking_file, wsl_shell_with_tracking, wsl_terminal_environment,
+    add_wsl_environment_variable_names, add_wsl_environment_variables, cygwin_path_to_windows,
+    cygwin_profile, is_wsl_shell, launch_working_directory, msys2_cwd_tracking_environment,
+    msys2_path_to_windows, msys2_profile, wsl_cwd_tracking_file, wsl_shell_with_tracking,
+    wsl_terminal_environment,
+};
+#[cfg(windows)]
+pub(crate) use wsl::{
+    cygwin_cwd_tracking_environment_with_path, cygwin_shell_with_tracking,
+    ensure_cygwin_environment,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

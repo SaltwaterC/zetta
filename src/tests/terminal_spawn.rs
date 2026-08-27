@@ -137,3 +137,20 @@ fn msys2_stacked_commands_use_the_profile_shell_inside_the_pty() {
     );
     assert_eq!(args, ["-i", "-c", "pwd"]);
 }
+
+#[cfg(windows)]
+#[test]
+fn cygwin_stacked_commands_use_the_direct_profile_shell() {
+    let profile = Shell::WithArguments {
+        program: r"C:\cygwin64\bin\zsh.exe".to_owned(),
+        args: vec!["-l".to_owned()],
+        title_override: Some("Cygwin: Zsh".to_owned()),
+    };
+    let Shell::WithArguments { program, args, .. } = stacked_task_shell(&profile, "pwd", None)
+    else {
+        panic!("Cygwin stacked command should use the direct shell executable");
+    };
+
+    assert_eq!(program, r"C:\cygwin64\bin\zsh.exe");
+    assert_eq!(args, ["-l", "-i", "-c", "pwd"]);
+}

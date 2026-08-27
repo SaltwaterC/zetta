@@ -9,6 +9,11 @@ fn tracked_windows_shells_prefer_their_reported_directory() {
         )));
     }
     assert!(shell_reports_current_directory(&Shell::System));
+    assert!(shell_reports_current_directory(&Shell::WithArguments {
+        program: r"C:\cygwin64\bin\bash.exe".to_owned(),
+        args: vec!["-l".to_owned()],
+        title_override: Some("Cygwin".to_owned()),
+    }));
 }
 
 #[test]

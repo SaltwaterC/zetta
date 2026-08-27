@@ -610,7 +610,7 @@ pub(crate) fn select_current_directory(
 
 #[cfg(windows)]
 fn shell_reports_current_directory(shell: &Shell) -> bool {
-    if msys2_profile(shell).is_some() {
+    if msys2_profile(shell).is_some() || cygwin_profile(shell).is_some() {
         return true;
     }
     let (Shell::Program(program) | Shell::WithArguments { program, .. }) = shell else {
@@ -1013,6 +1013,9 @@ impl TerminalPane {
     }
 
     pub(crate) fn wsl_working_directory(&self, cx: &App) -> Option<String> {
+        if !is_wsl_shell(&self.profile.command) {
+            return None;
+        }
         if let Some(directory) = self.terminal.as_ref().and_then(|terminal| {
             terminal
                 .read(cx)
@@ -1038,13 +1041,15 @@ impl TerminalPane {
     /// fallback when no marker is available. For untracked shells, process CWD
     /// is preferred while the shell owns the foreground. Once a child is
     /// running, a process-only result is explicitly non-authoritative. MSYS2
-    /// reports POSIX paths even though the rest of the application operates on
-    /// native Windows paths.
+    /// and Cygwin report POSIX paths even though the rest of the application
+    /// operates on native Windows paths.
     pub(crate) fn current_directory(&self, cx: &App) -> Option<(PathBuf, bool)> {
         let terminal = self.terminal.as_ref()?.read(cx);
         let reported_directory = terminal.reported_working_directory().and_then(|directory| {
             if let Some((root, _)) = msys2_profile(&self.profile.command) {
                 msys2_path_to_windows(&root, directory)
+            } else if let Some((root, _)) = cygwin_profile(&self.profile.command) {
+                cygwin_path_to_windows(&root, directory)
             } else {
                 let directory = PathBuf::from(directory);
                 directory.is_absolute().then_some(directory)

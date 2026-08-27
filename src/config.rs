@@ -1554,6 +1554,10 @@ fn discover_profiles() -> Vec<Profile> {
         profiles.extend(msys2_profiles(&root));
     }
     #[cfg(windows)]
+    if let Some(root) = cygwin_installation_root() {
+        profiles.extend(cygwin_profiles(&root));
+    }
+    #[cfg(windows)]
     if let Some(program) = wsl_program() {
         profiles.extend(discovered_wsl_profiles(&program));
     }
@@ -1849,6 +1853,300 @@ fn msys2_profiles(root: &Path) -> Vec<Profile> {
             }
         })
         .collect()
+}
+
+#[cfg(windows)]
+fn cygwin_installation_root() -> Option<PathBuf> {
+    select_cygwin_installation_root(cygwin_installation_roots())
+}
+
+#[cfg(any(windows, test))]
+fn select_cygwin_installation_root(roots: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
+    let mut first_valid_root = None;
+    for root in roots {
+        if !root.join("bin").join("cygwin1.dll").is_file() {
+            continue;
+        }
+        if first_valid_root.is_none() {
+            first_valid_root = Some(root.clone());
+        }
+        // A stale registry entry may retain cygwin1.dll after the supported
+        // shell executables have been removed. Prefer the next complete
+        // installation so that one such entry cannot hide a working root.
+        if !cygwin_profiles(&root).is_empty() {
+            return Some(root);
+        }
+    }
+    first_valid_root
+}
+
+#[cfg(windows)]
+fn cygwin_installation_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let mut seen = HashSet::new();
+
+    let mut add_root = |root: PathBuf| {
+        let key = root
+            .to_string_lossy()
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_ascii_lowercase();
+        if !key.is_empty() && seen.insert(key) {
+            roots.push(root);
+        }
+    };
+
+    for root in cygwin_registered_installation_roots() {
+        add_root(root);
+    }
+
+    if let Some(path) = env::var_os("PATH") {
+        for entry in env::split_paths(&path) {
+            if entry
+                .file_name()
+                .is_some_and(|name| name.eq_ignore_ascii_case(OsStr::new("bin")))
+            {
+                if let Some(root) = entry.parent() {
+                    add_root(root.to_path_buf());
+                }
+            } else if entry.join("bin").join("cygwin1.dll").is_file() {
+                add_root(entry);
+            }
+        }
+    }
+
+    add_root(PathBuf::from(r"C:\cygwin64"));
+    add_root(PathBuf::from(r"C:\cygwin"));
+    roots
+}
+
+#[cfg(windows)]
+fn cygwin_registered_installation_roots() -> Vec<PathBuf> {
+    use windows::{
+        Win32::{
+            Foundation::ERROR_SUCCESS,
+            System::Registry::{
+                HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY,
+                KEY_WOW64_64KEY, REG_EXPAND_SZ, REG_SZ, RegCloseKey, RegEnumKeyW, RegEnumValueW,
+                RegOpenKeyExW, RegQueryValueExW,
+            },
+        },
+        core::{PCWSTR, PWSTR},
+    };
+
+    fn registry_string(key: HKEY, name: PCWSTR) -> Option<String> {
+        let mut value_type = REG_SZ;
+        let mut byte_len = 0u32;
+        // SAFETY: The first query writes only the value type and size to local variables.
+        if unsafe {
+            RegQueryValueExW(
+                key,
+                name,
+                None,
+                Some(&mut value_type),
+                None,
+                Some(&mut byte_len),
+            )
+        } != ERROR_SUCCESS
+            || (value_type != REG_SZ && value_type != REG_EXPAND_SZ)
+            || byte_len < 2
+        {
+            return None;
+        }
+
+        let mut value = vec![0u8; byte_len as usize];
+        // SAFETY: `value` is sized from the preceding registry query.
+        if unsafe {
+            RegQueryValueExW(
+                key,
+                name,
+                None,
+                Some(&mut value_type),
+                Some(value.as_mut_ptr()),
+                Some(&mut byte_len),
+            )
+        } != ERROR_SUCCESS
+        {
+            return None;
+        }
+
+        let units = value[..byte_len as usize]
+            .chunks_exact(2)
+            .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+            .take_while(|unit| *unit != 0)
+            .collect::<Vec<_>>();
+        String::from_utf16(&units).ok()
+    }
+
+    fn add_value(roots: &mut Vec<PathBuf>, key: HKEY, name: PCWSTR) {
+        if let Some(value) = registry_string(key, name)
+            && let Some(root) = normalize_cygwin_registry_path(&value)
+        {
+            roots.push(root);
+        }
+    }
+
+    fn add_values(roots: &mut Vec<PathBuf>, key: HKEY) {
+        let mut index = 0u32;
+        loop {
+            let mut name = [0u16; 512];
+            let mut name_len = name.len() as u32;
+            // SAFETY: The buffers are valid for the duration of this call.
+            let status = unsafe {
+                RegEnumValueW(
+                    key,
+                    index,
+                    Some(PWSTR(name.as_mut_ptr())),
+                    &mut name_len,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            };
+            if status != ERROR_SUCCESS {
+                break;
+            }
+            let name = name[..name_len as usize]
+                .iter()
+                .copied()
+                .chain([0])
+                .collect::<Vec<_>>();
+            add_value(roots, key, PCWSTR(name.as_ptr()));
+            index += 1;
+        }
+    }
+
+    fn add_legacy_mount_values(roots: &mut Vec<PathBuf>, key: HKEY) {
+        add_value(roots, key, PCWSTR::null());
+        let mut index = 0u32;
+        loop {
+            let mut name = [0u16; 512];
+            // SAFETY: `name` is a valid output buffer for the enumerated subkey.
+            let status = unsafe { RegEnumKeyW(key, index, Some(&mut name)) };
+            if status != ERROR_SUCCESS {
+                break;
+            }
+            let name = name
+                .iter()
+                .copied()
+                .take_while(|unit| *unit != 0)
+                .chain([0])
+                .collect::<Vec<_>>();
+            let mut child = HKEY::default();
+            // SAFETY: The name is NUL-terminated and `child` is a valid output pointer.
+            if unsafe { RegOpenKeyExW(key, PCWSTR(name.as_ptr()), None, KEY_READ, &mut child) }
+                == ERROR_SUCCESS
+            {
+                add_value(roots, child, windows::core::w!("native"));
+                // SAFETY: `child` was opened successfully above.
+                unsafe {
+                    let _ = RegCloseKey(child);
+                }
+            }
+            index += 1;
+        }
+    }
+
+    let key_paths = [
+        (r"SOFTWARE\Cygwin\Installations", 0u8),
+        (r"SOFTWARE\Cygwin\setup", 1u8),
+        (r"SOFTWARE\Cygnus Solutions\Cygwin\mounts v2", 2u8),
+        (r"SOFTWARE\WOW6432Node\Cygwin\Installations", 0u8),
+        (r"SOFTWARE\WOW6432Node\Cygwin\setup", 1u8),
+        (
+            r"SOFTWARE\WOW6432Node\Cygnus Solutions\Cygwin\mounts v2",
+            2u8,
+        ),
+    ];
+    let hives = [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE];
+    let views = [KEY_WOW64_64KEY, KEY_WOW64_32KEY];
+    let mut roots = Vec::new();
+
+    for hive in hives {
+        for view in views {
+            for (path, kind) in key_paths {
+                let path = path.encode_utf16().chain([0]).collect::<Vec<_>>();
+                let mut key = HKEY::default();
+                // SAFETY: `path` is NUL-terminated and `key` is a valid output pointer.
+                if unsafe {
+                    RegOpenKeyExW(hive, PCWSTR(path.as_ptr()), None, KEY_READ | view, &mut key)
+                } != ERROR_SUCCESS
+                {
+                    continue;
+                }
+
+                match kind {
+                    0 => add_values(&mut roots, key),
+                    1 => {
+                        add_value(&mut roots, key, windows::core::w!("rootdir"));
+                        add_value(&mut roots, key, PCWSTR::null());
+                    }
+                    _ => add_legacy_mount_values(&mut roots, key),
+                }
+                // SAFETY: `key` was opened successfully above.
+                unsafe {
+                    let _ = RegCloseKey(key);
+                }
+            }
+        }
+    }
+
+    roots
+}
+
+#[cfg(any(windows, test))]
+fn normalize_cygwin_registry_path(value: &str) -> Option<PathBuf> {
+    let value = value.trim().trim_end_matches('\0');
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return None;
+    }
+
+    let value = value.replace('/', "\\");
+    let value = ["\\\\??\\", "\\??\\", "\\\\?\\"]
+        .iter()
+        .find_map(|prefix| {
+            value
+                .get(..prefix.len())
+                .filter(|value| value.eq_ignore_ascii_case(prefix))
+                .map(|_| &value[prefix.len()..])
+        })
+        .unwrap_or(&value);
+    let value = if value
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("UNC\\"))
+    {
+        format!("\\\\{}", &value[4..])
+    } else {
+        value.to_owned()
+    };
+    (!value.is_empty()).then(|| PathBuf::from(value))
+}
+
+#[cfg(any(windows, test))]
+fn cygwin_profiles(root: &Path) -> Vec<Profile> {
+    [
+        ("Cygwin", "bash", ProfileIcon::Bash),
+        ("Cygwin: Zsh", "zsh", ProfileIcon::Zsh),
+        ("Cygwin: Fish", "fish", ProfileIcon::Fish),
+        ("Cygwin: Nushell", "nu", ProfileIcon::Zetta),
+    ]
+    .into_iter()
+    .filter_map(|(name, shell, icon)| {
+        let program = root.join("bin").join(format!("{shell}.exe"));
+        program.is_file().then(|| Profile {
+            name: name.to_owned(),
+            command: Shell::WithArguments {
+                program: program.display().to_string(),
+                args: vec!["-l".to_owned()],
+                title_override: Some(name.to_owned()),
+            },
+            theme: None,
+            dark_theme: None,
+            icon,
+        })
+    })
+    .collect()
 }
 
 #[cfg(windows)]
