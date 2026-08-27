@@ -108,9 +108,9 @@ use terminal::{
     TerminalBuilder, TerminalExited, terminal_settings::TerminalSettings,
 };
 use terminal_view::{
-    ClearClipboard, CopyAndClearSelection, DismissSearch, EditScrollback, SavePaneOutput,
-    SearchNextMatch, SearchPreviousMatch, SearchScrollback, SelectAll, SelectAllSearchText,
-    TerminalInput, TerminalView, TerminalViewEvent,
+    ChangePaneTheme, ClearClipboard, CopyAndClearSelection, DismissSearch, EditScrollback,
+    SavePaneOutput, SearchNextMatch, SearchPreviousMatch, SearchScrollback, SelectAll,
+    SelectAllSearchText, SetPaneOverlay, TerminalInput, TerminalView, TerminalViewEvent,
 };
 use text_edit::{ClipboardOutcome, TextEdit, apply_clipboard_shortcut, is_copy_chord};
 use theme::{
@@ -161,12 +161,10 @@ actions!(
         MoveTabRight,
         RenameTab,
         ChangeTabIcon,
-        ChangePaneTheme,
         ChangeTabTheme,
         ResetPaneTheme,
         ResetTabTheme,
         RenamePane,
-        SetPaneOverlay,
         ResetPaneOverlay,
         TogglePaneControls,
         ToggleTabPaneControls,

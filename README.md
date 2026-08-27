@@ -96,6 +96,8 @@ terminal content, with `--size`, `--opacity`, and `--color` options
 (`--color` accepts the named presets `black`, `white`, `gray`, `red`,
 `orange`, `yellow`, `green`, `cyan`, `blue`, `purple`, `magenta`, and `pink`,
 as well as the existing hex formats; `zetta overlay --reset` clears it).
+**Change Pane Theme** and **Set Pane Overlay** are also available from a pane's
+right-click context menu; reset actions remain command-palette-only.
 Shell integration completes the current serial-device, tab-icon, pane/tab-theme,
 and command-pane label lists dynamically. See [Serial and network tools](docs/tools.md)
 for flags and safety notes.

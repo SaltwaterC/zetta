@@ -5,6 +5,23 @@ use terminal::{PathLikeTarget, is_hyperlink_modifier};
 use util::paths::{PathStyle, home_dir};
 
 #[test]
+fn pane_customization_context_menu_entries_have_stable_order() {
+    let entries = pane_customization_context_menu_entries();
+
+    assert_eq!(
+        entries.iter().map(|(label, _)| *label).collect::<Vec<_>>(),
+        ["Change Pane Theme", "Set Pane Overlay"]
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .map(|(_, action)| action.name())
+            .collect::<Vec<_>>(),
+        ["zetta::ChangePaneTheme", "zetta::SetPaneOverlay"]
+    );
+}
+
+#[test]
 fn trimmed_paste_removes_only_outer_whitespace() {
     assert_eq!(
         trim_paste_text(" \t\r\n first line \n second line \r\n\t "),

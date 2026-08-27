@@ -65,7 +65,7 @@ actions!(
     ]
 );
 
-actions!(zetta, [SavePaneOutput]);
+actions!(zetta, [ChangePaneTheme, SavePaneOutput, SetPaneOverlay]);
 
 #[derive(Clone, Debug)]
 pub enum TerminalViewEvent {
@@ -116,6 +116,13 @@ fn right_click_action(
     } else {
         RightClickAction::Paste
     }
+}
+
+fn pane_customization_context_menu_entries() -> [(&'static str, Box<dyn Action>); 2] {
+    [
+        ("Change Pane Theme", Box::new(ChangePaneTheme)),
+        ("Set Pane Overlay", Box::new(SetPaneOverlay)),
+    ]
 }
 
 #[derive(Clone, Debug)]
@@ -1152,7 +1159,8 @@ impl TerminalView {
             .as_ref()
             .map(|action| action.boxed_clone());
         let menu = ContextMenu::build(window, cx, |menu, _, _| {
-            menu.context(self.focus_handle.clone())
+            let menu = menu
+                .context(self.focus_handle.clone())
                 .action("Copy", Box::new(Copy))
                 .action("Paste", Box::new(Paste))
                 .action("Paste Trimmed", Box::new(PasteTrimmed))
@@ -1161,23 +1169,30 @@ impl TerminalView {
                 .action("Save Pane Output", Box::new(SavePaneOutput))
                 .separator()
                 .action("Clear Clipboard", Box::new(ClearClipboard))
-                .action("Clear", Box::new(Clear))
-                .when(
-                    pane_resize_toggle_action.is_some() || pane_move_toggle_action.is_some(),
-                    |menu| menu.separator(),
-                )
-                .when_some(pane_resize_toggle_action, |menu, action| {
-                    menu.action_checked("Pane Resize Mode", action, pane_resize_mode_active)
-                })
-                .when_some(pane_move_toggle_action, |menu, action| {
-                    menu.action_checked("Pane Move Mode", action, pane_move_mode_active)
-                })
+                .action("Clear", Box::new(Clear));
+            let menu = pane_customization_context_menu_entries()
+                .into_iter()
+                .fold(menu, |menu, (label, action)| menu.action(label, action));
+            menu.when(
+                pane_resize_toggle_action.is_some() || pane_move_toggle_action.is_some(),
+                |menu| menu.separator(),
+            )
+            .when_some(pane_resize_toggle_action, |menu, action| {
+                menu.action_checked("Pane Resize Mode", action, pane_resize_mode_active)
+            })
+            .when_some(pane_move_toggle_action, |menu, action| {
+                menu.action_checked("Pane Move Mode", action, pane_move_mode_active)
+            })
         });
         window.focus(&menu.focus_handle(cx), cx);
         let subscription =
             cx.subscribe_in(&menu, window, |view, _, _: &DismissEvent, window, cx| {
+                if view.context_menu.as_ref().is_some_and(|context_menu| {
+                    context_menu.0.focus_handle(cx).contains_focused(window, cx)
+                }) {
+                    view.focus_handle.focus(window, cx);
+                }
                 view.context_menu.take();
-                view.focus_handle.focus(window, cx);
                 cx.notify();
             });
         self.context_menu = Some((menu, position, subscription));

@@ -230,9 +230,10 @@ separate Escape binding.
 A maximized pane has a status strip below it. Restore it from that strip or
 with `Shift-Escape`.
 
-Press `Alt-Shift-T`, or `Cmd-Shift-T` on macOS, or run **Change Pane Theme**
-from the command palette to open a searchable list of registered themes for
-the active pane. **Change Tab Theme** opens the same picker for the whole tab.
+Press `Alt-Shift-T`, or `Cmd-Shift-T` on macOS, or choose **Change Pane Theme**
+from the pane's right-click context menu or command palette to open a searchable
+list of registered themes for the active pane. **Change Tab Theme** opens the
+same picker for the whole tab.
 Selecting a pane theme changes only that pane's terminal content; selecting a
 tab theme refreshes every terminal in the tab and the tab-specific chrome.
 **Reset Pane Theme** and **Reset Tab Theme** are also available directly from
@@ -251,8 +252,9 @@ same overrides from a script. Add `--reset` to clear one, or `--list` to print
 the theme names registered in the running process (built-in and
 user-installed). Shell integration completes both scopes dynamically.
 
-Run **Set Pane Overlay** from the command palette to edit text shown over the
-active pane's terminal content. It renders as larger, translucent text in the pane's top-right
+Choose **Set Pane Overlay** from the pane's right-click context menu or command
+palette to edit text shown over the active pane's terminal content. It renders
+as larger, translucent text in the pane's top-right
 corner, with no background box, so it reads as a watermark rather than
 obscuring the terminal underneath. The text is edited in place over the
 pane, at full opacity while editing; type to change it, use the arrow keys
