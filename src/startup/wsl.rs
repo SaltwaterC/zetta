@@ -349,7 +349,7 @@ fn windows_path_to_msys(path: &Path) -> Option<String> {
         .or_else(|| path.starts_with('/').then_some(path))
 }
 
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 pub(crate) fn windows_path_to_cygwin(root: &Path, path: &Path) -> Option<String> {
     let mut path = path.to_string_lossy().replace('\\', "/");
     if path.chars().any(char::is_control) {
