@@ -24,6 +24,28 @@
 	<string>@VERSION@</string>
 	<key>CFBundleVersion</key>
 	<string>@VERSION@</string>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Shell Script</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>command</string>
+				<string>tool</string>
+				<string>zsh</string>
+				<string>csh</string>
+				<string>sh</string>
+				<string>pl</string>
+			</array>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.shell-script</string>
+			</array>
+		</dict>
+	</array>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.utilities</string>
 	<key>NSHighResolutionCapable</key>

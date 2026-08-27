@@ -17,6 +17,25 @@ fn quotes_profile_names_for_windows_command_lines() {
 
 #[cfg(windows)]
 #[test]
+fn terminal_handoff_registration_uses_a_stable_clsid_and_quoted_server() {
+    assert_eq!(
+        ZETTA_TERMINAL_HANDOFF_CLSID,
+        GUID::from_u128(0x7f6f0d2e_0b8c_4a36_9c71_42b3c6d89e10)
+    );
+    let executable = Path::new(r"C:\Program Files\Zetta\zetta-gui.exe");
+    let command = local_server_command(executable);
+    assert_eq!(
+        command,
+        r#""C:\Program Files\Zetta\zetta-gui.exe" -Embedding"#
+    );
+    assert_eq!(
+        server_path_from_command(&command),
+        Some(executable.to_path_buf())
+    );
+}
+
+#[cfg(windows)]
+#[test]
 fn jump_list_icons_use_embedded_resources_or_executable_icons() {
     use std::path::PathBuf;
 

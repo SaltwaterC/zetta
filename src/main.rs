@@ -4,6 +4,7 @@ mod background_sessions;
 mod cli_services;
 mod command_palette;
 mod config;
+mod default_terminal;
 #[cfg(feature = "http-server")]
 mod http_server;
 mod mux;
@@ -133,6 +134,7 @@ actions!(
     [
         NewTab,
         NewWindow,
+        SetDefaultTerminal,
         OpenApplicationMenu,
         ActivateApplicationMenuLeft,
         ActivateApplicationMenuRight,

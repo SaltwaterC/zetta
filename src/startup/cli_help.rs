@@ -159,11 +159,7 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
     )
     .replace(
         "  -s, --split NAME                    Apply a configured pane split template; run `zetta splits` to list available names\n  -t, --theme NAME                    Non-persistently override --profile's theme for this launch",
-        "  -s, --split NAME                    Apply a configured pane split template; run `zetta splits` to list available names\n  -r, --replace-pane                  Replace the active pane in a running process; requires --split or --profile\n  -t, --theme NAME                    Non-persistently override --profile's theme for this launch",
-    )
-    .replace(
-        "  -t, --theme NAME                    Non-persistently override --profile's theme for this launch",
-        "  -t, --theme NAME                    Non-persistently override --profile's theme for this launch\n  -n, --no-mux                        Keep background sessions in this process for this launch; sharing unavailable",
+        "  -s, --split NAME                    Apply a configured pane split template; run `zetta splits` to list available names\n  -r, --replace-pane                  Replace the active pane in a running process; requires --split or --profile\n  -t, --theme NAME                    Non-persistently override --profile's theme for this launch\n  -n, --no-mux                          Keep background sessions in this process for this launch; sharing unavailable\n  -e, --command COMMAND [ARGUMENT ...] Open a tab and run COMMAND",
     )
     .replace(
         "       zetta mux [COMMAND]",

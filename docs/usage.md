@@ -36,6 +36,29 @@ override is never written to `config.json` or the profile itself, so the
 Settings UI keeps showing the profile's real configured theme and the next
 launch uses it again.
 
+## Launching a command
+
+Run a command in the first tab with either form:
+
+```sh
+zetta --command python -c "print('hello')"
+zetta -e npm run dev
+```
+
+`--command` and `-e` consume every remaining argument as the child command, so
+an argument such as `--help` is passed to the child rather than interpreted by
+Zetta. The command starts in the caller's working directory. If an existing
+Zetta process accepts the request, it opens the command in a new tab there;
+otherwise Zetta opens a new window.
+
+Choose **Set as Default Terminal** from the application menu or command palette
+to apply the current platform's default-terminal integration. This is an
+explicit user action and is separate from installing Zetta. Linux reports
+the `xdg-terminal-exec` preference for the active desktop and updates legacy
+desktop settings where available, macOS registers the shell-script file types
+`.command`, `.tool`, `.zsh`, `.csh`, `.sh`, and `.pl`, and Windows uses per-user
+default-terminal delegation.
+
 Manage persistent profile state with the typed `profile` command family:
 
 ```sh

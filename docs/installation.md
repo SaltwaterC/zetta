@@ -199,6 +199,18 @@ PATH entry.
 
 For a system-wide installation, run `sudo make install PREFIX=/usr`.
 
+Installing the desktop entry makes Zetta available to the desktop; it does not
+silently change the preferred terminal. To select Zetta, use **Set as Default
+Terminal** from the application menu or command palette. GNOME, Budgie,
+Cinnamon, and MATE use `xdg-terminal-exec` plus their legacy GSettings terminal
+preference; KDE Plasma and Xfce use `xdg-terminal-exec` plus their per-user
+configuration files. The XDG preference is stored in the active desktop's
+`~/.config/<desktop>-xdg-terminals.list` file and keeps unrelated entries. If
+`update-alternatives` is available, Zetta changes it only when the action is
+already running with the required privileges and never invokes `sudo`
+automatically. Unsupported or unrecognised desktop sessions still use the XDG
+preference when it can be configured.
+
 To build a restricted binary, pass build flags to both the build and install
 steps. `SERIAL`, `HTTP`, `TFTP`, `TFTP_SERVER`, `TFTP_CLIENT`, `NOTIFY`, and
 `CLIPBOARD` accept `0`, `false`, `no`, and `off`. `TFTP=0` disables both TFTP

@@ -97,7 +97,7 @@ use crate::alacritty::{
 use crate::mappings::colors::to_vte_rgb;
 use crate::mappings::keys::to_esc_str;
 
-pub use alacritty_terminal::tty::ConsolePalette;
+pub use alacritty_terminal::tty::{AttachedChildEvents, ConsolePalette};
 
 const PROCESS_KILL_GRACE_PERIOD: Duration = Duration::from_millis(100);
 

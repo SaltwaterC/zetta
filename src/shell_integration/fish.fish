@@ -109,6 +109,8 @@ function __zetta_config_args
                     set index (math $index + 1)
                     set args $args --config $words[$index]
                 end
+            case --command -e
+                break
         end
         set index (math $index + 1)
     end
@@ -235,6 +237,8 @@ function __zetta_profile_operation
             switch $word
                 case --config -c --keymap -k --profile -p --split -s --theme -t
                     set skip 1
+                case --command -e
+                    return 1
                 case profile
                     set seen 1
             end
@@ -267,6 +271,8 @@ function __zetta_has_profile_subcommand
         switch $word
             case --config -c --keymap -k --profile -p --split -s --theme -t
                 set skip 1
+            case --command -e
+                return 1
             case profile
                 return 0
         end
@@ -295,6 +301,8 @@ function __zetta_profile_argument_count
             switch $word
                 case --config -c --keymap -k --profile -p --split -s --theme -t
                     set skip 1
+                case --command -e
+                    return 1
                 case profile
                     set seen 1
             end
@@ -356,6 +364,8 @@ function __zetta_use_subcommand
             case --config -c --keymap -k --profile -p --split -s --theme -t
                 set skip_next 1
                 continue
+            case --command -e
+                return 1
             case '-*'
                 continue
         end
@@ -435,7 +445,8 @@ function __zetta_long_options
                 --split 'Apply a configured pane split template' \
                 --replace-pane 'Replace the active pane in a running process' \
                 --theme 'Non-persistently override the profile theme' \
-                --no-mux 'Keep background sessions in this process for this launch'
+                --no-mux 'Keep background sessions in this process for this launch' \
+                --command 'Open a tab and run COMMAND; remaining arguments go to the child'
         case profile
             printf '%s\t%s\n' \
                 list 'List all resolved profiles' \
@@ -615,6 +626,7 @@ complete -c zetta -n '__zetta_use_subcommand' -l split -r -a '(__zetta_pane_spli
 complete -c zetta -n '__zetta_use_subcommand' -l replace-pane -d 'Replace the active pane in a running process'
 complete -c zetta -n '__zetta_use_subcommand' -l theme -r -a '(__zetta_profile_themes)' -d 'Non-persistently override the profile theme'
 complete -c zetta -n '__zetta_use_subcommand' -l no-mux -d 'Keep background sessions in this process for this launch'
+complete -c zetta -n '__zetta_use_subcommand' -l command -r -d 'Open a tab and run COMMAND'
 complete -c zetta -n '__zetta_use_subcommand' -a '(__zetta_long_options root)'
 complete -c zetta -s c -r -n '__zetta_use_subcommand; and __zetta_short_option -c'
 complete -c zetta -s k -r -n '__zetta_use_subcommand; and __zetta_short_option -k'

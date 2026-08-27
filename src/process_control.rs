@@ -106,6 +106,13 @@ pub(crate) struct WorktreeNameRequest {
 }
 
 pub(crate) enum ProcessControlCommand {
+    #[cfg(target_os = "macos")]
+    OpenUrls(Vec<String>),
+    #[cfg(windows)]
+    OpenWindowsHandoff {
+        request: crate::windows_integration::WindowsHandoffRequest,
+        completion: Sender<bool>,
+    },
     ReloadConfiguration {
         config_path: String,
         completion: Sender<bool>,
@@ -122,6 +129,11 @@ pub(crate) enum ProcessControlCommand {
     },
     ReplacePane {
         request: ReplacePaneRequest,
+        completion: Sender<bool>,
+    },
+    OpenCommand {
+        request: PaneCommand,
+        working_directory: Option<PathBuf>,
         completion: Sender<bool>,
     },
     RunPane {
@@ -205,6 +217,10 @@ enum ControlRequestCommand {
         split: Option<String>,
         profile: Option<String>,
         theme: Option<String>,
+    },
+    OpenCommand {
+        request: PaneCommand,
+        working_directory: Option<PathBuf>,
     },
     RunPane {
         request: PaneCommand,
@@ -562,6 +578,21 @@ impl ProcessControlServer {
                                         profile,
                                         theme,
                                     },
+                                    completion,
+                                })
+                                .is_ok()
+                                && wait_for_control_completion(&completed, &stopping_for_thread);
+                            if accepted { "ok" } else { "rejected" }
+                        }
+                        Some(ControlRequestCommand::OpenCommand {
+                            request,
+                            working_directory,
+                        }) => {
+                            let (completion, completed) = channel();
+                            let accepted = commands
+                                .unbounded_send(ProcessControlCommand::OpenCommand {
+                                    request,
+                                    working_directory,
                                     completion,
                                 })
                                 .is_ok()
@@ -1019,15 +1050,17 @@ fn decode_control_request(
         zeroize_control_request_secrets(request);
         return None;
     }
-    if !matches!(request.command.as_str(), "run_pane" | "list_panes")
-        && request.pane_request.is_some()
+    if !matches!(
+        request.command.as_str(),
+        "run_pane" | "open_command" | "list_panes"
+    ) && request.pane_request.is_some()
     {
         zeroize_control_request_secrets(request);
         return None;
     }
     if !matches!(
         request.command.as_str(),
-        "reload_configuration" | "open_project" | "resume_disk_session"
+        "reload_configuration" | "open_project" | "resume_disk_session" | "open_command"
     ) && request.config_path.is_some()
     {
         zeroize_control_request_secrets(request);
@@ -1210,6 +1243,48 @@ fn decode_control_request(
                 .take()
                 .and_then(PaneControlRequest::into_command)
                 .map(|request| ControlRequestCommand::RunPane { request })
+        }
+        "open_command"
+            if request.runner_id.is_none()
+                && request.session_id.is_none()
+                && request.secret.is_none()
+                && request.icon.is_none()
+                && request.pane_theme.is_none()
+                && request.pane_overlay.is_none()
+                && request.pane_overlay_font_size.is_none()
+                && request.pane_overlay_opacity.is_none()
+                && request.pane_overlay_color.is_none()
+                && request.attention_id.is_none()
+                && request.attention_summary.is_none()
+                && request.attention_body.is_none()
+                && request.tab_name.is_none()
+                && request.worktree_name.is_none()
+                && request.split.is_none()
+                && request.profile.is_none()
+                && request.theme.is_none()
+                && request.scope.is_none() =>
+        {
+            let working_directory = request
+                .config_path
+                .take()
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from);
+            request
+                .pane_request
+                .take()
+                .and_then(PaneControlRequest::into_command)
+                .filter(|request| {
+                    request.direction.is_none()
+                        && request.label.is_none()
+                        && request.pane.is_none()
+                        && request.overlay.is_none()
+                        && !request.stack
+                        && !request.list
+                })
+                .map(|request| ControlRequestCommand::OpenCommand {
+                    request,
+                    working_directory,
+                })
         }
         "list_panes"
             if request.runner_id.is_none()
@@ -1698,6 +1773,50 @@ pub(crate) fn request_existing_process_pane(request: PaneCommand) -> Result<bool
             continue;
         }
         match send_run_pane_request(&endpoint, &request) {
+            Ok(true) => return Ok(true),
+            Ok(false) => {}
+            Err(error) => last_error = Some(error),
+        }
+    }
+    if let Some(error) = last_error {
+        return Err(error);
+    }
+    Ok(false)
+}
+
+pub(crate) fn request_existing_process_command(
+    request: PaneCommand,
+    working_directory: Option<PathBuf>,
+) -> Result<bool> {
+    let directory = crate::background_sessions::session_catalog_dir();
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).context("reading Zetta process control endpoints"),
+    };
+    let mut last_error = None;
+    for entry in entries {
+        let path = entry?.path();
+        if !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("control-") && name.ends_with(".json"))
+        {
+            continue;
+        }
+        let endpoint = match fs::read(&path)
+            .ok()
+            .and_then(|contents| serde_json::from_slice::<ControlEndpoint>(&contents).ok())
+        {
+            Some(endpoint) if endpoint.version == CONTROL_VERSION => endpoint,
+            _ => continue,
+        };
+        if !process_is_running(endpoint.process_id) {
+            let _ = fs::remove_file(path);
+            let _ = fs::remove_file(endpoint.socket_path);
+            continue;
+        }
+        match send_open_command_request(&endpoint, &request, working_directory.as_deref()) {
             Ok(true) => return Ok(true),
             Ok(false) => {}
             Err(error) => last_error = Some(error),
@@ -2403,6 +2522,52 @@ fn send_run_pane_request(endpoint: &ControlEndpoint, request: &PaneCommand) -> R
             tab_name: None,
             worktree_name: None,
             config_path: None,
+            split: None,
+            profile: None,
+            theme: None,
+            scope: None,
+            pane_request: Some(request.into()),
+        },
+    )?;
+    let response = read_message::<ControlResponse>(&mut stream)?;
+    if response.status == "ok" {
+        return Ok(true);
+    }
+    if let Some(error) = response.error {
+        anyhow::bail!("{}: {}", error.code, error.message);
+    }
+    Ok(false)
+}
+
+fn send_open_command_request(
+    endpoint: &ControlEndpoint,
+    request: &PaneCommand,
+    working_directory: Option<&Path>,
+) -> Result<bool> {
+    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
+    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    write_message(
+        &mut stream,
+        &ControlRequest {
+            token: endpoint.token.clone(),
+            command: "open_command".to_owned(),
+            runner_id: None,
+            session_id: None,
+            secret: None,
+            icon: None,
+            pane_theme: None,
+            pane_id: None,
+            pane_overlay: None,
+            pane_overlay_font_size: None,
+            pane_overlay_opacity: None,
+            pane_overlay_color: None,
+            attention_id: None,
+            attention_summary: None,
+            attention_body: None,
+            tab_name: None,
+            worktree_name: None,
+            config_path: working_directory.map(|path| path.to_string_lossy().into_owned()),
             split: None,
             profile: None,
             theme: None,

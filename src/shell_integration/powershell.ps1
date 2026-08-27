@@ -130,6 +130,13 @@ $zettaCompletions = {
         # reuses that logic by inserting the subcommand it stands in for.
         $words = @($words[0], 'mux') + @($words | Select-Object -Skip 1)
     }
+    for ($index = 1; $index -lt $words.Count; $index++) {
+        if ($words[$index] -in '--command', '-e') {
+            # --command owns the rest of argv, including tokens that happen to
+            # look like Zetta options or subcommands.
+            return @()
+        }
+    }
     $previous = if ($words.Count -gt 1) { $words[$words.Count - 2] } else { '' }
     $last = if ($words.Count -gt 1) { $words[$words.Count - 1] } else { '' }
 
@@ -201,7 +208,7 @@ $zettaCompletions = {
         & $zettaSplits
     } elseif ($previous -eq '--replace-pane' -or ($previous -eq '-r' -and $null -eq $subcommand)) {
         if ($wordToComplete -like '-*' -or [string]::IsNullOrEmpty($wordToComplete)) {
-            '--help', '--version', '--config', '--keymap', '--profile', '--split', '--theme', '--no-mux'
+            '--help', '--version', '--config', '--keymap', '--profile', '--split', '--theme', '--no-mux', '--command'
         } else {
             @()
         }
@@ -293,7 +300,7 @@ $zettaCompletions = {
             '--help'
         }
     } elseif ($null -eq $subcommand) {
-        'benchmark', 'terminal-size', 'mux', 'profile', 'project', 'splits', 'pane', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'theme', 'overlay', 'wt', '--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme', '--no-mux'
+        'benchmark', 'terminal-size', 'mux', 'profile', 'project', 'splits', 'pane', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'theme', 'overlay', 'wt', '--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme', '--no-mux', '--command'
     } else {
         switch ($subcommand) {
             'benchmark' {

@@ -314,6 +314,75 @@ fn pane_control_requests_validate_authentication_and_payloads() {
 }
 
 #[test]
+fn open_command_control_requests_preserve_the_caller_directory() {
+    let expected = PaneCommand {
+        direction: None,
+        label: None,
+        pane: None,
+        overlay: None,
+        stack: false,
+        list: false,
+        command: vec![
+            "python".to_owned(),
+            "-c".to_owned(),
+            "print('--help')".to_owned(),
+        ],
+    };
+    let mut valid = request("token", "open_command");
+    valid.config_path = Some("/caller/working directory".to_owned());
+    valid.pane_request = Some((&expected).into());
+    assert_eq!(
+        decode_control_request(&mut valid, "token"),
+        Some(ControlRequestCommand::OpenCommand {
+            request: expected.clone(),
+            working_directory: Some(PathBuf::from("/caller/working directory")),
+        })
+    );
+
+    for pane_request in [
+        PaneControlRequest {
+            direction: Some("right".to_owned()),
+            label: None,
+            pane: None,
+            overlay: None,
+            stack: false,
+            command: expected.command.clone(),
+        },
+        PaneControlRequest {
+            direction: None,
+            label: None,
+            pane: None,
+            overlay: None,
+            stack: true,
+            command: expected.command.clone(),
+        },
+        PaneControlRequest {
+            direction: None,
+            label: None,
+            pane: None,
+            overlay: None,
+            stack: false,
+            command: Vec::new(),
+        },
+    ] {
+        let mut invalid = request("token", "open_command");
+        invalid.pane_request = Some(pane_request);
+        assert_eq!(decode_control_request(&mut invalid, "token"), None);
+    }
+
+    let mut invalid_cwd = request("token", "open_command");
+    invalid_cwd.config_path = Some(String::new());
+    invalid_cwd.pane_request = Some((&expected).into());
+    assert_eq!(
+        decode_control_request(&mut invalid_cwd, "token"),
+        Some(ControlRequestCommand::OpenCommand {
+            request: expected,
+            working_directory: None,
+        })
+    );
+}
+
+#[test]
 fn pane_control_responses_round_trip_labels_and_structured_errors() {
     let response = ControlResponse {
         status: "rejected".to_owned(),
@@ -1153,6 +1222,48 @@ fn control_server_delivers_a_pane_command_and_reports_structured_rejection() {
     let error = client.join().unwrap().unwrap_err().to_string();
     assert!(error.contains("pane_rejected"));
     assert!(error.contains("no pane named"));
+}
+
+#[test]
+fn control_server_delivers_an_open_command_with_the_callers_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    let endpoint_path = directory.path().join("control.json");
+    let (commands, mut received) = futures::channel::mpsc::unbounded();
+    let _server = ProcessControlServer::start_at(commands, endpoint_path.clone()).unwrap();
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&fs::read(endpoint_path).unwrap()).unwrap();
+    let expected = PaneCommand {
+        direction: None,
+        label: None,
+        pane: None,
+        overlay: None,
+        stack: false,
+        list: false,
+        command: vec!["pwsh".to_owned(), "-NoLogo".to_owned()],
+    };
+    let client_request = expected.clone();
+    let working_directory = PathBuf::from("/caller/working directory");
+    let client_working_directory = working_directory.clone();
+    let client = thread::spawn(move || {
+        send_open_command_request(
+            &endpoint,
+            &client_request,
+            Some(client_working_directory.as_path()),
+        )
+    });
+    let command = futures::executor::block_on(received.next()).unwrap();
+    let ProcessControlCommand::OpenCommand {
+        request,
+        working_directory: received_working_directory,
+        completion,
+    } = command
+    else {
+        panic!("unexpected process control command");
+    };
+    assert_eq!(request, expected);
+    assert_eq!(received_working_directory, Some(working_directory));
+    completion.send(true).unwrap();
+    assert!(client.join().unwrap().unwrap());
 }
 
 #[test]

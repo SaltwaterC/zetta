@@ -65,6 +65,243 @@ impl Zetta {
         );
     }
 
+    #[cfg(windows)]
+    pub(crate) fn spawn_windows_handoff_terminal(
+        &mut self,
+        tab_id: u64,
+        pane_id: u64,
+        profile: Profile,
+        request: crate::windows_integration::WindowsHandoffRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (pane_theme_override, tab_theme_override) = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .map(|tab| {
+                (
+                    tab.pane(pane_id)
+                        .and_then(|pane| pane.theme_override.as_deref()),
+                    tab.theme_override.as_deref(),
+                )
+            })
+            .unwrap_or((None, None));
+        let terminal_theme = match resolve_terminal_theme(
+            pane_theme_override,
+            tab_theme_override,
+            &profile,
+            self.project_config_for_tab(tab_id).map(Arc::as_ref),
+            cx,
+        ) {
+            Ok(theme) => theme,
+            Err(error) => {
+                if let Some(pane) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.id == tab_id)
+                    .and_then(|tab| tab.pane_mut(pane_id))
+                {
+                    pane.error = Some(format!("Could not apply profile theme: {error:#}"));
+                }
+                cx.notify();
+                return;
+            }
+        };
+        let mut settings = TerminalSpawnSettings::current(cx);
+        let path_hyperlink_regexes = settings.path_hyperlink_regexes(true);
+        let child_handle = match request.duplicate_child_handle() {
+            Ok(handle) => handle,
+            Err(error) => {
+                if let Some(pane) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.id == tab_id)
+                    .and_then(|tab| tab.pane_mut(pane_id))
+                {
+                    pane.error = Some(format!(
+                        "Could not monitor the handed-over process: {error}"
+                    ));
+                }
+                cx.notify();
+                return;
+            }
+        };
+        let options = terminal::AttachedOptions {
+            shell: profile.command.clone(),
+            env: native_terminal_environment().into_iter().collect(),
+            cursor_shape: settings.cursor_shape,
+            alternate_scroll: settings.alternate_scroll,
+            max_scroll_history_lines: settings.max_scroll_history_lines,
+            path_hyperlink_regexes,
+            path_hyperlink_timeout_ms: settings.path_hyperlink_timeout_ms,
+            window_id: cx.entity_id().as_u64(),
+        };
+        let handover = request.into_handover();
+        let build_executor = cx.background_executor().clone();
+        let terminal_executor = build_executor.clone();
+        let build = build_executor.spawn(async move {
+            TerminalBuilder::new_attached(handover, options, &terminal_executor, PathStyle::local())
+        });
+        let this = cx.entity().downgrade();
+        let terminal_theme_for_task = terminal_theme.clone();
+        window
+            .spawn(cx, async move |cx| match build.await {
+                Ok(attached) => {
+                    let terminal::AttachedTerminal {
+                        builder,
+                        child_events,
+                    } = attached;
+                    crate::windows_integration::monitor_handoff_child(child_handle, child_events);
+                    this.update_in(cx, |this, window, cx| {
+                        let terminal = cx.new(|cx| builder.subscribe(cx));
+                        let view = cx.new(|cx| {
+                            TerminalView::new_with_theme(
+                                terminal.clone(),
+                                terminal_theme_for_task,
+                                window,
+                                cx,
+                            )
+                        });
+                        this.configure_terminal_view_silent_mode(tab_id, &view, cx);
+                        cx.subscribe_in(
+                            &terminal,
+                            window,
+                            move |this, _, event: &TerminalEvent, window, cx| match event {
+                                TerminalEvent::TerminalExited(exit)
+                                    if exit.is_unexpected()
+                                        && this.retain_unexpected_terminal_exit(
+                                            tab_id, pane_id, exit, cx,
+                                        ) =>
+                                {
+                                    this.publish_background_session_catalog(cx);
+                                    this.sync_visible_terminals(cx);
+                                    this.focus_active(window, cx);
+                                }
+                                TerminalEvent::ResizeRequested { rows, columns } => {
+                                    this.resize_pane_to(
+                                        tab_id,
+                                        pane_id,
+                                        Some(*columns),
+                                        Some(*rows),
+                                        window,
+                                        cx,
+                                    );
+                                }
+                                TerminalEvent::GridSizeChanged => cx.notify(),
+                                event if terminal_event_requires_worktree_detection(event) => {
+                                    this.schedule_worktree_detection_for_pane(tab_id, pane_id, cx);
+                                    this.schedule_project_detection_for_pane(
+                                        tab_id, pane_id, window, cx,
+                                    );
+                                    cx.notify();
+                                }
+                                _ => {}
+                            },
+                        )
+                        .detach();
+                        cx.subscribe_in(
+                            &view,
+                            window,
+                            move |this, _, event, window, cx| match event {
+                                TerminalViewEvent::Close => {
+                                    this.terminal_closed(tab_id, pane_id, window, cx);
+                                }
+                                TerminalViewEvent::TitleChanged => {
+                                    this.schedule_worktree_detection_for_pane(tab_id, pane_id, cx);
+                                    this.schedule_project_detection_for_pane(
+                                        tab_id, pane_id, window, cx,
+                                    );
+                                    cx.notify();
+                                }
+                                TerminalViewEvent::Input(input) => {
+                                    this.broadcast_input(tab_id, pane_id, input, cx);
+                                }
+                                TerminalViewEvent::OpenEditor(request) => {
+                                    this.open_editor_in_new_pane(
+                                        tab_id,
+                                        pane_id,
+                                        request.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                }
+                            },
+                        )
+                        .detach();
+                        let focus_handle = view.focus_handle(cx);
+                        let emit_input_events = this
+                            .tabs
+                            .iter()
+                            .find(|tab| tab.id == tab_id)
+                            .is_some_and(|tab| tab.broadcast_input);
+                        let input_enabled = this.terminal_input_enabled();
+                        view.update(cx, |view, cx| {
+                            view.set_emit_input_events(emit_input_events);
+                            view.set_input_enabled(input_enabled, cx);
+                        });
+                        cx.on_focus_in(&focus_handle, window, move |this, window, cx| {
+                            if let Some(tab) = this
+                                .tabs
+                                .iter_mut()
+                                .find(|tab| tab.id == tab_id)
+                                .filter(|tab| {
+                                    tab.pane(pane_id).is_some_and(|pane| !pane.base_exited)
+                                })
+                            {
+                                tab.activate_stack_entry(pane_id, PaneStackSelection::Base);
+                                cx.notify();
+                            }
+                            this.activate_current_project(window, cx);
+                            this.clear_active_tab_attention_if_focused(window, cx);
+                        })
+                        .detach();
+                        let tab_index = this.tabs.iter().position(|tab| tab.id == tab_id);
+                        let should_focus = tab_index.is_some_and(|index| {
+                            index == this.active_tab
+                                && this.tabs[index].active_pane == pane_id
+                                && this.tabs[index]
+                                    .pane(pane_id)
+                                    .is_some_and(|pane| pane.stack.selected_is_base())
+                        });
+                        if let Some(pane) = tab_index
+                            .and_then(|index| this.tabs.get_mut(index))
+                            .and_then(|tab| tab.pane_mut(pane_id))
+                        {
+                            pane.terminal = Some(terminal.clone());
+                            pane.view = Some(view.clone());
+                            pane.base_exited = false;
+                            pane.error = None;
+                            pane.exit = None;
+                        }
+                        this.schedule_worktree_detection_for_pane(tab_id, pane_id, cx);
+                        this.schedule_project_detection_for_pane(tab_id, pane_id, window, cx);
+                        if should_focus {
+                            view.focus_handle(cx).focus(window, cx);
+                        }
+                        this.sync_visible_terminals(cx);
+                        this.schedule_terminal_spawn_notify(cx);
+                    })
+                    .ok();
+                }
+                Err(error) => {
+                    this.update_in(cx, |this, _, cx| {
+                        if let Some(pane) = this
+                            .tabs
+                            .iter_mut()
+                            .find(|tab| tab.id == tab_id)
+                            .and_then(|tab| tab.pane_mut(pane_id))
+                        {
+                            pane.error = Some(format!("{error:#}"));
+                        }
+                        this.schedule_terminal_spawn_notify(cx);
+                    })
+                    .ok();
+                }
+            })
+            .detach();
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn spawn_terminal_with_theme(
         &mut self,

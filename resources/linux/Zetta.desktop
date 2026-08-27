@@ -8,6 +8,7 @@ TryExec=zetta
 Exec=zetta
 Icon=Zetta
 Terminal=false
+X-TerminalArgExec=-e
 StartupNotify=true
 StartupWMClass=Zetta
 Categories=System;TerminalEmulator;

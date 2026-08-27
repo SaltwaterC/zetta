@@ -1,5 +1,5 @@
 use super::*;
-use crate::command_panes::quote_pane_command_for_shell;
+use crate::command_panes::{PaneCommand, quote_pane_command_for_shell};
 use crate::configuration_reload::ConfigurationReloadFeedback;
 use crate::process_control::ReplacePaneRequest;
 use strum::IntoEnumIterator as _;
@@ -31,6 +31,12 @@ enum TabMoveDirection {
 pub(crate) enum NewTabOrigin {
     CurrentSession,
     ProjectEntry,
+}
+
+pub(crate) enum TerminalLaunch {
+    Spawn,
+    #[cfg(windows)]
+    Handoff(crate::windows_integration::WindowsHandoffRequest),
 }
 
 impl NewTabOrigin {
@@ -678,6 +684,9 @@ pub(crate) struct ZettaLaunchOptions {
     pub(crate) initial_project: Option<ProjectConfig>,
     pub(crate) launch_theme_override: Option<(String, String)>,
     pub(crate) no_mux: bool,
+    pub(crate) initial_command: Option<Vec<String>>,
+    pub(crate) initial_working_directory: Option<PathBuf>,
+    pub(crate) initial_launch: Option<TerminalLaunch>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -779,6 +788,9 @@ impl Zetta {
             initial_project,
             launch_theme_override,
             no_mux,
+            initial_command,
+            initial_working_directory,
+            initial_launch,
         } = launch_options;
         let button_layout = system_window_button_layout(cx);
         let projects = match ProjectState::load() {
@@ -952,6 +964,7 @@ impl Zetta {
         if this.auto_protect.is_none() {
             this.refresh_auto_protect(cx);
         }
+        let mut initial_launch = Some(initial_launch.unwrap_or(TerminalLaunch::Spawn));
         if let Some(project) = initial_project {
             let project = this.projects.insert_config(project);
             let profile = initial_profile.or_else(|| {
@@ -962,14 +975,49 @@ impl Zetta {
                     .cloned()
             });
             if let Some(profile) = profile {
-                this.open_tab_with_profile_in_project(profile, project, window, cx);
+                this.open_tab_with_profile_context(
+                    profile,
+                    Some(project),
+                    NewTabOrigin::ProjectEntry,
+                    initial_command.clone(),
+                    initial_working_directory.clone(),
+                    initial_launch.take().unwrap_or(TerminalLaunch::Spawn),
+                    window,
+                    cx,
+                );
             } else {
                 this.open_tab(window, cx);
             }
         } else if let Some(profile) = initial_profile {
-            this.open_tab_with_profile(profile, window, cx);
+            this.open_tab_with_profile_context(
+                profile,
+                None,
+                NewTabOrigin::CurrentSession,
+                initial_command.clone(),
+                initial_working_directory.clone(),
+                initial_launch.take().unwrap_or(TerminalLaunch::Spawn),
+                window,
+                cx,
+            );
         } else {
-            this.open_tab(window, cx);
+            let profile = new_tab_profile(
+                None,
+                &this.profiles,
+                this.launch_config.default_profile,
+                this.launch_config.new_tab_profile,
+            );
+            if let Some(profile) = profile {
+                this.open_tab_with_profile_context(
+                    profile,
+                    None,
+                    NewTabOrigin::CurrentSession,
+                    initial_command,
+                    initial_working_directory,
+                    initial_launch.take().unwrap_or(TerminalLaunch::Spawn),
+                    window,
+                    cx,
+                );
+            }
         }
         this
     }
@@ -993,6 +1041,9 @@ impl Zetta {
             profile,
             project,
             NewTabOrigin::CurrentSession,
+            None,
+            None,
+            TerminalLaunch::Spawn,
             window,
             cx,
         );
@@ -1009,6 +1060,9 @@ impl Zetta {
             profile,
             project,
             NewTabOrigin::CurrentSession,
+            None,
+            None,
+            TerminalLaunch::Spawn,
             window,
             cx,
         );
@@ -1025,20 +1079,126 @@ impl Zetta {
             profile,
             Some(project),
             NewTabOrigin::ProjectEntry,
+            None,
+            None,
+            TerminalLaunch::Spawn,
             window,
             cx,
         );
     }
 
+    pub(crate) fn open_command_in_new_tab(
+        &mut self,
+        request: PaneCommand,
+        working_directory: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            request.direction.is_none()
+                && request.label.is_none()
+                && request.pane.is_none()
+                && request.overlay.is_none()
+                && !request.stack
+                && !request.list
+                && !request.command.is_empty(),
+            "a default-terminal command must contain only a command and its arguments"
+        );
+        let project = self.active_project_config().cloned();
+        let effective = project
+            .as_ref()
+            .map(|project| &project.effective)
+            .unwrap_or(&self.launch_config);
+        let active_profile = self.tabs.get(self.active_tab).and_then(Tab::active_profile);
+        let profile = new_tab_profile(
+            active_profile,
+            &self.profiles,
+            effective.default_profile,
+            effective.new_tab_profile,
+        )
+        .context("no terminal profile is configured")?;
+        self.open_tab_with_profile_context(
+            profile,
+            project,
+            NewTabOrigin::CurrentSession,
+            Some(request.command),
+            working_directory,
+            TerminalLaunch::Spawn,
+            window,
+            cx,
+        );
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn open_windows_handoff(
+        &mut self,
+        request: crate::windows_integration::WindowsHandoffRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let project = self.active_project_config().cloned();
+        let effective = project
+            .as_ref()
+            .map(|project| &project.effective)
+            .unwrap_or(&self.launch_config);
+        let active_profile = self.tabs.get(self.active_tab).and_then(Tab::active_profile);
+        let Some(profile) = new_tab_profile(
+            active_profile,
+            &self.profiles,
+            effective.default_profile,
+            effective.new_tab_profile,
+        ) else {
+            return false;
+        };
+        let title = request
+            .startup
+            .as_ref()
+            .and_then(|startup| startup.title.clone());
+        self.open_tab_with_profile_context(
+            profile,
+            project,
+            NewTabOrigin::CurrentSession,
+            None,
+            None,
+            TerminalLaunch::Handoff(request),
+            window,
+            cx,
+        );
+        if let Some(title) = title.filter(|title| !title.is_empty())
+            && let Some(tab) = self.tabs.get_mut(self.active_tab)
+        {
+            tab.custom_title = Some(title);
+            cx.notify();
+        }
+        true
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn open_tab_with_profile_context(
         &mut self,
         mut profile: Profile,
         project: Option<Arc<ProjectConfig>>,
         origin: NewTabOrigin,
+        pending_command: Option<Vec<String>>,
+        working_directory_override: Option<PathBuf>,
+        launch: TerminalLaunch,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         apply_launch_theme_override(&mut profile, self.launch_theme_override.as_ref());
+        let mut pending_command_error = None;
+        let pending_command =
+            pending_command.and_then(|command| {
+                match quote_pane_command_for_shell(&profile.command, &command) {
+                    Ok(command) => Some(command),
+                    Err(error) => {
+                        pending_command_error =
+                            Some(format!("Could not prepare command: {error:#}"));
+                        None
+                    }
+                }
+            });
         let active_pane = self.tabs.get(self.active_tab).and_then(Tab::active_pane);
         let effective = project
             .as_ref()
@@ -1054,13 +1214,20 @@ impl Zetta {
             .filter(|_| inherit_working_directory)
             .filter(|pane| pane.profile.name.eq_ignore_ascii_case(&profile.name))
             .and_then(|pane| pane.wsl_working_directory(cx));
-        let (working_directory, wsl_directory) = launch_working_directory(
-            &profile,
-            inherited_working_directory,
-            inherited_wsl_directory,
-            effective.working_directory.clone(),
-            effective.working_directory_configured,
-        );
+        let (working_directory, wsl_directory) = if working_directory_override
+            .as_ref()
+            .is_some_and(|_| !is_wsl_shell(&profile.command))
+        {
+            (working_directory_override, None)
+        } else {
+            launch_working_directory(
+                &profile,
+                inherited_working_directory,
+                inherited_wsl_directory,
+                effective.working_directory.clone(),
+                effective.working_directory_configured,
+            )
+        };
         let tab_id = self.next_tab_id;
         self.next_tab_id += 1;
         let attention_id = if cx.has_global::<ZettaProcessState>() {
@@ -1093,7 +1260,8 @@ impl Zetta {
             panes: vec![
                 TerminalPane::new(pane_id, profile.clone())
                     .with_label_number(1)
-                    .with_wsl_cwd_file(wsl_cwd_file.clone()),
+                    .with_wsl_cwd_file(wsl_cwd_file.clone())
+                    .with_pending_command(pending_command),
             ],
             pane_indices: HashMap::from([(pane_id, 0)]),
             next_pane_label: 2,
@@ -1128,6 +1296,11 @@ impl Zetta {
             overlay_style_picker: None,
         });
         self.active_tab = self.tabs.len() - 1;
+        if let Some(error) = pending_command_error
+            && let Some(pane) = self.tabs.last_mut().and_then(|tab| tab.pane_mut(pane_id))
+        {
+            pane.error = Some(error);
+        }
 
         // Stop the previously active terminal from driving the foreground executor before
         // starting the asynchronous PTY setup. Waiting for that setup to finish before the next
@@ -1137,16 +1310,22 @@ impl Zetta {
         }
         cx.notify();
 
-        self.spawn_terminal(
-            tab_id,
-            pane_id,
-            profile,
-            working_directory,
-            wsl_directory,
-            wsl_cwd_file,
-            window,
-            cx,
-        );
+        match launch {
+            TerminalLaunch::Spawn => self.spawn_terminal(
+                tab_id,
+                pane_id,
+                profile,
+                working_directory,
+                wsl_directory,
+                wsl_cwd_file,
+                window,
+                cx,
+            ),
+            #[cfg(windows)]
+            TerminalLaunch::Handoff(request) => {
+                self.spawn_windows_handoff_terminal(tab_id, pane_id, profile, request, window, cx)
+            }
+        }
         if project.is_some() {
             self.activate_current_project(window, cx);
         }
@@ -1653,6 +1832,9 @@ impl Zetta {
             None,
             false,
             self.no_mux,
+            None,
+            None,
+            None,
             cx,
         )
         .log_err();

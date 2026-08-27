@@ -1282,6 +1282,41 @@ fn only_plain_application_launches_handoff_to_the_existing_process() {
 }
 
 #[test]
+fn command_launch_consumes_the_remaining_arguments() {
+    let long = parse_args_from([
+        OsString::from("--profile"),
+        OsString::from("System"),
+        OsString::from("--command"),
+        OsString::from("python"),
+        OsString::from("-c"),
+        OsString::from("print('hello')"),
+        OsString::from("--help"),
+    ])
+    .unwrap();
+    let short = parse_args_from([
+        OsString::from("-e"),
+        OsString::from("python"),
+        OsString::from("-c"),
+        OsString::from("print('hello')"),
+        OsString::from("--help"),
+    ])
+    .unwrap();
+
+    assert_eq!(
+        long.mode,
+        StartupMode::Command(vec![
+            "python".to_owned(),
+            "-c".to_owned(),
+            "print('hello')".to_owned(),
+            "--help".to_owned(),
+        ])
+    );
+    assert_eq!(short.profile, None);
+    assert!(should_handoff_to_existing_process(&short));
+    assert!(parse_args_from([OsString::from("-e")]).is_err());
+}
+
+#[test]
 fn root_split_option_accepts_configured_names_and_combines_with_profile() {
     for name in [
         "quarters",

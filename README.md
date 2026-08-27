@@ -107,6 +107,17 @@ Use `zetta --replace-pane --split NAME` or
 running process; the command falls back to the normal new-window launch when
 no process accepts it. See [Using Zetta](docs/usage.md) for details.
 
+Launch a command in the first tab with `zetta --command COMMAND [ARGUMENT ...]`
+or `zetta -e COMMAND [ARGUMENT ...]`. The command option consumes the rest of
+the command line literally, preserves the caller's working directory, and
+opens a new tab in an existing Zetta process when one accepts the request.
+Choose **Set as Default Terminal** from the application menu or command palette
+to register Zetta as the preferred terminal for the current desktop. Linux
+registers Zetta with `xdg-terminal-exec` and also updates the supported desktop's
+legacy settings where available; macOS associates shell-script files;
+Windows uses its default-terminal delegation and does not require
+administrator privileges.
+
 Run an exact command in an existing or new pane with `zetta pane`:
 
 ```sh

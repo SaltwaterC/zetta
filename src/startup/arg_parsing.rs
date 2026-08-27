@@ -17,6 +17,10 @@ const DEFAULT_PERFORMANCE_REPORT_DURATION: Duration = Duration::from_secs(10);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StartupMode {
     Application,
+    /// Start a terminal and send the command to its shell after it is ready.
+    /// The command owns the rest of argv, so arguments beginning with `-` are
+    /// preserved instead of being interpreted as Zetta options.
+    Command(Vec<String>),
     Pane(PaneCommand),
     Attention(AttentionCommand),
     Worktree(WorktreeCommand),
@@ -52,6 +56,10 @@ pub(crate) enum StartupMode {
     SetPaneOverlay(PaneOverlayRequest),
     #[cfg(windows)]
     RegisterWindowsShell(PathBuf),
+    #[cfg(windows)]
+    UnregisterWindowsShell,
+    #[cfg(windows)]
+    WindowsEmbedding,
     TerminalRenderingProfile,
     TerminalRenderingWorkload,
     TerminalCheckerboardWorkload,
@@ -1205,10 +1213,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
         #[cfg(not(feature = "clipboard"))]
         anyhow::bail!("Clipboard support is disabled in this build");
     }
-    if arguments
-        .iter()
-        .any(|argument| matches!(argument.to_string_lossy().as_ref(), "--help" | "-h"))
-    {
+    if has_global_help_argument(&arguments) {
         let config_path = arguments
             .windows(2)
             .find(|arguments| matches!(arguments[0].to_string_lossy().as_ref(), "--config" | "-c"))
@@ -1227,7 +1232,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
     #[cfg(windows)]
     let mut mode = StartupMode::Application;
     #[cfg(not(windows))]
-    let mode = StartupMode::Application;
+    let mut mode = StartupMode::Application;
     let mut args = arguments.into_iter();
     while let Some(argument) = args.next() {
         let argument = argument.to_string_lossy();
@@ -1288,16 +1293,46 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                         .into(),
                 )
             }
+            #[cfg(windows)]
+            "--unregister-windows-shell" => {
+                mode = StartupMode::UnregisterWindowsShell;
+            }
+            #[cfg(windows)]
+            // COM launches the GUI executable with this switch. It is kept
+            // out of the public help because it is an implementation detail of
+            // Windows' out-of-process activation protocol.
+            "-Embedding" | "--embedding" => {
+                anyhow::ensure!(
+                    mode == StartupMode::Application,
+                    "Windows embedding cannot be combined with another startup mode"
+                );
+                mode = StartupMode::WindowsEmbedding;
+            }
+            "--command" | "-e" => {
+                anyhow::ensure!(
+                    mode == StartupMode::Application,
+                    "-e/--command cannot be combined with another startup mode"
+                );
+                let command = args
+                    .map(|argument| argument.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>();
+                anyhow::ensure!(
+                    !command.is_empty(),
+                    "-e/--command requires a command and optional arguments"
+                );
+                mode = StartupMode::Command(command);
+                break;
+            }
             "--help" | "-h" => unreachable!("help arguments return before parsing options"),
             unknown => anyhow::bail!("unknown argument {unknown:?}"),
         }
     }
     anyhow::ensure!(
-        profile.is_none() || mode == StartupMode::Application,
+        profile.is_none() || matches!(mode, StartupMode::Application | StartupMode::Command(_)),
         "--profile cannot be combined with another startup mode"
     );
     anyhow::ensure!(
-        split.is_none() || mode == StartupMode::Application,
+        split.is_none() || matches!(mode, StartupMode::Application | StartupMode::Command(_)),
         "--split cannot be combined with another startup mode"
     );
     anyhow::ensure!(
@@ -1313,7 +1348,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
         "--theme requires --profile"
     );
     anyhow::ensure!(
-        !no_mux || mode == StartupMode::Application,
+        !no_mux || matches!(mode, StartupMode::Application | StartupMode::Command(_)),
         "--no-mux cannot be combined with another startup mode"
     );
     Ok(StartupArgs {
@@ -1517,12 +1552,26 @@ fn profile_subcommand_index(arguments: &[OsString]) -> Option<usize> {
                 index = index.checked_add(2)?;
             }
             "--replace-pane" | "-r" | "--no-mux" | "-n" => index += 1,
+            "--command" | "-e" => return None,
             "--help" | "-h" | "--version" | "-v" => index += 1,
             "profile" => return Some(index),
             _ => return None,
         }
     }
     None
+}
+
+fn has_global_help_argument(arguments: &[OsString]) -> bool {
+    for argument in arguments {
+        match argument.to_string_lossy().as_ref() {
+            // Everything after -e/--command belongs to the child command,
+            // including a literal `--help`.
+            "--command" | "-e" => return false,
+            "--help" | "-h" => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 fn parse_profile_root_config(arguments: &[OsString]) -> Result<Option<PathBuf>> {
@@ -1547,8 +1596,10 @@ fn parse_profile_root_config(arguments: &[OsString]) -> Result<Option<PathBuf>> 
 }
 
 pub(crate) fn should_handoff_to_existing_process(args: &StartupArgs) -> bool {
-    args.mode == StartupMode::Application
-        && args.config_path.is_none()
+    matches!(
+        args.mode,
+        StartupMode::Application | StartupMode::Command(_)
+    ) && args.config_path.is_none()
         && args.keymap_path.is_none()
         && !args.replace_pane
         && !args.no_mux

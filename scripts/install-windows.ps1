@@ -266,7 +266,19 @@ function Uninstall-Shortcut {
     }
 }
 
+function Unregister-WindowsIntegration {
+    if (-not (Test-Path -LiteralPath $installedBinary -PathType Leaf)) {
+        return
+    }
+    & $installedBinary --unregister-windows-shell
+    if ($LASTEXITCODE -ne 0) {
+        throw "Zetta failed to unregister its Windows shell integration (exit code $LASTEXITCODE)."
+    }
+    Write-Host "Removed Zetta-owned Windows terminal registration"
+}
+
 function Uninstall-Binary {
+    Unregister-WindowsIntegration
     Remove-InstallDirectoryFromUserPath
     foreach ($file in @(Get-InstallFiles)) {
         foreach ($installedFile in @(

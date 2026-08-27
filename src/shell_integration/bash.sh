@@ -98,7 +98,7 @@ _zetta_compgen() {
 }
 
 _zetta_complete() {
-    local current previous command profile_operation profile_command_index=-1
+    local current previous command profile_operation profile_command_index=-1 command_option_index=-1
     local -a config_args=()
     current=${COMP_WORDS[COMP_CWORD]}
     previous=${COMP_WORDS[COMP_CWORD-1]}
@@ -111,6 +111,8 @@ _zetta_complete() {
                 config_args+=(--config "${COMP_WORDS[index+1]}")
                 (( index++ ))
             fi
+        elif [[ ${COMP_WORDS[index]} == --command || ${COMP_WORDS[index]} == -e ]]; then
+            break
         fi
     done
 
@@ -119,6 +121,10 @@ _zetta_complete() {
         case ${COMP_WORDS[index]} in
             --config|-c|--keymap|-k|--profile|-p|--split|-s|--theme|-t)
                 (( index++ ))
+                ;;
+            --command|-e)
+                command_option_index=$index
+                break
                 ;;
             profile)
                 profile_command_index=$index
@@ -146,6 +152,10 @@ _zetta_complete() {
                     ;;
             esac
         done
+    fi
+    if (( command_option_index >= 0 )); then
+        COMPREPLY=()
+        return
     fi
 
     if [[ ${COMP_WORDS[0]} == vi || ${COMP_WORDS[0]} == zvi ]]; then
@@ -237,6 +247,10 @@ _zetta_complete() {
     }
 
     case "$previous" in
+        --command|-e)
+            COMPREPLY=()
+            return
+            ;;
         --copy)
             if [[ $command == wt && ${COMP_WORDS[2]} == new ]]; then
                 COMPREPLY=( $(compgen -f -- "$current") )
@@ -327,7 +341,7 @@ _zetta_complete() {
             ;;
         --replace-pane)
             if [[ $current == -* || -z $current ]]; then
-                _zetta_compgen '--help --version --config --keymap --profile --split --theme --no-mux'
+                _zetta_compgen '--help --version --config --keymap --profile --split --theme --no-mux --command'
             else
                 COMPREPLY=()
             fi
@@ -430,7 +444,7 @@ _zetta_complete() {
                 COMPREPLY=()
             elif [[ $command == -* || -z $command ]]; then
                 if [[ $current == -* || -z $current ]]; then
-                    _zetta_compgen '--help --version --config --keymap --profile --split --theme --no-mux'
+                    _zetta_compgen '--help --version --config --keymap --profile --split --theme --no-mux --command'
                 else
                     COMPREPLY=()
                 fi
@@ -466,7 +480,7 @@ _zetta_complete() {
     esac
 
     if (( COMP_CWORD == 1 )); then
-        _zetta_compgen 'benchmark terminal-size mux pane profile project edit vi init serial http tftp notify attention copy paste splits tabicon theme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme --no-mux'
+        _zetta_compgen 'benchmark terminal-size mux pane profile project edit vi init serial http tftp notify attention copy paste splits tabicon theme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme --no-mux --command'
         return
     fi
 
@@ -475,7 +489,7 @@ _zetta_complete() {
     # offering the remaining top-level flags instead of falling through to
     # the subcommand-specific cases below, which would offer nothing.
     if [[ $command == -* ]]; then
-        _zetta_compgen '--help --version --config --keymap --profile --split --replace-pane --theme --no-mux'
+        _zetta_compgen '--help --version --config --keymap --profile --split --replace-pane --theme --no-mux --command'
         return
     fi
 

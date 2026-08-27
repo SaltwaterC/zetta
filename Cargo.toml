@@ -136,14 +136,17 @@ uds_windows = "1.2"
 windows-registry = "0.5"
 windows = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Security",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Console",
     "Win32_System_IO",
     "Win32_System_Ioctl",
     "Win32_System_LibraryLoader",
+    "Win32_System_Pipes",
     "Win32_System_Registry",
     "Win32_System_SystemServices",
+    "Win32_System_Threading",
     "Win32_Storage_FileSystem",
     "Win32_Graphics_Gdi",
     "Win32_UI_Shell",
@@ -151,6 +154,7 @@ windows = { version = "0.61", features = [
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_WindowsAndMessaging",
 ] }
+windows-core = "0.61"
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 cpal = { version = "0.16", optional = true }
@@ -165,6 +169,7 @@ zbus = { version = "5.17", default-features = false, features = ["async-io"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
 mac-usernotifications = { version = "0.3.1", features = ["blocking-wrappers"], optional = true }
+url = "2.2"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["block2", "NSApplication", "NSEvent", "NSMenu"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["NSObject", "NSValue"] }

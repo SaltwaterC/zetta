@@ -848,6 +848,8 @@ fn native_macos_menus(
             MenuItem::action("New Window", NewWindow),
             MenuItem::separator(),
             MenuItem::action("Command Palette", ToggleCommandPalette),
+            MenuItem::action("Set as Default Terminal", SetDefaultTerminal)
+                .checked(crate::default_terminal::is_default_terminal()),
             MenuItem::action("Open Settings", ToggleSettings),
             MenuItem::action("Open Themes", OpenThemes),
             MenuItem::action("Open Keymap", OpenKeymap),

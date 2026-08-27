@@ -1099,6 +1099,7 @@ impl Zetta {
         content
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::new_window))
+            .on_action(cx.listener(Self::set_default_terminal))
             .on_action(cx.listener(Self::open_application_menu))
             .on_action(cx.listener(Self::activate_application_menu_left))
             .on_action(cx.listener(Self::activate_application_menu_right))

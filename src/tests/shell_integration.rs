@@ -27,6 +27,7 @@ fn bash_command() -> std::process::Command {
 #[test]
 fn supported_shells_generate_completion_and_tftp_shortcut() {
     assert!(shell_integration_help().contains("--replace-pane"));
+    assert!(shell_integration_help().contains("--command"));
     assert!(shell_integration_help().contains("zetta pane"));
     for shell in [
         ShellIntegration::Bash,
@@ -50,6 +51,7 @@ fn supported_shells_generate_completion_and_tftp_shortcut() {
         assert!(script.contains("--direction"));
         assert!(script.contains("--pane"));
         assert!(script.contains("replace-pane"));
+        assert!(script.contains("--command"));
         assert!(script.contains("zwt"));
         assert!(script.contains("wt"));
         assert!(script.contains("zmux"));
@@ -1661,7 +1663,7 @@ fn generated_scripts_only_offer_long_form_flags() {
         match shell {
             ShellIntegration::Bash => {
                 assert!(script.contains(
-                    "terminal-size mux pane profile project edit vi init serial http tftp notify attention copy paste splits tabicon theme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme --no-mux'"
+                    "terminal-size mux pane profile project edit vi init serial http tftp notify attention copy paste splits tabicon theme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme --no-mux --command'"
                 ));
                 assert!(script.contains("auto zetta bash zsh fish"));
             }
@@ -1676,7 +1678,7 @@ fn generated_scripts_only_offer_long_form_flags() {
             }
             ShellIntegration::PowerShell => {
                 assert!(script.contains(
-                    "'--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme', '--no-mux'"
+                    "'--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme', '--no-mux', '--command'"
                 ));
                 assert!(script.contains("'overlay', 'wt', '--help'"));
                 assert!(script.contains("'auto', 'zetta', 'bash', 'zsh', 'fish'"));

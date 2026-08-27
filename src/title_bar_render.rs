@@ -934,6 +934,7 @@ impl Zetta {
                 let dismiss_handle = dismiss_handle.clone();
                 let action_context = action_context.clone();
                 let is_fullscreen = window.is_fullscreen();
+                let is_default_terminal = crate::default_terminal::is_default_terminal();
                 let menu = ui::ContextMenu::build(window, cx, move |menu, _, _| {
                     let menu =
                         menu.when_some(action_context.clone(), |menu, focus| menu.context(focus));
@@ -941,6 +942,11 @@ impl Zetta {
                         .action("New Window", Box::new(NewWindow))
                         .separator()
                         .action("Command Palette", Box::new(ToggleCommandPalette))
+                        .action_checked(
+                            "Set as Default Terminal",
+                            Box::new(SetDefaultTerminal),
+                            is_default_terminal,
+                        )
                         .action("Open Settings", Box::new(ToggleSettings))
                         .action("Open Themes", Box::new(OpenThemes))
                         .action("Open Keymap", Box::new(OpenKeymap))

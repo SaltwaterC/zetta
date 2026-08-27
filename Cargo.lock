@@ -11832,6 +11832,7 @@ dependencies = [
  "url",
  "util",
  "windows 0.61.3",
+ "windows-core 0.61.2",
  "windows-registry 0.5.3",
  "zbus",
  "zed_actions",
