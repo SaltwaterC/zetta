@@ -3572,6 +3572,19 @@ impl Terminal {
             || old_bounds.line_height != new_bounds.line_height;
 
         if !requires_resize {
+            // Identical bounds mean this is the layout pass the truncate request
+            // was armed for, landing without resizing this grid at all. Callers
+            // arm whole sets of terminals speculatively — every pane in a tab
+            // being switched to, every survivor of a closed pane — so leaving
+            // the request standing would hand it to the next genuine window
+            // resize, which would truncate a grid that should have reflowed.
+            //
+            // A sub-cell pixel change is not that layout pass. It is the drag
+            // guard above, which exists to be transparent, so it leaves the
+            // request alone.
+            if old_bounds == new_bounds {
+                self.reflow_on_next_resize = true;
+            }
             return;
         }
 
@@ -3593,6 +3606,9 @@ impl Terminal {
     }
 
     /// Truncate instead of reflowing the primary grid during the next layout-driven resize.
+    ///
+    /// The request is dropped again if the layout settles on the size this
+    /// terminal already had, so it cannot reach a later window resize.
     pub fn truncate_on_next_resize(&mut self) {
         self.reflow_on_next_resize = false;
     }
@@ -8755,12 +8771,46 @@ mod tests {
         let mut resized = pixel_only;
         resized.bounds.size.width += resized.cell_width;
         terminal.set_size(resized);
-        assert!(matches!(
-            terminal.events.back(),
-            Some(InternalEvent::Resize { reflow: false, .. })
-        ));
+        assert!(
+            matches!(
+                terminal.events.back(),
+                Some(InternalEvent::Resize { reflow: false, .. })
+            ),
+            "a sub-cell pixel change must leave the truncate request standing"
+        );
 
         terminal.events.clear();
+        resized.bounds.size.width += resized.cell_width;
+        terminal.set_size(resized);
+        assert!(matches!(
+            terminal.events.back(),
+            Some(InternalEvent::Resize { reflow: true, .. })
+        ));
+    }
+
+    /// Callers arm whole sets of terminals without knowing which of them will
+    /// actually change size. A request that outlives the layout it was armed for
+    /// would truncate the next window resize instead of reflowing it.
+    #[gpui::test]
+    async fn test_a_settled_layout_drops_an_unused_truncate_request(cx: &mut TestAppContext) {
+        let builder = cx.update(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::Block,
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+        });
+        let mut terminal = builder.terminal;
+        let base_bounds = terminal.last_content.terminal_bounds;
+
+        terminal.truncate_on_next_resize();
+        terminal.set_size(base_bounds);
+        assert!(terminal.events.is_empty());
+
+        let mut resized = base_bounds;
         resized.bounds.size.width += resized.cell_width;
         terminal.set_size(resized);
         assert!(matches!(
