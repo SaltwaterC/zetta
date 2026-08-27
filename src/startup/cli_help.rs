@@ -159,7 +159,7 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
     )
     .replace(
         "  -t, --theme NAME                    Non-persistently override --profile's theme for this launch",
-        "  -t, --theme NAME                    Non-persistently override --profile's theme for this launch\n  -n, --no-mux                         Keep background sessions in this process for this launch; sharing unavailable",
+        "  -t, --theme NAME                    Non-persistently override --profile's theme for this launch\n  -n, --no-mux                        Keep background sessions in this process for this launch; sharing unavailable",
     )
     .replace(
         "       zetta mux [COMMAND]",
