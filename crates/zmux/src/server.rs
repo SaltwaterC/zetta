@@ -2574,7 +2574,7 @@ fn queue_for_shared_clients(
         // No size ceiling here. Dropping a viewer for having a large backlog
         // meant dropping every viewer of any sustained output, because a terminal
         // that parses and renders is always slower than a program that only
-        // writes: `zetta benchmark-output --size 1000` cut the viewer off 4 MiB in,
+        // writes: `zetta benchmark output --size 1000` cut the viewer off 4 MiB in,
         // every time, and left the pane connected to nothing. The backlog is
         // bounded by `relay_backpressure`, which stops reading the pane instead of
         // punishing whoever is reading it.

@@ -155,6 +155,7 @@ impl Zetta {
             return;
         };
         let tab_id = tab.id;
+        let tab_theme_override = tab.theme_override.clone();
         let pane_id = tab.active_pane;
         let Some(host) = tab.pane(pane_id) else {
             return;
@@ -182,7 +183,13 @@ impl Zetta {
             self.working_directory.clone(),
             working_directory_configured,
         );
-        let terminal_theme = match resolve_project_profile_theme(&profile, project.as_deref(), cx) {
+        let terminal_theme = match resolve_terminal_theme(
+            None,
+            tab_theme_override.as_deref(),
+            &profile,
+            project.as_deref(),
+            cx,
+        ) {
             Ok(theme) => theme,
             Err(error) => {
                 self.set_multi_command_error(

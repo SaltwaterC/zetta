@@ -194,19 +194,21 @@ impl Zetta {
         }
         apply_config_settings(&config, cx)?;
         // A configuration reload is the boundary at which session-scoped pane
-        // theme selections are intentionally discarded. Clear both visible
-        // and process-local detached tabs, and advance the generation used to
-        // reject older live multiplexer state from this same process.
+        // and tab theme selections are intentionally discarded. Clear both
+        // visible and process-local detached tabs, and advance the generation
+        // used to reject older live multiplexer state from this same process.
         self.configuration_generation = self.configuration_generation.wrapping_add(1);
-        for pane in self
+        for tab in self
             .tabs
             .iter_mut()
             .chain(self.background_sessions.iter_mut())
-            .flat_map(|tab| &mut tab.panes)
         {
-            pane.theme_override = None;
-            for entry in &mut pane.stack.entries {
-                entry.theme_override = None;
+            tab.theme_override = None;
+            for pane in &mut tab.panes {
+                pane.theme_override = None;
+                for entry in &mut pane.stack.entries {
+                    entry.theme_override = None;
+                }
             }
         }
         for pane in self.tabs.iter_mut().flat_map(|tab| &mut tab.panes) {

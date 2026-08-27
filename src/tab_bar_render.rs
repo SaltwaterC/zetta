@@ -865,6 +865,7 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, tab_theme: Arc<Theme>, cx: &App)
                     let menu = menu.when_some(action_context, |menu, focus| menu.context(focus));
                     menu.action("Rename Tab", Box::new(RenameTab))
                         .action("Change Tab Icon", Box::new(ChangeTabIcon))
+                        .action("Change Tab Theme", Box::new(ChangeTabTheme))
                         .action_checked("Pin Tab", Box::new(ToggleTabPinning), pinned)
                         .action_checked(
                             "Tab Silent Mode",

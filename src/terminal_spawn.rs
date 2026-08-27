@@ -14,7 +14,21 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let terminal_theme = match resolve_project_profile_theme(
+        let (pane_theme_override, tab_theme_override) = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .map(|tab| {
+                (
+                    tab.pane(pane_id)
+                        .and_then(|pane| pane.theme_override.as_deref()),
+                    tab.theme_override.as_deref(),
+                )
+            })
+            .unwrap_or((None, None));
+        let terminal_theme = match resolve_terminal_theme(
+            pane_theme_override,
+            tab_theme_override,
             &profile,
             self.project_config_for_tab(tab_id).map(Arc::as_ref),
             cx,

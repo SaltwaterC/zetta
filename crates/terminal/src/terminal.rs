@@ -8192,9 +8192,12 @@ mod tests {
         );
 
         let started_at = Instant::now();
-        let (terminal, completion_rx) =
-            build_test_terminal_with_arguments(cx, executable, vec!["benchmark-output".to_owned()])
-                .await;
+        let (terminal, completion_rx) = build_test_terminal_with_arguments(
+            cx,
+            executable,
+            vec!["benchmark".to_owned(), "output".to_owned()],
+        )
+        .await;
         let status = completion_rx.recv().await.unwrap();
         let elapsed = started_at.elapsed();
 

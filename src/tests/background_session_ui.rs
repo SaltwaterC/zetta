@@ -26,6 +26,27 @@ fn only_older_live_state_from_this_process_loses_pane_theme_overrides() {
 }
 
 #[test]
+fn stale_session_state_clears_tab_and_pane_theme_overrides_together() {
+    let mut tab = attached_tab_with_a_stacked_command();
+    tab.theme_override = Some("One Dark".to_owned());
+    tab.panes[0].theme_override = Some("Dracula".to_owned());
+    tab.panes[0].stack.entries[0].theme_override = Some("Ayu Dark".to_owned());
+    let mut state = crate::session_state::TabState::from_tab(&tab, &HashMap::new());
+
+    clear_session_theme_overrides(&mut state);
+
+    assert!(state.theme_override.is_none());
+    assert!(state.panes.iter().all(|pane| pane.theme_override.is_none()));
+    assert!(
+        state
+            .panes
+            .iter()
+            .flat_map(|pane| pane.stack.iter())
+            .all(|entry| entry.theme_override.is_none())
+    );
+}
+
+#[test]
 fn no_mux_keep_running_is_explicitly_process_local() {
     let action = ProtectedSessionAction::KeepRunning;
 
@@ -83,6 +104,7 @@ fn background_session_is_reaped_after_its_final_pane_exits() {
         }],
         pane_indices: HashMap::from([(3, 0)]),
         next_pane_label: 2,
+        theme_override: None,
         layout: PaneLayout::Pane(3),
         active_pane: 3,
         focus_history: vec![3],
@@ -282,6 +304,7 @@ fn attached_tab_with_a_stacked_command() -> Tab {
         panes: vec![pane],
         pane_indices: HashMap::from([(11, 0)]),
         next_pane_label: 2,
+        theme_override: None,
         layout: PaneLayout::Pane(11),
         active_pane: 11,
         focus_history: vec![11],

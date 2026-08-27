@@ -338,10 +338,15 @@ impl Zetta {
     }
 
     pub(crate) fn theme_for_tab(&self, tab: &Tab, cx: &App) -> Arc<Theme> {
-        self.projects
-            .config_for_pane(tab.active_pane)
-            .and_then(|project| project_theme_name(project, cx))
+        tab.theme_override
+            .as_deref()
             .and_then(|name| ThemeRegistry::global(cx).get(name).ok())
+            .or_else(|| {
+                self.projects
+                    .config_for_pane(tab.active_pane)
+                    .and_then(|project| project_theme_name(project, cx))
+                    .and_then(|name| ThemeRegistry::global(cx).get(name).ok())
+            })
             .unwrap_or_else(|| tab.theme(cx, || self.application_theme(cx)))
     }
 
@@ -622,6 +627,7 @@ impl Zetta {
             );
             let theme = resolve_terminal_theme(
                 pane.theme_override.as_deref(),
+                tab.theme_override.as_deref(),
                 &pane.profile,
                 project.map(Arc::as_ref),
                 cx,
@@ -652,6 +658,7 @@ impl Zetta {
                 );
                 let theme = resolve_terminal_theme(
                     entry.theme_override.as_deref(),
+                    tab.theme_override.as_deref(),
                     &entry.profile,
                     project.map(Arc::as_ref),
                     cx,
@@ -663,6 +670,18 @@ impl Zetta {
                 }
             }
         }
+    }
+
+    /// Refreshes the live terminals for a session-scoped theme change without
+    /// replacing the profiles already attached to pane-template leaves. The
+    /// full effective-theme path above is for project/configuration changes;
+    /// this path only needs to re-resolve the precedence chain for each view.
+    pub(crate) fn refresh_terminal_themes_in_tab(&mut self, tab_id: u64, cx: &mut Context<Self>) {
+        let Some(tab_index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            return;
+        };
+        let projects = terminal_projects_for_tab(&self.tabs[tab_index], &self.projects);
+        refresh_terminal_themes_in_tab(&mut self.tabs[tab_index], &projects, cx);
     }
 
     pub(crate) fn refresh_terminal_themes_for_appearance(&mut self, cx: &mut Context<Self>) {
@@ -967,15 +986,22 @@ pub(crate) fn resolve_project_profile_theme(
 /// over project and profile configuration; an absent result means the
 /// application theme selected by the caller/view remains in effect.
 pub(crate) fn resolve_terminal_theme(
-    theme_override: Option<&str>,
+    pane_theme_override: Option<&str>,
+    tab_theme_override: Option<&str>,
     profile: &Profile,
     project: Option<&ProjectConfig>,
     cx: &App,
 ) -> Result<Option<Arc<Theme>>> {
-    if let Some(name) = theme_override {
+    if let Some(name) = pane_theme_override {
         return ThemeRegistry::global(cx)
             .get(name)
             .with_context(|| format!("using pane theme {name:?}"))
+            .map(Some);
+    }
+    if let Some(name) = tab_theme_override {
+        return ThemeRegistry::global(cx)
+            .get(name)
+            .with_context(|| format!("using tab theme {name:?}"))
             .map(Some);
     }
     resolve_project_profile_theme(profile, project, cx)
@@ -997,6 +1023,7 @@ fn refresh_terminal_themes_in_tab(
     for pane in &mut tab.panes {
         refresh_terminal_theme_for_profile(
             pane.theme_override.as_deref(),
+            tab.theme_override.as_deref(),
             &mut pane.profile,
             pane.view.clone(),
             projects.get(&pane.id).map(Arc::as_ref),
@@ -1005,6 +1032,7 @@ fn refresh_terminal_themes_in_tab(
         for entry in &mut pane.stack.entries {
             refresh_terminal_theme_for_profile(
                 entry.theme_override.as_deref(),
+                tab.theme_override.as_deref(),
                 &mut entry.profile,
                 entry.view.clone(),
                 projects.get(&entry.id).map(Arc::as_ref),
@@ -1033,15 +1061,22 @@ fn terminal_projects_for_tab(
 }
 
 fn refresh_terminal_theme_for_profile(
-    theme_override: Option<&str>,
+    pane_theme_override: Option<&str>,
+    tab_theme_override: Option<&str>,
     profile: &mut Profile,
     view: Option<Entity<TerminalView>>,
     project: Option<&ProjectConfig>,
     cx: &mut Context<Zetta>,
 ) {
-    let theme = resolve_terminal_theme(theme_override, profile, project, cx)
-        .ok()
-        .flatten();
+    let theme = resolve_terminal_theme(
+        pane_theme_override,
+        tab_theme_override,
+        profile,
+        project,
+        cx,
+    )
+    .ok()
+    .flatten();
     if let Some(view) = view {
         view.update(cx, |view, cx| view.set_theme(theme, cx));
     }

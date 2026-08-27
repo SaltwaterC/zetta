@@ -84,17 +84,19 @@ Packaged macOS app builds support click routing; unbundled development builds
 still display notifications but do not route clicks.
 From a Zetta pane, `zetta tabicon ICON` sets a per-tab icon override on the
 active tab (`none` explicitly hides its icon); it is kept with the logical tab
-but is not written to user or project configuration. `zetta panetheme THEME`
-sets a session-scoped theme on the active pane
-(`zetta panetheme --reset` restores the profile's configured theme). It follows
-the pane through backgrounding, reconnect, and encrypted disk resume, but is
-cleared when the pane closes or configuration reloads.
+but is not written to user or project configuration. `zetta theme pane THEME`
+sets a session-scoped theme on the active pane, while `zetta theme tab THEME`
+sets one for the whole tab. Pane themes take precedence over tab themes, and
+`--reset` restores the next configured theme in the chain. **Reset Pane Theme**
+and **Reset Tab Theme** are also available from the command palette. These overrides
+follow their pane or tab through backgrounding, reconnect, and encrypted disk
+resume, but are cleared when the pane or tab closes or configuration reloads.
 `zetta overlay TEXT` non-persistently shows text over the active pane's
 terminal content, with `--size`, `--opacity`, and `--color` options
 (`--color` accepts the named presets `black`, `white`, `gray`, `red`,
 `orange`, `yellow`, `green`, `cyan`, `blue`, `purple`, `magenta`, and `pink`,
 as well as the existing hex formats; `zetta overlay --reset` clears it).
-Shell integration completes the current serial-device, tab-icon, pane-theme,
+Shell integration completes the current serial-device, tab-icon, pane/tab-theme,
 and command-pane label lists dynamically. See [Serial and network tools](docs/tools.md)
 for flags and safety notes.
 

@@ -107,6 +107,25 @@ impl Zetta {
             shortcut: change_pane_theme_shortcut,
             action: Box::new(change_pane_theme),
         });
+        let change_tab_theme = ChangeTabTheme;
+        let change_tab_theme_shortcut = terminal_focus
+            .as_ref()
+            .and_then(|focus| {
+                window.highest_precedence_binding_for_action_in(&change_tab_theme, focus)
+            })
+            .map(|binding| {
+                binding
+                    .keystrokes()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            });
+        commands.push(PaletteCommand {
+            name: humanize_action_name(change_tab_theme.name()),
+            shortcut: change_tab_theme_shortcut,
+            action: Box::new(change_tab_theme),
+        });
         let set_pane_overlay = SetPaneOverlay;
         let set_pane_overlay_shortcut = terminal_focus
             .as_ref()

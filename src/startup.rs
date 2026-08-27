@@ -19,9 +19,9 @@ use crate::cli_services::{parse_tftp_server_args, tftp_server_help};
 use crate::process_control::{
     ReplacePaneRequest, TabAttentionRequest, request_existing_process_pane,
     request_existing_process_pane_labels, request_existing_process_pane_overlay,
-    request_existing_process_pane_theme, request_existing_process_pane_theme_list,
     request_existing_process_project, request_existing_process_projects_reload,
     request_existing_process_replace_pane, request_existing_process_tab_icon,
+    request_existing_process_theme, request_existing_process_theme_list,
     request_process_tab_attention,
 };
 use crate::worktree_cli;
@@ -1145,16 +1145,16 @@ pub(crate) fn run() -> Result<()> {
         );
         return Ok(());
     }
-    if let StartupMode::SetPaneTheme { theme } = args.mode {
+    if let StartupMode::SetTheme { scope, theme } = args.mode {
         anyhow::ensure!(
-            request_existing_process_pane_theme(theme)?,
-            "no running Zetta process accepted the pane theme request"
+            request_existing_process_theme(scope, theme)?,
+            "no running Zetta process accepted the theme request"
         );
         return Ok(());
     }
-    if args.mode == StartupMode::ListPaneThemes {
-        let themes = request_existing_process_pane_theme_list()?
-            .context("no running Zetta process accepted the pane theme list request")?;
+    if args.mode == StartupMode::ListThemes {
+        let themes = request_existing_process_theme_list()?
+            .context("no running Zetta process accepted the theme list request")?;
         for theme in themes {
             println!("{theme}");
         }
@@ -1663,7 +1663,11 @@ pub(crate) fn run() -> Result<()> {
                             });
                             let _ = completion.send(accepted);
                         }
-                        ProcessControlCommand::SetPaneTheme { theme, completion } => {
+                        ProcessControlCommand::SetTheme {
+                            scope,
+                            theme,
+                            completion,
+                        } => {
                             let accepted = cx.update(|cx| {
                                 if !cx
                                     .global::<ZettaProcessState>()
@@ -1687,14 +1691,12 @@ pub(crate) fn run() -> Result<()> {
                                     return false;
                                 };
                                 gpui::WindowHandle::<Zetta>::new(window_id)
-                                    .update(cx, |zetta, _, cx| {
-                                        zetta.set_active_pane_theme(theme, cx)
-                                    })
+                                    .update(cx, |zetta, _, cx| zetta.set_theme(scope, theme, cx))
                                     .unwrap_or(false)
                             });
                             let _ = completion.send(accepted);
                         }
-                        ProcessControlCommand::ListPaneThemes { completion } => {
+                        ProcessControlCommand::ListThemes { completion } => {
                             let themes = cx.update(|cx| {
                                 if !cx
                                     .global::<ZettaProcessState>()

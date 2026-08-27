@@ -162,8 +162,9 @@ _zetta_tab_icons() {
     compadd -- "${(@f)$(zetta tabicon --list 2>/dev/null)}"
 }
 
-_zetta_pane_themes() {
-    compadd -- "${(@f)$(zetta panetheme --list 2>/dev/null)}"
+_zetta_themes() {
+    local scope=$1
+    compadd -- "${(@f)$(zetta theme "$scope" --list 2>/dev/null)}"
 }
 
 # zetta-default/zetta-ok/zetta-alarm/zetta-gong are bundled tones Zetta plays itself, so
@@ -248,7 +249,7 @@ _zetta() {
     fi
 
     if (( CURRENT == 2 )); then
-        compadd -S ' ' -- benchmark benchmark-output terminal-size mux profile project edit vi init serial http tftp notify notify-cleanup attention copy paste splits pane tabicon panetheme overlay wt
+        compadd -S ' ' -- benchmark terminal-size mux profile project edit vi init serial http tftp notify attention copy paste splits pane tabicon theme overlay wt
         _zetta_options --help --version --config --keymap --profile --split --replace-pane --theme --no-mux
         return
     fi
@@ -437,9 +438,11 @@ _zetta() {
         --output-type|-t|--theme|--text)
             if [[ $words[2] == profile || $words[2] == -* ]]; then
                 _zetta_profile_themes "${config_args[@]}"
-            elif [[ $words[2] == panetheme ]]; then
-                _zetta_pane_themes
-            elif [[ $words[2] == notify ]]; then
+            elif [[ $words[2] == theme && ($words[3] == pane || $words[3] == tab) ]]; then
+                _zetta_themes "$words[3]"
+            elif [[ $words[2] == benchmark && $words[3] == output ]]; then
+                compadd -- repeated unique
+            elif [[ $words[2] == notify && $words[3] != cleanup ]]; then
                 compadd -- default never
             elif [[ $words[2] == overlay ]]; then
                 return
@@ -508,12 +511,16 @@ _zetta() {
 
     case $words[2] in
         benchmark)
-            _zetta_options --profile-report --profile-duration \
-                --profile-pane-stress --profile-background-stress --profile-sparse-updates \
-                --profile-alt-screen-scroll --profile-external-terminal --help
-            ;;
-        benchmark-output)
-            _zetta_options --size --output-type --help
+            if (( CURRENT == 3 )); then
+                compadd -S ' ' -- output
+            fi
+            if [[ $words[3] == output ]]; then
+                _zetta_options --size --output-type --help
+            else
+                _zetta_options --profile-report --profile-duration \
+                    --profile-pane-stress --profile-background-stress --profile-sparse-updates \
+                    --profile-alt-screen-scroll --profile-external-terminal --help
+            fi
             ;;
         terminal-size)
             _zetta_options --json --resize --columns --rows --help
@@ -590,10 +597,14 @@ _zetta() {
             _zetta_tftp
             ;;
         notify)
-            _zetta_options --app-name --icon --sound --timeout --help
-            ;;
-        notify-cleanup)
-            _zetta_options --dry-run --help
+            if (( CURRENT == 3 )); then
+                compadd -S ' ' -- cleanup
+            fi
+            if [[ $words[3] == cleanup ]]; then
+                _zetta_options --dry-run --help
+            else
+                _zetta_options --app-name --icon --sound --timeout --help
+            fi
             ;;
         attention)
             _zetta_options --notify --app-name --icon --sound --timeout --help
@@ -641,11 +652,16 @@ _zetta() {
                 _zetta_tab_icons
             fi
             ;;
-        panetheme)
-            if [[ $words[CURRENT] == -* ]]; then
-                _zetta_options --theme --reset --list --help
-            else
-                _zetta_pane_themes
+        theme)
+            if (( CURRENT == 3 )); then
+                compadd -S ' ' -- pane tab
+                _zetta_options --help
+            elif [[ $words[3] == pane || $words[3] == tab ]]; then
+                if [[ $words[CURRENT] == -* ]]; then
+                    _zetta_options --theme --reset --list --help
+                else
+                    _zetta_themes "$words[3]"
+                fi
             fi
             ;;
         overlay)

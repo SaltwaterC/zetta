@@ -65,7 +65,7 @@ fn emit_cfg_aliases() {
         println!("cargo::rustc-cfg=linux_like");
     }
     if linux_like && feature_enabled("NOTIFICATIONS") {
-        // The leaked-worker bug `notify-cleanup` reaps only reproduces on the
+        // The leaked-worker bug behind `notify cleanup` reaps only reproduces on the
         // D-Bus-backed Linux/BSD notification path; other platforms tear
         // their workers down as soon as the notification is submitted.
         println!("cargo::rustc-cfg=notify_cleanup_enabled");

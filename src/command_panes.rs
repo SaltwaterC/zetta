@@ -270,7 +270,14 @@ impl Zetta {
             .inherits_for_new_pane();
         let working_directory_configured = self.effective_config().working_directory_configured;
         let project = self.active_project_config().cloned();
-        let (tab_id, active_pane_id, profile, inherited_working_directory, inherited_wsl_directory) = {
+        let (
+            tab_id,
+            active_pane_id,
+            tab_theme_override,
+            profile,
+            inherited_working_directory,
+            inherited_wsl_directory,
+        ) = {
             let tab = self.tabs.get(tab_index).context("there is no active tab")?;
             anyhow::ensure!(
                 can_add_panes(tab.panes.len(), 1),
@@ -288,6 +295,7 @@ impl Zetta {
             (
                 tab.id,
                 tab.active_pane,
+                tab.theme_override.clone(),
                 active_pane.profile.clone(),
                 inherit_working_directory
                     .then(|| {
@@ -310,8 +318,14 @@ impl Zetta {
         );
         let shell =
             exact_pane_command_shell(&profile.command, &request.command, wsl_directory.as_deref())?;
-        let terminal_theme = resolve_project_profile_theme(&profile, project.as_deref(), cx)
-            .context("could not resolve the active profile theme")?;
+        let terminal_theme = resolve_terminal_theme(
+            None,
+            tab_theme_override.as_deref(),
+            &profile,
+            project.as_deref(),
+            cx,
+        )
+        .context("could not resolve the active profile theme")?;
         let mut settings = TerminalSpawnSettings::current(cx);
         let path_hyperlink_regexes = settings.path_hyperlink_regexes(true);
         let pane_id = self.next_pane_id;
@@ -422,7 +436,14 @@ impl Zetta {
     ) -> Result<()> {
         let project = self.active_project_config().cloned();
         let working_directory_configured = self.effective_config().working_directory_configured;
-        let (tab_id, pane_id, profile, inherited_working_directory, inherited_wsl_directory) = {
+        let (
+            tab_id,
+            pane_id,
+            tab_theme_override,
+            profile,
+            inherited_working_directory,
+            inherited_wsl_directory,
+        ) = {
             let tab = self
                 .tabs
                 .get(self.active_tab)
@@ -437,6 +458,7 @@ impl Zetta {
             (
                 tab.id,
                 pane_id,
+                tab.theme_override.clone(),
                 host.profile.clone(),
                 host.working_directory(cx),
                 host.wsl_working_directory(cx),
@@ -453,8 +475,14 @@ impl Zetta {
             self.working_directory.clone(),
             working_directory_configured,
         );
-        let terminal_theme = resolve_project_profile_theme(&profile, project.as_deref(), cx)
-            .context("could not resolve the target profile theme")?;
+        let terminal_theme = resolve_terminal_theme(
+            None,
+            tab_theme_override.as_deref(),
+            &profile,
+            project.as_deref(),
+            cx,
+        )
+        .context("could not resolve the target profile theme")?;
         let command = quote_pane_command_for_shell(&profile.command, &request.command)?;
         let entry_id = self.next_pane_id;
         self.next_pane_id += 1;

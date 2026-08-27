@@ -57,10 +57,17 @@ impl Zetta {
             return None;
         }
         let tab_id = tab.id;
+        let tab_theme_override = tab.theme_override.clone();
         let active_pane_id = tab.active_pane;
         let profile = tab.active_profile().cloned()?;
         let project = self.active_project_config().cloned();
-        let terminal_theme = match resolve_project_profile_theme(&profile, project.as_deref(), cx) {
+        let terminal_theme = match resolve_terminal_theme(
+            None,
+            tab_theme_override.as_deref(),
+            &profile,
+            project.as_deref(),
+            cx,
+        ) {
             Ok(theme) => theme,
             Err(error) => {
                 self.configuration_error =

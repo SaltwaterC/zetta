@@ -25,6 +25,7 @@ fn populated_tab() -> Tab {
         ],
         pane_indices: HashMap::from([(10, 0), (11, 1)]),
         next_pane_label: 3,
+        theme_override: Some("One Dark".to_owned()),
         layout: PaneLayout::Pane(10),
         active_pane: 11,
         focus_history: vec![10, 11],
@@ -109,6 +110,7 @@ fn a_tab_survives_the_round_trip_to_the_multiplexer_and_back() {
     assert_eq!(restored.icon_override, original.icon_override);
     assert_eq!(restored.pinned, original.pinned);
     assert_eq!(restored.next_pane_label, original.next_pane_label);
+    assert_eq!(restored.theme_override, original.theme_override);
     assert!(matches!(
         restored.close_policy,
         TabClosePolicy::Background { .. }
@@ -204,9 +206,21 @@ fn base_and_stacked_pane_theme_overrides_survive_json_and_id_reassignment() {
 
 #[test]
 fn pane_theme_fields_are_backward_compatible() {
+    let mut no_override = populated_tab();
+    no_override.theme_override = None;
+    let without_tab_override =
+        serde_json::to_value(TabState::from_tab(&no_override, &HashMap::new())).unwrap();
+    assert!(
+        !without_tab_override
+            .as_object()
+            .unwrap()
+            .contains_key("theme_override")
+    );
+
     let mut encoded =
         serde_json::to_value(TabState::from_tab(&populated_tab(), &HashMap::new())).unwrap();
     encoded.as_object_mut().unwrap().remove("pane_theme_source");
+    encoded.as_object_mut().unwrap().remove("theme_override");
     for pane in encoded["panes"].as_array_mut().unwrap() {
         pane.as_object_mut().unwrap().remove("theme_override");
         for entry in pane["stack"].as_array_mut().unwrap() {
@@ -224,6 +238,7 @@ fn pane_theme_fields_are_backward_compatible() {
             .iter()
             .all(|pane| pane.theme_override.is_none())
     );
+    assert!(restored.theme_override.is_none());
 }
 
 #[test]

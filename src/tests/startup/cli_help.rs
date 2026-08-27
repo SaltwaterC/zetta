@@ -71,6 +71,8 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     );
     assert!(help.contains("run `zetta splits` to list available names"));
     assert!(help.contains("zetta terminal-size [--json | --resize"));
+    assert!(help.contains("zetta benchmark output [OPTIONS]"));
+    assert!(help.contains("benchmark output                    Write and time a text payload"));
     assert!(help.contains("zetta wt <COMMAND>"));
     assert!(
         help.contains("wt                                  Create and integrate Git worktrees")
@@ -113,6 +115,13 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     assert!(pane_help().contains("-p, --pane LABEL"));
     assert!(pane_help().contains("-o, --overlay TEXT"));
     assert!(pane_help().contains("--overlay-size SIZE"));
+
+    let theme_help_text = theme_help(None);
+    assert!(theme_help_text.contains("zetta theme pane [OPTIONS] THEME"));
+    assert!(theme_help_text.contains("zetta theme tab [OPTIONS] THEME"));
+    assert!(theme_help_text.contains("-t, --theme NAME"));
+    assert!(theme_help_text.contains("-r, --reset"));
+    assert!(theme_help_text.contains("-l, --list"));
 
     #[cfg(all(feature = "wayland", linux_like))]
     assert!(help.contains("Wayland backend"));
@@ -175,6 +184,10 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
         assert!(!help.contains("Desktop notifications"));
         assert!(!help.contains("zetta notify"));
     }
+    #[cfg(notify_cleanup_enabled)]
+    assert!(help.contains("zetta notify cleanup [OPTIONS]"));
+    #[cfg(not(notify_cleanup_enabled))]
+    assert!(!help.contains("zetta notify cleanup"));
 
     #[cfg(feature = "session-persistence")]
     assert!(help.contains("Encrypted session retention"));

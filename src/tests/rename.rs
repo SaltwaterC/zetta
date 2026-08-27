@@ -43,6 +43,7 @@ fn tab(attention_id: u64, custom_title: Option<&str>) -> Tab {
         panes: vec![pane],
         pane_indices: HashMap::from([(1, 0)]),
         next_pane_label: 2,
+        theme_override: None,
         layout: PaneLayout::Pane(1),
         active_pane: 1,
         focus_history: vec![1],

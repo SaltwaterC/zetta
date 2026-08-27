@@ -145,6 +145,16 @@ fn pane_theme_source_is_stale(
     })
 }
 
+fn clear_session_theme_overrides(state: &mut crate::session_state::TabState) {
+    state.theme_override = None;
+    for pane in &mut state.panes {
+        pane.theme_override = None;
+        for entry in &mut pane.stack {
+            entry.theme_override = None;
+        }
+    }
+}
+
 /// What to do with the size the multiplexer arbitrated for a shared pane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SharedSizeAction {
@@ -1745,17 +1755,27 @@ impl Zetta {
 
     fn restored_terminal_theme(
         &mut self,
-        theme_override: Option<&str>,
+        pane_theme_override: Option<&str>,
+        tab_theme_override: Option<&str>,
         profile: &Profile,
         project: Option<&ProjectConfig>,
         cx: &App,
     ) -> Option<Arc<Theme>> {
-        if let Some(name) = theme_override {
+        if let Some(name) = pane_theme_override {
             match ThemeRegistry::global(cx).get(name) {
                 Ok(theme) => return Some(theme),
                 Err(error) => {
                     self.configuration_error =
                         Some(format!("Could not restore pane theme {name:?}: {error:#}"));
+                }
+            }
+        }
+        if let Some(name) = tab_theme_override {
+            match ThemeRegistry::global(cx).get(name) {
+                Ok(theme) => return Some(theme),
+                Err(error) => {
+                    self.configuration_error =
+                        Some(format!("Could not restore tab theme {name:?}: {error:#}"));
                 }
             }
         }
@@ -1853,6 +1873,7 @@ impl Zetta {
         } else {
             self.inherit_project_for_incoming_panes(&tab);
         }
+        let tab_theme_override = tab.theme_override.clone();
         let panes = tab
             .panes
             .iter()
@@ -1868,6 +1889,7 @@ impl Zetta {
                             None,
                             terminal,
                             pane.theme_override.clone(),
+                            tab_theme_override.clone(),
                             pane.profile.clone(),
                             project.clone(),
                         )
@@ -1883,6 +1905,7 @@ impl Zetta {
                             Some(entry.id),
                             entry.terminal.clone()?,
                             entry.theme_override.clone(),
+                            tab_theme_override.clone(),
                             entry.profile.clone(),
                             project,
                         ))
@@ -1893,9 +1916,12 @@ impl Zetta {
             .collect::<Vec<_>>();
         self.active_tab = insert_tab_in_pin_order(&mut self.tabs, tab);
 
-        for (pane_id, stack_id, terminal, theme_override, profile, project) in panes {
+        for (pane_id, stack_id, terminal, theme_override, tab_theme_override, profile, project) in
+            panes
+        {
             let theme = self.restored_terminal_theme(
                 theme_override.as_deref(),
+                tab_theme_override.as_deref(),
                 &profile,
                 project.as_deref(),
                 cx,
@@ -2674,12 +2700,7 @@ impl Zetta {
             std::process::id(),
             self.configuration_generation,
         ) {
-            for pane in &mut state.panes {
-                pane.theme_override = None;
-                for entry in &mut pane.stack {
-                    entry.theme_override = None;
-                }
-            }
+            clear_session_theme_overrides(&mut state);
         }
         let restored_panes = restored_pane_metadata(&state, &summary);
         let restored_metadata = self.prepare_restored_panes(restored_panes.clone());
@@ -2837,10 +2858,12 @@ impl Zetta {
             };
             let profile = pane.profile.clone();
             let theme_override = pane.theme_override.clone();
+            let tab_theme_override = tab.theme_override.clone();
             let routing_id = pane.routing_id;
             let project = self.projects.config_for_pane(pane_id).cloned();
             let theme = self.restored_terminal_theme(
                 theme_override.as_deref(),
+                tab_theme_override.as_deref(),
                 &profile,
                 project.as_deref(),
                 cx,

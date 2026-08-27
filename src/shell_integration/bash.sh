@@ -211,12 +211,13 @@ _zetta_complete() {
         COMPREPLY=( $(compgen -W "$icons" -- "$current") )
     }
 
-    _zetta_complete_pane_themes() {
+    _zetta_complete_themes() {
+        local scope=$1
         COMPREPLY=()
         local theme
         while IFS= read -r theme; do
             [[ $theme == "$current"* ]] && COMPREPLY+=("$theme")
-        done < <(zetta panetheme --list 2>/dev/null)
+        done < <(zetta theme "$scope" --list 2>/dev/null)
     }
 
     _zetta_complete_pane_splits() {
@@ -443,12 +444,16 @@ _zetta_complete() {
                 _zetta_complete_profile_themes
             elif [[ $command == -* ]]; then
                 _zetta_complete_profile_themes
-            elif [[ $command == panetheme ]]; then
-                _zetta_complete_pane_themes
+            elif [[ $command == theme && ${COMP_WORDS[2]} == pane ]]; then
+                _zetta_complete_themes pane
+            elif [[ $command == theme && ${COMP_WORDS[2]} == tab ]]; then
+                _zetta_complete_themes tab
             elif [[ $command == notify || $command == attention ]]; then
                 _zetta_compgen 'default never'
             elif [[ $command == overlay ]]; then
                 COMPREPLY=()
+            elif [[ $command == benchmark && ${COMP_WORDS[2]} == output ]]; then
+                _zetta_compgen 'repeated unique'
             else
                 _zetta_compgen 'repeated unique'
             fi
@@ -461,7 +466,7 @@ _zetta_complete() {
     esac
 
     if (( COMP_CWORD == 1 )); then
-        _zetta_compgen 'benchmark benchmark-output terminal-size mux pane profile project edit vi init serial http tftp notify notify-cleanup attention copy paste splits tabicon panetheme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme --no-mux'
+        _zetta_compgen 'benchmark terminal-size mux pane profile project edit vi init serial http tftp notify attention copy paste splits tabicon theme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme --no-mux'
         return
     fi
 
@@ -564,10 +569,13 @@ _zetta_complete() {
             fi
             ;;
         benchmark)
-            _zetta_compgen '--profile-report --profile-duration --profile-pane-stress --profile-background-stress --profile-sparse-updates --profile-alt-screen-scroll --profile-external-terminal --help'
-            ;;
-        benchmark-output)
-            _zetta_compgen '--size --output-type --help'
+            if (( COMP_CWORD == 2 )); then
+                _zetta_compgen 'output --profile-report --profile-duration --profile-pane-stress --profile-background-stress --profile-sparse-updates --profile-alt-screen-scroll --profile-external-terminal --help'
+            elif [[ ${COMP_WORDS[2]} == output ]]; then
+                _zetta_compgen '--size --output-type --help'
+            else
+                _zetta_compgen '--profile-report --profile-duration --profile-pane-stress --profile-background-stress --profile-sparse-updates --profile-alt-screen-scroll --profile-external-terminal --help'
+            fi
             ;;
         terminal-size)
             _zetta_compgen '--json --resize --columns --rows --help'
@@ -632,10 +640,13 @@ _zetta_complete() {
             _zetta_tftp_complete 2
             ;;
         notify)
-            _zetta_compgen '--app-name --icon --sound --timeout --help'
-            ;;
-        notify-cleanup)
-            _zetta_compgen '--dry-run --help'
+            if (( COMP_CWORD == 2 )); then
+                _zetta_compgen 'cleanup --app-name --icon --sound --timeout --help'
+            elif [[ ${COMP_WORDS[2]} == cleanup ]]; then
+                _zetta_compgen '--dry-run --help'
+            else
+                _zetta_compgen '--app-name --icon --sound --timeout --help'
+            fi
             ;;
         attention)
             _zetta_compgen '--notify --app-name --icon --sound --timeout --help'
@@ -659,11 +670,17 @@ _zetta_complete() {
                 _zetta_complete_tab_icons
             fi
             ;;
-        panetheme)
-            if [[ $current == -* ]]; then
-                _zetta_compgen '--theme --reset --list --help'
+        theme)
+            if (( COMP_CWORD == 2 )); then
+                _zetta_compgen 'pane tab'
+            elif [[ ${COMP_WORDS[2]} == pane || ${COMP_WORDS[2]} == tab ]]; then
+                if [[ $current == -* ]]; then
+                    _zetta_compgen '--theme --reset --list --help'
+                else
+                    _zetta_complete_themes "${COMP_WORDS[2]}"
+                fi
             else
-                _zetta_complete_pane_themes
+                COMPREPLY=()
             fi
             ;;
         overlay)

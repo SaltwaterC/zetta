@@ -39,7 +39,7 @@ where
 pub(crate) struct TabState {
     /// Identifies the live Zetta configuration generation that published this
     /// state. A process that reloaded after detaching the session must not
-    /// resurrect pane-theme choices that reload intentionally cleared. Other
+    /// resurrect session-theme choices that reload intentionally cleared. Other
     /// processes, and disk resume, still restore the saved choices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) pane_theme_source: Option<PaneThemeSource>,
@@ -82,6 +82,9 @@ pub(crate) struct TabState {
     pub(crate) icon_override: Option<Option<String>>,
     pub(crate) pinned: bool,
     pub(crate) panes: Vec<PaneState>,
+    /// Absent means the tab follows project/profile/application themes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) theme_override: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -398,6 +401,7 @@ impl TabState {
                     },
                 })
                 .collect(),
+            theme_override: tab.theme_override.clone(),
         }
     }
 
@@ -501,6 +505,7 @@ impl TabState {
             panes,
             pane_indices,
             next_pane_label: self.next_pane_label,
+            theme_override: self.theme_override,
             layout: self.layout.into_layout(),
             active_pane: self.active_pane,
             focus_history: self.focus_history,

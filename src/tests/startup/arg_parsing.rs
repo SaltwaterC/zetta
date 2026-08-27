@@ -127,43 +127,63 @@ fn tabicon_subcommand_parses_icons_and_dynamic_listing() {
 }
 
 #[test]
-fn panetheme_subcommand_parses_names_resets_and_dynamic_listing() {
+fn theme_subcommand_requires_scope_and_parses_names_resets_and_dynamic_listing() {
     assert_eq!(
-        parse_args_from([OsString::from("panetheme"), OsString::from("Dracula")])
-            .unwrap()
-            .mode,
-        StartupMode::SetPaneTheme {
+        parse_args_from([
+            OsString::from("theme"),
+            OsString::from("pane"),
+            OsString::from("Dracula"),
+        ])
+        .unwrap()
+        .mode,
+        StartupMode::SetTheme {
+            scope: ThemeScope::Pane,
             theme: Some("Dracula".to_owned())
         }
     );
     assert_eq!(
         parse_args_from([
-            OsString::from("panetheme"),
+            OsString::from("theme"),
+            OsString::from("tab"),
             OsString::from("--theme"),
             OsString::from("One Light"),
         ])
         .unwrap()
         .mode,
-        StartupMode::SetPaneTheme {
+        StartupMode::SetTheme {
+            scope: ThemeScope::Tab,
             theme: Some("One Light".to_owned())
         }
     );
     assert_eq!(
-        parse_args_from([OsString::from("panetheme"), OsString::from("--reset")])
-            .unwrap()
-            .mode,
-        StartupMode::SetPaneTheme { theme: None }
+        parse_args_from([
+            OsString::from("theme"),
+            OsString::from("pane"),
+            OsString::from("--reset"),
+        ])
+        .unwrap()
+        .mode,
+        StartupMode::SetTheme {
+            scope: ThemeScope::Pane,
+            theme: None
+        }
     );
     assert_eq!(
-        parse_args_from([OsString::from("panetheme"), OsString::from("--list")])
-            .unwrap()
-            .mode,
-        StartupMode::ListPaneThemes
+        parse_args_from([
+            OsString::from("theme"),
+            OsString::from("tab"),
+            OsString::from("--list"),
+        ])
+        .unwrap()
+        .mode,
+        StartupMode::ListThemes
     );
-    assert!(parse_args_from([OsString::from("panetheme")]).is_err());
+    assert!(parse_args_from([OsString::from("theme")]).is_err());
+    assert!(parse_args_from([OsString::from("theme"), OsString::from("window")]).is_err());
     assert!(
         parse_args_from([
-            OsString::from("panetheme"),
+            OsString::from("theme"),
+            OsString::from("pane"),
             OsString::from("--list"),
             OsString::from("--reset"),
         ])
@@ -171,12 +191,14 @@ fn panetheme_subcommand_parses_names_resets_and_dynamic_listing() {
     );
     assert!(
         parse_args_from([
-            OsString::from("panetheme"),
+            OsString::from("theme"),
+            OsString::from("tab"),
             OsString::from("--reset"),
             OsString::from("Dracula"),
         ])
         .is_err()
     );
+    assert!(parse_args_from([OsString::from("panetheme"), OsString::from("Dracula")]).is_err());
 }
 
 #[test]
@@ -693,7 +715,7 @@ fn notify_subcommand_bypasses_application_startup() {
 #[cfg(notify_cleanup_enabled)]
 #[test]
 fn notify_cleanup_subcommand_bypasses_application_startup() {
-    let args = parse_args_from([OsString::from("notify-cleanup")]).unwrap();
+    let args = parse_args_from([OsString::from("notify"), OsString::from("cleanup")]).unwrap();
 
     assert!(matches!(
         args.mode,
@@ -702,7 +724,8 @@ fn notify_cleanup_subcommand_bypasses_application_startup() {
     assert!(!should_handoff_to_existing_process(&args));
 
     let args = parse_args_from([
-        OsString::from("notify-cleanup"),
+        OsString::from("notify"),
+        OsString::from("cleanup"),
         OsString::from("--dry-run"),
     ])
     .unwrap();
@@ -715,11 +738,13 @@ fn notify_cleanup_subcommand_bypasses_application_startup() {
 
     assert!(
         parse_args_from([
-            OsString::from("notify-cleanup"),
+            OsString::from("notify"),
+            OsString::from("cleanup"),
             OsString::from("--unknown")
         ])
         .is_err()
     );
+    assert!(parse_args_from([OsString::from("notify-cleanup")]).is_err());
 }
 
 #[test]
@@ -1116,7 +1141,7 @@ fn init_subcommand_configures_the_current_shell_or_prints_an_explicit_integratio
 
 #[test]
 fn output_benchmark_subcommand_bypasses_application_startup() {
-    let args = parse_args_from([OsString::from("benchmark-output")]).unwrap();
+    let args = parse_args_from([OsString::from("benchmark"), OsString::from("output")]).unwrap();
 
     assert_eq!(
         args.mode,
@@ -1128,7 +1153,8 @@ fn output_benchmark_subcommand_bypasses_application_startup() {
     assert!(!should_handoff_to_existing_process(&args));
 
     let sized = parse_args_from([
-        OsString::from("benchmark-output"),
+        OsString::from("benchmark"),
+        OsString::from("output"),
         OsString::from("--size"),
         OsString::from("64"),
     ])
@@ -1142,7 +1168,8 @@ fn output_benchmark_subcommand_bypasses_application_startup() {
     );
 
     let short_sized = parse_args_from([
-        OsString::from("benchmark-output"),
+        OsString::from("benchmark"),
+        OsString::from("output"),
         OsString::from("-s"),
         OsString::from("32"),
     ])
@@ -1156,7 +1183,8 @@ fn output_benchmark_subcommand_bypasses_application_startup() {
     );
 
     let unique = parse_args_from([
-        OsString::from("benchmark-output"),
+        OsString::from("benchmark"),
+        OsString::from("output"),
         OsString::from("--output-type"),
         OsString::from("unique"),
     ])
@@ -1170,7 +1198,8 @@ fn output_benchmark_subcommand_bypasses_application_startup() {
     );
 
     let short_unique = parse_args_from([
-        OsString::from("benchmark-output"),
+        OsString::from("benchmark"),
+        OsString::from("output"),
         OsString::from("-t"),
         OsString::from("unique"),
     ])
@@ -1186,7 +1215,8 @@ fn output_benchmark_subcommand_bypasses_application_startup() {
     for invalid in ["0", "1.5", "not-a-number"] {
         assert!(
             parse_args_from([
-                OsString::from("benchmark-output"),
+                OsString::from("benchmark"),
+                OsString::from("output"),
                 OsString::from("--size"),
                 OsString::from(invalid),
             ])
@@ -1194,11 +1224,17 @@ fn output_benchmark_subcommand_bypasses_application_startup() {
         );
     }
     assert!(
-        parse_args_from([OsString::from("benchmark-output"), OsString::from("--size"),]).is_err()
+        parse_args_from([
+            OsString::from("benchmark"),
+            OsString::from("output"),
+            OsString::from("--size"),
+        ])
+        .is_err()
     );
     assert!(
         parse_args_from([
-            OsString::from("benchmark-output"),
+            OsString::from("benchmark"),
+            OsString::from("output"),
             OsString::from("--unknown"),
         ])
         .is_err()
@@ -1206,7 +1242,8 @@ fn output_benchmark_subcommand_bypasses_application_startup() {
     for invalid in ["different", ""] {
         assert!(
             parse_args_from([
-                OsString::from("benchmark-output"),
+                OsString::from("benchmark"),
+                OsString::from("output"),
                 OsString::from("--output-type"),
                 OsString::from(invalid),
             ])
@@ -1215,11 +1252,13 @@ fn output_benchmark_subcommand_bypasses_application_startup() {
     }
     assert!(
         parse_args_from([
-            OsString::from("benchmark-output"),
+            OsString::from("benchmark"),
+            OsString::from("output"),
             OsString::from("--output-type"),
         ])
         .is_err()
     );
+    assert!(parse_args_from([OsString::from("benchmark-output")]).is_err());
 }
 
 #[test]

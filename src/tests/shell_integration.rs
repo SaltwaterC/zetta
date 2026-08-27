@@ -43,7 +43,7 @@ fn supported_shells_generate_completion_and_tftp_shortcut() {
         assert!(script.contains("EDITOR"));
         assert!(script.contains("zetta vi"));
         assert!(script.contains("zetta tabicon --list"));
-        assert!(script.contains("zetta panetheme --list"));
+        assert!(script.contains("zetta theme"));
         assert!(script.contains("zetta splits"));
         assert!(script.contains("zetta pane --list"));
         assert!(script.contains("ZETTA_NO_MUX"));
@@ -624,7 +624,7 @@ fn supported_shells_generate_notify_cleanup_completion() {
         ShellIntegration::Zsh,
     ] {
         let script = shell.script();
-        assert!(script.contains("notify-cleanup"));
+        assert!(script.contains("notify") && script.contains("cleanup"));
         if shell == ShellIntegration::Fish {
             assert!(script.contains("-l dry-run"));
         } else {
@@ -836,28 +836,32 @@ fn sound_completion_is_scoped_to_the_detected_platform() {
 }
 
 // Regression guard: --timeout shares its short form (-t) with
-// benchmark-output's --output-type, and the top-level/panetheme --theme flag
+// benchmark output's --output-type, and the top-level/theme --theme flag
 // now shares it too. Completion after -t/--output-type/--theme must stay
 // scoped to the active subcommand instead of always suggesting
-// benchmark-output's repeated/unique values.
+// benchmark output's repeated/unique values.
 #[test]
 fn notify_timeout_completion_does_not_leak_into_other_short_t_flags() {
     let bash = ShellIntegration::Bash.script();
-    assert!(bash.contains(
-        "--output-type|-t|--theme|--text)\n            if [[ $command == profile ]]; then\n                _zetta_complete_profile_themes\n            elif [[ $command == -* ]]; then\n                _zetta_complete_profile_themes\n            elif [[ $command == panetheme ]]; then"
-    ));
+    assert!(bash.contains("elif [[ $command == theme && ${COMP_WORDS[2]} == pane ]]; then"));
+    assert!(bash.contains("elif [[ $command == theme && ${COMP_WORDS[2]} == tab ]]; then"));
+    assert!(bash.contains("elif [[ $command == benchmark && ${COMP_WORDS[2]} == output ]]; then"));
     assert!(bash.contains("_zetta_compgen 'repeated unique'"));
 
     let zsh = ShellIntegration::Zsh.script();
     assert!(zsh.contains(
-        "--output-type|-t|--theme|--text)\n            if [[ $words[2] == profile || $words[2] == -* ]]; then\n                _zetta_profile_themes \"${config_args[@]}\"\n            elif [[ $words[2] == panetheme ]]; then"
+        "elif [[ $words[2] == theme && ($words[3] == pane || $words[3] == tab) ]]; then"
     ));
+    assert!(zsh.contains("elif [[ $words[2] == benchmark && $words[3] == output ]]; then"));
     assert!(zsh.contains("compadd -- repeated unique"));
 
     let powershell = ShellIntegration::PowerShell.script();
     assert!(powershell.contains(
-        "elseif ($previous -in '--output-type', '-t', '--theme', '--text') {\n        if ($subcommand -eq 'profile' -or $null -eq $subcommand) { & $zettaProfileThemes $configArguments }\n        elseif ($subcommand -eq 'panetheme') { & $zettaPaneThemes }"
+        "elseif ($subcommand -eq 'theme' -and $words.Count -gt 2 -and $words[2] -in 'pane', 'tab') { & $zettaThemes $words[2] }"
     ));
+    assert!(
+        powershell.contains("elseif ($previous -in '--output-type', '-t', '--theme', '--text')")
+    );
 }
 
 // Regression test: --theme requires --profile, so completing one must keep
@@ -1179,7 +1183,7 @@ fn service_subcommand_completions_only_offer_long_form_flags() {
     assert!(!powershell.contains("'-a', '--app-name'"));
     assert!(powershell.contains("'--app-name', '--icon', '--sound', '--timeout', '--help'"));
     assert!(!fish.contains("-s a -l app-name"));
-    assert!(fish.contains("subcommand_from notify' -l app-name"));
+    assert!(fish.contains("__zetta_notify_root' -l app-name"));
 }
 
 #[test]
@@ -1200,7 +1204,7 @@ fn profile_completion_uses_line_oriented_dynamic_endpoints() {
 // Regression test: values that contain spaces or quote characters are inserted
 // by PowerShell into the command line verbatim, splitting arguments. Completing
 // a theme name like "Gruvbox Light Hard" must emit a single quoted argument
-// (with embedded single quotes doubled), not the raw name, or `panetheme`
+// (with embedded single quotes doubled), not the raw name, or `theme pane`
 // rejects it with "only one theme may be specified".
 #[test]
 fn powershell_quotes_spaced_completion_values() {
@@ -1657,7 +1661,7 @@ fn generated_scripts_only_offer_long_form_flags() {
         match shell {
             ShellIntegration::Bash => {
                 assert!(script.contains(
-                    "terminal-size mux pane profile project edit vi init serial http tftp notify notify-cleanup attention copy paste splits tabicon panetheme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme --no-mux'"
+                    "terminal-size mux pane profile project edit vi init serial http tftp notify attention copy paste splits tabicon theme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme --no-mux'"
                 ));
                 assert!(script.contains("auto zetta bash zsh fish"));
             }
@@ -1698,7 +1702,7 @@ fn fish_script_emits_long_option_candidates_for_every_command_context() {
         "http",
         "terminal-size",
         "mux",
-        "benchmark-output",
+        "benchmark_output",
         "benchmark",
         "serial-console",
         "http-server",
@@ -1706,12 +1710,13 @@ fn fish_script_emits_long_option_candidates_for_every_command_context() {
         "tftp-client",
         "tftp-server",
         "notify",
-        "notify-cleanup",
+        "notify_cleanup",
         "attention",
         "copy",
         "paste",
         "tabicon",
-        "panetheme",
+        "theme_pane",
+        "theme_tab",
         "splits",
         "pane",
         "overlay",
@@ -1816,7 +1821,7 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
             ][..],
         ),
         (
-            "zetta benchmark-output ",
+            "zetta benchmark output ",
             &["--size", "--output-type", "--help"][..],
         ),
         (
@@ -1896,11 +1901,29 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
         ("zetta pane -c ", overlay_color_names.as_slice()),
         ("zetta tabicon ", &["--icon", "--list", "--help"][..]),
         ("zetta tabicon -i ", &[][..]),
+        ("zetta theme ", &["pane", "tab"][..]),
         (
-            "zetta panetheme ",
-            &["--theme", "--reset", "--list", "--help"][..],
+            "zetta theme pane ",
+            &[
+                "--theme",
+                "--reset",
+                "--list",
+                "--help",
+                "Gruvbox Light Hard",
+            ][..],
         ),
-        ("zetta panetheme -t ", &[][..]),
+        ("zetta theme pane -t ", &["Gruvbox Light Hard"][..]),
+        (
+            "zetta theme tab ",
+            &[
+                "--theme",
+                "--reset",
+                "--list",
+                "--help",
+                "Gruvbox Light Hard",
+            ][..],
+        ),
+        ("zetta theme tab -t ", &["Gruvbox Light Hard"][..]),
         (
             "zetta overlay ",
             &[
@@ -1954,6 +1977,7 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
             "zetta notify ",
             &["--app-name", "--icon", "--sound", "--timeout", "--help"][..],
         ),
+        ("zetta notify cleanup ", &["--dry-run", "--help"][..]),
         ("zetta notify -s ", &["zetta-default"][..]),
         (
             "zetta attention ",
@@ -1986,7 +2010,7 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
             .args([
                 "--no-config",
                 "-c",
-                "function zetta; if test \"$argv[1]\" = splits; printf '%s\\n' custom-layout quarters four-vertical three-left three-right; else if test \"$argv[1]\" = profile; and test \"$argv[2]\" = list; if test \"$argv[3]\" = --config; and test \"$argv[4]\" = profiles.json; printf '%s\\n' 'Configured Shell'; else; printf '%s\\n' System 'WSL: Ubuntu'; end; else if test \"$argv[1]\" = profile; and test \"$argv[2]\" = themes; printf '%s\\n' 'Gruvbox Light Hard'; end; end; source $argv[1]; complete -C \"$argv[2]\"",
+                "function zetta; if test \"$argv[1]\" = splits; printf '%s\\n' custom-layout quarters four-vertical three-left three-right; else if test \"$argv[1]\" = profile; and test \"$argv[2]\" = list; if test \"$argv[3]\" = --config; and test \"$argv[4]\" = profiles.json; printf '%s\\n' 'Configured Shell'; else; printf '%s\\n' System 'WSL: Ubuntu'; end; else if test \"$argv[1]\" = profile; and test \"$argv[2]\" = themes; printf '%s\\n' 'Gruvbox Light Hard'; else if test \"$argv[1]\" = theme; and test \"$argv[3]\" = --list; printf '%s\\n' 'Gruvbox Light Hard'; end; end; source $argv[1]; complete -C \"$argv[2]\"",
                 "--",
                 script_file.path().to_str().unwrap(),
                 line,

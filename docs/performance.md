@@ -12,14 +12,14 @@ same text stream:
 
 ```sh
 cargo build --release
-target/release/zetta benchmark-output
+target/release/zetta benchmark output
 ```
 
 The command writes 10 MiB of repeated lines by default. Set another output
 size in MiB with `--size` or `-s`:
 
 ```sh
-target/release/zetta benchmark-output --size 100
+target/release/zetta benchmark output --size 100
 ```
 
 Use `--output-type unique` (or `-t unique`) to write deterministic lines that never repeat.
@@ -27,7 +27,7 @@ This is the worst-case workload for scrollback history archival, where repeated
 lines may otherwise be compacted efficiently:
 
 ```sh
-target/release/zetta benchmark-output --output-type unique --size 100
+target/release/zetta benchmark output --output-type unique --size 100
 ```
 
 The deterministic, printable ASCII text is written to standard output in
@@ -47,7 +47,7 @@ For a scrollback-scaling check, run the benchmark repeatedly in the same pane:
 
 ```sh
 for run in 1 2 3 4 5 6 7 8 9 10; do
-  target/release/zetta benchmark-output
+  target/release/zetta benchmark output
 done
 ```
 

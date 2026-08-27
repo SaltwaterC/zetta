@@ -1,7 +1,7 @@
 use super::cli_help::{
     attention_help, help_text, is_version_argument, pane_help, pane_splits_help,
-    parse_overlay_args, parse_pane_theme_args, parse_tab_icon_args,
-    parse_terminal_resize_dimension, version_text,
+    parse_overlay_args, parse_tab_icon_args, parse_terminal_resize_dimension, parse_theme_args,
+    theme_help, version_text,
 };
 use super::*;
 use crate::cli_services::{NotificationRequest, parse_notification_timeout};
@@ -43,10 +43,11 @@ pub(crate) enum StartupMode {
         icon: Option<IconName>,
     },
     ListTabIcons,
-    SetPaneTheme {
+    SetTheme {
+        scope: ThemeScope,
         theme: Option<String>,
     },
-    ListPaneThemes,
+    ListThemes,
     ListPaneSplits,
     SetPaneOverlay(PaneOverlayRequest),
     #[cfg(windows)]
@@ -544,8 +545,23 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
     }
     if arguments
         .first()
-        .is_some_and(|argument| argument == "panetheme")
+        .is_some_and(|argument| argument == "theme")
     {
+        if arguments
+            .get(1)
+            .is_some_and(|argument| matches!(argument.to_string_lossy().as_ref(), "--help" | "-h"))
+        {
+            println!("{}", theme_help(None));
+            std::process::exit(0);
+        }
+        let scope = match arguments.get(1).map(|scope| scope.to_string_lossy()) {
+            Some(scope) if scope == "pane" => ThemeScope::Pane,
+            Some(scope) if scope == "tab" => ThemeScope::Tab,
+            Some(scope) => anyhow::bail!("unknown theme scope {scope:?}; expected pane or tab"),
+            None => anyhow::bail!(
+                "zetta theme requires a scope (pane or tab); run zetta theme --help for usage"
+            ),
+        };
         return Ok(StartupArgs {
             config_path: None,
             keymap_path: None,
@@ -554,7 +570,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             replace_pane: false,
             theme_override: None,
             no_mux: false,
-            mode: parse_pane_theme_args(&arguments[1..])?,
+            mode: parse_theme_args(scope, &arguments[2..])?,
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,
@@ -630,16 +646,19 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
     }
     if arguments
         .first()
-        .is_some_and(|argument| argument == "benchmark-output")
+        .is_some_and(|argument| argument == "benchmark")
+        && arguments
+            .get(1)
+            .is_some_and(|argument| argument == "output")
     {
         let mut size_mib = None;
         let mut output_type = OutputBenchmarkType::RepeatedLines;
-        let mut benchmark_arguments = arguments[1..].iter();
+        let mut benchmark_arguments = arguments[2..].iter();
         while let Some(argument) = benchmark_arguments.next() {
             match argument.to_string_lossy().as_ref() {
                 "--help" | "-h" => {
                     println!(
-                        "Benchmark terminal output throughput\n\nUsage: zetta benchmark-output [OPTIONS]\n\nWrites deterministic text to standard output and prints the elapsed time to standard error.\n\nOptions:\n  -s, --size MIB                 Set the output size in MiB [default: 10]\n  -t, --output-type TYPE         Select repeated or unique lines [default: repeated]\n  -h, --help                     Print help"
+                        "Benchmark terminal output throughput\n\nUsage: zetta benchmark output [OPTIONS]\n\nWrites deterministic text to standard output and prints the elapsed time to standard error.\n\nOptions:\n  -s, --size MIB                 Set the output size in MiB [default: 10]\n  -t, --output-type TYPE         Select repeated or unique lines [default: repeated]\n  -h, --help                     Print help"
                     );
                     std::process::exit(0);
                 }
@@ -671,7 +690,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                         ),
                     };
                 }
-                unknown => anyhow::bail!("unknown benchmark-output argument {unknown:?}"),
+                unknown => anyhow::bail!("unknown benchmark output argument {unknown:?}"),
             }
         }
         return Ok(StartupArgs {
@@ -1041,6 +1060,44 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
         .first()
         .is_some_and(|argument| argument == "notify")
     {
+        if arguments
+            .get(1)
+            .is_some_and(|argument| argument == "cleanup")
+        {
+            #[cfg(notify_cleanup_enabled)]
+            {
+                let cleanup_arguments = &arguments[2..];
+                if cleanup_arguments
+                    .iter()
+                    .any(|argument| matches!(argument.to_string_lossy().as_ref(), "--help" | "-h"))
+                {
+                    println!("{}", notify_cleanup_help());
+                    std::process::exit(0);
+                }
+                return Ok(StartupArgs {
+                    config_path: None,
+                    keymap_path: None,
+                    profile: None,
+                    split: None,
+                    replace_pane: false,
+                    theme_override: None,
+                    no_mux: false,
+                    mode: StartupMode::CliService(parse_notify_cleanup_args(
+                        cleanup_arguments.iter().cloned(),
+                    )?),
+                    profile_report: None,
+                    profile_duration: None,
+                    profile_pane_stress: false,
+                    profile_workload: PerformanceWorkload::Standard,
+                    profile_external_terminal: false,
+                    tftp_command: None,
+                });
+            }
+            #[cfg(not(notify_cleanup_enabled))]
+            anyhow::bail!(
+                "zetta notify cleanup requires desktop notifications and is only needed on Linux and BSD"
+            );
+        }
         #[cfg(feature = "notifications")]
         {
             let notify_arguments = &arguments[1..];
@@ -1071,43 +1128,13 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
         #[cfg(not(feature = "notifications"))]
         anyhow::bail!("Desktop notification support is disabled in this build");
     }
-    if arguments
-        .first()
-        .is_some_and(|argument| argument == "notify-cleanup")
-    {
-        #[cfg(notify_cleanup_enabled)]
-        {
-            let cleanup_arguments = &arguments[1..];
-            if cleanup_arguments
-                .iter()
-                .any(|argument| matches!(argument.to_string_lossy().as_ref(), "--help" | "-h"))
-            {
-                println!("{}", notify_cleanup_help());
-                std::process::exit(0);
-            }
-            return Ok(StartupArgs {
-                config_path: None,
-                keymap_path: None,
-                profile: None,
-                split: None,
-                replace_pane: false,
-                theme_override: None,
-                no_mux: false,
-                mode: StartupMode::CliService(parse_notify_cleanup_args(
-                    cleanup_arguments.iter().cloned(),
-                )?),
-                profile_report: None,
-                profile_duration: None,
-                profile_pane_stress: false,
-                profile_workload: PerformanceWorkload::Standard,
-                profile_external_terminal: false,
-                tftp_command: None,
-            });
-        }
-        #[cfg(not(notify_cleanup_enabled))]
-        anyhow::bail!(
-            "zetta notify-cleanup requires desktop notifications and is only needed on Linux and BSD"
-        );
+    if arguments.first().is_some_and(|argument| {
+        matches!(
+            argument.to_string_lossy().as_ref(),
+            "panetheme" | "benchmark-output" | "notify-cleanup"
+        )
+    }) {
+        anyhow::bail!("unknown command {:?}", arguments[0]);
     }
     if arguments.first().is_some_and(|argument| argument == "copy") {
         #[cfg(feature = "clipboard")]

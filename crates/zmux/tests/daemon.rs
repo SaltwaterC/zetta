@@ -3033,7 +3033,7 @@ fn a_pane_shared_with_one_viewer_is_handed_back_to_it() {
 ///
 /// A terminal parses and renders; a program only writes. So a viewer is *always*
 /// slower than sustained output, and dropping one for having a backlog meant
-/// dropping every viewer of any real workload — `zetta benchmark-output --size
+/// dropping every viewer of any real workload — `zetta benchmark output --size
 /// 1000` cut it off a few megabytes in, every time, leaving the pane attached to a
 /// closed connection with no way to exit it. Leaving the bytes in the terminal
 /// instead makes the program wait, which is what an exclusive client's own reading

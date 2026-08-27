@@ -338,10 +338,27 @@ fn active_project_theme_overrides_a_profile_theme_it_never_mentioned(
             .unwrap();
         assert_eq!(theme.name.as_ref(), "Solarized Dark");
 
-        let explicit = resolve_terminal_theme(Some("One Dark"), &profile, Some(&project), cx)
+        let explicit = resolve_terminal_theme(Some("One Dark"), None, &profile, Some(&project), cx)
             .unwrap()
             .unwrap();
         assert_eq!(explicit.name.as_ref(), "One Dark");
+
+        let tab_override =
+            resolve_terminal_theme(None, Some("Gruvbox Dark"), &profile, Some(&project), cx)
+                .unwrap()
+                .unwrap();
+        assert_eq!(tab_override.name.as_ref(), "Gruvbox Dark");
+
+        let pane_override = resolve_terminal_theme(
+            Some("One Light"),
+            Some("Gruvbox Dark"),
+            &profile,
+            Some(&project),
+            cx,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(pane_override.name.as_ref(), "One Light");
 
         // With no project active, the profile's own theme still applies.
         let theme = resolve_project_profile_theme(&profile, None, cx)
@@ -354,7 +371,7 @@ fn active_project_theme_overrides_a_profile_theme_it_never_mentioned(
             .unwrap()
             .unwrap();
         assert_eq!(theme.name.as_ref(), "Gruvbox Dark");
-        let explicit = resolve_terminal_theme(Some("One Dark"), &profile, Some(&project), cx)
+        let explicit = resolve_terminal_theme(Some("One Dark"), None, &profile, Some(&project), cx)
             .unwrap()
             .unwrap();
         assert_eq!(explicit.name.as_ref(), "One Dark");

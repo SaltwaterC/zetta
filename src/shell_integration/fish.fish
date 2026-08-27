@@ -133,8 +133,8 @@ function __zetta_tab_icons
     zetta tabicon --list 2>/dev/null
 end
 
-function __zetta_pane_themes
-    zetta panetheme --list 2>/dev/null
+function __zetta_themes
+    zetta theme $argv[1] --list 2>/dev/null
 end
 
 function __zetta_pane_splits
@@ -185,6 +185,41 @@ function __zetta_at_subcommand
     set -l words (commandline -opc)
     test (count $words) -eq 2
     and test "$words[2]" = "$argv[1]"
+end
+
+function __zetta_benchmark_output
+    set -l words (commandline -opc)
+    test (count $words) -ge 3
+    and test "$words[2]" = benchmark
+    and test "$words[3]" = output
+end
+
+function __zetta_notify_cleanup
+    set -l words (commandline -opc)
+    test (count $words) -ge 3
+    and test "$words[2]" = notify
+    and test "$words[3]" = cleanup
+end
+
+function __zetta_notify_root
+    set -l words (commandline -opc)
+    test (count $words) -ge 2
+    and test "$words[2]" = notify
+    and not __zetta_notify_cleanup
+end
+
+function __zetta_theme_pane
+    set -l words (commandline -opc)
+    test (count $words) -ge 3
+    and test "$words[2]" = theme
+    and test "$words[3]" = pane
+end
+
+function __zetta_theme_tab
+    set -l words (commandline -opc)
+    test (count $words) -ge 3
+    and test "$words[2]" = theme
+    and test "$words[3]" = tab
 end
 
 function __zetta_profile_operation
@@ -429,10 +464,15 @@ function __zetta_long_options
                 --stack 'Run in a stacked task pane' \
                 --list 'List pane labels' \
                 --help 'Print help'
-        case panetheme
+        case theme
             printf '%s\t%s\n' \
-                --theme 'Set the pane theme' \
-                --reset 'Restore the profile-configured theme' \
+                pane 'Change the active pane theme' \
+                tab 'Change the active tab theme' \
+                --help 'Print help'
+        case theme_pane theme_tab
+            printf '%s\t%s\n' \
+                --theme 'Set the theme' \
+                --reset 'Restore the configured theme' \
                 --list 'Print the registered theme names' \
                 --help 'Print help'
         case tabicon
@@ -472,7 +512,7 @@ function __zetta_long_options
             else
                 printf '%s\t%s\n' --json 'Print machine-readable JSON' --force 'Stop even while sessions are running' --upgrade 'Replace the multiplexer, keeping its sessions' --identity 'Age identity file for resume and reconnect' --help 'Print help' --version 'Print version'
             end
-        case benchmark-output
+        case benchmark_output
             printf '%s\t%s\n' \
                 --size 'Set the output size in MiB' \
                 --output-type 'Select repeated or unique lines' \
@@ -518,7 +558,7 @@ function __zetta_long_options
                 --sound 'Sound name' \
                 --timeout 'Timeout' \
                 --help 'Print help'
-        case notify-cleanup
+        case notify_cleanup
             printf '%s\t%s\n' \
                 --dry-run 'List stale workers without terminating them' \
                 --help 'Print help'
@@ -543,7 +583,6 @@ end
 
 complete -c zetta -f
 complete -c zetta -n '__zetta_at_root' -a benchmark -d 'Profile terminal rendering'
-complete -c zetta -n '__zetta_at_root' -a benchmark-output -d 'Write and time a text payload'
 complete -c zetta -n '__zetta_at_root' -a terminal-size -d 'Print the current terminal size'
 complete -c zetta -n '__zetta_at_root' -a mux -d 'Control the session multiplexer'
 complete -c zetta -n '__zetta_at_root' -a profile -d 'List and manage profiles'
@@ -555,16 +594,18 @@ complete -c zetta -n '__zetta_at_root' -a serial -d 'List or connect to serial d
 complete -c zetta -n '__zetta_at_root' -a http -d 'Serve static files over HTTP'
 complete -c zetta -n '__zetta_at_root' -a tftp -d 'Transfer a file with TFTP'
 complete -c zetta -n '__zetta_at_root' -a notify -d 'Show a desktop notification'
-complete -c zetta -n '__zetta_at_root' -a notify-cleanup -d 'Reap stale desktop notification worker processes'
 complete -c zetta -n '__zetta_at_root' -a attention -d 'Mark the originating tab as needing attention'
 complete -c zetta -n '__zetta_at_root' -a copy -d 'Copy standard input to the clipboard'
 complete -c zetta -n '__zetta_at_root' -a paste -d "Print the clipboard's contents"
 complete -c zetta -n '__zetta_at_root' -a tabicon -d 'Set the active tab icon'
-complete -c zetta -n '__zetta_at_root' -a panetheme -d "Non-persistently change the active pane's theme"
+complete -c zetta -n '__zetta_at_root' -a theme -d "Non-persistently change the active pane or tab's theme"
 complete -c zetta -n '__zetta_at_root' -a splits -d 'List configured pane split templates'
 complete -c zetta -n '__zetta_at_root' -a pane -d 'Run a command in a pane'
 complete -c zetta -n '__zetta_at_root' -a overlay -d 'Non-persistently show text over the active pane'
 complete -c zetta -n '__zetta_at_root' -a wt -d 'Create and integrate Git worktrees'
+complete -c zetta -n '__zetta_at_subcommand benchmark' -a output -d 'Write and time a text payload'
+complete -c zetta -n '__zetta_at_subcommand notify' -a cleanup -d 'Reap stale desktop notification worker processes'
+complete -c zetta -n '__zetta_at_subcommand theme' -a 'pane tab' -d 'Choose the theme scope'
 complete -c zetta -n '__zetta_use_subcommand' -l help -d 'Print help'
 complete -c zetta -n '__zetta_use_subcommand' -l version -d 'Print version'
 complete -c zetta -n '__zetta_use_subcommand' -l config -r -d 'Use a configuration file'
@@ -677,21 +718,21 @@ complete -c zetta -s d -n '__fish_seen_subcommand_from edit; and __zetta_short_o
 complete -c zetta -n '__fish_seen_subcommand_from vi' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from vi' -a '(__zetta_long_options vi)'
 complete -c zetta -n '__fish_seen_subcommand_from vi' -F
-complete -c zetta -n '__fish_seen_subcommand_from benchmark-output' -l size -r -d 'Set the output size in MiB'
-complete -c zetta -n '__fish_seen_subcommand_from benchmark-output' -l output-type -r -a 'repeated unique'
-complete -c zetta -n '__fish_seen_subcommand_from benchmark-output' -l help -d 'Print help'
-complete -c zetta -n '__fish_seen_subcommand_from benchmark-output' -a '(__zetta_long_options benchmark-output)'
-complete -c zetta -s s -r -n '__fish_seen_subcommand_from benchmark-output; and __zetta_short_option -s'
-complete -c zetta -s t -r -a 'repeated unique' -n '__fish_seen_subcommand_from benchmark-output; and __zetta_short_option -t'
-complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l profile-report -r
-complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l profile-duration -r
-complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l profile-pane-stress
-complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l profile-background-stress
-complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l profile-sparse-updates
-complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l profile-alt-screen-scroll
-complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l profile-external-terminal
-complete -c zetta -n '__fish_seen_subcommand_from benchmark' -l help -d 'Print help'
-complete -c zetta -n '__fish_seen_subcommand_from benchmark' -a '(__zetta_long_options benchmark)'
+complete -c zetta -n '__zetta_benchmark_output' -l size -r -d 'Set the output size in MiB'
+complete -c zetta -n '__zetta_benchmark_output' -l output-type -r -a 'repeated unique'
+complete -c zetta -n '__zetta_benchmark_output' -l help -d 'Print help'
+complete -c zetta -n '__zetta_benchmark_output' -a '(__zetta_long_options benchmark_output)'
+complete -c zetta -s s -r -n '__zetta_benchmark_output; and __zetta_short_option -s'
+complete -c zetta -s t -r -a 'repeated unique' -n '__zetta_benchmark_output; and __zetta_short_option -t'
+complete -c zetta -n '__fish_seen_subcommand_from benchmark; and not __zetta_benchmark_output' -l profile-report -r
+complete -c zetta -n '__fish_seen_subcommand_from benchmark; and not __zetta_benchmark_output' -l profile-duration -r
+complete -c zetta -n '__fish_seen_subcommand_from benchmark; and not __zetta_benchmark_output' -l profile-pane-stress
+complete -c zetta -n '__fish_seen_subcommand_from benchmark; and not __zetta_benchmark_output' -l profile-background-stress
+complete -c zetta -n '__fish_seen_subcommand_from benchmark; and not __zetta_benchmark_output' -l profile-sparse-updates
+complete -c zetta -n '__fish_seen_subcommand_from benchmark; and not __zetta_benchmark_output' -l profile-alt-screen-scroll
+complete -c zetta -n '__fish_seen_subcommand_from benchmark; and not __zetta_benchmark_output' -l profile-external-terminal
+complete -c zetta -n '__fish_seen_subcommand_from benchmark; and not __zetta_benchmark_output' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from benchmark; and not __zetta_benchmark_output' -a '(__zetta_long_options benchmark)'
 complete -c zetta -s r -r -n '__fish_seen_subcommand_from benchmark; and __zetta_short_option -r'
 complete -c zetta -s d -r -n '__fish_seen_subcommand_from benchmark; and __zetta_short_option -d'
 complete -c zetta -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console' -l device -r -a '(__zetta_serial_devices)' -d 'Serial device'
@@ -727,22 +768,22 @@ complete -c zetta -s p -r -n '__zetta_tftp_client; and __zetta_short_option -p'
 complete -c zetta -s r -r -a '(__fish_complete_directories)' -n '__zetta_tftp_server; and __zetta_short_option -r'
 complete -c zetta -s p -r -n '__zetta_tftp_server; and __zetta_short_option -p'
 complete -c zetta -s c -r -n '__zetta_tftp_server; and __zetta_short_option -c'
-complete -c zetta -n '__fish_seen_subcommand_from notify' -l app-name -r -d 'Application name'
-complete -c zetta -n '__fish_seen_subcommand_from notify' -l icon -r -d 'Image to show with the notification'
+complete -c zetta -n '__zetta_notify_root' -l app-name -r -d 'Application name'
+complete -c zetta -n '__zetta_notify_root' -l icon -r -d 'Image to show with the notification'
 complete -c zetta -n '__fish_seen_subcommand_from tabicon' -l icon -r -a '(__zetta_tab_icons)' -d 'Set the tab icon'
 complete -c zetta -s i -r -a '(__zetta_tab_icons)' -n '__fish_seen_subcommand_from tabicon; and __zetta_short_option -i'
-complete -c zetta -n '__fish_seen_subcommand_from notify' -l sound -r -a '(__zetta_sound_names)' -d 'Sound name'
-complete -c zetta -n '__fish_seen_subcommand_from notify' -l timeout -r -a 'default never' -d 'Timeout'
-complete -c zetta -n '__fish_seen_subcommand_from notify' -l help -d 'Print help'
-complete -c zetta -n '__fish_seen_subcommand_from notify' -a '(__zetta_long_options notify)'
-complete -c zetta -s a -r -n '__fish_seen_subcommand_from notify; and __zetta_short_option -a'
-complete -c zetta -s i -r -n '__fish_seen_subcommand_from notify; and __zetta_short_option -i'
-complete -c zetta -s s -r -a '(__zetta_sound_names)' -n '__fish_seen_subcommand_from notify; and __zetta_short_option -s'
-complete -c zetta -s t -r -a 'default never' -n '__fish_seen_subcommand_from notify; and __zetta_short_option -t'
-complete -c zetta -n '__fish_seen_subcommand_from notify-cleanup' -l dry-run -d 'List stale workers without terminating them'
-complete -c zetta -n '__fish_seen_subcommand_from notify-cleanup' -l help -d 'Print help'
-complete -c zetta -n '__fish_seen_subcommand_from notify-cleanup' -a '(__zetta_long_options notify-cleanup)'
-complete -c zetta -s n -n '__fish_seen_subcommand_from notify-cleanup; and __zetta_short_option -n'
+complete -c zetta -n '__zetta_notify_root' -l sound -r -a '(__zetta_sound_names)' -d 'Sound name'
+complete -c zetta -n '__zetta_notify_root' -l timeout -r -a 'default never' -d 'Timeout'
+complete -c zetta -n '__zetta_notify_root' -l help -d 'Print help'
+complete -c zetta -n '__zetta_notify_root' -a '(__zetta_long_options notify)'
+complete -c zetta -s a -r -n '__zetta_notify_root; and __zetta_short_option -a'
+complete -c zetta -s i -r -n '__zetta_notify_root; and __zetta_short_option -i'
+complete -c zetta -s s -r -a '(__zetta_sound_names)' -n '__zetta_notify_root; and __zetta_short_option -s'
+complete -c zetta -s t -r -a 'default never' -n '__zetta_notify_root; and __zetta_short_option -t'
+complete -c zetta -n '__zetta_notify_cleanup' -l dry-run -d 'List stale workers without terminating them'
+complete -c zetta -n '__zetta_notify_cleanup' -l help -d 'Print help'
+complete -c zetta -n '__zetta_notify_cleanup' -a '(__zetta_long_options notify_cleanup)'
+complete -c zetta -s n -n '__zetta_notify_cleanup; and __zetta_short_option -n'
 complete -c zetta -n '__fish_seen_subcommand_from attention' -l notify -d 'Also show a desktop notification'
 complete -c zetta -n '__fish_seen_subcommand_from attention' -l app-name -r -d 'Application name'
 complete -c zetta -n '__fish_seen_subcommand_from attention' -l icon -r -d 'Image to show with the notification'
@@ -769,13 +810,20 @@ complete -c zetta -n '__fish_seen_subcommand_from tabicon' -l list -d 'Print bui
 complete -c zetta -n '__fish_seen_subcommand_from tabicon' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from tabicon' -a '(__zetta_long_options tabicon)'
 complete -c zetta -n '__fish_seen_subcommand_from tabicon' -a '(__zetta_tab_icons)'
-complete -c zetta -n '__fish_seen_subcommand_from panetheme' -l theme -r -a '(__zetta_pane_themes)' -d 'Set the pane theme'
-complete -c zetta -s t -r -a '(__zetta_pane_themes)' -n '__fish_seen_subcommand_from panetheme; and __zetta_short_option -t'
-complete -c zetta -n '__fish_seen_subcommand_from panetheme' -l reset -d 'Restore the profile-configured theme'
-complete -c zetta -n '__fish_seen_subcommand_from panetheme' -l list -d 'Print the registered theme names'
-complete -c zetta -n '__fish_seen_subcommand_from panetheme' -l help -d 'Print help'
-complete -c zetta -n '__fish_seen_subcommand_from panetheme' -a '(__zetta_long_options panetheme)'
-complete -c zetta -n '__fish_seen_subcommand_from panetheme' -a '(__zetta_pane_themes)'
+complete -c zetta -n '__zetta_theme_pane' -l theme -r -a '(__zetta_themes pane)' -d 'Set the pane theme'
+complete -c zetta -s t -r -a '(__zetta_themes pane)' -n '__zetta_theme_pane; and __zetta_short_option -t'
+complete -c zetta -n '__zetta_theme_pane' -l reset -d 'Restore the tab or configured theme'
+complete -c zetta -n '__zetta_theme_pane' -l list -d 'Print the registered theme names'
+complete -c zetta -n '__zetta_theme_pane' -l help -d 'Print help'
+complete -c zetta -n '__zetta_theme_pane' -a '(__zetta_long_options theme_pane)'
+complete -c zetta -n '__zetta_theme_pane' -a '(__zetta_themes pane)'
+complete -c zetta -n '__zetta_theme_tab' -l theme -r -a '(__zetta_themes tab)' -d 'Set the tab theme'
+complete -c zetta -s t -r -a '(__zetta_themes tab)' -n '__zetta_theme_tab; and __zetta_short_option -t'
+complete -c zetta -n '__zetta_theme_tab' -l reset -d 'Restore the configured theme'
+complete -c zetta -n '__zetta_theme_tab' -l list -d 'Print the registered theme names'
+complete -c zetta -n '__zetta_theme_tab' -l help -d 'Print help'
+complete -c zetta -n '__zetta_theme_tab' -a '(__zetta_long_options theme_tab)'
+complete -c zetta -n '__zetta_theme_tab' -a '(__zetta_themes tab)'
 complete -c zetta -n '__fish_seen_subcommand_from overlay' -l text -r -d 'Set the overlay text'
 complete -c zetta -s t -r -n '__fish_seen_subcommand_from overlay; and __zetta_short_option -t'
 complete -c zetta -n '__fish_seen_subcommand_from overlay' -l size -r -a 'sm base lg xl 2xl 3xl' -d 'Set the font size'

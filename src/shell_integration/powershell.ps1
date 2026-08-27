@@ -81,7 +81,7 @@ $zettaProfiles = { param($configArguments) @(& zetta profile list @configArgumen
 $zettaProfileThemes = { param($configArguments) @(& zetta profile themes @configArguments 2>$null) }
 $zettaOverlayColors = @(ZETTA_OVERLAY_COLORS)
 $zettaTabIcons = { @(& zetta tabicon --list 2>$null) }
-$zettaPaneThemes = { @(& zetta panetheme --list 2>$null) }
+$zettaThemes = { param($scope) @(& zetta theme $scope --list 2>$null) }
 $zettaSplits = { @(& zetta splits 2>$null) }
 $zettaProjects = { @(& zetta project list 2>$null) }
 $zettaPaneLabels = { @(& zetta pane --list 2>$null) }
@@ -153,7 +153,7 @@ $zettaCompletions = {
         }
     }
     $subcommand = $words | Where-Object {
-        $_ -in 'benchmark', 'benchmark-output', 'terminal-size', 'mux', 'splits', 'pane', 'profile', 'project', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'notify-cleanup', 'attention', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', 'wt'
+        $_ -in 'benchmark', 'terminal-size', 'mux', 'splits', 'pane', 'profile', 'project', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'theme', 'overlay', 'wt'
     } | Select-Object -First 1
     $worktreeCommand = $false
     $worktreeOperation = ''
@@ -218,11 +218,11 @@ $zettaCompletions = {
         (($previous -eq '-p' -or $last -eq '-p') -and $null -eq $subcommand)
     ) {
         & $zettaProfiles $configArguments
-    } elseif ($previous -in '--timeout', '-t') {
+    } elseif ($previous -in '--timeout', '-t' -and $subcommand -in 'notify', 'attention') {
         'default', 'never'
     } elseif ($previous -in '--output-type', '-t', '--theme', '--text') {
         if ($subcommand -eq 'profile' -or $null -eq $subcommand) { & $zettaProfileThemes $configArguments }
-        elseif ($subcommand -eq 'panetheme') { & $zettaPaneThemes }
+        elseif ($subcommand -eq 'theme' -and $words.Count -gt 2 -and $words[2] -in 'pane', 'tab') { & $zettaThemes $words[2] }
         elseif ($subcommand -in 'notify', 'attention') { 'default', 'never' }
         elseif ($subcommand -eq 'overlay') { @() }
         else { 'repeated', 'unique' }
@@ -270,8 +270,8 @@ $zettaCompletions = {
         $previous -in '--icon', '-i' -or $wordToComplete -notlike '-*'
     )) {
         & $zettaTabIcons
-    } elseif ($subcommand -eq 'panetheme' -and $wordToComplete -notlike '-*') {
-        & $zettaPaneThemes
+    } elseif ($subcommand -eq 'theme' -and $words.Count -gt 2 -and $words[2] -in 'pane', 'tab' -and $wordToComplete -notlike '-*') {
+        & $zettaThemes $words[2]
     } elseif ($subcommand -eq 'profile' -and $profileOperation -in 'theme', 'dark-theme' -and $wordToComplete -notlike '-*' -and $words -notcontains '--reset' -and $words -notcontains '-r' -and -not ($profileOperationIndex -eq ($words.Count - 1) -and -not [string]::IsNullOrEmpty($wordToComplete))) {
         $profileArguments = @($words | Select-Object -Skip ($profileIndex + 2) | Where-Object { $_ -notlike '-*' -and -not [string]::IsNullOrEmpty($_) })
         if ($profileArguments.Count -ge 2 -or ($profileArguments.Count -eq 1 -and [string]::IsNullOrEmpty($wordToComplete))) { & $zettaProfileThemes $configArguments }
@@ -293,11 +293,16 @@ $zettaCompletions = {
             '--help'
         }
     } elseif ($null -eq $subcommand) {
-        'benchmark', 'benchmark-output', 'terminal-size', 'mux', 'profile', 'project', 'splits', 'pane', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'notify-cleanup', 'attention', 'copy', 'paste', 'tabicon', 'panetheme', 'overlay', 'wt', '--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme', '--no-mux'
+        'benchmark', 'terminal-size', 'mux', 'profile', 'project', 'splits', 'pane', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'theme', 'overlay', 'wt', '--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme', '--no-mux'
     } else {
         switch ($subcommand) {
-            'benchmark' { '--profile-report', '--profile-duration', '--profile-pane-stress', '--profile-background-stress', '--profile-sparse-updates', '--profile-alt-screen-scroll', '--profile-external-terminal', '--help' }
-            'benchmark-output' { '--size', '--output-type', '--help' }
+            'benchmark' {
+                if ($words.Count -gt 2 -and $words[2] -eq 'output') {
+                    '--size', '--output-type', '--help'
+                } else {
+                    'output', '--profile-report', '--profile-duration', '--profile-pane-stress', '--profile-background-stress', '--profile-sparse-updates', '--profile-alt-screen-scroll', '--profile-external-terminal', '--help'
+                }
+            }
             'terminal-size' { '--json', '--resize', '--columns', '--rows', '--help' }
             'edit' { '--delete-after', '--help' }
             'vi' { '--help' }
@@ -359,13 +364,24 @@ $zettaCompletions = {
                 elseif ($words[2] -eq 'server') { '--root', '--port', '--config', '--writable', '--help' }
                 else { '--port', '--help' }
             }
-            'notify' { '--app-name', '--icon', '--sound', '--timeout', '--help' }
-            'notify-cleanup' { '--dry-run', '--help' }
+            'notify' {
+                if ($words.Count -gt 2 -and $words[2] -eq 'cleanup') {
+                    '--dry-run', '--help'
+                } else {
+                    'cleanup', '--app-name', '--icon', '--sound', '--timeout', '--help'
+                }
+            }
             'attention' { '--notify', '--app-name', '--icon', '--sound', '--timeout', '--help' }
             'copy' { '--pboard', '--help' }
             'paste' { '--pboard', '--prefer', '--help' }
             'tabicon' { '--icon', '--list', '--help' }
-            'panetheme' { '--theme', '--reset', '--list', '--help' }
+            'theme' {
+                if ($words.Count -le 2) {
+                    'pane', 'tab', '--help'
+                } elseif ($words[2] -in 'pane', 'tab') {
+                    '--theme', '--reset', '--list', '--help'
+                }
+            }
             'overlay' { '--text', '--size', '--opacity', '--color', '--reset', '--help' }
             'wt' {
                 if ([string]::IsNullOrEmpty($worktreeOperation)) {

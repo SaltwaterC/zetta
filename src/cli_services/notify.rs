@@ -421,7 +421,7 @@ fn spawn_notification_response_watchdog(timeout: Option<NotificationTimeout>) {
     }
 }
 
-/// `zetta notify-cleanup` reaps workers left over from before
+/// `zetta notify cleanup` reaps workers left over from before
 /// [`spawn_notification_response_watchdog`] existed (or from a build that
 /// predates it). It is a plain CLI maintenance command, not a background
 /// service: it scans, reports, and exits.
@@ -433,7 +433,7 @@ pub(crate) struct NotifyCleanupCommand {
 
 #[cfg(notify_cleanup_enabled)]
 pub(crate) fn notify_cleanup_help() -> &'static str {
-    "Reap stale desktop notification worker processes\n\nUsage: zetta notify-cleanup [OPTIONS]\n\nA `zetta notify` invocation that targets a pane spawns a detached worker that waits for the notification to be clicked or dismissed, so it can focus the originating tab. Some notification servers (GNOME Shell in particular) do not reliably signal when a notification expires, which can leave a worker running indefinitely with nothing left to click. This command finds Zetta notification workers that have outlived their notification's own timeout and terminates them.\n\nOptions:\n  -n, --dry-run  List stale workers without terminating them\n  -h, --help     Print help"
+    "Reap stale desktop notification worker processes\n\nUsage: zetta notify cleanup [OPTIONS]\n\nA `zetta notify` invocation that targets a pane spawns a detached worker that waits for the notification to be clicked or dismissed, so it can focus the originating tab. Some notification servers (GNOME Shell in particular) do not reliably signal when a notification expires, which can leave a worker running indefinitely with nothing left to click. This command finds Zetta notification workers that have outlived their notification's own timeout and terminates them.\n\nOptions:\n  -n, --dry-run  List stale workers without terminating them\n  -h, --help     Print help"
 }
 
 #[cfg(notify_cleanup_enabled)]
@@ -448,7 +448,7 @@ pub(crate) fn parse_notify_cleanup_args(
                 dry_run = true;
             }
             "--help" | "-h" => anyhow::bail!("{}", notify_cleanup_help()),
-            option => anyhow::bail!("unknown notify-cleanup option {option:?}"),
+            option => anyhow::bail!("unknown notify cleanup option {option:?}"),
         }
     }
     Ok(CliServiceCommand::NotifyCleanup(NotifyCleanupCommand {

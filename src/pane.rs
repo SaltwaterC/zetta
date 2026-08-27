@@ -2036,6 +2036,10 @@ pub(crate) struct Tab {
     pub(crate) panes: Vec<TerminalPane>,
     pub(crate) pane_indices: HashMap<u64, usize>,
     pub(crate) next_pane_label: usize,
+    /// A session-scoped theme shared by this tab's terminal content and tab
+    /// chrome. Pane overrides take precedence over this value for terminal
+    /// content, but never change it.
+    pub(crate) theme_override: Option<String>,
     pub(crate) layout: PaneLayout,
     pub(crate) active_pane: u64,
     pub(crate) focus_history: Vec<u64>,
@@ -2456,10 +2460,10 @@ impl Tab {
         self.activate_pane(next);
     }
 
-    /// Chrome shared across a tab's panes (tab bar, pane borders, error
-    /// banners) always follows the active pane's *configured* profile theme,
-    /// never a pane's non-persistent theme override — an ephemeral,
-    /// single-pane preview should not repaint the rest of the tab.
+    /// The configured fallback for chrome shared across a tab's panes (tab bar,
+    /// pane borders, error banners). `Zetta::theme_for_tab` checks the tab's
+    /// session override and project theme before calling this; a pane's
+    /// non-persistent override never repaints the rest of the tab.
     ///
     /// `fallback` supplies the theme for a tab whose active profile selects
     /// none, and is lazy so the common case never resolves it. It is the

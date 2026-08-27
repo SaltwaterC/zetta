@@ -641,8 +641,10 @@ pub(crate) struct Zetta {
     pub(crate) tab_icon_picker: Option<TabIconPicker>,
     pub(crate) theme_picker_focus: gpui::FocusHandle,
     pub(crate) theme_picker: Option<CommandPalette>,
-    /// Name of the row representing the pane's currently effective theme,
-    /// ticked in the picker regardless of keyboard-selection position.
+    /// Scope whose selector is currently open.
+    pub(crate) theme_picker_scope: ThemeScope,
+    /// Name of the row representing the currently effective theme, ticked in
+    /// the picker regardless of keyboard-selection position.
     pub(crate) theme_picker_current: Option<String>,
     #[cfg(feature = "serial-console")]
     pub(crate) serial_console_focus: gpui::FocusHandle,
@@ -872,6 +874,7 @@ impl Zetta {
             tab_icon_picker: None,
             theme_picker_focus: cx.focus_handle(),
             theme_picker: None,
+            theme_picker_scope: ThemeScope::Pane,
             theme_picker_current: None,
             #[cfg(feature = "serial-console")]
             serial_console_focus: cx.focus_handle(),
@@ -1094,6 +1097,7 @@ impl Zetta {
             ],
             pane_indices: HashMap::from([(pane_id, 0)]),
             next_pane_label: 2,
+            theme_override: None,
             layout: PaneLayout::Pane(pane_id),
             active_pane: pane_id,
             focus_history: vec![pane_id],
@@ -2066,6 +2070,10 @@ impl Zetta {
             return false;
         }
         let tab_id = tab.id;
+        let tab_theme_override = tab.theme_override.clone();
+        let active_pane_theme_override = tab
+            .active_pane()
+            .and_then(|pane| pane.theme_override.clone());
         let active_pane_id = tab.active_pane;
         let active_pane = tab.active_pane();
         let Some(active_profile) = tab.active_profile().cloned() else {
@@ -2092,7 +2100,18 @@ impl Zetta {
         }
         let terminal_themes = match leaves
             .iter()
-            .map(|leaf| resolve_project_profile_theme(&leaf.profile, project.as_deref(), cx))
+            .enumerate()
+            .map(|(index, leaf)| {
+                resolve_terminal_theme(
+                    (index == 0)
+                        .then_some(active_pane_theme_override.as_deref())
+                        .flatten(),
+                    tab_theme_override.as_deref(),
+                    &leaf.profile,
+                    project.as_deref(),
+                    cx,
+                )
+            })
             .collect::<Result<Vec<_>>>()
         {
             Ok(themes) => themes,
@@ -2330,6 +2349,10 @@ impl Zetta {
             return false;
         };
         let tab_id = tab.id;
+        let tab_theme_override = tab.theme_override.clone();
+        let pane_theme_override = tab
+            .pane(tab.active_pane)
+            .and_then(|pane| pane.theme_override.clone());
         let active_pane_id = tab.active_pane;
         let active_pane = tab.active_pane();
         let effective_config = self.effective_config();
@@ -2351,7 +2374,9 @@ impl Zetta {
             self.working_directory.clone(),
             working_directory_configured,
         );
-        let terminal_theme = match resolve_project_profile_theme(
+        let terminal_theme = match resolve_terminal_theme(
+            pane_theme_override.as_deref(),
+            tab_theme_override.as_deref(),
             &profile,
             self.active_project_config().map(AsRef::as_ref),
             cx,
@@ -2743,15 +2768,13 @@ impl Zetta {
         let theme = view
             .and_then(|view| view.read(cx).theme().cloned())
             .or_else(|| {
-                pane.theme_override(selection)
-                    .and_then(|name| ThemeRegistry::global(cx).get(name).ok())
-            })
-            .or_else(|| {
-                resolve_project_profile_theme(
+                resolve_terminal_theme(
+                    pane.theme_override(selection),
+                    tab.theme_override.as_deref(),
                     profile,
                     self.projects
                         .config_for_pane(project_pane_id)
-                        .map(|project| project.as_ref()),
+                        .map(Arc::as_ref),
                     cx,
                 )
                 .ok()

@@ -231,22 +231,25 @@ A maximized pane has a status strip below it. Restore it from that strip or
 with `Shift-Escape`.
 
 Press `Alt-Shift-T`, or `Cmd-Shift-T` on macOS, or run **Change Pane Theme**
-from the command palette to open a searchable list of registered themes.
-Selecting one non-persistently changes only the active pane's theme; type to
-filter, use the arrow keys and `Enter` to apply, or `Escape` to cancel. The
-list always shows a checkmark next to the pane's current theme and pins
-**Reset to profile default** at the top to clear the override and go back to
-the profile's configured theme (or the global default, if the profile has
-none). The override is session-scoped rather than configuration: it is not
-written to `config.json`, the profile, or the settings view. It follows the
-logical pane through backgrounding, reconnect, and encrypted disk resume, and
-disappears when the pane closes or configuration reloads.
+from the command palette to open a searchable list of registered themes for
+the active pane. **Change Tab Theme** opens the same picker for the whole tab.
+Selecting a pane theme changes only that pane's terminal content; selecting a
+tab theme refreshes every terminal in the tab and the tab-specific chrome.
+**Reset Pane Theme** and **Reset Tab Theme** are also available directly from
+the command palette.
+Pane overrides take precedence over tab overrides. The picker pins a reset
+action at the top: pane reset falls back to the tab theme, while tab reset
+falls back to the configured project/profile/application theme. Type to
+filter, use the arrow keys and `Enter` to apply, or `Escape` to cancel.
 
-The same change is available from any Zetta pane, or a script, with
-`zetta panetheme THEME`; `zetta panetheme --reset` clears the override, and
-`zetta panetheme --list` prints the theme names registered in the running
-process (built-in and user-installed). Shell integration completes pane
-theme names dynamically, the same way it does for `zetta tabicon`.
+These overrides are session-scoped rather than configuration: they are not
+written to `config.json`, the profile, or the settings view. They follow the
+logical pane or tab through backgrounding, reconnect, and encrypted disk
+resume, and disappear when that pane or tab closes or configuration reloads.
+The commands `zetta theme pane THEME` and `zetta theme tab THEME` apply the
+same overrides from a script. Add `--reset` to clear one, or `--list` to print
+the theme names registered in the running process (built-in and
+user-installed). Shell integration completes both scopes dynamically.
 
 Run **Set Pane Overlay** from the command palette to edit text shown over the
 active pane's terminal content. It renders as larger, translucent text in the pane's top-right

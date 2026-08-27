@@ -16,6 +16,7 @@ fn pin_test_tab(id: u64, pinned: bool) -> Tab {
         panes: vec![pane],
         pane_indices: HashMap::from([(id, 0)]),
         next_pane_label: 2,
+        theme_override: None,
         layout: PaneLayout::Pane(id),
         active_pane: id,
         focus_history: vec![id],

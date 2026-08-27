@@ -162,7 +162,9 @@ actions!(
         RenameTab,
         ChangeTabIcon,
         ChangePaneTheme,
+        ChangeTabTheme,
         ResetPaneTheme,
+        ResetTabTheme,
         RenamePane,
         SetPaneOverlay,
         ResetPaneOverlay,
@@ -238,11 +240,35 @@ struct ApplyPaneSplitTemplate {
     name: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ThemeScope {
+    Pane,
+    Tab,
+}
+
+impl ThemeScope {
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Pane => "pane",
+            Self::Tab => "tab",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
-#[action(namespace = zetta)]
+#[action(namespace = zetta, no_json, no_register)]
 #[serde(deny_unknown_fields)]
-struct ApplyPaneTheme {
+struct ApplyTheme {
     name: String,
+    scope: ThemeScope,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = zetta, no_json, no_register)]
+#[serde(deny_unknown_fields)]
+struct ResetTheme {
+    scope: ThemeScope,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]

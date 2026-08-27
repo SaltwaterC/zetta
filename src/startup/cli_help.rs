@@ -84,7 +84,7 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         ""
     };
     let notify_cleanup_usage = if cfg!(notify_cleanup_enabled) {
-        "\n       zetta notify-cleanup [OPTIONS]"
+        "\n       zetta notify cleanup [OPTIONS]"
     } else {
         ""
     };
@@ -114,7 +114,7 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         ""
     };
     let notify_cleanup_command = if cfg!(notify_cleanup_enabled) {
-        "\n  notify-cleanup                      Reap stale desktop notification worker processes"
+        "\n  notify cleanup                      Reap stale desktop notification worker processes"
     } else {
         ""
     };
@@ -129,10 +129,14 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         .collect::<Vec<_>>()
         .join("\n  ");
     let help = format!(
-        "Zetta Terminal\n\nUsage: zetta [OPTIONS]\n       zetta benchmark [OPTIONS]\n       zetta benchmark-output [OPTIONS]\n       zetta terminal-size [--json | --resize [--columns COLUMNS] [--rows ROWS]]\n       zetta mux [COMMAND]\n       zetta profile <COMMAND>\n       zetta project <COMMAND>\n       zetta init [SHELL]{serial_usage}{http_usage}{tftp_usage}{notify_usage}{notify_cleanup_usage}{clipboard_usage}\n\nCommands:\n  benchmark                           Profile terminal rendering\n  benchmark-output                    Write and time a text payload (default: 10 MiB)\n  terminal-size                       Print or resize the current terminal pane\n  mux                                 Control, list, and reconnect background sessions\n  profile                             List and manage profiles\n  project                             List, add, remove, or open projects\n  init                                Configure or generate shell integration{serial_command}{http_command}{tftp_command}{notify_command}{notify_cleanup_command}{clipboard_command}\n\nBuilt-in features:\n  {}\n\nProfiles accepted by --profile NAME (case-insensitive):\n  {profiles}\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Select one of the profiles listed above\n  -s, --split NAME                    Apply a configured pane split template; run `zetta splits` to list available names\n  -t, --theme NAME                    Non-persistently override --profile's theme for this launch",
+        "Zetta Terminal\n\nUsage: zetta [OPTIONS]\n       zetta benchmark [OPTIONS]\n       zetta benchmark output [OPTIONS]\n       zetta terminal-size [--json | --resize [--columns COLUMNS] [--rows ROWS]]\n       zetta mux [COMMAND]\n       zetta profile <COMMAND>\n       zetta project <COMMAND>\n       zetta init [SHELL]{serial_usage}{http_usage}{tftp_usage}{notify_usage}{notify_cleanup_usage}{clipboard_usage}\n\nCommands:\n  benchmark                           Profile terminal rendering\n  terminal-size                       Print or resize the current terminal pane\n  mux                                 Control, list, and reconnect background sessions\n  profile                             List and manage profiles\n  project                             List, add, remove, or open projects\n  init                                Configure or generate shell integration{serial_command}{http_command}{tftp_command}{notify_command}{notify_cleanup_command}{clipboard_command}\n\nBuilt-in features:\n  {}\n\nProfiles accepted by --profile NAME (case-insensitive):\n  {profiles}\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Select one of the profiles listed above\n  -s, --split NAME                    Apply a configured pane split template; run `zetta splits` to list available names\n  -t, --theme NAME                    Non-persistently override --profile's theme for this launch",
         features.join("\n  "),
     );
     help
+    .replace(
+        "  benchmark                           Profile terminal rendering",
+        "  benchmark                           Profile terminal rendering\n  benchmark output                    Write and time a text payload (default: 10 MiB)",
+    )
     .replace(
         "       zetta profile <COMMAND>",
         "       zetta pane [OPTIONS] -- COMMAND [ARGUMENT ...]\n       zetta pane --list\n       zetta profile <COMMAND>",
@@ -163,11 +167,11 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
     )
     .replace(
         "       zetta mux [COMMAND]",
-        "       zetta mux [COMMAND]\n       zetta mux reconnect SESSION_ID\n       zetta mux resume SESSION [-i PATH]\n       zetta splits\n       zetta tabicon [OPTIONS] ICON\n       zetta tabicon --list\n       zetta panetheme [OPTIONS] THEME\n       zetta panetheme --reset\n       zetta panetheme --list\n       zetta overlay [OPTIONS] TEXT\n       zetta overlay --reset\n       zetta edit [OPTIONS] [--] FILE ...\n       zetta vi [OPTIONS] [FILE ...]",
+        "       zetta mux [COMMAND]\n       zetta mux reconnect SESSION_ID\n       zetta mux resume SESSION [-i PATH]\n       zetta splits\n       zetta tabicon [OPTIONS] ICON\n       zetta tabicon --list\n       zetta theme pane [OPTIONS] THEME\n       zetta theme tab [OPTIONS] THEME\n       zetta theme pane --reset\n       zetta theme tab --reset\n       zetta theme pane --list\n       zetta theme tab --list\n       zetta overlay [OPTIONS] TEXT\n       zetta overlay --reset\n       zetta edit [OPTIONS] [--] FILE ...\n       zetta vi [OPTIONS] [FILE ...]",
     )
     .replace(
         "mux                                 Control, list, and reconnect background sessions",
-        "mux                                 Control, list, reconnect, and resume background sessions\n  wt                                  Create and integrate Git worktrees\n  splits                              List configured pane split templates\n  tabicon                             Set the active tab's icon override\n  panetheme                           Non-persistently change the active pane's theme\n  overlay                             Non-persistently show text over the active pane\n  edit                                Edit files with $EDITOR, falling back to Zetta vi\n  vi                                  Edit files with Zetta's built-in vi",
+        "mux                                 Control, list, reconnect, and resume background sessions\n  wt                                  Create and integrate Git worktrees\n  splits                              List configured pane split templates\n  tabicon                             Set the active tab's icon override\n  theme                               Non-persistently change the active pane or tab's theme\n  overlay                             Non-persistently show text over the active pane\n  edit                                Edit files with $EDITOR, falling back to Zetta vi\n  vi                                  Edit files with Zetta's built-in vi",
     )
     .replace(
         "  -v, --version                       Print version",
@@ -253,8 +257,22 @@ pub(crate) fn parse_tab_icon_args(args: &[OsString]) -> Result<StartupMode> {
     Ok(StartupMode::SetTabIcon { icon })
 }
 
-pub(crate) fn pane_theme_help() -> &'static str {
-    "Non-persistently change the active pane's theme through the running Zetta process\n\nUsage: zetta panetheme [OPTIONS] THEME\n       zetta panetheme --reset\n       zetta panetheme --list\n\nTHEME is a theme name registered in the running Zetta process (built-in or user-installed). The theme list is fetched dynamically with --list. The session-scoped change is never written to configuration: it is preserved across backgrounding, reconnect, and encrypted disk resume, and is lost when the pane closes or configuration reloads.\n\nOptions:\n  -t, --theme NAME  Set the theme by option instead of as a positional argument\n  -r, --reset       Restore the active pane's profile-configured theme\n  -l, --list        Print the running process's registered theme names\n  -h, --help        Print help"
+pub(crate) fn theme_help(scope: Option<ThemeScope>) -> String {
+    let usage = match scope {
+        Some(scope) => format!(
+            "Usage: zetta theme {} [OPTIONS] THEME\n       zetta theme {} --reset\n       zetta theme {} --list",
+            scope.name(),
+            scope.name(),
+            scope.name()
+        ),
+        None => "Usage: zetta theme pane [OPTIONS] THEME\n       zetta theme tab [OPTIONS] THEME\n       zetta theme pane --reset\n       zetta theme tab --reset\n       zetta theme pane --list\n       zetta theme tab --list".to_owned(),
+    };
+    let target = scope
+        .map(|scope| format!("active {}", scope.name()))
+        .unwrap_or_else(|| "active pane or tab".to_owned());
+    format!(
+        "Non-persistently change the {target}'s theme through the running Zetta process\n\n{usage}\n\nTHEME is a theme name registered in the running Zetta process (built-in or user-installed). The theme list is fetched dynamically with --list. The session-scoped change is never written to configuration: it is preserved across backgrounding, reconnect, and encrypted disk resume, and is lost when the pane or tab closes or configuration reloads.\n\nOptions:\n  -t, --theme NAME  Set the theme by option instead of as a positional argument\n  -r, --reset       Restore the configured theme (or the tab theme for a pane)\n  -l, --list        Print the running process's registered theme names\n  -h, --help        Print help"
+    )
 }
 
 pub(crate) fn pane_splits_help() -> &'static str {
@@ -265,7 +283,7 @@ pub(crate) fn pane_help() -> &'static str {
     "Run a command in an existing or newly created pane\n\nUsage: zetta pane [OPTIONS] -- COMMAND [ARGUMENT ...]\n       zetta pane --list\n\nWithout --direction, the command is sent to the selected pane's existing base shell. With --stack, it runs in a task-backed stacked terminal. With --direction, a new split is created relative to the active pane; up and down split horizontally, while left and right split vertically. Commands are passed as exact argv values, and must follow --. An overlay can be shown on a newly created split with --overlay.\n\nOptions:\n  -d, --direction DIRECTION  Create a split to the left, right, up, or down of the active pane\n  -l, --label LABEL          Assign a generated label to a newly created split pane\n  -p, --pane LABEL           Target an existing pane by its exact, case-sensitive label\n  -o, --overlay TEXT         Show TEXT over a newly created split pane\n  -S, --overlay-size SIZE    Set overlay size: sm, base, lg, xl, 2xl, or 3xl\n  -O, --overlay-opacity PCT  Set overlay opacity from 0 to 100\n  -c, --overlay-color COLOR  Set overlay color by name or hex value\n  -s, --stack                 Run the command in a stacked task terminal\n  -L, --list                  Print labels for panes in the active tab\n  -h, --help                  Print help\n\nExamples:\n  zetta pane --direction right --label api --overlay API -- npm run dev\n  zetta pane --direction up --overlay TESTS --overlay-color cyan -- cargo test\n  zetta pane --pane api -- make test\n  zetta pane --pane api --stack -- tail -f server.log"
 }
 
-pub(crate) fn parse_pane_theme_args(args: &[OsString]) -> Result<StartupMode> {
+pub(crate) fn parse_theme_args(scope: ThemeScope, args: &[OsString]) -> Result<StartupMode> {
     let mut theme_name = None;
     let mut reset = false;
     let mut list = false;
@@ -273,7 +291,7 @@ pub(crate) fn parse_pane_theme_args(args: &[OsString]) -> Result<StartupMode> {
     while let Some(argument) = arguments.next() {
         match argument.to_string_lossy().as_ref() {
             "--help" | "-h" => {
-                println!("{}", pane_theme_help());
+                println!("{}", theme_help(Some(scope)));
                 std::process::exit(0);
             }
             "--reset" | "-r" => {
@@ -295,7 +313,7 @@ pub(crate) fn parse_pane_theme_args(args: &[OsString]) -> Result<StartupMode> {
                 );
             }
             value if value.starts_with('-') => {
-                anyhow::bail!("unknown panetheme option {value:?}")
+                anyhow::bail!("unknown theme option {value:?}")
             }
             value => {
                 anyhow::ensure!(theme_name.is_none(), "only one theme may be specified");
@@ -308,18 +326,24 @@ pub(crate) fn parse_pane_theme_args(args: &[OsString]) -> Result<StartupMode> {
             theme_name.is_none() && !reset,
             "--list cannot be combined with a theme name or --reset"
         );
-        return Ok(StartupMode::ListPaneThemes);
+        return Ok(StartupMode::ListThemes);
     }
     if reset {
         anyhow::ensure!(
             theme_name.is_none(),
             "--reset cannot be combined with a theme name"
         );
-        return Ok(StartupMode::SetPaneTheme { theme: None });
+        return Ok(StartupMode::SetTheme { scope, theme: None });
     }
-    let theme_name = theme_name
-        .context("zetta panetheme requires a theme name; run zetta panetheme --help for usage")?;
-    Ok(StartupMode::SetPaneTheme {
+    let theme_name = theme_name.with_context(|| {
+        format!(
+            "zetta theme {} requires a theme name; run zetta theme {} --help for usage",
+            scope.name(),
+            scope.name()
+        )
+    })?;
+    Ok(StartupMode::SetTheme {
+        scope,
         theme: Some(theme_name),
     })
 }

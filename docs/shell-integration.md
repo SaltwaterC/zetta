@@ -76,15 +76,16 @@ embed the built-in icon list. Use `zetta tabicon ICON` (or
 `zetta tabicon --icon ICON`) from a Zetta pane; `none` hides the active tab
 icon.
 
-Pane-theme completion works the same way: completing `zetta panetheme` runs
-`zetta panetheme --list` at completion time against the running Zetta
-process, so the generated script does not embed a theme list and always
-offers whatever that process has registered, including user-installed
-themes. Use `zetta panetheme THEME` (or `zetta panetheme --theme THEME`) from
-a Zetta pane to set its session-scoped theme. The choice survives
-backgrounding, reconnect, and encrypted disk resume, but not pane close or a
-configuration reload. `zetta panetheme --reset` restores the profile's
-configured theme. `--theme`
+Theme completion works the same way: completing `zetta theme pane` or
+`zetta theme tab` runs `zetta theme <scope> --list` at completion time against
+the running Zetta process, so the generated script does not embed a theme list
+and always offers whatever that process has registered, including
+user-installed themes. Use `zetta theme pane THEME` or `zetta theme tab THEME`
+(or the corresponding `--theme THEME` form) from a Zetta pane to set a
+session-scoped theme. The choice survives backgrounding, reconnect, and
+encrypted disk resume, but not pane/tab close or a configuration reload.
+`zetta theme pane --reset` falls back to the tab theme; `zetta theme tab
+--reset` restores the configured theme. `--theme`
 (or `-t`) also completes profile themes when typed after `--profile` at launch,
 since it non-persistently overrides that profile's theme for the new window.
 

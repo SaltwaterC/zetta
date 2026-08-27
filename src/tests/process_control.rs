@@ -1,4 +1,5 @@
 use super::*;
+use crate::ThemeScope;
 use crate::pane::{PaneDirection, overlay_color_to_hex};
 use futures::StreamExt as _;
 
@@ -25,6 +26,7 @@ fn request(token: &str, command: &str) -> ControlRequest {
         split: None,
         profile: None,
         theme: None,
+        scope: None,
         pane_request: None,
     }
 }
@@ -63,6 +65,7 @@ fn send_reconnect_session_request(
         split: None,
         profile: None,
         theme: None,
+        scope: None,
         pane_request: None,
     };
     let result = write_message(&mut stream, &request).and_then(|()| {
@@ -678,33 +681,61 @@ fn tab_icon_control_requests_decode_names_and_allow_clearing() {
 }
 
 #[test]
-fn pane_theme_control_requests_decode_names_and_allow_resetting() {
-    let mut theme_request = request("token", "set_pane_theme");
-    theme_request.pane_theme = Some("Dracula".to_owned());
+fn theme_control_requests_decode_scopes_and_allow_resetting() {
+    let mut theme_request = request("token", "set_theme");
+    theme_request.scope = Some("pane".to_owned());
+    theme_request.theme = Some("Dracula".to_owned());
     assert_eq!(
         decode_control_request(&mut theme_request, "token"),
-        Some(ControlRequestCommand::SetPaneTheme {
+        Some(ControlRequestCommand::SetTheme {
+            scope: ThemeScope::Pane,
             theme: Some("Dracula".to_owned())
         })
     );
 
-    let mut reset_request = request("token", "set_pane_theme");
+    let mut reset_request = request("token", "set_theme");
+    reset_request.scope = Some("tab".to_owned());
     assert_eq!(
         decode_control_request(&mut reset_request, "token"),
-        Some(ControlRequestCommand::SetPaneTheme { theme: None })
+        Some(ControlRequestCommand::SetTheme {
+            scope: ThemeScope::Tab,
+            theme: None
+        })
+    );
+
+    let mut missing_scope = request("token", "set_theme");
+    assert_eq!(decode_control_request(&mut missing_scope, "token"), None);
+
+    let mut invalid_scope = request("token", "set_theme");
+    invalid_scope.scope = Some("window".to_owned());
+    assert_eq!(decode_control_request(&mut invalid_scope, "token"), None);
+
+    let mut empty_theme = request("token", "set_theme");
+    empty_theme.scope = Some("pane".to_owned());
+    empty_theme.theme = Some(String::new());
+    assert_eq!(decode_control_request(&mut empty_theme, "token"), None);
+
+    assert_eq!(
+        decode_control_request(&mut request("token", "set_pane_theme"), "token"),
+        None
     );
 }
 
 #[test]
-fn pane_theme_list_requests_carry_no_arguments() {
+fn theme_list_requests_carry_no_arguments() {
     assert_eq!(
-        decode_control_request(&mut request("token", "list_pane_themes"), "token"),
-        Some(ControlRequestCommand::ListPaneThemes)
+        decode_control_request(&mut request("token", "list_themes"), "token"),
+        Some(ControlRequestCommand::ListThemes)
     );
 
-    let mut invalid_request = request("token", "list_pane_themes");
+    let mut invalid_request = request("token", "list_themes");
     invalid_request.pane_theme = Some("Dracula".to_owned());
     assert_eq!(decode_control_request(&mut invalid_request, "token"), None);
+
+    assert_eq!(
+        decode_control_request(&mut request("token", "list_pane_themes"), "token"),
+        None
+    );
 }
 
 #[test]
@@ -863,6 +894,7 @@ fn reconnect_requests_carry_a_session_target_and_optional_secret() {
         split: None,
         profile: None,
         theme: None,
+        scope: None,
         pane_request: None,
     };
     assert_eq!(
@@ -1199,9 +1231,9 @@ fn control_server_delivers_the_registered_theme_names() {
     let endpoint: ControlEndpoint =
         serde_json::from_slice(&fs::read(endpoint_path).unwrap()).unwrap();
 
-    let client = thread::spawn(move || send_list_pane_themes_request(&endpoint).unwrap());
+    let client = thread::spawn(move || send_list_themes_request(&endpoint).unwrap());
     let command = futures::executor::block_on(received.next()).unwrap();
-    let ProcessControlCommand::ListPaneThemes { completion } = command else {
+    let ProcessControlCommand::ListThemes { completion } = command else {
         panic!("unexpected process control command");
     };
     completion

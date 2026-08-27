@@ -7,18 +7,36 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_pane_theme_picker(window, cx);
+        self.open_theme_picker(ThemeScope::Pane, window, cx);
     }
 
-    pub(crate) fn open_pane_theme_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn change_tab_theme(
+        &mut self,
+        _: &ChangeTabTheme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_theme_picker(ThemeScope::Tab, window, cx);
+    }
+
+    pub(crate) fn open_theme_picker(
+        &mut self,
+        scope: ThemeScope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Falls back to the global theme when the pane has neither an
         // override nor a profile theme, so the tick mark always lands on
         // whichever theme is actually showing, not just an active override.
         let current_theme_name = self
             .tabs
             .get(self.active_tab)
-            .and_then(Tab::active_view)
-            .and_then(|view| view.read(cx).theme().cloned())
+            .and_then(|tab| match scope {
+                ThemeScope::Pane => tab
+                    .active_view()
+                    .and_then(|view| view.read(cx).theme().cloned()),
+                ThemeScope::Tab => Some(self.theme_for_tab(tab, cx)),
+            })
             .or_else(|| Some(self.window_theme(cx)))
             .map(|theme| theme.name.to_string());
         let mut theme_names = ThemeRegistry::global(cx)
@@ -29,16 +47,20 @@ impl Zetta {
         theme_names.sort();
         theme_names.dedup();
         let reset_command = PaletteCommand {
-            name: "Reset to profile default".to_owned(),
+            name: match scope {
+                ThemeScope::Pane => "Reset to tab default",
+                ThemeScope::Tab => "Reset to configured theme",
+            }
+            .to_owned(),
             shortcut: None,
-            action: Box::new(ResetPaneTheme),
+            action: Box::new(ResetTheme { scope }),
         };
         let theme_commands = theme_names
             .into_iter()
             .map(|name| PaletteCommand {
                 name: name.clone(),
                 shortcut: None,
-                action: Box::new(ApplyPaneTheme { name }),
+                action: Box::new(ApplyTheme { name, scope }),
             })
             .collect();
         let mut picker = CommandPalette::with_pinned_first(reset_command, theme_commands);
@@ -51,6 +73,7 @@ impl Zetta {
             picker.selected = index;
         }
         picker.scroll_to_selected();
+        self.theme_picker_scope = scope;
         self.theme_picker_current = current_theme_name;
         self.theme_picker = Some(picker);
         self.theme_picker_focus.focus(window, cx);
@@ -222,35 +245,69 @@ impl Zetta {
         }
     }
 
-    pub(crate) fn apply_pane_theme(
+    pub(crate) fn apply_theme(
         &mut self,
-        action: &ApplyPaneTheme,
+        action: &ApplyTheme,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.set_active_pane_theme(Some(action.name.clone()), cx);
+        self.set_theme(action.scope, Some(action.name.clone()), cx);
     }
 
+    pub(crate) fn reset_theme(
+        &mut self,
+        action: &ResetTheme,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_theme(action.scope, None, cx);
+    }
+
+    /// Keep the pre-scoped action usable for keymaps that already refer to it;
+    /// the picker itself dispatches [`ResetTheme`] so its scope is explicit.
     pub(crate) fn reset_pane_theme(
         &mut self,
         _: &ResetPaneTheme,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.set_active_pane_theme(None, cx);
+        self.set_theme(ThemeScope::Pane, None, cx);
     }
 
-    /// Applies `theme_name` to the active logical pane only: it never touches
-    /// `pane.profile`, `self.profiles`, or the configuration file. The choice
-    /// follows the pane through session transfers and is cleared by reset,
-    /// pane close, or the next configuration reload.
-    /// `None` restores whatever theme the pane's profile is configured with.
-    /// Shared by the interactive picker and the `panetheme` CLI command.
-    pub(crate) fn set_active_pane_theme(
+    pub(crate) fn reset_tab_theme(
         &mut self,
+        _: &ResetTabTheme,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_theme(ThemeScope::Tab, None, cx);
+    }
+
+    /// Applies a session-scoped theme to the active pane or tab. It never
+    /// touches profiles or the configuration file. The choice follows the
+    /// pane/tab through session transfers and is cleared by reset, close, or
+    /// the next configuration reload.
+    pub(crate) fn set_theme(
+        &mut self,
+        scope: ThemeScope,
         theme_name: Option<String>,
         cx: &mut Context<Self>,
     ) -> bool {
+        if scope == ThemeScope::Tab {
+            let Some(tab_id) = self.tabs.get(self.active_tab).map(|tab| tab.id) else {
+                return false;
+            };
+            if let Some(name) = theme_name.as_deref()
+                && ThemeRegistry::global(cx).get(name).is_err()
+            {
+                return false;
+            }
+            self.tabs[self.active_tab].theme_override = theme_name;
+            self.refresh_terminal_themes_in_tab(tab_id, cx);
+            cx.notify();
+            return true;
+        }
+
         let Some((pane_id, selection, project_pane_id, profile, view)) = self
             .tabs
             .get(self.active_tab)
@@ -310,7 +367,9 @@ impl Zetta {
                         entry.theme_override = None;
                     }
                 }
-                resolve_project_profile_theme(
+                resolve_terminal_theme(
+                    None,
+                    self.tabs[self.active_tab].theme_override.as_deref(),
                     &profile,
                     self.projects
                         .config_for_pane(project_pane_id)
@@ -340,6 +399,11 @@ impl Zetta {
         let query_after = query_after.to_owned();
         let query_empty = picker.query.is_empty();
         let query_selected = picker.select_all;
+        let theme_scope = self.theme_picker_scope;
+        let search_placeholder = match theme_scope {
+            ThemeScope::Pane => "Search pane themes",
+            ThemeScope::Tab => "Search tab themes",
+        };
         let result_count = picker.matches().len();
         let row_handle = handle.clone();
         let row_colors = colors.clone();
@@ -479,7 +543,7 @@ impl Zetta {
                                             input.child(
                                                 div()
                                                     .text_color(colors.text_placeholder)
-                                                    .child("Search pane themes"),
+                                                    .child(search_placeholder),
                                             )
                                         }),
                                 ),

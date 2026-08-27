@@ -149,11 +149,12 @@ pub(crate) enum ProcessControlCommand {
         icon: Option<IconName>,
         completion: Sender<bool>,
     },
-    SetPaneTheme {
+    SetTheme {
+        scope: crate::ThemeScope,
         theme: Option<String>,
         completion: Sender<bool>,
     },
-    ListPaneThemes {
+    ListThemes {
         completion: Sender<Vec<String>>,
     },
     GetPaneTheme {
@@ -224,10 +225,11 @@ enum ControlRequestCommand {
     SetTabIcon {
         icon: Option<IconName>,
     },
-    SetPaneTheme {
+    SetTheme {
+        scope: crate::ThemeScope,
         theme: Option<String>,
     },
-    ListPaneThemes,
+    ListThemes,
     GetPaneTheme {
         attention_id: u64,
         pane_id: Option<u64>,
@@ -292,6 +294,8 @@ struct ControlRequest {
     split: Option<String>,
     profile: Option<String>,
     theme: Option<String>,
+    #[serde(default)]
+    scope: Option<String>,
     pane_request: Option<PaneControlRequest>,
 }
 
@@ -671,10 +675,11 @@ impl ProcessControlServer {
                                 && wait_for_control_completion(&completed, &stopping_for_thread);
                             if accepted { "ok" } else { "rejected" }
                         }
-                        Some(ControlRequestCommand::SetPaneTheme { theme }) => {
+                        Some(ControlRequestCommand::SetTheme { scope, theme }) => {
                             let (completion, completed) = channel();
                             let accepted = commands
-                                .unbounded_send(ProcessControlCommand::SetPaneTheme {
+                                .unbounded_send(ProcessControlCommand::SetTheme {
+                                    scope,
                                     theme,
                                     completion,
                                 })
@@ -682,12 +687,10 @@ impl ProcessControlServer {
                                 && wait_for_control_completion(&completed, &stopping_for_thread);
                             if accepted { "ok" } else { "rejected" }
                         }
-                        Some(ControlRequestCommand::ListPaneThemes) => {
+                        Some(ControlRequestCommand::ListThemes) => {
                             let (completion, completed) = channel();
                             let accepted = commands
-                                .unbounded_send(ProcessControlCommand::ListPaneThemes {
-                                    completion,
-                                })
+                                .unbounded_send(ProcessControlCommand::ListThemes { completion })
                                 .is_ok();
                             match accepted
                                 .then(|| {
@@ -1038,6 +1041,10 @@ fn decode_control_request(
         zeroize_control_request_secrets(request);
         return None;
     }
+    if request.command != "set_theme" && request.scope.is_some() {
+        zeroize_control_request_secrets(request);
+        return None;
+    }
     if request.command != "get_pane_theme" && request.pane_id.is_some() {
         zeroize_control_request_secrets(request);
         return None;
@@ -1331,22 +1338,31 @@ fn decode_control_request(
             };
             Some(ControlRequestCommand::SetTabIcon { icon })
         }
-        "set_pane_theme"
+        "set_theme"
             if request.runner_id.is_none()
                 && request.session_id.is_none()
                 && request.secret.is_none() =>
         {
-            Some(ControlRequestCommand::SetPaneTheme {
-                theme: request.pane_theme.take(),
-            })
+            let scope = match request.scope.take()?.as_str() {
+                "pane" => crate::ThemeScope::Pane,
+                "tab" => crate::ThemeScope::Tab,
+                _ => return None,
+            };
+            let theme = request.theme.take();
+            if theme.as_deref().is_some_and(str::is_empty) {
+                return None;
+            }
+            Some(ControlRequestCommand::SetTheme { scope, theme })
         }
-        "list_pane_themes"
+        "list_themes"
             if request.runner_id.is_none()
                 && request.session_id.is_none()
                 && request.secret.is_none()
-                && request.pane_theme.is_none() =>
+                && request.icon.is_none()
+                && request.pane_theme.is_none()
+                && request.theme.is_none() =>
         {
-            Some(ControlRequestCommand::ListPaneThemes)
+            Some(ControlRequestCommand::ListThemes)
         }
         "get_pane_theme"
             if request.runner_id.is_none()
@@ -1769,7 +1785,10 @@ pub(crate) fn request_existing_process_tab_icon(icon: Option<IconName>) -> Resul
     Ok(false)
 }
 
-pub(crate) fn request_existing_process_pane_theme(theme: Option<String>) -> Result<bool> {
+pub(crate) fn request_existing_process_theme(
+    scope: crate::ThemeScope,
+    theme: Option<String>,
+) -> Result<bool> {
     let directory = crate::background_sessions::session_catalog_dir();
     let entries = match fs::read_dir(&directory) {
         Ok(entries) => entries,
@@ -1797,14 +1816,14 @@ pub(crate) fn request_existing_process_pane_theme(theme: Option<String>) -> Resu
             let _ = fs::remove_file(endpoint.socket_path);
             continue;
         }
-        if send_set_pane_theme_request(&endpoint, theme.clone()).unwrap_or(false) {
+        if send_set_theme_request(&endpoint, scope, theme.clone()).unwrap_or(false) {
             return Ok(true);
         }
     }
     Ok(false)
 }
 
-pub(crate) fn request_existing_process_pane_theme_list() -> Result<Option<Vec<String>>> {
+pub(crate) fn request_existing_process_theme_list() -> Result<Option<Vec<String>>> {
     let directory = crate::background_sessions::session_catalog_dir();
     let entries = match fs::read_dir(&directory) {
         Ok(entries) => entries,
@@ -1832,7 +1851,7 @@ pub(crate) fn request_existing_process_pane_theme_list() -> Result<Option<Vec<St
             let _ = fs::remove_file(endpoint.socket_path);
             continue;
         }
-        if let Some(themes) = send_list_pane_themes_request(&endpoint).unwrap_or(None) {
+        if let Some(themes) = send_list_themes_request(&endpoint).unwrap_or(None) {
             return Ok(Some(themes));
         }
     }
@@ -2082,6 +2101,7 @@ fn send_open_window_request(endpoint: &ControlEndpoint) -> Result<bool> {
             split: None,
             profile: None,
             theme: None,
+            scope: None,
             pane_request: None,
         },
     )?;
@@ -2117,6 +2137,7 @@ fn send_open_project_request(endpoint: &ControlEndpoint, root: &Path) -> Result<
             split: None,
             profile: None,
             theme: None,
+            scope: None,
             pane_request: None,
         },
     )?;
@@ -2152,6 +2173,7 @@ fn send_reload_projects_request(endpoint: &ControlEndpoint) -> Result<bool> {
             split: None,
             profile: None,
             theme: None,
+            scope: None,
             pane_request: None,
         },
     )?;
@@ -2191,6 +2213,7 @@ fn send_get_silent_mode_request(
             split: None,
             profile: None,
             theme: None,
+            scope: None,
             pane_request: None,
         },
     )?;
@@ -2233,6 +2256,7 @@ fn send_set_tab_attention_request(
             split: None,
             profile: None,
             theme: None,
+            scope: None,
             pane_request: None,
         },
     )?;
@@ -2269,6 +2293,7 @@ fn send_set_tab_name_request(endpoint: &ControlEndpoint, request: &TabNameReques
             split: None,
             profile: None,
             theme: None,
+            scope: None,
             pane_request: None,
         },
     )?;
@@ -2307,6 +2332,7 @@ fn send_set_worktree_name_request(
             split: None,
             profile: None,
             theme: None,
+            scope: None,
             pane_request: None,
         },
     )?;
@@ -2344,6 +2370,7 @@ fn send_focus_tab_request(endpoint: &ControlEndpoint, attention_id: u64) -> Resu
             split: None,
             profile: None,
             theme: None,
+            scope: None,
             pane_request: None,
         },
     )?;
@@ -2379,6 +2406,7 @@ fn send_run_pane_request(endpoint: &ControlEndpoint, request: &PaneCommand) -> R
             split: None,
             profile: None,
             theme: None,
+            scope: None,
             pane_request: Some(request.into()),
         },
     )?;
@@ -2420,6 +2448,7 @@ fn send_list_pane_labels_request(endpoint: &ControlEndpoint) -> Result<Option<Ve
             split: None,
             profile: None,
             theme: None,
+            scope: None,
             pane_request: None,
         },
     )?;
@@ -2464,6 +2493,7 @@ fn send_replace_pane_request(
             split: request.split.clone(),
             profile: request.profile.clone(),
             theme: request.theme.clone(),
+            scope: None,
             pane_request: None,
         },
     )?;
@@ -2502,6 +2532,7 @@ fn send_reload_configuration_request(
             split: None,
             profile: None,
             theme: None,
+            scope: None,
             pane_request: None,
         },
     )?;
@@ -2540,6 +2571,7 @@ fn send_set_tab_icon_request(endpoint: &ControlEndpoint, icon: Option<IconName>)
             split: None,
             profile: None,
             theme: None,
+            scope: None,
             pane_request: None,
         },
     )?;
@@ -2547,7 +2579,11 @@ fn send_set_tab_icon_request(endpoint: &ControlEndpoint, icon: Option<IconName>)
     Ok(response.status == "ok")
 }
 
-fn send_set_pane_theme_request(endpoint: &ControlEndpoint, theme: Option<String>) -> Result<bool> {
+fn send_set_theme_request(
+    endpoint: &ControlEndpoint,
+    scope: crate::ThemeScope,
+    theme: Option<String>,
+) -> Result<bool> {
     let mut stream = UnixStream::connect(&endpoint.socket_path)?;
     stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
     stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
@@ -2555,12 +2591,12 @@ fn send_set_pane_theme_request(endpoint: &ControlEndpoint, theme: Option<String>
         &mut stream,
         &ControlRequest {
             token: endpoint.token.clone(),
-            command: "set_pane_theme".to_owned(),
+            command: "set_theme".to_owned(),
             runner_id: None,
             session_id: None,
             secret: None,
             icon: None,
-            pane_theme: theme,
+            pane_theme: None,
             pane_id: None,
             pane_overlay: None,
             pane_overlay_font_size: None,
@@ -2574,7 +2610,8 @@ fn send_set_pane_theme_request(endpoint: &ControlEndpoint, theme: Option<String>
             config_path: None,
             split: None,
             profile: None,
-            theme: None,
+            theme,
+            scope: Some(scope.name().to_owned()),
             pane_request: None,
         },
     )?;
@@ -2582,7 +2619,7 @@ fn send_set_pane_theme_request(endpoint: &ControlEndpoint, theme: Option<String>
     Ok(response.status == "ok")
 }
 
-fn send_list_pane_themes_request(endpoint: &ControlEndpoint) -> Result<Option<Vec<String>>> {
+fn send_list_themes_request(endpoint: &ControlEndpoint) -> Result<Option<Vec<String>>> {
     let mut stream = UnixStream::connect(&endpoint.socket_path)?;
     stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
     stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
@@ -2590,7 +2627,7 @@ fn send_list_pane_themes_request(endpoint: &ControlEndpoint) -> Result<Option<Ve
         &mut stream,
         &ControlRequest {
             token: endpoint.token.clone(),
-            command: "list_pane_themes".to_owned(),
+            command: "list_themes".to_owned(),
             runner_id: None,
             session_id: None,
             secret: None,
@@ -2610,6 +2647,7 @@ fn send_list_pane_themes_request(endpoint: &ControlEndpoint) -> Result<Option<Ve
             split: None,
             profile: None,
             theme: None,
+            scope: None,
             pane_request: None,
         },
     )?;
@@ -2650,6 +2688,7 @@ fn send_get_pane_theme_request(
             split: None,
             profile: None,
             theme: None,
+            scope: None,
             pane_request: None,
         },
     )?;
@@ -2693,6 +2732,7 @@ fn send_set_overlay_request(
             split: None,
             profile: None,
             theme: None,
+            scope: None,
             pane_request: None,
         },
     )?;
