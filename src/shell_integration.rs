@@ -1,4 +1,5 @@
 use super::*;
+use crate::startup::format_help_table;
 use std::ffi::OsStr;
 use std::io::Write as _;
 #[cfg(windows)]
@@ -569,7 +570,15 @@ fn render_overlay_color_names(shell: ShellIntegration) -> String {
 }
 
 pub(crate) fn shell_integration_help() -> String {
-    let help = "Configure or generate shell integration\n\nUsage: zetta init [SHELL]\n\nWithout SHELL, detects the active supported shell process (falling back to SHELL when process inspection cannot identify it) and adds the integration command to its startup file. On Windows, Unix-style HOME paths from MSYS2 and Cygwin are resolved with cygpath; when neither an active shell nor SHELL identifies a POSIX shell, Zetta detects the launching PowerShell and writes to its $PROFILE. Running it again leaves an existing integration unchanged. With SHELL, prints the integration script for use in a shell startup file.\n\nSupported shells:\n  bash        Bash\n  fish        Fish\n  powershell  PowerShell (also accepted as pwsh)\n  zsh         Z shell\n\nThe generated script adds completion, including dynamic profile and theme values from `zetta profile list` and `zetta profile themes`, live serial-device, tab-icon, pane-split, pane-label, and --replace-pane completion, the root --command option (which passes the rest of the command line to the child), the attention command's notification options, the zvi shortcut for the built-in vi editor, the ztftp shortcut when the TFTP client is enabled, and the zntfy and zcopy/zpaste shortcuts when desktop notifications and clipboard access are enabled. `zetta pane --direction` completes left, right, up, and down, while `zetta pane --pane` fetches labels from the active process, and new-pane overlay sizes and colors are offered as fixed values. zcopy/zpaste are also available as pbcopy/pbpaste on platforms other than macOS, taking priority over any existing pbcopy/pbpaste alias so pbcopy/pbpaste muscle memory keeps working there too.";
+    let supported_shells = format_help_table([
+        ("bash", "Bash"),
+        ("fish", "Fish"),
+        ("powershell", "PowerShell (also accepted as pwsh)"),
+        ("zsh", "Z shell"),
+    ]);
+    let help = format!(
+        "Configure or generate shell integration\n\nUsage: zetta init [SHELL]\n\nWithout SHELL, detects the active supported shell process (falling back to SHELL when process inspection cannot identify it) and adds the integration command to its startup file. On Windows, Unix-style HOME paths from MSYS2 and Cygwin are resolved with cygpath; when neither an active shell nor SHELL identifies a POSIX shell, Zetta detects the launching PowerShell and writes to its $PROFILE. Running it again leaves an existing integration unchanged. With SHELL, prints the integration script for use in a shell startup file.\n\nSupported shells:\n{supported_shells}\n\nThe generated script adds completion, including dynamic profile and theme values from `zetta profile list` and `zetta profile themes`, live serial-device, tab-icon, pane-split, pane-label, and --replace-pane completion, the root --command option (which passes the rest of the command line to the child), the attention command's notification options, the zvi shortcut for the built-in vi editor, the ztftp shortcut when the TFTP client is enabled, and the zntfy and zcopy/zpaste shortcuts when desktop notifications and clipboard access are enabled. `zetta pane --direction` completes left, right, up, and down, while `zetta pane --pane` fetches labels from the active process, and new-pane overlay sizes and colors are offered as fixed values. zcopy/zpaste are also available as pbcopy/pbpaste on platforms other than macOS, taking priority over any existing pbcopy/pbpaste alias so pbcopy/pbpaste muscle memory keeps working there too."
+    );
     format!(
         "{help}\n\nThe generated integration also provides the zwt wrapper for zetta wt new and zetta wt done; it changes directory only after a successful operation. Worktree completion includes the repeatable --copy path option and filesystem path arguments. Profile administration also completes the fixed icon values auto, zetta, bash, zsh, and fish."
     )

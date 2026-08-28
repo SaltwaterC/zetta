@@ -5,6 +5,7 @@ use std::{
 
 use anyhow::{Context as _, Result};
 
+use crate::startup::format_help_table;
 use crate::{
     config::Config,
     project::{
@@ -172,22 +173,57 @@ fn absolute_path_without_requiring_existence(path: Option<&Path>) -> Result<Path
     }
 }
 
-pub(crate) fn project_help(operation: Option<&str>) -> &'static str {
+pub(crate) fn project_help(operation: Option<&str>) -> String {
     match operation {
         Some("add") => {
-            "Register a Zetta project\n\nUsage: zetta project add [PATH]\n       zetta project add --path PATH\n\nCreates PATH/.zetta/config.json with an empty object when it does not exist, validates it, and records the canonical project root. Without PATH, the nearest native Git repository root is used, falling back to the current directory. WSL uses the exact current directory and is never scanned. Register only trusted projects: pane templates may launch commands.\n\nOptions:\n  -p, --path PATH  Project root\n  -h, --help       Print help"
+            format!(
+                "Register a Zetta project\n\nUsage: zetta project add [PATH]\n       zetta project add --path PATH\n\nCreates PATH/.zetta/config.json with an empty object when it does not exist, validates it, and records the canonical project root. Without PATH, the nearest native Git repository root is used, falling back to the current directory. WSL uses the exact current directory and is never scanned. Register only trusted projects: pane templates may launch commands.\n\nOptions:\n{}",
+                format_help_table([
+                    ("-p, --path PATH", "Project root"),
+                    ("-h, --help", "Print help"),
+                ])
+            )
         }
         Some("list") => {
-            "List registered Zetta projects\n\nUsage: zetta project list\n\nPrints one canonical project root per line.\n\nOptions:\n  -h, --help  Print help"
+            format!(
+                "List registered Zetta projects\n\nUsage: zetta project list\n\nPrints one canonical project root per line.\n\nOptions:\n{}",
+                format_help_table([("-h, --help", "Print help")])
+            )
         }
         Some("remove") => {
-            "Unregister a Zetta project\n\nUsage: zetta project remove [PATH]\n       zetta project remove --path PATH\n\nRemoves the containing project from Zetta's registry. The project's .zetta/config.json is never deleted.\n\nOptions:\n  -p, --path PATH  Project root or a path inside it\n  -h, --help       Print help"
+            format!(
+                "Unregister a Zetta project\n\nUsage: zetta project remove [PATH]\n       zetta project remove --path PATH\n\nRemoves the containing project from Zetta's registry. The project's .zetta/config.json is never deleted.\n\nOptions:\n{}",
+                format_help_table([
+                    ("-p, --path PATH", "Project root or a path inside it"),
+                    ("-h, --help", "Print help"),
+                ])
+            )
         }
         Some("open") => {
-            "Open a registered Zetta project\n\nUsage: zetta project open [PATH]\n       zetta project open --path PATH\n\nOpens the containing registered project in a new active tab of the running Zetta process, or starts Zetta when needed.\n\nOptions:\n  -p, --path PATH  Project root or a path inside it\n  -h, --help       Print help"
+            format!(
+                "Open a registered Zetta project\n\nUsage: zetta project open [PATH]\n       zetta project open --path PATH\n\nOpens the containing registered project in a new active tab of the running Zetta process, or starts Zetta when needed.\n\nOptions:\n{}",
+                format_help_table([
+                    ("-p, --path PATH", "Project root or a path inside it"),
+                    ("-h, --help", "Print help"),
+                ])
+            )
         }
         _ => {
-            "Manage Zetta projects\n\nUsage: zetta project <COMMAND> [OPTIONS]\n\nCommands:\n  add       Create or validate project configuration and register the project\n  list      List registered projects\n  remove    Unregister a project without deleting its configuration\n  open      Open a registered project in a new active tab\n\nRun `zetta project <COMMAND> --help` for command-specific help."
+            let commands = format_help_table([
+                (
+                    "add",
+                    "Create or validate project configuration and register the project",
+                ),
+                ("list", "List registered projects"),
+                (
+                    "remove",
+                    "Unregister a project without deleting its configuration",
+                ),
+                ("open", "Open a registered project in a new active tab"),
+            ]);
+            format!(
+                "Manage Zetta projects\n\nUsage: zetta project <COMMAND> [OPTIONS]\n\nCommands:\n{commands}\n\nRun `zetta project <COMMAND> --help` for command-specific help."
+            )
         }
     }
 }

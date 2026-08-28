@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 
+use crate::startup::format_help_table;
+
 use super::{
     DEFAULT_BLOCK_SIZE, DEFAULT_TFTP_PORT, MAX_BLOCK_SIZE, MAX_RETRIES, OP_ACK, OP_DATA, OP_ERROR,
     OP_OACK, OP_RRQ, OP_WRQ, SOCKET_TIMEOUT, ack_packet, check_error_packet, packet_block,
@@ -55,14 +57,41 @@ impl TftpCommand {
     }
 }
 
-pub(crate) fn tftp_help() -> &'static str {
+pub(crate) fn tftp_help() -> String {
     #[cfg(feature = "tftp-server")]
     {
-        "Zetta TFTP tools\n\nUsage:\n  zetta tftp get [--port PORT] HOST REMOTE [LOCAL]\n  zetta tftp put [--port PORT] HOST LOCAL [REMOTE]\n  zetta tftp server [OPTIONS]\n\nCommands:\n  get       Download REMOTE, optionally naming the LOCAL output file\n  put       Upload LOCAL, optionally naming the REMOTE file\n  server    Serve files with TFTP\n\nClient options:\n  -p, --port PORT    Server port (default: 69)\n  -h, --help         Print help\n\nRun `zetta tftp server --help` for server options."
+        format!(
+            "Zetta TFTP tools\n\nUsage:\n  zetta tftp get [--port PORT] HOST REMOTE [LOCAL]\n  zetta tftp put [--port PORT] HOST LOCAL [REMOTE]\n  zetta tftp server [OPTIONS]\n\nCommands:\n{}\n\nClient options:\n{}\n\nRun `zetta tftp server --help` for server options.",
+            format_help_table([
+                (
+                    "get",
+                    "Download REMOTE, optionally naming the LOCAL output file",
+                ),
+                ("put", "Upload LOCAL, optionally naming the REMOTE file",),
+                ("server", "Serve files with TFTP"),
+            ]),
+            format_help_table([
+                ("-p, --port PORT", "Server port (default: 69)"),
+                ("-h, --help", "Print help"),
+            ])
+        )
     }
     #[cfg(not(feature = "tftp-server"))]
     {
-        "Zetta TFTP client\n\nUsage:\n  zetta tftp get [--port PORT] HOST REMOTE [LOCAL]\n  zetta tftp put [--port PORT] HOST LOCAL [REMOTE]\n\nCommands:\n  get    Download REMOTE, optionally naming the LOCAL output file\n  put    Upload LOCAL, optionally naming the REMOTE file\n\nOptions:\n  -p, --port PORT    Server port (default: 69)\n  -h, --help         Print help"
+        format!(
+            "Zetta TFTP client\n\nUsage:\n  zetta tftp get [--port PORT] HOST REMOTE [LOCAL]\n  zetta tftp put [--port PORT] HOST LOCAL [REMOTE]\n\nCommands:\n{}\n\nOptions:\n{}",
+            format_help_table([
+                (
+                    "get",
+                    "Download REMOTE, optionally naming the LOCAL output file",
+                ),
+                ("put", "Upload LOCAL, optionally naming the REMOTE file",),
+            ]),
+            format_help_table([
+                ("-p, --port PORT", "Server port (default: 69)"),
+                ("-h, --help", "Print help"),
+            ])
+        )
     }
 }
 

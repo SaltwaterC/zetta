@@ -12,6 +12,7 @@ use std::cell::RefCell;
 use std::os::unix::ffi::OsStringExt;
 
 use crate::process_control::{WorktreeNameRequest, request_process_worktree_name};
+use crate::startup::format_help_table;
 use crate::worktree_copy::{
     copy_paths as copy_worktree_paths, cow_copy_supported, validate_copy_path, validate_copy_paths,
     validate_copy_sources,
@@ -182,48 +183,49 @@ fn parse_no_arguments(
     Ok(command)
 }
 
-pub(crate) fn worktree_help() -> &'static str {
-    "Zetta Git worktree workflow\n\nUsage: zetta wt <COMMAND>\n       zetta wt new [OPTIONS] NAME\n       zetta wt done [OPTIONS]\n       zetta wt status\n       zetta wt rerere\n\nCommands:\n  new                                 Create a wt/NAME worktree from the current branch\n  done                                Rebase, integrate, and remove the current wt/* worktree\n  status                              Show the current worktree workflow state\n  rerere                              Enable Git recorded conflict-resolution helpers\n\nThe direct CLI never changes the caller directory. Generated shell integration provides\nzwt, which changes directory after successful new or done operations.\n\nWorktree roots:\n  Git reads effective wt.root configuration. Configure a repository with:\n    git config --local wt.root ../project-worktrees\n  Relative values resolve from the repository main worktree root. Without wt.root, Zetta\n  uses sibling directory <repository>-worktrees. NAME may contain nested components such\n  as feature/api, which creates <wt.root>/feature/api.\n\nRecommended setup:\n  zetta wt rerere\n  This enables rerere.enabled and rerere.autoupdate globally so repeated conflicts can\n  be resolved automatically after you resolve and stage them once."
-}
-
-pub(crate) fn worktree_new_help() -> &'static str {
-    concat!(
-        "Create a Git worktree for a temporary wt/NAME branch\n\n",
-        "Usage: zetta wt new [OPTIONS] NAME\n\n",
-        "The current worktree must be on an attached branch. Zetta creates branch wt/NAME,\n",
-        "records that branch source in wtbranch.wt/NAME.base, and places the worktree at\n",
-        "<wt.root>/NAME. Nested NAME values are supported. The default root is sibling\n",
-        "<repository>-worktrees; configure a repository root with git config --local wt.root PATH.\n",
-        "For example, use git config --local wt.root ../project-worktrees. Relative PATH values\n",
-        "resolve from the repository root. Existing paths, symlinks, and branches are rejected.\n\n",
-        "If the source commit contains submodules, new recursively initializes them at their\n",
-        "recorded commits. An initialized matching submodule checkout in the source worktree\n",
-        "is reused as a local Git object reference when possible; otherwise Git uses the\n",
-        "submodule's configured remote. If initialization fails, Zetta force-removes the\n",
-        "partial worktree, deletes its branch, and clears its metadata.\n\n",
-        "The repeatable --copy PATH (or -c PATH) option copies a relative file, directory,\n",
-        "or symlink from the current source worktree to the identical location in the new\n",
-        "worktree. Paths may not be absolute, traverse a parent directory, or traverse an\n",
-        "intermediate symlink. Existing destination paths and overlapping copy requests are\n",
-        "rejected. Native copy-on-write cloning is used when the filesystem supports it, with\n",
-        "a regular recursive-copy fallback elsewhere. A copy failure removes the new\n",
-        "worktree, branch, metadata, and directories created for its root.\n\n",
-        "new reports phase progress on standard error while creating the worktree,\n",
-        "initializing submodules, copying paths, and recording metadata.\n\n",
-        "Options:\n",
-        "  -c, --copy PATH                   Copy a source-worktree path (repeatable)\n",
-        "  -P, --path-only                   Print exactly the created worktree path\n",
-        "  -h, --help                        Print help\n\n",
-        "Use zwt new NAME from generated shell integration to create the worktree and cd into\n",
-        "it. The zetta wt rerere shortcut is recommended before the first conflict."
+pub(crate) fn worktree_help() -> String {
+    format!(
+        "Zetta Git worktree workflow\n\nUsage: zetta wt <COMMAND>\n       zetta wt new [OPTIONS] NAME\n       zetta wt done [OPTIONS]\n       zetta wt status\n       zetta wt rerere\n\nCommands:\n{}\n\nThe direct CLI never changes the caller directory. Generated shell integration provides\nzwt, which changes directory after successful new or done operations.\n\nWorktree roots:\n  Git reads effective wt.root configuration. Configure a repository with:\n    git config --local wt.root ../project-worktrees\n  Relative values resolve from the repository main worktree root. Without wt.root, Zetta\n  uses sibling directory <repository>-worktrees. NAME may contain nested components such\n  as feature/api, which creates <wt.root>/feature/api.\n\nRecommended setup:\n  zetta wt rerere\n  This enables rerere.enabled and rerere.autoupdate globally so repeated conflicts can\n  be resolved automatically after you resolve and stage them once.",
+        format_help_table([
+            ("new", "Create a wt/NAME worktree from the current branch"),
+            (
+                "done",
+                "Rebase, integrate, and remove the current wt/* worktree",
+            ),
+            ("status", "Show the current worktree workflow state"),
+            ("rerere", "Enable Git recorded conflict-resolution helpers",),
+        ])
     )
 }
 
-pub(crate) fn worktree_done_help() -> &'static str {
-    "Integrate and remove the current temporary worktree\n\nUsage: zetta wt done [OPTIONS]\n\nThe current worktree must be a clean, attached wt/* branch created by zetta wt new.\nZetta rebases it onto the recorded source branch, verifies that the source worktree is\nstill attached to a clean worktree, fast-forwards that source worktree, removes the\ntemporary worktree and branch, and clears the source metadata. Submodule changes are\nincluded in the cleanliness checks. Worktrees whose current commit contains submodules\nare removed with Git's forced worktree cleanup after successful integration. If a rebase\nconflicts, resolve the files, stage the resolutions with git add, and rerun zetta wt done.\n\nOptions:\n  -P, --path-only                   Print exactly the integrated source worktree path\n  -h, --help                        Print help\n\nThe direct CLI does not change directory. zwt done changes into the source worktree\nafter success. The worktree destination uses the configured wt.root, or the sibling\n<repository>-worktrees default when wt.root is unset. For example, use git config --local\nwt.root ../project-worktrees. Run zetta wt rerere to enable Git recorded conflict-resolution\nhelpers."
+pub(crate) fn worktree_new_help() -> String {
+    let options = format_help_table([
+        (
+            "-c, --copy PATH",
+            "Copy a source-worktree path (repeatable)",
+        ),
+        ("-P, --path-only", "Print exactly the created worktree path"),
+        ("-h, --help", "Print help"),
+    ]);
+    format!(
+        "Create a Git worktree for a temporary wt/NAME branch\n\nUsage: zetta wt new [OPTIONS] NAME\n\nThe current worktree must be on an attached branch. Zetta creates branch wt/NAME,\nrecords that branch source in wtbranch.wt/NAME.base, and places the worktree at\n<wt.root>/NAME. Nested NAME values are supported. The default root is sibling\n<repository>-worktrees; configure a repository root with git config --local wt.root PATH.\nFor example, use git config --local wt.root ../project-worktrees. Relative PATH values\nresolve from the repository root. Existing paths, symlinks, and branches are rejected.\n\nIf the source commit contains submodules, new recursively initializes them at their\nrecorded commits. An initialized matching submodule checkout in the source worktree\nis reused as a local Git object reference when possible; otherwise Git uses the\nsubmodule's configured remote. If initialization fails, Zetta force-removes the\npartial worktree, deletes its branch, and clears its metadata.\n\nThe repeatable --copy PATH (or -c PATH) option copies a relative file, directory,\nor symlink from the current source worktree to the identical location in the new\nworktree. Paths may not be absolute, traverse a parent directory, or traverse an\nintermediate symlink. Existing destination paths and overlapping copy requests are\nrejected. Native copy-on-write cloning is used when the filesystem supports it, with\na regular recursive-copy fallback elsewhere. A copy failure removes the new\nworktree, branch, metadata, and directories created for its root.\n\nnew reports phase progress on standard error while creating the worktree,\ninitializing submodules, copying paths, and recording metadata.\n\nOptions:\n{options}\n\nUse zwt new NAME from generated shell integration to create the worktree and cd into\nit. The zetta wt rerere shortcut is recommended before the first conflict."
+    )
 }
 
-pub(crate) fn worktree_status_help() -> &'static str {
+pub(crate) fn worktree_done_help() -> String {
+    let options = format_help_table([
+        (
+            "-P, --path-only",
+            "Print exactly the integrated source worktree path",
+        ),
+        ("-h, --help", "Print help"),
+    ]);
+    format!(
+        "Integrate and remove the current temporary worktree\n\nUsage: zetta wt done [OPTIONS]\n\nThe current worktree must be a clean, attached wt/* branch created by zetta wt new.\nZetta rebases it onto the recorded source branch, verifies that the source worktree is\nstill attached to a clean worktree, fast-forwards that source worktree, removes the\ntemporary worktree and branch, and clears the source metadata. Submodule changes are\nincluded in the cleanliness checks. Worktrees whose current commit contains submodules\nare removed with Git's forced worktree cleanup after successful integration. If a rebase\nconflicts, resolve the files, stage the resolutions with git add, and rerun zetta wt done.\n\nOptions:\n{options}\n\nThe direct CLI does not change directory. zwt done changes into the source worktree\nafter success. The worktree destination uses the configured wt.root, or the sibling\n<repository>-worktrees default when wt.root is unset. For example, use git config --local\nwt.root ../project-worktrees. Run zetta wt rerere to enable Git recorded conflict-resolution\nhelpers."
+    )
+}
+
+pub(crate) fn worktree_status_help() -> String {
     concat!(
         "Show Git worktree workflow state\n\n",
         "Usage: zetta wt status\n\n",
@@ -239,10 +241,12 @@ pub(crate) fn worktree_status_help() -> &'static str {
         "resolution helpers. The direct CLI never changes directory; generated zwt new and\n",
         "zwt done wrappers enter worktrees only after successful operations."
     )
+    .to_owned()
 }
 
-pub(crate) fn worktree_rerere_help() -> &'static str {
+pub(crate) fn worktree_rerere_help() -> String {
     "Enable Git rerere for the worktree workflow\n\nUsage: zetta wt rerere\n\nRuns git config --global rerere.enabled true and git config --global\nrerere.autoupdate true. This is the recommended shortcut before using zetta wt done,\nespecially when the same conflicts recur. The optional wt.root setting does not affect\nrerere; configure it per repository with git config --local wt.root PATH, where a\nrelative PATH is resolved from the repository root and the default is sibling\n<repository>-worktrees. Generated shell integration provides zwt new and zwt done,\nwhich enter the resulting worktrees after successful operations."
+        .to_owned()
 }
 
 pub(crate) fn run(command: &WorktreeCommand) -> Result<()> {

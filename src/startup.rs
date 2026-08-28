@@ -49,6 +49,7 @@ use arg_parsing::{
     should_handoff_to_existing_process, should_replace_pane_in_existing_process,
     validate_launch_split,
 };
+pub(crate) use cli_help::format_help_table;
 #[cfg(not(feature = "tftp-client"))]
 pub(crate) use cli_help::{TftpCommand, parse_tftp_args, tftp_help};
 pub(crate) use keybindings::{

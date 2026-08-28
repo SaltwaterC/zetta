@@ -11,6 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 
+use crate::startup::format_help_table;
+
 use super::{
     CliServiceCommand, NotificationRequest, NotificationTarget, NotificationTimeout,
     parse_notification_timeout,
@@ -55,8 +57,29 @@ fn notification_target_from_worker_environment() -> Result<NotificationTarget> {
         .context("notification worker has an invalid target")
 }
 
-pub(crate) fn notify_help() -> &'static str {
-    "Show a desktop notification\n\nUsage: zetta notify [OPTIONS] SUMMARY [BODY]\n\nSUMMARY is the notification's title; BODY is optional additional text.\n\nOptions:\n  -a, --app-name NAME                Set the notification's application name\n  -i, --icon PATH                    Show an image from PATH with the notification (default: Zetta's icon)\n  -s, --sound NAME                   zetta-default, zetta-ok, zetta-alarm, zetta-gong, or a platform-specific system sound name\n  -t, --timeout WHEN                 default, never, or a number of milliseconds (default: default)\n  -h, --help                         Print help\n\nShows the notification through the desktop's native notification system: D-Bus\non Linux and BSD, Notification Center on macOS, and toast notifications on\nWindows. Without --icon, Zetta's own icon is shown; it is bundled in the\nbinary, so it is always available. --app-name has no effect on macOS and\n--timeout is ignored by some macOS notification centers; every other option\nbehaves the same on all platforms.\n\n--sound zetta-default, zetta-ok, zetta-alarm, and zetta-gong are bundled tones\nthat Zetta plays directly, so they always sound the same regardless of the\nhost's sound theme or configuration. Any other value is passed through as a\nplatform-specific system sound name (for example a freedesktop sound-theme\nname on Linux, a system sound name on macOS, or a toast sound identifier on\nWindows) and is only played if the platform recognizes it."
+pub(crate) fn notify_help() -> String {
+    format!(
+        "Show a desktop notification\n\nUsage: zetta notify [OPTIONS] SUMMARY [BODY]\n\nSUMMARY is the notification's title; BODY is optional additional text.\n\nOptions:\n{}\n\nShows the notification through the desktop's native notification system: D-Bus\non Linux and BSD, Notification Center on macOS, and toast notifications on\nWindows. Without --icon, Zetta's own icon is shown; it is bundled in the\nbinary, so it is always available. --app-name has no effect on macOS and\n--timeout is ignored by some macOS notification centers; every other option\nbehaves the same on all platforms.\n\n--sound zetta-default, zetta-ok, zetta-alarm, and zetta-gong are bundled tones\nthat Zetta plays directly, so they always sound the same regardless of the\nhost's sound theme or configuration. Any other value is passed through as a\nplatform-specific system sound name (for example a freedesktop sound-theme\nname on Linux, a system sound name on macOS, or a toast sound identifier on\nWindows) and is only played if the platform recognizes it.",
+        format_help_table([
+            (
+                "-a, --app-name NAME",
+                "Set the notification's application name"
+            ),
+            (
+                "-i, --icon PATH",
+                "Show an image from PATH with the notification (default: Zetta's icon)",
+            ),
+            (
+                "-s, --sound NAME",
+                "zetta-default, zetta-ok, zetta-alarm, zetta-gong, or a platform-specific system sound name",
+            ),
+            (
+                "-t, --timeout WHEN",
+                "default, never, or a number of milliseconds (default: default)",
+            ),
+            ("-h, --help", "Print help"),
+        ])
+    )
 }
 
 pub(crate) fn parse_notify_args(
@@ -432,8 +455,17 @@ pub(crate) struct NotifyCleanupCommand {
 }
 
 #[cfg(notify_cleanup_enabled)]
-pub(crate) fn notify_cleanup_help() -> &'static str {
-    "Reap stale desktop notification worker processes\n\nUsage: zetta notify cleanup [OPTIONS]\n\nA `zetta notify` invocation that targets a pane spawns a detached worker that waits for the notification to be clicked or dismissed, so it can focus the originating tab. Some notification servers (GNOME Shell in particular) do not reliably signal when a notification expires, which can leave a worker running indefinitely with nothing left to click. This command finds Zetta notification workers that have outlived their notification's own timeout and terminates them.\n\nOptions:\n  -n, --dry-run  List stale workers without terminating them\n  -h, --help     Print help"
+pub(crate) fn notify_cleanup_help() -> String {
+    format!(
+        "Reap stale desktop notification worker processes\n\nUsage: zetta notify cleanup [OPTIONS]\n\nA `zetta notify` invocation that targets a pane spawns a detached worker that waits for the notification to be clicked or dismissed, so it can focus the originating tab. Some notification servers (GNOME Shell in particular) do not reliably signal when a notification expires, which can leave a worker running indefinitely with nothing left to click. This command finds Zetta notification workers that have outlived their notification's own timeout and terminates them.\n\nOptions:\n{}",
+        format_help_table([
+            (
+                "-n, --dry-run",
+                "List stale workers without terminating them"
+            ),
+            ("-h, --help", "Print help"),
+        ])
+    )
 }
 
 #[cfg(notify_cleanup_enabled)]

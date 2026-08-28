@@ -28,6 +28,30 @@ fn version_flags_and_output_are_defined() {
 }
 
 #[test]
+fn format_help_table_aligns_multiline_rows_without_trailing_whitespace() {
+    let help = format_help_table([
+        ("short", "first description\ncontinued description"),
+        ("long label", "second description"),
+    ]);
+    let lines = help.lines().collect::<Vec<_>>();
+    let description_column = 2 + "long label".chars().count() + 2;
+
+    assert_eq!(lines.len(), 3);
+    assert_eq!(lines[0].find("first description"), Some(description_column));
+    assert_eq!(
+        lines[1].find("continued description"),
+        Some(description_column)
+    );
+    assert_eq!(
+        lines[2].find("second description"),
+        Some(description_column)
+    );
+    assert!(lines.iter().all(|line| *line == line.trim_end()));
+    assert!(lines[0].starts_with("  short"));
+    assert!(lines[2].starts_with("  long label"));
+}
+
+#[test]
 fn help_text_uses_title_case_and_lists_built_in_features() {
     let profiles = [
         Profile {
@@ -60,55 +84,31 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     assert!(help.contains("-n, --no-mux"));
     assert!(help.contains("-e, --command COMMAND [ARGUMENT ...]"));
     assert!(help.contains("zetta pane [OPTIONS] -- COMMAND [ARGUMENT ...]"));
-    assert!(
-        help.contains(
-            "pane                                Run a command in an existing or new pane"
-        )
-    );
+    assert!(help.contains("Run a command in an existing or new pane"));
     assert!(help.contains("requires --split or --profile"));
     assert!(help.contains("zetta splits"));
-    assert!(
-        help.contains("splits                              List configured pane split templates")
-    );
+    assert!(help.contains("List configured pane split templates"));
     assert!(help.contains("run `zetta splits` to list available names"));
     assert!(help.contains("zetta terminal-size [--json | --resize"));
     assert!(help.contains("zetta benchmark output [OPTIONS]"));
-    assert!(help.contains("benchmark output                    Write and time a text payload"));
+    assert!(help.contains("Write and time a text payload"));
     assert!(help.contains("zetta wt <COMMAND>"));
-    assert!(
-        help.contains("wt                                  Create and integrate Git worktrees")
-    );
+    assert!(help.contains("Create and integrate Git worktrees"));
     assert!(help.contains("zetta tabicon [OPTIONS] ICON"));
-    assert!(
-        help.contains("tabicon                             Set the active tab's icon override")
-    );
+    assert!(help.contains("Set the active tab's icon override"));
     assert!(tab_icon_help().contains("per-tab icon override"));
     assert!(tab_icon_help().contains("never written to user or project configuration"));
     assert!(help.contains("zetta attention [OPTIONS] [SUMMARY] [BODY]"));
-    assert!(help.contains(
-        "attention                           Mark the originating tab as needing attention"
-    ));
+    assert!(help.contains("Mark the originating tab as needing attention"));
     assert!(help.contains("zetta overlay [OPTIONS] TEXT"));
-    assert!(help.contains(
-        "overlay                             Non-persistently show text over the active pane"
-    ));
+    assert!(help.contains("Non-persistently show text over the active pane"));
     assert!(help.contains("zetta vi [OPTIONS] [FILE ...]"));
     assert!(help.contains("zetta edit [OPTIONS] [--] FILE ..."));
-    assert!(help.contains("edit                                Edit files with $EDITOR"));
-    assert!(
-        help.contains("vi                                  Edit files with Zetta's built-in vi")
-    );
-    assert!(
-        help.contains(
-            "terminal-size                       Print or resize the current terminal pane"
-        )
-    );
+    assert!(help.contains("Edit files with $EDITOR"));
+    assert!(help.contains("Edit files with Zetta's built-in vi"));
+    assert!(help.contains("Print or resize the current terminal pane"));
     assert!(help.contains("zetta init [SHELL]"));
-    assert!(
-        help.contains(
-            "init                                Configure or generate shell integration"
-        )
-    );
+    assert!(help.contains("Configure or generate shell integration"));
     assert!(pane_splits_help().contains("Usage: zetta splits"));
     assert!(pane_splits_help().contains("--split or -s"));
     assert!(pane_splits_help().contains("--replace-pane --split"));
@@ -138,9 +138,7 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     {
         assert!(help.contains("Serial console"));
         assert!(help.contains("zetta serial <COMMAND>"));
-        assert!(
-            help.contains("serial                              List or connect to serial devices")
-        );
+        assert!(help.contains("List or connect to serial devices"));
     }
     #[cfg(not(feature = "serial-console"))]
     assert!(!help.contains("Serial console"));
@@ -149,7 +147,7 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     {
         assert!(help.contains("HTTP server"));
         assert!(help.contains("zetta http server [OPTIONS]"));
-        assert!(help.contains("http server                         Serve static files over HTTP"));
+        assert!(help.contains("Serve static files over HTTP"));
     }
     #[cfg(not(feature = "http-server"))]
     assert!(!help.contains("HTTP server"));
@@ -178,7 +176,7 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     {
         assert!(help.contains("Desktop notifications"));
         assert!(help.contains("zetta notify [OPTIONS] SUMMARY [BODY]"));
-        assert!(help.contains("notify                              Show a desktop notification"));
+        assert!(help.contains("Show a desktop notification"));
     }
     #[cfg(not(feature = "notifications"))]
     {

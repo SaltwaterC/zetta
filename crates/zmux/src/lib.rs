@@ -35,6 +35,7 @@ pub mod upgrade;
 
 use std::ffi::OsString;
 
+#[cfg(feature = "session-persistence")]
 use anyhow::Context as _;
 use anyhow::Result;
 
@@ -42,62 +43,129 @@ use anyhow::Result;
 /// instead of using the multiplexer daemon.
 pub const NO_MUX_ENVIRONMENT_VARIABLE: &str = "ZETTA_NO_MUX";
 
-const USAGE: &str = "\
-Zetta session multiplexer
+fn format_help_table<'a>(rows: impl AsRef<[(&'a str, &'a str)]>) -> String {
+    let rows = rows
+        .as_ref()
+        .iter()
+        .map(|&(label, description)| (label.trim_end(), description))
+        .collect::<Vec<_>>();
+    let label_width = rows
+        .iter()
+        .map(|(label, _)| label.chars().count())
+        .max()
+        .unwrap_or(0);
+    rows.into_iter()
+        .map(|(label, description)| {
+            let mut lines = description.split('\n');
+            let first_line = lines.next().unwrap_or("").trim_end();
+            let mut formatted = String::new();
+            formatted.push_str("  ");
+            formatted.push_str(label);
+            formatted.push_str(&" ".repeat(label_width - label.chars().count()));
+            if !first_line.is_empty() {
+                formatted.push_str("  ");
+                formatted.push_str(first_line);
+            }
+            for line in lines {
+                formatted.push('\n');
+                let line = line.trim_end();
+                if !line.is_empty() {
+                    formatted.push_str("  ");
+                    formatted.push_str(&" ".repeat(label_width));
+                    formatted.push_str("  ");
+                    formatted.push_str(line);
+                }
+            }
+            formatted
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
-Usage: zmux [COMMAND]
-       zetta mux [COMMAND]
-
-Commands:
-  list          List the sessions this multiplexer is holding
-  resume SESSION Resume an encrypted disk record; saved screens are read-only
-  stop          Stop the multiplexer. It refuses while it is holding a
-                session, because stopping it ends everything running in one;
-                --force stops it anyway, ending them. Stopping a multiplexer
-                that is not running is not an error.
-  reconnect SESSION_ID
-                Open a backgrounded session in a Zetta window. A scoped
-                session must be shared first.
-  share SESSION_ID   Make a backgrounded session joinable by every Zetta
-                     process. This changes its scope; it does not open it.
-  unshare SESSION_ID Scope a shared session back to the window that last held it
-  kill SESSION_ID    End a session and everything running in it
-  forget SESSION_ID  Remove a session from the catalog without killing it
-
-Options:
-  -u, --upgrade         Replace the running multiplexer, keeping its sessions
-  -f, --force           Stop even while sessions are running (with stop)
-  -j, --json            Print machine-readable JSON (with list)
-  -r, --retention MODE  What to keep of a detached pane's output:
-                        none, memory (default), or disk
-  -i, --identity PATH   Age identity file for resuming a disk record and for
-                        opening a session protected by your key; may be
-                        repeated. Defaults to the configured identity.
-  -h, --help            Print help
-  -v, --version         Print the version, and the protocol it speaks";
-
-const NO_MUX_USAGE: &str = "\
-Zetta background sessions (without a multiplexer daemon)
-
-Usage: zmux [COMMAND]
-       zetta mux [COMMAND]
-
-Commands:
-  list          List the available background session catalogs
-  reconnect SESSION_ID
-                Open a backgrounded session in a Zetta window
-
-Options:
-  -j, --json            Print machine-readable JSON (with list)
-  -h, --help            Print help
-  -v, --version         Print the version, and the protocol it speaks";
+fn usage(no_mux: bool) -> String {
+    let commands = if no_mux {
+        format_help_table([
+            ("list", "List the available background session catalogs"),
+            (
+                "reconnect SESSION_ID",
+                "Open a backgrounded session in a Zetta window",
+            ),
+        ])
+    } else {
+        format_help_table([
+            ("list", "List the sessions this multiplexer is holding"),
+            (
+                "resume SESSION",
+                "Resume an encrypted disk record; saved screens are read-only",
+            ),
+            (
+                "stop",
+                "Stop the multiplexer. It refuses while it is holding a\nsession, because stopping it ends everything running in one;\n--force stops it anyway, ending them. Stopping a multiplexer that is not\nrunning is not an error.",
+            ),
+            (
+                "reconnect SESSION_ID",
+                "Open a backgrounded session in a Zetta window. A scoped\nsession must be shared first.",
+            ),
+            (
+                "share SESSION_ID",
+                "Make a backgrounded session joinable by every Zetta\nprocess. This changes its scope; it does not open it.",
+            ),
+            (
+                "unshare SESSION_ID",
+                "Scope a shared session back to the window that last held it",
+            ),
+            (
+                "kill SESSION_ID",
+                "End a session and everything running in it",
+            ),
+            (
+                "forget SESSION_ID",
+                "Remove a session from the catalog without killing it",
+            ),
+        ])
+    };
+    let options = if no_mux {
+        format_help_table([
+            ("-j, --json", "Print machine-readable JSON (with list)"),
+            ("-h, --help", "Print help"),
+            (
+                "-v, --version",
+                "Print the version, and the protocol it speaks",
+            ),
+        ])
+    } else {
+        format_help_table([
+            (
+                "-u, --upgrade",
+                "Replace the running multiplexer, keeping its sessions",
+            ),
+            (
+                "-f, --force",
+                "Stop even while sessions are running (with stop)",
+            ),
+            ("-j, --json", "Print machine-readable JSON (with list)"),
+            (
+                "-r, --retention MODE",
+                "What to keep of a detached pane's output:\nnone, memory (default), or disk",
+            ),
+            (
+                "-i, --identity PATH",
+                "Age identity file for resuming a disk record and for\nopening a session protected by your key; may be\nrepeated. Defaults to the configured identity.",
+            ),
+            ("-h, --help", "Print help"),
+            (
+                "-v, --version",
+                "Print the version, and the protocol it speaks",
+            ),
+        ])
+    };
+    format!(
+        "Zetta session multiplexer\n\nUsage: zmux [COMMAND]\n       zetta mux [COMMAND]\n\nCommands:\n{commands}\n\nOptions:\n{options}"
+    )
+}
 
 fn no_mux_environment() -> bool {
     std::env::var(NO_MUX_ENVIRONMENT_VARIABLE).is_ok_and(|value| value == "1")
-}
-
-fn usage(no_mux: bool) -> &'static str {
-    if no_mux { NO_MUX_USAGE } else { USAGE }
 }
 
 const SESSION_ID_HELP: &str = "SESSION_ID is either the bare numeric session ID or the stable PROCESS:RUNNER:SESSION catalog identifier printed by `zmux list`. The bare form is accepted only when the numeric ID is unambiguous; use the full form when more than one catalog contains it. `share` changes a scoped session to shared mode; `reconnect` is the command that opens it in a Zetta window. `resume` accepts the opaque numeric record ID from disk retention.";

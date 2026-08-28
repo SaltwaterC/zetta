@@ -7,6 +7,8 @@ use std::sync::{
 
 use anyhow::{Context as _, Result};
 
+use crate::startup::format_help_table;
+
 use super::CliServiceCommand;
 use super::raw_terminal::RawTerminal;
 
@@ -40,8 +42,26 @@ pub(crate) enum SerialFlowControl {
     Hardware,
 }
 
-pub(crate) fn serial_help() -> &'static str {
-    "Zetta serial console\n\nUsage:\n  zetta serial list\n  zetta serial console [OPTIONS]\n\nCommands:\n  list                              List currently available serial devices\n  console                           Connect the current terminal to a serial device\n\nConsole options:\n  -d, --device PATH                 Serial device to open (required)\n  -b, --baud-rate RATE              Baud rate (default: 115200)\n  -D, --data-bits BITS              5, 6, 7, or 8 (default: 8)\n  -p, --parity MODE                 none, odd, or even (default: none)\n  -s, --stop-bits BITS              1 or 2 (default: 1)\n  -f, --flow-control MODE           none, software, or hardware (default: none)\n  -h, --help                        Print help\n\nThe serial console uses the terminal's raw input mode. Ctrl-C is sent to the device; press Ctrl-] to disconnect locally."
+pub(crate) fn serial_help() -> String {
+    format!(
+        "Zetta serial console\n\nUsage:\n  zetta serial list\n  zetta serial console [OPTIONS]\n\nCommands:\n{}\n\nConsole options:\n{}\n\nThe serial console uses the terminal's raw input mode. Ctrl-C is sent to the device; press Ctrl-] to disconnect locally.",
+        format_help_table([
+            ("list", "List currently available serial devices"),
+            ("console", "Connect the current terminal to a serial device",),
+        ]),
+        format_help_table([
+            ("-d, --device PATH", "Serial device to open (required)"),
+            ("-b, --baud-rate RATE", "Baud rate (default: 115200)"),
+            ("-D, --data-bits BITS", "5, 6, 7, or 8 (default: 8)"),
+            ("-p, --parity MODE", "none, odd, or even (default: none)"),
+            ("-s, --stop-bits BITS", "1 or 2 (default: 1)"),
+            (
+                "-f, --flow-control MODE",
+                "none, software, or hardware (default: none)",
+            ),
+            ("-h, --help", "Print help"),
+        ])
+    )
 }
 
 pub(crate) fn parse_serial_args(
@@ -52,7 +72,7 @@ pub(crate) fn parse_serial_args(
         .iter()
         .any(|argument| matches!(argument.to_string_lossy().as_ref(), "--help" | "-h"))
     {
-        anyhow::bail!(serial_help());
+        anyhow::bail!("{}", serial_help());
     }
     let Some(operation) = args.first() else {
         anyhow::bail!("usage: zetta serial <list|console>; run `zetta serial --help` for details");

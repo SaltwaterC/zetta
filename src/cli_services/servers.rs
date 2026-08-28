@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
 
+use crate::startup::format_help_table;
+
 use super::CliServiceCommand;
 
 #[cfg(feature = "http-server")]
@@ -15,8 +17,25 @@ pub(crate) struct HttpServerCommand {
 }
 
 #[cfg(feature = "http-server")]
-pub(crate) fn http_server_help() -> &'static str {
-    "Serve static files over HTTP\n\nUsage: zetta http server [OPTIONS]\n\nOptions:\n  -r, --root PATH                   Directory to serve (default: current directory)\n  -p, --port PORT                   TCP port (default: http_server_port from configuration)\n  -c, --config PATH                 Read the HTTP port default from this configuration file\n  -h, --help                        Print help\n\nPress Ctrl-C to stop the server."
+pub(crate) fn http_server_help() -> String {
+    format!(
+        "Serve static files over HTTP\n\nUsage: zetta http server [OPTIONS]\n\nOptions:\n{}\n\nPress Ctrl-C to stop the server.",
+        format_help_table([
+            (
+                "-r, --root PATH",
+                "Directory to serve (default: current directory)",
+            ),
+            (
+                "-p, --port PORT",
+                "TCP port (default: http_server_port from configuration)",
+            ),
+            (
+                "-c, --config PATH",
+                "Read the HTTP port default from this configuration file",
+            ),
+            ("-h, --help", "Print help"),
+        ])
+    )
 }
 
 #[cfg(feature = "http-server")]
@@ -28,7 +47,7 @@ pub(crate) fn parse_http_args(
         .iter()
         .any(|argument| matches!(argument.to_string_lossy().as_ref(), "--help" | "-h"))
     {
-        anyhow::bail!(http_server_help());
+        anyhow::bail!("{}", http_server_help());
     }
     anyhow::ensure!(
         args.first().is_some_and(|argument| argument == "server"),
@@ -77,8 +96,26 @@ pub(crate) struct TftpServerCommand {
 }
 
 #[cfg(feature = "tftp-server")]
-pub(crate) fn tftp_server_help() -> &'static str {
-    "Serve files with TFTP\n\nUsage: zetta tftp server [OPTIONS]\n\nOptions:\n  -r, --root PATH                   Directory to serve (default: current directory)\n  -p, --port PORT                   UDP port (default: tftp_server_port from configuration)\n  -c, --config PATH                 Read the TFTP port default from this configuration file\n  -w, --writable                    Accept uploads into the served directory\n  -h, --help                        Print help\n\nTFTP has no authentication: the server answers any host that can reach the\nport, and --writable lets those hosts create files under --root. Existing\nfiles are never overwritten. Uploads are off unless --writable is given.\n\nPress Ctrl-C to stop the server."
+pub(crate) fn tftp_server_help() -> String {
+    format!(
+        "Serve files with TFTP\n\nUsage: zetta tftp server [OPTIONS]\n\nOptions:\n{}\n\nTFTP has no authentication: the server answers any host that can reach the\nport, and --writable lets those hosts create files under --root. Existing\nfiles are never overwritten. Uploads are off unless --writable is given.\n\nPress Ctrl-C to stop the server.",
+        format_help_table([
+            (
+                "-r, --root PATH",
+                "Directory to serve (default: current directory)",
+            ),
+            (
+                "-p, --port PORT",
+                "UDP port (default: tftp_server_port from configuration)",
+            ),
+            (
+                "-c, --config PATH",
+                "Read the TFTP port default from this configuration file",
+            ),
+            ("-w, --writable", "Accept uploads into the served directory"),
+            ("-h, --help", "Print help"),
+        ])
+    )
 }
 
 #[cfg(feature = "tftp-server")]
@@ -90,7 +127,7 @@ pub(crate) fn parse_tftp_server_args(
         .iter()
         .any(|argument| matches!(argument.to_string_lossy().as_ref(), "--help" | "-h"))
     {
-        anyhow::bail!(tftp_server_help());
+        anyhow::bail!("{}", tftp_server_help());
     }
     let mut writable = false;
     let mut remaining = Vec::with_capacity(args.len());

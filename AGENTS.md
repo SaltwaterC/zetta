@@ -432,3 +432,19 @@ and offer them in the tab auto-complete for their respective command line
 argument. Arguments that depend on both runtime knowledge and a specific state,
 such as a serial console emulator being plugged, in must offer a way to
 dynamically enumerate these values via CLI and offer these via auto complete.
+
+### CLI help formatting
+
+CLI help tables must use the shared `format_help_table` helper from
+`startup/cli_help.rs`; the standalone `zmux` CLI uses its equivalent
+crate-local helper. Store option or command labels and descriptions separately
+instead of embedding manual padding. The formatter computes the longest label
+per table, uses a two-space separator, aligns multiline continuation text, and
+emits no trailing whitespace.
+
+This convention applies to `Commands`, `Operations`, `Options`, and equivalent
+sections across maintained Rust CLI help. Do not manually count spaces or use
+chained string replacements to insert help rows. Help-content tests should
+verify semantic content and alignment without depending on fragile,
+hand-counted padding. Shell-completion descriptions and upstream `zed/` and
+`busy-v/` code are outside this convention.

@@ -38,6 +38,45 @@ pub(crate) fn version_text() -> String {
     )
 }
 
+pub(crate) fn format_help_table<'a>(rows: impl AsRef<[(&'a str, &'a str)]>) -> String {
+    let rows = rows
+        .as_ref()
+        .iter()
+        .map(|&(label, description)| (label.trim_end(), description))
+        .collect::<Vec<_>>();
+    let label_width = rows
+        .iter()
+        .map(|(label, _)| label.chars().count())
+        .max()
+        .unwrap_or(0);
+    rows.into_iter()
+        .map(|(label, description)| {
+            let mut lines = description.split('\n');
+            let first_line = lines.next().unwrap_or("").trim_end();
+            let mut formatted = String::new();
+            formatted.push_str("  ");
+            formatted.push_str(label);
+            formatted.push_str(&" ".repeat(label_width - label.chars().count()));
+            if !first_line.is_empty() {
+                formatted.push_str("  ");
+                formatted.push_str(first_line);
+            }
+            for line in lines {
+                formatted.push('\n');
+                let line = line.trim_end();
+                if !line.is_empty() {
+                    formatted.push_str("  ");
+                    formatted.push_str(&" ".repeat(label_width));
+                    formatted.push_str("  ");
+                    formatted.push_str(line);
+                }
+            }
+            formatted
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub(crate) fn help_text(profiles: &[Profile]) -> String {
     let features = [
         "Terminal emulator",
@@ -63,115 +102,220 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         "Encrypted session retention",
     ];
 
-    let serial_usage = if cfg!(feature = "serial-console") {
-        "\n       zetta serial <COMMAND>"
-    } else {
-        ""
-    };
-    let http_usage = if cfg!(feature = "http-server") {
-        "\n       zetta http server [OPTIONS]"
-    } else {
-        ""
-    };
-    let tftp_usage = if cfg!(tftp_enabled) {
-        "\n       zetta tftp <COMMAND>"
-    } else {
-        ""
-    };
-    let notify_usage = if cfg!(feature = "notifications") {
-        "\n       zetta notify [OPTIONS] SUMMARY [BODY]"
-    } else {
-        ""
-    };
-    let notify_cleanup_usage = if cfg!(notify_cleanup_enabled) {
-        "\n       zetta notify cleanup [OPTIONS]"
-    } else {
-        ""
-    };
-    let clipboard_usage = if cfg!(feature = "clipboard") {
-        "\n       zetta copy [OPTIONS]\n       zetta paste [OPTIONS]"
-    } else {
-        ""
-    };
-    let serial_command = if cfg!(feature = "serial-console") {
-        "\n  serial                              List or connect to serial devices"
-    } else {
-        ""
-    };
-    let http_command = if cfg!(feature = "http-server") {
-        "\n  http server                         Serve static files over HTTP"
-    } else {
-        ""
-    };
-    let tftp_command = if cfg!(tftp_enabled) {
-        "\n  tftp                                Transfer files or serve them with TFTP"
-    } else {
-        ""
-    };
-    let notify_command = if cfg!(feature = "notifications") {
-        "\n  notify                              Show a desktop notification"
-    } else {
-        ""
-    };
-    let notify_cleanup_command = if cfg!(notify_cleanup_enabled) {
-        "\n  notify cleanup                      Reap stale desktop notification worker processes"
-    } else {
-        ""
-    };
-    let clipboard_command = if cfg!(feature = "clipboard") {
-        "\n  copy                                Copy standard input to the clipboard\n  paste                               Print the clipboard's contents"
-    } else {
-        ""
-    };
+    let mut usage = vec![
+        "zetta [OPTIONS]",
+        "zetta benchmark [OPTIONS]",
+        "zetta benchmark output [OPTIONS]",
+        "zetta terminal-size [--json | --resize [--columns COLUMNS] [--rows ROWS]]",
+        "zetta mux [COMMAND]",
+        "zetta wt <COMMAND>",
+        "zetta mux reconnect SESSION_ID",
+        "zetta mux resume SESSION [-i PATH]",
+        "zetta splits",
+        "zetta tabicon [OPTIONS] ICON",
+        "zetta tabicon --list",
+        "zetta theme pane [OPTIONS] THEME",
+        "zetta theme tab [OPTIONS] THEME",
+        "zetta theme pane --reset",
+        "zetta theme tab --reset",
+        "zetta theme pane --list",
+        "zetta theme tab --list",
+        "zetta overlay [OPTIONS] TEXT",
+        "zetta overlay --reset",
+        "zetta edit [OPTIONS] [--] FILE ...",
+        "zetta vi [OPTIONS] [FILE ...]",
+        "zetta pane [OPTIONS] -- COMMAND [ARGUMENT ...]",
+        "zetta pane --list",
+        "zetta profile <COMMAND>",
+        "zetta project <COMMAND>",
+        "zetta attention [OPTIONS] [SUMMARY] [BODY]",
+        "zetta init [SHELL]",
+    ];
+    if cfg!(feature = "serial-console") {
+        usage.push("zetta serial <COMMAND>");
+    }
+    if cfg!(feature = "http-server") {
+        usage.push("zetta http server [OPTIONS]");
+    }
+    if cfg!(tftp_enabled) {
+        usage.push("zetta tftp <COMMAND>");
+    }
+    if cfg!(feature = "notifications") {
+        usage.push("zetta notify [OPTIONS] SUMMARY [BODY]");
+    }
+    if cfg!(notify_cleanup_enabled) {
+        usage.push("zetta notify cleanup [OPTIONS]");
+    }
+    if cfg!(feature = "clipboard") {
+        usage.extend(["zetta copy [OPTIONS]", "zetta paste [OPTIONS]"]);
+    }
+
+    let mut commands = vec![
+        ("benchmark", "Profile terminal rendering"),
+        (
+            "benchmark output",
+            "Write and time a text payload (default: 10 MiB)",
+        ),
+        ("terminal-size", "Print or resize the current terminal pane"),
+        (
+            "mux",
+            "Control, list, reconnect, and resume background sessions",
+        ),
+        ("wt", "Create and integrate Git worktrees"),
+        ("splits", "List configured pane split templates"),
+        ("tabicon", "Set the active tab's icon override"),
+        (
+            "theme",
+            "Non-persistently change the active pane or tab's theme",
+        ),
+        ("overlay", "Non-persistently show text over the active pane"),
+        ("edit", "Edit files with $EDITOR, falling back to Zetta vi"),
+        ("vi", "Edit files with Zetta's built-in vi"),
+        ("pane", "Run a command in an existing or new pane"),
+        ("profile", "List and manage profiles"),
+        ("attention", "Mark the originating tab as needing attention"),
+        ("project", "List, add, remove, or open projects"),
+        ("init", "Configure or generate shell integration"),
+    ];
+    if cfg!(feature = "serial-console") {
+        commands.push(("serial", "List or connect to serial devices"));
+    }
+    if cfg!(feature = "http-server") {
+        commands.push(("http server", "Serve static files over HTTP"));
+    }
+    if cfg!(tftp_enabled) {
+        commands.push(("tftp", "Transfer files or serve them with TFTP"));
+    }
+    if cfg!(feature = "notifications") {
+        commands.push(("notify", "Show a desktop notification"));
+    }
+    if cfg!(notify_cleanup_enabled) {
+        commands.push((
+            "notify cleanup",
+            "Reap stale desktop notification worker processes",
+        ));
+    }
+    if cfg!(feature = "clipboard") {
+        commands.extend([
+            ("copy", "Copy standard input to the clipboard"),
+            ("paste", "Print the clipboard's contents"),
+        ]);
+    }
+    let commands = format_help_table(commands);
+
+    let options = format_help_table([
+        ("-h, --help", "Print help"),
+        ("-v, --version", "Print version and compatibility versions"),
+        ("-c, --config PATH", "Use a configuration file"),
+        ("-k, --keymap PATH", "Use a keymap file"),
+        (
+            "-p, --profile NAME",
+            "Select one of the profiles listed above",
+        ),
+        (
+            "-s, --split NAME",
+            "Apply a configured pane split template; run `zetta splits` to list available names",
+        ),
+        (
+            "-r, --replace-pane",
+            "Replace the active pane in a running process; requires --split or --profile",
+        ),
+        (
+            "-t, --theme NAME",
+            "Non-persistently override --profile's theme for this launch",
+        ),
+        (
+            "-n, --no-mux",
+            "Keep background sessions in this process for this launch; sharing unavailable",
+        ),
+        (
+            "-e, --command COMMAND [ARGUMENT ...]",
+            "Open a tab and run COMMAND",
+        ),
+    ]);
     let profiles = profiles
         .iter()
         .map(|profile| profile.name.as_str())
         .collect::<Vec<_>>()
         .join("\n  ");
-    let help = format!(
-        "Zetta Terminal\n\nUsage: zetta [OPTIONS]\n       zetta benchmark [OPTIONS]\n       zetta benchmark output [OPTIONS]\n       zetta terminal-size [--json | --resize [--columns COLUMNS] [--rows ROWS]]\n       zetta mux [COMMAND]\n       zetta profile <COMMAND>\n       zetta project <COMMAND>\n       zetta init [SHELL]{serial_usage}{http_usage}{tftp_usage}{notify_usage}{notify_cleanup_usage}{clipboard_usage}\n\nCommands:\n  benchmark                           Profile terminal rendering\n  terminal-size                       Print or resize the current terminal pane\n  mux                                 Control, list, and reconnect background sessions\n  profile                             List and manage profiles\n  project                             List, add, remove, or open projects\n  init                                Configure or generate shell integration{serial_command}{http_command}{tftp_command}{notify_command}{notify_cleanup_command}{clipboard_command}\n\nBuilt-in features:\n  {}\n\nProfiles accepted by --profile NAME (case-insensitive):\n  {profiles}\n\nOptions:\n  -h, --help                          Print help\n  -v, --version                       Print version\n  -c, --config PATH                   Use a configuration file\n  -k, --keymap PATH                   Use a keymap file\n  -p, --profile NAME                  Select one of the profiles listed above\n  -s, --split NAME                    Apply a configured pane split template; run `zetta splits` to list available names\n  -t, --theme NAME                    Non-persistently override --profile's theme for this launch",
+    let usage = format!("Usage: {}", usage.join("\n       "));
+    format!(
+        "Zetta Terminal\n\n{usage}\n\nCommands:\n{commands}\n\nBuilt-in features:\n  {}\n\nProfiles accepted by --profile NAME (case-insensitive):\n  {profiles}\n\nOptions:\n{options}",
         features.join("\n  "),
-    );
-    help
-    .replace(
-        "  benchmark                           Profile terminal rendering",
-        "  benchmark                           Profile terminal rendering\n  benchmark output                    Write and time a text payload (default: 10 MiB)",
     )
-    .replace(
-        "       zetta profile <COMMAND>",
-        "       zetta pane [OPTIONS] -- COMMAND [ARGUMENT ...]\n       zetta pane --list\n       zetta profile <COMMAND>",
+}
+
+pub(crate) fn benchmark_output_help() -> String {
+    format!(
+        "Benchmark terminal output throughput\n\nUsage: zetta benchmark output [OPTIONS]\n\nWrites deterministic text to standard output and prints the elapsed time to standard error.\n\nOptions:\n{}",
+        format_help_table([
+            ("-s, --size MIB", "Set the output size in MiB [default: 10]",),
+            (
+                "-t, --output-type TYPE",
+                "Select repeated or unique lines [default: repeated]",
+            ),
+            ("-h, --help", "Print help"),
+        ])
     )
-    .replace(
-        "  profile                             List and manage profiles",
-        "  pane                                Run a command in an existing or new pane\n  profile                             List and manage profiles",
+}
+
+pub(crate) fn terminal_size_help() -> String {
+    format!(
+        "Print or resize the current terminal pane\n\nUsage: zetta terminal-size [--json | --resize [--columns COLUMNS] [--rows ROWS]]\n\nWithout --resize, prints the terminal width in columns and height in rows. With --resize, emits the xterm CSI 8 resize request for the current pane; an omitted dimension is kept unchanged.\n\nOptions:\n{}",
+        format_help_table([
+            ("-j, --json", "Print machine-readable JSON"),
+            ("-r, --resize", "Resize the current pane"),
+            ("-c, --columns COLUMNS", "Set the pane width in columns",),
+            ("-R, --rows ROWS", "Set the pane height in rows"),
+            ("-h, --help", "Print help"),
+        ])
     )
-    .replace(
-        "       zetta profile <COMMAND>",
-        "       zetta profile <COMMAND>\n       zetta attention [OPTIONS] [SUMMARY] [BODY]",
+}
+
+pub(crate) fn edit_help() -> String {
+    format!(
+        "Edit files with the pane's configured editor\n\nUsage: zetta edit [OPTIONS] [--] FILE ...\n\nUses EDITOR from the current environment. If EDITOR is unset or empty, Zetta's built-in vi is used.\n\nOptions:\n{}",
+        format_help_table([
+            (
+                "-d, --delete-after",
+                "Delete a managed scrollback file after editing",
+            ),
+            ("-h, --help", "Print help"),
+        ])
     )
-    .replace(
-        "  profile                             List and manage profiles",
-        "  profile                             List and manage profiles\n  attention                           Mark the originating tab as needing attention",
-    )
-    .replace(
-        "       zetta mux [COMMAND]",
-        "       zetta mux [COMMAND]\n       zetta wt <COMMAND>",
-    )
-    .replace(
-        "  -s, --split NAME                    Apply a configured pane split template; run `zetta splits` to list available names\n  -t, --theme NAME                    Non-persistently override --profile's theme for this launch",
-        "  -s, --split NAME                    Apply a configured pane split template; run `zetta splits` to list available names\n  -r, --replace-pane                  Replace the active pane in a running process; requires --split or --profile\n  -t, --theme NAME                    Non-persistently override --profile's theme for this launch\n  -n, --no-mux                          Keep background sessions in this process for this launch; sharing unavailable\n  -e, --command COMMAND [ARGUMENT ...] Open a tab and run COMMAND",
-    )
-    .replace(
-        "       zetta mux [COMMAND]",
-        "       zetta mux [COMMAND]\n       zetta mux reconnect SESSION_ID\n       zetta mux resume SESSION [-i PATH]\n       zetta splits\n       zetta tabicon [OPTIONS] ICON\n       zetta tabicon --list\n       zetta theme pane [OPTIONS] THEME\n       zetta theme tab [OPTIONS] THEME\n       zetta theme pane --reset\n       zetta theme tab --reset\n       zetta theme pane --list\n       zetta theme tab --list\n       zetta overlay [OPTIONS] TEXT\n       zetta overlay --reset\n       zetta edit [OPTIONS] [--] FILE ...\n       zetta vi [OPTIONS] [FILE ...]",
-    )
-    .replace(
-        "mux                                 Control, list, and reconnect background sessions",
-        "mux                                 Control, list, reconnect, and resume background sessions\n  wt                                  Create and integrate Git worktrees\n  splits                              List configured pane split templates\n  tabicon                             Set the active tab's icon override\n  theme                               Non-persistently change the active pane or tab's theme\n  overlay                             Non-persistently show text over the active pane\n  edit                                Edit files with $EDITOR, falling back to Zetta vi\n  vi                                  Edit files with Zetta's built-in vi",
-    )
-    .replace(
-        "  -v, --version                       Print version",
-        "  -v, --version                       Print version and compatibility versions",
+}
+
+pub(crate) fn benchmark_help() -> String {
+    format!(
+        "Benchmark terminal rendering\n\nUsage: zetta benchmark [OPTIONS]\n\nThe workload options select one producer pattern and cannot be combined with\neach other. Without one, the standard text and line-drawing workload runs.\n\nOptions:\n{}",
+        format_help_table([
+            (
+                "-s, --profile-pane-stress",
+                "Use four visible producer panes",
+            ),
+            (
+                "-b, --profile-background-stress",
+                "Render alternating cell backgrounds",
+            ),
+            (
+                "-u, --profile-sparse-updates",
+                "Update a dense terminal at 40 Hz",
+            ),
+            (
+                "-a, --profile-alt-screen-scroll",
+                "Scroll a colourised diff on the alternate screen",
+            ),
+            (
+                "-x, --profile-external-terminal",
+                "Run the workload in the current terminal",
+            ),
+            ("-r, --profile-report PATH", "Write a profiling report"),
+            (
+                "-d, --profile-duration SECONDS",
+                "Set the profiling duration",
+            ),
+            ("-h, --help", "Print help"),
+        ])
     )
 }
 
@@ -179,8 +323,30 @@ pub(crate) fn is_version_argument(argument: &str) -> bool {
     matches!(argument, "--version" | "-v")
 }
 
-pub(crate) fn attention_help() -> &'static str {
-    "Mark the originating Zetta tab as needing attention\n\nUsage: zetta attention [OPTIONS] [SUMMARY] [BODY]\n\nSUMMARY defaults to `Attention required`; BODY is optional additional text. The command must run inside a terminal launched by Zetta. The badge is cleared when that tab becomes active and genuinely focused.\n\nOptions:\n  -n, --notify                      Also show a desktop notification\n  -a, --app-name NAME               Set the notification's application name\n  -i, --icon PATH                   Show an image with the notification (default: Zetta's icon)\n  -s, --sound NAME                  zetta-default, zetta-ok, zetta-alarm, zetta-gong, or a platform-specific system sound name\n  -t, --timeout WHEN                default, never, or a number of milliseconds (default: default)\n  -h, --help                        Print help\n\nNotification options require --notify. Without --notify, attention is an in-memory tab badge only."
+pub(crate) fn attention_help() -> String {
+    let options = format_help_table([
+        ("-n, --notify", "Also show a desktop notification"),
+        (
+            "-a, --app-name NAME",
+            "Set the notification's application name",
+        ),
+        (
+            "-i, --icon PATH",
+            "Show an image with the notification (default: Zetta's icon)",
+        ),
+        (
+            "-s, --sound NAME",
+            "zetta-default, zetta-ok, zetta-alarm, zetta-gong, or a platform-specific system sound name",
+        ),
+        (
+            "-t, --timeout WHEN",
+            "default, never, or a number of milliseconds (default: default)",
+        ),
+        ("-h, --help", "Print help"),
+    ]);
+    format!(
+        "Mark the originating Zetta tab as needing attention\n\nUsage: zetta attention [OPTIONS] [SUMMARY] [BODY]\n\nSUMMARY defaults to `Attention required`; BODY is optional additional text. The command must run inside a terminal launched by Zetta. The badge is cleared when that tab becomes active and genuinely focused.\n\nOptions:\n{options}\n\nNotification options require --notify. Without --notify, attention is an in-memory tab badge only."
+    )
 }
 
 pub(crate) fn parse_terminal_resize_dimension(argument: &OsString, option: &str) -> Result<usize> {
@@ -197,8 +363,18 @@ pub(crate) fn parse_terminal_resize_dimension(argument: &OsString, option: &str)
     Ok(value)
 }
 
-pub(crate) fn tab_icon_help() -> &'static str {
-    "Set the active tab's per-tab icon override through the running Zetta process\n\nUsage: zetta tabicon [OPTIONS] ICON\n       zetta tabicon --list\n\nICON is a built-in icon name. Use none to explicitly hide the icon. The choice remains with the logical tab across project changes and background/shared-session handoffs, and is never written to user or project configuration. The icon list is fetched dynamically with --list.\n\nOptions:\n  -i, --icon NAME  Set the icon by option instead of as a positional argument\n  -l, --list       Print built-in icon names, including none\n  -h, --help       Print help"
+pub(crate) fn tab_icon_help() -> String {
+    let options = format_help_table([
+        (
+            "-i, --icon NAME",
+            "Set the icon by option instead of as a positional argument",
+        ),
+        ("-l, --list", "Print built-in icon names, including none"),
+        ("-h, --help", "Print help"),
+    ]);
+    format!(
+        "Set the active tab's per-tab icon override through the running Zetta process\n\nUsage: zetta tabicon [OPTIONS] ICON\n       zetta tabicon --list\n\nICON is a built-in icon name. Use none to explicitly hide the icon. The choice remains with the logical tab across project changes and background/shared-session handoffs, and is never written to user or project configuration. The icon list is fetched dynamically with --list.\n\nOptions:\n{options}"
+    )
 }
 
 pub(crate) fn parse_tab_icon_args(args: &[OsString]) -> Result<StartupMode> {
@@ -266,17 +442,70 @@ pub(crate) fn theme_help(scope: Option<ThemeScope>) -> String {
     let target = scope
         .map(|scope| format!("active {}", scope.name()))
         .unwrap_or_else(|| "active pane or tab".to_owned());
+    let options = format_help_table([
+        (
+            "-t, --theme NAME",
+            "Set the theme by option instead of as a positional argument",
+        ),
+        (
+            "-r, --reset",
+            "Restore the configured theme (or the tab theme for a pane)",
+        ),
+        (
+            "-l, --list",
+            "Print the running process's registered theme names",
+        ),
+        ("-h, --help", "Print help"),
+    ]);
     format!(
-        "Non-persistently change the {target}'s theme through the running Zetta process\n\n{usage}\n\nTHEME is a theme name registered in the running Zetta process (built-in or user-installed). The theme list is fetched dynamically with --list. The session-scoped change is never written to configuration: it is preserved across backgrounding, reconnect, and encrypted disk resume, and is lost when the pane or tab closes or configuration reloads.\n\nOptions:\n  -t, --theme NAME  Set the theme by option instead of as a positional argument\n  -r, --reset       Restore the configured theme (or the tab theme for a pane)\n  -l, --list        Print the running process's registered theme names\n  -h, --help        Print help"
+        "Non-persistently change the {target}'s theme through the running Zetta process\n\n{usage}\n\nTHEME is a theme name registered in the running Zetta process (built-in or user-installed). The theme list is fetched dynamically with --list. The session-scoped change is never written to configuration: it is preserved across backgrounding, reconnect, and encrypted disk resume, and is lost when the pane or tab closes or configuration reloads.\n\nOptions:\n{options}"
     )
 }
 
-pub(crate) fn pane_splits_help() -> &'static str {
-    "List configured pane split templates\n\nUsage: zetta splits\n\nPrints one configured pane split template name per line. Pass a listed name to the root --split or -s option, or to --replace-pane --split when replacing the active pane in a running process.\n\nOptions:\n  -h, --help  Print help"
+pub(crate) fn pane_splits_help() -> String {
+    format!(
+        "List configured pane split templates\n\nUsage: zetta splits\n\nPrints one configured pane split template name per line. Pass a listed name to the root --split or -s option, or to --replace-pane --split when replacing the active pane in a running process.\n\nOptions:\n{}",
+        format_help_table([("-h, --help", "Print help")]),
+    )
 }
 
-pub(crate) fn pane_help() -> &'static str {
-    "Run a command in an existing or newly created pane\n\nUsage: zetta pane [OPTIONS] -- COMMAND [ARGUMENT ...]\n       zetta pane --list\n\nWithout --direction, the command is sent to the selected pane's existing base shell. With --stack, it runs in a task-backed stacked terminal. With --direction, a new split is created relative to the active pane; up and down split horizontally, while left and right split vertically. Commands are passed as exact argv values, and must follow --. An overlay can be shown on a newly created split with --overlay.\n\nOptions:\n  -d, --direction DIRECTION  Create a split to the left, right, up, or down of the active pane\n  -l, --label LABEL          Assign a generated label to a newly created split pane\n  -p, --pane LABEL           Target an existing pane by its exact, case-sensitive label\n  -o, --overlay TEXT         Show TEXT over a newly created split pane\n  -S, --overlay-size SIZE    Set overlay size: sm, base, lg, xl, 2xl, or 3xl\n  -O, --overlay-opacity PCT  Set overlay opacity from 0 to 100\n  -c, --overlay-color COLOR  Set overlay color by name or hex value\n  -s, --stack                 Run the command in a stacked task terminal\n  -L, --list                  Print labels for panes in the active tab\n  -h, --help                  Print help\n\nExamples:\n  zetta pane --direction right --label api --overlay API -- npm run dev\n  zetta pane --direction up --overlay TESTS --overlay-color cyan -- cargo test\n  zetta pane --pane api -- make test\n  zetta pane --pane api --stack -- tail -f server.log"
+pub(crate) fn pane_help() -> String {
+    let options = format_help_table([
+        (
+            "-d, --direction DIRECTION",
+            "Create a split to the left, right, up, or down of the active pane",
+        ),
+        (
+            "-l, --label LABEL",
+            "Assign a generated label to a newly created split pane",
+        ),
+        (
+            "-p, --pane LABEL",
+            "Target an existing pane by its exact, case-sensitive label",
+        ),
+        (
+            "-o, --overlay TEXT",
+            "Show TEXT over a newly created split pane",
+        ),
+        (
+            "-S, --overlay-size SIZE",
+            "Set overlay size: sm, base, lg, xl, 2xl, or 3xl",
+        ),
+        (
+            "-O, --overlay-opacity PCT",
+            "Set overlay opacity from 0 to 100",
+        ),
+        (
+            "-c, --overlay-color COLOR",
+            "Set overlay color by name or hex value",
+        ),
+        ("-s, --stack", "Run the command in a stacked task terminal"),
+        ("-L, --list", "Print labels for panes in the active tab"),
+        ("-h, --help", "Print help"),
+    ]);
+    format!(
+        "Run a command in an existing or newly created pane\n\nUsage: zetta pane [OPTIONS] -- COMMAND [ARGUMENT ...]\n       zetta pane --list\n\nWithout --direction, the command is sent to the selected pane's existing base shell. With --stack, it runs in a task-backed stacked terminal. With --direction, a new split is created relative to the active pane; up and down split horizontally, while left and right split vertically. Commands are passed as exact argv values, and must follow --. An overlay can be shown on a newly created split with --overlay.\n\nOptions:\n{options}\n\nExamples:\n  zetta pane --direction right --label api --overlay API -- npm run dev\n  zetta pane --direction up --overlay TESTS --overlay-color cyan -- cargo test\n  zetta pane --pane api -- make test\n  zetta pane --pane api --stack -- tail -f server.log"
+    )
 }
 
 pub(crate) fn parse_theme_args(scope: ThemeScope, args: &[OsString]) -> Result<StartupMode> {
@@ -350,8 +579,28 @@ pub(crate) fn overlay_help() -> String {
         .map(|preset| preset.name)
         .collect::<Vec<_>>()
         .join(", ");
+    let color_description = format!(
+        "Set the text color as a named preset ({preset_names}) or an rgb, rgba, rrggbb, or rrggbbaa hex value (no leading #)"
+    );
+    let options = format_help_table([
+        (
+            "-t, --text TEXT",
+            "Set the overlay text by option instead of as a positional argument",
+        ),
+        (
+            "-s, --size SIZE",
+            "Set the font size: sm, base, lg, xl (default), 2xl, or 3xl",
+        ),
+        (
+            "-o, --opacity PERCENT",
+            "Set the opacity as a percentage from 0 to 100 (default: 85)",
+        ),
+        ("-c, --color COLOR", color_description.as_str()),
+        ("-r, --reset", "Clear the active pane's overlay"),
+        ("-h, --help", "Print help"),
+    ]);
     format!(
-        "Non-persistently show text over the active pane's terminal content through the running Zetta process\n\nUsage: zetta overlay [OPTIONS] TEXT\n       zetta overlay --reset\n\nTEXT is free-form text, shown over the top-right corner of the active pane. The change is never written to the configuration file: it is lost when the pane closes or the configuration reloads.\n\nOptions:\n  -t, --text TEXT        Set the overlay text by option instead of as a positional argument\n  -s, --size SIZE        Set the font size: sm, base, lg, xl (default), 2xl, or 3xl\n  -o, --opacity PERCENT  Set the opacity as a percentage from 0 to 100 (default: 85)\n  -c, --color COLOR      Set the text color as a named preset ({preset_names}) or an rgb, rgba, rrggbb, or rrggbbaa hex value (no leading #)\n  -r, --reset            Clear the active pane's overlay\n  -h, --help             Print help"
+        "Non-persistently show text over the active pane's terminal content through the running Zetta process\n\nUsage: zetta overlay [OPTIONS] TEXT\n       zetta overlay --reset\n\nTEXT is free-form text, shown over the top-right corner of the active pane. The change is never written to the configuration file: it is lost when the pane closes or the configuration reloads.\n\nOptions:\n{options}"
     )
 }
 

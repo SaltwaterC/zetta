@@ -1,7 +1,8 @@
 use super::cli_help::{
-    attention_help, help_text, is_version_argument, pane_help, pane_splits_help,
-    parse_overlay_args, parse_tab_icon_args, parse_terminal_resize_dimension, parse_theme_args,
-    theme_help, version_text,
+    attention_help, benchmark_help, benchmark_output_help, edit_help, help_text,
+    is_version_argument, pane_help, pane_splits_help, parse_overlay_args, parse_tab_icon_args,
+    parse_terminal_resize_dimension, parse_theme_args, terminal_size_help, theme_help,
+    version_text,
 };
 use super::*;
 use crate::cli_services::{NotificationRequest, parse_notification_timeout};
@@ -665,9 +666,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
         while let Some(argument) = benchmark_arguments.next() {
             match argument.to_string_lossy().as_ref() {
                 "--help" | "-h" => {
-                    println!(
-                        "Benchmark terminal output throughput\n\nUsage: zetta benchmark output [OPTIONS]\n\nWrites deterministic text to standard output and prints the elapsed time to standard error.\n\nOptions:\n  -s, --size MIB                 Set the output size in MiB [default: 10]\n  -t, --output-type TYPE         Select repeated or unique lines [default: repeated]\n  -h, --help                     Print help"
-                    );
+                    println!("{}", benchmark_output_help());
                     std::process::exit(0);
                 }
                 "--size" | "-s" => {
@@ -759,9 +758,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                     )?);
                 }
                 "--help" | "-h" => {
-                    println!(
-                        "Print or resize the current terminal pane\n\nUsage: zetta terminal-size [--json | --resize [--columns COLUMNS] [--rows ROWS]]\n\nWithout --resize, prints the terminal width in columns and height in rows. With --resize, emits the xterm CSI 8 resize request for the current pane; an omitted dimension is kept unchanged.\n\nOptions:\n  -j, --json           Print machine-readable JSON\n  -r, --resize         Resize the current pane\n  -c, --columns COLUMNS Set the pane width in columns\n  -R, --rows ROWS       Set the pane height in rows\n  -h, --help           Print help"
-                    );
+                    println!("{}", terminal_size_help());
                     std::process::exit(0);
                 }
                 unknown => anyhow::bail!("unknown terminal-size argument {unknown:?}"),
@@ -823,9 +820,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             match argument.to_string_lossy().as_ref() {
                 "--" if options => options = false,
                 "--help" | "-h" if options => {
-                    println!(
-                        "Edit files with the pane's configured editor\n\nUsage: zetta edit [OPTIONS] [--] FILE ...\n\nUses EDITOR from the current environment. If EDITOR is unset or empty, Zetta's built-in vi is used.\n\nOptions:\n  -d, --delete-after             Delete a managed scrollback file after editing\n  -h, --help                     Print help"
-                    );
+                    println!("{}", edit_help());
                     std::process::exit(0);
                 }
                 "--delete-after" | "-d" if options => {
@@ -1446,9 +1441,7 @@ fn parse_benchmark_args(arguments: &[OsString]) -> Result<StartupArgs> {
                 profile_duration = Some(Duration::from_secs_f64(seconds));
             }
             "--help" | "-h" => {
-                println!(
-                    "Benchmark terminal rendering\n\nUsage: zetta benchmark [OPTIONS]\n\nThe workload options select one producer pattern and cannot be combined with\neach other. Without one, the standard text and line-drawing workload runs.\n\nOptions:\n  -s, --profile-pane-stress           Use four visible producer panes\n  -b, --profile-background-stress     Render alternating cell backgrounds\n  -u, --profile-sparse-updates        Update a dense terminal at 40 Hz\n  -a, --profile-alt-screen-scroll     Scroll a colourised diff on the alternate screen\n  -x, --profile-external-terminal     Run the workload in the current terminal\n  -r, --profile-report PATH           Write a profiling report\n  -d, --profile-duration SECONDS      Set the profiling duration\n  -h, --help                          Print help"
-                );
+                println!("{}", benchmark_help());
                 std::process::exit(0);
             }
             unknown => anyhow::bail!("unknown benchmark argument {unknown:?}"),

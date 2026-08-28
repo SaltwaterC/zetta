@@ -5,6 +5,8 @@ use std::io::{self, Read as _, Write as _};
 
 use anyhow::{Context as _, Result};
 
+use crate::startup::format_help_table;
+
 use super::CliServiceCommand;
 
 const CLIPBOARD_DAEMON_FLAG: &str = "--internal-clipboard-daemon";
@@ -15,12 +17,34 @@ pub(crate) struct CopyCommand;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PasteCommand;
 
-pub(crate) fn copy_help() -> &'static str {
-    "Copy standard input to the clipboard\n\nUsage: zetta copy [OPTIONS]\n\nReads standard input and writes it to the system clipboard as UTF-8 text, mirroring macOS's pbcopy. Available as zcopy in shell integration, and as pbcopy on platforms other than macOS so pbcopy muscle memory keeps working there too.\n\nOptions:\n  -pboard NAME                 Accepted for pbcopy compatibility (general, ruler, find, or font); Zetta has only one clipboard, so this has no effect\n  -h, -help, --help            Print help\n\nOn Linux and FreeBSD, Zetta forks a short-lived background process that keeps serving the clipboard after this command exits, since the X11 and Wayland clipboards are only available while their owning process is running. macOS and Windows keep the clipboard through their own system services, so no such process is needed there."
+pub(crate) fn copy_help() -> String {
+    format!(
+        "Copy standard input to the clipboard\n\nUsage: zetta copy [OPTIONS]\n\nReads standard input and writes it to the system clipboard as UTF-8 text, mirroring macOS's pbcopy. Available as zcopy in shell integration, and as pbcopy on platforms other than macOS so pbcopy muscle memory keeps working there too.\n\nOptions:\n{}\n\nOn Linux and FreeBSD, Zetta forks a short-lived background process that keeps serving the clipboard after this command exits, since the X11 and Wayland clipboards are only available while their owning process is running. macOS and Windows keep the clipboard through their own system services, so no such process is needed there.",
+        format_help_table([
+            (
+                "-pboard NAME",
+                "Accepted for pbcopy compatibility (general, ruler, find, or font); Zetta has only one clipboard, so this has no effect",
+            ),
+            ("-h, -help, --help", "Print help"),
+        ])
+    )
 }
 
-pub(crate) fn paste_help() -> &'static str {
-    "Print the clipboard's contents\n\nUsage: zetta paste [OPTIONS]\n\nWrites the system clipboard's text contents to standard output, mirroring macOS's pbpaste. Available as zpaste in shell integration, and as pbpaste on platforms other than macOS so pbpaste muscle memory keeps working there too. Prints nothing if the clipboard is empty or holds no text.\n\nOptions:\n  -pboard NAME                 Accepted for pbpaste compatibility (general, ruler, find, or font); Zetta has only one clipboard, so this has no effect\n  -Prefer TYPE                 Accepted for pbpaste compatibility (txt, rtf, or ps); Zetta only stores plain text, so this has no effect\n  -h, -help, --help            Print help"
+pub(crate) fn paste_help() -> String {
+    format!(
+        "Print the clipboard's contents\n\nUsage: zetta paste [OPTIONS]\n\nWrites the system clipboard's text contents to standard output, mirroring macOS's pbpaste. Available as zpaste in shell integration, and as pbpaste on platforms other than macOS so pbpaste muscle memory keeps working there too. Prints nothing if the clipboard is empty or holds no text.\n\nOptions:\n{}",
+        format_help_table([
+            (
+                "-pboard NAME",
+                "Accepted for pbpaste compatibility (general, ruler, find, or font); Zetta has only one clipboard, so this has no effect",
+            ),
+            (
+                "-Prefer TYPE",
+                "Accepted for pbpaste compatibility (txt, rtf, or ps); Zetta only stores plain text, so this has no effect",
+            ),
+            ("-h, -help, --help", "Print help"),
+        ])
+    )
 }
 
 fn parse_pboard_name(argument: &OsString) -> Result<()> {

@@ -5,6 +5,28 @@ fn args(values: &[&str]) -> Vec<OsString> {
 }
 
 #[test]
+fn format_help_table_aligns_multiline_rows_without_trailing_whitespace() {
+    let help = format_help_table([
+        ("short", "first description\ncontinued description"),
+        ("long label", "second description"),
+    ]);
+    let lines = help.lines().collect::<Vec<_>>();
+    let description_column = 2 + "long label".chars().count() + 2;
+
+    assert_eq!(lines.len(), 3);
+    assert_eq!(lines[0].find("first description"), Some(description_column));
+    assert_eq!(
+        lines[1].find("continued description"),
+        Some(description_column)
+    );
+    assert_eq!(
+        lines[2].find("second description"),
+        Some(description_column)
+    );
+    assert!(lines.iter().all(|line| *line == line.trim_end()));
+}
+
+#[test]
 fn kill_requires_a_session_id() {
     let error = run(&args(&["kill"])).unwrap_err().to_string();
     assert!(error.contains("requires a session ID"), "{error}");
@@ -19,8 +41,8 @@ fn kill_requires_a_session_id() {
 fn reconnect_requires_a_session_id_and_is_documented_separately_from_share() {
     let error = run(&args(&["reconnect"])).unwrap_err().to_string();
     assert!(error.contains("requires a session ID"), "{error}");
-    assert!(USAGE.contains("reconnect SESSION_ID"));
-    assert!(USAGE.contains("it does not open it"));
+    assert!(usage(false).contains("reconnect SESSION_ID"));
+    assert!(usage(false).contains("it does not open it"));
 }
 
 #[test]
@@ -63,8 +85,11 @@ fn stop_is_a_command_and_force_is_its_flag() {
     let error = run(&args(&["stop", "7"])).unwrap_err().to_string();
     assert!(error.contains("unknown mux argument"), "{error}");
 
-    assert!(USAGE.contains("stop"), "stop must be documented");
-    assert!(USAGE.contains("--force"), "--force must be documented");
+    assert!(usage(false).contains("stop"), "stop must be documented");
+    assert!(
+        usage(false).contains("--force"),
+        "--force must be documented"
+    );
     // Both spellings, as every other flag here has.
     for flag in ["--force", "-f"] {
         let error = run(&args(&[flag, "frobnicate"])).unwrap_err().to_string();
@@ -82,11 +107,14 @@ fn version_takes_the_same_short_form_as_zetta() {
     for flag in ["--version", "-v", "-V"] {
         run(&args(&[flag])).unwrap_or_else(|error| panic!("{flag}: {error}"));
     }
-    assert!(USAGE.contains("-v, --version"), "-v must be documented");
+    assert!(
+        usage(false).contains("-v, --version"),
+        "-v must be documented"
+    );
     // And the protocol with it: which build this is says nothing about whether it
     // can talk to the multiplexer that is running, which is the question.
     assert!(
-        USAGE.contains("the protocol it speaks"),
+        usage(false).contains("the protocol it speaks"),
         "the protocol must be part of what --version promises"
     );
 }
@@ -103,7 +131,10 @@ fn upgrade_has_a_short_form() {
             "{flag} must parse rather than be refused itself: {error}"
         );
     }
-    assert!(USAGE.contains("-u, --upgrade"), "-u must be documented");
+    assert!(
+        usage(false).contains("-u, --upgrade"),
+        "-u must be documented"
+    );
 }
 
 #[test]

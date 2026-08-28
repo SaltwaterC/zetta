@@ -8,6 +8,7 @@ use anyhow::{Context as _, Result};
 use gpui::AssetSource as _;
 use serde_json::{Map, Value, json};
 
+use crate::startup::format_help_table;
 use crate::{
     config::{Config, Profile, themes_dir},
     process_control::request_existing_process_configuration_reload,
@@ -757,40 +758,111 @@ fn save_config(path: &Path, source: &str) -> Result<()> {
     fs::write(path, format!("{source}\n")).with_context(|| format!("writing {}", path.display()))
 }
 
-pub(crate) fn profile_operation_help(operation: Option<&str>) -> &'static str {
+fn profile_config_options() -> String {
+    format_help_table([
+        ("-c, --config PATH", "Use a configuration file"),
+        ("-h, --help", "Print help"),
+    ])
+}
+
+fn profile_override_options(description: &str) -> String {
+    format_help_table([
+        ("-r, --reset", description),
+        ("-c, --config PATH", "Use a configuration file"),
+        ("-h, --help", "Print help"),
+    ])
+}
+
+pub(crate) fn profile_operation_help(operation: Option<&str>) -> String {
     match operation {
         Some("list") => {
-            "List all resolved profiles\n\nUsage: zetta profile list [OPTIONS]\n\nPrints one resolved profile name per line, including hidden profiles.\n\nOptions:\n  -c, --config PATH  Use a configuration file\n  -h, --help         Print help"
+            format!(
+                "List all resolved profiles\n\nUsage: zetta profile list [OPTIONS]\n\nPrints one resolved profile name per line, including hidden profiles.\n\nOptions:\n{}",
+                profile_config_options()
+            )
         }
         Some("themes") => {
-            "List available profile themes\n\nUsage: zetta profile themes [OPTIONS]\n\nPrints sorted, deduplicated bundled and installed theme names, one per line.\n\nOptions:\n  -c, --config PATH  Use a configuration file\n  -h, --help         Print help"
+            format!(
+                "List available profile themes\n\nUsage: zetta profile themes [OPTIONS]\n\nPrints sorted, deduplicated bundled and installed theme names, one per line.\n\nOptions:\n{}",
+                profile_config_options()
+            )
         }
         Some("disable") => {
-            "Hide a profile\n\nUsage: zetta profile disable PROFILE [OPTIONS]\n\nDisabling an already hidden profile succeeds without changing the file.\n\nOptions:\n  -c, --config PATH  Use a configuration file\n  -h, --help         Print help"
+            format!(
+                "Hide a profile\n\nUsage: zetta profile disable PROFILE [OPTIONS]\n\nDisabling an already hidden profile succeeds without changing the file.\n\nOptions:\n{}",
+                profile_config_options()
+            )
         }
         Some("enable") => {
-            "Show a profile\n\nUsage: zetta profile enable PROFILE [OPTIONS]\n\nEnabling an already visible profile succeeds without changing the file.\n\nOptions:\n  -c, --config PATH  Use a configuration file\n  -h, --help         Print help"
+            format!(
+                "Show a profile\n\nUsage: zetta profile enable PROFILE [OPTIONS]\n\nEnabling an already visible profile succeeds without changing the file.\n\nOptions:\n{}",
+                profile_config_options()
+            )
         }
         Some("theme") => {
-            "Set or reset a profile theme\n\nUsage: zetta profile theme PROFILE THEME [OPTIONS]\n       zetta profile theme PROFILE --reset [OPTIONS]\n\nTHEME must be listed by `zetta profile themes`.\n\nOptions:\n  -r, --reset        Remove the profile theme override\n  -c, --config PATH  Use a configuration file\n  -h, --help         Print help"
+            format!(
+                "Set or reset a profile theme\n\nUsage: zetta profile theme PROFILE THEME [OPTIONS]\n       zetta profile theme PROFILE --reset [OPTIONS]\n\nTHEME must be listed by `zetta profile themes`.\n\nOptions:\n{}",
+                profile_override_options("Remove the profile theme override")
+            )
         }
         Some("dark-theme") => {
-            "Set or reset a profile dark theme\n\nUsage: zetta profile dark-theme PROFILE THEME [OPTIONS]\n       zetta profile dark-theme PROFILE --reset [OPTIONS]\n\nTHEME must be listed by `zetta profile themes`. It is used when the operating system is in dark appearance.\n\nOptions:\n  -r, --reset        Remove the profile dark theme override\n  -c, --config PATH  Use a configuration file\n  -h, --help         Print help"
+            format!(
+                "Set or reset a profile dark theme\n\nUsage: zetta profile dark-theme PROFILE THEME [OPTIONS]\n       zetta profile dark-theme PROFILE --reset [OPTIONS]\n\nTHEME must be listed by `zetta profile themes`. It is used when the operating system is in dark appearance.\n\nOptions:\n{}",
+                profile_override_options("Remove the profile dark theme override")
+            )
         }
         Some("icon") => {
-            "Set or reset a profile icon\n\nUsage: zetta profile icon PROFILE ICON [OPTIONS]\n       zetta profile icon PROFILE --reset [OPTIONS]\n\nICON may be auto, zetta, bash, zsh, or fish. auto and --reset restore automatic icon inference.\n\nOptions:\n  -r, --reset        Remove the profile icon override\n  -c, --config PATH  Use a configuration file\n  -h, --help         Print help"
+            format!(
+                "Set or reset a profile icon\n\nUsage: zetta profile icon PROFILE ICON [OPTIONS]\n       zetta profile icon PROFILE --reset [OPTIONS]\n\nICON may be auto, zetta, bash, zsh, or fish. auto and --reset restore automatic icon inference.\n\nOptions:\n{}",
+                profile_override_options("Remove the profile icon override")
+            )
         }
         Some("default") => {
-            "Set the default profile\n\nUsage: zetta profile default PROFILE [OPTIONS]\n\nOptions:\n  -c, --config PATH  Use a configuration file\n  -h, --help         Print help"
+            format!(
+                "Set the default profile\n\nUsage: zetta profile default PROFILE [OPTIONS]\n\nOptions:\n{}",
+                profile_config_options()
+            )
         }
         Some("add") => {
-            "Add a custom profile\n\nUsage: zetta profile add NAME --program PROGRAM [OPTIONS]\n\nOptions:\n  -p, --program PROGRAM   Program to launch\n  -a, --arg ARG           Add a repeatable program argument\n  -t, --theme THEME       Set a light theme\n  -d, --dark-theme THEME  Set a dark theme\n  -i, --icon ICON         Set zetta, bash, zsh, fish, or auto\n  -c, --config PATH       Use a configuration file\n  -h, --help              Print help"
+            format!(
+                "Add a custom profile\n\nUsage: zetta profile add NAME --program PROGRAM [OPTIONS]\n\nOptions:\n{}",
+                format_help_table([
+                    ("-p, --program PROGRAM", "Program to launch"),
+                    ("-a, --arg ARG", "Add a repeatable program argument"),
+                    ("-t, --theme THEME", "Set a light theme"),
+                    ("-d, --dark-theme THEME", "Set a dark theme"),
+                    ("-i, --icon ICON", "Set zetta, bash, zsh, fish, or auto"),
+                    ("-c, --config PATH", "Use a configuration file"),
+                    ("-h, --help", "Print help"),
+                ])
+            )
         }
         Some("remove") => {
-            "Remove a custom profile\n\nUsage: zetta profile remove PROFILE [OPTIONS]\n\nDetected profiles and the active default profile cannot be removed.\n\nOptions:\n  -c, --config PATH  Use a configuration file\n  -h, --help         Print help"
+            format!(
+                "Remove a custom profile\n\nUsage: zetta profile remove PROFILE [OPTIONS]\n\nDetected profiles and the active default profile cannot be removed.\n\nOptions:\n{}",
+                profile_config_options()
+            )
         }
         _ => {
-            "Manage Zetta profiles\n\nUsage: zetta profile list [OPTIONS]\n       zetta profile themes [OPTIONS]\n       zetta profile disable PROFILE [OPTIONS]\n       zetta profile enable PROFILE [OPTIONS]\n       zetta profile theme PROFILE THEME [OPTIONS]\n       zetta profile theme PROFILE --reset [OPTIONS]\n       zetta profile dark-theme PROFILE THEME [OPTIONS]\n       zetta profile dark-theme PROFILE --reset [OPTIONS]\n       zetta profile icon PROFILE ICON [OPTIONS]\n       zetta profile icon PROFILE --reset [OPTIONS]\n       zetta profile default PROFILE [OPTIONS]\n       zetta profile add NAME --program PROGRAM [--arg ARG ...] [--theme THEME] [--dark-theme THEME] [--icon ICON] [OPTIONS]\n       zetta profile remove PROFILE [OPTIONS]\n\nOperations:\n  list       List all resolved profiles, including hidden profiles\n  themes     List available bundled and installed themes\n  disable    Hide a profile\n  enable     Show a profile\n  theme      Set or reset a profile theme\n  dark-theme Set or reset a profile dark theme\n  icon       Set or reset a profile icon\n  default    Set the default profile\n  add        Add a custom profile\n  remove     Remove a custom profile\n\nThe -c/--config option may appear anywhere after `profile`. Mutations are validated before saving and request a best-effort live reload from a matching Zetta process.\n\nOptions:\n  -c, --config PATH  Use a configuration file\n  -h, --help         Print help"
+            let operations = format_help_table([
+                (
+                    "list",
+                    "List all resolved profiles, including hidden profiles",
+                ),
+                ("themes", "List available bundled and installed themes"),
+                ("disable", "Hide a profile"),
+                ("enable", "Show a profile"),
+                ("theme", "Set or reset a profile theme"),
+                ("dark-theme", "Set or reset a profile dark theme"),
+                ("icon", "Set or reset a profile icon"),
+                ("default", "Set the default profile"),
+                ("add", "Add a custom profile"),
+                ("remove", "Remove a custom profile"),
+            ]);
+            format!(
+                "Manage Zetta profiles\n\nUsage: zetta profile list [OPTIONS]\n       zetta profile themes [OPTIONS]\n       zetta profile disable PROFILE [OPTIONS]\n       zetta profile enable PROFILE [OPTIONS]\n       zetta profile theme PROFILE THEME [OPTIONS]\n       zetta profile theme PROFILE --reset [OPTIONS]\n       zetta profile dark-theme PROFILE THEME [OPTIONS]\n       zetta profile dark-theme PROFILE --reset [OPTIONS]\n       zetta profile icon PROFILE ICON [OPTIONS]\n       zetta profile icon PROFILE --reset [OPTIONS]\n       zetta profile default PROFILE [OPTIONS]\n       zetta profile add NAME --program PROGRAM [--arg ARG ...] [--theme THEME] [--dark-theme THEME] [--icon ICON] [OPTIONS]\n       zetta profile remove PROFILE [OPTIONS]\n\nOperations:\n{operations}\n\nThe -c/--config option may appear anywhere after `profile`. Mutations are validated before saving and request a best-effort live reload from a matching Zetta process.\n\nOptions:\n{}",
+                profile_config_options()
+            )
         }
     }
 }
