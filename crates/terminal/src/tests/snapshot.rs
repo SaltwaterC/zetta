@@ -56,6 +56,47 @@ fn colour_is_carried_across_and_reset_at_the_end() {
 }
 
 #[test]
+fn psreadline_command_and_argument_colours_survive_the_prompt_reset() {
+    // A native command can leave the console's current attribute red. The
+    // CWD tracker reset must make the plain prompt default-colored before
+    // PSReadLine applies separate command and argument colors.
+    let term = term_showing(
+        b"\x1b[31m\x1b]2;zetta-cwd:C:\\work\x1b\\\x1b[0mPS C:\\work> \x1b[93mGet-ChildItem\x1b[0m \x1b[96m-Path\x1b[0m",
+    );
+    let term = term.lock();
+    let row = &term.grid()[alacritty_terminal::index::Line(0)];
+
+    assert_eq!(
+        row[alacritty_terminal::index::Column(0)].fg,
+        Color::Named(NamedColor::Foreground)
+    );
+    assert_eq!(
+        row[alacritty_terminal::index::Column(11)].fg,
+        Color::Named(NamedColor::Foreground)
+    );
+    assert_eq!(
+        row[alacritty_terminal::index::Column(12)].fg,
+        Color::Named(NamedColor::BrightYellow)
+    );
+    assert_eq!(
+        row[alacritty_terminal::index::Column(24)].fg,
+        Color::Named(NamedColor::BrightYellow)
+    );
+    assert_eq!(
+        row[alacritty_terminal::index::Column(25)].fg,
+        Color::Named(NamedColor::Foreground)
+    );
+    assert_eq!(
+        row[alacritty_terminal::index::Column(26)].fg,
+        Color::Named(NamedColor::BrightCyan)
+    );
+    assert_ne!(
+        row[alacritty_terminal::index::Column(12)].fg,
+        row[alacritty_terminal::index::Column(26)].fg
+    );
+}
+
+#[test]
 fn a_run_of_one_style_costs_one_sequence() {
     let snapshot = snapshot_of(b"\x1b[32mgreengreengreen");
 

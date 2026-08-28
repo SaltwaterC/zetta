@@ -1308,6 +1308,9 @@ fn install_windows_cwd_tracking(
         return;
     }
 
+    // This tracker is injected into ordinary interactive PowerShell panes, so
+    // CWD and prompt-style reporting does not depend on the optional profile
+    // integration installed by `zetta init powershell`.
     let arguments = arguments.get_or_insert_default();
     if powershell_has_command_arguments(arguments) {
         return;
@@ -6907,6 +6910,7 @@ mod tests {
         assert!(POWERSHELL_CWD_TRACKER.contains("CurrentFileSystemLocation.ProviderPath"));
         assert!(POWERSHELL_CWD_TRACKER.contains("__ZettaCwdTrackerInstalled"));
         assert!(POWERSHELL_CWD_TRACKER.contains("__ZettaOriginalPrompt"));
+        assert!(POWERSHELL_CWD_TRACKER.contains("$([char]27)[0m"));
         assert!(!POWERSHELL_CWD_TRACKER.contains("-NoProfile"));
     }
 
@@ -7052,6 +7056,11 @@ mod tests {
                     1,
                     "{program} with profile {profile_name} did not preserve the original prompt: {stdout:?}"
                 );
+                let expected_prompt = format!("{expected_marker}\u{1b}[0moriginal-profile-prompt");
+                assert!(
+                    stdout.contains(&expected_prompt),
+                    "{program} with profile {profile_name} did not reset before the prompt: {stdout:?}"
+                );
             }
         }
     }
@@ -7132,6 +7141,75 @@ mod tests {
             terminal.update(cx, |terminal, _| terminal.input(b"exit\r".to_vec()));
             let _ = completion_rx.recv().await;
             assert_eq!(reported.as_deref(), Some(directory.as_path()), "{program}");
+        }
+
+        if !available_shell {
+            eprintln!("neither powershell.exe nor pwsh.exe is installed");
+        }
+    }
+
+    #[cfg(windows)]
+    #[gpui::test]
+    async fn windows_powershell_automatic_tracker_resets_native_attributes(
+        cx: &mut TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        init_test(cx);
+
+        let mut available_shell = false;
+        for program in ["powershell.exe", "pwsh.exe"] {
+            if std::process::Command::new(program)
+                .args(["-NoLogo", "-NoProfile", "-Command", "exit"])
+                .output()
+                .is_err()
+            {
+                continue;
+            }
+            available_shell = true;
+
+            let (terminal, completion_rx) = build_test_terminal_with_arguments(
+                cx,
+                program.to_owned(),
+                vec!["-NoLogo".into(), "-NoProfile".into()],
+            )
+            .await;
+            terminal.update(cx, |terminal, _| {
+                terminal.input(
+                    b"cmd.exe /d /c color 4; Write-Output ZETTA_NATIVE_COLOR_DONE\r".to_vec(),
+                );
+            });
+
+            let mut completed = false;
+            for _ in 0..200 {
+                cx.run_until_parked();
+                completed = terminal.read_with(cx, |terminal, _| {
+                    terminal.get_content().contains("ZETTA_NATIVE_COLOR_DONE")
+                        && terminal.term.lock().grid().cursor.template.fg
+                            == Color::Named(NamedColor::Foreground)
+                });
+                if completed {
+                    break;
+                }
+                cx.background_executor
+                    .timer(Duration::from_millis(10))
+                    .await;
+            }
+            assert!(
+                completed,
+                "{program} did not complete the native color transition"
+            );
+
+            let foreground = terminal.read_with(cx, |terminal, _| {
+                terminal.term.lock().grid().cursor.template.fg
+            });
+            assert_eq!(
+                foreground,
+                Color::Named(NamedColor::Foreground),
+                "{program}'s automatically injected tracker must reset before its prompt"
+            );
+
+            terminal.update(cx, |terminal, _| terminal.input(b"exit\r".to_vec()));
+            let _ = completion_rx.recv().await;
         }
 
         if !available_shell {

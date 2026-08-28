@@ -230,6 +230,41 @@ fn palette_probe_request(palette: ConsolePalette) -> SpawnRequest {
     request
 }
 
+fn assert_powershell_prompt_resets_after_cwd_marker(
+    output: &[u8],
+    program: &str,
+    profile_name: &str,
+) {
+    let output = String::from_utf8_lossy(output);
+    let mut search_from = 0;
+    let mut prompt_count = 0;
+    while let Some(marker_start) = output[search_from..].find("\u{1b}]2;zetta-cwd:") {
+        let marker_start = search_from + marker_start;
+        let marker_end = output[marker_start..]
+            .find("\u{1b}\\")
+            .map(|offset| marker_start + offset + 2)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{program} with profile {profile_name} emitted an unterminated CWD marker: {output:?}"
+                )
+            });
+        assert!(
+            output[marker_end..].starts_with("\u{1b}[0mZETTA_PROMPT"),
+            "{program} with profile {profile_name} did not reset before the prompt: {output:?}"
+        );
+        prompt_count += 1;
+        search_from = marker_end;
+    }
+    assert_eq!(
+        prompt_count, 2,
+        "{program} with profile {profile_name} did not report both prompt transitions: {output:?}"
+    );
+    assert!(
+        output.contains("ZETTA_DONE"),
+        "{program} with profile {profile_name} did not finish the prompt exercise: {output:?}"
+    );
+}
+
 fn session_summary(session_id: u64, pane_id: u64) -> BackgroundSessionSummary {
     BackgroundSessionSummary {
         id: session_id,
@@ -372,6 +407,63 @@ fn palette_initialization_does_not_block_native_shell_startup() {
             "printf ZETTA_MSYS2_READY".to_owned(),
         ];
         assert_shell_starts_quickly(&client, msys, b"ZETTA_MSYS2_READY");
+    }
+
+    let _ = client.shutdown();
+}
+
+#[test]
+fn conpty_powershell_prompts_reset_native_attributes_with_or_without_profile_integration() {
+    const POWERSHELL_INTEGRATION: &str =
+        include_str!("../../../src/shell_integration/powershell.ps1");
+    const POWERSHELL_CWD_TRACKER: &str =
+        include_str!("../../terminal/src/terminal/powershell_cwd_tracker.ps1");
+
+    let profile_tracker = POWERSHELL_INTEGRATION
+        .split_once("\n\nif (-not (Test-Path Env:EDITOR))")
+        .expect("the profile tracker must remain the integration preamble")
+        .0;
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+
+    for program in ["powershell.exe", "pwsh.exe"] {
+        if Command::new(program)
+            .args(["-NoLogo", "-NoProfile", "-Command", "exit"])
+            .output()
+            .is_err()
+        {
+            continue;
+        }
+
+        for (profile_name, profile) in [("absent", ""), ("present", profile_tracker)] {
+            let mut request = spawn_request();
+            request.program = Some(program.to_owned());
+            request.args = vec![
+                "-NoLogo".to_owned(),
+                "-NoProfile".to_owned(),
+                "-NoExit".to_owned(),
+                "-Command".to_owned(),
+                format!(
+                    "function global:prompt {{ 'ZETTA_PROMPT' }}\n{profile}\n{POWERSHELL_CWD_TRACKER}\ncmd.exe /d /c color 4\nprompt\ncmd.exe /d /c color 2\nprompt\nWrite-Output ZETTA_DONE\nexit"
+                ),
+            ];
+            let pane = client.spawn(request).unwrap_or_else(|error| {
+                panic!("creating {program} with profile {profile_name}: {error:#}")
+            });
+            let session_id = pane.session_id;
+            let mut output = std::fs::File::from(pane.conout);
+            let mut input = std::fs::File::from(pane.conin);
+            let bytes = read_until(
+                &mut output,
+                &mut input,
+                b"ZETTA_DONE",
+                Duration::from_secs(10),
+            );
+            assert_powershell_prompt_resets_after_cwd_marker(&bytes, program, profile_name);
+            drop(output);
+            drop(input);
+            let _ = client.kill(session_id);
+        }
     }
 
     let _ = client.shutdown();

@@ -6,6 +6,7 @@ if (-not $terminalTrackerActive) {
         try {
             $zettaDirectory = $ExecutionContext.SessionState.Path.CurrentFileSystemLocation.ProviderPath
             [Console]::Write("$([char]27)]2;zetta-cwd:$zettaDirectory$([char]27)\")
+            [Console]::Write("$([char]27)[0m")
         } catch {}
         if ($null -ne $global:__ZettaOriginalPrompt) {
             & $global:__ZettaOriginalPrompt

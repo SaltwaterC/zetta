@@ -99,6 +99,54 @@ fn powershell_cwd_tracker_uses_the_shared_idempotence_guard() {
 }
 
 #[test]
+fn powershell_cwd_trackers_reset_before_the_saved_prompt() {
+    const TERMINAL_TRACKER: &str =
+        include_str!("../../crates/terminal/src/terminal/powershell_cwd_tracker.ps1");
+    const MARKER_WRITE: &str =
+        r#"[Console]::Write("$([char]27)]2;zetta-cwd:$zettaDirectory$([char]27)\")"#;
+    const RESET_WRITE: &str = r#"[Console]::Write("$([char]27)[0m")"#;
+
+    for (name, script) in [
+        ("shell integration", ShellIntegration::PowerShell.script()),
+        ("terminal tracker", TERMINAL_TRACKER.to_owned()),
+    ] {
+        let marker = script
+            .find(MARKER_WRITE)
+            .unwrap_or_else(|| panic!("{name} must write the CWD marker"));
+        let reset = script
+            .find(RESET_WRITE)
+            .unwrap_or_else(|| panic!("{name} must reset the console style"));
+        let prompt = script
+            .find("if ($null -ne $global:__ZettaOriginalPrompt)")
+            .unwrap_or_else(|| panic!("{name} must invoke the saved prompt"));
+
+        assert_eq!(
+            script.matches(MARKER_WRITE).count(),
+            1,
+            "{name} must have one CWD marker write"
+        );
+        assert_eq!(
+            script.matches(RESET_WRITE).count(),
+            1,
+            "{name} must have one prompt reset write"
+        );
+        assert_eq!(
+            script.matches("function global:prompt").count(),
+            1,
+            "{name} must install the prompt only once"
+        );
+        assert!(
+            script[marker..].starts_with(&format!("{MARKER_WRITE}\n            {RESET_WRITE}")),
+            "{name} must reset immediately after its CWD marker"
+        );
+        assert!(
+            marker < reset && reset < prompt,
+            "{name} reset must precede prompt"
+        );
+    }
+}
+
+#[test]
 fn vi_integration_is_conditional_and_has_cli_completion() {
     let bash = ShellIntegration::Bash.script();
     assert!(bash.contains("if ! type -t vi >/dev/null 2>&1"));
