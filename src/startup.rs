@@ -989,6 +989,28 @@ fn reconnect_window_id(runner_id: u64, attention_id: Option<u64>, cx: &App) -> O
     })
 }
 
+trait ApplicationOpenUrlsExt {
+    fn with_open_url_handler(
+        self,
+        control_tx: futures::channel::mpsc::UnboundedSender<ProcessControlCommand>,
+    ) -> Self;
+}
+
+impl ApplicationOpenUrlsExt for gpui::Application {
+    fn with_open_url_handler(
+        self,
+        control_tx: futures::channel::mpsc::UnboundedSender<ProcessControlCommand>,
+    ) -> Self {
+        #[cfg(target_os = "macos")]
+        self.on_open_urls(move |urls| {
+            let _ = control_tx.unbounded_send(ProcessControlCommand::OpenUrls(urls));
+        });
+        #[cfg(not(target_os = "macos"))]
+        let _ = control_tx;
+        self
+    }
+}
+
 pub(crate) fn run() -> Result<()> {
     let args = parse_args()?;
     let mut startup_project_root = None;
@@ -1367,9 +1389,11 @@ pub(crate) fn run() -> Result<()> {
     let is_embedding = args.mode == StartupMode::WindowsEmbedding;
     #[cfg(not(windows))]
     let is_embedding = false;
+    let (control_tx, mut control_rx) = futures::channel::mpsc::unbounded();
     gpui_platform::application()
         .with_quit_mode(zetta_quit_mode())
         .with_assets(ZettaAssets)
+        .with_open_url_handler(control_tx.clone())
         .run(move |cx: &mut App| {
             #[cfg(windows)]
             {
@@ -1393,14 +1417,6 @@ pub(crate) fn run() -> Result<()> {
                 &config.hidden_profiles,
                 config.default_profile,
             );
-            let (control_tx, mut control_rx) = futures::channel::mpsc::unbounded();
-            #[cfg(target_os = "macos")]
-            {
-                let control_tx = control_tx.clone();
-                cx.on_open_urls(move |urls| {
-                    let _ = control_tx.unbounded_send(ProcessControlCommand::OpenUrls(urls));
-                });
-            }
             #[cfg(windows)]
             let handoff_control_tx = control_tx.clone();
             let control_server = ProcessControlServer::start(control_tx)

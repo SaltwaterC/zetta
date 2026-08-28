@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 use anyhow::Context as _;
 #[cfg(target_os = "macos")]
 use std::path::Path;
@@ -24,7 +24,7 @@ pub(crate) fn set_default_terminal() -> Result<String> {
     #[cfg(target_os = "macos")]
     {
         register_macos_script_handlers()?;
-        return Ok("Zetta is now the default terminal for shell-script files".to_owned());
+        Ok("Zetta is now the default terminal for shell-script files".to_owned())
     }
     #[cfg(target_os = "linux")]
     {
@@ -74,6 +74,32 @@ impl crate::Zetta {
                         &effective.hidden_profiles,
                         effective.default_profile,
                     );
+                    let profiles = self.profiles.clone();
+                    let hidden_profiles = effective.hidden_profiles.clone();
+                    let default_profile = effective.default_profile;
+                    let executor = cx.background_executor().clone();
+                    cx.spawn(async move |this, cx| {
+                        // Launch Services can finish committing the handler after the
+                        // setter returns, especially when it has shown confirmation
+                        // dialogs. Refresh until it reports the new handler, but bound
+                        // the polling so a cancelled prompt does not leave a task alive.
+                        for _ in 0..20 {
+                            executor.timer(std::time::Duration::from_millis(50)).await;
+                            if macos_script_handlers_are_zetta() {
+                                this.update(cx, |_this, cx| {
+                                    crate::startup::update_native_macos_menus(
+                                        cx,
+                                        &profiles,
+                                        &hidden_profiles,
+                                        default_profile,
+                                    );
+                                })
+                                .ok();
+                                break;
+                            }
+                        }
+                    })
+                    .detach();
                 }
                 self.show_notice(message, cx);
             }
