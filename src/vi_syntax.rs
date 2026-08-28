@@ -721,19 +721,22 @@ impl ZedSyntaxHighlighter {
                 let configuration = loaded[language_index]
                     .as_deref()
                     .expect("selected grammar configuration is loaded");
-                let events =
-                    self.highlighter
-                        .highlight(configuration, buffer, cancellation_flag, |name| {
-                            let &injected_language =
-                                language_names.get(&name.to_ascii_lowercase())?;
-                            match loaded[injected_language].as_deref() {
-                                Some(configuration) => Some(configuration),
-                                None => {
-                                    missing_languages.borrow_mut().insert(injected_language);
-                                    None
-                                }
+                let events = self.highlighter.highlight(
+                    configuration,
+                    buffer,
+                    None,
+                    cancellation_flag,
+                    |name| {
+                        let &injected_language = language_names.get(&name.to_ascii_lowercase())?;
+                        match loaded[injected_language].as_deref() {
+                            Some(configuration) => Some(configuration),
+                            None => {
+                                missing_languages.borrow_mut().insert(injected_language);
+                                None
                             }
-                        });
+                        }
+                    },
+                );
                 let spans = highlight_spans(events.expect("highlight failed"), &styles);
                 (spans, missing_languages.into_inner())
             };

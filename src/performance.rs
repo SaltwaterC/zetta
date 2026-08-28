@@ -263,7 +263,10 @@ impl PerformanceOverlay {
             .collector
             .collect_unseen()
             .into_iter()
-            .filter(|timing| timing.window_id == self.window_id)
+            .filter_map(|event| match event {
+                FrameEvent::Draw(timing) if timing.window_id == self.window_id => Some(timing),
+                FrameEvent::Draw(_) | FrameEvent::Present(_) => None,
+            })
             .collect::<Vec<_>>();
         self.metrics = PerformanceMetrics::from_timings(&timings, sample_elapsed);
         self.sampled_at = now;
@@ -515,8 +518,7 @@ impl Zetta {
 
 pub(crate) fn enable_frame_tracing() {
     if PERFORMANCE_OVERLAY_COUNT.fetch_add(1, Ordering::AcqRel) == 0 {
-        PERFORMANCE_OWNS_FRAME_TRACING
-            .store(profiler::set_frame_trace_enabled(true), Ordering::Release);
+        PERFORMANCE_OWNS_FRAME_TRACING.store(profiler::set_trace_enabled(true), Ordering::Release);
     }
 }
 
@@ -524,7 +526,7 @@ pub(crate) fn disable_frame_tracing() {
     let previous = PERFORMANCE_OVERLAY_COUNT.fetch_sub(1, Ordering::AcqRel);
     debug_assert!(previous > 0);
     if previous == 1 && PERFORMANCE_OWNS_FRAME_TRACING.swap(false, Ordering::AcqRel) {
-        profiler::set_frame_trace_enabled(false);
+        profiler::set_trace_enabled(false);
     }
 }
 

@@ -212,28 +212,6 @@ code until the row's close control or the close shortcut is used. Opening
 another command while one is selected adds it to the same host pane; the host
 pane controls are hidden while stacking is enabled.
 
-## Built with Codex and GPT-5.6
-
-Zetta was developed using Codex with GPT-5.6. Codex accelerated the project
-from an experimental question—whether Zed's terminal could become a standalone
-application—into a working cross-platform terminal emulator in a short
-development cycle. It implemented the application, the local terminal and
-platform forks, tests, documentation, and iterative fixes through the Codex
-TUI.
-
-The project was self-hosted early: development continued inside Zetta using the
-Codex TUI before the first commit was made. That provided a practical feedback
-loop in which terminal interaction, rendering, panes, profiles, and
-cross-platform behavior could be exercised while the application itself was
-being built.
-
-The key product and engineering decisions remained human-led. These included
-the cross-platform terminal workflow, feature priorities, interaction design,
-application architecture, testing strategy, and the boundaries between Zetta's
-code, its maintained forks, and upstream Zed. Codex handled implementation and
-rapid iteration; decades of day-to-day terminal use guided what should be
-built, how it should behave, and when the result was good enough.
-
 ## Documentation
 
 - [Installation](docs/installation.md): build requirements and platform

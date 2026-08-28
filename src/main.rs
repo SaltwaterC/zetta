@@ -76,15 +76,15 @@ use futures::StreamExt as _;
 use gpui::WindowControls;
 use gpui::{
     Action, Anchor, Animation, AnimationExt, AnyElement, App, AppContext as _, Bounds, Context,
-    CursorStyle, Decorations, DismissEvent, Entity, Focusable, FrameTiming, FrameTimingCollector,
-    Global, HitboxBehavior, Hsla, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent,
-    KeyUpEvent, KeybindingKeystroke, ListSizingBehavior, MAX_BUTTONS_PER_SIDE, MouseButton,
-    PathPromptOptions, Pixels, PlatformKeyboardMapper, Point, Render, ResizeEdge, ScrollHandle,
-    ScrollStrategy, SharedString, Size, Subscription, Task, Tiling, TitlebarOptions,
-    UniformListScrollHandle, WeakEntity, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowButton, WindowButtonLayout, WindowControlArea, WindowDecorations, WindowId,
-    WindowOptions, actions, anchored, canvas, container_query, deferred, div, point, profiler, px,
-    size, svg, transparent_black, uniform_list,
+    CursorStyle, Decorations, DismissEvent, Entity, Focusable, FrameEvent, FrameTiming,
+    FrameTimingCollector, Global, HitboxBehavior, Hsla, InteractiveElement as _, IntoElement,
+    KeyBinding, KeyDownEvent, KeyUpEvent, KeybindingKeystroke, ListSizingBehavior,
+    MAX_BUTTONS_PER_SIDE, MouseButton, PathPromptOptions, Pixels, PlatformKeyboardMapper, Point,
+    Render, ResizeEdge, ScrollHandle, ScrollStrategy, SharedString, Size, Subscription, Task,
+    Tiling, TitlebarOptions, UniformListScrollHandle, WeakEntity, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowButton, WindowButtonLayout, WindowControlArea,
+    WindowDecorations, WindowId, WindowOptions, actions, anchored, canvas, container_query,
+    deferred, div, point, profiler, px, size, svg, transparent_black, uniform_list,
 };
 use mux::{MuxPanes, MuxRuntime};
 use process_control::{
