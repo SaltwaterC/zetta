@@ -938,7 +938,7 @@ fn test_get_pw_entry() {
 mod attached_tests {
     use super::*;
     use crate::tty::Shell;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     fn attached_pty(child_pid: u32) -> (Pty, AttachedChildEvents) {
         let pty = openpty(None, None).unwrap();
@@ -984,8 +984,20 @@ mod attached_tests {
 
         // Otherwise a pane whose daemon died would spin: the event loop retries
         // a failing read on the master and only stops on a child event.
+        // A concurrent PTY test can fork while the reporter is still open; its
+        // close-on-exec copy keeps the peer open until that child execs.
         drop(events);
-        assert_eq!(pty.next_child_event(), Some(ChildEvent::WatcherDisconnected));
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let event = loop {
+            if let Some(event) = pty.next_child_event() {
+                break Some(event);
+            }
+            if Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert_eq!(event, Some(ChildEvent::WatcherDisconnected));
     }
 
     #[test]
