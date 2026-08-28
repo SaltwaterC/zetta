@@ -255,7 +255,7 @@ fn read_until(
     let mut sent_device_attributes = false;
     while Instant::now() < deadline {
         let mut available = 0;
-        let peek_succeeded = unsafe {
+        let peek_result = unsafe {
             windows::Win32::System::Pipes::PeekNamedPipe(
                 windows::Win32::Foundation::HANDLE(output.as_raw_handle()),
                 None,
@@ -264,10 +264,14 @@ fn read_until(
                 Some(&mut available),
                 None,
             )
-            .is_ok()
         };
-        if !peek_succeeded {
-            break;
+        if peek_result.is_err() {
+            // ConPTY can briefly report an unavailable pipe while its
+            // attached process is being brought up. Treat that as a retry,
+            // not EOF; a genuinely closed pipe still fails the marker
+            // assertion once the overall deadline expires.
+            std::thread::sleep(Duration::from_millis(10));
+            continue;
         }
         if available > 0 {
             let start = bytes.len();
