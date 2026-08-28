@@ -261,7 +261,9 @@ zmux unshare 12345:7:3   # the window that last held it owns it again
 
 `Ctrl-Shift-K` asks for the secret a joining window will have to present, exactly
 as detaching asks for the one that will reattach a session — and, exactly as
-there, an empty dialog leaves the session unprotected. It is worth choosing one:
+there, an empty dialog leaves the session unprotected. The terminal form has
+the same behavior: typed characters are masked with `*`, and Ctrl-C cancels
+either prompt. It is worth choosing one:
 a window joining a session can do everything that session's terminals can
 already do, and that may be more than the joining process could do on its own,
 since a shell that has answered `sudo` stays answered. `zmux share` offers the
@@ -443,11 +445,12 @@ zetta mux reconnect 12345:7:42
 
 Use the complete `PROCESS:RUNNER:SESSION` ID when more than one process has a
 session with the same numeric ID. Reconnecting a protected session prompts for
-the secret on the controlling terminal with terminal echo disabled. The secret
-is read from the prompt rather than a command-line option, so it is not stored
-in shell history or exposed in the process list. When this command runs inside
-a Zetta terminal, the reconnect is routed to that terminal's Zetta process and
-window; an invocation from outside Zetta uses the available running window.
+the secret on the controlling terminal with typed characters masked as `*`.
+Ctrl-C cancels the prompt. The secret is read from the prompt rather than a
+command-line option, so it is not stored in shell history or exposed in the
+process list. When this command runs inside a Zetta terminal, the reconnect is
+routed to that terminal's Zetta process and window; an invocation from outside
+Zetta uses the available running window.
 
 In a shell launched by `zetta --no-mux`, the local session catalog is still
 managed from the CLI:

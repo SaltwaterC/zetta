@@ -168,7 +168,7 @@ fn no_mux_environment() -> bool {
     std::env::var(NO_MUX_ENVIRONMENT_VARIABLE).is_ok_and(|value| value == "1")
 }
 
-const SESSION_ID_HELP: &str = "SESSION_ID is either the bare numeric session ID or the stable PROCESS:RUNNER:SESSION catalog identifier printed by `zmux list`. The bare form is accepted only when the numeric ID is unambiguous; use the full form when more than one catalog contains it. `share` changes a scoped session to shared mode; `reconnect` is the command that opens it in a Zetta window. `resume` accepts the opaque numeric record ID from disk retention.";
+const SESSION_ID_HELP: &str = "SESSION_ID is either the bare numeric session ID or the stable PROCESS:RUNNER:SESSION catalog identifier printed by `zmux list`. The bare form is accepted only when the numeric ID is unambiguous; use the full form when more than one catalog contains it. `share` changes a scoped session to shared mode and offers an optional secret; press Enter on an empty prompt for no protection. Entered characters are shown as `*`, and Ctrl-C cancels the prompt. `reconnect` is the command that opens it in a Zetta window. `resume` accepts the opaque numeric record ID from disk retention.";
 const NO_MUX_SESSION_ID_HELP: &str = "SESSION_ID is either the bare numeric session ID or the stable PROCESS:RUNNER:SESSION catalog identifier printed by `zmux list`. The bare form is accepted only when the numeric ID is unambiguous; use the full form when more than one catalog contains it. `reconnect` is the command that opens it in a Zetta window.";
 
 enum SessionArgument {
