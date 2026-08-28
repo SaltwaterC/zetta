@@ -361,6 +361,10 @@ fn configure_retries_once_after_an_unsupported_request() {
                 };
                 let name = request["request"]["request"].as_str();
                 let response = match name {
+                    // `configure_raw` verifies that the daemon is serving
+                    // requests before each attempt. A pre-Configure daemon
+                    // can answer Ping even though it rejects Configure.
+                    Some("ping") => serde_json::json!({"response": "ok"}),
                     Some("configure") => {
                         configure_requests.fetch_add(1, Ordering::Relaxed);
                         if upgraded.load(Ordering::Acquire) {
