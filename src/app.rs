@@ -576,6 +576,12 @@ pub(crate) struct Zetta {
     /// `None` until then. Normal launches require the daemon; `--no-mux` is an
     /// explicit compatibility escape hatch for the legacy in-process owner.
     pub(crate) mux: Option<MuxRuntime>,
+    #[cfg(feature = "session-persistence")]
+    /// Invalidates a disk-recovery task whenever the effective configuration or
+    /// the runtime it belongs to changes.
+    pub(crate) mux_recovery_generation: u64,
+    #[cfg(feature = "session-persistence")]
+    pub(crate) mux_recovery_task: Option<Task<()>>,
     pub(crate) no_mux: bool,
     pub(crate) mux_panes: MuxPanes,
     /// The panes this window shows in shared mode, keyed by pane id. A shared
@@ -832,6 +838,10 @@ impl Zetta {
             tabs: Vec::new(),
             background_sessions: BackgroundSessionRunner::default(),
             mux: None,
+            #[cfg(feature = "session-persistence")]
+            mux_recovery_generation: 0,
+            #[cfg(feature = "session-persistence")]
+            mux_recovery_task: None,
             no_mux,
             mux_panes: MuxPanes::default(),
             shared_panes: HashMap::new(),

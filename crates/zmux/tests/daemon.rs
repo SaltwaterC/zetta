@@ -508,15 +508,18 @@ fn reconfiguring_to_disk_keeps_an_existing_process_and_creates_encrypted_persist
     let descriptor = std::fs::File::from(pane.descriptor);
     read_until(&descriptor, "ready");
 
-    client
-        .configure_with_retention_and_persistence(
+    let configuration = client
+        .configure_with_retention_and_persistence_resilient(
             Retention::Disk,
             zmux::persistence::PersistenceOptions {
                 recipients: vec![identity.to_public().to_string()],
                 identity: None,
             },
+            Retention::Memory { bytes: 4096 },
         )
         .unwrap();
+    assert_eq!(configuration.requested_retention, Retention::Disk);
+    assert_eq!(configuration.effective_retention, Retention::Disk);
     assert!(process_is_alive(pane.child_pid));
 
     drop(descriptor);

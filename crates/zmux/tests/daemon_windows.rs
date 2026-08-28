@@ -645,6 +645,59 @@ fn cli_upgrade_keeps_a_live_windows_pseudoconsole() {
         .expect("stopping the replacement daemon");
 }
 
+#[cfg(feature = "session-persistence")]
+#[test]
+fn resilient_reconfiguration_to_disk_keeps_a_windows_pseudoconsole_running() {
+    let identity = age::x25519::Identity::generate();
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let pane = client
+        .spawn(spawn_request())
+        .expect("creating a pseudoconsole pane");
+    let session_id = pane.session_id;
+    let pane_id = pane.pane_id;
+    let child_pid = pane.child_pid;
+
+    let configuration = client
+        .configure_with_retention_and_persistence_resilient(
+            zmux::retention::Retention::Disk,
+            zmux::persistence::PersistenceOptions {
+                recipients: vec![identity.to_public().to_string()],
+                identity: None,
+            },
+            zmux::retention::Retention::Memory { bytes: 4096 },
+        )
+        .expect("switching retention to disk");
+    assert_eq!(
+        configuration.effective_retention,
+        zmux::retention::Retention::Disk
+    );
+    assert!(process_is_alive(child_pid));
+
+    drop(pane);
+    client
+        .detach(
+            session_id,
+            session_summary(session_id, pane_id),
+            serde_json::json!({"configured_after_startup": true}),
+            None,
+            Vec::new(),
+        )
+        .expect("detaching the configured pseudoconsole");
+    assert!(
+        daemon
+            .sessions_dir()
+            .join("persistence")
+            .join("manifest.json")
+            .is_file()
+    );
+
+    client
+        .kill(session_id)
+        .expect("cleaning up the pseudoconsole");
+    client.shutdown().expect("stopping the daemon");
+}
+
 #[test]
 fn attached_client_receives_conpty_output_without_host_competing_for_it() {
     let daemon = TestDaemon::start();

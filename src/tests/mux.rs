@@ -79,3 +79,44 @@ fn a_window_knows_which_sessions_it_is_already_showing() {
         "a detached tab's session is available again"
     );
 }
+
+#[cfg(feature = "session-persistence")]
+#[test]
+fn a_degraded_disk_runtime_keeps_the_requested_policy_separate_from_effective_memory() {
+    let state = MuxRetentionState {
+        requested: Retention::Disk,
+        effective: Retention::Memory { bytes: 8192 },
+        degraded_reason: Some("GitHub is unavailable".to_owned()),
+    };
+
+    assert_eq!(state.requested, Retention::Disk);
+    assert_eq!(state.effective, Retention::Memory { bytes: 8192 });
+    assert!(state.degraded_reason.is_some());
+    assert!(!state.can_resume_disk());
+
+    let restored = MuxRetentionState::exact(Retention::Disk);
+    assert!(restored.can_resume_disk());
+}
+
+#[cfg(feature = "session-persistence")]
+#[test]
+fn mux_recovery_uses_exponential_delays_and_caps_at_one_minute() {
+    assert_eq!(
+        MUX_RECOVERY_DELAYS,
+        [
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(20),
+            std::time::Duration::from_secs(40),
+            std::time::Duration::from_secs(60),
+        ]
+    );
+}
+
+#[cfg(feature = "session-persistence")]
+#[test]
+fn mux_recovery_generation_rejects_old_runtime_or_configuration_tasks() {
+    assert!(mux_recovery_generation_matches(4, 9, 4, 9));
+    assert!(!mux_recovery_generation_matches(5, 9, 4, 9));
+    assert!(!mux_recovery_generation_matches(4, 10, 4, 9));
+}

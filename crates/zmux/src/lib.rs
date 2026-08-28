@@ -35,7 +35,6 @@ pub mod upgrade;
 
 use std::ffi::OsString;
 
-#[cfg(feature = "session-persistence")]
 use anyhow::Context as _;
 use anyhow::Result;
 

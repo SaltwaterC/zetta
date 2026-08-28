@@ -107,6 +107,8 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         self.configuration_reload_feedback.begin_attempt();
+        #[cfg(feature = "session-persistence")]
+        self.invalidate_mux_recovery();
         let config_path = self.launch_config.config_path.clone();
         let keymap_override = self.launch_config.keymap_override.clone();
         let config = match Config::load(Some(&config_path), keymap_override) {
@@ -160,6 +162,8 @@ impl Zetta {
     }
 
     fn apply_loaded_configuration(&mut self, config: Config, cx: &mut Context<Self>) -> Result<()> {
+        #[cfg(feature = "session-persistence")]
+        self.invalidate_mux_recovery();
         load_user_themes(cx).log_err();
         let project_detection_base = Arc::new(config.clone());
         let project_roots = self
@@ -186,6 +190,9 @@ impl Zetta {
             runtime.reconfigure_with_retention_and_persistence(
                 config.sessions.to_zmux_retention()?,
                 config.sessions.to_zmux_persistence(),
+                zmux::retention::Retention::Memory {
+                    bytes: config.sessions.ring_bytes,
+                },
             )?;
         }
         #[cfg(not(feature = "session-persistence"))]
@@ -270,6 +277,8 @@ impl Zetta {
         // must not land on the keystroke that detaches a tab.
         #[cfg(feature = "session-persistence")]
         self.refresh_auto_protect(cx);
+        #[cfg(feature = "session-persistence")]
+        self.start_mux_recovery_if_needed(cx);
         self.project_detection_base = project_detection_base;
         self.projects.configs.clear();
         for project in project_configs {

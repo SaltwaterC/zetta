@@ -47,6 +47,18 @@ identity files; the configured identity path is used by the Zetta picker, and
 by `zmux resume` and `zmux reconnect`, when one is set. An explicit `--identity`
 adds to the configured one rather than replacing it.
 
+Disk retention can temporarily fall back to the configured in-memory screen
+when a `github:USER` recipient cannot be resolved because GitHub is
+unreachable. The daemon remains the owner, so detached sessions continue to be
+available to another Zetta process; the tradeoff is that sessions created while
+the fallback is active do not get new encrypted persistence files. Existing
+files are not removed or rewritten by the fallback. Zetta retries persistence
+in the background after 5, 10, 20, 40, and then 60 seconds, repeating at most
+every 60 seconds, and restores disk retention in the same daemon when the
+lookup succeeds. The window shows an informational notice, and encrypted disk
+resume is unavailable until restoration; permanent recipient errors still
+fail the configuration.
+
 ### Protecting a session without a secret
 
 A session is normally protected by a secret someone chooses and types back in

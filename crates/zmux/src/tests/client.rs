@@ -77,6 +77,187 @@ fn ready_connection_rejects_a_failed_ping() {
     server.join().unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn ready_connection_refreshes_a_stale_endpoint_token() {
+    use std::os::unix::net::UnixListener;
+
+    let directory = tempfile::tempdir().unwrap();
+    let socket_path = directory.path().join("zmux.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let endpoint_path = directory.path().join("zmux.json");
+    let old = Endpoint {
+        version: crate::transport::ENDPOINT_VERSION,
+        protocol_version: PROTOCOL_VERSION,
+        process_id: 4242,
+        socket_path: socket_path.clone(),
+        token: "old-token".to_owned(),
+    };
+    old.write(&endpoint_path).unwrap();
+
+    let server = std::thread::spawn({
+        let endpoint_path = endpoint_path.clone();
+        let socket_path = socket_path.clone();
+        move || {
+            // The first connection is the liveness check performed while the
+            // endpoint is read. The second is the readiness ping, which sees
+            // the token from the stale endpoint file.
+            let _ = listener.accept().unwrap();
+            let (stream, _) = listener.accept().unwrap();
+            let mut connection = Connection::new(stream);
+            let (envelope, _) = connection.receive::<Envelope>().unwrap();
+            assert!(matches!(envelope.request, Request::Ping));
+            assert_eq!(envelope.token, "old-token");
+            connection
+                .send(&Response::Error {
+                    message: "invalid multiplexer token".to_owned(),
+                })
+                .unwrap();
+
+            Endpoint {
+                version: crate::transport::ENDPOINT_VERSION,
+                protocol_version: PROTOCOL_VERSION,
+                process_id: 4243,
+                socket_path,
+                token: "new-token".to_owned(),
+            }
+            .write(&endpoint_path)
+            .unwrap();
+
+            let (stream, _) = listener.accept().unwrap();
+            let mut connection = Connection::new(stream);
+            let (envelope, _) = connection.receive::<Envelope>().unwrap();
+            assert!(matches!(envelope.request, Request::Ping));
+            assert_eq!(envelope.token, "new-token");
+            connection.send(&Response::Ok).unwrap();
+        }
+    });
+
+    let client = Client::connect_ready_at(directory.path()).unwrap().unwrap();
+    assert_eq!(client.process_id(), 4243);
+    server.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn configure_retries_after_a_pre_dispatch_stale_endpoint_token() {
+    use std::os::unix::net::UnixListener;
+
+    let directory = tempfile::tempdir().unwrap();
+    let socket_path = directory.path().join("zmux.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let endpoint_path = directory.path().join("zmux.json");
+    let old = Endpoint {
+        version: crate::transport::ENDPOINT_VERSION,
+        protocol_version: PROTOCOL_VERSION,
+        process_id: 4242,
+        socket_path: socket_path.clone(),
+        token: "old-token".to_owned(),
+    };
+    old.write(&endpoint_path).unwrap();
+
+    let server = std::thread::spawn({
+        let endpoint_path = endpoint_path.clone();
+        let socket_path = socket_path.clone();
+        move || {
+            // The first connection is the liveness probe from
+            // `connect_existing_at`.
+            let _ = listener.accept().unwrap();
+
+            // `configure_raw` settles readiness before sending the request.
+            let (stream, _) = listener.accept().unwrap();
+            let mut connection = Connection::new(stream);
+            let (envelope, _) = connection.receive::<Envelope>().unwrap();
+            assert!(matches!(envelope.request, Request::Ping));
+            assert_eq!(envelope.token, "old-token");
+            connection.send(&Response::Ok).unwrap();
+
+            let (stream, _) = listener.accept().unwrap();
+            let mut connection = Connection::new(stream);
+            let (envelope, _) = connection.receive::<Envelope>().unwrap();
+            assert!(matches!(envelope.request, Request::Configure { .. }));
+            assert_eq!(envelope.token, "old-token");
+            connection
+                .send(&Response::Error {
+                    message: "invalid multiplexer token".to_owned(),
+                })
+                .unwrap();
+
+            Endpoint {
+                version: crate::transport::ENDPOINT_VERSION,
+                protocol_version: PROTOCOL_VERSION,
+                process_id: 4243,
+                socket_path,
+                token: "new-token".to_owned(),
+            }
+            .write(&endpoint_path)
+            .unwrap();
+
+            let (stream, _) = listener.accept().unwrap();
+            let mut connection = Connection::new(stream);
+            let (envelope, _) = connection.receive::<Envelope>().unwrap();
+            assert!(matches!(envelope.request, Request::Ping));
+            assert_eq!(envelope.token, "new-token");
+            connection.send(&Response::Ok).unwrap();
+
+            let (stream, _) = listener.accept().unwrap();
+            let mut connection = Connection::new(stream);
+            let (envelope, _) = connection.receive::<Envelope>().unwrap();
+            assert!(matches!(envelope.request, Request::Configure { .. }));
+            assert_eq!(envelope.token, "new-token");
+            connection.send(&Response::Ok).unwrap();
+        }
+    });
+
+    let client = Client::connect_existing_at(directory.path())
+        .unwrap()
+        .unwrap();
+    client
+        .configure(Retention::Memory { bytes: 4096 }, Vec::new())
+        .unwrap();
+    assert_eq!(client.process_id(), 4243);
+    server.join().unwrap();
+}
+
+#[cfg(feature = "session-persistence")]
+#[test]
+fn temporary_recipient_failure_degrades_disk_to_memory_without_recipients() {
+    let fallback = Retention::Memory { bytes: 16_384 };
+    let (effective, reason, recipients) = resolve_effective_retention(
+        Retention::Disk,
+        &["github:zetta-user".to_owned()],
+        fallback,
+        |_| {
+            Err(crate::persistence::RecipientResolutionError::Temporary(
+                anyhow::anyhow!("GitHub DNS lookup failed"),
+            ))
+        },
+    )
+    .unwrap();
+
+    assert_eq!(effective, fallback);
+    assert!(reason.unwrap().contains("GitHub DNS lookup failed"));
+    assert!(recipients.is_empty());
+}
+
+#[cfg(feature = "session-persistence")]
+#[test]
+fn permanent_recipient_failure_does_not_degrade_disk_to_memory() {
+    let error = resolve_effective_retention(
+        Retention::Disk,
+        &["github:zetta-user".to_owned()],
+        Retention::Memory { bytes: 16_384 },
+        |_| {
+            Err(crate::persistence::RecipientResolutionError::Permanent(
+                anyhow::anyhow!("invalid GitHub SSH key"),
+            ))
+        },
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("invalid GitHub SSH key"));
+}
+
 #[test]
 fn the_multiplexer_is_resolved_beside_this_executable_not_from_the_path() {
     // Resolving through PATH would let an unrelated `zmux` earlier in it be

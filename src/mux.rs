@@ -17,6 +17,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[cfg(feature = "session-persistence")]
+use std::time::Duration;
+
 use anyhow::{Context as _, Result};
 use gpui::AppContext as _;
 use terminal::{ConsolePalette, PtyControl, PtyHandover, PtyProvider, PtySpawnRequest};
@@ -28,14 +31,61 @@ use zmux::{
     retention::Retention,
 };
 
+#[cfg(feature = "session-persistence")]
+const MUX_RECOVERY_DELAYS: [Duration; 5] = [
+    Duration::from_secs(5),
+    Duration::from_secs(10),
+    Duration::from_secs(20),
+    Duration::from_secs(40),
+    Duration::from_secs(60),
+];
+
+#[cfg(feature = "session-persistence")]
+fn mux_recovery_generation_matches(
+    current_generation: u64,
+    current_configuration_generation: u64,
+    expected_generation: u64,
+    expected_configuration_generation: u64,
+) -> bool {
+    current_generation == expected_generation
+        && current_configuration_generation == expected_configuration_generation
+}
+
 /// The connection shared by every pane in this process.
 #[derive(Clone)]
 pub(crate) struct MuxRuntime {
     client: Arc<Client>,
-    retention: Retention,
+    retention_state: Arc<Mutex<MuxRetentionState>>,
     reporters: Arc<ExitReporters>,
     revoke_reporters: Arc<PaneSignals>,
     grant_reporters: Arc<PaneSignals>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MuxRetentionState {
+    /// The policy selected in configuration, which stays disk while a
+    /// temporary recipient lookup has degraded the daemon to memory.
+    requested: Retention,
+    /// What the daemon is actually using right now.
+    effective: Retention,
+    degraded_reason: Option<String>,
+}
+
+impl MuxRetentionState {
+    fn exact(retention: Retention) -> Self {
+        Self {
+            requested: retention,
+            effective: retention,
+            degraded_reason: None,
+        }
+    }
+
+    #[cfg(feature = "session-persistence")]
+    fn can_resume_disk(&self) -> bool {
+        self.requested == Retention::Disk
+            && self.effective == Retention::Disk
+            && self.degraded_reason.is_none()
+    }
 }
 
 impl MuxRuntime {
@@ -50,7 +100,7 @@ impl MuxRuntime {
             .context("subscribing to multiplexer events")?;
         Ok(Self {
             client,
-            retention,
+            retention_state: Arc::new(Mutex::new(MuxRetentionState::exact(retention))),
             reporters: subscription.exits,
             revoke_reporters: subscription.revokes,
             grant_reporters: subscription.grants,
@@ -61,17 +111,27 @@ impl MuxRuntime {
     pub(crate) fn connect_with_retention_and_persistence(
         retention: Retention,
         persistence: PersistenceOptions,
+        fallback_retention: Retention,
     ) -> Result<Self> {
-        let client = Arc::new(
-            Client::connect_with_retention_and_persistence(retention, persistence)
-                .context("connecting to the multiplexer")?,
-        );
+        let configured = Client::connect_with_retention_and_persistence_resilient(
+            retention,
+            persistence,
+            fallback_retention,
+        )
+        .context("connecting to the multiplexer")?;
+        let effective_retention = configured.effective_retention;
+        let degraded_reason = configured.degraded_reason;
+        let client = Arc::new(configured.client);
         let subscription = client
             .subscribe()
             .context("subscribing to multiplexer events")?;
         Ok(Self {
             client,
-            retention,
+            retention_state: Arc::new(Mutex::new(MuxRetentionState {
+                requested: retention,
+                effective: effective_retention,
+                degraded_reason,
+            })),
             reporters: subscription.exits,
             revoke_reporters: subscription.revokes,
             grant_reporters: subscription.grants,
@@ -89,7 +149,7 @@ impl MuxRuntime {
             .context("subscribing to multiplexer events")?;
         Ok(Self {
             client,
-            retention: Retention::Disk,
+            retention_state: Arc::new(Mutex::new(MuxRetentionState::exact(Retention::Disk))),
             reporters: subscription.exits,
             revoke_reporters: subscription.revokes,
             grant_reporters: subscription.grants,
@@ -97,7 +157,31 @@ impl MuxRuntime {
     }
 
     pub(crate) fn retention(&self) -> Retention {
-        self.retention
+        self.retention_state.lock().unwrap().effective
+    }
+
+    #[cfg(feature = "session-persistence")]
+    pub(crate) fn requested_retention(&self) -> Retention {
+        self.retention_state.lock().unwrap().requested
+    }
+
+    #[cfg(feature = "session-persistence")]
+    pub(crate) fn degraded_reason(&self) -> Option<String> {
+        self.retention_state.lock().unwrap().degraded_reason.clone()
+    }
+
+    #[cfg(feature = "session-persistence")]
+    pub(crate) fn is_degraded(&self) -> bool {
+        self.retention_state
+            .lock()
+            .unwrap()
+            .degraded_reason
+            .is_some()
+    }
+
+    #[cfg(feature = "session-persistence")]
+    pub(crate) fn can_resume_disk(&self) -> bool {
+        self.retention_state.lock().unwrap().can_resume_disk()
     }
 
     #[cfg(not(feature = "session-persistence"))]
@@ -107,7 +191,7 @@ impl MuxRuntime {
         // handover, and only let the local view of retention follow a confirmed
         // daemon response.
         self.client.configure(retention, Vec::new())?;
-        self.retention = retention;
+        *self.retention_state.lock().unwrap() = MuxRetentionState::exact(retention);
         Ok(())
     }
 
@@ -116,18 +200,40 @@ impl MuxRuntime {
         &mut self,
         retention: Retention,
         persistence: PersistenceOptions,
+        fallback_retention: Retention,
     ) -> Result<()> {
         // Recipient resolution and the upgrade-aware retry both happen inside
         // the existing client. Replacing the `Arc<Client>` here would strand
         // pane reporters and revoke/grant watchers on the old subscription.
-        self.client
-            .configure_with_retention_and_persistence(retention, persistence)?;
-        self.retention = retention;
+        let configuration = self
+            .client
+            .configure_with_retention_and_persistence_resilient(
+                retention,
+                persistence,
+                fallback_retention,
+            )?;
+        *self.retention_state.lock().unwrap() = MuxRetentionState {
+            requested: configuration.requested_retention,
+            effective: configuration.effective_retention,
+            degraded_reason: configuration.degraded_reason,
+        };
         Ok(())
     }
 
     pub(crate) fn client(&self) -> &Arc<Client> {
         &self.client
+    }
+
+    #[cfg(feature = "session-persistence")]
+    fn apply_retention_configuration(
+        &mut self,
+        configuration: zmux::client::RetentionConfiguration,
+    ) {
+        *self.retention_state.lock().unwrap() = MuxRetentionState {
+            requested: configuration.requested_retention,
+            effective: configuration.effective_retention,
+            degraded_reason: configuration.degraded_reason,
+        };
     }
 
     pub(crate) fn reporters(&self) -> &Arc<ExitReporters> {
@@ -403,6 +509,185 @@ impl MuxPanes {
 mod tests;
 
 impl crate::Zetta {
+    #[cfg(feature = "session-persistence")]
+    fn retention_fallback(&self) -> Retention {
+        Retention::Memory {
+            bytes: self.launch_config.sessions.ring_bytes,
+        }
+    }
+
+    #[cfg(feature = "session-persistence")]
+    fn current_mux_recovery(
+        &self,
+        generation: u64,
+        configuration_generation: u64,
+        client: &Arc<Client>,
+    ) -> bool {
+        mux_recovery_generation_matches(
+            self.mux_recovery_generation,
+            self.configuration_generation,
+            generation,
+            configuration_generation,
+        ) && self.mux.as_ref().is_some_and(|runtime| {
+            Arc::ptr_eq(runtime.client(), client)
+                && runtime.requested_retention() == Retention::Disk
+                && runtime.is_degraded()
+        })
+    }
+
+    #[cfg(feature = "session-persistence")]
+    pub(crate) fn invalidate_mux_recovery(&mut self) {
+        self.mux_recovery_generation = self.mux_recovery_generation.wrapping_add(1);
+        self.mux_recovery_task.take();
+    }
+
+    #[cfg(feature = "session-persistence")]
+    pub(crate) fn show_mux_degraded_notice(&mut self, reason: &str, cx: &mut gpui::Context<Self>) {
+        self.show_notice(
+            format!(
+                "Disk session retention is temporarily unavailable ({reason}). New detached \
+                 sessions will be kept in memory until persistence is restored.",
+            ),
+            cx,
+        );
+    }
+
+    #[cfg(feature = "session-persistence")]
+    pub(crate) fn install_mux_runtime(
+        &mut self,
+        runtime: MuxRuntime,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.mux = Some(runtime);
+        self.start_mux_recovery_if_needed(cx);
+    }
+
+    #[cfg(feature = "session-persistence")]
+    pub(crate) fn start_mux_recovery_if_needed(&mut self, cx: &mut gpui::Context<Self>) {
+        if let Some(reason) = self.mux.as_ref().and_then(MuxRuntime::degraded_reason) {
+            self.show_mux_degraded_notice(&reason, cx);
+            self.schedule_mux_recovery(cx);
+        } else {
+            self.invalidate_mux_recovery();
+        }
+    }
+
+    #[cfg(not(feature = "session-persistence"))]
+    pub(crate) fn install_mux_runtime(&mut self, runtime: MuxRuntime, _: &mut gpui::Context<Self>) {
+        self.mux = Some(runtime);
+    }
+
+    #[cfg(feature = "session-persistence")]
+    pub(crate) fn schedule_mux_recovery(&mut self, cx: &mut gpui::Context<Self>) {
+        let Some(runtime) = self.mux.as_ref() else {
+            self.invalidate_mux_recovery();
+            return;
+        };
+        if runtime.requested_retention() != Retention::Disk || !runtime.is_degraded() {
+            self.invalidate_mux_recovery();
+            return;
+        }
+
+        let client = runtime.client().clone();
+        self.invalidate_mux_recovery();
+        let generation = self.mux_recovery_generation;
+        let configuration_generation = self.configuration_generation;
+        let persistence = self.launch_config.sessions.to_zmux_persistence();
+        let fallback_retention = self.retention_fallback();
+        let executor = cx.background_executor().clone();
+        let task = cx.spawn(async move |this, cx| {
+            let mut delay_index = 0;
+            loop {
+                executor.timer(MUX_RECOVERY_DELAYS[delay_index]).await;
+                let current = this
+                    .update(cx, |this, _| {
+                        this.current_mux_recovery(generation, configuration_generation, &client)
+                    })
+                    .unwrap_or(false);
+                if !current {
+                    break;
+                }
+
+                let result = cx
+                    .background_spawn({
+                        let client = client.clone();
+                        let persistence = persistence.clone();
+                        async move {
+                            client.configure_with_retention_and_persistence_resilient(
+                                Retention::Disk,
+                                persistence,
+                                fallback_retention,
+                            )
+                        }
+                    })
+                    .await;
+
+                match result {
+                    Ok(configuration) if configuration.effective_retention == Retention::Disk => {
+                        this.update(cx, |this, cx| {
+                            if !this.current_mux_recovery(
+                                generation,
+                                configuration_generation,
+                                &client,
+                            ) {
+                                return;
+                            }
+                            if let Some(runtime) = this.mux.as_mut() {
+                                runtime.apply_retention_configuration(configuration);
+                            }
+                            this.mux_recovery_task.take();
+                            this.show_notice("Disk session retention restored.", cx);
+                            this.refresh_auto_protect(cx);
+                            cx.notify();
+                        })
+                        .ok();
+                        break;
+                    }
+                    Ok(configuration) => {
+                        let current = this
+                            .update(cx, |this, _| {
+                                if !this.current_mux_recovery(
+                                    generation,
+                                    configuration_generation,
+                                    &client,
+                                ) {
+                                    return false;
+                                }
+                                if let Some(runtime) = this.mux.as_mut() {
+                                    runtime.apply_retention_configuration(configuration);
+                                }
+                                true
+                            })
+                            .unwrap_or(false);
+                        if !current {
+                            break;
+                        }
+                        delay_index = (delay_index + 1).min(MUX_RECOVERY_DELAYS.len() - 1);
+                    }
+                    Err(error) => {
+                        this.update(cx, |this, cx| {
+                            if !this.current_mux_recovery(
+                                generation,
+                                configuration_generation,
+                                &client,
+                            ) {
+                                return;
+                            }
+                            this.mux_recovery_task.take();
+                            this.configuration_error = Some(format!(
+                                "Could not restore disk session persistence: {error:#}"
+                            ));
+                            cx.notify();
+                        })
+                        .ok();
+                        break;
+                    }
+                }
+            }
+        });
+        self.mux_recovery_task = Some(task);
+    }
+
     /// A provider that spawns into `tab_id`'s multiplexer session.
     ///
     /// Returns `None` only for the explicit `--no-mux` legacy mode. In normal
@@ -427,6 +712,9 @@ impl crate::Zetta {
                         MuxRuntime::connect_with_retention_and_persistence(
                             retention,
                             self.launch_config.sessions.to_zmux_persistence(),
+                            Retention::Memory {
+                                bytes: self.launch_config.sessions.ring_bytes,
+                            },
                         )
                     }
                     #[cfg(not(feature = "session-persistence"))]
@@ -434,7 +722,7 @@ impl crate::Zetta {
                         MuxRuntime::connect_with_retention(retention)
                     }
                 }) {
-                Ok(runtime) => self.mux = Some(runtime),
+                Ok(runtime) => self.install_mux_runtime(runtime, cx),
                 Err(error) => {
                     self.configuration_error = Some(format!(
                         "Could not reach the session multiplexer, so this terminal cannot be \

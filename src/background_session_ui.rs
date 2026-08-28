@@ -1148,11 +1148,19 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> ReconnectSessionResult {
-        let runtime = if self
-            .mux
-            .as_ref()
-            .is_some_and(|runtime| runtime.retention() == zmux::retention::Retention::Disk)
-        {
+        if self.mux.as_ref().is_some_and(|runtime| {
+            runtime.requested_retention() == zmux::retention::Retention::Disk
+                && !runtime.can_resume_disk()
+        }) {
+            self.pane_output_error = Some(
+                "Encrypted disk resume is unavailable while disk persistence is being restored; \
+                 try again after the connection returns."
+                    .to_owned(),
+            );
+            cx.notify();
+            return ReconnectSessionResult::Rejected;
+        }
+        let runtime = if self.mux.as_ref().is_some_and(MuxRuntime::can_resume_disk) {
             self.mux.clone().expect("disk runtime was present")
         } else {
             let runtime = match MuxRuntime::connect_for_disk_resume() {
@@ -2646,10 +2654,13 @@ impl Zetta {
             let runtime = MuxRuntime::connect_with_retention_and_persistence(
                 retention,
                 self.launch_config.sessions.to_zmux_persistence(),
+                zmux::retention::Retention::Memory {
+                    bytes: self.launch_config.sessions.ring_bytes,
+                },
             )?;
             #[cfg(not(feature = "session-persistence"))]
             let runtime = MuxRuntime::connect_with_retention(retention)?;
-            self.mux = Some(runtime);
+            self.install_mux_runtime(runtime, cx);
         }
         let Some(runtime) = self.mux.clone() else {
             anyhow::bail!("no multiplexer is running");

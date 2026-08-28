@@ -63,12 +63,60 @@ const STARTUP_POLL: Duration = Duration::from_millis(10);
 /// not understand the request framing.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 pub struct Client {
-    endpoint: Endpoint,
+    /// The endpoint can change while this client is alive: an in-place daemon
+    /// replacement publishes a fresh token and socket.  Keeping it behind a
+    /// mutex lets every pane-opening task share the repaired value without
+    /// replacing the client (and, importantly, its subscription registries).
+    endpoint: Mutex<Endpoint>,
     /// Where this client found its multiplexer, so a subscription that is lost
     /// can look again. Re-reading the endpoint file rather than reusing the
     /// `Endpoint` matters: a replacement publishes its own process id, and one
     /// day may publish a different socket.
     directory: PathBuf,
+}
+
+/// The result of applying a retention policy to a daemon.
+///
+/// `requested_retention` remains the user's choice even when a temporary
+/// recipient lookup makes the daemon use `effective_retention` for now.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RetentionConfiguration {
+    pub requested_retention: Retention,
+    pub effective_retention: Retention,
+    pub degraded_reason: Option<String>,
+}
+
+/// A connected client together with the retention policy the daemon actually
+/// accepted during startup.
+pub struct ConfiguredClient {
+    pub client: Client,
+    pub requested_retention: Retention,
+    pub effective_retention: Retention,
+    pub degraded_reason: Option<String>,
+}
+
+#[cfg(feature = "session-persistence")]
+fn resolve_effective_retention(
+    retention: Retention,
+    recipient_values: &[String],
+    fallback_retention: Retention,
+    resolve: impl FnOnce(
+        &[String],
+    ) -> std::result::Result<
+        Vec<String>,
+        crate::persistence::RecipientResolutionError,
+    >,
+) -> Result<(Retention, Option<String>, Vec<String>)> {
+    if !matches!(retention, Retention::Disk) {
+        return Ok((retention, None, Vec::new()));
+    }
+    match resolve(recipient_values) {
+        Ok(recipients) => Ok((retention, None, recipients)),
+        Err(error) if error.is_temporary() => {
+            Ok((fallback_retention, Some(format!("{error:#}")), Vec::new()))
+        }
+        Err(error) => Err(error.into_anyhow()),
+    }
 }
 
 /// A pane's terminal, as handed over by the multiplexer.
@@ -273,6 +321,31 @@ fn is_closed(error: &anyhow::Error) -> bool {
     })
 }
 
+fn is_invalid_token_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.to_string() == "invalid multiplexer token")
+}
+
+fn is_transport_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<io::Error>().is_some_and(|error| {
+            matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionAborted
+                    | io::ErrorKind::ConnectionRefused
+                    | io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::BrokenPipe
+                    | io::ErrorKind::NotFound
+                    | io::ErrorKind::AddrNotAvailable
+                    | io::ErrorKind::TimedOut
+                    | io::ErrorKind::UnexpectedEof
+                    | io::ErrorKind::WouldBlock
+            )
+        })
+    })
+}
+
 fn is_unsupported_configure(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         let message = cause.to_string();
@@ -331,6 +404,33 @@ impl Client {
         )
     }
 
+    /// Connects with the application's requested retention, temporarily using
+    /// `fallback_retention` when a valid GitHub recipient cannot be resolved
+    /// because of a network failure.
+    ///
+    /// This is intentionally separate from [`Self::connect_with_retention_and_persistence`]:
+    /// disk resume and CLI commands must keep reporting configuration and
+    /// connectivity errors instead of silently changing their durability.
+    #[cfg(feature = "session-persistence")]
+    pub fn connect_with_retention_and_persistence_resilient(
+        retention: Retention,
+        persistence: PersistenceOptions,
+        fallback_retention: Retention,
+    ) -> Result<ConfiguredClient> {
+        retention.validate()?;
+        fallback_retention.validate()?;
+        anyhow::ensure!(
+            matches!(fallback_retention, Retention::Memory { .. }),
+            "retention fallback must be an in-memory policy"
+        );
+        Self::connect_at_with_retention_and_persistence_resilient(
+            &session_catalog_dir(),
+            retention,
+            persistence,
+            fallback_retention,
+        )
+    }
+
     #[cfg(feature = "session-persistence")]
     pub fn connect_with_retention_for_resume(retention: Retention) -> Result<Self> {
         Self::connect_at_with_retention_for_resume(&session_catalog_dir(), retention)
@@ -381,14 +481,14 @@ impl Client {
         #[cfg(not(feature = "session-persistence"))]
         {
             retention.validate()?;
-            if let Some(client) = Self::connect_existing_at(directory)? {
+            if let Some(client) = Self::connect_ready_at(directory)? {
                 client.configure(retention, Vec::new())?;
                 return Ok(client);
             }
             start_daemon(directory, None)?;
             let deadline = Instant::now() + STARTUP_TIMEOUT;
             loop {
-                if let Some(client) = Self::connect_existing_at(directory)? {
+                if let Some(client) = Self::connect_ready_at(directory)? {
                     client.configure(retention, Vec::new())?;
                     return Ok(client);
                 }
@@ -413,14 +513,59 @@ impl Client {
         } else {
             Vec::new()
         };
-        if let Some(client) = Self::connect_existing_at(directory)? {
+        Self::connect_at_with_resolved_retention_and_persistence(
+            directory,
+            retention,
+            resolved_recipients,
+        )
+    }
+
+    #[cfg(feature = "session-persistence")]
+    pub fn connect_at_with_retention_and_persistence_resilient(
+        directory: &std::path::Path,
+        retention: Retention,
+        persistence: PersistenceOptions,
+        fallback_retention: Retention,
+    ) -> Result<ConfiguredClient> {
+        retention.validate()?;
+        fallback_retention.validate()?;
+        anyhow::ensure!(
+            matches!(fallback_retention, Retention::Memory { .. }),
+            "retention fallback must be an in-memory policy"
+        );
+        let (effective_retention, degraded_reason, recipients) = resolve_effective_retention(
+            retention,
+            &persistence.recipients,
+            fallback_retention,
+            crate::persistence::resolve_recipient_strings_for_startup,
+        )?;
+        let client = Self::connect_at_with_resolved_retention_and_persistence(
+            directory,
+            effective_retention,
+            recipients,
+        )?;
+        Ok(ConfiguredClient {
+            client,
+            requested_retention: retention,
+            effective_retention,
+            degraded_reason,
+        })
+    }
+
+    #[cfg(feature = "session-persistence")]
+    fn connect_at_with_resolved_retention_and_persistence(
+        directory: &std::path::Path,
+        retention: Retention,
+        resolved_recipients: Vec<String>,
+    ) -> Result<Self> {
+        if let Some(client) = Self::connect_ready_at(directory)? {
             client.configure(retention, resolved_recipients)?;
             return Ok(client);
         }
         start_daemon(directory, None, Some(resolved_recipients.clone()))?;
         let deadline = Instant::now() + STARTUP_TIMEOUT;
         loop {
-            if let Some(client) = Self::connect_existing_at(directory)? {
+            if let Some(client) = Self::connect_ready_at(directory)? {
                 client.configure(retention, resolved_recipients.clone())?;
                 return Ok(client);
             }
@@ -508,7 +653,7 @@ impl Client {
         let Some(client) = Self::connect_endpoint(directory, VersionCheck::Required)? else {
             return Ok(None);
         };
-        client.ping()?;
+        client.ping_until_ready(Instant::now() + STARTUP_TIMEOUT)?;
         Ok(Some(client))
     }
 
@@ -517,7 +662,7 @@ impl Client {
     /// reject an identifier belonging to a different catalog in the same
     /// session directory.
     pub fn process_id(&self) -> u32 {
-        self.endpoint.process_id
+        self.endpoint.lock().unwrap().process_id
     }
 
     fn connect_endpoint(
@@ -550,7 +695,7 @@ impl Client {
             endpoint.protocol_version
         );
         Ok(Some(Self {
-            endpoint,
+            endpoint: Mutex::new(endpoint),
             directory: directory.to_owned(),
         }))
     }
@@ -568,75 +713,132 @@ impl Client {
         client_process_id: u32,
         secret: Option<String>,
     ) -> Result<AttachOutcome> {
-        let mut connection = self.open_as(
-            Request::Attach {
-                session_id,
-                pane_id: Some(pane_id),
-                secret,
-            },
-            client_process_id,
-        )?;
-        let (response, mut descriptors) = Self::receive(&mut connection)?;
-        match response {
-            Response::Attached {
-                pane_id,
-                child_pid,
-                replay_length,
-                state,
-                summary,
-                handles,
-            } => {
-                let terminal = claim_terminal(&mut descriptors, handles)?;
-                let replay = connection.read_exact(replay_length)?;
-                Ok(AttachOutcome::Attached {
-                    pane: AttachedPane {
-                        session_id,
-                        pane_id,
-                        child_pid,
-                        #[cfg(unix)]
-                        descriptor: terminal,
-                        #[cfg(windows)]
-                        conout: terminal.0,
-                        #[cfg(windows)]
-                        conin: terminal.1,
-                        replay,
-                    },
-                    state,
-                    summary: *summary,
-                })
+        self.attach_as_process(session_id, Some(pane_id), secret, client_process_id)
+    }
+
+    fn attach_as_process(
+        &self,
+        session_id: u64,
+        pane_id: Option<u64>,
+        secret: Option<String>,
+        client_process_id: u32,
+    ) -> Result<AttachOutcome> {
+        let deadline = Instant::now() + STARTUP_TIMEOUT;
+        let request = Request::Attach {
+            session_id,
+            pane_id,
+            secret,
+        };
+        loop {
+            self.ping_until_ready(deadline)?;
+            let endpoint = self.endpoint_snapshot();
+            let mut connection =
+                self.open_as_with_endpoint(request.clone(), client_process_id, &endpoint)?;
+            let (response, mut descriptors) = Self::receive(&mut connection)?;
+            if matches!(
+                &response,
+                Response::Error { message } if message == "invalid multiplexer token"
+            ) {
+                self.refresh_endpoint_after_token(&endpoint, deadline)
+                    .context("refreshing the multiplexer endpoint after an invalid token")?;
+                continue;
             }
-            Response::SharedAttached {
-                pane_id,
-                child_pid,
-                replay_length,
-                state,
-                summary,
-                columns,
-                lines,
-            } => {
-                let replay = connection.read_exact(replay_length)?;
-                Ok(AttachOutcome::SharedAttached {
-                    pane: SharedPane {
-                        session_id,
-                        pane_id,
-                        child_pid,
-                        connection: Mutex::new(connection),
-                        sizes: Arc::new(Mutex::new(vec![(columns, lines)])),
-                        replay,
-                    },
+            return match response {
+                Response::Attached {
+                    pane_id,
+                    child_pid,
+                    replay_length,
                     state,
-                    summary: *summary,
-                })
-            }
-            Response::AuthenticationRequired => Ok(AttachOutcome::AuthenticationRequired),
-            Response::AuthenticationFailed => Ok(AttachOutcome::AuthenticationFailed),
-            Response::Error { message } => anyhow::bail!("{message}"),
-            other => anyhow::bail!("unexpected response to attach: {other:?}"),
+                    summary,
+                    handles,
+                } => {
+                    let terminal = claim_terminal(&mut descriptors, handles)?;
+                    let replay = connection.read_exact(replay_length)?;
+                    Ok(AttachOutcome::Attached {
+                        pane: AttachedPane {
+                            session_id,
+                            pane_id,
+                            child_pid,
+                            #[cfg(unix)]
+                            descriptor: terminal,
+                            #[cfg(windows)]
+                            conout: terminal.0,
+                            #[cfg(windows)]
+                            conin: terminal.1,
+                            replay,
+                        },
+                        state,
+                        summary: *summary,
+                    })
+                }
+                Response::SharedAttached {
+                    pane_id,
+                    child_pid,
+                    replay_length,
+                    state,
+                    summary,
+                    columns,
+                    lines,
+                } => {
+                    let replay = connection.read_exact(replay_length)?;
+                    Ok(AttachOutcome::SharedAttached {
+                        pane: SharedPane {
+                            session_id,
+                            pane_id,
+                            child_pid,
+                            connection: Mutex::new(connection),
+                            sizes: Arc::new(Mutex::new(vec![(columns, lines)])),
+                            replay,
+                        },
+                        state,
+                        summary: *summary,
+                    })
+                }
+                Response::AuthenticationRequired => Ok(AttachOutcome::AuthenticationRequired),
+                Response::AuthenticationFailed => Ok(AttachOutcome::AuthenticationFailed),
+                Response::Error { message } => anyhow::bail!("{message}"),
+                other => anyhow::bail!("unexpected response to attach: {other:?}"),
+            };
         }
     }
 
     fn open(&self, request: Request) -> Result<Connection> {
         self.open_as(request, std::process::id())
+    }
+
+    fn endpoint_snapshot(&self) -> Endpoint {
+        self.endpoint.lock().unwrap().clone()
+    }
+
+    /// Refreshes the cached endpoint after the daemon has rejected a request
+    /// before dispatching it.  Waiting for the file to change avoids replaying
+    /// the same request against the same stale token in a tight loop.
+    fn refresh_endpoint_after_token(&self, previous: &Endpoint, deadline: Instant) -> Result<()> {
+        let path = endpoint_path(&self.directory);
+        let mut last_error = None;
+        loop {
+            match Endpoint::read(&path) {
+                Ok(endpoint) if endpoint != *previous => {
+                    *self.endpoint.lock().unwrap() = endpoint;
+                    return Ok(());
+                }
+                Ok(_) => {}
+                Err(error) => last_error = Some(error),
+            }
+            if Instant::now() >= deadline {
+                return Err(last_error.unwrap_or_else(|| {
+                    anyhow::anyhow!(
+                        "the multiplexer endpoint did not change after an invalid token"
+                    )
+                }));
+            }
+            thread::sleep(STARTUP_POLL);
+        }
+    }
+
+    fn open_ready(&self, request: Request) -> Result<Connection> {
+        self.ping_until_ready(Instant::now() + STARTUP_TIMEOUT)?;
+        self.open(request)
     }
 
     /// Opens a connection whose peer identity is settled before the request
@@ -658,7 +860,7 @@ impl Client {
             }
             connection.send(&Envelope {
                 version: PROTOCOL_VERSION,
-                token: self.endpoint.token.clone(),
+                token: self.endpoint_snapshot().token,
                 client_process_id,
                 request,
             })?;
@@ -686,8 +888,18 @@ impl Client {
     }
 
     fn open_as(&self, request: Request, client_process_id: u32) -> Result<Connection> {
+        let endpoint = self.endpoint_snapshot();
+        self.open_as_with_endpoint(request, client_process_id, &endpoint)
+    }
+
+    fn open_as_with_endpoint(
+        &self,
+        request: Request,
+        client_process_id: u32,
+        endpoint: &Endpoint,
+    ) -> Result<Connection> {
         let stream =
-            Stream::connect(&self.endpoint.socket_path).context("connecting to the multiplexer")?;
+            Stream::connect(&endpoint.socket_path).context("connecting to the multiplexer")?;
         stream
             .set_read_timeout(Some(REQUEST_TIMEOUT))
             .context("setting the multiplexer request read timeout")?;
@@ -697,7 +909,7 @@ impl Client {
         let mut connection = Connection::new(stream);
         connection.send(&Envelope {
             version: PROTOCOL_VERSION,
-            token: self.endpoint.token.clone(),
+            token: endpoint.token.clone(),
             // Named so a platform without descriptor passing can duplicate a
             // terminal's handles into this process instead.
             client_process_id,
@@ -706,12 +918,36 @@ impl Client {
         Ok(connection)
     }
 
-    fn ping(&self) -> Result<()> {
-        let mut connection = self.open(Request::Ping)?;
+    fn ping_with_endpoint(&self, endpoint: &Endpoint) -> Result<()> {
+        let mut connection =
+            self.open_as_with_endpoint(Request::Ping, std::process::id(), endpoint)?;
         match Self::receive(&mut connection)?.0 {
             Response::Ok => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to ping: {other:?}"),
+        }
+    }
+
+    fn ping_until_ready(&self, deadline: Instant) -> Result<()> {
+        loop {
+            let endpoint = self.endpoint_snapshot();
+            match self.ping_with_endpoint(&endpoint) {
+                Ok(()) => return Ok(()),
+                Err(error) if is_invalid_token_error(&error) => {
+                    self.refresh_endpoint_after_token(&endpoint, deadline)
+                        .with_context(
+                            || "refreshing the multiplexer endpoint after an invalid token",
+                        )?;
+                }
+                Err(error) if is_transport_error(&error) && Instant::now() < deadline => {
+                    thread::sleep(STARTUP_POLL);
+                }
+                Err(error) => return Err(error),
+            }
+            anyhow::ensure!(
+                Instant::now() < deadline,
+                "the multiplexer did not become ready within {STARTUP_TIMEOUT:?}"
+            );
         }
     }
 
@@ -844,68 +1080,7 @@ impl Client {
         pane_id: Option<u64>,
         secret: Option<String>,
     ) -> Result<AttachOutcome> {
-        let mut connection = self.open(Request::Attach {
-            session_id,
-            pane_id,
-            secret,
-        })?;
-        let (response, mut descriptors) = Self::receive(&mut connection)?;
-        match response {
-            Response::Attached {
-                pane_id,
-                child_pid,
-                replay_length,
-                state,
-                summary,
-                handles,
-            } => {
-                let terminal = claim_terminal(&mut descriptors, handles)?;
-                let replay = connection.read_exact(replay_length)?;
-                Ok(AttachOutcome::Attached {
-                    pane: AttachedPane {
-                        session_id,
-                        pane_id,
-                        child_pid,
-                        #[cfg(unix)]
-                        descriptor: terminal,
-                        #[cfg(windows)]
-                        conout: terminal.0,
-                        #[cfg(windows)]
-                        conin: terminal.1,
-                        replay,
-                    },
-                    state,
-                    summary: *summary,
-                })
-            }
-            Response::SharedAttached {
-                pane_id,
-                child_pid,
-                replay_length,
-                state,
-                summary,
-                columns,
-                lines,
-            } => {
-                let replay = connection.read_exact(replay_length)?;
-                Ok(AttachOutcome::SharedAttached {
-                    pane: SharedPane {
-                        session_id,
-                        pane_id,
-                        child_pid,
-                        connection: Mutex::new(connection),
-                        sizes: Arc::new(Mutex::new(vec![(columns, lines)])),
-                        replay,
-                    },
-                    state,
-                    summary: *summary,
-                })
-            }
-            Response::AuthenticationRequired => Ok(AttachOutcome::AuthenticationRequired),
-            Response::AuthenticationFailed => Ok(AttachOutcome::AuthenticationFailed),
-            Response::Error { message } => anyhow::bail!("{message}"),
-            other => anyhow::bail!("unexpected response to attach: {other:?}"),
-        }
+        self.attach_as_process(session_id, pane_id, secret, std::process::id())
     }
 
     /// Gives a session back to the multiplexer to hold.
@@ -1235,14 +1410,30 @@ impl Client {
         retention: Retention,
         persistence_recipients: Vec<String>,
     ) -> Result<()> {
-        let mut connection = self.open(Request::Configure {
+        let deadline = Instant::now() + STARTUP_TIMEOUT;
+        let request = Request::Configure {
             retention,
             persistence_recipients,
-        })?;
-        match Self::receive(&mut connection)?.0 {
-            Response::Ok => Ok(()),
-            Response::Error { message } => anyhow::bail!("{message}"),
-            other => anyhow::bail!("unexpected response to daemon configuration: {other:?}"),
+        };
+        loop {
+            self.ping_until_ready(deadline)?;
+            let endpoint = self.endpoint_snapshot();
+            let mut connection =
+                self.open_as_with_endpoint(request.clone(), std::process::id(), &endpoint)?;
+            let (response, _) = Self::receive(&mut connection)?;
+            if matches!(
+                &response,
+                Response::Error { message } if message == "invalid multiplexer token"
+            ) {
+                self.refresh_endpoint_after_token(&endpoint, deadline)
+                    .context("refreshing the multiplexer endpoint after an invalid token")?;
+                continue;
+            }
+            return match response {
+                Response::Ok => Ok(()),
+                Response::Error { message } => anyhow::bail!("{message}"),
+                other => anyhow::bail!("unexpected response to daemon configuration: {other:?}"),
+            };
         }
     }
 
@@ -1261,6 +1452,35 @@ impl Client {
             Vec::new()
         };
         self.configure(retention, recipients)
+    }
+
+    /// Applies persistence settings while allowing a temporary GitHub lookup
+    /// failure to leave the daemon in the supplied in-memory mode.
+    #[cfg(feature = "session-persistence")]
+    pub fn configure_with_retention_and_persistence_resilient(
+        &self,
+        retention: Retention,
+        persistence: PersistenceOptions,
+        fallback_retention: Retention,
+    ) -> Result<RetentionConfiguration> {
+        retention.validate()?;
+        fallback_retention.validate()?;
+        anyhow::ensure!(
+            matches!(fallback_retention, Retention::Memory { .. }),
+            "retention fallback must be an in-memory policy"
+        );
+        let (effective_retention, degraded_reason, recipients) = resolve_effective_retention(
+            retention,
+            &persistence.recipients,
+            fallback_retention,
+            crate::persistence::resolve_recipient_strings_for_startup,
+        )?;
+        self.configure(effective_retention, recipients)?;
+        Ok(RetentionConfiguration {
+            requested_retention: retention,
+            effective_retention,
+            degraded_reason,
+        })
     }
 
     /// Asks the daemon to replace itself, keeping its sessions.
@@ -1317,7 +1537,7 @@ impl Client {
     /// terminal across a daemon replacement, and the one thing that would ruin
     /// it is treating the lost connection as the pane's process ending.
     pub fn subscribe(&self) -> Result<Subscription> {
-        let connection = self.open(Request::Subscribe)?;
+        let connection = self.open_ready(Request::Subscribe)?;
         // Subscription connections are intentionally long-lived and may be
         // idle for hours. Keep the write deadline from `open_as`, but remove
         // the request read deadline before handing the connection to the
@@ -1518,7 +1738,7 @@ fn resubscribe(
         if subscription_is_abandoned(reporters, revokes, grants) {
             return Some(Resubscribed::Abandoned);
         }
-        if let Ok(Some(client)) = Client::connect_existing_at(directory)
+        if let Ok(Some(client)) = Client::connect_ready_at(directory)
             && let Ok(connection) = client.open(Request::Subscribe)
         {
             log::info!("re-established the multiplexer's event stream");

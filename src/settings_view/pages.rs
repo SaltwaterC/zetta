@@ -282,7 +282,7 @@ pub(crate) fn render_settings_pages(
                     .into_any_element(),
                 setting_row(
                     "Detached session retention",
-                    "Keep no screen, or a bounded in-memory screen for background sessions",
+                    "Keep no screen, a bounded in-memory screen, or encrypted disk state; a temporary GitHub outage uses memory until persistence returns",
                     SettingsControl::Dropdown(SettingsDropdown::SessionRetention),
                     session_retention,
                 ),

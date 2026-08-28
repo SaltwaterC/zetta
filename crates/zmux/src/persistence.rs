@@ -8,6 +8,7 @@
 
 use std::{
     collections::{HashMap, HashSet, hash_map::Entry},
+    error::Error as StdError,
     fmt, fs,
     io::{self, BufReader, Cursor, Read as _, Write as _},
     path::{Path, PathBuf},
@@ -60,6 +61,55 @@ pub struct PersistenceOptions {
     /// The client-side default identity used by resume. The daemon never
     /// receives this path as part of its startup options.
     pub identity: Option<PathBuf>,
+}
+
+/// Why resolving a configured recipient failed.
+///
+/// A temporary failure means that the configuration is valid but the network
+/// lookup could not be completed right now.  The application may retain a
+/// session in memory and try the same disk configuration again later.  A
+/// permanent failure is part of the configuration itself and must remain an
+/// actionable error for callers such as `zmux resume` and the CLI.
+#[derive(Debug)]
+pub enum RecipientResolutionError {
+    Temporary(anyhow::Error),
+    Permanent(anyhow::Error),
+}
+
+impl RecipientResolutionError {
+    pub fn is_temporary(&self) -> bool {
+        matches!(self, Self::Temporary(_))
+    }
+
+    pub fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            Self::Temporary(error) | Self::Permanent(error) => error,
+        }
+    }
+}
+
+impl fmt::Display for RecipientResolutionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Temporary(error) | Self::Permanent(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl StdError for RecipientResolutionError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            Self::Temporary(error) | Self::Permanent(error) => error.source(),
+        }
+    }
+}
+
+fn permanent_recipient_error(error: impl Into<anyhow::Error>) -> RecipientResolutionError {
+    RecipientResolutionError::Permanent(error.into())
+}
+
+fn temporary_recipient_error(error: impl Into<anyhow::Error>) -> RecipientResolutionError {
+    RecipientResolutionError::Temporary(error.into())
 }
 
 /// The private file handed to a daemon at startup. It contains only resolved
@@ -420,64 +470,121 @@ pub fn parse_recipient(value: &str) -> Result<Box<dyn age::Recipient + Send + Sy
 /// Resolves `github:USER` entries and then applies the same parser and PQ
 /// mixing rule as direct recipients. Configuration parsing never calls this.
 pub fn resolve_recipients(values: &[String]) -> Result<RecipientSet> {
-    let mut resolved = Vec::new();
-    for value in values {
-        let value = value.trim();
-        if let Some(username) = value.strip_prefix("github:") {
-            resolved.extend(fetch_github_recipients(username)?);
-        } else {
-            resolved.push(value.to_owned());
-        }
-    }
+    let resolved = resolve_recipient_strings_for_startup(values)
+        .map_err(RecipientResolutionError::into_anyhow)?;
     RecipientSet::parse(&resolved)
 }
 
 /// Resolves aliases and validates the complete recipient set, returning only
 /// the public strings the daemon needs to encrypt future records.
 pub fn resolve_recipient_strings(values: &[String]) -> Result<Vec<String>> {
+    resolve_recipient_strings_for_startup(values).map_err(RecipientResolutionError::into_anyhow)
+}
+
+/// Resolves aliases for an application startup path while preserving whether
+/// a failure is temporary network trouble or invalid configuration.
+///
+/// The direct recipient entries and all GitHub usernames are validated before
+/// the first network request.  That ordering matters: a bad recipient must not
+/// be mistaken for a temporary GitHub outage merely because it appeared after a
+/// `github:` entry in the configuration.
+pub fn resolve_recipient_strings_for_startup(
+    values: &[String],
+) -> std::result::Result<Vec<String>, RecipientResolutionError> {
+    resolve_recipient_strings_with(values, fetch_github_recipients)
+}
+
+fn resolve_recipient_strings_with(
+    values: &[String],
+    mut fetch_github: impl FnMut(&str) -> std::result::Result<Vec<String>, RecipientResolutionError>,
+) -> std::result::Result<Vec<String>, RecipientResolutionError> {
     let mut resolved = Vec::new();
+    let mut usernames = Vec::new();
     for value in values {
         let value = value.trim();
         if let Some(username) = value.strip_prefix("github:") {
-            resolved.extend(fetch_github_recipients(username)?);
+            validate_github_username(username).map_err(permanent_recipient_error)?;
+            usernames.push(username.to_owned());
         } else {
+            if value.is_empty() {
+                return Err(permanent_recipient_error(anyhow::anyhow!(
+                    "age recipient entries must not be empty"
+                )));
+            }
+            parse_recipient(value).map_err(permanent_recipient_error)?;
             resolved.push(value.to_owned());
         }
     }
-    RecipientSet::parse(&resolved)?;
+
+    for username in usernames {
+        resolved.extend(fetch_github(&username)?);
+    }
+    RecipientSet::parse(&resolved).map_err(permanent_recipient_error)?;
     Ok(resolved)
 }
 
-fn fetch_github_recipients(username: &str) -> Result<Vec<String>> {
-    validate_github_username(username)?;
+fn fetch_github_recipients(
+    username: &str,
+) -> std::result::Result<Vec<String>, RecipientResolutionError> {
+    validate_github_username(username).map_err(permanent_recipient_error)?;
     let url = format!("https://github.com/{username}.keys");
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(GITHUB_TIMEOUT)
         .timeout(GITHUB_TIMEOUT)
         .user_agent("zetta-zmux")
         .build()
-        .context("creating GitHub key client")?;
-    let response = client.get(url).send().context("fetching GitHub SSH keys")?;
-    anyhow::ensure!(
-        response.status().is_success(),
-        "GitHub did not return SSH keys"
-    );
+        .map_err(|error| permanent_recipient_error(anyhow::Error::new(error)))?;
+    let response = client.get(url).send().map_err(|error| {
+        let error = anyhow::Error::new(error).context("fetching GitHub SSH keys");
+        if error.chain().any(|cause| {
+            cause
+                .downcast_ref::<reqwest::Error>()
+                .is_some_and(|error| error.is_connect() || error.is_timeout())
+        }) {
+            temporary_recipient_error(error)
+        } else {
+            permanent_recipient_error(error)
+        }
+    })?;
+    let status = response.status();
+    if !status.is_success() {
+        let error = anyhow::anyhow!("GitHub did not return SSH keys (HTTP {status})");
+        return if is_retryable_github_status(status) {
+            Err(temporary_recipient_error(error))
+        } else {
+            Err(permanent_recipient_error(error))
+        };
+    }
     if response
         .content_length()
         .is_some_and(|length| length > MAX_GITHUB_RESPONSE_BYTES)
     {
-        anyhow::bail!("GitHub SSH key response is too large");
+        return Err(permanent_recipient_error(anyhow::anyhow!(
+            "GitHub SSH key response is too large"
+        )));
     }
     let mut body = Vec::new();
     response
         .take(MAX_GITHUB_RESPONSE_BYTES + 1)
         .read_to_end(&mut body)
-        .context("reading GitHub SSH keys")?;
-    anyhow::ensure!(
-        body.len() as u64 <= MAX_GITHUB_RESPONSE_BYTES,
-        "GitHub SSH key response is too large"
-    );
-    parse_github_keys(&body)
+        .map_err(|error| {
+            temporary_recipient_error(anyhow::Error::new(error).context("reading GitHub SSH keys"))
+        })?;
+    if body.len() as u64 > MAX_GITHUB_RESPONSE_BYTES {
+        return Err(permanent_recipient_error(anyhow::anyhow!(
+            "GitHub SSH key response is too large"
+        )));
+    }
+    parse_github_keys(&body).map_err(permanent_recipient_error)
+}
+
+fn is_retryable_github_status(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status,
+        reqwest::StatusCode::REQUEST_TIMEOUT
+            | reqwest::StatusCode::TOO_EARLY
+            | reqwest::StatusCode::TOO_MANY_REQUESTS
+    ) || status.is_server_error()
 }
 
 fn validate_github_username(username: &str) -> Result<()> {

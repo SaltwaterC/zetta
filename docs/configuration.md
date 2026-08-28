@@ -169,6 +169,19 @@ the default client-side identity file for resuming a disk record; it is never
 sent to the daemon. With disk selected and no recipients, no persistence files
 are written.
 
+When disk retention includes a `github:USER` recipient and GitHub is temporarily
+unreachable, Zetta keeps the requested disk setting but configures the daemon
+with the configured `ring_bytes` memory budget until the lookup succeeds. This
+is a temporary durability tradeoff: new detached or shared sessions remain
+daemon-owned and attachable from another Zetta process, but no new encrypted
+disk records are written during the fallback. Existing persistence files are
+left untouched. Zetta retries in the background after 5, 10, 20, 40, and then
+60 seconds (repeating at most every 60 seconds), and switches back to disk
+without restarting the daemon or terminating running shells. Encrypted disk
+resume is unavailable while the setting is degraded. Invalid usernames,
+malformed keys, invalid direct recipients, and non-retryable GitHub responses
+remain configuration errors.
+
 The setting is global to the daemon and is applied when a Zetta process
 connects or reloads configuration; an already-running daemon does not need to
 be restarted. Use `zmux list` to see opaque restorable records and

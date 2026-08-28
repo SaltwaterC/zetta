@@ -103,6 +103,61 @@ fn github_entries_are_validated_without_logging_or_networking_in_the_parser() {
 }
 
 #[test]
+fn recipient_resolution_preserves_temporary_and_permanent_failures() {
+    let temporary = resolve_recipient_strings_with(&["github:zetta-user".to_owned()], |_| {
+        Err(RecipientResolutionError::Temporary(anyhow::anyhow!(
+            "DNS lookup failed"
+        )))
+    })
+    .unwrap_err();
+    assert!(temporary.is_temporary());
+    assert!(temporary.to_string().contains("DNS lookup failed"));
+
+    let permanent = resolve_recipient_strings_with(&["github:zetta-user".to_owned()], |_| {
+        Err(RecipientResolutionError::Permanent(anyhow::anyhow!(
+            "malformed GitHub SSH key"
+        )))
+    })
+    .unwrap_err();
+    assert!(!permanent.is_temporary());
+    assert!(permanent.to_string().contains("malformed GitHub SSH key"));
+}
+
+#[test]
+fn invalid_direct_recipients_are_rejected_before_a_github_lookup() {
+    let error = resolve_recipient_strings_with(
+        &[
+            "github:zetta-user".to_owned(),
+            "not-an-age-recipient".to_owned(),
+        ],
+        |_| panic!("a permanent local configuration error must not fetch GitHub"),
+    )
+    .unwrap_err();
+    assert!(!error.is_temporary());
+    assert!(error.to_string().contains("invalid age recipient"));
+}
+
+#[test]
+fn github_retryable_statuses_are_distinguished_from_configuration_responses() {
+    for status in [
+        reqwest::StatusCode::REQUEST_TIMEOUT,
+        reqwest::StatusCode::TOO_EARLY,
+        reqwest::StatusCode::TOO_MANY_REQUESTS,
+        reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+        reqwest::StatusCode::BAD_GATEWAY,
+    ] {
+        assert!(is_retryable_github_status(status), "{status}");
+    }
+    for status in [
+        reqwest::StatusCode::BAD_REQUEST,
+        reqwest::StatusCode::UNAUTHORIZED,
+        reqwest::StatusCode::NOT_FOUND,
+    ] {
+        assert!(!is_retryable_github_status(status), "{status}");
+    }
+}
+
+#[test]
 fn disk_segments_are_encrypted_and_manifest_sizes_are_updated() {
     let directory = tempfile::tempdir().unwrap();
     let identity = age::x25519::Identity::generate();
