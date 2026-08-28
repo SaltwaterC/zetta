@@ -488,9 +488,9 @@ pane with a reusable layout. Built-in templates are:
 - `quarters`: a 2-by-2 grid
 - `four-vertical`: four equal-width columns
 
-Each is available by name in the command palette. Add bindings like these to
-`keymap.json` for direct access. On macOS, replace `alt` with `cmd` in these
-custom bindings:
+Each is available by name in the command palette, but none has a built-in
+keyboard shortcut. Add bindings like these to `keymap.json` for direct access.
+On macOS, replace `alt` with `cmd` in these custom bindings:
 
 ```json
 {

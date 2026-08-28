@@ -72,8 +72,6 @@
       "alt-shift-up": "zetta::RestoreMinimizedPane",
       "alt-shift-left": "zetta::SelectPreviousMinimizedPane",
       "alt-shift-right": "zetta::SelectNextMinimizedPane",
-      "alt-shift-o": ["zetta::ApplyPaneSplitTemplate", { "name": "three-right" }],
-      "alt-shift-e": ["zetta::ApplyPaneSplitTemplate", { "name": "quarters" }],
       "alt-shift-=": "zetta::IncreasePaneFontSize",
       "alt-shift-+": "zetta::IncreasePaneFontSize",
       "alt-shift--": "zetta::DecreasePaneFontSize",

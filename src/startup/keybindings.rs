@@ -122,25 +122,6 @@ pub(crate) fn profile_shortcut_label(
     (binding.keystrokes() == expected_binding.keystrokes()).then(|| format!("Ctrl+Shift+{key}"))
 }
 
-pub(crate) fn pane_template_keybindings() -> [KeyBinding; 2] {
-    [
-        platform_keybinding(
-            "alt-shift-o",
-            ApplyPaneSplitTemplate {
-                name: "three-right".to_owned(),
-            },
-            Some("Zetta > Terminal"),
-        ),
-        platform_keybinding(
-            "alt-shift-e",
-            ApplyPaneSplitTemplate {
-                name: "quarters".to_owned(),
-            },
-            Some("Zetta > Terminal"),
-        ),
-    ]
-}
-
 pub(crate) fn pane_font_size_keybindings() -> [KeyBinding; 4] {
     [
         platform_keybinding(
@@ -697,7 +678,6 @@ fn default_keybindings(
     bindings.extend(pane_resize_keybindings());
     bindings.extend(pane_move_keybindings());
     bindings.extend(tab_move_keybindings());
-    bindings.extend(pane_template_keybindings());
     bindings.extend(pane_font_size_keybindings());
     #[cfg(target_os = "macos")]
     bindings.push(macos_terminal_clear_unbinding());

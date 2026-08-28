@@ -1061,14 +1061,8 @@ fn keymap_template_exposes_all_builtin_shortcuts() {
         .iter()
         .find(|section| section["context"] == "Zetta > Terminal")
         .expect("bundled template must define the terminal context");
-    assert_eq!(
-        terminal["bindings"]["alt-shift-o"],
-        json!(["zetta::ApplyPaneSplitTemplate", { "name": "three-right" }])
-    );
-    assert_eq!(
-        terminal["bindings"]["alt-shift-e"],
-        json!(["zetta::ApplyPaneSplitTemplate", { "name": "quarters" }])
-    );
+    assert!(terminal["bindings"].get("alt-shift-o").is_none());
+    assert!(terminal["bindings"].get("alt-shift-e").is_none());
 }
 
 #[test]

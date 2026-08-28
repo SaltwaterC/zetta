@@ -53,16 +53,14 @@ fn profile_shortcut_labels_survive_keyboard_layout_mapping() {
 }
 
 #[test]
-fn pane_template_shortcuts_are_built_in() {
-    let [three_right, quarters] = pane_template_keybindings();
-    let three_right_key = gpui::Keystroke::parse(&platform_keystroke("alt-shift-o")).unwrap();
-    let quarters_key = gpui::Keystroke::parse(&platform_keystroke("alt-shift-e")).unwrap();
-
-    assert_eq!(
-        three_right.match_keystrokes(&[three_right_key]),
-        Some(false)
-    );
-    assert_eq!(quarters.match_keystrokes(&[quarters_key]), Some(false));
+fn pane_template_shortcuts_are_unbound_by_default() {
+    let bindings = default_keybindings(0, &gpui::DummyKeyboardMapper);
+    for shortcut in ["alt-shift-o", "alt-shift-e"] {
+        let shortcut = gpui::Keystroke::parse(&platform_keystroke(shortcut)).unwrap();
+        assert!(!bindings.iter().any(|binding| {
+            binding.match_keystrokes(std::slice::from_ref(&shortcut)) == Some(false)
+        }));
+    }
 }
 
 #[test]
@@ -375,8 +373,6 @@ fn alt_shortcuts_use_the_platform_equivalent() {
         ("alt-left", "cmd-left"),
         ("alt-shift-l", "cmd-shift-l"),
         ("alt-shift-k", "cmd-shift-k"),
-        ("alt-shift-o", "cmd-shift-o"),
-        ("alt-shift-e", "cmd-shift-e"),
         ("alt-shift-a", "cmd-shift-a"),
         ("alt-shift-down", "cmd-shift-down"),
         ("alt-shift-up", "cmd-shift-up"),
