@@ -19,7 +19,7 @@ use crate::command_panes::PaneCommand;
 pub(crate) fn set_default_terminal() -> Result<String> {
     #[cfg(windows)]
     {
-        return crate::windows_integration::set_default_terminal();
+        crate::windows_integration::set_default_terminal()
     }
     #[cfg(target_os = "macos")]
     {

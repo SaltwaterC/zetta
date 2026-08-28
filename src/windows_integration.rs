@@ -1,4 +1,7 @@
 #![allow(non_snake_case)]
+// Windows Terminal's handoff ABI fixes several parameter lists that exceed
+// Clippy's general-purpose argument-count threshold.
+#![allow(clippy::too_many_arguments)]
 
 use std::{
     env,
@@ -291,7 +294,7 @@ impl TerminalHandoff {
             Ok(request) => request,
             Err(_) => return E_FAIL,
         };
-        self.submit(request).then_some(S_OK).unwrap_or(E_FAIL)
+        if self.submit(request) { S_OK } else { E_FAIL }
     }
 
     fn establish_v3(
