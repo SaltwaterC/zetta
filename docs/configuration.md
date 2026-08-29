@@ -40,6 +40,14 @@ registered project opens that project, and `project open` opens a new active
 tab in an existing Zetta process when possible. The deepest registered
 ancestor wins for nested projects.
 
+Zetta-managed `wt/*` linked worktrees are aliases for their registered main
+repository: Zetta loads the main project's `.zetta/config.json`, keeps the
+main root as the project context, and does not offer a second project import.
+The worktree only changes the initial terminal directory, so launching plain
+`zetta` or using `project open` from inside it starts there. This association
+requires the main repository to be registered already; ordinary, detached, and
+unregistered worktrees retain normal directory matching and import offers.
+
 Project configuration is an overlay on the normal configuration and supports
 these deliberately scoped fields:
 

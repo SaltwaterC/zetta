@@ -50,6 +50,9 @@ use crate::pane::{OverlayFontSize, PaneOverlayRequest, overlay_color_from_value}
 /// request.
 ///
 /// 17 adds passphrases for encrypted identity files to that private payload.
+///
+/// 18 adds an optional working directory to open-project requests, so opening
+/// a registered project from a managed worktree can preserve that directory.
 pub(crate) const CONTROL_VERSION: u32 = zmux::protocol::CONTROL_VERSION;
 // A 64 KiB argv payload can expand substantially when it contains many
 // one-character arguments and each value is represented as JSON. Keep enough
@@ -122,6 +125,7 @@ pub(crate) enum ProcessControlCommand {
     },
     OpenProject {
         root: PathBuf,
+        working_directory: Option<PathBuf>,
         completion: Sender<bool>,
     },
     ReloadProjects {
@@ -211,6 +215,7 @@ enum ControlRequestCommand {
     OpenWindow,
     OpenProject {
         root: PathBuf,
+        working_directory: Option<PathBuf>,
     },
     ReloadProjects,
     ReplacePane {
@@ -307,6 +312,8 @@ struct ControlRequest {
     tab_name: Option<String>,
     worktree_name: Option<String>,
     config_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    working_directory: Option<String>,
     split: Option<String>,
     profile: Option<String>,
     theme: Option<String>,
@@ -544,11 +551,15 @@ impl ProcessControlServer {
                                 && wait_for_control_completion(&completed, &stopping_for_thread);
                             if accepted { "ok" } else { "rejected" }
                         }
-                        Some(ControlRequestCommand::OpenProject { root }) => {
+                        Some(ControlRequestCommand::OpenProject {
+                            root,
+                            working_directory,
+                        }) => {
                             let (completion, completed) = channel();
                             let accepted = commands
                                 .unbounded_send(ProcessControlCommand::OpenProject {
                                     root,
+                                    working_directory,
                                     completion,
                                 })
                                 .is_ok()
@@ -1066,6 +1077,10 @@ fn decode_control_request(
         zeroize_control_request_secrets(request);
         return None;
     }
+    if request.command != "open_project" && request.working_directory.is_some() {
+        zeroize_control_request_secrets(request);
+        return None;
+    }
     if request.command != "set_tab_name" && request.tab_name.is_some() {
         zeroize_control_request_secrets(request);
         return None;
@@ -1148,7 +1163,17 @@ fn decode_control_request(
                 .take()
                 .filter(|path| !path.is_empty())
                 .map(PathBuf::from)
-                .map(|root| ControlRequestCommand::OpenProject { root })
+                .map(|root| {
+                    let working_directory = request
+                        .working_directory
+                        .take()
+                        .filter(|path| !path.is_empty())
+                        .map(PathBuf::from);
+                    ControlRequestCommand::OpenProject {
+                        root,
+                        working_directory,
+                    }
+                })
         }
         "reload_projects"
             if request.runner_id.is_none()
@@ -1639,7 +1664,15 @@ pub(crate) fn request_existing_process_window() -> Result<bool> {
     Ok(false)
 }
 
+#[allow(dead_code)]
 pub(crate) fn request_existing_process_project(root: &Path) -> Result<bool> {
+    request_existing_process_project_with_working_directory(root, None)
+}
+
+pub(crate) fn request_existing_process_project_with_working_directory(
+    root: &Path,
+    working_directory: Option<&Path>,
+) -> Result<bool> {
     let directory = crate::background_sessions::session_catalog_dir();
     let entries = match fs::read_dir(&directory) {
         Ok(entries) => entries,
@@ -1667,7 +1700,9 @@ pub(crate) fn request_existing_process_project(root: &Path) -> Result<bool> {
             let _ = fs::remove_file(endpoint.socket_path);
             continue;
         }
-        if send_open_project_request(&endpoint, root).unwrap_or(false) {
+        if send_open_project_request_with_working_directory(&endpoint, root, working_directory)
+            .unwrap_or(false)
+        {
             return Ok(true);
         }
     }
@@ -2217,6 +2252,7 @@ fn send_open_window_request(endpoint: &ControlEndpoint) -> Result<bool> {
             tab_name: None,
             worktree_name: None,
             config_path: None,
+            working_directory: None,
             split: None,
             profile: None,
             theme: None,
@@ -2228,7 +2264,16 @@ fn send_open_window_request(endpoint: &ControlEndpoint) -> Result<bool> {
     Ok(response.status == "ok")
 }
 
+#[allow(dead_code)]
 fn send_open_project_request(endpoint: &ControlEndpoint, root: &Path) -> Result<bool> {
+    send_open_project_request_with_working_directory(endpoint, root, None)
+}
+
+fn send_open_project_request_with_working_directory(
+    endpoint: &ControlEndpoint,
+    root: &Path,
+    working_directory: Option<&Path>,
+) -> Result<bool> {
     let mut stream = UnixStream::connect(&endpoint.socket_path)?;
     stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
     stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
@@ -2253,6 +2298,7 @@ fn send_open_project_request(endpoint: &ControlEndpoint, root: &Path) -> Result<
             tab_name: None,
             worktree_name: None,
             config_path: Some(root.to_string_lossy().into_owned()),
+            working_directory: working_directory.map(|path| path.to_string_lossy().into_owned()),
             split: None,
             profile: None,
             theme: None,
@@ -2289,6 +2335,7 @@ fn send_reload_projects_request(endpoint: &ControlEndpoint) -> Result<bool> {
             tab_name: None,
             worktree_name: None,
             config_path: None,
+            working_directory: None,
             split: None,
             profile: None,
             theme: None,
@@ -2329,6 +2376,7 @@ fn send_get_silent_mode_request(
             tab_name: None,
             worktree_name: None,
             config_path: None,
+            working_directory: None,
             split: None,
             profile: None,
             theme: None,
@@ -2372,6 +2420,7 @@ fn send_set_tab_attention_request(
             tab_name: None,
             worktree_name: None,
             config_path: None,
+            working_directory: None,
             split: None,
             profile: None,
             theme: None,
@@ -2409,6 +2458,7 @@ fn send_set_tab_name_request(endpoint: &ControlEndpoint, request: &TabNameReques
             tab_name: request.name.clone(),
             worktree_name: None,
             config_path: None,
+            working_directory: None,
             split: None,
             profile: None,
             theme: None,
@@ -2448,6 +2498,7 @@ fn send_set_worktree_name_request(
             tab_name: None,
             worktree_name: request.name.clone(),
             config_path: None,
+            working_directory: None,
             split: None,
             profile: None,
             theme: None,
@@ -2486,6 +2537,7 @@ fn send_focus_tab_request(endpoint: &ControlEndpoint, attention_id: u64) -> Resu
             tab_name: None,
             worktree_name: None,
             config_path: None,
+            working_directory: None,
             split: None,
             profile: None,
             theme: None,
@@ -2522,6 +2574,7 @@ fn send_run_pane_request(endpoint: &ControlEndpoint, request: &PaneCommand) -> R
             tab_name: None,
             worktree_name: None,
             config_path: None,
+            working_directory: None,
             split: None,
             profile: None,
             theme: None,
@@ -2568,6 +2621,7 @@ fn send_open_command_request(
             tab_name: None,
             worktree_name: None,
             config_path: working_directory.map(|path| path.to_string_lossy().into_owned()),
+            working_directory: None,
             split: None,
             profile: None,
             theme: None,
@@ -2610,6 +2664,7 @@ fn send_list_pane_labels_request(endpoint: &ControlEndpoint) -> Result<Option<Ve
             tab_name: None,
             worktree_name: None,
             config_path: None,
+            working_directory: None,
             split: None,
             profile: None,
             theme: None,
@@ -2655,6 +2710,7 @@ fn send_replace_pane_request(
             tab_name: None,
             worktree_name: None,
             config_path: None,
+            working_directory: None,
             split: request.split.clone(),
             profile: request.profile.clone(),
             theme: request.theme.clone(),
@@ -2694,6 +2750,7 @@ fn send_reload_configuration_request(
             tab_name: None,
             worktree_name: None,
             config_path: Some(config_path.to_owned()),
+            working_directory: None,
             split: None,
             profile: None,
             theme: None,
@@ -2733,6 +2790,7 @@ fn send_set_tab_icon_request(endpoint: &ControlEndpoint, icon: Option<IconName>)
             tab_name: None,
             worktree_name: None,
             config_path: None,
+            working_directory: None,
             split: None,
             profile: None,
             theme: None,
@@ -2773,6 +2831,7 @@ fn send_set_theme_request(
             tab_name: None,
             worktree_name: None,
             config_path: None,
+            working_directory: None,
             split: None,
             profile: None,
             theme,
@@ -2809,6 +2868,7 @@ fn send_list_themes_request(endpoint: &ControlEndpoint) -> Result<Option<Vec<Str
             tab_name: None,
             worktree_name: None,
             config_path: None,
+            working_directory: None,
             split: None,
             profile: None,
             theme: None,
@@ -2850,6 +2910,7 @@ fn send_get_pane_theme_request(
             tab_name: None,
             worktree_name: None,
             config_path: None,
+            working_directory: None,
             split: None,
             profile: None,
             theme: None,
@@ -2894,6 +2955,7 @@ fn send_set_overlay_request(
             tab_name: None,
             worktree_name: None,
             config_path: None,
+            working_directory: None,
             split: None,
             profile: None,
             theme: None,

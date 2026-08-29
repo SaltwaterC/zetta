@@ -1,6 +1,7 @@
 use super::*;
 use crate::project::{
     ProjectConfig, ProjectRegistry, canonical_project_root, ensure_project_config,
+    resolve_registered_project,
 };
 use crate::project_form::{
     self, PROJECT_INHERIT_LABEL, ProjectEnvironmentForm, ProjectForm, ProjectProfileForm,
@@ -302,9 +303,17 @@ impl Zetta {
                 let result = executor
                     .spawn(async move {
                         let root = canonical_project_root(&root)?;
+                        let mut registry = ProjectRegistry::load_from(registry_path)?;
+                        let resolution = resolve_registered_project(&root, &registry);
+                        let root = if resolution.managed_worktree.is_some() {
+                            resolution
+                                .root
+                                .context("managed worktree has no registered main project")?
+                        } else {
+                            root
+                        };
                         ensure_project_config(&root)?;
                         let config = ProjectConfig::load(&root, &base)?;
-                        let mut registry = ProjectRegistry::load_from(registry_path)?;
                         if registry.add(&root)? {
                             registry.save()?;
                         }

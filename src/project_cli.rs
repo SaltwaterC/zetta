@@ -1,5 +1,6 @@
 use std::{
     ffi::OsString,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -9,8 +10,9 @@ use crate::startup::format_help_table;
 use crate::{
     config::Config,
     project::{
-        ProjectConfig, ProjectRegistry, canonical_project_root, ensure_project_config,
-        find_repository_root, is_wsl_unc_path,
+        ProjectConfig, ProjectRegistry, ProjectRootResolution, canonical_project_root,
+        ensure_project_config, find_repository_root, is_wsl_unc_path, resolve_registered_project,
+        resolve_registered_project_root,
     },
 };
 
@@ -20,6 +22,15 @@ pub(crate) enum ProjectCommand {
     List,
     Remove { path: Option<PathBuf> },
     Open { path: Option<PathBuf> },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProjectOpenTarget {
+    pub(crate) root: PathBuf,
+    /// A managed worktree keeps the directory from which `project open` was
+    /// requested, while an ordinary project uses its configured working
+    /// directory and therefore leaves this unset.
+    pub(crate) working_directory: Option<PathBuf>,
 }
 
 pub(crate) fn parse_project_args(arguments: &[OsString]) -> Result<ProjectCommand> {
@@ -87,14 +98,19 @@ pub(crate) fn run_non_open(command: &ProjectCommand, base: &Config) -> Result<bo
     match command {
         ProjectCommand::Add { path } => {
             let requested = absolute_path(path.as_deref())?;
-            let root = if path.is_none() && !is_wsl_unc_path(&requested) {
+            let mut registry = ProjectRegistry::load()?;
+            let resolution = resolve_registered_project(&requested, &registry);
+            let root = if resolution.managed_worktree.is_some() {
+                resolution
+                    .root
+                    .context("managed worktree has no registered main project")?
+            } else if path.is_none() && !is_wsl_unc_path(&requested) {
                 find_repository_root(&requested)?.unwrap_or(requested)
             } else {
-                canonical_project_root(&requested)?
+                requested
             };
             ensure_project_config(&root)?;
             ProjectConfig::load(&root, base)?;
-            let mut registry = ProjectRegistry::load()?;
             let changed = registry.add(&root)?;
             if changed {
                 registry.save()?;
@@ -111,7 +127,9 @@ pub(crate) fn run_non_open(command: &ProjectCommand, base: &Config) -> Result<bo
         ProjectCommand::Remove { path } => {
             let requested = absolute_path_without_requiring_existence(path.as_deref())?;
             let mut registry = ProjectRegistry::load()?;
-            let removed = registry.remove(&requested).with_context(|| {
+            let remove_from =
+                resolve_registered_project_root(&requested, &registry).unwrap_or(requested.clone());
+            let removed = registry.remove(&remove_from).with_context(|| {
                 format!(
                     "{} is not inside a registered Zetta project",
                     requested.display()
@@ -125,23 +143,60 @@ pub(crate) fn run_non_open(command: &ProjectCommand, base: &Config) -> Result<bo
     }
 }
 
-pub(crate) fn resolve_open_root(path: Option<&Path>) -> Result<PathBuf> {
+pub(crate) fn resolve_open_target(path: Option<&Path>) -> Result<ProjectOpenTarget> {
     let requested = absolute_path_without_requiring_existence(path)?;
     let registry = ProjectRegistry::load()?;
-    registry
-        .matching_root(&requested)
-        .cloned()
-        .with_context(|| {
-            format!(
-                "{} is not inside a registered Zetta project",
-                requested.display()
-            )
-        })
+    resolve_open_target_in_registry(&requested, &registry)
 }
 
+fn resolve_open_target_in_registry(
+    requested: &Path,
+    registry: &ProjectRegistry,
+) -> Result<ProjectOpenTarget> {
+    let resolution = resolve_registered_project(requested, registry);
+    let ProjectRootResolution {
+        root,
+        managed_worktree,
+    } = resolution;
+    let root = root.with_context(|| {
+        format!(
+            "{} is not inside a registered Zetta project",
+            requested.display()
+        )
+    })?;
+    let working_directory = managed_worktree
+        .as_ref()
+        .and_then(|_| fs::canonicalize(requested).ok())
+        .filter(|directory| directory.is_dir());
+    Ok(ProjectOpenTarget {
+        root,
+        working_directory,
+    })
+}
+
+#[allow(dead_code)]
+pub(crate) fn resolve_open_root(path: Option<&Path>) -> Result<PathBuf> {
+    Ok(resolve_open_target(path)?.root)
+}
+
+#[allow(dead_code)]
 pub(crate) fn current_registered_project() -> Result<Option<PathBuf>> {
     let current = absolute_path(None)?;
-    Ok(ProjectRegistry::load()?.matching_root(&current).cloned())
+    Ok(resolve_registered_project(&current, &ProjectRegistry::load()?).root)
+}
+
+pub(crate) fn current_project_target() -> Result<Option<ProjectOpenTarget>> {
+    let current = absolute_path(None)?;
+    let registry = ProjectRegistry::load()?;
+    let resolution = resolve_registered_project(&current, &registry);
+    let ProjectRootResolution {
+        root,
+        managed_worktree,
+    } = resolution;
+    Ok(root.map(|root| ProjectOpenTarget {
+        root,
+        working_directory: managed_worktree.map(|_| current.clone()),
+    }))
 }
 
 /// Loads the `.zetta/config.json` of the registered project containing the current
@@ -152,9 +207,9 @@ pub(crate) fn current_registered_project() -> Result<Option<PathBuf>> {
 /// runs as its own process, so without it the editor highlighted with the
 /// application theme inside a project that selects a different one.
 pub(crate) fn current_project_config(base: &Config) -> Result<Option<ProjectConfig>> {
-    current_registered_project()?
-        .as_deref()
-        .map(|root| ProjectConfig::load(root, base))
+    current_project_target()?
+        .as_ref()
+        .map(|target| ProjectConfig::load(&target.root, base))
         .transpose()
 }
 
@@ -201,7 +256,7 @@ pub(crate) fn project_help(operation: Option<&str>) -> String {
         }
         Some("open") => {
             format!(
-                "Open a registered Zetta project\n\nUsage: zetta project open [PATH]\n       zetta project open --path PATH\n\nOpens the containing registered project in a new active tab of the running Zetta process, or starts Zetta when needed.\n\nOptions:\n{}",
+                "Open a registered Zetta project\n\nUsage: zetta project open [PATH]\n       zetta project open --path PATH\n\nOpens the containing registered project in a new active tab of the running Zetta process, or starts Zetta when needed. A Zetta-managed wt/* worktree uses the registered main repository's configuration while preserving the requested worktree directory.\n\nOptions:\n{}",
                 format_help_table([
                     ("-p, --path PATH", "Project root or a path inside it"),
                     ("-h, --help", "Print help"),

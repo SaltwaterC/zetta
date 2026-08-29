@@ -1,5 +1,6 @@
 use super::*;
 use crate::mux::SharedPaneEntry;
+use crate::project::resolve_registered_project_root;
 use crate::rename::resolve_tab_title;
 use crate::worktree_detection::terminal_event_requires_worktree_detection;
 
@@ -1660,11 +1661,10 @@ impl Zetta {
                     icon: ProfileIcon::default(),
                 });
             let project_root = match working_directory.as_deref() {
-                Some(directory) => self
-                    .projects
-                    .registry
-                    .matching_root(&restored_project_directory(&profile, directory))
-                    .cloned(),
+                Some(directory) => resolve_registered_project_root(
+                    &restored_project_directory(&profile, directory),
+                    &self.projects.registry,
+                ),
                 None => destination_root.clone(),
             };
             metadata.panes.insert(

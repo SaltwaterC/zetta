@@ -8,6 +8,12 @@ use anyhow::Result;
 
 const WORKTREE_BRANCH_PREFIX: &str = "refs/heads/wt/";
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorktreeMetadata {
+    pub(crate) name: String,
+    pub(crate) main_root: PathBuf,
+}
+
 pub(crate) fn terminal_event_requires_worktree_detection(event: &TerminalEvent) -> bool {
     matches!(
         event,
@@ -23,7 +29,33 @@ pub(crate) fn terminal_event_requires_worktree_detection(event: &TerminalEvent) 
 /// `Result` distinguishes an unavailable/unreadable directory from a normal
 /// directory that simply is not a matching worktree, so an explicit WSL or
 /// remote title is not cleared by an inspection that the host cannot perform.
-pub(crate) fn detect_worktree_name(path: &Path) -> Result<Option<String>> {
+pub(crate) fn detect_worktree_metadata(path: &Path) -> Result<Option<WorktreeMetadata>> {
+    let Some((commondir, branch)) = inspect_linked_worktree(path)? else {
+        return Ok(None);
+    };
+    let common_gitdir = read_gitdir_metadata_pointer(&commondir)?;
+    let common_gitdir = canonicalize_gitdir(&commondir, &common_gitdir)?;
+    let main_root = common_gitdir
+        .parent()
+        .context("Git common directory has no main-worktree parent")?;
+    let main_root = fs::canonicalize(main_root).with_context(|| {
+        format!(
+            "canonicalizing Git main worktree root {}",
+            main_root.display()
+        )
+    })?;
+    anyhow::ensure!(
+        main_root.is_dir(),
+        "Git main worktree root {} is not a directory",
+        main_root.display()
+    );
+    Ok(Some(WorktreeMetadata {
+        name: branch,
+        main_root,
+    }))
+}
+
+fn inspect_linked_worktree(path: &Path) -> Result<Option<(PathBuf, String)>> {
     let directory = fs::canonicalize(path)
         .with_context(|| format!("canonicalizing terminal directory {}", path.display()))?;
     anyhow::ensure!(
@@ -71,10 +103,18 @@ pub(crate) fn detect_worktree_name(path: &Path) -> Result<Option<String>> {
     let Some(branch) = reference.strip_prefix(WORKTREE_BRANCH_PREFIX) else {
         return Ok(None);
     };
-    (!branch.is_empty() && !branch.contains(['\r', '\n', '\0']))
-        .then(|| branch.to_owned())
-        .ok_or_else(|| anyhow::anyhow!("linked worktree HEAD contains an invalid wt/* branch"))
-        .map(Some)
+    anyhow::ensure!(
+        !branch.is_empty() && !branch.contains(['\r', '\n', '\0']),
+        "linked worktree HEAD contains an invalid wt/* branch"
+    );
+    Ok(Some((commondir, branch.to_owned())))
+}
+
+/// Inspect a native directory for a matching linked worktree and return only
+/// its title. Project resolution uses [`detect_worktree_metadata`] when it
+/// also needs the canonical main-worktree root.
+pub(crate) fn detect_worktree_name(path: &Path) -> Result<Option<String>> {
+    Ok(inspect_linked_worktree(path)?.map(|(_, branch)| branch))
 }
 
 fn find_git_marker(directory: &Path) -> Result<Option<PathBuf>> {
@@ -115,6 +155,17 @@ fn read_gitdir_back_pointer(path: &Path) -> Result<PathBuf> {
     anyhow::ensure!(
         !pointer.is_empty() && !pointer.contains(['\r', '\n', '\0']),
         "linked worktree pointer is invalid"
+    );
+    Ok(PathBuf::from(pointer))
+}
+
+fn read_gitdir_metadata_pointer(path: &Path) -> Result<PathBuf> {
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("reading Git common directory pointer {}", path.display()))?;
+    let pointer = contents.trim();
+    anyhow::ensure!(
+        !pointer.is_empty() && !pointer.contains(['\r', '\n', '\0']),
+        "Git common directory pointer is invalid"
     );
     Ok(PathBuf::from(pointer))
 }

@@ -1185,7 +1185,7 @@ impl Zetta {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn open_tab_with_profile_context(
+    pub(crate) fn open_tab_with_profile_context(
         &mut self,
         mut profile: Profile,
         project: Option<Arc<ProjectConfig>>,

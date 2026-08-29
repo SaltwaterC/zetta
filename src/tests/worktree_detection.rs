@@ -69,12 +69,16 @@ fn detects_nested_worktree_names_from_subdirectories() {
         detect_worktree_name(&nested).unwrap(),
         Some("feature/api".to_owned())
     );
+    let metadata = detect_worktree_metadata(&nested).unwrap().unwrap();
+    assert_eq!(metadata.name, "feature/api");
+    assert_eq!(metadata.main_root, fs::canonicalize(&fixture.main).unwrap());
 }
 
 #[test]
 fn ignores_the_main_worktree() {
     let fixture = Fixture::new();
     assert_eq!(detect_worktree_name(&fixture.main).unwrap(), None);
+    assert_eq!(detect_worktree_metadata(&fixture.main).unwrap(), None);
 }
 
 #[test]
@@ -84,6 +88,7 @@ fn ignores_detached_linked_worktrees() {
     Fixture::git(&linked, &["checkout", "-q", "--detach", "HEAD"]);
 
     assert_eq!(detect_worktree_name(&linked).unwrap(), None);
+    assert_eq!(detect_worktree_metadata(&linked).unwrap(), None);
 }
 
 #[test]
@@ -92,6 +97,7 @@ fn ignores_linked_worktrees_on_non_worktree_branches() {
     let linked = fixture.linked("feature/api", "ordinary");
 
     assert_eq!(detect_worktree_name(&linked).unwrap(), None);
+    assert_eq!(detect_worktree_metadata(&linked).unwrap(), None);
 }
 
 #[test]

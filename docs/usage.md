@@ -415,6 +415,15 @@ Zetta uses the sibling directory `<repository>-worktrees`. The root is created
 on demand by `new`; `status` only reports its resolved path and never creates
 directories.
 
+When the main repository is a registered Zetta project, a Zetta-managed
+`wt/*` linked worktree automatically inherits that project's configuration.
+The linked worktree is not added as a duplicate project and does not show an
+import offer; its main repository remains the project root while the terminal
+keeps the worktree directory. This applies only to worktrees created by
+Zetta's workflow and only when the main repository is already registered.
+Ordinary, detached, or otherwise unregistered worktrees follow the usual
+project discovery and trust flow.
+
 `status` also reports whether the current `HEAD` contains submodules and lists
 detected submodule paths, including nested paths. It reports whether native
 copy-on-write cloning is available between the current worktree and the

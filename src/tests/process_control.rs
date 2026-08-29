@@ -23,6 +23,7 @@ fn request(token: &str, command: &str) -> ControlRequest {
         tab_name: None,
         worktree_name: None,
         config_path: None,
+        working_directory: None,
         split: None,
         profile: None,
         theme: None,
@@ -62,6 +63,7 @@ fn send_reconnect_session_request(
         tab_name: None,
         worktree_name: None,
         config_path: None,
+        working_directory: None,
         split: None,
         profile: None,
         theme: None,
@@ -701,6 +703,18 @@ fn project_control_requests_decode_and_reject_unexpected_payloads() {
         decode_control_request(&mut open, "token"),
         Some(ControlRequestCommand::OpenProject {
             root: PathBuf::from("/tmp/project"),
+            working_directory: None,
+        })
+    );
+
+    let mut open_from_worktree = request("token", "open_project");
+    open_from_worktree.config_path = Some("/tmp/project".to_owned());
+    open_from_worktree.working_directory = Some("/tmp/project-worktrees/feature".to_owned());
+    assert_eq!(
+        decode_control_request(&mut open_from_worktree, "token"),
+        Some(ControlRequestCommand::OpenProject {
+            root: PathBuf::from("/tmp/project"),
+            working_directory: Some(PathBuf::from("/tmp/project-worktrees/feature")),
         })
     );
 
@@ -716,6 +730,24 @@ fn project_control_requests_decode_and_reject_unexpected_payloads() {
     );
     assert_eq!(
         decode_control_request(&mut request("token", "open_project"), "token"),
+        None
+    );
+
+    let mut open_with_empty_working_directory = request("token", "open_project");
+    open_with_empty_working_directory.config_path = Some("/tmp/project".to_owned());
+    open_with_empty_working_directory.working_directory = Some(String::new());
+    assert_eq!(
+        decode_control_request(&mut open_with_empty_working_directory, "token"),
+        Some(ControlRequestCommand::OpenProject {
+            root: PathBuf::from("/tmp/project"),
+            working_directory: None,
+        })
+    );
+
+    let mut unexpected_working_directory = request("token", "open_window");
+    unexpected_working_directory.working_directory = Some("/tmp/project".to_owned());
+    assert_eq!(
+        decode_control_request(&mut unexpected_working_directory, "token"),
         None
     );
 }
@@ -960,6 +992,7 @@ fn reconnect_requests_carry_a_session_target_and_optional_secret() {
         tab_name: None,
         worktree_name: None,
         config_path: None,
+        working_directory: None,
         split: None,
         profile: None,
         theme: None,

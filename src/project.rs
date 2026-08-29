@@ -11,6 +11,7 @@ use serde_json::{Map, Value};
 use tempfile::NamedTempFile;
 
 use crate::config::{Config, platform_config_dir};
+use crate::worktree_detection::{WorktreeMetadata, detect_worktree_metadata};
 
 pub(crate) const PROJECT_CONFIG_DIRECTORY: &str = ".zetta";
 pub(crate) const PROJECT_CONFIG_FILE: &str = "config.json";
@@ -202,6 +203,15 @@ pub(crate) struct ProjectRegistry {
     roots: Vec<PathBuf>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProjectRootResolution {
+    pub(crate) root: Option<PathBuf>,
+    /// Present only when `root` is a registered project reached through a
+    /// Zetta-managed `wt/*` linked worktree. An unregistered or ordinary Git
+    /// worktree deliberately falls through to normal directory matching.
+    pub(crate) managed_worktree: Option<WorktreeMetadata>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProjectRegistryFile {
@@ -311,6 +321,41 @@ impl ProjectRegistry {
         };
         write_json_atomically(&self.path, &file)
     }
+}
+
+/// Resolve a directory to a registered project without invoking Git or
+/// changing the registry.
+///
+/// A Zetta-managed `wt/*` linked worktree lives beside its main repository, so
+/// a lexical ancestor lookup cannot find the main project. Git's linked
+/// worktree metadata gives us that main root; it is trusted only when the main
+/// root is already registered. Everything else uses the existing directory
+/// based lookup, preserving ordinary and detached worktree behavior.
+pub(crate) fn resolve_registered_project(
+    directory: &Path,
+    registry: &ProjectRegistry,
+) -> ProjectRootResolution {
+    let worktree = detect_worktree_metadata(directory).ok().flatten();
+    if let Some(worktree) = worktree
+        && let Some(root) = registry.matching_root(&worktree.main_root).cloned()
+    {
+        return ProjectRootResolution {
+            root: Some(root),
+            managed_worktree: Some(worktree),
+        };
+    }
+
+    ProjectRootResolution {
+        root: registry.matching_root(directory).cloned(),
+        managed_worktree: None,
+    }
+}
+
+pub(crate) fn resolve_registered_project_root(
+    directory: &Path,
+    registry: &ProjectRegistry,
+) -> Option<PathBuf> {
+    resolve_registered_project(directory, registry).root
 }
 
 pub(crate) fn ensure_project_config(root: &Path) -> Result<PathBuf> {

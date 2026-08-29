@@ -92,7 +92,10 @@ use process_control::{
     request_existing_process_window,
 };
 use profile_icon::ProfileIcon;
-use project::{ProjectConfig, ProjectRegistry};
+use project::{
+    ProjectConfig, ProjectRegistry, canonical_project_root, paths_equal,
+    resolve_registered_project_root,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use session_auth_ui::SessionAuthenticationPrompt;

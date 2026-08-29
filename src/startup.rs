@@ -19,7 +19,7 @@ use crate::cli_services::{parse_tftp_server_args, tftp_server_help};
 use crate::process_control::{
     ReplacePaneRequest, TabAttentionRequest, request_existing_process_command,
     request_existing_process_pane, request_existing_process_pane_labels,
-    request_existing_process_pane_overlay, request_existing_process_project,
+    request_existing_process_pane_overlay, request_existing_process_project_with_working_directory,
     request_existing_process_projects_reload, request_existing_process_replace_pane,
     request_existing_process_tab_icon, request_existing_process_theme,
     request_existing_process_theme_list, request_process_tab_attention,
@@ -1015,15 +1015,20 @@ impl ApplicationOpenUrlsExt for gpui::Application {
 pub(crate) fn run() -> Result<()> {
     let args = parse_args()?;
     let mut startup_project_root = None;
+    let mut startup_project_working_directory = None;
     if let StartupMode::Project(command) = &args.mode {
         let (base, _) = load_startup_config(None, None);
         match command {
             crate::project_cli::ProjectCommand::Open { path } => {
-                let root = crate::project_cli::resolve_open_root(path.as_deref())?;
-                if request_existing_process_project(&root)? {
+                let target = crate::project_cli::resolve_open_target(path.as_deref())?;
+                if request_existing_process_project_with_working_directory(
+                    &target.root,
+                    target.working_directory.as_deref(),
+                )? {
                     return Ok(());
                 }
-                startup_project_root = Some(root);
+                startup_project_working_directory = target.working_directory;
+                startup_project_root = Some(target.root);
             }
             _ => {
                 let changed = crate::project_cli::run_non_open(command, &base)?;
@@ -1038,8 +1043,12 @@ pub(crate) fn run() -> Result<()> {
         && args.keymap_path.is_none()
         && !args.replace_pane
     {
-        startup_project_root = match crate::project_cli::current_registered_project() {
-            Ok(root) => root,
+        startup_project_root = match crate::project_cli::current_project_target() {
+            Ok(Some(target)) => {
+                startup_project_working_directory = target.working_directory;
+                Some(target.root)
+            }
+            Ok(None) => None,
             Err(error) => {
                 eprintln!("Could not load the Zetta project registry: {error:#}");
                 None
@@ -1047,7 +1056,10 @@ pub(crate) fn run() -> Result<()> {
         };
         if let Some(root) = startup_project_root.as_ref()
             && should_handoff_to_existing_process(&args)
-            && request_existing_process_project(root)?
+            && request_existing_process_project_with_working_directory(
+                root,
+                startup_project_working_directory.as_deref(),
+            )?
         {
             return Ok(());
         }
@@ -1372,10 +1384,13 @@ pub(crate) fn run() -> Result<()> {
         StartupMode::Command(command) => Some(command.clone()),
         _ => None,
     };
-    let initial_working_directory = initial_command
-        .as_ref()
-        .map(|_| env::current_dir())
-        .transpose()?;
+    let initial_working_directory = match startup_project_working_directory {
+        Some(directory) => Some(directory),
+        None => initial_command
+            .as_ref()
+            .map(|_| env::current_dir())
+            .transpose()?,
+    };
     let keymap_path = config.keymap_path.clone();
     let profile_count = visible_profile_count(
         &effective_launch_config.profiles,
@@ -1653,7 +1668,11 @@ pub(crate) fn run() -> Result<()> {
                             });
                             let _ = completion.send(opened);
                         }
-                        ProcessControlCommand::OpenProject { root, completion } => {
+                        ProcessControlCommand::OpenProject {
+                            root,
+                            working_directory,
+                            completion,
+                        } => {
                             let opened = cx.update(|cx| {
                                 if !cx
                                     .global::<ZettaProcessState>()
@@ -1672,6 +1691,21 @@ pub(crate) fn run() -> Result<()> {
                                 if !registry.contains(&root) {
                                     return false;
                                 }
+                                let working_directory = match working_directory {
+                                    Some(directory) => {
+                                        let Ok(directory) = canonical_project_root(&directory)
+                                        else {
+                                            return false;
+                                        };
+                                        if resolve_registered_project_root(&directory, &registry)
+                                            .is_none_or(|resolved| !paths_equal(&resolved, &root))
+                                        {
+                                            return false;
+                                        }
+                                        Some(directory)
+                                    }
+                                    None => None,
+                                };
                                 if cx.active_window().is_none()
                                     && let Err(error) = open_dormant_or_new_window(cx)
                                 {
@@ -1686,7 +1720,12 @@ pub(crate) fn run() -> Result<()> {
                                 gpui::WindowHandle::<Zetta>::new(window_id)
                                     .update(cx, |zetta, window, cx| {
                                         zetta.projects.registry = registry;
-                                        zetta.open_project_tab(root, window, cx);
+                                        zetta.open_project_tab_with_working_directory(
+                                            root,
+                                            working_directory,
+                                            window,
+                                            cx,
+                                        );
                                         true
                                     })
                                     .unwrap_or(false)

@@ -1,4 +1,23 @@
 use super::*;
+use crate::project::PROJECT_CONFIG_DIRECTORY;
+use std::{path::Path, process::Command};
+
+fn git(directory: &Path, arguments: &[&str]) {
+    let output = Command::new("git")
+        .current_dir(directory)
+        .args(arguments)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {arguments:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn base_config() -> Config {
+    Config::defaults(None, None)
+}
 
 #[test]
 fn registered_detection_loads_once_then_reuses_the_cached_project() {
@@ -22,6 +41,101 @@ fn registered_detection_loads_once_then_reuses_the_cached_project() {
         detect_project_for_directory(&child, &registry, &base, std::slice::from_ref(&registered));
     assert_eq!(cached.registered_root, Some(registered));
     assert!(cached.config.is_none());
+}
+
+#[test]
+fn registered_main_projects_resolve_managed_worktree_aliases() {
+    let temporary = tempfile::tempdir().unwrap();
+    let main = temporary.path().join("project");
+    let linked = temporary.path().join("worktrees").join("feature");
+    fs::create_dir_all(&main).unwrap();
+    git(&main, &["init", "-q", "-b", "main"]);
+    git(&main, &["config", "user.email", "test@example.invalid"]);
+    git(&main, &["config", "user.name", "Zetta Test"]);
+    fs::write(main.join("file"), "base\n").unwrap();
+    git(&main, &["add", "file"]);
+    git(
+        &main,
+        &["-c", "commit.gpgsign=false", "commit", "-qm", "initial"],
+    );
+    fs::create_dir_all(main.join(PROJECT_CONFIG_DIRECTORY)).unwrap();
+    fs::write(ProjectConfig::path_for(&main), "{\"theme\":\"One Dark\"}\n").unwrap();
+    fs::create_dir_all(linked.parent().unwrap()).unwrap();
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "wt/feature",
+            linked.to_str().unwrap(),
+        ],
+    );
+    let child = linked.join("src");
+    fs::create_dir(&child).unwrap();
+
+    let registry_path = temporary.path().join("registry.json");
+    let mut registry = ProjectRegistry::load_from(registry_path).unwrap();
+    registry.add(&main).unwrap();
+    // A stale duplicate registration must not win over the main project.
+    registry.add(&linked).unwrap();
+    let main = fs::canonicalize(main).unwrap();
+
+    let resolution = resolve_registered_project(&child, &registry);
+    assert_eq!(resolution.root, Some(main.clone()));
+    assert_eq!(
+        resolution
+            .managed_worktree
+            .as_ref()
+            .map(|worktree| &worktree.name),
+        Some(&"feature".to_owned())
+    );
+
+    let detection = detect_project_for_directory(&child, &registry, &base_config(), &[]);
+    assert_eq!(detection.registered_root, Some(main));
+    assert!(detection.config.unwrap().is_ok());
+    assert!(detection.offer_root.is_none());
+}
+
+#[test]
+fn an_unregistered_managed_worktree_keeps_the_normal_import_offer() {
+    let temporary = tempfile::tempdir().unwrap();
+    let main = temporary.path().join("project");
+    let linked = temporary.path().join("linked");
+    fs::create_dir(&main).unwrap();
+    git(&main, &["init", "-q", "-b", "main"]);
+    git(&main, &["config", "user.email", "test@example.invalid"]);
+    git(&main, &["config", "user.name", "Zetta Test"]);
+    fs::write(main.join("file"), "base\n").unwrap();
+    git(&main, &["add", "file"]);
+    git(
+        &main,
+        &["-c", "commit.gpgsign=false", "commit", "-qm", "initial"],
+    );
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "wt/unregistered",
+            linked.to_str().unwrap(),
+        ],
+    );
+    fs::create_dir_all(linked.join(PROJECT_CONFIG_DIRECTORY)).unwrap();
+    fs::write(ProjectConfig::path_for(&linked), "{}\n").unwrap();
+    let child = linked.join("src");
+    fs::create_dir(&child).unwrap();
+
+    let registry = ProjectRegistry::load_from(temporary.path().join("registry.json")).unwrap();
+    let detection = detect_project_for_directory(&child, &registry, &base_config(), &[]);
+    assert!(detection.registered_root.is_none());
+    assert_eq!(
+        detection.offer_root,
+        Some(fs::canonicalize(&linked).unwrap())
+    );
 }
 
 #[test]

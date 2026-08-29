@@ -1,7 +1,7 @@
 use super::*;
 use crate::project::{
-    ProjectConfig, ProjectRegistry, canonical_project_root, discover_project_config,
-    path_is_within, paths_equal,
+    ProjectConfig, ProjectRegistry, canonical_project_root, discover_project_config, paths_equal,
+    resolve_registered_project, resolve_registered_project_root,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,11 +80,15 @@ impl ProjectState {
 
     pub(crate) fn suppress_offer_for(&mut self, root: &Path) {
         self.dismissed_offers.insert(project_key(root));
-        if self
-            .offer
-            .as_ref()
-            .is_some_and(|offer| paths_equal(&offer.root, root))
-        {
+        if let Some(registered_root) = resolve_registered_project_root(root, &self.registry) {
+            self.dismissed_offers.insert(project_key(&registered_root));
+        }
+        let related_offer = self.offer.as_ref().is_some_and(|offer| {
+            paths_equal(&offer.root, root)
+                || resolve_registered_project_root(&offer.root, &self.registry)
+                    .is_some_and(|registered_root| paths_equal(&registered_root, root))
+        });
+        if related_offer {
             self.offer = None;
         }
     }
@@ -97,11 +101,10 @@ impl ProjectState {
         self.pane_roots
             .retain(|_, root| self.registry.contains(root));
         self.configs.retain(|root, _| self.registry.contains(root));
-        if self
-            .offer
-            .as_ref()
-            .is_some_and(|offer| self.registry.contains(&offer.root))
-        {
+        if self.offer.as_ref().is_some_and(|offer| {
+            self.registry.contains(&offer.root)
+                || resolve_registered_project_root(&offer.root, &self.registry).is_some()
+        }) {
             self.offer = None;
         }
     }
@@ -198,7 +201,8 @@ fn detect_project_for_directory(
 ) -> ProjectDetectionResult {
     let canonical = fs::canonicalize(directory).ok();
     let directory = canonical.as_deref().unwrap_or(directory);
-    if let Some(root) = registry.matching_root(directory).cloned() {
+    let resolution = resolve_registered_project(directory, registry);
+    if let Some(root) = resolution.root {
         let config = (!loaded_roots.iter().any(|loaded| paths_equal(loaded, &root)))
             .then(|| ProjectConfig::load(&root, base));
         return ProjectDetectionResult {
@@ -389,10 +393,12 @@ impl Zetta {
         let Some(generation) = self.projects.begin_detection(pane_id, directory.clone()) else {
             return;
         };
-        let left_project = self
-            .projects
-            .root_for_pane(pane_id)
-            .is_some_and(|root| !path_is_within(&directory, root));
+        let resolved_root = resolve_registered_project(&directory, &self.projects.registry).root;
+        let left_project = self.projects.root_for_pane(pane_id).is_some_and(|root| {
+            resolved_root
+                .as_ref()
+                .is_none_or(|resolved| !paths_equal(resolved, root))
+        });
         if left_project {
             self.projects.clear_pane_root(pane_id);
             self.projects.invalidate_active_context();
@@ -498,7 +504,7 @@ impl Zetta {
             self.projects.offer = None;
         }
         if let Some(root) = result.offer_root
-            && !self.projects.registry.contains(&root)
+            && resolve_registered_project_root(&root, &self.projects.registry).is_none()
             && !self.projects.offer_is_dismissed(&root)
         {
             self.projects.offer = Some(ProjectOffer { root, pane_id });
@@ -729,6 +735,16 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_project_tab_with_working_directory(root, None, window, cx);
+    }
+
+    pub(crate) fn open_project_tab_with_working_directory(
+        &mut self,
+        root: PathBuf,
+        working_directory: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.projects.registry.contains(&root) {
             self.configuration_error = Some(format!(
                 "{} is not a registered Zetta project",
@@ -747,7 +763,16 @@ impl Zetta {
                     .spawn(async move { ProjectConfig::load(&project_root, &base) })
                     .await;
                 this.update_in(cx, |this, window, cx| match result {
-                    Ok(project) => this.open_loaded_project_tab(project, window, cx),
+                    Ok(project) => match working_directory {
+                        Some(working_directory) => this
+                            .open_loaded_project_tab_with_working_directory(
+                                project,
+                                Some(working_directory),
+                                window,
+                                cx,
+                            ),
+                        None => this.open_loaded_project_tab(project, window, cx),
+                    },
                     Err(error) => {
                         this.configuration_error = Some(format!(
                             "Could not open project {}: {error:#}",
@@ -767,6 +792,16 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_loaded_project_tab_with_working_directory(project, None, window, cx);
+    }
+
+    pub(crate) fn open_loaded_project_tab_with_working_directory(
+        &mut self,
+        project: ProjectConfig,
+        working_directory: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let project = self.projects.insert_config(project);
         let Some(profile) = project
             .effective
@@ -781,7 +816,19 @@ impl Zetta {
             cx.notify();
             return;
         };
-        self.open_tab_with_profile_in_project(profile, project, window, cx);
+        match working_directory {
+            None => self.open_tab_with_profile_in_project(profile, project, window, cx),
+            Some(working_directory) => self.open_tab_with_profile_context(
+                profile,
+                Some(project),
+                NewTabOrigin::ProjectEntry,
+                None,
+                Some(working_directory),
+                TerminalLaunch::Spawn,
+                window,
+                cx,
+            ),
+        }
     }
 
     pub(crate) fn reload_projects(
@@ -887,10 +934,14 @@ impl Zetta {
                 let root = offer.root.clone();
                 let result = executor
                     .spawn(async move {
-                        let config = ProjectConfig::load(&root, &base)?;
                         let mut registry = ProjectRegistry::load_from(registry_path)?;
-                        registry.add(&root)?;
-                        registry.save()?;
+                        let root = canonical_project_root(&root)?;
+                        let root =
+                            resolve_registered_project_root(&root, &registry).unwrap_or(root);
+                        let config = ProjectConfig::load(&root, &base)?;
+                        if registry.add(&root)? {
+                            registry.save()?;
+                        }
                         Ok::<_, anyhow::Error>((registry, config))
                     })
                     .await;
@@ -904,7 +955,11 @@ impl Zetta {
                             .detections
                             .get(&offer.pane_id)
                             .is_some_and(|state| {
-                                crate::project::path_is_within(&state.directory, &root)
+                                resolve_registered_project_root(
+                                    &state.directory,
+                                    &this.projects.registry,
+                                )
+                                .is_some_and(|resolved| paths_equal(&resolved, &root))
                             });
                         if still_inside {
                             this.projects.pane_roots.insert(offer.pane_id, root);

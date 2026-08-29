@@ -153,6 +153,13 @@ included, and leaves anything set to *Inherit* out of the file. See
 [Projects](docs/configuration.md#projects) for supported fields, WSL behavior,
 and the template-command trust boundary.
 
+Zetta-managed `wt/*` linked worktrees automatically use the configuration of
+their already-registered main repository. No separate worktree registration or
+import offer is created, and moving within the worktree keeps the same project
+context. Launching plain `zetta` from such a worktree still starts the first
+terminal in the worktree's current directory. Ordinary, detached, and
+unregistered worktrees keep the normal discovery and trust flow.
+
 Use `zetta wt new NAME`, `zetta wt done`, `zetta wt status`, and
 `zetta wt rerere` for the Git worktree workflow. The direct commands never
 change the caller's directory; generated shell integration provides `zwt new`
