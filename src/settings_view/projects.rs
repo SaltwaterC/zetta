@@ -443,15 +443,22 @@ fn render_project_config(
         .into_any_element(),
     );
     for (index, profile) in form.profiles.iter().enumerate() {
+        let [
+            profile_name_control,
+            profile_remove_control,
+            profile_program_control,
+            profile_arguments_control,
+            profile_visibility_control,
+            profile_icon_control,
+            profile_theme_control,
+            profile_dark_theme_control,
+        ] = project_profile_controls(index);
+        let profile_name_row_controls =
+            [profile_name_control.clone(), profile_remove_control.clone()];
         content.push(control_row(
             editor,
             format!("Profile {} · name", index + 1),
-            &[
-                SettingsControl::Input(SettingsInput::Project(ProjectTextField::ProfileName(
-                    index,
-                ))),
-                SettingsControl::RemoveProjectProfile(index),
-            ],
+            &profile_name_row_controls,
             h_flex()
                 .gap_1()
                 .child(text_field(
@@ -466,7 +473,7 @@ fn render_project_config(
                     editor,
                     format!("project-profile-remove-{index}"),
                     "×".to_owned(),
-                    SettingsControl::RemoveProjectProfile(index),
+                    profile_remove_control.clone(),
                     true,
                     colors,
                     handle,
@@ -477,9 +484,7 @@ fn render_project_config(
         content.push(control_row(
             editor,
             format!("Profile {} · program", index + 1),
-            &[SettingsControl::Input(SettingsInput::Project(
-                ProjectTextField::ProfileProgram(index),
-            ))],
+            std::slice::from_ref(&profile_program_control),
             text_field(
                 format!("project-profile-program-{index}"),
                 profile.program.clone(),
@@ -493,9 +498,7 @@ fn render_project_config(
         content.push(control_row(
             editor,
             format!("Profile {} · arguments (comma separated)", index + 1),
-            &[SettingsControl::Input(SettingsInput::Project(
-                ProjectTextField::ProfileArguments(index),
-            ))],
+            std::slice::from_ref(&profile_arguments_control),
             text_field(
                 format!("project-profile-arguments-{index}"),
                 profile.arguments.clone(),
@@ -506,72 +509,11 @@ fn render_project_config(
             ),
             colors,
         ));
-        content.push(control_row(
-            editor,
-            format!("Profile {} · light theme", index + 1),
-            &[SettingsControl::Dropdown(
-                SettingsDropdown::ProjectProfileTheme(index),
-            )],
-            dropdown_field(
-                format!("project-profile-theme-{index}"),
-                profile
-                    .theme
-                    .clone()
-                    .unwrap_or_else(|| crate::project_form::PROJECT_INHERIT_LABEL.to_owned()),
-                SettingsDropdown::ProjectProfileTheme(index),
-                editor,
-                colors,
-                handle,
-            ),
-            colors,
-        ));
-        content.push(control_row(
-            editor,
-            format!("Profile {} · dark theme", index + 1),
-            &[SettingsControl::Dropdown(
-                SettingsDropdown::ProjectProfileDarkTheme(index),
-            )],
-            dropdown_field(
-                format!("project-profile-dark-theme-{index}"),
-                profile
-                    .dark_theme
-                    .clone()
-                    .unwrap_or_else(|| crate::project_form::PROJECT_INHERIT_LABEL.to_owned()),
-                SettingsDropdown::ProjectProfileDarkTheme(index),
-                editor,
-                colors,
-                handle,
-            ),
-            colors,
-        ));
-        content.push(control_row(
-            editor,
-            format!("Profile {} · icon", index + 1),
-            &[SettingsControl::Dropdown(
-                SettingsDropdown::ProjectProfileIcon(index),
-            )],
-            dropdown_field(
-                format!("project-profile-icon-{index}"),
-                profile
-                    .icon
-                    .as_ref()
-                    .map(ProfileIcon::label)
-                    .unwrap_or("Automatic")
-                    .to_owned(),
-                SettingsDropdown::ProjectProfileIcon(index),
-                editor,
-                colors,
-                handle,
-            ),
-            colors,
-        ));
         let visibility_handle = handle.clone();
         content.push(control_row(
             editor,
             format!("Profile {} · shown in menus", index + 1),
-            &[SettingsControl::Toggle(
-                SettingsToggle::ProjectProfileVisibility(index),
-            )],
+            std::slice::from_ref(&profile_visibility_control),
             switch(
                 ("project-profile-visibility", index),
                 (!profile.hidden).into(),
@@ -592,6 +534,59 @@ fn render_project_config(
                     .ok();
             })
             .into_any_element(),
+            colors,
+        ));
+        content.push(control_row(
+            editor,
+            format!("Profile {} · icon", index + 1),
+            std::slice::from_ref(&profile_icon_control),
+            dropdown_field(
+                format!("project-profile-icon-{index}"),
+                profile
+                    .icon
+                    .as_ref()
+                    .map(ProfileIcon::label)
+                    .unwrap_or("Automatic")
+                    .to_owned(),
+                SettingsDropdown::ProjectProfileIcon(index),
+                editor,
+                colors,
+                handle,
+            ),
+            colors,
+        ));
+        content.push(control_row(
+            editor,
+            format!("Profile {} · light theme", index + 1),
+            std::slice::from_ref(&profile_theme_control),
+            dropdown_field(
+                format!("project-profile-theme-{index}"),
+                profile
+                    .theme
+                    .clone()
+                    .unwrap_or_else(|| crate::project_form::PROJECT_INHERIT_LABEL.to_owned()),
+                SettingsDropdown::ProjectProfileTheme(index),
+                editor,
+                colors,
+                handle,
+            ),
+            colors,
+        ));
+        content.push(control_row(
+            editor,
+            format!("Profile {} · dark theme", index + 1),
+            std::slice::from_ref(&profile_dark_theme_control),
+            dropdown_field(
+                format!("project-profile-dark-theme-{index}"),
+                profile
+                    .dark_theme
+                    .clone()
+                    .unwrap_or_else(|| crate::project_form::PROJECT_INHERIT_LABEL.to_owned()),
+                SettingsDropdown::ProjectProfileDarkTheme(index),
+                editor,
+                colors,
+                handle,
+            ),
             colors,
         ));
     }

@@ -45,6 +45,7 @@ fn test_editor(config: &Config, project: Option<ProjectEditor>) -> SettingsEdito
         profile_draft: None,
         keymap_search: TextField::default(),
         settings_scroll: ScrollHandle::new(),
+        profile_draft_scroll: ScrollHandle::new(),
         dropdown_scroll: UniformListScrollHandle::new(),
         font_scroll: UniformListScrollHandle::new(),
         keymap_scroll: UniformListScrollHandle::new(),
@@ -162,6 +163,41 @@ fn the_builder_replaces_the_list_controls_and_reaches_every_row() {
     // tab order.
     assert!(controls.contains(&SettingsControl::SelectPaneTemplate(0)));
     assert!(controls.contains(&SettingsControl::NewPaneTemplate));
+}
+
+#[test]
+fn project_profile_controls_follow_the_visible_selection_order() {
+    let config = base_config();
+    let project = test_project(
+        &config,
+        r#"{
+            "profiles": [{ "name": "Toolbox" }]
+        }"#,
+    );
+    let editor = test_editor(&config, Some(project));
+    let controls = project_controls(&editor);
+    let profile = project_profile_controls(0);
+    assert_eq!(
+        profile,
+        [
+            SettingsControl::Input(SettingsInput::Project(ProjectTextField::ProfileName(0))),
+            SettingsControl::RemoveProjectProfile(0),
+            SettingsControl::Input(SettingsInput::Project(ProjectTextField::ProfileProgram(0))),
+            SettingsControl::Input(SettingsInput::Project(ProjectTextField::ProfileArguments(
+                0
+            ),)),
+            SettingsControl::Toggle(SettingsToggle::ProjectProfileVisibility(0)),
+            SettingsControl::Dropdown(SettingsDropdown::ProjectProfileIcon(0)),
+            SettingsControl::Dropdown(SettingsDropdown::ProjectProfileTheme(0)),
+            SettingsControl::Dropdown(SettingsDropdown::ProjectProfileDarkTheme(0)),
+        ]
+    );
+    let start = controls
+        .iter()
+        .position(|control| control == &profile[0])
+        .expect("the project profile starts in the builder tab order");
+
+    assert_eq!(&controls[start..start + profile.len()], profile.as_slice());
 }
 
 #[test]

@@ -87,13 +87,56 @@ fn the_form_scroll_mapping_skips_the_controls_that_live_in_the_dialog_header() {
 }
 
 #[test]
-fn custom_profiles_can_reach_their_visibility_control() {
-    let controls = profile_settings_controls(3, false);
+fn detected_profile_controls_follow_the_visible_selection_order() {
+    assert_eq!(
+        profile_controls(3, true),
+        vec![
+            SettingsControl::Toggle(SettingsToggle::ProfileVisibility(3)),
+            SettingsControl::Dropdown(SettingsDropdown::ProfileIcon(3)),
+            SettingsControl::Dropdown(SettingsDropdown::ProfileTheme(3)),
+            SettingsControl::Dropdown(SettingsDropdown::ProfileDarkTheme(3)),
+        ]
+    );
+}
 
-    assert!(
-        controls.contains(&SettingsControl::Toggle(SettingsToggle::ProfileVisibility(
-            3
-        )))
+#[test]
+fn custom_profile_controls_follow_the_visible_selection_order() {
+    assert_eq!(
+        profile_controls(3, false),
+        vec![
+            SettingsControl::Input(SettingsInput::Configuration(ConfigTextField::ProfileName(
+                3
+            ),)),
+            SettingsControl::RemoveProfile(3),
+            SettingsControl::Input(SettingsInput::Configuration(
+                ConfigTextField::ProfileProgram(3),
+            )),
+            SettingsControl::Input(SettingsInput::Configuration(
+                ConfigTextField::ProfileArguments(3),
+            )),
+            SettingsControl::Toggle(SettingsToggle::ProfileVisibility(3)),
+            SettingsControl::Dropdown(SettingsDropdown::ProfileIcon(3)),
+            SettingsControl::Dropdown(SettingsDropdown::ProfileTheme(3)),
+            SettingsControl::Dropdown(SettingsDropdown::ProfileDarkTheme(3)),
+        ]
+    );
+}
+
+#[test]
+fn profile_draft_controls_include_visibility_and_modal_actions_in_order() {
+    assert_eq!(
+        profile_draft_controls(),
+        [
+            SettingsControl::Input(SettingsInput::ProfileDraft(ProfileDraftField::Name)),
+            SettingsControl::Input(SettingsInput::ProfileDraft(ProfileDraftField::Program)),
+            SettingsControl::Input(SettingsInput::ProfileDraft(ProfileDraftField::Arguments)),
+            SettingsControl::Toggle(SettingsToggle::ProfileDraftVisibility),
+            SettingsControl::Dropdown(SettingsDropdown::ProfileDraftIcon),
+            SettingsControl::Dropdown(SettingsDropdown::ProfileDraftTheme),
+            SettingsControl::Dropdown(SettingsDropdown::ProfileDraftDarkTheme),
+            SettingsControl::Close,
+            SettingsControl::CreateProfile,
+        ]
     );
 }
 
@@ -162,6 +205,7 @@ fn configuration_editor(config: &Config) -> SettingsEditor {
         profile_draft: None,
         keymap_search: TextField::default(),
         settings_scroll: ScrollHandle::new(),
+        profile_draft_scroll: ScrollHandle::new(),
         dropdown_scroll: UniformListScrollHandle::new(),
         font_scroll: UniformListScrollHandle::new(),
         keymap_scroll: UniformListScrollHandle::new(),

@@ -48,3 +48,83 @@ fn profile_fields_stay_inside_the_card_at_the_minimum_dialog_width(cx: &mut Test
         );
     }
 }
+
+struct ProfileCardScrollHarness {
+    scroll: ScrollHandle,
+    focus_scroll_request: Option<(SettingsControl, Pixels)>,
+}
+
+impl Render for ProfileCardScrollHarness {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let control = SettingsControl::Dropdown(SettingsDropdown::ProfileDarkTheme(0));
+        let controls = profile_controls(0, true);
+        let card = div()
+            .h(px(60.))
+            .w_full()
+            .debug_selector(|| "profile-card".to_owned())
+            .child(
+                div()
+                    .h(px(40.))
+                    .debug_selector(|| "profile-card-control".to_owned()),
+            );
+        let tracked_card = track_focus_scroll_from(
+            div().w_full().child(card),
+            self.focus_scroll_request.as_ref(),
+            &self.scroll,
+            &controls,
+        );
+        div()
+            .size_full()
+            .id("profile-scroll")
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll)
+            .child(
+                v_flex()
+                    .child(
+                        div()
+                            .h(px(80.))
+                            .debug_selector(|| "profile-card-top".to_owned()),
+                    )
+                    .child(tracked_card)
+                    .child(
+                        div()
+                            .h(px(100.))
+                            .debug_selector(|| "profile-card-bottom".to_owned()),
+                    ),
+            )
+            .when(self.focus_scroll_request.is_some(), |view| {
+                view.debug_selector(|| format!("profile-card-focus-{control:?}"))
+            })
+    }
+}
+
+#[gpui::test]
+fn a_focused_profile_card_scrolls_as_a_complete_container(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, _| ProfileCardScrollHarness {
+        scroll: ScrollHandle::new(),
+        focus_scroll_request: None,
+    });
+    cx.simulate_resize(size(px(240.), px(100.)));
+    cx.run_until_parked();
+
+    let requested_offset = view.read_with(cx, |view, _| view.scroll.offset().y);
+    view.update(cx, |view, cx| {
+        view.focus_scroll_request = Some((
+            SettingsControl::Dropdown(SettingsDropdown::ProfileDarkTheme(0)),
+            requested_offset,
+        ));
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    let card = cx
+        .debug_bounds("profile-card")
+        .expect("profile card bounds");
+    let viewport = view.read_with(cx, |view, _| view.scroll.bounds());
+    let maximum = view.read_with(cx, |view, _| view.scroll.max_offset());
+    let offset = view.read_with(cx, |view, _| view.scroll.offset());
+    assert!(
+        card.top() + offset.y >= viewport.top() && card.bottom() + offset.y <= viewport.bottom(),
+        "the complete card should be visible after focusing one of its controls: {card:?} outside {viewport:?}, max {maximum:?}, offset {offset:?}"
+    );
+}

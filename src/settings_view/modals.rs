@@ -161,10 +161,46 @@ pub(crate) fn render_profile_modal(
     editor: &SettingsEditor,
     colors: &ThemeColors,
     handle: &WeakEntity<Zetta>,
+    scroll_indicator: &impl Fn(String, &ScrollHandle) -> AnyElement,
     text_input: &impl Fn(String, TextField, SettingsInput) -> AnyElement,
     dropdown: &impl Fn(String, String, SettingsDropdown) -> AnyElement,
 ) -> Option<AnyElement> {
     editor.profile_draft.as_ref().map(|draft| {
+        let [
+            name_control,
+            program_control,
+            arguments_control,
+            visibility_control,
+            icon_control,
+            theme_control,
+            dark_theme_control,
+            close_control,
+            create_control,
+        ] = profile_draft_controls();
+        let draft_scroll = editor.profile_draft_scroll.clone();
+        let focus_scroll_request = editor.focus_scroll_request.as_ref();
+        let profile_scrollbar =
+            scroll_indicator("settings-new-profile-scrollbar".to_owned(), &draft_scroll);
+        let draft_field =
+            |label: &'static str, control: SettingsControl, content: AnyElement, spaced: bool| {
+                let row = div()
+                    .when(spaced, |row| row.mt_3())
+                    .child(
+                        div()
+                            .mb_1()
+                            .text_xs()
+                            .text_color(colors.text_muted)
+                            .child(label),
+                    )
+                    .child(content);
+                track_focus_scroll_from(
+                    row,
+                    focus_scroll_request,
+                    &draft_scroll,
+                    std::slice::from_ref(&control),
+                )
+                .into_any_element()
+            };
         let profile_theme = dropdown(
             "settings-new-profile-theme".to_owned(),
             draft
@@ -194,6 +230,86 @@ pub(crate) fn render_profile_modal(
             )));
         let close_handle = handle.clone();
         let create_handle = handle.clone();
+        let visibility_handle = handle.clone();
+        let close_focused = editor.focused_control == Some(close_control.clone());
+        let create_focused = editor.focused_control == Some(create_control.clone());
+        let profile_visibility = switch("settings-new-profile-visibility", (!draft.hidden).into())
+            .label(if draft.hidden { "Hidden" } else { "Visible" })
+            .full_width(true)
+            .aria_label("Show profile in Profiles menu")
+            .on_click(move |state, window, cx| {
+                visibility_handle
+                    .update(cx, |this, cx| {
+                        this.set_settings_toggle(
+                            SettingsToggle::ProfileDraftVisibility,
+                            state.selected(),
+                            window,
+                            cx,
+                        );
+                    })
+                    .ok();
+            });
+        let close_click_control = close_control.clone();
+        let create_click_control = create_control.clone();
+        let close_button = div()
+            .id("close-settings-profile")
+            .flex_none()
+            .px_4()
+            .py_2()
+            .rounded(px(4.))
+            .border_1()
+            .border_color(if close_focused {
+                colors.border_focused
+            } else {
+                colors.element_selected
+            })
+            .cursor_pointer()
+            .bg(colors.element_selected)
+            .text_color(colors.text)
+            .hover(|style| style.bg(colors.element_hover))
+            .tooltip(Tooltip::text("Close add profile (Esc)"))
+            .on_click(move |_, window, cx| {
+                close_handle
+                    .update(cx, |this, cx| {
+                        this.focus_settings_control_without_scroll(
+                            close_click_control.clone(),
+                            window,
+                            cx,
+                        );
+                        this.activate_settings_control(close_click_control.clone(), window, cx);
+                    })
+                    .ok();
+            })
+            .child("Close");
+        let create_button = div()
+            .id("create-settings-profile")
+            .px_4()
+            .py_2()
+            .rounded(px(4.))
+            .border_1()
+            .border_color(if create_focused {
+                colors.border_focused
+            } else {
+                colors.element_selected
+            })
+            .cursor_pointer()
+            .bg(colors.element_selected)
+            .text_color(colors.text)
+            .hover(|style| style.bg(colors.element_hover))
+            .tooltip(Tooltip::text("Create profile (Enter)"))
+            .child("Create profile")
+            .on_click(move |_, window, cx| {
+                create_handle
+                    .update(cx, |this, cx| {
+                        this.focus_settings_control_without_scroll(
+                            create_click_control.clone(),
+                            window,
+                            cx,
+                        );
+                        this.activate_settings_control(create_click_control.clone(), window, cx);
+                    })
+                    .ok();
+            });
         div()
             .id("new-profile-modal")
             .absolute()
@@ -209,7 +325,11 @@ pub(crate) fn render_profile_modal(
                     .id("new-profile-form")
                     .w_full()
                     .max_w(px(640.))
+                    .h_full()
+                    .max_h(px(520.))
                     .p_6()
+                    .flex()
+                    .flex_col()
                     .rounded(px(8.))
                     .border_1()
                     .border_color(colors.border)
@@ -219,181 +339,99 @@ pub(crate) fn render_profile_modal(
                     .child(
                         h_flex()
                             .mb_4()
+                            .flex_none()
                             .child(div().min_w_0().flex_1().text_lg().child("Add profile")),
                     )
                     .child(
                         div()
-                            .mb_1()
-                            .text_xs()
-                            .text_color(colors.text_muted)
-                            .child("Profile name"),
-                    )
-                    .child(text_input(
-                        "settings-new-profile-name".to_owned(),
-                        draft.name.clone(),
-                        SettingsInput::ProfileDraft(ProfileDraftField::Name),
-                    ))
-                    .child(
-                        div()
-                            .mt_3()
-                            .mb_1()
-                            .text_xs()
-                            .text_color(colors.text_muted)
-                            .child("Program"),
-                    )
-                    .child(text_input(
-                        "settings-new-profile-program".to_owned(),
-                        draft.program.clone(),
-                        SettingsInput::ProfileDraft(ProfileDraftField::Program),
-                    ))
-                    .child(
-                        div()
-                            .mt_3()
-                            .mb_1()
-                            .text_xs()
-                            .text_color(colors.text_muted)
-                            .child("Arguments (comma separated)"),
-                    )
-                    .child(text_input(
-                        "settings-new-profile-arguments".to_owned(),
-                        draft.arguments.clone(),
-                        SettingsInput::ProfileDraft(ProfileDraftField::Arguments),
-                    ))
-                    .child(
-                        div()
-                            .mt_3()
-                            .mb_1()
-                            .text_xs()
-                            .text_color(colors.text_muted)
-                            .child("Light theme"),
-                    )
-                    .child(profile_theme)
-                    .child(
-                        div()
-                            .mt_3()
-                            .mb_1()
-                            .text_xs()
-                            .text_color(colors.text_muted)
-                            .child("Dark theme"),
-                    )
-                    .child(profile_dark_theme)
-                    .child(
-                        div()
-                            .mt_3()
-                            .mb_1()
-                            .text_xs()
-                            .text_color(colors.text_muted)
-                            .child("Icon"),
-                    )
-                    .child(profile_icon)
-                    .when_some(editor.message.clone(), |modal, (_, message)| {
-                        modal.child(
-                            div()
-                                .mt_3()
-                                .text_xs()
-                                .text_color(colors.text)
-                                .child(message),
-                        )
-                    })
-                    .child(
-                        h_flex()
-                            .mt_5()
-                            .gap_2()
-                            .justify_end()
+                            .relative()
+                            .min_h_0()
+                            .flex_1()
                             .child(
                                 div()
-                                    .id("close-settings-profile")
-                                    .flex_none()
-                                    .px_4()
-                                    .py_2()
-                                    .rounded(px(4.))
-                                    .border_1()
-                                    .border_color(colors.element_selected)
-                                    .cursor_pointer()
-                                    .bg(colors.element_selected)
-                                    .text_color(colors.text)
-                                    .hover(|style| style.bg(colors.element_hover))
-                                    .tooltip(Tooltip::text("Close add profile (Esc)"))
-                                    .on_click(move |_, _, cx| {
-                                        close_handle
-                                            .update(cx, |this, cx| {
-                                                if let Some(editor) = this.settings_editor.as_mut()
-                                                {
-                                                    editor.dismiss_profile_draft();
-                                                    editor.focused_input = None;
-                                                    editor.focused_control = None;
-                                                    editor.message = None;
-                                                    cx.notify();
-                                                }
-                                            })
-                                            .ok();
-                                    })
-                                    .child("Close"),
-                            )
-                            .child(
-                                div()
-                                    .id("create-settings-profile")
-                                    .px_4()
-                                    .py_2()
-                                    .rounded(px(4.))
-                                    .border_1()
-                                    .border_color(
-                                        if editor.focused_control
-                                            == Some(SettingsControl::CreateProfile)
-                                        {
-                                            colors.border_focused
-                                        } else {
-                                            colors.element_selected
-                                        },
-                                    )
-                                    .cursor_pointer()
-                                    .bg(colors.element_selected)
-                                    .text_color(colors.text)
-                                    .hover(|style| style.bg(colors.element_hover))
-                                    .tooltip(Tooltip::text("Create profile (Enter)"))
-                                    .child("Create profile")
-                                    .on_click(move |_, _, cx| {
-                                        create_handle
-                                            .update(cx, |this, cx| {
-                                                let Some(editor) = this.settings_editor.as_mut()
-                                                else {
-                                                    return;
-                                                };
-                                                let valid = editor
-                                                    .profile_draft
-                                                    .as_ref()
-                                                    .is_some_and(|draft| {
-                                                        Zetta::profile_draft_has_required_fields(
-                                                            &draft.name.text,
-                                                            &draft.program.text,
-                                                        )
-                                                    });
-                                                if !valid {
-                                                    editor.message = Some((
-                                                        true,
-                                                        "Profile name and program are required."
-                                                            .to_owned(),
-                                                    ));
-                                                    cx.notify();
-                                                    return;
-                                                }
-                                                let mut draft =
-                                                    editor.profile_draft.take().unwrap();
-                                                draft.automatic_icon =
-                                                    ProfileIcon::automatic_for_program(
-                                                        &draft.program.text,
-                                                    );
-                                                editor.configuration.profiles.push(draft);
-                                                editor.configuration_dirty = true;
-                                                editor.clear_dropdown();
-                                                editor.focused_input = None;
-                                                editor.message = None;
-                                                cx.notify();
-                                            })
-                                            .ok();
+                                    .id("new-profile-body")
+                                    .size_full()
+                                    .pr(px(SETTINGS_SCROLLBAR_WIDTH + 2.))
+                                    .overflow_y_scroll()
+                                    .track_scroll(&draft_scroll)
+                                    .children([
+                                        draft_field(
+                                            "Profile name",
+                                            name_control,
+                                            text_input(
+                                                "settings-new-profile-name".to_owned(),
+                                                draft.name.clone(),
+                                                SettingsInput::ProfileDraft(
+                                                    ProfileDraftField::Name,
+                                                ),
+                                            ),
+                                            false,
+                                        ),
+                                        draft_field(
+                                            "Program",
+                                            program_control,
+                                            text_input(
+                                                "settings-new-profile-program".to_owned(),
+                                                draft.program.clone(),
+                                                SettingsInput::ProfileDraft(
+                                                    ProfileDraftField::Program,
+                                                ),
+                                            ),
+                                            true,
+                                        ),
+                                        draft_field(
+                                            "Arguments (comma separated)",
+                                            arguments_control,
+                                            text_input(
+                                                "settings-new-profile-arguments".to_owned(),
+                                                draft.arguments.clone(),
+                                                SettingsInput::ProfileDraft(
+                                                    ProfileDraftField::Arguments,
+                                                ),
+                                            ),
+                                            true,
+                                        ),
+                                        draft_field(
+                                            "Shown in Profiles menu",
+                                            visibility_control,
+                                            profile_visibility.into_any_element(),
+                                            true,
+                                        ),
+                                        draft_field(
+                                            "Icon",
+                                            icon_control,
+                                            profile_icon.into_any_element(),
+                                            true,
+                                        ),
+                                        draft_field(
+                                            "Light theme",
+                                            theme_control,
+                                            profile_theme,
+                                            true,
+                                        ),
+                                        draft_field(
+                                            "Dark theme",
+                                            dark_theme_control,
+                                            profile_dark_theme,
+                                            true,
+                                        ),
+                                    ])
+                                    .when_some(editor.message.clone(), |body, (_, message)| {
+                                        body.child(
+                                            div()
+                                                .mt_3()
+                                                .text_xs()
+                                                .text_color(colors.text)
+                                                .child(message),
+                                        )
                                     }),
-                            ),
-                    ),
+                            )
+                            .child(profile_scrollbar),
+                    )
+                    .child(h_flex().mt_5().flex_none().gap_2().justify_end().children([
+                        close_button.into_any_element(),
+                        create_button.into_any_element(),
+                    ])),
             )
             .into_any_element()
     })
@@ -510,3 +548,7 @@ pub(crate) fn render_keymap_capture_modal(
                 .into_any_element()
     })
 }
+
+#[cfg(test)]
+#[path = "../tests/settings_view/modals.rs"]
+mod tests;

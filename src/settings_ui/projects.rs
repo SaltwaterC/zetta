@@ -101,20 +101,7 @@ pub(crate) fn project_controls(editor: &SettingsEditor) -> Vec<SettingsControl> 
     }
     controls.push(SettingsControl::AddProjectEnvironment);
     for index in 0..form.profiles.len() {
-        controls.extend([
-            SettingsControl::Input(SettingsInput::Project(ProjectTextField::ProfileName(index))),
-            SettingsControl::Input(SettingsInput::Project(ProjectTextField::ProfileProgram(
-                index,
-            ))),
-            SettingsControl::Input(SettingsInput::Project(ProjectTextField::ProfileArguments(
-                index,
-            ))),
-            SettingsControl::Dropdown(SettingsDropdown::ProjectProfileTheme(index)),
-            SettingsControl::Dropdown(SettingsDropdown::ProjectProfileDarkTheme(index)),
-            SettingsControl::Dropdown(SettingsDropdown::ProjectProfileIcon(index)),
-            SettingsControl::Toggle(SettingsToggle::ProjectProfileVisibility(index)),
-            SettingsControl::RemoveProjectProfile(index),
-        ]);
+        controls.extend(project_profile_controls(index));
     }
     controls.push(SettingsControl::AddProjectProfile);
     controls.push(SettingsControl::Dropdown(

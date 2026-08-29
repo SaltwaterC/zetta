@@ -11,7 +11,9 @@ pub(crate) mod pane_templates;
 pub(crate) mod projects;
 mod theme_extensions_ui;
 
-pub(crate) use controls::invalidate_controls_cache;
+pub(crate) use controls::{
+    invalidate_controls_cache, profile_controls, profile_draft_controls, project_profile_controls,
+};
 use keymap::{
     KeymapCapture, is_modifier_key, is_unmodified_capture_control, keybinding_for_capture,
 };
@@ -79,6 +81,7 @@ pub(crate) enum SettingsToggle {
     TitleBarLabels,
     TitleBarButtons,
     ProfileVisibility(usize),
+    ProfileDraftVisibility,
     /// Protect background sessions with the configured age key instead of a
     /// typed secret. Offered only when a recipient and an identity are both set,
     /// because without them it would mint sessions nobody can reattach.
@@ -201,6 +204,7 @@ pub(crate) struct SettingsEditor {
     pub(crate) profile_draft: Option<settings_editor::ProfileForm>,
     pub(crate) keymap_search: TextField,
     pub(crate) settings_scroll: ScrollHandle,
+    pub(crate) profile_draft_scroll: ScrollHandle,
     pub(crate) dropdown_scroll: UniformListScrollHandle,
     pub(crate) font_scroll: UniformListScrollHandle,
     pub(crate) keymap_scroll: UniformListScrollHandle,
@@ -608,6 +612,7 @@ impl Zetta {
             profile_draft: None,
             keymap_search: TextField::new(""),
             settings_scroll: ScrollHandle::new(),
+            profile_draft_scroll: ScrollHandle::new(),
             dropdown_scroll: UniformListScrollHandle::new(),
             font_scroll: UniformListScrollHandle::new(),
             keymap_scroll: UniformListScrollHandle::new(),
@@ -1041,7 +1046,9 @@ impl Zetta {
                         editor.dismiss_profile_draft();
                         editor.focused_input = None;
                         editor.focused_control = None;
+                        editor.focus_scroll_request = None;
                         editor.message = None;
+                        invalidate_controls_cache(editor);
                     }
                     cx.notify();
                 } else if self

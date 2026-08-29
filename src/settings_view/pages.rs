@@ -498,35 +498,10 @@ pub(crate) fn render_settings_pages(
                     .into_any_element(),
             );
             for (index, profile) in configuration.profiles.iter().enumerate() {
-                let profile_focused = editor.focused_control
-                    == Some(SettingsControl::Dropdown(SettingsDropdown::ProfileTheme(
-                        index,
-                    )))
-                    || editor.focused_control
-                        == Some(SettingsControl::Dropdown(SettingsDropdown::ProfileIcon(
-                            index,
-                        )))
-                    || editor.focused_control
-                        == Some(SettingsControl::Dropdown(
-                            SettingsDropdown::ProfileDarkTheme(index),
-                        ))
-                    || editor.focused_control
-                        == Some(SettingsControl::Input(SettingsInput::Configuration(
-                            ConfigTextField::ProfileName(index),
-                        )))
-                    || editor.focused_control
-                        == Some(SettingsControl::Input(SettingsInput::Configuration(
-                            ConfigTextField::ProfileProgram(index),
-                        )))
-                    || editor.focused_control
-                        == Some(SettingsControl::Input(SettingsInput::Configuration(
-                            ConfigTextField::ProfileArguments(index),
-                        )))
-                    || editor.focused_control
-                        == Some(SettingsControl::Toggle(SettingsToggle::ProfileVisibility(
-                            index,
-                        )))
-                    || editor.focused_control == Some(SettingsControl::RemoveProfile(index));
+                let profile_controls = profile_controls(index, profile.detected);
+                let profile_focused = profile_controls
+                    .iter()
+                    .any(|control| editor.focused_control.as_ref() == Some(control));
                 let profile_theme = profile
                     .theme
                     .clone()
@@ -687,6 +662,7 @@ pub(crate) fn render_settings_pages(
                                                     {
                                                         editor.configuration.profiles.remove(index);
                                                         editor.configuration_dirty = true;
+                                                        invalidate_controls_cache(editor);
                                                         cx.notify();
                                                     }
                                                 })
@@ -748,7 +724,10 @@ pub(crate) fn render_settings_pages(
                         ]))
                         .into_any_element()
                 };
-                rows.push(card);
+                rows.push(
+                    track_focus_scroll(div().w_full().child(card), editor, &profile_controls)
+                        .into_any_element(),
+                );
             }
             let add_handle = handle.clone();
             let add_focused = editor.focused_control == Some(SettingsControl::AddProfile);
@@ -769,6 +748,7 @@ pub(crate) fn render_settings_pages(
                                 add_handle
                                     .update(cx, |this, cx| {
                                         if let Some(editor) = this.settings_editor.as_mut() {
+                                            editor.profile_draft_scroll = ScrollHandle::new();
                                             editor.profile_draft =
                                                 Some(settings_editor::ProfileForm {
                                                     name: TextField::default(),
@@ -782,6 +762,7 @@ pub(crate) fn render_settings_pages(
                                                     detected: false,
                                                 });
                                             editor.message = None;
+                                            invalidate_controls_cache(editor);
                                         }
                                         this.focus_settings_input(
                                             SettingsInput::ProfileDraft(ProfileDraftField::Name),

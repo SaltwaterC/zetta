@@ -13,7 +13,7 @@ mod widgets;
 pub(crate) use form_widgets::SettingsFormWidgets;
 pub(crate) use widgets::{
     DropdownRenderState, KEYMAP_ROW_HEIGHT, SETTINGS_SCROLLBAR_WIDTH, action_button, control_row,
-    dropdown_field, text_field, track_focus_scroll,
+    dropdown_field, text_field, track_focus_scroll, track_focus_scroll_from,
 };
 
 impl Zetta {
@@ -181,8 +181,14 @@ impl Zetta {
         let font_modal =
             modals::render_font_modal(editor, &colors, &handle, &scroll_indicator, &text_input);
 
-        let profile_modal =
-            modals::render_profile_modal(editor, &colors, &handle, &text_input, &dropdown);
+        let profile_modal = modals::render_profile_modal(
+            editor,
+            &colors,
+            &handle,
+            &scroll_indicator,
+            &text_input,
+            &dropdown,
+        );
 
         let keymap_capture_modal = modals::render_keymap_capture_modal(editor, &colors, &handle);
 

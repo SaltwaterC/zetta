@@ -104,15 +104,7 @@ impl Zetta {
             return controls;
         }
         if editor.profile_draft.is_some() {
-            return vec![
-                SettingsControl::Input(SettingsInput::ProfileDraft(ProfileDraftField::Name)),
-                SettingsControl::Input(SettingsInput::ProfileDraft(ProfileDraftField::Program)),
-                SettingsControl::Input(SettingsInput::ProfileDraft(ProfileDraftField::Arguments)),
-                SettingsControl::Dropdown(SettingsDropdown::ProfileDraftTheme),
-                SettingsControl::Dropdown(SettingsDropdown::ProfileDraftDarkTheme),
-                SettingsControl::Dropdown(SettingsDropdown::ProfileDraftIcon),
-                SettingsControl::CreateProfile,
-            ];
+            return profile_draft_controls().to_vec();
         }
 
         if editor.keymap_capture.is_some() {
@@ -186,7 +178,7 @@ impl Zetta {
                 #[cfg(feature = "tftp-server")]
                 controls.push(SettingsControl::Numeric(NumericSetting::TftpServerPort));
                 for (index, profile) in editor.configuration.profiles.iter().enumerate() {
-                    controls.extend(profile_settings_controls(index, profile.detected));
+                    controls.extend(profile_controls(index, profile.detected));
                 }
                 controls.push(SettingsControl::AddProfile);
             }
@@ -285,9 +277,6 @@ impl Zetta {
             }
             return;
         }
-        if editor.profile_draft.is_some() {
-            return;
-        }
         if editor.page == SettingsPage::Keymap {
             let row = match control {
                 SettingsControl::Input(SettingsInput::Keymap(KeymapTextField::Context(
@@ -319,6 +308,15 @@ impl Zetta {
             }
             return;
         }
+        if editor.profile_draft.is_some()
+            && matches!(
+                control,
+                SettingsControl::Close | SettingsControl::CreateProfile
+            )
+        {
+            editor.focus_scroll_request = None;
+            return;
+        }
         let controls = Self::settings_controls(editor);
         let Some(index) = controls.iter().position(|candidate| candidate == control) else {
             return;
@@ -333,12 +331,15 @@ impl Zetta {
         // ends up, so this gets close and the row itself corrects the rest once
         // it has been laid out (`widgets::track_focus_scroll`).
         let progress = form_index as f32 / form_count.saturating_sub(1).max(1) as f32;
-        let maximum = editor.settings_scroll.max_offset().y;
-        let offset = editor.settings_scroll.offset();
-        editor
-            .settings_scroll
-            .set_offset(point(offset.x, -(maximum * progress)));
-        editor.focus_scroll_request = Some((control.clone(), editor.settings_scroll.offset().y));
+        let scroll = if editor.profile_draft.is_some() {
+            &editor.profile_draft_scroll
+        } else {
+            &editor.settings_scroll
+        };
+        let maximum = scroll.max_offset().y;
+        let offset = scroll.offset();
+        scroll.set_offset(point(offset.x, -(maximum * progress)));
+        editor.focus_scroll_request = Some((control.clone(), scroll.offset().y));
     }
 
     pub(crate) fn focus_settings_control(
@@ -752,7 +753,25 @@ impl Zetta {
         }
         match control {
             SettingsControl::Tab(page) => self.select_settings_page(page, window, cx),
-            SettingsControl::Close => self.dismiss_settings(window, cx),
+            SettingsControl::Close => {
+                if self
+                    .settings_editor
+                    .as_ref()
+                    .is_some_and(|editor| editor.profile_draft.is_some())
+                {
+                    if let Some(editor) = self.settings_editor.as_mut() {
+                        editor.dismiss_profile_draft();
+                        editor.focused_input = None;
+                        editor.focused_control = None;
+                        editor.focus_scroll_request = None;
+                        editor.message = None;
+                        invalidate_controls_cache(editor);
+                        cx.notify();
+                    }
+                } else {
+                    self.dismiss_settings(window, cx);
+                }
+            }
             SettingsControl::Save => self.save_settings(window, cx),
             SettingsControl::Input(input) => self.focus_settings_input(input, window, cx),
             SettingsControl::CaptureKeymap(target) => self.start_keymap_capture(target, window, cx),
@@ -773,6 +792,10 @@ impl Zetta {
                         .configuration
                         .profiles
                         .get(index)
+                        .is_some_and(|profile| !profile.hidden),
+                    SettingsToggle::ProfileDraftVisibility => editor
+                        .profile_draft
+                        .as_ref()
                         .is_some_and(|profile| !profile.hidden),
                     #[cfg(target_os = "macos")]
                     SettingsToggle::TitleBarMenus => editor.configuration.hide_title_bar_menus,
@@ -808,6 +831,7 @@ impl Zetta {
             SettingsControl::Numeric(_) | SettingsControl::Opacity => {}
             SettingsControl::AddProfile => {
                 if let Some(editor) = self.settings_editor.as_mut() {
+                    editor.profile_draft_scroll = ScrollHandle::new();
                     editor.profile_draft = Some(settings_editor::ProfileForm {
                         name: TextField::default(),
                         program: TextField::default(),
@@ -820,6 +844,7 @@ impl Zetta {
                         detected: false,
                     });
                     editor.message = None;
+                    invalidate_controls_cache(editor);
                 }
                 self.focus_settings_input(
                     SettingsInput::ProfileDraft(ProfileDraftField::Name),
@@ -834,6 +859,7 @@ impl Zetta {
                     editor.configuration.profiles.remove(index);
                     editor.configuration_dirty = true;
                     editor.focused_control = None;
+                    invalidate_controls_cache(editor);
                     cx.notify();
                 }
             }
@@ -900,6 +926,7 @@ impl Zetta {
                     editor.focused_input = None;
                     editor.focused_control = None;
                     editor.message = None;
+                    invalidate_controls_cache(editor);
                     cx.notify();
                 }
             }
@@ -928,7 +955,9 @@ impl Zetta {
                     editor.clear_dropdown();
                     editor.focused_input = None;
                     editor.focused_control = None;
+                    editor.focus_scroll_request = None;
                     editor.message = None;
+                    invalidate_controls_cache(editor);
                     cx.notify();
                 }
             }
@@ -1354,6 +1383,11 @@ impl Zetta {
                     profile.hidden = !value;
                 }
             }
+            SettingsToggle::ProfileDraftVisibility => {
+                if let Some(profile) = editor.profile_draft.as_mut() {
+                    profile.hidden = !value;
+                }
+            }
             #[cfg(target_os = "macos")]
             SettingsToggle::TitleBarMenus => editor.configuration.hide_title_bar_menus = value,
             SettingsToggle::ProjectOpacityOverride => {
@@ -1379,7 +1413,7 @@ impl Zetta {
         ) {
             projects::mark_project_dirty(editor);
             invalidate_controls_cache(editor);
-        } else {
+        } else if !matches!(toggle, SettingsToggle::ProfileDraftVisibility) {
             editor.configuration_dirty = true;
         }
         editor.message = None;
@@ -1589,8 +1623,8 @@ impl Zetta {
     }
 }
 
-fn profile_settings_controls(index: usize, detected: bool) -> Vec<SettingsControl> {
-    let mut controls = Vec::new();
+pub(crate) fn profile_controls(index: usize, detected: bool) -> Vec<SettingsControl> {
+    let mut controls = Vec::with_capacity(if detected { 4 } else { 8 });
     if !detected {
         controls.extend([
             SettingsControl::Input(SettingsInput::Configuration(ConfigTextField::ProfileName(
@@ -1607,11 +1641,42 @@ fn profile_settings_controls(index: usize, detected: bool) -> Vec<SettingsContro
     }
     controls.extend([
         SettingsControl::Toggle(SettingsToggle::ProfileVisibility(index)),
+        SettingsControl::Dropdown(SettingsDropdown::ProfileIcon(index)),
         SettingsControl::Dropdown(SettingsDropdown::ProfileTheme(index)),
         SettingsControl::Dropdown(SettingsDropdown::ProfileDarkTheme(index)),
-        SettingsControl::Dropdown(SettingsDropdown::ProfileIcon(index)),
     ]);
     controls
+}
+
+pub(crate) fn project_profile_controls(index: usize) -> [SettingsControl; 8] {
+    [
+        SettingsControl::Input(SettingsInput::Project(ProjectTextField::ProfileName(index))),
+        SettingsControl::RemoveProjectProfile(index),
+        SettingsControl::Input(SettingsInput::Project(ProjectTextField::ProfileProgram(
+            index,
+        ))),
+        SettingsControl::Input(SettingsInput::Project(ProjectTextField::ProfileArguments(
+            index,
+        ))),
+        SettingsControl::Toggle(SettingsToggle::ProjectProfileVisibility(index)),
+        SettingsControl::Dropdown(SettingsDropdown::ProjectProfileIcon(index)),
+        SettingsControl::Dropdown(SettingsDropdown::ProjectProfileTheme(index)),
+        SettingsControl::Dropdown(SettingsDropdown::ProjectProfileDarkTheme(index)),
+    ]
+}
+
+pub(crate) fn profile_draft_controls() -> [SettingsControl; 9] {
+    [
+        SettingsControl::Input(SettingsInput::ProfileDraft(ProfileDraftField::Name)),
+        SettingsControl::Input(SettingsInput::ProfileDraft(ProfileDraftField::Program)),
+        SettingsControl::Input(SettingsInput::ProfileDraft(ProfileDraftField::Arguments)),
+        SettingsControl::Toggle(SettingsToggle::ProfileDraftVisibility),
+        SettingsControl::Dropdown(SettingsDropdown::ProfileDraftIcon),
+        SettingsControl::Dropdown(SettingsDropdown::ProfileDraftTheme),
+        SettingsControl::Dropdown(SettingsDropdown::ProfileDraftDarkTheme),
+        SettingsControl::Close,
+        SettingsControl::CreateProfile,
+    ]
 }
 
 #[cfg(test)]
