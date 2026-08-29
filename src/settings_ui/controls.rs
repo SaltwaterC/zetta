@@ -608,6 +608,7 @@ impl Zetta {
         };
         let (_, options) = Self::settings_dropdown_options(editor, dropdown);
         Self::refresh_open_dropdown_snapshot(editor, options);
+        scroll_open_dropdown_to_selection(editor);
     }
 
     /// Refreshes the open dropdown's render snapshot for `options` and the

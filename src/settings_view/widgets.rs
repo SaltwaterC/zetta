@@ -29,6 +29,12 @@ pub(crate) const KEYMAP_ROW_HEIGHT: f32 = 56.;
 /// their own rows reserve this much trailing padding so the two never overlap.
 pub(crate) const SETTINGS_SCROLLBAR_WIDTH: f32 = 10.;
 
+/// Seven dropdown rows plus the list's two 4px padding edges fit exactly in
+/// the 260px viewport, so the virtualized list never paints a partial row.
+const DROPDOWN_OPTION_ROW_HEIGHT: Pixels = px(36.);
+const DROPDOWN_OPTIONS_MAX_HEIGHT: Pixels = px(260.);
+const DROPDOWN_LIST_VIEWPORT_HEIGHT: Pixels = px(252.);
+
 /// Owned snapshot of everything a keymap row needs to render, cloned once into
 /// the `uniform_list` row closure (see [`DropdownRenderState`] for why this
 /// can't just borrow `SettingsEditor`).
@@ -328,6 +334,7 @@ impl Zetta {
                             let handle = option_handle.clone();
                             div()
                                 .id(format!("{list_id}-option-{index}"))
+                                .h(DROPDOWN_OPTION_ROW_HEIGHT)
                                 .px_2()
                                 .py_1()
                                 .rounded(px(3.))
@@ -369,9 +376,19 @@ impl Zetta {
             // hands the list a definite height, and here it collapses the list to zero.
             .with_sizing_behavior(ListSizingBehavior::Infer)
             .with_width_from_item(widest_row)
-            .max_h(px(260.))
+            .max_h(DROPDOWN_LIST_VIEWPORT_HEIGHT)
             .track_scroll(&state.dropdown_scroll)
         };
+        // Keep the measured list inside its own capped flex item. Letting the
+        // UniformList itself be the popup's flex item can make its intrinsic
+        // height escape the cap in the unfiltered state. The padding belongs
+        // outside the list so its scroll viewport is an exact multiple of a
+        // row height at both ends of the scroll range.
+        let options_region = div()
+            .flex_none()
+            .max_h(DROPDOWN_OPTIONS_MAX_HEIGHT)
+            .p_1()
+            .child(option_rows.on_scroll_wheel(|_, _, cx| cx.stop_propagation()));
         deferred(
             anchored()
                 .position(state.dropdown_anchor)
@@ -387,11 +404,14 @@ impl Zetta {
                         .bg(colors.elevated_surface_background)
                         .text_color(colors.text)
                         .shadow_lg()
+                        .flex()
+                        .flex_col()
                         .overflow_hidden()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .when(!dropdown_query.is_empty(), |menu| {
                             menu.child(
                                 div()
+                                    .flex_none()
                                     .px_2()
                                     .py_1()
                                     .text_xs()
@@ -401,6 +421,7 @@ impl Zetta {
                         })
                         .child(if no_matches {
                             div()
+                                .flex_none()
                                 .p_1()
                                 .child(
                                     div()
@@ -411,10 +432,7 @@ impl Zetta {
                                 )
                                 .into_any_element()
                         } else {
-                            option_rows
-                                .p_1()
-                                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                                .into_any_element()
+                            options_region.into_any_element()
                         }),
                 ),
         )
@@ -935,3 +953,7 @@ impl Zetta {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/settings_view/widgets.rs"]
+mod tests;

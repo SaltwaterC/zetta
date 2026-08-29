@@ -65,6 +65,18 @@ fn filtered_dropdown_selection_scrolls_to_its_visible_row() {
 }
 
 #[test]
+fn dropdown_scroll_uses_the_filtered_row_index() {
+    let config = Config::parse("{}", None, None).unwrap();
+    let mut editor = configuration_editor(&config);
+    editor.open_dropdown_rows = Arc::from([4, 17, 29]);
+    editor.dropdown_index = 29;
+
+    scroll_open_dropdown_to_selection(&mut editor);
+
+    assert_eq!(editor.dropdown_scroll.logical_scroll_top_index(), 2);
+}
+
+#[test]
 fn the_form_scroll_mapping_skips_the_controls_that_live_in_the_dialog_header() {
     let controls = vec![
         SettingsControl::Tab(SettingsPage::Configuration),
