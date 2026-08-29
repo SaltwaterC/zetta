@@ -192,7 +192,7 @@ pub(crate) fn to_esc_str(
             "f2" => Some(format!("\x1b[1;{}Q", modifier_code)),
             "f3" => Some(format!("\x1b[1;{}R", modifier_code)),
             "f4" => Some(format!("\x1b[1;{}S", modifier_code)),
-            "F5" => Some(format!("\x1b[15;{}~", modifier_code)),
+            "f5" => Some(format!("\x1b[15;{}~", modifier_code)),
             "f6" => Some(format!("\x1b[17;{}~", modifier_code)),
             "f7" => Some(format!("\x1b[18;{}~", modifier_code)),
             "f8" => Some(format!("\x1b[19;{}~", modifier_code)),
@@ -220,18 +220,25 @@ pub(crate) fn to_esc_str(
         }
     }
 
-    if !cfg!(target_os = "macos") || option_as_meta {
-        let is_alt_lowercase_ascii =
-            modifiers == TerminalModifiers::Alt && keystroke.key.is_ascii();
-        let is_alt_uppercase_ascii =
-            keystroke.modifiers.alt && keystroke.modifiers.shift && keystroke.key.is_ascii();
-        if is_alt_lowercase_ascii || is_alt_uppercase_ascii {
-            let key = if is_alt_uppercase_ascii {
-                &keystroke.key.to_ascii_uppercase()
-            } else {
-                &keystroke.key
-            };
-            return Some(Cow::Owned(format!("\x1b{}", key)));
+    // Alt-prefixed sequences, for single ASCII characters only: a named key
+    // such as "enter" is also `is_ascii()`, and encoding it as `\x1benter`
+    // would send the literal name rather than a keystroke.
+    if (!cfg!(target_os = "macos") || option_as_meta)
+        && keystroke.modifiers.alt
+        && keystroke.key.is_ascii()
+        && keystroke.key.len() == 1
+    {
+        let key = keystroke.key.chars().next().unwrap();
+
+        if modifiers == TerminalModifiers::Alt {
+            return Some(Cow::Owned(format!("\x1b{key}")));
+        } else if keystroke.modifiers.shift {
+            return Some(Cow::Owned(format!("\x1b{}", key.to_ascii_uppercase())));
+        } else if keystroke.modifiers.control && key.is_ascii_lowercase() {
+            return Some(Cow::Owned(format!(
+                "\x1b{}",
+                (key as u8 - b'a' + 1) as char
+            )));
         }
     }
 
@@ -501,7 +508,7 @@ mod test {
         }
 
         let gpui_keys = [
-            "up", "down", "right", "left", "f1", "f2", "f3", "f4", "F5", "f6", "f7", "f8", "f9",
+            "up", "down", "right", "left", "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9",
             "f10", "f11", "f12", "f13", "f14", "f15", "f16", "f17", "f18", "f19", "f20", "insert",
             "pageup", "pagedown", "end", "home",
         ];
@@ -515,6 +522,43 @@ mod test {
                 )
                 .unwrap(),
                 format!("\x1b{}", key)
+            );
+        }
+    }
+
+    /// The modified-function-key table used to spell f5 as `F5`, which no
+    /// keystroke ever matches, so alt-f5 fell through to the alt-prefix path.
+    #[test]
+    fn modified_f5_uses_the_function_key_sequence() {
+        assert_eq!(
+            to_esc_str(&Keystroke::parse("alt-f5").unwrap(), Modes::NONE, true),
+            Some("\x1b[15;3~".into())
+        );
+    }
+
+    /// A named key is `is_ascii()` too, so the alt-prefix path must not encode
+    /// it as its own name.
+    #[test]
+    fn alt_named_key_is_not_encoded_as_its_name() {
+        assert_ne!(
+            to_esc_str(&Keystroke::parse("alt-enter").unwrap(), Modes::NONE, true),
+            Some("\x1benter".into())
+        );
+    }
+
+    #[test]
+    fn test_ctrl_alt_codes() {
+        let letters_lower = 'a'..='z';
+        let esc_codes = '\x01'..='\x1a';
+        for (character, esc_code) in letters_lower.zip(esc_codes) {
+            assert_eq!(
+                to_esc_str(
+                    &Keystroke::parse(&format!("ctrl-alt-{}", character)).unwrap(),
+                    Modes::NONE,
+                    true
+                )
+                .unwrap(),
+                format!("\x1b{}", esc_code)
             );
         }
     }

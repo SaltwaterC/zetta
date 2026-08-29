@@ -1,7 +1,7 @@
 # Zetta GPUI macOS fork
 
 The source baseline is `zed/crates/gpui_macos` at Zed revision
-`849ec5898a321eefbeb1d1beda130cc50ef43f10`. Zetta owns this fork for macOS
+`2890c340e07a4c4c7e6778e99a49f5414115b250`. Zetta owns this fork for macOS
 input-source and menu behavior without modifying the upstream submodule.
 
 Retain these Zetta changes when synchronizing:
@@ -18,5 +18,12 @@ Retain these Zetta changes when synchronizing:
 - keep the current appearance/blur behavior synchronized with upstream;
 - install native macOS menu behavior and Ctrl-Shift profile shortcuts;
 - keep the regression tests under `src/tests`.
+
+The Metal renderer is deliberately *not* forked. `metal_renderer.rs`,
+`metal_atlas.rs`, `shaders.metal` and the `cbindgen` build script were carried
+here only because upstream kept them in this crate; upstream `52b2418110` moved
+them to `gpui_apple`, and since Zetta had never modified them, this crate now
+depends on `zed/crates/gpui_apple` instead. Do not reintroduce local copies —
+renderer changes belong upstream.
 
 The fork was introduced by Zetta commit `38b9185`.

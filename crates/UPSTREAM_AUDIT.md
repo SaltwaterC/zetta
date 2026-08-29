@@ -1,22 +1,23 @@
 # Forked dependency upstream audit
 
-Reviewed 2026-08-03 after synchronizing the Zed submodule. It is now pinned to
-`849ec5898a321eefbeb1d1beda130cc50ef43f10` (2026-08-03), which is the current
-upstream `main` used for this sync.
+Reviewed 2026-08-29 after synchronizing the Zed submodule. It is now pinned to
+`2890c340e07a4c4c7e6778e99a49f5414115b250` (2026-08-28), which is the current
+upstream `main` used for this sync. The previous review was against
+`849ec5898a321eefbeb1d1beda130cc50ef43f10` (2026-08-03).
 The Alacritty base used by Zetta, `4c129667ce56611becdc82de6e28218c80e2e88f`,
-is still upstream `master`.
+is still upstream `master`, so that fork has no upstream to catch up with.
 
 ## Fork inventory
 
 | Local fork | Upstream/base | Current retained change |
 | --- | --- | --- |
 | `crates/alacritty_terminal` | `zed-industries/alacritty@4c129667` | Hybrid bounded-memory scrollback, allocator/performance fixes, Windows ConPTY read and hangup handling, shell integration, resize behavior, and attached PTYs whose child belongs to the multiplexer. |
-| `crates/terminal` | `zed/crates/terminal@849ec589` | Standalone terminal engine with Zetta identity, PTY/process-group/CWD tracking, shell integration, unbounded scrollback coordinates, input mapping, export/serial support, diagnostics, and performance work. |
-| `crates/terminal_view` | `zed/crates/terminal_view@849ec589` | Standalone renderer and interaction model, independent cursor/text layout, pixel-snapped subcell block/sextant painting, themes and font overrides, pane controls, path targets, literal/asynchronous search, inline sizing, alternate-screen anchoring, and scrollback editing. |
-| `crates/gpui_platform` | `zed/crates/gpui_platform@849ec589` | Local routing manifest selecting Zetta's Linux, macOS, and Windows platform forks. |
-| `crates/gpui_linux` | `zed/crates/gpui_linux@849ec589` | Executor cap, keyboard and serial fixes, Wayland diagnostics and resize safety, X11 exposure repainting, Zenity fallback, and Zetta-specific platform behavior. |
-| `crates/gpui_macos` | `zed/crates/gpui_macos@849ec589` | Input-source lifetime/context gating, keyboard-layout recovery, pasteboard lifetime safety, native menu/profile shortcuts, and related tests. |
-| `crates/gpui_windows` | `zed/crates/gpui_windows@849ec589` | Correct maximize/restore toggle, DirectX scene annotations, one-shot attention flashing, inactive popup behavior, and input activation fixes. |
+| `crates/terminal` | `zed/crates/terminal@2890c340` | Standalone terminal engine with Zetta identity, PTY/process-group/CWD tracking, shell integration, unbounded scrollback coordinates, input mapping, export/serial support, diagnostics, and performance work. |
+| `crates/terminal_view` | `zed/crates/terminal_view@2890c340` | Standalone renderer and interaction model, independent cursor/text layout, pixel-snapped subcell block/sextant painting, themes and font overrides, pane controls, path targets, literal/asynchronous search, inline sizing, alternate-screen anchoring, and scrollback editing. |
+| `crates/gpui_platform` | `zed/crates/gpui_platform@2890c340` | Local routing manifest selecting Zetta's Linux, macOS, and Windows platform forks. |
+| `crates/gpui_linux` | `zed/crates/gpui_linux@2890c340` | Executor cap, keyboard and serial fixes, Wayland diagnostics and resize safety, X11 exposure repainting, Zenity fallback, and Zetta-specific platform behavior. |
+| `crates/gpui_macos` | `zed/crates/gpui_macos@2890c340` | Input-source lifetime/context gating, keyboard-layout recovery, pasteboard lifetime safety, native menu/profile shortcuts, and related tests. The Metal renderer is no longer forked: it now comes from the submodule's `gpui_apple`. |
+| `crates/gpui_windows` | `zed/crates/gpui_windows@2890c340` | Correct maximize/restore toggle, DirectX scene annotations, one-shot attention flashing, inactive popup behavior, and input activation fixes. |
 
 Per-fork synchronization notes live in each fork directory's `UPSTREAM.md`.
 `target/` directories and license-only differences are not fork patches.
@@ -102,6 +103,64 @@ merge with Zetta's fork, not an automatic cherry-pick.
 This queue is intentionally recorded rather than silently applied: the forks
 contain substantial standalone rewrites, so each candidate needs a source-level
 merge and focused platform validation.
+
+## Changes merged from the 2026-08-28 pin
+
+Of the 361 upstream commits in `849ec589..2890c340`, 40 touch forked paths.
+These were merged or adapted:
+
+| Upstream change | Result |
+| --- | --- |
+| `52b2418110` extract the shared Apple renderer | Adopted by deleting `gpui_macos`'s `metal_renderer.rs`, `metal_atlas.rs`, `shaders.metal` and `build.rs` — all byte-identical to the previous pin — and depending on `zed/crates/gpui_apple`. This also brings in `be8c6f9fb3` (renderer resource management) for macOS. |
+| `be8c6f9fb3` tweak renderer resource management | Imported verbatim into `gpui_windows` (`directx_renderer.rs`, `shaders.hlsl`), which had no local divergence. |
+| `7040aa5669` clear the render target before compositing COLR emoji | Imported verbatim into `gpui_windows/direct_write.rs`. |
+| `1d7e5f1d01` fix window placement on a secondary monitor with different DPI | Imported; `display.rs` verbatim, `window.rs` merged. |
+| `5dd0666dfb` fix the missing NUL terminator in X11 `WM_CLASS` | Imported. |
+| `d9ad6aff67` release X11 client state before the close callback | Imported; the previous form called `should_close()` while holding `borrow_mut()`. |
+| `c43e2d9734` handle XKB context initialization failure | Imported, with the upstream regression test. |
+| `655ed1385b` stop inactive Wayland windows updating the IME position | Imported. |
+| `4d1935b8d0` clear the X11 urgency hint when the window becomes active | Imported. |
+| `f4178619ac` drain buffered X11 events after foreground work | Imported, except the removal of `set_input_focus` from `activate`, which is a separate focus-behaviour change Zetta has not adopted. |
+| `2bf9e26473` fix alt-f5 and add ctrl-alt-key | Imported; the modified-function-key table spelled f5 as `F5`, and the alt-prefix path also encoded named keys as their own names. |
+| `f25b256f2c` respect word boundaries after tree branches | Imported into both term configs. |
+| `c8dfe26a7e` add visual-line select to terminal vi mode | Imported. |
+| `184e124bba` resolve path hyperlinks using per-line cwd | Adapted: `cwd_history`/`cwd_at_line` feed both `process_hyperlink` and Zetta's own `path_like_target_at_event_position`. WSL and Cygwin keep resolving against the current directory, because their translation applies to the currently reported path. The commit's `emit_title_changed_if_changed` bugfix does not apply — Zetta already captured the previous value before `load()`. |
+| `b41505358f` make hyperlinks display correctly with changing content | Adapted into the standalone renderer: `make_content` carries a hovered word only across an unchanged grid and shifts its match when the viewport follows new output, and `terminal_element` matches on the hovered word's id rather than the whole value. |
+| `3b90a96830` release completed terminal PTY resources | Adapted. Upstream's typed `TerminalMode`/`PtyResources` refactor is agent-driven and was not imported; the underlying leak was. See below. |
+| `7f2a2c3c3e`, `7150765979` | Already absorbed by the submodule bump: these are `Platform` signature changes. |
+| `eb354c8d50` make the Wayland render loop demand-driven | Already present — Zetta's `FrameLoop` state machine and upstream's are the same design. Nothing to import. |
+
+### Not imported
+
+| Upstream change | Decision |
+| --- | --- |
+| `492acd6c81` revert "actually close process groups" | **Not imported.** Upstream reverted its own fix because it terminated newly started tasks; Zetta keeps the behaviour, because not orphaning a job that ignores SIGHUP/SIGTERM is the point. The reuse hazard behind that regression is addressed directly instead — see below. |
+| `279da63882`, `93f07f6d17`, `107ee1a60a`, `08827f9208`, `e3056061d4`, and the view half of `1c9cbd3b24` | Not applicable: all in `terminal_view.rs`, `terminal_panel.rs` or `persistence.rs`, which this fork does not compile (`[lib] path = "src/standalone.rs"`). |
+| `a7d74150ac` fix `git_gutter_width`; `1c9cbd3b24`'s `used_lines` | Not applicable: no Zetta counterpart. |
+| `5b70f793d3` use `Duration`; `1271f8b0e8` bump rustc to 1.97 | Cosmetic. `hyperlinks.rs` matches the previous pin, so both remain trivially importable when wanted. |
+| `2893b86b04` + `242fe31a39` macOS simple fullscreen over the notch | New upstream feature; Zetta has no `simple_fullscreen_state`. Optional. |
+| `4c6c4750d3` improve Windows shell discovery | Not applicable: Zetta never calls `Platform::restart`. |
+| `74490daced`, `fecc3273ed`, `4601ead416` | Headless/bench/web plumbing. Only `gpui_platform`'s `test-support = [.., "gpui_windows/test-support"]` was taken. |
+
+### PTY lifetime, corrected while merging the above
+
+The comparison surfaced two Zetta-side problems that the upstream commits above
+only partly describe:
+
+- An exited-but-open pane retained its entire event loop. `PtyIo` holds the
+  loop thread's `JoinHandle`, the thread *returns* its `EventLoop` rather than
+  dropping it, and an un-joined handle keeps the returned value alive — so the
+  pty master descriptor, the poller's descriptor and the loop's buffers were all
+  held until the pane was closed. `Terminal::release_pty_resources` now drops
+  them when the child ends.
+- Releasing them makes the borrowed pty master descriptor stale, which is the
+  hazard behind upstream's revert: `tcgetpgrp` on a recycled descriptor answers
+  with another pane's foreground process group, and that answer was about to be
+  sent SIGTERM and SIGKILL. `ProcessIdGetter` now marks the descriptor closed
+  when the loop is released, teardown skips signalling entirely once the child
+  is known to have ended, and `Terminal::drop` captures the process groups
+  before shutting the pty down rather than after, which is what its own comment
+  always said it did.
 
 ## Deliberate behavioural divergences from upstream
 

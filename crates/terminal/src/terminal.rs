@@ -540,16 +540,30 @@ impl SelectionRange {
 pub struct Content {
     pub cells: Vec<IndexedCell>,
     pub mode: Modes,
+    pub total_lines: usize,
     pub display_offset: usize,
+    pub columns: usize,
+    pub screen_lines: usize,
     pub selection_text: Option<String>,
     pub selection: Option<SelectionRange>,
     pub cursor: Cursor,
     pub cursor_char: char,
     pub terminal_bounds: TerminalBounds,
     pub last_hovered_word: Option<HoveredWord>,
+    /// Whether the lines this snapshot shows are the same lines the previous one
+    /// showed. A hovered word is only carried across a snapshot that is
+    /// `Unchanged`; otherwise it names a position that has moved.
+    pub grid_lines_change: GridLinesChange,
     pub scrolled_to_top: bool,
     pub scrolled_to_bottom: bool,
     pub bottom_row_occupied: bool,
+}
+
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
+pub enum GridLinesChange {
+    #[default]
+    Unchanged,
+    Changed,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -564,7 +578,10 @@ impl Default for Content {
         Content {
             cells: Default::default(),
             mode: Default::default(),
+            total_lines: Default::default(),
             display_offset: Default::default(),
+            columns: Default::default(),
+            screen_lines: Default::default(),
             selection_text: Default::default(),
             selection: Default::default(),
             cursor: Cursor {
@@ -574,6 +591,7 @@ impl Default for Content {
             cursor_char: Default::default(),
             terminal_bounds: Default::default(),
             last_hovered_word: None,
+            grid_lines_change: Default::default(),
             scrolled_to_top: false,
             scrolled_to_bottom: false,
             bottom_row_occupied: false,
@@ -1945,6 +1963,7 @@ impl TerminalBuilder {
             subprocess: None,
             byte_stream: None,
             pty_control: None,
+            pty_control_is_local: false,
             console_palette_enabled: false,
             last_console_palette: None,
             events_tx: events_tx.clone(),
@@ -1997,6 +2016,7 @@ impl TerminalBuilder {
             child_is_the_multiplexers: false,
             pending_replay: None,
             child_exited: None,
+            child_process_ended: false,
             terminal_exit_reported: false,
             task_exit_code: None,
             keyboard_input_sent: false,
@@ -2005,6 +2025,8 @@ impl TerminalBuilder {
             event_loop_task: Task::ready(Ok(())),
             background_executor: background_executor.clone(),
             path_style,
+            cwd_history: Vec::new(),
+            pending_cwd_boundary: None,
             reported_theme: None,
             reported_working_directory: None,
             restored_working_directory: None,
@@ -2095,11 +2117,12 @@ impl TerminalBuilder {
         let (pty_tx, io) = spawn_event_loop(builder.terminal.term.clone(), listener, pty, true)?;
 
         builder.terminal.terminal_type = TerminalType::Pty {
-            pty_tx,
+            pty_tx: Some(pty_tx),
             io: Some(io),
             info: Arc::new(info),
         };
         builder.terminal.pty_control = Some(control);
+        builder.terminal.pty_control_is_local = false;
         builder.terminal.console_palette_enabled = cfg!(windows);
         builder.terminal.hyperlink_regex_searches =
             RegexSearches::new(&path_hyperlink_regexes, path_hyperlink_timeout_ms);
@@ -2393,7 +2416,7 @@ impl TerminalBuilder {
             // PTY path would feed.
             #[cfg(windows)]
             let mut wsl_startup_timing = None;
-            let (terminal_type, subprocess, pty_control) = if no_pty {
+            let (terminal_type, subprocess, pty_control, pty_control_is_local) = if no_pty {
                 let (program, args) = match &shell_params {
                     Some(params) => (
                         params.program.clone(),
@@ -2436,7 +2459,7 @@ impl TerminalBuilder {
                         pty_ready_at,
                     );
                 }
-                (TerminalType::DisplayOnly, Some(subprocess), None)
+                (TerminalType::DisplayOnly, Some(subprocess), None, false)
             } else {
                 let alacritty_shell = shell_params.as_ref().map(|params| {
                     (
@@ -2536,17 +2559,19 @@ impl TerminalBuilder {
                 //And connect them together
                 let (pty_tx, io) =
                     spawn_event_loop(term.clone(), listener, pty, pty_options.drain_on_exit)?;
+                let pty_control_is_local = provided_control.is_none();
                 let pty_control = provided_control
                     .unwrap_or_else(|| Arc::new(pty_tx.clone()) as Arc<dyn PtyControl>);
 
                 (
                     TerminalType::Pty {
-                        pty_tx,
+                        pty_tx: Some(pty_tx),
                         io: Some(io),
                         info: Arc::new(pty_info),
                     },
                     None,
                     Some(pty_control),
+                    pty_control_is_local,
                 )
             };
 
@@ -2557,6 +2582,7 @@ impl TerminalBuilder {
                 subprocess,
                 byte_stream: None,
                 pty_control,
+                pty_control_is_local,
                 console_palette_enabled,
                 last_console_palette: console_palette_enabled.then_some(console_palette),
                 events_tx: events_tx.clone(),
@@ -2611,6 +2637,7 @@ impl TerminalBuilder {
                 child_is_the_multiplexers: false,
                 pending_replay,
                 child_exited: None,
+                child_process_ended: false,
                 terminal_exit_reported: false,
                 task_exit_code: None,
                 keyboard_input_sent: false,
@@ -2619,6 +2646,8 @@ impl TerminalBuilder {
                 event_loop_task: Task::ready(Ok(())),
                 background_executor,
                 path_style,
+                cwd_history: initial_cwd_history(is_remote_terminal, working_directory.as_ref()),
+                pending_cwd_boundary: None,
                 reported_theme: None,
                 reported_working_directory: None,
                 restored_working_directory: None,
@@ -2671,7 +2700,11 @@ impl TerminalBuilder {
                 // outliving the window is the entire point of backgrounding
                 // it, and killing it here would empty every held session the
                 // moment the application closed.
-                TerminalType::Pty { info, .. } if terminal.owns_child() => {
+                // A child that has already ended has nothing left to signal, and
+                // its process group ids may since have been reused.
+                TerminalType::Pty { info, .. }
+                    if terminal.owns_child() && !terminal.child_process_ended =>
+                {
                     Some(terminate_processes_with_grace_period(
                         info.clone(),
                         cx.background_executor().clone(),
@@ -2771,10 +2804,20 @@ impl TerminalBuilder {
 
 enum TerminalType {
     Pty {
-        pty_tx: PtySender,
+        /// `None` once the pty has been released — see
+        /// [`Terminal::release_pty_resources`]. The variant stays `Pty` because
+        /// the pane is still a pty pane: it keeps its grid, its exit status and
+        /// the process metadata in `info`.
+        pty_tx: Option<PtySender>,
         /// The thread reading this pty, kept so converting the terminal to
         /// another backend can stop it synchronously. Taken by
         /// [`Terminal::stop_pty_loop`].
+        ///
+        /// It also owns the pty for as long as it is held: the thread returns
+        /// its `EventLoop` rather than dropping it, and a `JoinHandle` keeps
+        /// the value its thread returned alive. Holding this past the child's
+        /// exit therefore holds the pty master descriptor, the poller and the
+        /// loop's buffers open.
         io: Option<PtyIo>,
         info: Arc<PtyProcessInfo>,
     },
@@ -2788,6 +2831,10 @@ pub struct Terminal {
     subprocess: Option<SubprocessHandle>,
     /// Set for terminals connected to a blocking bidirectional byte stream.
     byte_stream: Option<ByteStreamHandle>,
+    /// True when `pty_control` is this terminal's own pty sender rather than a
+    /// control the multiplexer provided. Only the former is released along with
+    /// the rest of the pty's resources.
+    pty_control_is_local: bool,
     /// Operations routed to the owner of this specific PTY.
     pty_control: Option<Arc<dyn PtyControl>>,
     /// False for WSL and non-PTY streams, whose color state is intentionally unchanged.
@@ -2850,6 +2897,10 @@ pub struct Terminal {
     /// up looking corrupted rather than resumed.
     pending_replay: Option<Vec<u8>>,
     child_exited: Option<ExitStatus>,
+    /// Set once the pty's child is known to have ended, as opposed to the pty
+    /// merely having become unusable. Its process group ids are free to be
+    /// reused from that moment, so teardown must not signal them.
+    child_process_ended: bool,
     terminal_exit_reported: bool,
     task_exit_code: Option<i32>,
     keyboard_input_sent: bool,
@@ -2858,6 +2909,16 @@ pub struct Terminal {
     event_loop_task: Task<Result<(), anyhow::Error>>,
     background_executor: BackgroundExecutor,
     path_style: PathStyle,
+    /// Where the shell was, at each point in the scrollback where it moved.
+    /// A relative path printed by an old command names a file relative to the
+    /// directory the shell was in *then*, not the one it is in now.
+    cwd_history: Vec<CwdHistoryEntry>,
+    /// The scrollback position of the last command submitted, held until the
+    /// cwd change that command caused is observed. A `cd` is noticed a refresh
+    /// interval after the fact, by which point the shell has printed its next
+    /// prompt; recording the boundary instead attributes the new directory to
+    /// the command that changed it.
+    pending_cwd_boundary: Option<i32>,
     reported_theme: Option<Arc<Theme>>,
     reported_working_directory: Option<String>,
     restored_working_directory: Option<PathBuf>,
@@ -2870,6 +2931,34 @@ pub struct Terminal {
     input_log: Vec<Vec<u8>>,
     #[cfg(any(test, feature = "test-support"))]
     pty_write_log: std::cell::RefCell<Vec<Vec<u8>>>,
+}
+
+/// Where the shell was when a given stretch of scrollback was printed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CwdHistoryEntry {
+    /// Line offset in the retained scrollback buffer.
+    scrollback_position: i32,
+    working_directory: PathBuf,
+}
+
+/// Seeds the history so lines printed before the first observed `cd` still
+/// resolve. A remote terminal records nothing: its shell's directory is on the
+/// other host and this window cannot observe it.
+fn initial_cwd_history(
+    is_remote_terminal: bool,
+    working_directory: Option<&PathBuf>,
+) -> Vec<CwdHistoryEntry> {
+    if is_remote_terminal {
+        return Vec::new();
+    }
+    working_directory
+        .map(|working_directory| {
+            vec![CwdHistoryEntry {
+                scrollback_position: i32::MIN,
+                working_directory: working_directory.clone(),
+            }]
+        })
+        .unwrap_or_default()
 }
 
 struct CopyTemplate {
@@ -3139,19 +3228,26 @@ impl Terminal {
                 // `set_size` already advanced when it queued this event.
                 let grid_size_changed = term.screen_lines() != new_bounds.num_lines()
                     || term.columns() != new_bounds.num_columns();
+                let columns_changed = term.columns() != new_bounds.num_columns();
                 self.last_content.terminal_bounds = new_bounds;
 
+                #[cfg(windows)]
                 if let TerminalType::Pty { pty_tx, .. } = &self.terminal_type {
-                    #[cfg(windows)]
                     if let Some(control) = &self.pty_control {
                         control.resize(
                             new_bounds.num_columns() as u16,
                             new_bounds.num_lines() as u16,
                         );
-                    } else {
+                    } else if let Some(pty_tx) = pty_tx {
                         pty_tx.resize(new_bounds);
                     }
-                    #[cfg(not(windows))]
+                }
+                #[cfg(not(windows))]
+                if let TerminalType::Pty {
+                    pty_tx: Some(pty_tx),
+                    ..
+                } = &self.terminal_type
+                {
                     pty_tx.resize(new_bounds);
                 }
 
@@ -3167,6 +3263,11 @@ impl Terminal {
                 if grid_size_changed {
                     cx.emit(Event::GridSizeChanged);
                 }
+                // A reflow rewraps the scrollback, which moves every line the
+                // recorded directories are keyed by.
+                if columns_changed {
+                    self.reset_cwd_history();
+                }
                 // If there are matches we need to emit a wake up event to
                 // invalidate the matches and recalculate their locations
                 // in the new terminal layout
@@ -3177,6 +3278,7 @@ impl Terminal {
             InternalEvent::Clear => {
                 trace!("Clearing");
                 clear_saved_screen(term);
+                self.reset_cwd_history();
                 cx.emit(Event::Wakeup);
             }
             InternalEvent::Scroll(scroll) => {
@@ -3278,7 +3380,8 @@ impl Terminal {
                     path_style,
                 ) {
                     Some(hyperlink) => {
-                        self.process_hyperlink(hyperlink, *open, cx);
+                        let history_size = term.history_size();
+                        self.process_hyperlink(hyperlink, *open, history_size, cx);
                     }
                     None => {
                         self.last_content.last_hovered_word = None;
@@ -3287,18 +3390,28 @@ impl Terminal {
                 }
             }
             InternalEvent::ProcessHyperlink(hyperlink, open) => {
-                self.process_hyperlink(hyperlink.clone(), *open, cx);
+                // Read here rather than in `process_hyperlink`, which cannot lock
+                // the term: `sync` already holds the lock while dispatching.
+                let history_size = term.history_size();
+                self.process_hyperlink(hyperlink.clone(), *open, history_size, cx);
             }
         }
     }
 
-    fn process_hyperlink(&mut self, hyperlink: HyperlinkMatch, open: bool, cx: &mut Context<Self>) {
+    fn process_hyperlink(
+        &mut self,
+        hyperlink: HyperlinkMatch,
+        open: bool,
+        history_size: usize,
+        cx: &mut Context<Self>,
+    ) {
         let HyperlinkMatch {
             text: maybe_url_or_path,
             is_url,
             range,
         } = hyperlink;
         let prev_hovered_word = self.last_content.last_hovered_word.take();
+        let terminal_dir = self.cwd_at_line(range.start().line, history_size);
         let target_path = if !is_url {
             #[cfg(windows)]
             {
@@ -3321,7 +3434,7 @@ impl Terminal {
 
                 MaybeNavigationTarget::PathLike(PathLikeTarget {
                     maybe_path: decoded_path,
-                    terminal_dir: self.working_directory(),
+                    terminal_dir,
                     path_style: self.path_style,
                 })
             } else {
@@ -3330,7 +3443,7 @@ impl Terminal {
         } else {
             MaybeNavigationTarget::PathLike(PathLikeTarget {
                 maybe_path: target_path,
-                terminal_dir: self.working_directory(),
+                terminal_dir,
                 path_style: self.path_style,
             })
         };
@@ -3631,7 +3744,11 @@ impl Terminal {
         // being able to type.
         if let Some(byte_stream) = &self.byte_stream {
             byte_stream.write(input.into_owned());
-        } else if let TerminalType::Pty { pty_tx, .. } = &self.terminal_type {
+        } else if let TerminalType::Pty {
+            pty_tx: Some(pty_tx),
+            ..
+        } = &self.terminal_type
+        {
             if log::log_enabled!(log::Level::Debug) {
                 if let Ok(str) = str::from_utf8(&input) {
                     log::debug!("Writing to PTY: {:?}", str);
@@ -3834,14 +3951,25 @@ impl Terminal {
         clear_saved_screen(&mut term);
         self.last_content = make_content(&term, &mut self.last_content);
         self.content_revision = self.content_revision.wrapping_add(1);
+        drop(term);
+        self.reset_cwd_history();
         cx.emit(Event::Wakeup);
     }
 
     fn write_input(&mut self, input: impl Into<Cow<'static, [u8]>>) {
+        let input: Cow<'static, [u8]> = input.into();
+        // A submitted command is the boundary a directory change belongs to.
+        if !self.is_remote_terminal && input.contains(&b'\r') {
+            let term = self.term.lock_unfair();
+            self.pending_cwd_boundary = Some(Self::scrollback_position(
+                term.grid().cursor.point.line.0,
+                term.history_size(),
+            ));
+        }
+
         self.events.push_back(InternalEvent::Scroll(Scroll::Bottom));
         self.events.push_back(InternalEvent::SetSelection(None));
 
-        let input = input.into();
         #[cfg(any(test, feature = "test-support"))]
         self.input_log.push(input.to_vec());
 
@@ -3941,6 +4069,15 @@ impl Terminal {
                     .push_back(InternalEvent::SetSelection(Some(selection)));
             }
 
+            "V" => {
+                let point = self.last_content.cursor.point;
+                let selection_type = SelectionType::Lines;
+                let side = SelectionSide::Right;
+                let selection = Selection::new(selection_type, point, side);
+                self.events
+                    .push_back(InternalEvent::SetSelection(Some(selection)));
+            }
+
             "escape" => {
                 self.events.push_back(InternalEvent::SetSelection(None));
             }
@@ -4019,6 +4156,17 @@ impl Terminal {
             self.last_content = make_content(&terminal, &mut self.last_content);
             self.content_dirty = false;
             self.content_revision = self.content_revision.wrapping_add(1);
+
+            if self.last_content.grid_lines_change == GridLinesChange::Changed {
+                debug_assert!(self.last_content.last_hovered_word.is_none());
+                self.refresh_hovered_word(window);
+
+                // The search it queued is drained by the next `sync`, and
+                // nothing else here schedules a frame for it to run in.
+                if !self.events.is_empty() {
+                    cx.emit(Event::Wakeup);
+                }
+            }
         }
     }
 
@@ -4200,6 +4348,8 @@ impl Terminal {
         );
         let hyperlink =
             self.find_hyperlink_at_point_with_path_style(point, self.hyperlink_path_style())?;
+        let match_line = hyperlink.range.start().line;
+        let history_size = self.term.lock().history_size();
         let maybe_path = if hyperlink.is_url {
             let path = hyperlink.text.strip_prefix("file://")?;
             urlencoding::decode(path)
@@ -4214,11 +4364,30 @@ impl Terminal {
 
         Some(PathLikeTarget {
             maybe_path,
-            terminal_dir: self.editor_path_working_directory(),
+            terminal_dir: self.editor_path_working_directory_at_line(match_line, history_size),
             path_style: self.editor_path_style(),
         })
     }
 
+    /// The directory a path printed on `line` should be resolved against.
+    fn editor_path_working_directory_at_line(
+        &self,
+        line: i32,
+        history_size: usize,
+    ) -> Option<PathBuf> {
+        // The WSL and Cygwin translations map the shell's *currently* reported
+        // directory into a Windows path, and the recorded history is not in that
+        // form, so those hosts keep resolving against the current directory.
+        #[cfg(windows)]
+        if posix_host(&self.template.shell).is_some() {
+            return self.editor_path_working_directory();
+        }
+        self.cwd_at_line(line, history_size)
+    }
+
+    /// Only WSL and Cygwin need this: elsewhere the shell's directory needs no
+    /// translation, and [`Self::cwd_at_line`] resolves it per line instead.
+    #[cfg(windows)]
     fn editor_path_working_directory(&self) -> Option<PathBuf> {
         #[cfg(windows)]
         match posix_host(&self.template.shell) {
@@ -4599,6 +4768,62 @@ impl Terminal {
         })
     }
 
+    /// Records that the shell moved, attributing the move to the command that
+    /// caused it rather than to wherever the cursor happens to be when the
+    /// change is finally observed.
+    pub(crate) fn record_cwd_change(&mut self, new_working_directory: PathBuf) {
+        // `ProcessInfo::cwd` is an empty path when the process's directory could
+        // not be read; recording that would resolve later clicks against the
+        // filesystem root.
+        if self.is_remote_terminal || new_working_directory.as_os_str().is_empty() {
+            return;
+        }
+
+        let scrollback_position = self.pending_cwd_boundary.take().unwrap_or_else(|| {
+            let term = self.term.lock_unfair();
+            Self::scrollback_position(term.grid().cursor.point.line.0, term.history_size())
+        });
+        self.cwd_history.push(CwdHistoryEntry {
+            scrollback_position,
+            working_directory: new_working_directory,
+        });
+    }
+
+    /// Drops the recorded history, for the cases that invalidate the line
+    /// offsets it is keyed by: a reflow moves every line, and a clear discards
+    /// them.
+    fn reset_cwd_history(&mut self) {
+        self.pending_cwd_boundary = None;
+        self.cwd_history =
+            initial_cwd_history(self.is_remote_terminal, self.working_directory().as_ref());
+    }
+
+    /// The directory the shell was in when `line` was printed, falling back to
+    /// the current one when that cannot be established.
+    fn cwd_at_line(&self, line: i32, history_size: usize) -> Option<PathBuf> {
+        // Once the scrollback cap is reached, evictions move retained lines
+        // without changing `history_size`, so stored offsets no longer identify
+        // their original lines.
+        if self.is_remote_terminal
+            || self.cwd_history.is_empty()
+            || history_size >= self.term_config.scrolling_history
+        {
+            return self.working_directory();
+        }
+        let scrollback_position = Self::scrollback_position(line, history_size);
+        self.cwd_history
+            .iter()
+            .rev()
+            .find(|entry| entry.scrollback_position <= scrollback_position)
+            .map(|entry| entry.working_directory.clone())
+            .or_else(|| self.working_directory())
+    }
+
+    fn scrollback_position(line: i32, history_size: usize) -> i32 {
+        let history_size = i32::try_from(history_size).unwrap_or(i32::MAX);
+        history_size.saturating_add(line)
+    }
+
     pub fn working_directory(&self) -> Option<PathBuf> {
         if self.is_remote_terminal {
             // We can't yet reliably detect the working directory of a shell on the
@@ -4840,6 +5065,16 @@ impl Terminal {
         source: TerminalExitSource,
         cx: &mut Context<Terminal>,
     ) {
+        // `WatcherDisconnected` and `BackendShutdown` say the pty stopped being
+        // usable, not that the child ended, so they keep the pty open: the
+        // process may still be running, and closing the master would hang it up.
+        if matches!(
+            source,
+            TerminalExitSource::Child | TerminalExitSource::StatusUnavailable
+        ) {
+            self.child_process_ended = true;
+            self.release_pty_resources();
+        }
         if self.task.is_some() {
             // Task terminals retain their established completion and hide
             // semantics. The richer interactive classification is for PTY
@@ -4891,6 +5126,36 @@ impl Terminal {
         }
     }
 
+    /// Releases everything the pty event loop held, once its child has ended.
+    ///
+    /// The pane stays open after a shell exits so its output remains readable,
+    /// and it used to keep the whole event loop alive with it: the loop thread
+    /// returns its `EventLoop` rather than dropping it, and an un-joined
+    /// `JoinHandle` keeps that value alive, so the pty master descriptor, the
+    /// poller's descriptor and the loop's buffers were all retained per exited
+    /// pane until the pane itself was closed.
+    ///
+    /// Idempotent, and a no-op for a terminal that is not pty-backed.
+    fn release_pty_resources(&mut self) {
+        let TerminalType::Pty { pty_tx, io, info } = &mut self.terminal_type else {
+            return;
+        };
+        if let Some(pty_tx) = pty_tx.take() {
+            pty_tx.shutdown();
+        }
+        // The loop's own control, which holds a reference to its poller. A
+        // control the multiplexer provided is somebody else's and is left alone.
+        if self.pty_control_is_local {
+            self.pty_control = None;
+            self.pty_control_is_local = false;
+        }
+        // Dropping the handle rather than joining it lets the loop thread finish
+        // on its own; the terminal must not block on it. The master descriptor
+        // goes with it, so stop reading foreground process groups through it.
+        info.close_pty_handle();
+        drop(io.take());
+    }
+
     /// Stops this terminal's pty event loop, synchronously.
     ///
     /// Used when a pane is handed back to the multiplexer: the loop thread is
@@ -4899,10 +5164,15 @@ impl Terminal {
     /// between them. The grid stays intact; the terminal just stops being
     /// fed until [`Terminal::attach_byte_stream`] reconnects it.
     pub fn stop_pty_loop(&mut self) -> Result<()> {
-        let TerminalType::Pty { pty_tx, io, .. } = &mut self.terminal_type else {
+        let TerminalType::Pty { pty_tx, io, info } = &mut self.terminal_type else {
             return Ok(());
         };
-        pty_tx.shutdown();
+        if let Some(pty_tx) = pty_tx.take() {
+            pty_tx.shutdown();
+        }
+        // Joining drops the loop's `EventLoop`, and with it the pty master this
+        // borrows for foreground-process lookups.
+        info.close_pty_handle();
         match io.take() {
             Some(io) => io.join(),
             None => Ok(()),
@@ -4987,14 +5257,19 @@ impl Terminal {
         // Whatever was there before is replaced, including a stopped pty loop left
         // behind by the revoke that made this pane shared in the first place.
         self.terminal_type = TerminalType::Pty {
-            pty_tx,
+            pty_tx: Some(pty_tx),
             io: Some(io),
             info: Arc::new(info),
         };
+        // This pane has a running child again, whatever became of the last one.
+        self.child_process_ended = false;
         if let Some(palette) = self.last_console_palette {
             control.set_console_palette(palette);
         }
         self.pty_control = Some(control);
+        // The multiplexer drives this pty now, so the control is no longer this
+        // terminal's own sender and must not be released with the pty.
+        self.pty_control_is_local = false;
         self.console_palette_enabled = cfg!(windows);
         // Handed back rather than opened here: the daemon is still this child's
         // parent, so this window must not end it. A pane that joined a shared
@@ -5468,14 +5743,23 @@ impl Drop for Terminal {
             subprocess.kill();
         }
         let owns_child = self.owns_child();
+        let child_already_exited = self.child_process_ended;
         if let TerminalType::Pty { pty_tx, info, .. } =
             std::mem::replace(&mut self.terminal_type, TerminalType::DisplayOnly)
         {
+            // Capture the process groups before shutting the pty down, not after:
+            // the foreground group is read from the pty master, and shutting the
+            // loop down is what closes it. Nothing is captured for a child that
+            // has already exited — its group ids are free to be reused, and
+            // signalling a reused one would kill an unrelated process.
+            let kill_processes = (owns_child && !child_already_exited).then(|| {
+                terminate_processes_with_grace_period(info, self.background_executor.clone())
+            });
             // Stop reading either way: this terminal is going away.
-            pty_tx.shutdown();
-            if owns_child {
-                let kill_processes =
-                    terminate_processes_with_grace_period(info, self.background_executor.clone());
+            if let Some(pty_tx) = pty_tx {
+                pty_tx.shutdown();
+            }
+            if let Some(kill_processes) = kill_processes {
                 self.background_executor.spawn(kill_processes).detach();
             }
         }
@@ -5773,6 +6057,136 @@ mod tests {
         fn set_console_palette(&self, palette: ConsolePalette) {
             self.palettes.lock().unwrap().push(palette);
         }
+    }
+
+    fn make_display_only_terminal(cx: &mut TestAppContext) -> Terminal {
+        TerminalBuilder::new_display_only(
+            SettingsCursorShape::default(),
+            AlternateScroll::On,
+            None,
+            0,
+            &cx.background_executor,
+            PathStyle::local(),
+        )
+        .terminal
+    }
+
+    #[gpui::test]
+    fn cwd_at_line_without_history_falls_back_to_the_current_directory(cx: &mut TestAppContext) {
+        let terminal = make_display_only_terminal(cx);
+        assert_eq!(terminal.cwd_at_line(0, 0), None);
+    }
+
+    #[gpui::test]
+    fn cwd_at_line_selects_the_directory_active_when_the_line_was_printed(cx: &mut TestAppContext) {
+        let mut terminal = make_display_only_terminal(cx);
+        let project_a = PathBuf::from("/home/user/project_a");
+        let project_b = PathBuf::from("/home/user/project_b");
+        let project_c = PathBuf::from("/home/user/project_c");
+        for (scrollback_position, working_directory) in
+            [(0, &project_a), (10, &project_b), (20, &project_c)]
+        {
+            terminal.cwd_history.push(CwdHistoryEntry {
+                scrollback_position,
+                working_directory: working_directory.clone(),
+            });
+        }
+
+        assert_eq!(terminal.cwd_at_line(5, 0), Some(project_a));
+        assert_eq!(terminal.cwd_at_line(15, 0), Some(project_b));
+        assert_eq!(terminal.cwd_at_line(25, 0), Some(project_c));
+    }
+
+    #[gpui::test]
+    fn cwd_at_line_falls_back_for_a_line_printed_before_any_recorded_directory(
+        cx: &mut TestAppContext,
+    ) {
+        let mut terminal = make_display_only_terminal(cx);
+        terminal.cwd_history.push(CwdHistoryEntry {
+            scrollback_position: 10,
+            working_directory: PathBuf::from("/home/user/project_a"),
+        });
+
+        assert_eq!(terminal.cwd_at_line(3, 0), None);
+    }
+
+    /// Once the scrollback is capped, evictions move retained lines without
+    /// changing the history size, so the recorded offsets stop identifying the
+    /// lines they were taken from.
+    #[gpui::test]
+    fn cwd_at_line_ignores_history_once_the_scrollback_cap_is_reached(cx: &mut TestAppContext) {
+        let mut terminal = make_display_only_terminal(cx);
+        terminal.term_config.scrolling_history = 10;
+        terminal.cwd_history.push(CwdHistoryEntry {
+            scrollback_position: 0,
+            working_directory: PathBuf::from("/stale/cwd"),
+        });
+
+        assert_eq!(terminal.cwd_at_line(-5, 10), None);
+    }
+
+    #[gpui::test]
+    fn record_cwd_change_attributes_the_move_to_the_command_that_caused_it(
+        cx: &mut TestAppContext,
+    ) {
+        let mut terminal = make_display_only_terminal(cx);
+        terminal.write_input(b"cd elsewhere\r".to_vec());
+        assert_eq!(terminal.pending_cwd_boundary, Some(0));
+
+        let working_directory = PathBuf::from("/tmp/elsewhere");
+        terminal.record_cwd_change(working_directory.clone());
+
+        assert_eq!(terminal.pending_cwd_boundary, None);
+        assert_eq!(
+            terminal.cwd_history,
+            vec![CwdHistoryEntry {
+                scrollback_position: 0,
+                working_directory,
+            }]
+        );
+    }
+
+    #[gpui::test]
+    fn record_cwd_change_ignores_an_unreadable_directory(cx: &mut TestAppContext) {
+        let mut terminal = make_display_only_terminal(cx);
+        terminal.record_cwd_change(PathBuf::new());
+        assert!(terminal.cwd_history.is_empty());
+    }
+
+    #[gpui::test]
+    fn remote_terminals_record_no_local_directory(cx: &mut TestAppContext) {
+        let mut terminal = make_display_only_terminal(cx);
+        terminal.is_remote_terminal = true;
+        terminal.write_input(b"cd elsewhere\r".to_vec());
+        terminal.record_cwd_change(PathBuf::from("/local/ssh/cwd"));
+
+        assert_eq!(terminal.pending_cwd_boundary, None);
+        assert!(terminal.cwd_history.is_empty());
+        assert_eq!(terminal.cwd_at_line(0, 0), None);
+    }
+
+    #[gpui::test]
+    fn vi_mode_visual_selection_types(cx: &mut TestAppContext) {
+        let selection_type_for = |keystroke: &str| {
+            let mut terminal = TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                &cx.background_executor,
+                PathStyle::local(),
+            )
+            .terminal;
+            terminal.vi_mode_enabled = true;
+            terminal.vi_motion(&Keystroke::parse(keystroke).unwrap());
+            terminal.events.iter().find_map(|event| match event {
+                InternalEvent::SetSelection(Some(selection)) => Some(selection.ty),
+                _ => None,
+            })
+        };
+
+        assert_eq!(selection_type_for("v"), Some(SelectionType::Simple));
+        assert_eq!(selection_type_for("shift-v"), Some(SelectionType::Lines));
     }
 
     #[cfg(windows)]
@@ -9727,6 +10141,44 @@ mod tests {
     }
 
     /// Test that kill_active_task on a task that's not running is a no-op
+    /// A pane stays open after its child ends so its output stays readable, and
+    /// it used to keep the whole pty event loop alive with it: the loop thread
+    /// returns its `EventLoop` and an un-joined `JoinHandle` keeps that value
+    /// alive, so the pty master descriptor, the poller and the loop's buffers
+    /// were all retained until the pane itself was closed.
+    #[gpui::test]
+    async fn test_exited_terminal_releases_its_pty_resources(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+
+        let (terminal, completion_rx) = build_test_terminal(cx, "echo", &["released"]).await;
+        completion_rx
+            .recv()
+            .await
+            .expect("Should receive exit status");
+
+        terminal.update(cx, |terminal, _| {
+            assert!(
+                terminal.child_process_ended,
+                "the child ending is what releases the pty"
+            );
+            let TerminalType::Pty { pty_tx, io, info } = &terminal.terminal_type else {
+                panic!("an exited pty pane stays a pty pane");
+            };
+            assert!(pty_tx.is_none(), "the pty sender should be released");
+            assert!(io.is_none(), "the pty event loop should be released");
+            assert!(
+                terminal.pty_control.is_none(),
+                "the local control holds a reference to the loop's poller"
+            );
+            #[cfg(unix)]
+            assert!(
+                !info.pty_handle_is_open(),
+                "the borrowed pty master descriptor must not be read after it is closed"
+            );
+            let _ = info;
+        });
+    }
+
     #[gpui::test]
     async fn test_kill_active_task_on_completed_task_is_noop(cx: &mut TestAppContext) {
         cx.executor().allow_parking();

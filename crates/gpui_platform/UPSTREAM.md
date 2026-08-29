@@ -1,7 +1,7 @@
 # Zetta GPUI platform routing fork
 
 The source matches `zed/crates/gpui_platform` at Zed revision
-`849ec5898a321eefbeb1d1beda130cc50ef43f10`. Its local manifest routes Linux,
+`2890c340e07a4c4c7e6778e99a49f5414115b250`. Its local manifest routes Linux,
 macOS, and Windows builds to Zetta's platform forks while continuing to use
 the upstream web implementation.
 

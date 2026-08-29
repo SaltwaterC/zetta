@@ -1,5 +1,7 @@
 use gpui::{Context, Task};
 use parking_lot::{MappedRwLockReadGuard, Mutex, RwLock, RwLockReadGuard};
+#[cfg(unix)]
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::{
     path::PathBuf,
     sync::Arc,
@@ -10,20 +12,31 @@ use sysinfo::{Pid, Process, ProcessRefreshKind, ProcessesToUpdate, System, Updat
 
 use crate::{Event, Terminal};
 
-#[derive(Clone, Copy)]
 pub struct ProcessIdGetter {
+    /// The pty master descriptor, borrowed rather than owned: the pty event
+    /// loop closes it when it stops. [`ProcessIdGetter::close`] marks it unusable
+    /// at that point, because the number is free to be reassigned to an
+    /// unrelated file — including another pane's pty master — and asking a
+    /// recycled descriptor for its foreground process group would answer with
+    /// somebody else's job.
     #[cfg(unix)]
-    handle: i32,
+    handle: AtomicI32,
     #[cfg(windows)]
     pid: Option<u32>,
     fallback_pid: u32,
 }
 
+/// The value [`ProcessIdGetter::handle`] holds once the pty has been closed.
+/// `tcgetpgrp` rejects it, but it is never passed to one: the guard in
+/// [`ProcessIdGetter::pid`] comes first.
+#[cfg(unix)]
+const CLOSED_PTY_HANDLE: i32 = -1;
+
 impl ProcessIdGetter {
     #[cfg(unix)]
     pub(crate) fn new(handle: i32, fallback_pid: u32) -> ProcessIdGetter {
         ProcessIdGetter {
-            handle,
+            handle: AtomicI32::new(handle),
             fallback_pid,
         }
     }
@@ -41,12 +54,15 @@ impl ProcessIdGetter {
 #[cfg(unix)]
 impl ProcessIdGetter {
     fn pid(&self) -> Option<Pid> {
-        // Negative pid means error.
-        // Zero pid means no foreground process group is set on the PTY yet.
-        // Avoid killing the current process by returning a zero pid.
-        let pid = unsafe { libc::tcgetpgrp(self.handle) };
-        if pid > 0 {
-            return Some(Pid::from_u32(pid as u32));
+        let handle = self.handle.load(Ordering::Relaxed);
+        if handle != CLOSED_PTY_HANDLE {
+            // Negative pid means error.
+            // Zero pid means no foreground process group is set on the PTY yet.
+            // Avoid killing the current process by returning a zero pid.
+            let pid = unsafe { libc::tcgetpgrp(handle) };
+            if pid > 0 {
+                return Some(Pid::from_u32(pid as u32));
+            }
         }
 
         if self.fallback_pid > 0 {
@@ -55,6 +71,17 @@ impl ProcessIdGetter {
 
         None
     }
+
+    /// Stops using the pty master descriptor. Called when the event loop that
+    /// owns it is released; afterwards only [`Self::fallback_pid`] is reported.
+    fn close(&self) {
+        self.handle.store(CLOSED_PTY_HANDLE, Ordering::Relaxed);
+    }
+}
+
+#[cfg(not(unix))]
+impl ProcessIdGetter {
+    fn close(&self) {}
 }
 
 #[cfg(windows)]
@@ -213,6 +240,18 @@ impl PtyProcessInfo {
             #[cfg(unix)]
             child: self.pid_getter.fallback_pid(),
         }
+    }
+
+    /// Releases the pty master descriptor this borrows for foreground-process
+    /// lookups. Must be called by whoever releases the pty event loop, before
+    /// the descriptor can be reassigned. See [`ProcessIdGetter`].
+    pub(crate) fn close_pty_handle(&self) {
+        self.pid_getter.close();
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn pty_handle_is_open(&self) -> bool {
+        self.pid_getter.handle.load(Ordering::Relaxed) != CLOSED_PTY_HANDLE
     }
 
     #[cfg(unix)]
@@ -431,7 +470,7 @@ impl PtyProcessInfo {
         };
         let this = self.clone();
         let executor = cx.background_executor().clone();
-        let has_changed = cx.background_executor().spawn(async move {
+        let change_task = cx.background_executor().spawn(async move {
             if !refresh_delay.is_zero() {
                 executor.timer(refresh_delay).await;
             }
@@ -447,15 +486,27 @@ impl PtyProcessInfo {
                 }
                 _ => true,
             };
+            let changed_cwd = match (previous.as_ref(), current.as_ref()) {
+                (Some(prev), Some(now)) if prev.cwd != now.cwd => Some(now.cwd.clone()),
+                (None, Some(now)) => Some(now.cwd.clone()),
+                _ => None,
+            };
             if has_changed {
                 *this.current.write() = current;
             }
-            has_changed
+            (has_changed, changed_cwd)
         });
         let this = Arc::downgrade(self);
         *self.task.lock() = Some(cx.spawn(async move |term, cx| {
-            if has_changed.await {
-                term.update(cx, |_, cx| cx.emit(Event::TitleChanged)).ok();
+            let (has_changed, changed_cwd) = change_task.await;
+            if has_changed {
+                term.update(cx, |terminal, cx| {
+                    if let Some(cwd) = changed_cwd {
+                        terminal.record_cwd_change(cwd);
+                    }
+                    cx.emit(Event::TitleChanged);
+                })
+                .ok();
             }
             if let Some(this) = this.upgrade() {
                 this.task.lock().take();

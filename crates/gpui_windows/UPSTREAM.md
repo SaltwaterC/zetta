@@ -1,7 +1,7 @@
 # Zetta GPUI Windows fork
 
 This crate is synchronized with `zed/crates/gpui_windows` at Zed revision
-`849ec5898a321eefbeb1d1beda130cc50ef43f10`. Zetta owns the fork so Windows
+`2890c340e07a4c4c7e6778e99a49f5414115b250`. Zetta owns the fork so Windows
 platform fixes can be carried without modifying the upstream submodule.
 
 Retain this Zetta patch when synchronizing:

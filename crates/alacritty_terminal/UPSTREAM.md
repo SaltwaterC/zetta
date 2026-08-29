@@ -1,7 +1,7 @@
 # Zetta Alacritty terminal fork
 
 Upstream base: `zed-industries/alacritty@4c129667ce56611becdc82de6e28218c80e2e88f`.
-That revision remains the current upstream `master` as of 2026-08-03.
+That revision remains the current upstream `master` as of 2026-08-29.
 
 Retain these Zetta changes when synchronizing:
 

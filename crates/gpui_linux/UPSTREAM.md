@@ -1,7 +1,7 @@
 # Zetta GPUI Linux fork
 
 This crate is synchronized with `zed/crates/gpui_linux` at Zed revision
-`849ec5898a321eefbeb1d1beda130cc50ef43f10`. Zetta owns the fork so Linux
+`2890c340e07a4c4c7e6778e99a49f5414115b250`. Zetta owns the fork so Linux
 platform fixes can be carried without modifying the upstream submodule.
 
 Retain these Zetta patches when synchronizing:
@@ -18,6 +18,9 @@ Retain these Zetta patches when synchronizing:
   background Zenity save-file fallback when the portal cannot create a file;
 - request a repaint after X11 exposure events rather than during the blocked
   event loop;
+- keep `set_input_focus` in `X11Window::activate`, which upstream dropped in
+  `f4178619ac`; without it a window manager that ignores `_NET_ACTIVE_WINDOW`
+  never focuses the activated window;
 - omit Zed's platform notification API because Zetta owns notifications at the
   application layer.
 

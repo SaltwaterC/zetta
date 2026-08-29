@@ -16,9 +16,10 @@ use std::{
 mod hyperlinks;
 
 use crate::{
-    Cell, Color, Content, Cursor, CursorShape, Hyperlink, HyperlinkData, IndexedCell, Modes, Point,
-    PtyEvent, Range, RenderableCells, Scroll, Search, Selection, SelectionRange, SelectionSide,
-    SelectionType, TerminalBackendEvent, TerminalBounds, ViMotion,
+    Cell, Color, Content, Cursor, CursorShape, GridLinesChange, HoveredWord, Hyperlink,
+    HyperlinkData, IndexedCell, Modes, Point, PtyEvent, Range, RenderableCells, Scroll, Search,
+    Selection, SelectionRange, SelectionSide, SelectionType, TerminalBackendEvent, TerminalBounds,
+    ViMotion,
     pty_info::ProcessIdGetter,
     terminal_settings::{AlternateScroll, CursorShape as SettingsCursorShape},
 };
@@ -33,7 +34,7 @@ use alacritty_terminal::{
     },
     sync::FairMutex,
     term::{
-        Config, Osc52, RenderableCursor, Term, TermMode,
+        Config, Osc52, RenderableCursor, SEMANTIC_ESCAPE_CHARS, Term, TermMode,
         cell::{Cell as AlacCell, Flags, Hyperlink as AlacHyperlink, LineLength},
         search::{RegexIter, RegexSearch},
     },
@@ -202,9 +203,17 @@ pub(super) fn display_only_term_config(
     Config {
         scrolling_history,
         default_cursor_style: alacritty_cursor_style(cursor_shape),
+        semantic_escape_chars: semantic_escape_chars(),
         osc52: Osc52::Disabled,
         ..Config::default()
     }
+}
+
+/// Alacritty's defaults plus the box-drawing horizontal line, so double-clicking
+/// a name printed after a tree branch (`systemctl status`, `tree`, `pstree`)
+/// selects the name without its `└─` prefix.
+fn semantic_escape_chars() -> String {
+    format!("{SEMANTIC_ESCAPE_CHARS}─")
 }
 
 pub(super) fn pty_term_config(
@@ -214,6 +223,7 @@ pub(super) fn pty_term_config(
     Config {
         scrolling_history,
         default_cursor_style: alacritty_cursor_style(cursor_shape),
+        semantic_escape_chars: semantic_escape_chars(),
         ..Config::default()
     }
 }
@@ -940,6 +950,73 @@ pub(super) fn shrink_to_used(term: &mut Term<ZedListener>) {
     term.grid_mut().truncate();
 }
 
+/// Decides whether the previous snapshot's hovered word still names the same
+/// text, and where it has moved to.
+///
+/// Carrying it forward unconditionally left a hyperlink drawn over whatever
+/// happened to occupy those cells afterwards. It survives only while the grid
+/// keeps its shape and shows the same lines; when output has been appended and
+/// the viewport followed it by the same amount, the word is still on screen and
+/// its match is shifted to where it now is.
+fn adjusted_last_hovered_word(
+    grid: &Grid<AlacCell>,
+    last_content: &Content,
+) -> (Option<HoveredWord>, GridLinesChange) {
+    let grid_size_changed =
+        grid.columns() != last_content.columns || grid.screen_lines() != last_content.screen_lines;
+
+    let Some(total_lines_delta) = grid
+        .total_lines()
+        .checked_signed_diff(last_content.total_lines)
+    else {
+        return (None, GridLinesChange::Unchanged);
+    };
+
+    let Some(display_offset_delta) = grid
+        .display_offset()
+        .checked_signed_diff(last_content.display_offset)
+    else {
+        return (None, GridLinesChange::Unchanged);
+    };
+
+    let grid_visible_lines_changed = total_lines_delta != display_offset_delta;
+
+    let grid_lines_change = if grid_size_changed || grid_visible_lines_changed {
+        GridLinesChange::Changed
+    } else {
+        GridLinesChange::Unchanged
+    };
+
+    let hovered_word = if let Some(last_hovered_word) = last_content.last_hovered_word.as_ref()
+        && grid_lines_change == GridLinesChange::Unchanged
+    {
+        if total_lines_delta == 0 {
+            // Same viewport over the same content: the match still stands.
+            Some(last_hovered_word.clone())
+        } else {
+            // Content grew and the viewport followed it by the same amount, so
+            // the word is still shown, just on a different line.
+            let mut adjusted_hovered_word = last_hovered_word.clone();
+            adjusted_hovered_word.word_match = Range::new(
+                Point::new(
+                    last_hovered_word.word_match.start().line - display_offset_delta as i32,
+                    last_hovered_word.word_match.start().column,
+                ),
+                Point::new(
+                    last_hovered_word.word_match.end().line - display_offset_delta as i32,
+                    last_hovered_word.word_match.end().column,
+                ),
+            );
+
+            Some(adjusted_hovered_word)
+        }
+    } else {
+        None
+    };
+
+    (hovered_word, grid_lines_change)
+}
+
 pub(super) fn make_content(term: &Term<ZedListener>, last_content: &mut Content) -> Content {
     let content = term.renderable_content();
 
@@ -962,6 +1039,9 @@ pub(super) fn make_content(term: &Term<ZedListener>, last_content: &mut Content)
         None
     };
 
+    let grid = term.grid();
+    let (last_hovered_word, grid_lines_change) = adjusted_last_hovered_word(grid, last_content);
+
     let bottom_line = term.screen_lines() as i32 - 1 - content.display_offset as i32;
     let bottom_row_occupied = content.cursor.point.line.0 >= bottom_line
         || cells
@@ -973,7 +1053,10 @@ pub(super) fn make_content(term: &Term<ZedListener>, last_content: &mut Content)
     Content {
         cells,
         mode: terminal_modes_from_alacritty(content.mode),
-        display_offset: content.display_offset,
+        total_lines: grid.total_lines(),
+        display_offset: grid.display_offset(),
+        columns: grid.columns(),
+        screen_lines: grid.screen_lines(),
         selection_text,
         selection: content
             .selection
@@ -981,7 +1064,8 @@ pub(super) fn make_content(term: &Term<ZedListener>, last_content: &mut Content)
         cursor: Cursor::from_alacritty(content.cursor),
         cursor_char: term.grid()[content.cursor.point].c,
         terminal_bounds: last_content.terminal_bounds,
-        last_hovered_word: last_content.last_hovered_word.clone(),
+        last_hovered_word,
+        grid_lines_change,
         scrolled_to_top: content.display_offset == term.history_size(),
         scrolled_to_bottom: content.display_offset == 0,
         bottom_row_occupied,
@@ -1446,6 +1530,136 @@ mod tests {
             Ok(PtyEvent::Event(TerminalBackendEvent::Bell))
         ));
         assert!(events_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn semantic_selection_stops_at_tree_branch() {
+        use alacritty_terminal::vte::ansi::Handler as _;
+
+        let bounds = TerminalBounds::new(
+            px(10.),
+            px(10.),
+            gpui::bounds(gpui::point(px(0.), px(0.)), gpui::size(px(400.), px(40.))),
+        );
+        let (events_tx, _) = futures::channel::mpsc::unbounded();
+        let listener = ZedListener::new(events_tx, WakeupGate::new());
+        let mut term = Term::new(
+            pty_term_config(1000, SettingsCursorShape::default()),
+            &bounds,
+            listener,
+        );
+        for character in "└─zms-demo.target".chars() {
+            term.input(character);
+        }
+
+        let selection = Selection::new(
+            SelectionType::Semantic,
+            Point::new(0, 2),
+            SelectionSide::Left,
+        );
+        set_selection(&mut term, Some(&selection));
+
+        assert_eq!(selection_text(&term).as_deref(), Some("zms-demo.target"));
+    }
+
+    fn hovered_word_at(line: i32) -> HoveredWord {
+        HoveredWord {
+            word: "target".to_owned(),
+            word_match: Range::new(Point::new(line, 0), Point::new(line, 5)),
+            id: 7,
+        }
+    }
+
+    /// A snapshot of `term`'s grid, optionally rewound by `lines_behind` lines of
+    /// content and `viewport_behind` lines of viewport, to stand for the previous
+    /// snapshot that `adjusted_last_hovered_word` compares against.
+    fn previous_content(
+        term: &Term<ZedListener>,
+        lines_behind: usize,
+        viewport_behind: usize,
+        hovered_word: Option<HoveredWord>,
+    ) -> Content {
+        let grid = term.grid();
+        Content {
+            total_lines: grid.total_lines() - lines_behind,
+            display_offset: grid.display_offset() - viewport_behind,
+            columns: grid.columns(),
+            screen_lines: grid.screen_lines(),
+            last_hovered_word: hovered_word,
+            ..Content::default()
+        }
+    }
+
+    fn scrolled_back_term() -> Term<ZedListener> {
+        use alacritty_terminal::vte::ansi::Handler as _;
+
+        let bounds = TerminalBounds::new(
+            px(10.),
+            px(10.),
+            gpui::bounds(gpui::point(px(0.), px(0.)), gpui::size(px(100.), px(40.))),
+        );
+        let (events_tx, _) = futures::channel::mpsc::unbounded();
+        let listener = ZedListener::new(events_tx, WakeupGate::new());
+        let mut term = Term::new(Config::default(), &bounds, listener);
+        for _ in 0..20 {
+            term.newline();
+        }
+        term.scroll_display(AlacScroll::Delta(4));
+        assert!(
+            term.grid().display_offset() >= 2,
+            "the test needs scrollback"
+        );
+        term
+    }
+
+    /// The hovered word used to be carried across every snapshot, which left a
+    /// hyperlink drawn over whatever text later occupied those cells.
+    #[test]
+    fn hovered_word_is_dropped_when_output_scrolls_past_the_viewport() {
+        let term = scrolled_back_term();
+        // Two lines of output arrived while the viewport stayed put.
+        let last_content = previous_content(&term, 2, 0, Some(hovered_word_at(1)));
+
+        let (hovered_word, change) = adjusted_last_hovered_word(term.grid(), &last_content);
+
+        assert_eq!(change, GridLinesChange::Changed);
+        assert_eq!(hovered_word, None);
+    }
+
+    #[test]
+    fn hovered_word_is_kept_unmoved_when_nothing_changed() {
+        let term = scrolled_back_term();
+        let last_content = previous_content(&term, 0, 0, Some(hovered_word_at(1)));
+
+        let (hovered_word, change) = adjusted_last_hovered_word(term.grid(), &last_content);
+
+        assert_eq!(change, GridLinesChange::Unchanged);
+        assert_eq!(hovered_word, Some(hovered_word_at(1)));
+    }
+
+    /// Output arrived and the viewport followed it by the same amount, so the
+    /// word is still on screen — two lines further up.
+    #[test]
+    fn hovered_word_is_shifted_when_the_viewport_follows_the_output() {
+        let term = scrolled_back_term();
+        let last_content = previous_content(&term, 2, 2, Some(hovered_word_at(1)));
+
+        let (hovered_word, change) = adjusted_last_hovered_word(term.grid(), &last_content);
+
+        assert_eq!(change, GridLinesChange::Unchanged);
+        assert_eq!(hovered_word, Some(hovered_word_at(-1)));
+    }
+
+    #[test]
+    fn hovered_word_is_dropped_when_the_grid_is_resized() {
+        let term = scrolled_back_term();
+        let mut last_content = previous_content(&term, 0, 0, Some(hovered_word_at(1)));
+        last_content.columns += 1;
+
+        let (hovered_word, change) = adjusted_last_hovered_word(term.grid(), &last_content);
+
+        assert_eq!(change, GridLinesChange::Changed);
+        assert_eq!(hovered_word, None);
     }
 
     #[test]
