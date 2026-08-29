@@ -445,8 +445,7 @@ impl Zetta {
             let discarded = closed
                 .as_ref()
                 .is_some_and(|project| project.dirty && !project.save_in_progress);
-            editor.open_dropdown = None;
-            editor.dropdown_query.clear();
+            editor.clear_dropdown();
             editor.pane_template_validation_error = None;
             editor.settings_scroll.set_offset(Point::default());
             editor.focused_input = None;
@@ -505,6 +504,7 @@ impl Zetta {
                             this.projects.invalidate_active_context();
                             if let Some(editor) = this.settings_editor.as_mut() {
                                 let saved = editor.project.take();
+                                editor.clear_dropdown();
                                 editor.pane_template_validation_error = None;
                                 editor.focused_input = None;
                                 editor.focused_control =
@@ -580,6 +580,7 @@ impl Zetta {
                                 .is_some_and(|project| project.root == root)
                         {
                             editor.project = None;
+                            editor.clear_dropdown();
                         }
                         this.refresh_settings_project_roots(cx);
                         this.activate_current_project(window, cx);

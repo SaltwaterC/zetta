@@ -67,6 +67,7 @@ pub(crate) fn render_font_modal(
                                             editor.configuration.terminal_font_family =
                                                 value.clone();
                                             editor.configuration_dirty = true;
+                                            editor.clear_dropdown();
                                             editor.font_query = None;
                                             editor.focused_input = None;
                                             editor.message = None;
@@ -135,6 +136,7 @@ pub(crate) fn render_font_modal(
                                             .update(cx, |this, cx| {
                                                 if let Some(editor) = this.settings_editor.as_mut()
                                                 {
+                                                    editor.clear_dropdown();
                                                     editor.font_query = None;
                                                     editor.focused_input = None;
                                                     editor.focused_control = None;
@@ -317,7 +319,7 @@ pub(crate) fn render_profile_modal(
                                             .update(cx, |this, cx| {
                                                 if let Some(editor) = this.settings_editor.as_mut()
                                                 {
-                                                    editor.profile_draft = None;
+                                                    editor.dismiss_profile_draft();
                                                     editor.focused_input = None;
                                                     editor.focused_control = None;
                                                     editor.message = None;
@@ -383,6 +385,7 @@ pub(crate) fn render_profile_modal(
                                                     );
                                                 editor.configuration.profiles.push(draft);
                                                 editor.configuration_dirty = true;
+                                                editor.clear_dropdown();
                                                 editor.focused_input = None;
                                                 editor.message = None;
                                                 cx.notify();

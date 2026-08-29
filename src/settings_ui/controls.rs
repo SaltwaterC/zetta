@@ -43,6 +43,20 @@ pub(crate) fn dropdown_snapshot_rows(
     (rows, widest_row)
 }
 
+fn dropdown_row_for_option(rows: &[usize], option_index: usize) -> Option<usize> {
+    rows.iter().position(|index| *index == option_index)
+}
+
+fn scroll_open_dropdown_to_selection(editor: &mut SettingsEditor) {
+    let Some(row) = dropdown_row_for_option(&editor.open_dropdown_rows, editor.dropdown_index)
+    else {
+        return;
+    };
+    editor
+        .dropdown_scroll
+        .scroll_to_item(row, ScrollStrategy::Nearest);
+}
+
 /// How many controls at the front of the tab order live in the dialog's fixed
 /// header — the page tabs, Close, and Save.
 ///
@@ -628,9 +642,7 @@ impl Zetta {
             .unwrap_or(0);
         editor.dropdown_query.clear();
         Self::refresh_open_dropdown_snapshot(editor, options);
-        editor
-            .dropdown_scroll
-            .scroll_to_item(editor.dropdown_index, ScrollStrategy::Nearest);
+        scroll_open_dropdown_to_selection(editor);
         editor.dropdown_anchor = anchor;
         editor.open_dropdown = Some(dropdown);
         cx.notify();
@@ -661,9 +673,7 @@ impl Zetta {
             (current + 1) % matching_indices.len()
         };
         editor.dropdown_index = matching_indices[next];
-        editor
-            .dropdown_scroll
-            .scroll_to_item(editor.dropdown_index, ScrollStrategy::Nearest);
+        scroll_open_dropdown_to_selection(editor);
         cx.notify();
         true
     }
@@ -701,11 +711,9 @@ impl Zetta {
         let query = editor.dropdown_query.clone();
         if let Some(index) = fuzzy_match_index(&options, &query) {
             editor.dropdown_index = index;
-            editor
-                .dropdown_scroll
-                .scroll_to_item(index, ScrollStrategy::Nearest);
         }
         Self::refresh_open_dropdown_snapshot(editor, options);
+        scroll_open_dropdown_to_selection(editor);
         cx.notify();
         true
     }
@@ -887,6 +895,7 @@ impl Zetta {
                 {
                     editor.configuration.terminal_font_family = font.clone();
                     editor.configuration_dirty = true;
+                    editor.clear_dropdown();
                     editor.font_query = None;
                     editor.focused_input = None;
                     editor.focused_control = None;
@@ -916,6 +925,7 @@ impl Zetta {
                     draft.automatic_icon = ProfileIcon::automatic_for_program(&draft.program.text);
                     editor.configuration.profiles.push(draft);
                     editor.configuration_dirty = true;
+                    editor.clear_dropdown();
                     editor.focused_input = None;
                     editor.focused_control = None;
                     editor.message = None;
@@ -980,8 +990,7 @@ impl Zetta {
         if settings_save_in_flight(editor) {
             return;
         }
-        editor.open_dropdown = None;
-        editor.dropdown_query.clear();
+        editor.clear_dropdown();
         let Some(input) = editor.focused_input else {
             return;
         };
@@ -1134,8 +1143,7 @@ impl Zetta {
         if settings_save_in_flight(editor) {
             return;
         }
-        editor.open_dropdown = None;
-        editor.dropdown_query.clear();
+        editor.clear_dropdown();
         match dropdown {
             SettingsDropdown::DefaultProfile => {
                 editor.configuration.default_profile = value;

@@ -284,6 +284,16 @@ fn prepare_settings_save(
 }
 
 impl SettingsEditor {
+    pub(crate) fn clear_dropdown(&mut self) {
+        self.open_dropdown = None;
+        self.dropdown_query.clear();
+    }
+
+    pub(crate) fn dismiss_profile_draft(&mut self) {
+        self.profile_draft = None;
+        self.clear_dropdown();
+    }
+
     /// Check if a binding in the given section matches a default binding.
     /// Returns true if the binding (keystroke + action) exists in the default template.
     pub(crate) fn is_default_binding(&self, section_index: usize, binding_index: usize) -> bool {
@@ -681,10 +691,8 @@ impl Zetta {
             editor.focused_input = None;
             editor.focused_control = Some(SettingsControl::Tab(page));
             editor.keymap_capture = None;
-            editor.open_dropdown = None;
-            editor.dropdown_query.clear();
             editor.font_query = None;
-            editor.profile_draft = None;
+            editor.dismiss_profile_draft();
             editor.numeric_repeat_generation = editor.numeric_repeat_generation.wrapping_add(1);
             invalidate_controls_cache(editor);
         }
@@ -753,8 +761,7 @@ impl Zetta {
         };
         editor.focused_input = Some(input);
         editor.focused_control = Some(SettingsControl::Input(input));
-        editor.open_dropdown = None;
-        editor.dropdown_query.clear();
+        editor.clear_dropdown();
         let field = match input {
             SettingsInput::Configuration(field) => editor.configuration.text_mut(field),
             SettingsInput::Keymap(field) => editor.keymap.text_mut(field),
@@ -978,8 +985,7 @@ impl Zetta {
             match event.keystroke.key.as_str() {
                 "escape" => {
                     if let Some(editor) = self.settings_editor.as_mut() {
-                        editor.open_dropdown = None;
-                        editor.dropdown_query.clear();
+                        editor.clear_dropdown();
                         cx.notify();
                     }
                 }
@@ -1003,8 +1009,7 @@ impl Zetta {
                 }
                 "tab" => {
                     if let Some(editor) = self.settings_editor.as_mut() {
-                        editor.open_dropdown = None;
-                        editor.dropdown_query.clear();
+                        editor.clear_dropdown();
                     }
                     self.focus_adjacent_settings_control(
                         event.keystroke.modifiers.shift,
@@ -1033,7 +1038,7 @@ impl Zetta {
                 }) {
                     if let Some(editor) = self.settings_editor.as_mut() {
                         editor.font_query = None;
-                        editor.profile_draft = None;
+                        editor.dismiss_profile_draft();
                         editor.focused_input = None;
                         editor.focused_control = None;
                         editor.message = None;

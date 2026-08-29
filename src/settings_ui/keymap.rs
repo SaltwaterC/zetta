@@ -442,8 +442,7 @@ impl Zetta {
         });
         editor.focused_input = None;
         editor.focused_control = Some(SettingsControl::CaptureKeymap(target));
-        editor.open_dropdown = None;
-        editor.dropdown_query.clear();
+        editor.clear_dropdown();
         editor.message = None;
         self.settings_focus.focus(window, cx);
         cx.notify();

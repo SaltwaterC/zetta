@@ -52,6 +52,19 @@ fn dropdown_snapshot_is_empty_when_nothing_matches() {
 }
 
 #[test]
+fn filtered_dropdown_selection_scrolls_to_its_visible_row() {
+    let config = Config::parse("{}", None, None).unwrap();
+    let mut editor = configuration_editor(&config);
+    editor.open_dropdown_rows = Arc::from([1usize, 4, 9]);
+    editor.dropdown_index = 4;
+
+    scroll_open_dropdown_to_selection(&mut editor);
+
+    assert_eq!(editor.dropdown_index, 4);
+    assert_eq!(editor.dropdown_scroll.logical_scroll_top_index(), 1);
+}
+
+#[test]
 fn the_form_scroll_mapping_skips_the_controls_that_live_in_the_dialog_header() {
     let controls = vec![
         SettingsControl::Tab(SettingsPage::Configuration),
@@ -82,6 +95,43 @@ fn custom_profiles_can_reach_their_visibility_control() {
             3
         )))
     );
+}
+
+#[test]
+fn dismissing_the_profile_modal_clears_each_draft_dropdown() {
+    let config = Config::parse(
+        r#"{"profiles":[{"name":"Toolbox","program":"/bin/sh"}]}"#,
+        None,
+        None,
+    )
+    .unwrap();
+    let mut editor = configuration_editor(&config);
+
+    for dropdown in [
+        SettingsDropdown::ProfileDraftTheme,
+        SettingsDropdown::ProfileDraftDarkTheme,
+        SettingsDropdown::ProfileDraftIcon,
+    ] {
+        editor.profile_draft = Some(crate::settings_editor::ProfileForm {
+            name: TextField::default(),
+            program: TextField::default(),
+            arguments: TextField::default(),
+            theme: None,
+            dark_theme: None,
+            icon: None,
+            automatic_icon: ProfileIcon::Zetta,
+            hidden: false,
+            detected: false,
+        });
+        editor.open_dropdown = Some(dropdown);
+        editor.dropdown_query = "profile".to_owned();
+
+        editor.dismiss_profile_draft();
+
+        assert!(editor.profile_draft.is_none());
+        assert_eq!(editor.open_dropdown, None);
+        assert!(editor.dropdown_query.is_empty());
+    }
 }
 
 /// A Configuration-page editor with no files behind it: the form falls back to

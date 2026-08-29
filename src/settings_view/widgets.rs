@@ -354,7 +354,7 @@ impl Zetta {
                                                 cx,
                                             );
                                             if let Some(editor) = this.settings_editor.as_mut() {
-                                                editor.open_dropdown = None;
+                                                editor.clear_dropdown();
                                             }
                                             cx.notify();
                                         })
