@@ -235,8 +235,9 @@ than an old process command line, is authoritative.
 
 ## Git worktree root
 
-The `zetta wt` commands use Git's effective `wt.root` configuration; it is not
-a Zetta JSON setting. The recommended repository-local configuration is:
+The standalone `zwt` command and the compatible `zetta wt` commands use Git's
+effective `wt.root` configuration; it is not a Zetta JSON setting. The
+recommended repository-local configuration is:
 
 ```sh
 git config --local wt.root ../project-worktrees

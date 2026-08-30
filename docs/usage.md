@@ -396,10 +396,13 @@ Zetta includes a small, safety-focused Git worktree workflow for temporary
 branches:
 
 ```sh
-zetta wt new feature/api
-zetta wt status
-zetta wt done
+zwt new feature/api
+zwt status
+zwt done
 ```
+
+The same operations are available as `zetta wt new`, `zetta wt status`, and
+`zetta wt done` when the full Zetta build includes the `worktree` feature.
 
 `new NAME` creates `wt/NAME` from the current attached branch, records the
 source branch in `wtbranch.<branch>.base`, and creates the worktree below
@@ -435,7 +438,7 @@ or symlinks from the current source worktree into the identical relative
 locations in the new worktree:
 
 ```sh
-zetta wt new --copy .env.local --copy .cache feature/api
+zwt new --copy .env.local --copy .cache feature/api
 ```
 
 Copy paths must be relative, may not contain parent-directory traversal, and may
@@ -463,8 +466,8 @@ still attached and clean (including submodule changes), fast-forwards the source
 branch, then removes the temporary worktree, branch, and metadata. A worktree
 whose current commit contains submodules is removed with Git's forced cleanup
 after integration. A conflict leaves the rebase in place: resolve the files,
-stage them with `git add`, and rerun `zetta wt done`.
-Run `zetta wt rerere` once to enable Git's `rerere.enabled` and
+stage them with `git add`, and rerun `zwt done` (or `zetta wt done`).
+Run `zwt rerere` once to enable Git's `rerere.enabled` and
 `rerere.autoupdate` helpers for repeated conflicts.
 
 When `new NAME` or `done` is run from a terminal opened by Zetta, the originating
@@ -481,7 +484,7 @@ Manual tab renames take precedence over the worktree title, and clearing a
 manual rename reveals it again. Missing or unavailable Zetta process control
 never changes the Git result or `--path-only` output.
 
-The direct CLI never changes the caller's directory. After enabling shell
+The standalone CLI never changes the caller's directory. After enabling shell
 integration, `zwt new NAME` changes into the new worktree and `zwt done`
 changes into the integrated source worktree. Use `--path-only` (or `-P`) with
 `new` or `done` when scripting; it reserves standard output for exactly one

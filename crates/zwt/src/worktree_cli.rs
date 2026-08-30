@@ -8,11 +8,11 @@ use std::{
 
 #[cfg(test)]
 use std::cell::RefCell;
-#[cfg(unix)]
+#[cfg(all(unix, feature = "recursive-submodules"))]
 use std::os::unix::ffi::OsStringExt;
 
+use crate::format_help_table;
 use crate::process_control::{WorktreeNameRequest, request_process_worktree_name};
-use crate::startup::format_help_table;
 use crate::worktree_copy::{
     copy_paths as copy_worktree_paths, cow_copy_supported, validate_copy_path, validate_copy_paths,
     validate_copy_sources,
@@ -22,6 +22,24 @@ use anyhow::{Context as _, Result};
 const WORKTREE_BRANCH_PREFIX: &str = "wt/";
 const WORKTREE_METADATA_SECTION: &str = "wtbranch";
 const PATH_ONLY_OPTION: &str = "--path-only";
+
+/// Identifies the command name used in diagnostics and help text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorktreeInvocation {
+    /// The independently installed `zwt` command.
+    Standalone,
+    /// The command exposed as `zetta wt`.
+    Zetta,
+}
+
+impl WorktreeInvocation {
+    pub fn command(self) -> &'static str {
+        match self {
+            Self::Standalone => "zwt",
+            Self::Zetta => "zetta wt",
+        }
+    }
+}
 
 #[cfg(test)]
 thread_local! {
@@ -60,7 +78,7 @@ fn test_current_directory() -> Option<PathBuf> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum WorktreeCommand {
+pub enum WorktreeCommand {
     New {
         name: String,
         path_only: bool,
@@ -73,29 +91,57 @@ pub(crate) enum WorktreeCommand {
     Rerere,
 }
 
-pub(crate) fn parse_worktree_args(arguments: &[OsString]) -> Result<WorktreeCommand> {
+pub fn parse_worktree_args(arguments: &[OsString]) -> Result<WorktreeCommand> {
+    parse_worktree_args_for(arguments, WorktreeInvocation::Standalone)
+}
+
+pub fn parse_worktree_args_for(
+    arguments: &[OsString],
+    invocation: WorktreeInvocation,
+) -> Result<WorktreeCommand> {
     if arguments.is_empty() {
-        anyhow::bail!("zetta wt requires an operation; run zetta wt --help for usage");
+        anyhow::bail!(
+            "{} requires an operation; run {} --help for usage",
+            invocation.command(),
+            invocation.command()
+        );
     }
     let operation = arguments.first().map(|argument| argument.to_string_lossy());
     if operation.as_deref() == Some("--help") || operation.as_deref() == Some("-h") {
-        println!("{}", worktree_help());
+        println!("{}", worktree_help_for(invocation));
         std::process::exit(0);
     }
 
     let operation = operation.expect("worktree operation was checked above");
     match operation.as_ref() {
-        "new" => parse_new_args(&arguments[1..]),
-        "done" => parse_done_args(&arguments[1..]),
-        "status" => parse_no_arguments("status", &arguments[1..], WorktreeCommand::Status),
-        "rerere" => parse_no_arguments("rerere", &arguments[1..], WorktreeCommand::Rerere),
+        "new" => parse_new_args(&arguments[1..], invocation),
+        "done" => parse_done_args(&arguments[1..], invocation),
+        "status" => parse_no_arguments(
+            "status",
+            &arguments[1..],
+            WorktreeCommand::Status,
+            invocation,
+        ),
+        "rerere" => parse_no_arguments(
+            "rerere",
+            &arguments[1..],
+            WorktreeCommand::Rerere,
+            invocation,
+        ),
         unknown => {
-            anyhow::bail!("unknown zetta wt operation {unknown:?}; run zetta wt --help for usage")
+            anyhow::bail!(
+                "unknown {} operation {unknown:?}; run {} --help for usage",
+                invocation.command(),
+                invocation.command()
+            )
         }
     }
 }
 
-fn parse_new_args(arguments: &[OsString]) -> Result<WorktreeCommand> {
+fn parse_new_args(
+    arguments: &[OsString],
+    invocation: WorktreeInvocation,
+) -> Result<WorktreeCommand> {
     let mut path_only = false;
     let mut name = None;
     let mut copy_paths = Vec::new();
@@ -103,7 +149,7 @@ fn parse_new_args(arguments: &[OsString]) -> Result<WorktreeCommand> {
     while let Some(argument) = arguments.next() {
         match argument.to_string_lossy().as_ref() {
             "--help" | "-h" => {
-                println!("{}", worktree_new_help());
+                println!("{}", worktree_new_help_for(invocation));
                 std::process::exit(0);
             }
             PATH_ONLY_OPTION | "-P" => {
@@ -121,16 +167,30 @@ fn parse_new_args(arguments: &[OsString]) -> Result<WorktreeCommand> {
                 copy_paths.push(validate_copy_path(Path::new(path))?);
             }
             value if value.starts_with('-') => {
-                anyhow::bail!("unknown zetta wt new option {value:?}")
+                anyhow::bail!("unknown {} new option {value:?}", invocation.command())
             }
             value => {
-                anyhow::ensure!(name.is_none(), "zetta wt new accepts exactly one NAME");
+                anyhow::ensure!(
+                    name.is_none(),
+                    "{} new accepts exactly one NAME",
+                    invocation.command()
+                );
                 name = Some(value.to_owned());
             }
         }
     }
-    let name = name.context("zetta wt new requires NAME; run zetta wt new --help for usage")?;
-    anyhow::ensure!(!name.is_empty(), "zetta wt new requires a non-empty NAME");
+    let name = name.with_context(|| {
+        format!(
+            "{} new requires NAME; run {} new --help for usage",
+            invocation.command(),
+            invocation.command()
+        )
+    })?;
+    anyhow::ensure!(
+        !name.is_empty(),
+        "{} new requires a non-empty NAME",
+        invocation.command()
+    );
     let copy_paths = validate_copy_paths(&copy_paths)?;
     Ok(WorktreeCommand::New {
         name,
@@ -139,19 +199,22 @@ fn parse_new_args(arguments: &[OsString]) -> Result<WorktreeCommand> {
     })
 }
 
-fn parse_done_args(arguments: &[OsString]) -> Result<WorktreeCommand> {
+fn parse_done_args(
+    arguments: &[OsString],
+    invocation: WorktreeInvocation,
+) -> Result<WorktreeCommand> {
     let mut path_only = false;
     for argument in arguments {
         match argument.to_string_lossy().as_ref() {
             "--help" | "-h" => {
-                println!("{}", worktree_done_help());
+                println!("{}", worktree_done_help_for(invocation));
                 std::process::exit(0);
             }
             PATH_ONLY_OPTION | "-P" => {
                 anyhow::ensure!(!path_only, "{PATH_ONLY_OPTION} may only be specified once");
                 path_only = true;
             }
-            value => anyhow::bail!("unknown zetta wt done argument {value:?}"),
+            value => anyhow::bail!("unknown {} done argument {value:?}", invocation.command()),
         }
     }
     Ok(WorktreeCommand::Done { path_only })
@@ -161,6 +224,7 @@ fn parse_no_arguments(
     operation: &str,
     arguments: &[OsString],
     command: WorktreeCommand,
+    invocation: WorktreeInvocation,
 ) -> Result<WorktreeCommand> {
     if arguments
         .iter()
@@ -169,23 +233,30 @@ fn parse_no_arguments(
         println!(
             "{}",
             match operation {
-                "status" => worktree_status_help(),
-                "rerere" => worktree_rerere_help(),
-                _ => worktree_help(),
+                "status" => worktree_status_help_for(invocation),
+                "rerere" => worktree_rerere_help_for(invocation),
+                _ => worktree_help_for(invocation),
             }
         );
         std::process::exit(0);
     }
     anyhow::ensure!(
         arguments.is_empty(),
-        "zetta wt {operation} does not accept arguments; run zetta wt {operation} --help for usage"
+        "{} {operation} does not accept arguments; run {} {operation} --help for usage",
+        invocation.command(),
+        invocation.command()
     );
     Ok(command)
 }
 
-pub(crate) fn worktree_help() -> String {
+pub fn worktree_help() -> String {
+    worktree_help_for(WorktreeInvocation::Standalone)
+}
+
+pub fn worktree_help_for(invocation: WorktreeInvocation) -> String {
+    let command = invocation.command();
     format!(
-        "Zetta Git worktree workflow\n\nUsage: zetta wt <COMMAND>\n       zetta wt new [OPTIONS] NAME\n       zetta wt done [OPTIONS]\n       zetta wt status\n       zetta wt rerere\n\nCommands:\n{}\n\nThe direct CLI never changes the caller directory. Generated shell integration provides\nzwt, which changes directory after successful new or done operations.\n\nWorktree roots:\n  Git reads effective wt.root configuration. Configure a repository with:\n    git config --local wt.root ../project-worktrees\n  Relative values resolve from the repository main worktree root. Without wt.root, Zetta\n  uses sibling directory <repository>-worktrees. NAME may contain nested components such\n  as feature/api, which creates <wt.root>/feature/api.\n\nRecommended setup:\n  zetta wt rerere\n  This enables rerere.enabled and rerere.autoupdate globally so repeated conflicts can\n  be resolved automatically after you resolve and stage them once.",
+        "Zetta Git worktree workflow\n\nUsage: {command} <COMMAND>\n       {command} new [OPTIONS] NAME\n       {command} done [OPTIONS]\n       {command} status\n       {command} rerere\n\nCommands:\n{}\n\nThe direct CLI never changes the caller directory. Generated shell integration provides\nzwt, which changes directory after successful new or done operations.\n\nWorktree roots:\n  Git reads effective wt.root configuration. Configure a repository with:\n    git config --local wt.root ../project-worktrees\n  Relative values resolve from the repository main worktree root. Without wt.root, Zetta\n  uses sibling directory <repository>-worktrees. NAME may contain nested components such\n  as feature/api, which creates <wt.root>/feature/api.\n\nRecommended setup:\n  {command} rerere\n  This enables rerere.enabled and rerere.autoupdate globally so repeated conflicts can\n  be resolved automatically after you resolve and stage them once.",
         format_help_table([
             ("new", "Create a wt/NAME worktree from the current branch"),
             (
@@ -194,11 +265,17 @@ pub(crate) fn worktree_help() -> String {
             ),
             ("status", "Show the current worktree workflow state"),
             ("rerere", "Enable Git recorded conflict-resolution helpers",),
-        ])
+        ]),
+        command = command,
     )
 }
 
-pub(crate) fn worktree_new_help() -> String {
+pub fn worktree_new_help() -> String {
+    worktree_new_help_for(WorktreeInvocation::Standalone)
+}
+
+pub fn worktree_new_help_for(invocation: WorktreeInvocation) -> String {
+    let command = invocation.command();
     let options = format_help_table([
         (
             "-c, --copy PATH",
@@ -208,11 +285,17 @@ pub(crate) fn worktree_new_help() -> String {
         ("-h, --help", "Print help"),
     ]);
     format!(
-        "Create a Git worktree for a temporary wt/NAME branch\n\nUsage: zetta wt new [OPTIONS] NAME\n\nThe current worktree must be on an attached branch. Zetta creates branch wt/NAME,\nrecords that branch source in wtbranch.wt/NAME.base, and places the worktree at\n<wt.root>/NAME. Nested NAME values are supported. The default root is sibling\n<repository>-worktrees; configure a repository root with git config --local wt.root PATH.\nFor example, use git config --local wt.root ../project-worktrees. Relative PATH values\nresolve from the repository root. Existing paths, symlinks, and branches are rejected.\n\nIf the source commit contains submodules, new recursively initializes them at their\nrecorded commits. An initialized matching submodule checkout in the source worktree\nis reused as a local Git object reference when possible; otherwise Git uses the\nsubmodule's configured remote. If initialization fails, Zetta force-removes the\npartial worktree, deletes its branch, and clears its metadata.\n\nThe repeatable --copy PATH (or -c PATH) option copies a relative file, directory,\nor symlink from the current source worktree to the identical location in the new\nworktree. Paths may not be absolute, traverse a parent directory, or traverse an\nintermediate symlink. Existing destination paths and overlapping copy requests are\nrejected. Native copy-on-write cloning is used when the filesystem supports it, with\na regular recursive-copy fallback elsewhere. A copy failure removes the new\nworktree, branch, metadata, and directories created for its root.\n\nnew reports phase progress on standard error while creating the worktree,\ninitializing submodules, copying paths, and recording metadata.\n\nOptions:\n{options}\n\nUse zwt new NAME from generated shell integration to create the worktree and cd into\nit. The zetta wt rerere shortcut is recommended before the first conflict."
+        "Create a Git worktree for a temporary wt/NAME branch\n\nUsage: {command} new [OPTIONS] NAME\n\nThe current worktree must be on an attached branch. Zetta creates branch wt/NAME,\nrecords that branch source in wtbranch.wt/NAME.base, and places the worktree at\n<wt.root>/NAME. Nested NAME values are supported. The default root is sibling\n<repository>-worktrees; configure a repository root with git config --local wt.root PATH.\nFor example, use git config --local wt.root ../project-worktrees. Relative PATH values\nresolve from the repository root. Existing paths, symlinks, and branches are rejected.\n\nIf the source commit contains submodules, new recursively initializes them at their\nrecorded commits. An initialized matching submodule checkout in the source worktree\nis reused as a local Git object reference when possible; otherwise Git uses the\nsubmodule's configured remote. If initialization fails, Zetta force-removes the\npartial worktree, deletes its branch, and clears its metadata.\n\nThe repeatable --copy PATH (or -c PATH) option copies a relative file, directory,\nor symlink from the current source worktree to the identical location in the new\nworktree. Paths may not be absolute, traverse a parent directory, or traverse an\nintermediate symlink. Existing destination paths and overlapping copy requests are\nrejected. Native copy-on-write cloning is used when the filesystem supports it, with\na regular recursive-copy fallback elsewhere. A copy failure removes the new\nworktree, branch, metadata, and directories created for its root.\n\nnew reports phase progress on standard error while creating the worktree,\ninitializing submodules, copying paths, and recording metadata.\n\nOptions:\n{options}\n\nUse zwt new NAME from generated shell integration to create the worktree and cd into\nit. The {command} rerere shortcut is recommended before the first conflict.",
+        command = command,
     )
 }
 
-pub(crate) fn worktree_done_help() -> String {
+pub fn worktree_done_help() -> String {
+    worktree_done_help_for(WorktreeInvocation::Standalone)
+}
+
+pub fn worktree_done_help_for(invocation: WorktreeInvocation) -> String {
+    let command = invocation.command();
     let options = format_help_table([
         (
             "-P, --path-only",
@@ -221,47 +304,70 @@ pub(crate) fn worktree_done_help() -> String {
         ("-h, --help", "Print help"),
     ]);
     format!(
-        "Integrate and remove the current temporary worktree\n\nUsage: zetta wt done [OPTIONS]\n\nThe current worktree must be a clean, attached wt/* branch created by zetta wt new.\nZetta rebases it onto the recorded source branch, verifies that the source worktree is\nstill attached to a clean worktree, fast-forwards that source worktree, removes the\ntemporary worktree and branch, and clears the source metadata. Submodule changes are\nincluded in the cleanliness checks. Worktrees whose current commit contains submodules\nare removed with Git's forced worktree cleanup after successful integration. If a rebase\nconflicts, resolve the files, stage the resolutions with git add, and rerun zetta wt done.\n\nOptions:\n{options}\n\nThe direct CLI does not change directory. zwt done changes into the source worktree\nafter success. The worktree destination uses the configured wt.root, or the sibling\n<repository>-worktrees default when wt.root is unset. For example, use git config --local\nwt.root ../project-worktrees. Run zetta wt rerere to enable Git recorded conflict-resolution\nhelpers."
+        "Integrate and remove the current temporary worktree\n\nUsage: {command} done [OPTIONS]\n\nThe current worktree must be a clean, attached wt/* branch created by {command} new.\nZetta rebases it onto the recorded source branch, verifies that the source worktree is\nstill attached to a clean worktree, fast-forwards that source worktree, removes the\ntemporary worktree and branch, and clears the source metadata. Submodule changes are\nincluded in the cleanliness checks. Worktrees whose current commit contains submodules\nare removed with Git's forced worktree cleanup after successful integration. If a rebase\nconflicts, resolve the files, stage the resolutions with git add, and rerun {command} done.\n\nOptions:\n{options}\n\nThe direct CLI does not change directory. zwt done changes into the source worktree\nafter success. The worktree destination uses the configured wt.root, or the sibling\n<repository>-worktrees default when wt.root is unset. For example, use git config --local\nwt.root ../project-worktrees. Run {command} rerere to enable Git recorded conflict-resolution\nhelpers.",
+        command = command,
     )
 }
 
-pub(crate) fn worktree_status_help() -> String {
-    concat!(
-        "Show Git worktree workflow state\n\n",
-        "Usage: zetta wt status\n\n",
-        "Prints repository root, current worktree, attached or detached branch state, recorded\n",
-        "source branch, resolved wt.root, whether the current HEAD contains submodules, the\n",
-        "detected submodule paths (including nested paths), and whether native copy-on-write\n",
-        "copying is available between the current worktree and wt.root. The root is marked\n",
-        "configured or default and status never creates it; a missing root is checked through\n",
-        "its nearest existing ancestor. For example, configure it with git config --local\n",
-        "wt.root ../project-worktrees; relative values resolve from the repository root. If it\n",
-        "is unset, Zetta uses sibling <repository>-worktrees.\n\n",
-        "Run zetta wt rerere before integrating worktrees to enable Git's recorded conflict\n",
-        "resolution helpers. The direct CLI never changes directory; generated zwt new and\n",
-        "zwt done wrappers enter worktrees only after successful operations."
+pub fn worktree_status_help() -> String {
+    worktree_status_help_for(WorktreeInvocation::Standalone)
+}
+
+pub fn worktree_status_help_for(invocation: WorktreeInvocation) -> String {
+    format!(
+        concat!(
+            "Show Git worktree workflow state\n\n",
+            "Usage: {} status\n\n",
+            "Prints repository root, current worktree, attached or detached branch state, recorded\n",
+            "source branch, resolved wt.root, whether the current HEAD contains submodules, the\n",
+            "detected submodule paths (including nested paths), and whether native copy-on-write\n",
+            "copying is available between the current worktree and wt.root. The root is marked\n",
+            "configured or default and status never creates it; a missing root is checked through\n",
+            "its nearest existing ancestor. For example, configure it with git config --local\n",
+            "wt.root ../project-worktrees; relative values resolve from the repository root. If it\n",
+            "is unset, Zetta uses sibling <repository>-worktrees.\n\n",
+            "Run {} rerere before integrating worktrees to enable Git's recorded conflict\n",
+            "resolution helpers. The direct CLI never changes directory; generated zwt new and\n",
+            "zwt done wrappers enter worktrees only after successful operations."
+        ),
+        invocation.command(),
+        invocation.command(),
     )
-    .to_owned()
 }
 
-pub(crate) fn worktree_rerere_help() -> String {
-    "Enable Git rerere for the worktree workflow\n\nUsage: zetta wt rerere\n\nRuns git config --global rerere.enabled true and git config --global\nrerere.autoupdate true. This is the recommended shortcut before using zetta wt done,\nespecially when the same conflicts recur. The optional wt.root setting does not affect\nrerere; configure it per repository with git config --local wt.root PATH, where a\nrelative PATH is resolved from the repository root and the default is sibling\n<repository>-worktrees. Generated shell integration provides zwt new and zwt done,\nwhich enter the resulting worktrees after successful operations."
-        .to_owned()
+pub fn worktree_rerere_help() -> String {
+    worktree_rerere_help_for(WorktreeInvocation::Standalone)
 }
 
-pub(crate) fn run(command: &WorktreeCommand) -> Result<()> {
-    run_at(command, None)
+pub fn worktree_rerere_help_for(invocation: WorktreeInvocation) -> String {
+    format!(
+        "Enable Git rerere for the worktree workflow\n\nUsage: {} rerere\n\nRuns git config --global rerere.enabled true and git config --global\nrerere.autoupdate true. This is the recommended shortcut before using {} done,\nespecially when the same conflicts recur. The optional wt.root setting does not affect\nrerere; configure it per repository with git config --local wt.root PATH, where a\nrelative PATH is resolved from the repository root and the default is sibling\n<repository>-worktrees. Generated shell integration provides zwt new and zwt done,\nwhich enter the resulting worktrees after successful operations.",
+        invocation.command(),
+        invocation.command(),
+    )
 }
 
-fn run_at(command: &WorktreeCommand, current_directory: Option<&Path>) -> Result<()> {
+pub fn run(command: &WorktreeCommand) -> Result<()> {
+    run_for(command, WorktreeInvocation::Standalone)
+}
+
+pub fn run_for(command: &WorktreeCommand, invocation: WorktreeInvocation) -> Result<()> {
+    run_at(command, None, invocation)
+}
+
+fn run_at(
+    command: &WorktreeCommand,
+    current_directory: Option<&Path>,
+    invocation: WorktreeInvocation,
+) -> Result<()> {
     match command {
         WorktreeCommand::New {
             name,
             path_only,
             copy_paths,
-        } => run_new(name, *path_only, copy_paths, current_directory),
-        WorktreeCommand::Done { path_only } => run_done(*path_only, current_directory),
-        WorktreeCommand::Status => run_status(current_directory),
+        } => run_new(name, *path_only, copy_paths, current_directory, invocation),
+        WorktreeCommand::Done { path_only } => run_done(*path_only, current_directory, invocation),
+        WorktreeCommand::Status => run_status(current_directory, invocation),
         WorktreeCommand::Rerere => run_rerere(current_directory),
     }
 }
@@ -331,24 +437,26 @@ fn run_new(
     path_only: bool,
     copy_paths: &[PathBuf],
     current_directory: Option<&Path>,
+    invocation: WorktreeInvocation,
 ) -> Result<()> {
+    let command = invocation.command();
     let repository = discover_repository(current_directory)?;
     anyhow::ensure!(
         !rebase_in_progress(&repository.current_worktree)?,
-        "zetta wt new cannot run while the current worktree has a rebase in progress"
+        "{command} new cannot run while the current worktree has a rebase in progress"
     );
-    let source_branch = repository
-        .current_branch
-        .as_deref()
-        .context("zetta wt new requires the current worktree to have an attached branch")?;
+    let source_branch = repository.current_branch.as_deref().with_context(|| {
+        format!("{command} new requires the current worktree to have an attached branch")
+    })?;
     anyhow::ensure!(
         !repository.current_entry.bare,
-        "zetta wt new requires a non-bare Git worktree"
+        "{command} new requires a non-bare Git worktree"
     );
 
     let branch = format!("{WORKTREE_BRANCH_PREFIX}{name}");
     validate_branch_name(&repository.current_worktree, &branch)?;
     ensure_branch_is_available(&repository.current_worktree, &branch)?;
+    #[cfg(feature = "recursive-submodules")]
     let source_submodules = gitlink_paths(&repository.current_worktree, source_branch)?;
     validate_copy_sources(&repository.current_worktree, copy_paths)?;
 
@@ -373,6 +481,7 @@ fn run_new(
     }
 
     let metadata_key = metadata_key(&branch);
+    #[cfg(feature = "recursive-submodules")]
     if !source_submodules.is_empty() {
         eprintln!("Initializing submodules...");
         if let Err(error) = initialize_submodules(
@@ -458,20 +567,25 @@ fn run_new(
     Ok(())
 }
 
-fn run_done(path_only: bool, current_directory: Option<&Path>) -> Result<()> {
+fn run_done(
+    path_only: bool,
+    current_directory: Option<&Path>,
+    invocation: WorktreeInvocation,
+) -> Result<()> {
+    let command = invocation.command();
     let repository = discover_repository(current_directory)?;
-    let current_branch = repository.current_branch.clone().context(
-        "zetta wt done requires an attached branch; detached worktrees cannot be integrated",
-    )?;
+    let current_branch = repository.current_branch.clone().context(format!(
+        "{command} done requires an attached branch; detached worktrees cannot be integrated"
+    ))?;
     anyhow::ensure!(
         current_branch.starts_with(WORKTREE_BRANCH_PREFIX)
             && current_branch.len() > WORKTREE_BRANCH_PREFIX.len(),
-        "zetta wt done only operates on wt/* worktree branches"
+        "{command} done only operates on wt/* worktree branches"
     );
     anyhow::ensure!(
         !repository.current_entry.bare
             && !same_path(&repository.current_worktree, &repository.root),
-        "zetta wt done must be run from a linked Git worktree, not the repository main worktree"
+        "{command} done must be run from a linked Git worktree, not the repository main worktree"
     );
 
     let metadata_key = metadata_key(&current_branch);
@@ -489,14 +603,14 @@ fn run_done(path_only: bool, current_directory: Option<&Path>) -> Result<()> {
 
     let rebasing = rebase_in_progress(&repository.current_worktree)?;
     if rebasing {
-        continue_rebase(&repository.current_worktree)?;
+        continue_rebase(&repository.current_worktree, invocation)?;
     } else {
         ensure_clean(&repository.current_worktree, "current worktree")?;
         let rebase_arguments = vec![os("rebase"), os(&source_branch)];
         let rebase_output = run_git(Some(&repository.current_worktree), &rebase_arguments)?;
         if !rebase_output.status.success() {
             if rebase_in_progress(&repository.current_worktree)? {
-                return Err(conflict_error(&rebase_output));
+                return Err(conflict_error(&rebase_output, invocation));
             }
             return Err(git_error("git rebase", &rebase_output));
         }
@@ -504,14 +618,17 @@ fn run_done(path_only: bool, current_directory: Option<&Path>) -> Result<()> {
 
     anyhow::ensure!(
         !rebase_in_progress(&repository.current_worktree)?,
-        "the worktree rebase is still in progress; resolve conflicts, stage the resolutions with git add, and rerun zetta wt done"
+        "the worktree rebase is still in progress; resolve conflicts, stage the resolutions with git add, and rerun {command} done"
     );
     ensure_clean(
         &repository.current_worktree,
         "current worktree after rebase",
     )?;
+    #[cfg(feature = "recursive-submodules")]
     let current_commit_has_submodules =
         !gitlink_paths(&repository.current_worktree, "HEAD")?.is_empty();
+    #[cfg(not(feature = "recursive-submodules"))]
+    let current_commit_has_submodules = false;
 
     // Re-read the source worktree after rebasing. This catches a source branch
     // switch or newly-created changes before the integration mutates it.
@@ -567,7 +684,7 @@ fn run_done(path_only: bool, current_directory: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-fn run_status(current_directory: Option<&Path>) -> Result<()> {
+fn run_status(current_directory: Option<&Path>, _invocation: WorktreeInvocation) -> Result<()> {
     let repository = discover_repository(current_directory)?;
     let resolved_root = resolved_worktree_root(&repository.current_worktree, &repository.root)?;
     print!("{}", status_report(&repository, &resolved_root)?);
@@ -592,7 +709,10 @@ fn status_report(repository: &Repository, resolved_root: &ResolvedRoot) -> Resul
     } else {
         "default"
     };
+    #[cfg(feature = "recursive-submodules")]
     let submodule_paths = all_gitlink_paths(&repository.current_worktree, "HEAD")?;
+    #[cfg(not(feature = "recursive-submodules"))]
+    let submodule_paths = Vec::<PathBuf>::new();
     let cow_status = if cow_copy_supported(&repository.current_worktree, &resolved_root.path) {
         "available"
     } else {
@@ -866,6 +986,7 @@ fn remove_empty_directories(directories: &[PathBuf]) {
     }
 }
 
+#[cfg(feature = "recursive-submodules")]
 fn gitlink_paths(repository: &Path, treeish: &str) -> Result<Vec<PathBuf>> {
     Ok(gitlink_entries(repository, treeish)?
         .into_iter()
@@ -873,11 +994,13 @@ fn gitlink_paths(repository: &Path, treeish: &str) -> Result<Vec<PathBuf>> {
         .collect())
 }
 
+#[cfg(feature = "recursive-submodules")]
 struct GitlinkEntry {
     path: PathBuf,
     commit: String,
 }
 
+#[cfg(feature = "recursive-submodules")]
 fn gitlink_entries(repository: &Path, treeish: &str) -> Result<Vec<GitlinkEntry>> {
     let arguments = vec![
         os("ls-tree"),
@@ -896,12 +1019,14 @@ fn gitlink_entries(repository: &Path, treeish: &str) -> Result<Vec<GitlinkEntry>
     parse_gitlink_entries(&output.stdout)
 }
 
+#[cfg(feature = "recursive-submodules")]
 fn all_gitlink_paths(repository: &Path, treeish: &str) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
     collect_gitlink_paths(repository, treeish, Path::new(""), &mut paths)?;
     Ok(paths)
 }
 
+#[cfg(feature = "recursive-submodules")]
 fn collect_gitlink_paths(
     repository: &Path,
     treeish: &str,
@@ -920,7 +1045,7 @@ fn collect_gitlink_paths(
     Ok(())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, unix, feature = "recursive-submodules"))]
 fn parse_gitlink_paths(output: &[u8]) -> Result<Vec<PathBuf>> {
     Ok(parse_gitlink_entries(output)?
         .into_iter()
@@ -928,6 +1053,7 @@ fn parse_gitlink_paths(output: &[u8]) -> Result<Vec<PathBuf>> {
         .collect())
 }
 
+#[cfg(feature = "recursive-submodules")]
 fn parse_gitlink_entries(output: &[u8]) -> Result<Vec<GitlinkEntry>> {
     let mut paths = Vec::new();
     for record in output.split(|byte| *byte == 0) {
@@ -968,6 +1094,7 @@ fn parse_gitlink_entries(output: &[u8]) -> Result<Vec<GitlinkEntry>> {
     Ok(paths)
 }
 
+#[cfg(feature = "recursive-submodules")]
 fn git_path_from_bytes(path: &[u8]) -> PathBuf {
     #[cfg(unix)]
     {
@@ -979,6 +1106,7 @@ fn git_path_from_bytes(path: &[u8]) -> PathBuf {
     }
 }
 
+#[cfg(feature = "recursive-submodules")]
 fn initialize_submodules(
     destination: &Path,
     source_worktree: &Path,
@@ -990,6 +1118,7 @@ fn initialize_submodules(
     Ok(())
 }
 
+#[cfg(feature = "recursive-submodules")]
 fn initialize_submodule(
     destination_parent: &Path,
     source_parent: &Path,
@@ -1025,6 +1154,7 @@ fn initialize_submodule(
     Ok(())
 }
 
+#[cfg(feature = "recursive-submodules")]
 fn is_valid_reference_repository(path: &Path) -> bool {
     if !path.is_dir() {
         return false;
@@ -1189,7 +1319,7 @@ fn rebase_marker_paths(path: &Path, marker: &str) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-fn continue_rebase(path: &Path) -> Result<()> {
+fn continue_rebase(path: &Path, invocation: WorktreeInvocation) -> Result<()> {
     for _ in 0..1024 {
         if !rebase_in_progress(path)? {
             return Ok(());
@@ -1198,7 +1328,7 @@ fn continue_rebase(path: &Path) -> Result<()> {
         let output = run_git_with_editor(path, &arguments)?;
         if !output.status.success() {
             if rebase_in_progress(path)? {
-                return Err(conflict_error(&output));
+                return Err(conflict_error(&output, invocation));
             }
             return Err(git_error("git rebase --continue", &output));
         }
@@ -1206,10 +1336,11 @@ fn continue_rebase(path: &Path) -> Result<()> {
     anyhow::bail!("git rebase did not finish after 1024 continuation attempts")
 }
 
-fn conflict_error(output: &Output) -> anyhow::Error {
+fn conflict_error(output: &Output, invocation: WorktreeInvocation) -> anyhow::Error {
     anyhow::anyhow!(
-        "rebase stopped with conflicts: {}. Resolve the conflicts, stage the resolutions with git add, and rerun zetta wt done.",
-        git_diagnostic(output)
+        "rebase stopped with conflicts: {}. Resolve the conflicts, stage the resolutions with git add, and rerun {} done.",
+        git_diagnostic(output),
+        invocation.command()
     )
 }
 

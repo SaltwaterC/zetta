@@ -11,6 +11,15 @@ if /i "%~1"=="off" exit /b 0
 set "FEATURES=%FEATURES%,%~2"
 exit /b 0
 
+:append_worktree_targets
+if /i "%~1"=="0" exit /b 0
+if /i "%~1"=="false" exit /b 0
+if /i "%~1"=="no" exit /b 0
+if /i "%~1"=="off" exit /b 0
+set "BINARIES=!BINARIES! --bin zwt"
+set "VERIFY_ARGS=!VERIFY_ARGS! -WorktreeBinaryPath !TARGET_DIR!\zwt.exe"
+exit /b 0
+
 :main
 if not defined CARGO set "CARGO=cargo"
 if not defined SERIAL set "SERIAL=1"
@@ -22,6 +31,7 @@ if not defined CLIPBOARD set "CLIPBOARD=1"
 if not defined NOTIFY set "NOTIFY=1"
 if not defined SYNTAX_HIGHLIGHTING set "SYNTAX_HIGHLIGHTING=1"
 if not defined SESSION_PERSISTENCE set "SESSION_PERSISTENCE=1"
+if not defined WORKTREE set "WORKTREE=1"
 
 set "FEATURES=windows-gui"
 set "PROFILE_ARGS="
@@ -43,9 +53,14 @@ call :append_feature "%CLIPBOARD%" clipboard
 call :append_feature "%NOTIFY%" notifications
 call :append_feature "%SYNTAX_HIGHLIGHTING%" syntax-highlighting
 call :append_feature "%SESSION_PERSISTENCE%" session-persistence
+call :append_feature "%WORKTREE%" worktree
 
-call scripts\cargo-windows.cmd build %PROFILE_ARGS% --jobs %CARGO_BUILD_JOBS% --locked --no-default-features --features %FEATURES% --bin zetta --bin zetta-gui --bin zmux --bin zmux-pty
+set "BINARIES=--bin zetta --bin zetta-gui --bin zmux --bin zmux-pty"
+set "VERIFY_ARGS="
+call :append_worktree_targets "%WORKTREE%"
+
+call scripts\cargo-windows.cmd build %PROFILE_ARGS% --jobs %CARGO_BUILD_JOBS% --locked --no-default-features --features %FEATURES% !BINARIES!
 if errorlevel 1 exit /b !errorlevel!
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\verify-windows-binary.ps1 -ConsoleBinaryPath !TARGET_DIR!\zetta.exe -GuiBinaryPath !TARGET_DIR!\zetta-gui.exe -MuxBinaryPath !TARGET_DIR!\zmux.exe -PtyBinaryPath !TARGET_DIR!\zmux-pty.exe
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\verify-windows-binary.ps1 -ConsoleBinaryPath !TARGET_DIR!\zetta.exe -GuiBinaryPath !TARGET_DIR!\zetta-gui.exe -MuxBinaryPath !TARGET_DIR!\zmux.exe -PtyBinaryPath !TARGET_DIR!\zmux-pty.exe !VERIFY_ARGS!
 exit /b !errorlevel!

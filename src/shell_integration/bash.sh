@@ -26,6 +26,7 @@ fi
 
 zvi() { zetta vi "$@"; }
 
+# ZETTA_WORKTREE_INTEGRATION_BEGIN
 zwt() {
     case $1 in
         new)
@@ -33,7 +34,7 @@ zwt() {
             local -a operation_args=("${@:2}")
             for path_only_arg in "${operation_args[@]}"; do
                 if [[ $path_only_arg == --help || $path_only_arg == -h ]]; then
-                    zetta wt new "${operation_args[@]}"
+                    command zwt new "${operation_args[@]}"
                     return
                 fi
                 if [[ $path_only_arg == --path-only || $path_only_arg == -P ]]; then
@@ -43,9 +44,9 @@ zwt() {
                 path_only_arg=''
             done
             if [[ $path_only_arg == 1 ]]; then
-                path=$(zetta wt new "${operation_args[@]}") || return
+                path=$(command zwt new "${operation_args[@]}") || return
             else
-                path=$(zetta wt new --path-only "${operation_args[@]}") || return
+                path=$(command zwt new --path-only "${operation_args[@]}") || return
             fi
             [[ -n $path ]] || return 1
             builtin cd -- "$path"
@@ -55,7 +56,7 @@ zwt() {
             local -a operation_args=("${@:2}")
             for path_only_arg in "${operation_args[@]}"; do
                 if [[ $path_only_arg == --help || $path_only_arg == -h ]]; then
-                    zetta wt done "${operation_args[@]}"
+                    command zwt done "${operation_args[@]}"
                     return
                 fi
                 if [[ $path_only_arg == --path-only || $path_only_arg == -P ]]; then
@@ -65,18 +66,19 @@ zwt() {
                 path_only_arg=''
             done
             if [[ $path_only_arg == 1 ]]; then
-                path=$(zetta wt done "${operation_args[@]}") || return
+                path=$(command zwt done "${operation_args[@]}") || return
             else
-                path=$(zetta wt done --path-only "${operation_args[@]}") || return
+                path=$(command zwt done --path-only "${operation_args[@]}") || return
             fi
             [[ -n $path ]] || return 1
             builtin cd -- "$path"
             ;;
         *)
-            zetta wt "$@"
+            command zwt "$@"
             ;;
     esac
 }
+# ZETTA_WORKTREE_INTEGRATION_END
 
 _zetta_option_used() {
     local option=$1 index
@@ -90,7 +92,7 @@ _zetta_compgen() {
     local options=$1 repeatable=${2:-0} candidate
     local -a available=()
     for candidate in $options; do
-        if [[ $candidate != -* ]] || ! _zetta_option_used "$candidate" || [[ $repeatable == 1 && $candidate == --copy ]]; then
+        if [[ $candidate != -* ]] || ! _zetta_option_used "$candidate" || ZETTA_WORKTREE_BASH_REPEATABLE_COPY; then
             available+=("$candidate")
         fi
     done
@@ -251,6 +253,7 @@ _zetta_complete() {
             COMPREPLY=()
             return
             ;;
+# ZETTA_WORKTREE_INTEGRATION_BEGIN
         --copy)
             if [[ $command == wt && ${COMP_WORDS[2]} == new ]]; then
                 COMPREPLY=( $(compgen -f -- "$current") )
@@ -259,6 +262,7 @@ _zetta_complete() {
             fi
             return
             ;;
+# ZETTA_WORKTREE_INTEGRATION_END
         --profile)
             _zetta_complete_profiles
             return
@@ -416,7 +420,7 @@ _zetta_complete() {
             return
             ;;
         -c)
-            if [[ $command == wt && ${COMP_WORDS[2]} == new ]]; then
+            if ZETTA_WORKTREE_BASH_COPY_CONDITION; then
                 COMPREPLY=( $(compgen -f -- "$current") )
             elif [[ $command == overlay ]]; then
                 _zetta_compgen 'ZETTA_OVERLAY_COLORS'
@@ -480,7 +484,7 @@ _zetta_complete() {
     esac
 
     if (( COMP_CWORD == 1 )); then
-        _zetta_compgen 'benchmark terminal-size mux pane profile project edit vi init serial http tftp notify attention copy paste splits tabicon theme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme --no-mux --command'
+        _zetta_compgen 'benchmark terminal-size mux pane profile project edit vi init serial http tftp notify attention copy paste splits tabicon theme overlay ZETTA_WORKTREE_ROOT_COMMAND --help --version --config --keymap --profile --split --replace-pane --theme --no-mux --command'
         return
     fi
 
@@ -700,6 +704,7 @@ _zetta_complete() {
         overlay)
             _zetta_compgen '--text --size --opacity --color --reset --help'
             ;;
+# ZETTA_WORKTREE_INTEGRATION_BEGIN
         wt)
             if (( COMP_CWORD == 2 )); then
                 _zetta_compgen 'new done status rerere --help'
@@ -713,9 +718,11 @@ _zetta_complete() {
                 _zetta_compgen '--help'
             fi
             ;;
+# ZETTA_WORKTREE_INTEGRATION_END
     esac
 }
 
+# ZETTA_WORKTREE_INTEGRATION_BEGIN
 _zetta_complete_zwt() {
     local saved_words=("${COMP_WORDS[@]}")
     local saved_cword=$COMP_CWORD
@@ -725,6 +732,7 @@ _zetta_complete_zwt() {
     COMP_WORDS=("${saved_words[@]}")
     COMP_CWORD=$saved_cword
 }
+# ZETTA_WORKTREE_INTEGRATION_END
 
 _zetta_complete_zmux() {
     local _zetta_mux_completion_command=zmux
@@ -868,7 +876,9 @@ zntfy() { zetta notify "$@"; }
 zcopy() { zetta copy "$@"; }
 zpaste() { zetta paste "$@"; }
 complete -F _zetta_complete zetta
+# ZETTA_WORKTREE_INTEGRATION_BEGIN
 complete -F _zetta_complete_zwt zwt
+# ZETTA_WORKTREE_INTEGRATION_END
 complete -F _zetta_complete_zmux zmux
 complete -F _zetta_complete zvi
 complete -F _ztftp_complete ztftp

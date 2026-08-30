@@ -22,6 +22,10 @@ make install RELEASE=1
 GNU Make reserves options beginning with `--`, so `RELEASE=1` is the portable
 Makefile equivalent of Cargo's `--release` flag.
 
+The default build includes the standalone `zwt` Git worktree command and the
+`zetta wt` compatibility route. Set `WORKTREE=0` on both build and install
+commands to omit them.
+
 ## Linux build requirements
 
 Linux defaults to Wayland. Build with `make build X11=1` to include the X11
@@ -118,11 +122,12 @@ make install
 ```
 
 This installs `~/Applications/Zetta.app`, including the Zetta icon and the
-development binary, and creates `~/.local/bin/zetta` as a command-line launcher
-for the bundled executable. It also adds `~/.local/bin` to the installing
-user's shell startup file so new shells can invoke `zetta` directly. Native
-panes prepend the running executable's directory to `PATH` as before. `make
-uninstall` removes the application bundle, CLI entry point, and PATH entry.
+development binaries, and creates `~/.local/bin/zetta` and `~/.local/bin/zwt`
+as command-line launchers for the bundled executables. It also adds
+`~/.local/bin` to the installing user's shell startup file so new shells can
+invoke both commands directly. Native panes prepend the running executable's
+directory to `PATH` as before. `make uninstall` removes the application
+bundle, CLI entry points, and PATH entry.
 
 For a system-wide installation, run `sudo make install PREFIX=/usr/local
 MAC_APPLICATIONS_DIR=/Applications`.
@@ -143,6 +148,7 @@ The build produces the following runtime files in `target\debug`:
 
 - `zetta.exe`, the console executable
 - `zetta-gui.exe`, the no-console launcher used by the Start Menu shortcut
+- `zwt.exe`, the standalone Git worktree executable
 - `conpty.dll`
 - `OpenConsole.exe`
 
@@ -159,8 +165,8 @@ For an optimized release build, use `make build RELEASE=1` and
 
 This copies the runtime to `%LOCALAPPDATA%\Programs\Zetta`, adds that directory
 to the user `PATH`, and creates a Start Menu shortcut. New console sessions can
-then run `zetta`. The shortcut launches `zetta-gui.exe`, which starts the
-console-native executable without opening an extra console window.
+then run `zetta` and `zwt`. The shortcut launches `zetta-gui.exe`, which starts
+the console-native executable without opening an extra console window.
 
 Zetta can be reinstalled while it is running. Windows keeps the previous
 runtime under names such as `zetta.old.exe` until its processes exit. Repeating
@@ -190,7 +196,8 @@ make install
 ```
 
 The Linux user-local install stores the application in `~/.local/zetta.app`,
-links `~/.local/bin/zetta` to its binary, and installs the desktop entry under
+links `~/.local/bin/zetta` and `~/.local/bin/zwt` to their binaries, and
+installs the desktop entry under
 `~/.local/share/applications`. The desktop entry uses the installed binary and
 icon paths directly, so it works even when the desktop session does not have
 `~/.local/bin` in its `PATH`. The installer also adds `~/.local/bin` to
@@ -212,9 +219,10 @@ automatically. Unsupported or unrecognised desktop sessions still use the XDG
 preference when it can be configured.
 
 To build a restricted binary, pass build flags to both the build and install
-steps. `SERIAL`, `HTTP`, `TFTP`, `TFTP_SERVER`, `TFTP_CLIENT`, `NOTIFY`, and
-`CLIPBOARD` accept `0`, `false`, `no`, and `off`. `TFTP=0` disables both TFTP
-components; the server and client switches can be used independently:
+steps. `SERIAL`, `HTTP`, `TFTP`, `TFTP_SERVER`, `TFTP_CLIENT`, `NOTIFY`,
+`CLIPBOARD`, and `WORKTREE` accept `0`, `false`, `no`, and `off`. `TFTP=0`
+disables both TFTP components; the server and client switches can be used
+independently:
 
 ```sh
 make build SERIAL=0 HTTP=0 TFTP=0 NOTIFY=0 CLIPBOARD=0
@@ -225,6 +233,10 @@ make build TFTP_SERVER=0
 
 # Include X11 support alongside the default Wayland backend.
 make build X11=1
+
+# Omit both the in-process route and the standalone zwt binary.
+make build WORKTREE=0
+make install WORKTREE=0
 ```
 
 Disabled tools are omitted from the command palette, default keybindings, and

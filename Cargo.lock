@@ -11833,6 +11833,7 @@ dependencies = [
  "zed_actions",
  "zeroize",
  "zmux",
+ "zwt",
 ]
 
 [[package]]
@@ -11955,4 +11956,17 @@ dependencies = [
  "serde",
  "syn",
  "winnow 1.0.4",
+]
+
+[[package]]
+name = "zwt"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "serde",
+ "serde_json",
+ "uds_windows",
+ "windows 0.61.3",
+ "zmux",
 ]

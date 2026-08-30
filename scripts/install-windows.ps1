@@ -13,6 +13,8 @@ param(
     [string]$SourceGuiBinary,
     [string]$SourceMuxBinary,
     [string]$SourcePtyBinary,
+    [string]$SourceZwtBinary,
+    [switch]$WorktreeEnabled,
     [string]$InstallDirectory,
     [string]$ShortcutPath
 )
@@ -39,6 +41,12 @@ if (-not $SourceMuxBinary) {
 if (-not $SourcePtyBinary) {
     $SourcePtyBinary = Join-Path (Split-Path -Parent $SourceBinary) "zmux-pty.exe"
 }
+if ($SourceZwtBinary) {
+    $WorktreeEnabled = $true
+}
+if ($WorktreeEnabled -and -not $SourceZwtBinary) {
+    $SourceZwtBinary = Join-Path (Split-Path -Parent $SourceBinary) "zwt.exe"
+}
 if (-not $InstallDirectory) {
     $InstallDirectory = Join-Path $env:LOCALAPPDATA "Programs\Zetta"
 }
@@ -50,6 +58,7 @@ $installedBinary = Join-Path $InstallDirectory "zetta.exe"
 $installedGuiBinary = Join-Path $InstallDirectory "zetta-gui.exe"
 $installedMuxBinary = Join-Path $InstallDirectory "zmux.exe"
 $installedPtyBinary = Join-Path $InstallDirectory "zmux-pty.exe"
+$installedZwtBinary = Join-Path $InstallDirectory "zwt.exe"
 $runtimeFileNames = @("conpty.dll", "OpenConsole.exe")
 $sourceDirectory = Split-Path -Parent $SourceBinary
 $pathMarker = Join-Path $InstallDirectory ".zetta-path-managed"
@@ -68,6 +77,9 @@ function Get-InstallFiles {
         [pscustomobject]@{ Source = $SourceMuxBinary; Destination = $installedMuxBinary },
         [pscustomobject]@{ Source = $SourcePtyBinary; Destination = $installedPtyBinary }
     )
+    if ($WorktreeEnabled) {
+        $files += [pscustomobject]@{ Source = $SourceZwtBinary; Destination = $installedZwtBinary }
+    }
     foreach ($fileName in $runtimeFileNames) {
         $files += [pscustomobject]@{
             Source = Join-Path $sourceDirectory $fileName
@@ -75,6 +87,26 @@ function Get-InstallFiles {
         }
     }
     return $files
+}
+
+function Remove-DisabledWorktreeFiles {
+    if ($WorktreeEnabled) {
+        return
+    }
+    foreach ($path in @(
+        $installedZwtBinary,
+        (Get-VersionedPath $installedZwtBinary "new"),
+        (Get-VersionedPath $installedZwtBinary "old")
+    )) {
+        if (Test-Path -LiteralPath $path) {
+            try {
+                Remove-Item -LiteralPath $path -Force
+                Write-Host "Removed $path"
+            } catch {
+                Write-Warning "Could not remove disabled worktree executable ${path}: $_"
+            }
+        }
+    }
 }
 
 function Test-InstallFilesCurrent($InstallFiles) {
@@ -145,6 +177,7 @@ function Install-Binary {
             throw "Required Windows file not found at $($file.Source). Run 'make build' first."
         }
     }
+    Remove-DisabledWorktreeFiles
 
     if (Test-InstallFilesCurrent $installFiles) {
         Add-InstallDirectoryToUserPath
@@ -280,7 +313,11 @@ function Unregister-WindowsIntegration {
 function Uninstall-Binary {
     Unregister-WindowsIntegration
     Remove-InstallDirectoryFromUserPath
-    foreach ($file in @(Get-InstallFiles)) {
+    $filesToRemove = @(Get-InstallFiles)
+    if (-not $WorktreeEnabled) {
+        $filesToRemove += [pscustomobject]@{ Source = $null; Destination = $installedZwtBinary }
+    }
+    foreach ($file in $filesToRemove) {
         foreach ($installedFile in @(
             $file.Destination,
             (Get-VersionedPath $file.Destination "new"),

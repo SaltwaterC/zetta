@@ -26,9 +26,14 @@ fn bash_command() -> std::process::Command {
 
 #[test]
 fn supported_shells_generate_completion_and_tftp_shortcut() {
-    assert!(shell_integration_help().contains("--replace-pane"));
-    assert!(shell_integration_help().contains("--command"));
-    assert!(shell_integration_help().contains("zetta pane"));
+    let help = shell_integration_help();
+    assert!(help.contains("--replace-pane"));
+    assert!(help.contains("--command"));
+    assert!(help.contains("zetta pane"));
+    #[cfg(feature = "worktree")]
+    assert!(help.contains("standalone Git worktree command"));
+    #[cfg(not(feature = "worktree"))]
+    assert!(!help.contains("Git worktree command"));
     for shell in [
         ShellIntegration::Bash,
         ShellIntegration::Fish,
@@ -52,14 +57,41 @@ fn supported_shells_generate_completion_and_tftp_shortcut() {
         assert!(script.contains("--pane"));
         assert!(script.contains("replace-pane"));
         assert!(script.contains("--command"));
-        assert!(script.contains("zwt"));
-        assert!(script.contains("wt"));
+        #[cfg(feature = "worktree")]
+        {
+            assert!(script.contains("zwt"));
+            assert!(script.contains("wt"));
+        }
         assert!(script.contains("zmux"));
+        #[cfg(feature = "worktree")]
         for operation in ["new", "done", "status", "rerere"] {
             assert!(script.contains(operation));
         }
-        assert!(script.contains("--path-only"));
-        assert!(script.contains("--copy"));
+        #[cfg(feature = "worktree")]
+        {
+            assert!(script.contains("--path-only"));
+            assert!(script.contains("--copy"));
+        }
+    }
+}
+
+#[cfg(not(feature = "worktree"))]
+#[test]
+fn generated_shell_scripts_omit_worktree_integration_when_disabled() {
+    for shell in [
+        ShellIntegration::Bash,
+        ShellIntegration::Fish,
+        ShellIntegration::PowerShell,
+        ShellIntegration::Zsh,
+    ] {
+        let script = shell.script();
+        assert!(!script.contains("zwt"), "{shell:?} emitted zwt integration");
+        assert!(
+            !script.contains("ZETTA_WORKTREE"),
+            "{shell:?} emitted a worktree template marker"
+        );
+        assert!(!script.contains("--path-only"));
+        assert!(!script.contains("--copy"));
     }
 }
 
@@ -177,8 +209,11 @@ fn vi_integration_is_conditional_and_has_cli_completion() {
     assert!(zsh.contains("compdef _zetta vi"));
     assert!(zsh.contains("function zvi { zetta vi \"$@\"; }"));
     assert!(zsh.contains("ZETTA_HOST_EXECUTABLE"));
-    assert!(zsh.contains("local worktree_path path_only_arg"));
-    assert!(!zsh.contains("local path path_only_arg"));
+    #[cfg(feature = "worktree")]
+    {
+        assert!(zsh.contains("local worktree_path path_only_arg"));
+        assert!(!zsh.contains("local path path_only_arg"));
+    }
     assert!(zsh.contains("compdef _zetta zvi"));
     assert!(zsh.contains("_zetta_option_unused"));
     assert!(zsh.contains("_zetta_options()"));
@@ -279,6 +314,7 @@ fn bash_color_completion_offers_named_presets_for_long_and_short_flags() {
     }
 }
 
+#[cfg(feature = "worktree")]
 #[test]
 fn bash_worktree_completion_offers_operations_and_long_worktree_options() {
     use std::io::Write as _;
@@ -454,7 +490,7 @@ fn zsh_and_powershell_wire_up_zmux_completion() {
     assert!(powershell.contains("if ($commandName -eq 'zmux')"));
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "worktree"))]
 #[test]
 fn bash_zwt_changes_directory_for_nested_paths_with_spaces() {
     use std::{io::Write as _, os::unix::fs::PermissionsExt as _, process::Stdio};
@@ -468,15 +504,15 @@ fn bash_zwt_changes_directory_for_nested_paths_with_spaces() {
     std::fs::create_dir_all(&new_path).unwrap();
     std::fs::create_dir_all(&done_path).unwrap();
 
-    let fake_zetta = temporary.path().join("zetta");
+    let fake_zwt = temporary.path().join("zwt");
     std::fs::write(
-        &fake_zetta,
-        "#!/bin/sh\ncase \"$2\" in\n  new) printf '%s\\n' \"$ZETTA_TEST_NEW\" ;;\n  done) printf '%s\\n' \"$ZETTA_TEST_DONE\" ;;\n  *) exit 0 ;;\nesac\n",
+        &fake_zwt,
+        "#!/bin/sh\ncase \"$1\" in\n  new) printf '%s\\n' \"$ZETTA_TEST_NEW\" ;;\n  done) printf '%s\\n' \"$ZETTA_TEST_DONE\" ;;\n  *) exit 0 ;;\nesac\n",
     )
     .unwrap();
-    let mut permissions = std::fs::metadata(&fake_zetta).unwrap().permissions();
+    let mut permissions = std::fs::metadata(&fake_zwt).unwrap().permissions();
     permissions.set_mode(0o755);
-    std::fs::set_permissions(&fake_zetta, permissions).unwrap();
+    std::fs::set_permissions(&fake_zwt, permissions).unwrap();
 
     let mut path = std::env::var_os("PATH").unwrap_or_default();
     let mut paths = std::env::split_paths(&path).collect::<Vec<_>>();
@@ -525,6 +561,7 @@ fn bash_zwt_changes_directory_for_nested_paths_with_spaces() {
     );
 }
 
+#[cfg(feature = "worktree")]
 #[test]
 fn worktree_wrappers_pass_help_through_without_capturing_it_as_a_path() {
     let bash = ShellIntegration::Bash.script();
@@ -542,7 +579,7 @@ fn worktree_wrappers_pass_help_through_without_capturing_it_as_a_path() {
     );
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "worktree"))]
 #[test]
 fn posix_zwt_help_does_not_change_directory_or_inject_path_only() {
     use std::{
@@ -554,18 +591,18 @@ fn posix_zwt_help_does_not_change_directory_or_inject_path_only() {
     let _bash_test_lock = lock_bash_tests();
     let temporary = tempfile::tempdir().unwrap();
     let start = temporary.path().join("start directory");
-    let args_file = temporary.path().join("zetta arguments");
+    let args_file = temporary.path().join("zwt arguments");
     std::fs::create_dir_all(&start).unwrap();
 
-    let fake_zetta = temporary.path().join("zetta");
+    let fake_zwt = temporary.path().join("zwt");
     std::fs::write(
-        &fake_zetta,
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ZETTA_TEST_ARGS\"\nprintf '%s\\n' 'Create a Git worktree for a temporary wt/NAME branch' 'Usage: zetta wt new [OPTIONS] NAME'\n",
+        &fake_zwt,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ZETTA_TEST_ARGS\"\nprintf '%s\\n' 'Create a Git worktree for a temporary wt/NAME branch' 'Usage: zwt new [OPTIONS] NAME'\n",
     )
     .unwrap();
-    let mut permissions = std::fs::metadata(&fake_zetta).unwrap().permissions();
+    let mut permissions = std::fs::metadata(&fake_zwt).unwrap().permissions();
     permissions.set_mode(0o755);
-    std::fs::set_permissions(&fake_zetta, permissions).unwrap();
+    std::fs::set_permissions(&fake_zwt, permissions).unwrap();
 
     let mut path = std::env::var_os("PATH").unwrap_or_default();
     let mut paths = std::env::split_paths(&path).collect::<Vec<_>>();
@@ -634,7 +671,7 @@ fn posix_zwt_help_does_not_change_directory_or_inject_path_only() {
         );
         assert_eq!(
             std::fs::read_to_string(&args_file).unwrap(),
-            "wt\nnew\n--help\n",
+            "new\n--help\n",
             "{shell} zwt help wrapper changed the CLI arguments"
         );
     }
@@ -1674,6 +1711,7 @@ fn generated_scripts_include_root_flags_and_configured_profiles() {
         assert!(script.contains("zetta splits"));
         assert!(script.contains("project"));
         assert!(script.contains("zetta project list"));
+        #[cfg(feature = "worktree")]
         assert!(script.contains("--path"));
         assert!(!script.contains("quarters four-vertical three-left three-right"));
     }
@@ -1699,6 +1737,7 @@ fn generated_scripts_offer_the_shared_overlay_colour_catalogue() {
     }
 }
 
+#[cfg(feature = "worktree")]
 #[test]
 fn generated_scripts_only_offer_long_form_flags() {
     for shell in [

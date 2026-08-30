@@ -100,6 +100,8 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         "Clipboard access",
         #[cfg(feature = "session-persistence")]
         "Encrypted session retention",
+        #[cfg(feature = "worktree")]
+        "Git worktree workflow",
     ];
 
     let mut usage = vec![
@@ -108,6 +110,7 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         "zetta benchmark output [OPTIONS]",
         "zetta terminal-size [--json | --resize [--columns COLUMNS] [--rows ROWS]]",
         "zetta mux [COMMAND]",
+        #[cfg(feature = "worktree")]
         "zetta wt <COMMAND>",
         "zetta mux reconnect SESSION_ID",
         "zetta mux resume SESSION [-i PATH]",
@@ -161,6 +164,7 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
             "mux",
             "Control, list, reconnect, and resume background sessions",
         ),
+        #[cfg(feature = "worktree")]
         ("wt", "Create and integrate Git worktrees"),
         ("splits", "List configured pane split templates"),
         ("tabicon", "Set the active tab's icon override"),

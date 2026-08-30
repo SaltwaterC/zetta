@@ -1,5 +1,5 @@
 use super::*;
-#[cfg(unix)]
+#[cfg(all(unix, feature = "recursive-submodules"))]
 use std::os::unix::ffi::OsStrExt;
 use std::{
     ffi::OsString,
@@ -122,6 +122,7 @@ impl GitFixture {
         self.worktree_path(name)
     }
 
+    #[cfg(feature = "recursive-submodules")]
     fn create_repository(&self, name: &str) -> PathBuf {
         let repository = self._tempdir.path().join(name);
         fs::create_dir(&repository).unwrap();
@@ -135,6 +136,7 @@ impl GitFixture {
         repository
     }
 
+    #[cfg(feature = "recursive-submodules")]
     fn add_submodule(&self, parent: &Path, repository: &Path, path: &str) -> String {
         let url = repository.to_str().unwrap();
         let output = self.git_output(
@@ -170,6 +172,7 @@ impl GitFixture {
             .to_owned()
     }
 
+    #[cfg(feature = "recursive-submodules")]
     fn initialize_submodule(&self, parent: &Path, path: &str) {
         let output = self.git_output(
             parent,
@@ -190,6 +193,7 @@ impl GitFixture {
         );
     }
 
+    #[cfg(feature = "recursive-submodules")]
     fn allow_file_protocol(&self) {
         self.git(
             &self.root,
@@ -197,6 +201,7 @@ impl GitFixture {
         );
     }
 
+    #[cfg(feature = "recursive-submodules")]
     fn remove_source_submodule(&self, path: &str) {
         let submodule = self.root.join(path);
         if submodule.exists() {
@@ -219,6 +224,7 @@ impl GitFixture {
         }
     }
 
+    #[cfg(feature = "recursive-submodules")]
     fn git_dir(&self, repository: &Path) -> PathBuf {
         let git_dir = PathBuf::from(self.git(repository, &["rev-parse", "--git-dir"]).trim());
         if git_dir.is_absolute() {
@@ -228,6 +234,7 @@ impl GitFixture {
         }
     }
 
+    #[cfg(feature = "recursive-submodules")]
     fn uses_reference(&self, repository: &Path, reference: &Path) -> bool {
         let alternates = self.git_dir(repository).join("objects/info/alternates");
         let Ok(contents) = fs::read_to_string(alternates) else {
@@ -371,7 +378,7 @@ fn rejects_invalid_worktree_arguments() {
 #[test]
 fn worktree_help_covers_the_workflow() {
     assert!(worktree_help().contains("wt.root"));
-    assert!(worktree_help().contains("zetta wt rerere"));
+    assert!(worktree_help().contains("zwt rerere"));
     assert!(worktree_new_help().contains("--copy"));
     assert!(worktree_new_help().contains("--path-only"));
     assert!(worktree_new_help().contains("phase progress"));
@@ -383,6 +390,20 @@ fn worktree_help_covers_the_workflow() {
 }
 
 #[test]
+fn help_and_diagnostics_use_the_selected_invocation_name() {
+    assert!(worktree_help_for(WorktreeInvocation::Standalone).contains("Usage: zwt <COMMAND>"));
+    assert!(worktree_help_for(WorktreeInvocation::Zetta).contains("Usage: zetta wt <COMMAND>"));
+    assert_eq!(WorktreeInvocation::Standalone.command(), "zwt");
+    assert_eq!(WorktreeInvocation::Zetta.command(), "zetta wt");
+    assert!(
+        parse_worktree_args_for(&[OsString::from("unknown")], WorktreeInvocation::Zetta,)
+            .unwrap_err()
+            .to_string()
+            .contains("run zetta wt --help")
+    );
+}
+
+#[test]
 fn originating_tab_target_requires_positive_numeric_ids() {
     assert_eq!(parse_originating_tab_target("123", "456"), Some((123, 456)));
     assert_eq!(parse_originating_tab_target("0", "456"), None);
@@ -390,7 +411,7 @@ fn originating_tab_target_requires_positive_numeric_ids() {
     assert_eq!(parse_originating_tab_target("not-a-pid", "456"), None);
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "recursive-submodules"))]
 #[test]
 fn parses_gitlink_paths_without_lossy_path_conversion() {
     let paths = parse_gitlink_paths(b"160000 commit abc\tdeps/\xff-module\0").unwrap();
@@ -587,6 +608,7 @@ fn missing_copy_sources_are_rejected_before_creating_a_worktree() {
     );
 }
 
+#[cfg(feature = "recursive-submodules")]
 #[test]
 fn initializes_top_level_and_nested_submodules_at_recorded_commits() {
     let fixture = GitFixture::new();
@@ -621,6 +643,7 @@ fn initializes_top_level_and_nested_submodules_at_recorded_commits() {
     ));
 }
 
+#[cfg(feature = "recursive-submodules")]
 #[test]
 fn falls_back_to_a_submodule_remote_when_the_source_checkout_is_missing() {
     let fixture = GitFixture::new();
@@ -642,6 +665,7 @@ fn falls_back_to_a_submodule_remote_when_the_source_checkout_is_missing() {
     ));
 }
 
+#[cfg(feature = "recursive-submodules")]
 #[test]
 fn failed_submodule_initialization_rolls_back_worktree_branch_metadata_and_modules() {
     let fixture = GitFixture::new();
@@ -790,6 +814,7 @@ fn failed_done_does_not_clear_the_originating_worktree_name() {
     assert!(requests.is_empty());
 }
 
+#[cfg(feature = "recursive-submodules")]
 #[test]
 fn integrates_and_forcibly_removes_a_worktree_containing_submodules() {
     let fixture = GitFixture::new();
@@ -820,6 +845,7 @@ fn integrates_and_forcibly_removes_a_worktree_containing_submodules() {
     );
 }
 
+#[cfg(feature = "recursive-submodules")]
 #[test]
 fn submodule_changes_are_included_in_done_cleanliness_checks() {
     let fixture = GitFixture::new();
@@ -1018,6 +1044,7 @@ fn status_report_includes_branch_source_and_root_kind() {
     assert!(report.contains("Native CoW copying: "));
 }
 
+#[cfg(feature = "recursive-submodules")]
 #[test]
 fn status_report_lists_top_level_and_nested_submodule_paths() {
     let fixture = GitFixture::new();

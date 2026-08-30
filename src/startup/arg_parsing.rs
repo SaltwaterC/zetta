@@ -11,7 +11,8 @@ use crate::command_panes::{
 };
 use crate::profile_cli::{ProfileCommand, parse_profile_args};
 use crate::project_cli::{ProjectCommand, parse_project_args};
-use crate::worktree_cli::{WorktreeCommand, parse_worktree_args};
+#[cfg(feature = "worktree")]
+use zwt::{WorktreeCommand, WorktreeInvocation, parse_worktree_args_for};
 
 const DEFAULT_PERFORMANCE_REPORT_DURATION: Duration = Duration::from_secs(10);
 
@@ -24,6 +25,7 @@ pub(crate) enum StartupMode {
     Command(Vec<String>),
     Pane(PaneCommand),
     Attention(AttentionCommand),
+    #[cfg(feature = "worktree")]
     Worktree(WorktreeCommand),
     Project(ProjectCommand),
     #[cfg(cli_services)]
@@ -493,6 +495,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             tftp_command: None,
         });
     }
+    #[cfg(feature = "worktree")]
     if arguments.first().is_some_and(|argument| argument == "wt") {
         return Ok(StartupArgs {
             config_path: None,
@@ -502,7 +505,10 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             replace_pane: false,
             theme_override: None,
             no_mux: false,
-            mode: StartupMode::Worktree(parse_worktree_args(&arguments[1..])?),
+            mode: StartupMode::Worktree(parse_worktree_args_for(
+                &arguments[1..],
+                WorktreeInvocation::Zetta,
+            )?),
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,

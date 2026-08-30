@@ -7,7 +7,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$MuxBinaryPath,
     [Parameter(Mandatory = $true)]
-    [string]$PtyBinaryPath
+    [string]$PtyBinaryPath,
+    [string]$WorktreeBinaryPath
 )
 
 $ErrorActionPreference = "Stop"
@@ -59,6 +60,10 @@ $consoleBinary = (Resolve-Path -LiteralPath $ConsoleBinaryPath).Path
 $guiBinary = (Resolve-Path -LiteralPath $GuiBinaryPath).Path
 $muxBinary = (Resolve-Path -LiteralPath $MuxBinaryPath).Path
 $ptyBinary = (Resolve-Path -LiteralPath $PtyBinaryPath).Path
+$worktreeBinary = $null
+if ($WorktreeBinaryPath) {
+    $worktreeBinary = (Resolve-Path -LiteralPath $WorktreeBinaryPath).Path
+}
 $actualConsoleSubsystem = Get-PeSubsystem $consoleBinary
 $actualGuiSubsystem = Get-PeSubsystem $guiBinary
 $actualMuxSubsystem = Get-PeSubsystem $muxBinary
@@ -74,6 +79,12 @@ if ($actualMuxSubsystem -ne $consoleSubsystem) {
 }
 if ($actualPtySubsystem -ne $consoleSubsystem) {
     throw "$ptyBinary uses PE subsystem $actualPtySubsystem; expected console subsystem $consoleSubsystem"
+}
+if ($worktreeBinary) {
+    $actualWorktreeSubsystem = Get-PeSubsystem $worktreeBinary
+    if ($actualWorktreeSubsystem -ne $consoleSubsystem) {
+        throw "$worktreeBinary uses PE subsystem $actualWorktreeSubsystem; expected console subsystem $consoleSubsystem"
+    }
 }
 
 $version = ((& $consoleBinary --version | Out-String).Trim() -replace "`r", "")
@@ -98,8 +109,18 @@ $muxVersion = & $muxBinary --version
 if ($LASTEXITCODE -ne 0 -or $muxVersion -notmatch '^zmux \S+ \(protocol \d+\)$') {
     throw "$muxBinary --version failed its CLI smoke test"
 }
+$worktreeHelp = $null
+if ($worktreeBinary) {
+    $worktreeHelp = ((& $worktreeBinary --help | Out-String).Trim() -replace "`r", "")
+    if ($LASTEXITCODE -ne 0 -or $worktreeHelp -notmatch '(?m)^Usage: zwt <COMMAND>$') {
+        throw "$worktreeBinary --help failed its CLI smoke test"
+    }
+}
 
 Write-Host "Verified Windows console executable: $consoleBinary ($version)"
 Write-Host "Verified Windows GUI launcher: $guiBinary"
 Write-Host "Verified Windows multiplexer executable: $muxBinary ($muxVersion)"
 Write-Host "Verified Windows pseudoconsole host: $ptyBinary"
+if ($worktreeBinary) {
+    Write-Host "Verified standalone worktree executable: $worktreeBinary"
+}

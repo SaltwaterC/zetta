@@ -3,7 +3,8 @@ use super::*;
 use crate::cli_services::NotifyCleanupCommand;
 #[cfg(feature = "serial-console")]
 use crate::cli_services::SerialCommand;
-use crate::worktree_cli::WorktreeCommand;
+#[cfg(feature = "worktree")]
+use zwt::WorktreeCommand;
 
 #[cfg(windows)]
 #[test]
@@ -49,6 +50,7 @@ fn native_terminal_does_not_inherit_windows_host_zetta_routing() {
     );
 }
 
+#[cfg(feature = "worktree")]
 #[test]
 fn worktree_subcommand_is_available_without_cli_services() {
     let arguments = parse_args_from([

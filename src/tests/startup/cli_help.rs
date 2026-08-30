@@ -1,9 +1,10 @@
 #[cfg(feature = "tftp-client")]
 use super::super::arg_parsing::parse_args_from;
 use super::*;
-use crate::worktree_cli::{
-    worktree_done_help, worktree_help, worktree_new_help, worktree_rerere_help,
-    worktree_status_help,
+#[cfg(feature = "worktree")]
+use zwt::{
+    WorktreeInvocation, worktree_done_help_for, worktree_help_for, worktree_new_help_for,
+    worktree_rerere_help_for, worktree_status_help_for,
 };
 
 #[test]
@@ -92,8 +93,17 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     assert!(help.contains("zetta terminal-size [--json | --resize"));
     assert!(help.contains("zetta benchmark output [OPTIONS]"));
     assert!(help.contains("Write and time a text payload"));
-    assert!(help.contains("zetta wt <COMMAND>"));
-    assert!(help.contains("Create and integrate Git worktrees"));
+    #[cfg(feature = "worktree")]
+    {
+        assert!(help.contains("zetta wt <COMMAND>"));
+        assert!(help.contains("Create and integrate Git worktrees"));
+        assert!(help.contains("Git worktree workflow"));
+    }
+    #[cfg(not(feature = "worktree"))]
+    {
+        assert!(!help.contains("zetta wt <COMMAND>"));
+        assert!(!help.contains("Git worktree workflow"));
+    }
     assert!(help.contains("zetta tabicon [OPTIONS] ICON"));
     assert!(help.contains("Set the active tab's icon override"));
     assert!(tab_icon_help().contains("per-tab icon override"));
@@ -194,25 +204,26 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     assert!(!help.contains("Encrypted session retention"));
 }
 
+#[cfg(feature = "worktree")]
 #[test]
 fn worktree_help_lists_every_operation_and_path_only() {
     for help in [
-        worktree_help(),
-        worktree_new_help(),
-        worktree_done_help(),
-        worktree_status_help(),
-        worktree_rerere_help(),
+        worktree_help_for(WorktreeInvocation::Zetta),
+        worktree_new_help_for(WorktreeInvocation::Zetta),
+        worktree_done_help_for(WorktreeInvocation::Zetta),
+        worktree_status_help_for(WorktreeInvocation::Zetta),
+        worktree_rerere_help_for(WorktreeInvocation::Zetta),
     ] {
         assert!(help.contains("wt.root"));
         assert!(help.contains("zetta wt rerere"));
     }
-    assert!(worktree_help().contains("zetta wt new [OPTIONS] NAME"));
-    assert!(worktree_help().contains("zetta wt done [OPTIONS]"));
-    assert!(worktree_help().contains("zetta wt status"));
-    assert!(worktree_help().contains("zetta wt rerere"));
-    assert!(worktree_new_help().contains("-P, --path-only"));
-    assert!(worktree_new_help().contains("-c, --copy PATH"));
-    assert!(worktree_done_help().contains("-P, --path-only"));
+    assert!(worktree_help_for(WorktreeInvocation::Zetta).contains("zetta wt new [OPTIONS] NAME"));
+    assert!(worktree_help_for(WorktreeInvocation::Zetta).contains("zetta wt done [OPTIONS]"));
+    assert!(worktree_help_for(WorktreeInvocation::Zetta).contains("zetta wt status"));
+    assert!(worktree_help_for(WorktreeInvocation::Zetta).contains("zetta wt rerere"));
+    assert!(worktree_new_help_for(WorktreeInvocation::Zetta).contains("-P, --path-only"));
+    assert!(worktree_new_help_for(WorktreeInvocation::Zetta).contains("-c, --copy PATH"));
+    assert!(worktree_done_help_for(WorktreeInvocation::Zetta).contains("-P, --path-only"));
 }
 
 #[test]

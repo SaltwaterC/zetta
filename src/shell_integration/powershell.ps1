@@ -28,17 +28,24 @@ if ($zettaViMissing) {
 
 function zvi { & zetta vi @args }
 
+# ZETTA_WORKTREE_INTEGRATION_BEGIN
 function zwt {
+    $zwtApplication = Get-Command zwt -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1 -ExpandProperty Path
+    if (-not $zwtApplication) {
+        Write-Error "The zwt application was not found on PATH"
+        return
+    }
     switch ($args[0]) {
         'new' {
             $operationArgs = @($args | Select-Object -Skip 1)
             if ($operationArgs -contains '--help' -or $operationArgs -contains '-h') {
-                & zetta wt new @operationArgs
+                & $zwtApplication new @operationArgs
                 return
             } elseif ($operationArgs -contains '--path-only' -or $operationArgs -contains '-P') {
-                $path = @(& zetta wt new @operationArgs)
+                $path = @(& $zwtApplication new @operationArgs)
             } else {
-                $path = @(& zetta wt new --path-only @operationArgs)
+                $path = @(& $zwtApplication new --path-only @operationArgs)
             }
             if ($LASTEXITCODE -ne 0 -or $path.Count -ne 1) { return }
             Set-Location -LiteralPath $path[0]
@@ -46,21 +53,22 @@ function zwt {
         'done' {
             $operationArgs = @($args | Select-Object -Skip 1)
             if ($operationArgs -contains '--help' -or $operationArgs -contains '-h') {
-                & zetta wt done @operationArgs
+                & $zwtApplication done @operationArgs
                 return
             } elseif ($operationArgs -contains '--path-only' -or $operationArgs -contains '-P') {
-                $path = @(& zetta wt done @operationArgs)
+                $path = @(& $zwtApplication done @operationArgs)
             } else {
-                $path = @(& zetta wt done --path-only @operationArgs)
+                $path = @(& $zwtApplication done --path-only @operationArgs)
             }
             if ($LASTEXITCODE -ne 0 -or $path.Count -ne 1) { return }
             Set-Location -LiteralPath $path[0]
         }
         default {
-            & zetta wt @args
+            & $zwtApplication @args
         }
     }
 }
+# ZETTA_WORKTREE_INTEGRATION_END
 
 function ztftp { & zetta tftp @args }
 function zntfy { & zetta notify @args }
@@ -161,14 +169,14 @@ $zettaCompletions = {
         }
     }
     $subcommand = $words | Where-Object {
-        $_ -in 'benchmark', 'terminal-size', 'mux', 'splits', 'pane', 'profile', 'project', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'theme', 'overlay', 'wt'
+        $_ -in 'benchmark', 'terminal-size', 'mux', 'splits', 'pane', 'profile', 'project', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'theme', 'overlay'ZETTA_WORKTREE_ROOT_COMMANDS
     } | Select-Object -First 1
     $worktreeCommand = $false
     $worktreeOperation = ''
-    if ($commandName -eq 'zwt') {
+    if ZETTA_WORKTREE_STANDALONE_CHECK {
         $worktreeCommand = $true
         if ($words.Count -gt 1) { $worktreeOperation = $words[1] }
-    } elseif ($subcommand -eq 'wt') {
+    } elseif ZETTA_WORKTREE_ROOT_CHECK {
         $worktreeCommand = $true
         if ($words.Count -gt 2) { $worktreeOperation = $words[2] }
     }
@@ -255,7 +263,7 @@ $zettaCompletions = {
         'txt', 'rtf', 'ps'
     } elseif ($previous -in '--opacity', '-o', '--overlay-opacity', '-O', '--overlay') {
         @()
-    } elseif ($worktreeCommand -and $worktreeOperation -eq 'new' -and $previous -in '--copy', '-c') {
+    } elseif ZETTA_WORKTREE_POWERSHELL_COPY_COMPLETION_CHECK {
         @(Get-ChildItem -Name -Path "$wordToComplete*" -ErrorAction SilentlyContinue)
     } elseif ($previous -in '--color', '-c') {
         if ($subcommand -eq 'overlay') { $zettaOverlayColors } else { @() }
@@ -290,7 +298,8 @@ $zettaCompletions = {
         (-not $noMux -and $words[2] -in 'share', 'unshare', 'kill', 'forget')
     ) -and $wordToComplete -notlike '-*') {
         if ($words[2] -eq 'resume') { & $zmuxRestorableIds } else { & $zmuxSessionIds }
-    } elseif ($worktreeCommand) {
+# ZETTA_WORKTREE_INTEGRATION_BEGIN
+    } elseif ZETTA_WORKTREE_COMPLETION_CHECK {
         if ([string]::IsNullOrEmpty($worktreeOperation)) {
             'new', 'done', 'status', 'rerere', '--help'
         } elseif ($worktreeOperation -eq 'new') {
@@ -300,8 +309,9 @@ $zettaCompletions = {
         } else {
             '--help'
         }
+# ZETTA_WORKTREE_INTEGRATION_END
     } elseif ($null -eq $subcommand) {
-        'benchmark', 'terminal-size', 'mux', 'profile', 'project', 'splits', 'pane', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'theme', 'overlay', 'wt', '--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme', '--no-mux', '--command'
+        'benchmark', 'terminal-size', 'mux', 'profile', 'project', 'splits', 'pane', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'theme', 'overlay'ZETTA_WORKTREE_ROOT_COMMANDS, '--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme', '--no-mux', '--command'
     } else {
         switch ($subcommand) {
             'benchmark' {
@@ -391,7 +401,8 @@ $zettaCompletions = {
                 }
             }
             'overlay' { '--text', '--size', '--opacity', '--color', '--reset', '--help' }
-            'wt' {
+# ZETTA_WORKTREE_INTEGRATION_BEGIN
+            ZETTA_WORKTREE_SWITCH_CASE {
                 if ([string]::IsNullOrEmpty($worktreeOperation)) {
                     'new', 'done', 'status', 'rerere', '--help'
                 } elseif ($worktreeOperation -eq 'new') {
@@ -402,11 +413,12 @@ $zettaCompletions = {
                     '--help'
                 }
             }
+# ZETTA_WORKTREE_INTEGRATION_END
         }
     }
 
     $candidates = @($candidates | Where-Object {
-        if ($_ -like '-*') { $_ -eq '--copy' -or $_ -notin $words } else { $true }
+        if ($_ -like '-*') { ZETTA_WORKTREE_POWERSHELL_REPEATABLE_COPY -or $_ -notin $words } else { $true }
     })
     $candidates | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
         $value = $_
@@ -426,7 +438,9 @@ Register-ArgumentCompleter -CommandName zntfy -ScriptBlock $zettaCompletions
 Register-ArgumentCompleter -CommandName zcopy -ScriptBlock $zettaCompletions
 Register-ArgumentCompleter -CommandName zpaste -ScriptBlock $zettaCompletions
 Register-ArgumentCompleter -CommandName zvi -ScriptBlock $zettaCompletions
+# ZETTA_WORKTREE_INTEGRATION_BEGIN
 Register-ArgumentCompleter -CommandName zwt -ScriptBlock $zettaCompletions
+# ZETTA_WORKTREE_INTEGRATION_END
 if ($zettaViMissing) {
     Register-ArgumentCompleter -CommandName vi -ScriptBlock $zettaCompletions
 }

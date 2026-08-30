@@ -35,8 +35,9 @@ for active development.
   command-palette entry that opens each registered project
 - Serial consoles plus built-in HTTP and TFTP tools, usable from panes or the
   CLI
-- Git worktree workflow with `zetta wt new`, `zetta wt done`, status, and
-  conflict-resolution helpers; shell integration adds the `zwt` directory wrapper
+- Git worktree workflow with the standalone `zwt` command (also available as
+  `zetta wt`), status, and conflict-resolution helpers; shell integration adds
+  the `zwt` directory wrapper
 - In-memory tab attention badges from `zetta attention`, with optional
   cross-platform desktop notifications that click back to the issuing visible
   tab
@@ -63,6 +64,10 @@ as well. Linux system dependencies and platform-specific build and desktop
 installation instructions are in the [installation guide](docs/installation.md).
 `make build` uses an incremental development build; use `RELEASE=1` for an
 optimized release build.
+
+The default build also produces the standalone `zwt` Git worktree command. Set
+`WORKTREE=0` on `make build` and `make install` to omit the in-process
+`zetta wt` route and the root-produced `zwt` binary.
 
 Corporate or otherwise restricted deployments can omit the serial console,
 network tools, and desktop notification support at build time. For example, `make
@@ -160,11 +165,12 @@ context. Launching plain `zetta` from such a worktree still starts the first
 terminal in the worktree's current directory. Ordinary, detached, and
 unregistered worktrees keep the normal discovery and trust flow.
 
-Use `zetta wt new NAME`, `zetta wt done`, `zetta wt status`, and
-`zetta wt rerere` for the Git worktree workflow. The direct commands never
-change the caller's directory; generated shell integration provides `zwt new`
-and `zwt done` wrappers that enter the resulting worktree, including paths with
-spaces and nested names. `zetta wt new` also recursively initializes source
+Use `zwt new NAME`, `zwt done`, `zwt status`, and `zwt rerere` for the Git
+worktree workflow; the same operations are available as `zetta wt ...` in a
+full Zetta build. The direct commands never change the caller's directory;
+generated shell integration provides the `zwt new` and `zwt done` wrappers that
+enter the resulting worktree, including paths with spaces and nested names.
+`zwt new` also recursively initializes source
 submodules at their pinned commits, reusing initialized source checkouts as
 local object references and falling back to configured submodule remotes when a
 source checkout is unavailable. Failed initialization cleans up the partial
@@ -184,10 +190,10 @@ replace the seed when the shell reports a different linked worktree. Manual
 renames take precedence over the worktree title, and an empty manual rename
 reveals it again.
 The Git operations and `--path-only` output do not depend on Zetta being
-available. `wt status` also reports whether the current `HEAD` contains
+available. `zwt status` also reports whether the current `HEAD` contains
 submodules, lists detected nested submodule paths, and reports native
 copy-on-write availability for the current worktree and resolved `wt.root`.
-`wt new` emits phase progress on stderr while preserving its normal and
+`zwt new` emits phase progress on stderr while preserving its normal and
 `--path-only` stdout.
 
 ## Multi-command prompt

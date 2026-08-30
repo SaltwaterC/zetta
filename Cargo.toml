@@ -6,7 +6,7 @@ license = "GPL-3.0-or-later"
 default-run = "zetta"
 
 [features]
-default = ["wayland", "serial-console", "http-server", "tftp-server", "tftp-client", "notifications", "clipboard", "syntax-highlighting", "session-persistence"]
+default = ["wayland", "serial-console", "http-server", "tftp-server", "tftp-client", "notifications", "clipboard", "syntax-highlighting", "session-persistence", "worktree"]
 wayland = ["gpui_platform/wayland"]
 x11 = ["gpui_platform/x11"]
 windows-gui = []
@@ -43,6 +43,7 @@ tftp-server = []
 tftp-client = []
 notifications = ["dep:notify-rust", "dep:cpal", "dep:mac-usernotifications", "dep:ashpd"]
 clipboard = ["dep:arboard"]
+worktree = ["dep:zwt", "zwt/recursive-submodules"]
 
 [[bin]]
 name = "zetta-gui"
@@ -56,6 +57,11 @@ required-features = ["windows-gui"]
 [[bin]]
 name = "zmux"
 path = "src/bin/zmux.rs"
+
+[[bin]]
+name = "zwt"
+path = "src/bin/zwt.rs"
+required-features = ["worktree"]
 
 [[bin]]
 name = "zmux-pty"
@@ -129,6 +135,7 @@ util = { path = "zed/crates/util" }
 zeroize = "1"
 zed_actions = { path = "zed/crates/zed_actions" }
 zmux = { path = "crates/zmux", default-features = false, features = ["scrollback-buffer"] }
+zwt = { path = "crates/zwt", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }

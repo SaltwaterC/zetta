@@ -2205,28 +2205,6 @@ pub(crate) fn request_process_tab_name(process_id: u32, request: TabNameRequest)
     send_set_tab_name_request(&endpoint, &request)
 }
 
-pub(crate) fn request_process_worktree_name(
-    process_id: u32,
-    request: WorktreeNameRequest,
-) -> Result<bool> {
-    anyhow::ensure!(process_id != 0, "process ID must be positive");
-    anyhow::ensure!(request.attention_id != 0, "attention ID must be positive");
-    let endpoint_path = control_endpoint_path(process_id);
-    let contents = fs::read(&endpoint_path).with_context(|| {
-        format!(
-            "reading Zetta process control endpoint {}",
-            endpoint_path.display()
-        )
-    })?;
-    let endpoint: ControlEndpoint =
-        serde_json::from_slice(&contents).context("parsing Zetta process control endpoint")?;
-    anyhow::ensure!(
-        endpoint.version == CONTROL_VERSION && endpoint.process_id == process_id,
-        "Zetta process control endpoint is outdated"
-    );
-    send_set_worktree_name_request(&endpoint, &request)
-}
-
 fn send_open_window_request(endpoint: &ControlEndpoint) -> Result<bool> {
     let mut stream = UnixStream::connect(&endpoint.socket_path)?;
     stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
@@ -2470,6 +2448,7 @@ fn send_set_tab_name_request(endpoint: &ControlEndpoint, request: &TabNameReques
     Ok(response.status == "ok")
 }
 
+#[cfg(test)]
 fn send_set_worktree_name_request(
     endpoint: &ControlEndpoint,
     request: &WorktreeNameRequest,

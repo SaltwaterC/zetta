@@ -35,7 +35,8 @@ impl ShellIntegration {
             Self::PowerShell => POWERSHELL_INTEGRATION,
             Self::Zsh => ZSH_INTEGRATION,
         };
-        template.replace("ZETTA_OVERLAY_COLORS", &render_overlay_color_names(self))
+        let template = template.replace("ZETTA_OVERLAY_COLORS", &render_overlay_color_names(self));
+        render_worktree_integration(&template)
     }
 
     fn startup_file(self, home: &Path) -> PathBuf {
@@ -146,6 +147,118 @@ impl ShellIntegration {
             }
         }
     }
+}
+
+fn render_worktree_integration(template: &str) -> String {
+    const BEGIN: &str = "ZETTA_WORKTREE_INTEGRATION_BEGIN";
+    const END: &str = "ZETTA_WORKTREE_INTEGRATION_END";
+    let worktree_enabled = cfg!(feature = "worktree");
+    let mut rendered = String::with_capacity(template.len());
+    let mut in_optional_section = false;
+
+    for line in template.split_inclusive('\n') {
+        if line.contains(BEGIN) {
+            in_optional_section = true;
+            continue;
+        }
+        if line.contains(END) {
+            in_optional_section = false;
+            continue;
+        }
+        if !in_optional_section || worktree_enabled {
+            rendered.push_str(line);
+        }
+    }
+
+    rendered
+        .replace(
+            "ZETTA_WORKTREE_ROOT_COMMANDS",
+            if worktree_enabled { ", 'wt'" } else { "" },
+        )
+        .replace(
+            "ZETTA_WORKTREE_ROOT_COMMAND",
+            if worktree_enabled { "wt" } else { "" },
+        )
+        .replace(
+            "ZETTA_WORKTREE_BASH_COPY_CONDITION",
+            if worktree_enabled {
+                "[[ $command == wt && ${COMP_WORDS[2]} == new ]]"
+            } else {
+                "false"
+            },
+        )
+        .replace(
+            "ZETTA_WORKTREE_BASH_REPEATABLE_COPY",
+            if worktree_enabled {
+                "[[ $repeatable == 1 && $candidate == --copy ]]"
+            } else {
+                "false"
+            },
+        )
+        .replace(
+            "ZETTA_WORKTREE_ZSH_COPY_OPTION",
+            if worktree_enabled {
+                "[[ $option == --copy ]]"
+            } else {
+                "false"
+            },
+        )
+        .replace(
+            "ZETTA_WORKTREE_FISH_COPY_OPTION",
+            if worktree_enabled {
+                "test \"$argv[1]\" = --copy"
+            } else {
+                "false"
+            },
+        )
+        .replace(
+            "ZETTA_WORKTREE_POWERSHELL_COPY_COMPLETION_CHECK",
+            if worktree_enabled {
+                "($worktreeCommand -and $worktreeOperation -eq 'new' -and $previous -in '--copy', '-c')"
+            } else {
+                "($false)"
+            },
+        )
+        .replace(
+            "ZETTA_WORKTREE_POWERSHELL_REPEATABLE_COPY",
+            if worktree_enabled {
+                "$_ -eq '--copy'"
+            } else {
+                "$false"
+            },
+        )
+        .replace(
+            "ZETTA_WORKTREE_COMPLETION_CHECK",
+            if worktree_enabled {
+                "($worktreeCommand)"
+            } else {
+                "($false)"
+            },
+        )
+        .replace(
+            "ZETTA_WORKTREE_STANDALONE_CHECK",
+            if worktree_enabled {
+                "($commandName -eq 'zwt')"
+            } else {
+                "($false)"
+            },
+        )
+        .replace(
+            "ZETTA_WORKTREE_ROOT_CHECK",
+            if worktree_enabled {
+                "($subcommand -eq 'wt')"
+            } else {
+                "($false)"
+            },
+        )
+        .replace(
+            "ZETTA_WORKTREE_SWITCH_CASE",
+            if worktree_enabled {
+                "'wt'"
+            } else {
+                "'__zetta_worktree_disabled__'"
+            },
+        )
 }
 
 fn active_shell_path() -> Option<PathBuf> {
@@ -579,8 +692,13 @@ pub(crate) fn shell_integration_help() -> String {
     let help = format!(
         "Configure or generate shell integration\n\nUsage: zetta init [SHELL]\n\nWithout SHELL, detects the active supported shell process (falling back to SHELL when process inspection cannot identify it) and adds the integration command to its startup file. On Windows, Unix-style HOME paths from MSYS2 and Cygwin are resolved with cygpath; when neither an active shell nor SHELL identifies a POSIX shell, Zetta detects the launching PowerShell and writes to its $PROFILE. Running it again leaves an existing integration unchanged. With SHELL, prints the integration script for use in a shell startup file.\n\nSupported shells:\n{supported_shells}\n\nThe generated script adds completion, including dynamic profile and theme values from `zetta profile list` and `zetta profile themes`, live serial-device, tab-icon, pane-split, pane-label, and --replace-pane completion, the root --command option (which passes the rest of the command line to the child), the attention command's notification options, the zvi shortcut for the built-in vi editor, the ztftp shortcut when the TFTP client is enabled, and the zntfy and zcopy/zpaste shortcuts when desktop notifications and clipboard access are enabled. `zetta pane --direction` completes left, right, up, and down, while `zetta pane --pane` fetches labels from the active process, and new-pane overlay sizes and colors are offered as fixed values. zcopy/zpaste are also available as pbcopy/pbpaste on platforms other than macOS, taking priority over any existing pbcopy/pbpaste alias so pbcopy/pbpaste muscle memory keeps working there too."
     );
+    let worktree_help = if cfg!(feature = "worktree") {
+        "\n\nThe generated integration also provides the zwt wrapper for the standalone Git worktree command; it changes directory only after a successful operation. Worktree completion includes the repeatable --copy path option and filesystem path arguments."
+    } else {
+        ""
+    };
     format!(
-        "{help}\n\nThe generated integration also provides the zwt wrapper for zetta wt new and zetta wt done; it changes directory only after a successful operation. Worktree completion includes the repeatable --copy path option and filesystem path arguments. Profile administration also completes the fixed icon values auto, zetta, bash, zsh, and fish."
+        "{help}{worktree_help}\n\nProfile administration also completes the fixed icon values auto, zetta, bash, zsh, and fish."
     )
 }
 

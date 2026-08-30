@@ -29,18 +29,19 @@ function zvi --wraps 'zetta vi' --description 'Zetta vi editor'
 end
 complete -c zvi -F
 
+# ZETTA_WORKTREE_INTEGRATION_BEGIN
 function zwt --description 'Zetta Git worktree workflow'
     switch $argv[1]
         case new
             set -l operation_args $argv[2..-1]
             set -l path
             if contains -- --help $operation_args; or contains -- -h $operation_args
-                zetta wt new $operation_args
+                command zwt new $operation_args
                 return $status
             else if contains -- --path-only $operation_args; or contains -- -P $operation_args
-                set path (zetta wt new $operation_args)
+                set path (command zwt new $operation_args)
             else
-                set path (zetta wt new --path-only $operation_args)
+                set path (command zwt new --path-only $operation_args)
             end
             or return
             test (count $path) -eq 1
@@ -50,21 +51,22 @@ function zwt --description 'Zetta Git worktree workflow'
             set -l operation_args $argv[2..-1]
             set -l path
             if contains -- --help $operation_args; or contains -- -h $operation_args
-                zetta wt done $operation_args
+                command zwt done $operation_args
                 return $status
             else if contains -- --path-only $operation_args; or contains -- -P $operation_args
-                set path (zetta wt done $operation_args)
+                set path (command zwt done $operation_args)
             else
-                set path (zetta wt done --path-only $operation_args)
+                set path (command zwt done --path-only $operation_args)
             end
             or return
             test (count $path) -eq 1
             or return 1
             builtin cd -- $path[1]
         case '*'
-            zetta wt $argv
+            command zwt $argv
     end
 end
+# ZETTA_WORKTREE_INTEGRATION_END
 
 function ztftp --wraps 'zetta tftp' --description 'Zetta TFTP client'
     zetta tftp $argv
@@ -419,7 +421,7 @@ end
 # they appear alongside subcommands at every valid argument position.
 function __zetta_option_unused
     set -l words (commandline -opc)
-    test "$argv[1]" = --copy; and return 0
+    ZETTA_WORKTREE_FISH_COPY_OPTION; and return 0
     not contains -- $argv[1] $words[2..-1]
 end
 
@@ -499,6 +501,7 @@ function __zetta_long_options
                 --color 'Set the text color (name or hex)' \
                 --reset 'Clear the overlay' \
                 --help 'Print help'
+# ZETTA_WORKTREE_INTEGRATION_BEGIN
         case wt
             printf '%s\t%s\n' \
                 new 'Create a worktree' \
@@ -506,6 +509,7 @@ function __zetta_long_options
                 status 'Show worktree state' \
                 rerere 'Enable Git rerere' \
                 --help 'Print help'
+# ZETTA_WORKTREE_INTEGRATION_END
         case terminal-size
             printf '%s\t%s\n' \
                 --json 'Print machine-readable JSON' \
@@ -613,7 +617,9 @@ complete -c zetta -n '__zetta_at_root' -a theme -d "Non-persistently change the 
 complete -c zetta -n '__zetta_at_root' -a splits -d 'List configured pane split templates'
 complete -c zetta -n '__zetta_at_root' -a pane -d 'Run a command in a pane'
 complete -c zetta -n '__zetta_at_root' -a overlay -d 'Non-persistently show text over the active pane'
+# ZETTA_WORKTREE_INTEGRATION_BEGIN
 complete -c zetta -n '__zetta_at_root' -a wt -d 'Create and integrate Git worktrees'
+# ZETTA_WORKTREE_INTEGRATION_END
 complete -c zetta -n '__zetta_at_subcommand benchmark' -a output -d 'Write and time a text payload'
 complete -c zetta -n '__zetta_at_subcommand notify' -a cleanup -d 'Reap stale desktop notification worker processes'
 complete -c zetta -n '__zetta_at_subcommand theme' -a 'pane tab' -d 'Choose the theme scope'
@@ -847,18 +853,22 @@ complete -c zetta -s c -r -a 'ZETTA_OVERLAY_COLORS' -n '__fish_seen_subcommand_f
 complete -c zetta -n '__fish_seen_subcommand_from overlay' -l reset -d 'Clear the overlay'
 complete -c zetta -n '__fish_seen_subcommand_from overlay' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from overlay' -a '(__zetta_long_options overlay)'
+# ZETTA_WORKTREE_INTEGRATION_BEGIN
 complete -c zetta -n '__zetta_at_subcommand wt' -a 'new done status rerere'
 complete -c zetta -n '__fish_seen_subcommand_from wt' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from wt' -a '(__zetta_long_options wt)'
 complete -c zetta -n '__fish_seen_subcommand_from wt; and __fish_seen_subcommand_from new done' -l path-only -d 'Print only the resulting path'
 complete -c zetta -n '__fish_seen_subcommand_from wt; and __fish_seen_subcommand_from new' -l copy -r -F -d 'Copy a source-worktree path (repeatable)'
 complete -c zetta -s c -r -F -n '__fish_seen_subcommand_from wt; and __fish_seen_subcommand_from new; and __zetta_short_option -c'
+# ZETTA_WORKTREE_INTEGRATION_END
+# ZETTA_WORKTREE_INTEGRATION_BEGIN
 complete -c zwt -f
 complete -c zwt -n '__fish_use_subcommand' -a 'new done status rerere'
 complete -c zwt -n '__fish_seen_subcommand_from new done' -l path-only -d 'Print only the resulting path'
 complete -c zwt -n '__fish_seen_subcommand_from new' -l copy -r -F -d 'Copy a source-worktree path (repeatable)'
 complete -c zwt -s c -r -F -n '__fish_seen_subcommand_from new; and __zetta_short_option -c'
 complete -c zwt -n '__fish_seen_subcommand_from new done status rerere' -l help -d 'Print help'
+# ZETTA_WORKTREE_INTEGRATION_END
 complete -c zmux -f
 complete -c zmux -n '__fish_use_subcommand' -a list -d 'List the sessions the multiplexer is holding'
 complete -c zmux -n '__fish_use_subcommand; and __zetta_mux_daemon_commands' -a stop -d 'Stop the multiplexer'

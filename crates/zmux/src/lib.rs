@@ -903,6 +903,7 @@ fn signal_until_stopped(endpoint: &transport::Endpoint) -> Result<()> {
 
 #[cfg(windows)]
 pub(crate) fn terminate_process(process_id: u32) -> Result<()> {
+    use anyhow::Context as _;
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
 

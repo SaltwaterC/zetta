@@ -12,6 +12,7 @@ NOTIFY ?= 1
 CLIPBOARD ?= 1
 SYNTAX_HIGHLIGHTING ?= 1
 SESSION_PERSISTENCE ?= 1
+WORKTREE ?= 1
 X11 ?= 0
 RELEASE ?= 0
 
@@ -60,6 +61,7 @@ ZETTA_CRATE_DIRS := \
 	crates/gpui_windows \
 	crates/terminal \
 	crates/terminal_view \
+	crates/zwt \
 	crates/zmux
 # These standalone test workspaces have checked-in lockfiles. The other local
 # platform crates are included in formatting coverage but do not have an
@@ -67,6 +69,7 @@ ZETTA_CRATE_DIRS := \
 ZETTA_TEST_CRATE_DIRS := \
 	crates/alacritty_terminal \
 	crates/terminal \
+	crates/zwt \
 	crates/zmux
 
 ifeq ($(OS),Windows_NT)
@@ -84,8 +87,8 @@ CARGO_BUILD_JOBS := 1
 endif
 
 # Set any of SERIAL, HTTP, TFTP, TFTP_SERVER, TFTP_CLIENT, NOTIFY, CLIPBOARD,
-# SYNTAX_HIGHLIGHTING, or SESSION_PERSISTENCE to 0, false, no, or off to omit
-# that capability from the built binary.
+# SYNTAX_HIGHLIGHTING, SESSION_PERSISTENCE, or WORKTREE to 0, false, no, or off
+# to omit that capability from the built binary.
 # TFTP is a convenient shorthand for disabling both the server and client.
 # Linux and FreeBSD default to Wayland; set X11=1 to include the X11 backend.
 tool_enabled = $(if $(filter 0 false no off,$(strip $(1))),,1)
@@ -122,13 +125,16 @@ endif
 ifneq ($(call tool_enabled,$(SESSION_PERSISTENCE)),)
 BUILD_FEATURES += session-persistence
 endif
+ifneq ($(call tool_enabled,$(WORKTREE)),)
+BUILD_FEATURES += worktree
+endif
 ifneq ($(call tool_enabled,$(X11)),)
 ifneq ($(filter Linux FreeBSD,$(UNAME_S)),)
 BUILD_FEATURES += x11
 endif
 endif
 
-export SERIAL HTTP TFTP TFTP_SERVER TFTP_CLIENT NOTIFY CLIPBOARD SYNTAX_HIGHLIGHTING SESSION_PERSISTENCE X11
+export SERIAL HTTP TFTP TFTP_SERVER TFTP_CLIENT NOTIFY CLIPBOARD SYNTAX_HIGHLIGHTING SESSION_PERSISTENCE WORKTREE X11
 export CARGO_BUILD_JOBS
 
 export CARGO
@@ -153,11 +159,15 @@ MAC_BUNDLE := $(DESTDIR)$(MAC_APPLICATIONS_DIR)/$(APP_ID).app
 MAC_RUNTIME_BUNDLE := $(MAC_APPLICATIONS_DIR)/$(APP_ID).app
 MAC_CLI_DIR := $(DESTDIR)$(PREFIX)/bin
 MAC_CLI_PATH := $(MAC_CLI_DIR)/zetta
+MAC_ZWT_CLI_PATH := $(MAC_CLI_DIR)/zwt
 LINUX_USER_INSTALL := $(if $(and $(filter Linux,$(UNAME_S)),$(IS_ROOT)),,1)
 LINUX_USER_DATA_DIR := $(DESTDIR)$(HOME)/.local/share
 LINUX_USER_BIN_DIR := $(DESTDIR)$(HOME)/.local/bin
 LINUX_USER_DESKTOP_DIR := $(LINUX_USER_DATA_DIR)/applications
 LINUX_USER_CLI_PATH := $(LINUX_USER_BIN_DIR)/zetta
+LINUX_USER_ZWT_PATH := $(LINUX_USER_BIN_DIR)/zwt
+
+WINDOWS_ZWT_ARGS := $(if $(call tool_enabled,$(WORKTREE)), -SourceZwtBinary "$(BUILD_TARGET_DIR)/zwt.exe",)
 
 .PHONY: build fmt test lint install install-binary install-capabilities install-assets install-user-path uninstall \
 	uninstall-binary uninstall-assets uninstall-user-path refresh-desktop-caches clean
@@ -187,10 +197,10 @@ build:
 	cmd.exe /d /c scripts\build-windows.cmd $(CARGO_PROFILE_ARGS)
 
 install: build
-	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action Install -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" -SourceMuxBinary "$(BUILD_TARGET_DIR)/zmux.exe" -SourcePtyBinary "$(BUILD_TARGET_DIR)/zmux-pty.exe"
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action Install -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" -SourceMuxBinary "$(BUILD_TARGET_DIR)/zmux.exe" -SourcePtyBinary "$(BUILD_TARGET_DIR)/zmux-pty.exe"$(WINDOWS_ZWT_ARGS)
 
 install-binary:
-	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action InstallBinary -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" -SourceMuxBinary "$(BUILD_TARGET_DIR)/zmux.exe" -SourcePtyBinary "$(BUILD_TARGET_DIR)/zmux-pty.exe"
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action InstallBinary -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" -SourceMuxBinary "$(BUILD_TARGET_DIR)/zmux.exe" -SourcePtyBinary "$(BUILD_TARGET_DIR)/zmux-pty.exe"$(WINDOWS_ZWT_ARGS)
 
 install-capabilities:
 
@@ -233,9 +243,21 @@ install-binary:
 	mkdir -p "$(MAC_BUNDLE)/Contents/MacOS" "$(BINDIR)"
 	$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/zetta" "$(MAC_BUNDLE)/Contents/MacOS/zetta"
 	$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/zmux" "$(MAC_BUNDLE)/Contents/MacOS/zmux"
+	if [ -n "$(call tool_enabled,$(WORKTREE))" ]; then \
+		$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/zwt" "$(MAC_BUNDLE)/Contents/MacOS/zwt"; \
+	else \
+		$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zwt"; \
+	fi
 	$(RM) "$(MAC_CLI_PATH)"
 	sed 's|@MAC_RUNTIME_BUNDLE@|$(MAC_RUNTIME_BUNDLE)|g' resources/macos/zetta-cli.in > "$(MAC_CLI_PATH)"
 	chmod 755 "$(MAC_CLI_PATH)"
+	if [ -n "$(call tool_enabled,$(WORKTREE))" ]; then \
+		$(RM) "$(MAC_ZWT_CLI_PATH)"; \
+		sed 's|@MAC_RUNTIME_BUNDLE@|$(MAC_RUNTIME_BUNDLE)|g' resources/macos/zwt-cli.in > "$(MAC_ZWT_CLI_PATH)"; \
+		chmod 755 "$(MAC_ZWT_CLI_PATH)"; \
+	else \
+		$(RM) "$(MAC_ZWT_CLI_PATH)"; \
+	fi
 
 install-capabilities:
 
@@ -266,8 +288,10 @@ uninstall:
 
 uninstall-binary:
 	$(RM) "$(MAC_CLI_PATH)"
+	$(RM) "$(MAC_ZWT_CLI_PATH)"
 	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zetta"
 	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zmux"
+	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zwt"
 	$(MAKE) uninstall-user-path
 
 uninstall-assets:
@@ -298,12 +322,23 @@ install-binary:
 	# beside Zetta: a client starts it from its own directory rather than
 	# through PATH, where an unrelated zmux could be picked up instead.
 	$(INSTALL) -Dm755 "$(BUILD_TARGET_DIR)/zmux" $(BINDIR)/zmux
+ifneq ($(call tool_enabled,$(WORKTREE)),)
+	$(INSTALL) -Dm755 "$(BUILD_TARGET_DIR)/zwt" $(BINDIR)/zwt
+else
+	$(RM) $(BINDIR)/zwt
+endif
 ifneq ($(LINUX_USER_INSTALL),)
 	mkdir -p "$(LINUX_USER_BIN_DIR)"
 	$(RM) "$(LINUX_USER_CLI_PATH)"
 	ln -s "$(BINDIR)/zetta" "$(LINUX_USER_CLI_PATH)"
 	$(RM) "$(LINUX_USER_BIN_DIR)/zmux"
 	ln -s "$(BINDIR)/zmux" "$(LINUX_USER_BIN_DIR)/zmux"
+ifneq ($(call tool_enabled,$(WORKTREE)),)
+	$(RM) "$(LINUX_USER_ZWT_PATH)"
+	ln -s "$(BINDIR)/zwt" "$(LINUX_USER_ZWT_PATH)"
+else
+	$(RM) "$(LINUX_USER_ZWT_PATH)"
+endif
 endif
 
 install-capabilities:
@@ -367,9 +402,11 @@ uninstall:
 uninstall-binary:
 	$(RM) $(BINDIR)/zetta
 	$(RM) $(BINDIR)/zmux
+	$(RM) $(BINDIR)/zwt
 ifneq ($(LINUX_USER_INSTALL),)
 	$(RM) "$(LINUX_USER_CLI_PATH)"
 	$(RM) "$(LINUX_USER_BIN_DIR)/zmux"
+	$(RM) "$(LINUX_USER_ZWT_PATH)"
 endif
 	$(MAKE) uninstall-user-path
 

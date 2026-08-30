@@ -24,7 +24,8 @@ use crate::process_control::{
     request_existing_process_tab_icon, request_existing_process_theme,
     request_existing_process_theme_list, request_process_tab_attention,
 };
-use crate::worktree_cli;
+#[cfg(feature = "worktree")]
+use zwt::{WorktreeInvocation, run_for as run_worktree};
 
 use gpui::{KeyBindingContextPredicate, Unbind};
 #[cfg(target_os = "macos")]
@@ -1179,8 +1180,9 @@ pub(crate) fn run() -> Result<()> {
         }
         return Ok(());
     }
+    #[cfg(feature = "worktree")]
     if let StartupMode::Worktree(command) = args.mode {
-        return worktree_cli::run(&command);
+        return run_worktree(&command, WorktreeInvocation::Zetta);
     }
     if let StartupMode::Profile(command) = args.mode {
         let result = crate::profile_cli::run(command, args.config_path.as_deref())?;

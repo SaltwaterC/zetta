@@ -24,6 +24,7 @@ fi
 
 function zvi { zetta vi "$@"; }
 
+# ZETTA_WORKTREE_INTEGRATION_BEGIN
 function zwt {
     case $1 in
         new)
@@ -31,7 +32,7 @@ function zwt {
             local -a operation_args=("${@[2,-1]}")
             for path_only_arg in "${operation_args[@]}"; do
                 if [[ $path_only_arg == --help || $path_only_arg == -h ]]; then
-                    zetta wt new "${operation_args[@]}"
+                    command zwt new "${operation_args[@]}"
                     return
                 fi
                 if [[ $path_only_arg == --path-only || $path_only_arg == -P ]]; then
@@ -41,9 +42,9 @@ function zwt {
                 path_only_arg=''
             done
             if [[ $path_only_arg == 1 ]]; then
-                worktree_path=$(zetta wt new "${operation_args[@]}") || return
+                worktree_path=$(command zwt new "${operation_args[@]}") || return
             else
-                worktree_path=$(zetta wt new --path-only "${operation_args[@]}") || return
+                worktree_path=$(command zwt new --path-only "${operation_args[@]}") || return
             fi
             [[ -n $worktree_path ]] || return 1
             builtin cd -- "$worktree_path"
@@ -53,7 +54,7 @@ function zwt {
             local -a operation_args=("${@[2,-1]}")
             for path_only_arg in "${operation_args[@]}"; do
                 if [[ $path_only_arg == --help || $path_only_arg == -h ]]; then
-                    zetta wt done "${operation_args[@]}"
+                    command zwt done "${operation_args[@]}"
                     return
                 fi
                 if [[ $path_only_arg == --path-only || $path_only_arg == -P ]]; then
@@ -63,18 +64,19 @@ function zwt {
                 path_only_arg=''
             done
             if [[ $path_only_arg == 1 ]]; then
-                worktree_path=$(zetta wt done "${operation_args[@]}") || return
+                worktree_path=$(command zwt done "${operation_args[@]}") || return
             else
-                worktree_path=$(zetta wt done --path-only "${operation_args[@]}") || return
+                worktree_path=$(command zwt done --path-only "${operation_args[@]}") || return
             fi
             [[ -n $worktree_path ]] || return 1
             builtin cd -- "$worktree_path"
             ;;
         *)
-            zetta wt "$@"
+            command zwt "$@"
             ;;
     esac
 }
+# ZETTA_WORKTREE_INTEGRATION_END
 
 if ! (( $+functions[compdef] )); then
     autoload -Uz compinit
@@ -83,7 +85,7 @@ fi
 
 _zetta_option_unused() {
     local option=$1 index
-    [[ $option == --copy ]] && return 0
+    ZETTA_WORKTREE_ZSH_COPY_OPTION && return 0
     for (( index = 2; index < CURRENT; index++ )); do
         [[ ${words[index]} == "$option" ]] && return 1
     done
@@ -256,7 +258,7 @@ _zetta() {
     fi
 
     if (( CURRENT == 2 )); then
-        compadd -S ' ' -- benchmark terminal-size mux profile project edit vi init serial http tftp notify attention copy paste splits pane tabicon theme overlay wt
+        compadd -S ' ' -- benchmark terminal-size mux profile project edit vi init serial http tftp notify attention copy paste splits pane tabicon theme overlay ZETTA_WORKTREE_ROOT_COMMAND
         _zetta_options --help --version --config --keymap --profile --split --replace-pane --theme --no-mux --command
         return
     fi
@@ -271,12 +273,14 @@ _zetta() {
         --command|-e)
             return
             ;;
+# ZETTA_WORKTREE_INTEGRATION_BEGIN
         --copy|-c)
             if [[ $words[2] == wt && $words[3] == new ]]; then
                 _files
             fi
             return
             ;;
+# ZETTA_WORKTREE_INTEGRATION_END
         --profile)
             _zetta_profiles
             return
@@ -677,6 +681,7 @@ _zetta() {
         overlay)
             _zetta_options --text --size --opacity --color --reset --help
             ;;
+# ZETTA_WORKTREE_INTEGRATION_BEGIN
         wt)
             if (( CURRENT == 3 )); then
                 compadd -S ' ' -- new done status rerere
@@ -691,6 +696,7 @@ _zetta() {
                 _zetta_options --help
             fi
             ;;
+# ZETTA_WORKTREE_INTEGRATION_END
     esac
 }
 
@@ -798,6 +804,7 @@ _zpaste() {
 }
 
 compdef _zetta zetta
+# ZETTA_WORKTREE_INTEGRATION_BEGIN
 _zwt() {
     local -a saved_words=("${words[@]}")
     local saved_current=$CURRENT
@@ -808,6 +815,7 @@ _zwt() {
     CURRENT=$saved_current
 }
 compdef _zwt zwt
+# ZETTA_WORKTREE_INTEGRATION_END
 _zmux() {
     local _zetta_mux_completion_command=zmux
     local -a saved_words=("${words[@]}")
