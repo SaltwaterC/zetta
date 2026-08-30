@@ -1264,8 +1264,10 @@ fn output_benchmark_subcommand_bypasses_application_startup() {
 }
 
 #[test]
-fn only_plain_application_launches_handoff_to_the_existing_process() {
+fn application_and_explicit_new_window_launches_are_handoff_eligible() {
     let plain = parse_args_from(Vec::<OsString>::new()).unwrap();
+    let new_window = parse_args_from([OsString::from("--new-window")]).unwrap();
+    let short_new_window = parse_args_from([OsString::from("-w")]).unwrap();
     let profile = parse_args_from([OsString::from("--profile"), OsString::from("System")]).unwrap();
     let split = parse_args_from([OsString::from("--split"), OsString::from("quarters")]).unwrap();
     let mux = parse_args_from([OsString::from("mux")]).unwrap();
@@ -1273,6 +1275,9 @@ fn only_plain_application_launches_handoff_to_the_existing_process() {
     let short_no_mux = parse_args_from([OsString::from("-n")]).unwrap();
 
     assert!(should_handoff_to_existing_process(&plain));
+    assert_eq!(new_window, short_new_window);
+    assert_eq!(new_window.mode, StartupMode::NewWindow);
+    assert!(should_handoff_to_existing_process(&new_window));
     assert!(!should_handoff_to_existing_process(&profile));
     assert!(!should_handoff_to_existing_process(&split));
     assert!(!should_handoff_to_existing_process(&mux));
@@ -1281,6 +1286,43 @@ fn only_plain_application_launches_handoff_to_the_existing_process() {
     assert!(!should_handoff_to_existing_process(&no_mux));
     assert!(parse_args_from([OsString::from("--no-mux"), OsString::from("--no-mux")]).is_err());
     assert!(parse_args_from([OsString::from("--no-mux"), OsString::from("sessions")]).is_err());
+}
+
+#[test]
+fn explicit_new_window_is_standalone() {
+    for arguments in [
+        vec!["--config", "config.json"],
+        vec!["--keymap", "keymap.json"],
+        vec!["--profile", "System"],
+        vec!["--split", "quarters"],
+        vec!["--replace-pane"],
+        vec!["--theme", "Dracula"],
+        vec!["--no-mux"],
+        vec!["--command", "sh"],
+    ] {
+        let mut combined = vec![OsString::from("--new-window")];
+        combined.extend(arguments.into_iter().map(OsString::from));
+        assert!(
+            parse_args_from(combined).is_err(),
+            "accepted invalid --new-window combination"
+        );
+    }
+
+    assert!(
+        parse_args_from([
+            OsString::from("--new-window"),
+            OsString::from("--new-window")
+        ])
+        .is_err()
+    );
+    assert!(
+        parse_args_from([
+            OsString::from("-w"),
+            OsString::from("--profile"),
+            OsString::from("System")
+        ])
+        .is_err()
+    );
 }
 
 #[test]

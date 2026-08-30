@@ -18,8 +18,9 @@ use crate::cli_services::{parse_serial_args, serial_help};
 use crate::cli_services::{parse_tftp_server_args, tftp_server_help};
 use crate::process_control::{
     ReplacePaneRequest, TabAttentionRequest, request_existing_process_command,
-    request_existing_process_pane, request_existing_process_pane_labels,
-    request_existing_process_pane_overlay, request_existing_process_project_with_working_directory,
+    request_existing_process_new_window, request_existing_process_pane,
+    request_existing_process_pane_labels, request_existing_process_pane_overlay,
+    request_existing_process_project_with_working_directory,
     request_existing_process_projects_reload, request_existing_process_replace_pane,
     request_existing_process_tab_icon, request_existing_process_theme,
     request_existing_process_theme_list, request_process_tab_attention,
@@ -593,37 +594,62 @@ fn shutdown_multiplexer_if_idle(cx: &App) {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WindowOpenTarget {
+    Existing(WindowId),
+    Dormant,
+    Fresh,
+}
+
+fn select_window_open_target(
+    existing_window: Option<WindowId>,
+    has_dormant_session: bool,
+) -> WindowOpenTarget {
+    if let Some(window_id) = existing_window {
+        WindowOpenTarget::Existing(window_id)
+    } else if has_dormant_session {
+        WindowOpenTarget::Dormant
+    } else {
+        WindowOpenTarget::Fresh
+    }
+}
+
 pub(crate) fn open_dormant_or_new_window(cx: &mut App) -> Result<()> {
-    let (existing, dormant, config, configuration_error, no_mux) = {
-        let process = cx.global_mut::<ZettaProcessState>();
+    let (target, config, configuration_error, no_mux) = {
+        let process = cx.global::<ZettaProcessState>();
         (
-            process
-                .windows
-                .iter()
-                .next()
-                .map(|(window_id, entity)| (*window_id, entity.clone())),
-            process.dormant.pop(),
+            select_window_open_target(
+                process.windows.keys().next().copied(),
+                !process.dormant.is_empty(),
+            ),
             process.config.clone(),
             process.configuration_error.clone(),
             process.no_mux,
         )
     };
-    if let Some((window_id, _)) = existing {
+    if let WindowOpenTarget::Existing(window_id) = target {
         gpui::WindowHandle::<Zetta>::new(window_id).update(cx, |zetta, window, cx| {
             zetta.resume_hidden_window(window, cx)
         })?;
         cx.activate(true);
         return Ok(());
     }
+    let dormant = matches!(target, WindowOpenTarget::Dormant)
+        .then(|| cx.global_mut::<ZettaProcessState>().dormant.pop())
+        .flatten();
     if let Some(zetta) = dormant {
         let zetta_for_window = zetta.clone();
-        cx.open_window(zetta_window_options(cx), move |window, cx| {
+        let result = cx.open_window(zetta_window_options(cx), move |window, cx| {
             window.set_window_title("Zetta");
             zetta_for_window.update(cx, |zetta, cx| zetta.attach_to_reopened_window(window, cx));
             track_zetta_window(&zetta_for_window, window, cx);
             prepare_background_tabs_before_window_close(&zetta_for_window, window, cx);
             zetta_for_window
-        })?;
+        });
+        if let Err(error) = result {
+            cx.global_mut::<ZettaProcessState>().dormant.push(zetta);
+            return Err(error).context("opening Zetta window");
+        }
         cx.activate(true);
         Ok(())
     } else {
@@ -644,6 +670,35 @@ pub(crate) fn open_dormant_or_new_window(cx: &mut App) -> Result<()> {
             cx,
         )
     }
+}
+
+/// Opens a new OS window from process-wide configuration without selecting a
+/// dormant entity or applying a project from another window.
+pub(crate) fn open_fresh_zetta_window(cx: &mut App) -> Result<()> {
+    let (config, configuration_error, no_mux) = {
+        let process = cx.global::<ZettaProcessState>();
+        (
+            process.config.clone(),
+            process.configuration_error.clone(),
+            process.no_mux,
+        )
+    };
+    open_zetta_window(
+        config,
+        configuration_error,
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        false,
+        no_mux,
+        None,
+        None,
+        None,
+        cx,
+    )
 }
 
 #[cfg(windows)]
@@ -1015,6 +1070,12 @@ impl ApplicationOpenUrlsExt for gpui::Application {
 
 pub(crate) fn run() -> Result<()> {
     let args = parse_args()?;
+    if args.mode == StartupMode::NewWindow
+        && should_handoff_to_existing_process(&args)
+        && request_existing_process_new_window()?
+    {
+        return Ok(());
+    }
     let mut startup_project_root = None;
     let mut startup_project_working_directory = None;
     if let StartupMode::Project(command) = &args.mode {
@@ -1349,6 +1410,7 @@ pub(crate) fn run() -> Result<()> {
             workload,
         });
     let report_requested = report_options.is_some();
+    let explicit_new_window = args.mode == StartupMode::NewWindow;
     let report_status = Arc::new(Mutex::new(None));
     let (config, configuration_error) = if profiling {
         (
@@ -1520,7 +1582,7 @@ pub(crate) fn run() -> Result<()> {
             .detach();
             #[cfg(target_os = "macos")]
             cx.on_action(|_: &NewWindow, cx| {
-                open_dormant_or_new_window(cx).log_err();
+                open_fresh_zetta_window(cx).log_err();
             });
             cx.spawn(async move |cx| {
                 while let Some(command) = control_rx.next().await {
@@ -1663,6 +1725,28 @@ pub(crate) fn run() -> Result<()> {
                                     Err(error) => {
                                         eprintln!(
                                             "Could not open the requested Zetta window: {error:#}"
+                                        );
+                                        false
+                                    }
+                                }
+                            });
+                            let _ = completion.send(opened);
+                        }
+                        ProcessControlCommand::OpenNewWindow { completion } => {
+                            let opened = cx.update(|cx| {
+                                if !cx
+                                    .global::<ZettaProcessState>()
+                                    .control_server
+                                    .is_accepting()
+                                {
+                                    return false;
+                                }
+
+                                match open_fresh_zetta_window(cx) {
+                                    Ok(()) => true,
+                                    Err(error) => {
+                                        eprintln!(
+                                            "Could not open the requested fresh Zetta window: {error:#}"
                                         );
                                         false
                                     }
@@ -2297,23 +2381,27 @@ pub(crate) fn run() -> Result<()> {
             cx.on_window_closed(handle_zetta_window_closed).detach();
 
             if !is_embedding {
-                open_zetta_window(
-                    config,
-                    configuration_error,
-                    initial_profile,
-                    initial_project,
-                    launch_theme_override,
-                    args.split,
-                    profiling,
-                    report_options.map(|options| (options, report_status_for_app)),
-                    args.profile_pane_stress,
-                    args.no_mux,
-                    initial_command,
-                    initial_working_directory,
-                    None,
-                    cx,
-                )
-                .expect("failed to open Zetta window");
+                if explicit_new_window {
+                    open_fresh_zetta_window(cx).expect("failed to open Zetta window");
+                } else {
+                    open_zetta_window(
+                        config,
+                        configuration_error,
+                        initial_profile,
+                        initial_project,
+                        launch_theme_override,
+                        args.split,
+                        profiling,
+                        report_options.map(|options| (options, report_status_for_app)),
+                        args.profile_pane_stress,
+                        args.no_mux,
+                        initial_command,
+                        initial_working_directory,
+                        None,
+                        cx,
+                    )
+                    .expect("failed to open Zetta window");
+                }
             }
         });
     if report_requested {

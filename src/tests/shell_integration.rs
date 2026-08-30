@@ -28,6 +28,7 @@ fn bash_command() -> std::process::Command {
 fn supported_shells_generate_completion_and_tftp_shortcut() {
     let help = shell_integration_help();
     assert!(help.contains("--replace-pane"));
+    assert!(help.contains("--new-window"));
     assert!(help.contains("--command"));
     assert!(help.contains("zetta pane"));
     #[cfg(feature = "worktree")]
@@ -56,6 +57,8 @@ fn supported_shells_generate_completion_and_tftp_shortcut() {
         assert!(script.contains("--direction"));
         assert!(script.contains("--pane"));
         assert!(script.contains("replace-pane"));
+        assert!(script.contains("--new-window"));
+        assert!(!script.contains(" -w"));
         assert!(script.contains("--command"));
         #[cfg(feature = "worktree")]
         {
@@ -1750,7 +1753,7 @@ fn generated_scripts_only_offer_long_form_flags() {
         match shell {
             ShellIntegration::Bash => {
                 assert!(script.contains(
-                    "terminal-size mux pane profile project edit vi init serial http tftp notify attention copy paste splits tabicon theme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme --no-mux --command'"
+                    "terminal-size mux pane profile project edit vi init serial http tftp notify attention copy paste splits tabicon theme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme --no-mux --new-window --command'"
                 ));
                 assert!(script.contains("auto zetta bash zsh fish"));
             }
@@ -1765,7 +1768,7 @@ fn generated_scripts_only_offer_long_form_flags() {
             }
             ShellIntegration::PowerShell => {
                 assert!(script.contains(
-                    "'--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme', '--no-mux', '--command'"
+                    "'--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme', '--no-mux', '--new-window', '--command'"
                 ));
                 assert!(script.contains("'overlay', 'wt', '--help'"));
                 assert!(script.contains("'auto', 'zetta', 'bash', 'zsh', 'fish'"));
@@ -1851,6 +1854,7 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
                 "--replace-pane",
                 "--theme",
                 "--no-mux",
+                "--new-window",
             ][..],
         ),
         (

@@ -19,6 +19,9 @@ const DEFAULT_PERFORMANCE_REPORT_DURATION: Duration = Duration::from_secs(10);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StartupMode {
     Application,
+    /// Always open a fresh OS window, without activating or consuming an
+    /// existing process's dormant sessions.
+    NewWindow,
     /// Start a terminal and send the command to its shell after it is ready.
     /// The command owns the rest of argv, so arguments beginning with `-` are
     /// preserved instead of being interpreted as Zetta options.
@@ -1284,6 +1287,13 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 anyhow::ensure!(!no_mux, "--no-mux may only be specified once");
                 no_mux = true;
             }
+            "--new-window" | "-w" => {
+                anyhow::ensure!(
+                    mode == StartupMode::Application,
+                    "--new-window cannot be combined with another startup mode"
+                );
+                mode = StartupMode::NewWindow;
+            }
             #[cfg(windows)]
             // Hidden: written into the Start menu shortcut by the installer,
             // not something a user types.
@@ -1352,6 +1362,33 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
         !no_mux || matches!(mode, StartupMode::Application | StartupMode::Command(_)),
         "--no-mux cannot be combined with another startup mode"
     );
+    if mode == StartupMode::NewWindow {
+        anyhow::ensure!(
+            config.is_none(),
+            "--new-window cannot be combined with --config"
+        );
+        anyhow::ensure!(
+            keymap.is_none(),
+            "--new-window cannot be combined with --keymap"
+        );
+        anyhow::ensure!(
+            profile.is_none(),
+            "--new-window cannot be combined with --profile"
+        );
+        anyhow::ensure!(
+            split.is_none(),
+            "--new-window cannot be combined with --split"
+        );
+        anyhow::ensure!(
+            !replace_pane,
+            "--new-window cannot be combined with --replace-pane"
+        );
+        anyhow::ensure!(
+            theme_override.is_none(),
+            "--new-window cannot be combined with --theme"
+        );
+        anyhow::ensure!(!no_mux, "--new-window cannot be combined with --no-mux");
+    }
     Ok(StartupArgs {
         config_path: config,
         keymap_path: keymap,
@@ -1597,7 +1634,7 @@ fn parse_profile_root_config(arguments: &[OsString]) -> Result<Option<PathBuf>> 
 pub(crate) fn should_handoff_to_existing_process(args: &StartupArgs) -> bool {
     matches!(
         args.mode,
-        StartupMode::Application | StartupMode::Command(_)
+        StartupMode::Application | StartupMode::NewWindow | StartupMode::Command(_)
     ) && args.config_path.is_none()
         && args.keymap_path.is_none()
         && !args.replace_pane

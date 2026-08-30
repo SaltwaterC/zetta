@@ -388,7 +388,7 @@ ifneq ($(LINUX_USER_INSTALL),)
 	mkdir -p "$(LINUX_USER_DESKTOP_DIR)"
 	sed \
 		-e 's|^TryExec=.*|TryExec=$(BINDIR)/zetta|' \
-		-e 's|^Exec=.*|Exec=$(BINDIR)/zetta|' \
+		-e 's|^Exec=zetta$$|Exec=$(BINDIR)/zetta|' \
 		-e 's|^Icon=.*|Icon=$(ICON_512_DIR)/$(APP_ID).png|' \
 		resources/linux/$(APP_ID).desktop > "$(LINUX_USER_DESKTOP_DIR)/$(APP_ID).desktop"
 	chmod 644 "$(LINUX_USER_DESKTOP_DIR)/$(APP_ID).desktop"

@@ -83,6 +83,8 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     assert!(help.contains("-s, --split NAME"));
     assert!(help.contains("-r, --replace-pane"));
     assert!(help.contains("-n, --no-mux"));
+    assert!(help.contains("-w, --new-window"));
+    assert!(help.contains("fresh OS window"));
     assert!(help.contains("-e, --command COMMAND [ARGUMENT ...]"));
     assert!(help.contains("zetta pane [OPTIONS] -- COMMAND [ARGUMENT ...]"));
     assert!(help.contains("Run a command in an existing or new pane"));

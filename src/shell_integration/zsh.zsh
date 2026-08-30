@@ -259,7 +259,7 @@ _zetta() {
 
     if (( CURRENT == 2 )); then
         compadd -S ' ' -- benchmark terminal-size mux profile project edit vi init serial http tftp notify attention copy paste splits pane tabicon theme overlay ZETTA_WORKTREE_ROOT_COMMAND
-        _zetta_options --help --version --config --keymap --profile --split --replace-pane --theme --no-mux --command
+        _zetta_options --help --version --config --keymap --profile --split --replace-pane --theme --no-mux --new-window --command
         return
     fi
 
@@ -357,7 +357,7 @@ _zetta() {
             ;;
         --replace-pane)
             if [[ $words[CURRENT] == -* || -z $words[CURRENT] ]]; then
-                _zetta_options --help --version --config --keymap --profile --split --theme --no-mux --command
+                _zetta_options --help --version --config --keymap --profile --split --theme --no-mux --new-window --command
             fi
             return
             ;;
@@ -442,7 +442,7 @@ _zetta() {
             fi
             if [[ $words[2] == terminal-size || $words[2] == profile || $words[2] == -* || -z $words[2] ]]; then
                 if [[ $words[2] == -* && ($words[CURRENT] == -* || -z $words[CURRENT]) ]]; then
-                    _zetta_options --help --version --config --keymap --profile --split --theme --no-mux --command
+                    _zetta_options --help --version --config --keymap --profile --split --theme --no-mux --new-window --command
                 fi
                 return
             fi
@@ -519,7 +519,7 @@ _zetta() {
     # offering the remaining top-level flags instead of falling through to
     # the subcommand-specific cases below, which would offer nothing.
     if [[ $words[2] == -* ]]; then
-        _zetta_options --help --version --config --keymap --profile --split --replace-pane --theme --no-mux --command
+        _zetta_options --help --version --config --keymap --profile --split --replace-pane --theme --no-mux --new-window --command
         return
     fi
 

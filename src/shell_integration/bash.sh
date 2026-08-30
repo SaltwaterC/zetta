@@ -345,7 +345,7 @@ _zetta_complete() {
             ;;
         --replace-pane)
             if [[ $current == -* || -z $current ]]; then
-                _zetta_compgen '--help --version --config --keymap --profile --split --theme --no-mux --command'
+                _zetta_compgen '--help --version --config --keymap --profile --split --theme --no-mux --new-window --command'
             else
                 COMPREPLY=()
             fi
@@ -448,7 +448,7 @@ _zetta_complete() {
                 COMPREPLY=()
             elif [[ $command == -* || -z $command ]]; then
                 if [[ $current == -* || -z $current ]]; then
-                    _zetta_compgen '--help --version --config --keymap --profile --split --theme --no-mux --command'
+                    _zetta_compgen '--help --version --config --keymap --profile --split --theme --no-mux --new-window --command'
                 else
                     COMPREPLY=()
                 fi
@@ -484,7 +484,7 @@ _zetta_complete() {
     esac
 
     if (( COMP_CWORD == 1 )); then
-        _zetta_compgen 'benchmark terminal-size mux pane profile project edit vi init serial http tftp notify attention copy paste splits tabicon theme overlay ZETTA_WORKTREE_ROOT_COMMAND --help --version --config --keymap --profile --split --replace-pane --theme --no-mux --command'
+        _zetta_compgen 'benchmark terminal-size mux pane profile project edit vi init serial http tftp notify attention copy paste splits tabicon theme overlay ZETTA_WORKTREE_ROOT_COMMAND --help --version --config --keymap --profile --split --replace-pane --theme --no-mux --new-window --command'
         return
     fi
 
@@ -493,7 +493,7 @@ _zetta_complete() {
     # offering the remaining top-level flags instead of falling through to
     # the subcommand-specific cases below, which would offer nothing.
     if [[ $command == -* ]]; then
-        _zetta_compgen '--help --version --config --keymap --profile --split --replace-pane --theme --no-mux --command'
+        _zetta_compgen '--help --version --config --keymap --profile --split --replace-pane --theme --no-mux --new-window --command'
         return
     fi
 

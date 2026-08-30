@@ -233,6 +233,10 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
             "Keep background sessions in this process for this launch; sharing unavailable",
         ),
         (
+            "-w, --new-window",
+            "Open a fresh OS window without resuming a dormant session",
+        ),
+        (
             "-e, --command COMMAND [ARGUMENT ...]",
             "Open a tab and run COMMAND",
         ),

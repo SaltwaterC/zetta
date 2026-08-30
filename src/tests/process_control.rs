@@ -99,6 +99,39 @@ fn control_requests_require_the_endpoint_token() {
 }
 
 #[test]
+fn fresh_window_control_requests_require_authentication_and_no_payload() {
+    assert_eq!(
+        decode_control_request(&mut request("correct", "new_window"), "correct"),
+        Some(ControlRequestCommand::OpenNewWindow)
+    );
+    assert_eq!(
+        decode_control_request(&mut request("wrong", "new_window"), "correct"),
+        None
+    );
+
+    for mut invalid in [
+        ControlRequest {
+            icon: Some("terminal".to_owned()),
+            ..request("correct", "new_window")
+        },
+        ControlRequest {
+            config_path: Some("config.json".to_owned()),
+            ..request("correct", "new_window")
+        },
+        ControlRequest {
+            attention_id: Some(42),
+            ..request("correct", "new_window")
+        },
+        ControlRequest {
+            working_directory: Some("/tmp".to_owned()),
+            ..request("correct", "new_window")
+        },
+    ] {
+        assert_eq!(decode_control_request(&mut invalid, "correct"), None);
+    }
+}
+
+#[test]
 fn replace_pane_control_requests_validate_the_payload() {
     let mut replace = request("token", "replace_pane");
     replace.split = Some("quarters".to_owned());
@@ -1165,6 +1198,26 @@ fn control_server_delivers_a_token_authenticated_open_request() {
     assert!(client.join().unwrap());
 }
 
+#[test]
+fn control_server_delivers_a_token_authenticated_fresh_window_request() {
+    let directory = tempfile::tempdir().unwrap();
+    let endpoint_path = directory.path().join("control.json");
+    let (commands, mut received) = futures::channel::mpsc::unbounded();
+    let _server = ProcessControlServer::start_at(commands, endpoint_path.clone()).unwrap();
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&fs::read(endpoint_path).unwrap()).unwrap();
+    assert_eq!(endpoint.version, CONTROL_VERSION);
+    assert_eq!(CONTROL_VERSION, 2);
+
+    let client = thread::spawn(move || send_open_new_window_request(&endpoint).unwrap());
+    let command = futures::executor::block_on(received.next()).unwrap();
+    let ProcessControlCommand::OpenNewWindow { completion } = command else {
+        panic!("unexpected process control command");
+    };
+    completion.send(true).unwrap();
+    assert!(client.join().unwrap());
+}
+
 #[cfg(feature = "notifications")]
 #[test]
 fn control_server_delivers_targeted_and_untargeted_silent_mode_queries() {
@@ -1360,6 +1413,24 @@ fn control_client_continues_startup_when_window_open_is_rejected() {
     let client = thread::spawn(move || send_open_window_request(&endpoint).unwrap());
     let command = futures::executor::block_on(received.next()).unwrap();
     let ProcessControlCommand::OpenWindow { completion } = command else {
+        panic!("unexpected process control command");
+    };
+    completion.send(false).unwrap();
+    assert!(!client.join().unwrap());
+}
+
+#[test]
+fn control_client_continues_startup_when_fresh_window_is_rejected() {
+    let directory = tempfile::tempdir().unwrap();
+    let endpoint_path = directory.path().join("control.json");
+    let (commands, mut received) = futures::channel::mpsc::unbounded();
+    let _server = ProcessControlServer::start_at(commands, endpoint_path.clone()).unwrap();
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&fs::read(endpoint_path).unwrap()).unwrap();
+
+    let client = thread::spawn(move || send_open_new_window_request(&endpoint).unwrap());
+    let command = futures::executor::block_on(received.next()).unwrap();
+    let ProcessControlCommand::OpenNewWindow { completion } = command else {
         panic!("unexpected process control command");
     };
     completion.send(false).unwrap();

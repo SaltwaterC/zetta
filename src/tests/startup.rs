@@ -17,6 +17,28 @@ fn process_quits_only_without_windows_or_dormant_session_runners() {
 }
 
 #[test]
+fn live_windows_are_selected_before_dormant_sessions() {
+    let window_id = WindowId::from(7);
+
+    assert_eq!(
+        select_window_open_target(Some(window_id), true),
+        WindowOpenTarget::Existing(window_id)
+    );
+    assert_eq!(
+        select_window_open_target(None, true),
+        WindowOpenTarget::Dormant
+    );
+}
+
+#[test]
+fn window_open_selection_falls_back_to_a_fresh_window_without_reopen_state() {
+    assert_eq!(
+        select_window_open_target(None, false),
+        WindowOpenTarget::Fresh
+    );
+}
+
+#[test]
 fn application_shutdown_is_managed_by_the_session_runner() {
     assert_eq!(zetta_quit_mode(), gpui::QuitMode::Explicit);
 }
@@ -183,8 +205,16 @@ fn selected_theme_follows_the_system_appearance_without_cross_mode_fallback(
 #[test]
 fn linux_desktop_entry_matches_app_id() {
     let desktop_entry = include_str!("../../resources/linux/Zetta.desktop");
+    let makefile = include_str!("../../Makefile");
     assert!(desktop_entry.contains(&format!("\nIcon={ZETTA_APP_ID}\n")));
     assert!(desktop_entry.contains(&format!("\nStartupWMClass={ZETTA_APP_ID}\n")));
+    assert!(desktop_entry.contains("\nActions=new-window;\n"));
+    assert!(
+        desktop_entry
+            .contains("[Desktop Action new-window]\nName=New Window\nExec=zetta --new-window\n")
+    );
+    assert!(makefile.contains("-e 's|^Exec=zetta$$|Exec=$(BINDIR)/zetta|'"));
+    assert!(!makefile.contains("-e 's|^Exec=.*|Exec=$(BINDIR)/zetta|'"));
 }
 
 #[test]

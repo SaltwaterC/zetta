@@ -448,6 +448,7 @@ function __zetta_long_options
                 --replace-pane 'Replace the active pane in a running process' \
                 --theme 'Non-persistently override the profile theme' \
                 --no-mux 'Keep background sessions in this process for this launch' \
+                --new-window 'Open a fresh OS window without resuming a dormant session' \
                 --command 'Open a tab and run COMMAND; remaining arguments go to the child'
         case profile
             printf '%s\t%s\n' \

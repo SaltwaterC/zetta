@@ -36,6 +36,19 @@ override is never written to `config.json` or the profile itself, so the
 Settings UI keeps showing the profile's real configured theme and the next
 launch uses it again.
 
+Open a fresh OS window with either form:
+
+```sh
+zetta --new-window
+zetta -w
+```
+
+This standalone launch mode always creates a new window, even when another
+Zetta process has live windows or dormant sessions. It does not accept profile,
+split, theme, configuration, keymap, `--no-mux`, or replace-pane options. Plain
+`zetta` keeps its existing activate-or-reopen behavior, while the in-window
+**New Window** action preserves the active project's settings.
+
 ## Launching a command
 
 Run a command in the first tab with either form:

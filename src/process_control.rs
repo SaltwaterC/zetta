@@ -53,6 +53,10 @@ use crate::pane::{OverlayFontSize, PaneOverlayRequest, overlay_color_from_value}
 ///
 /// 18 adds an optional working directory to open-project requests, so opening
 /// a registered project from a managed worktree can preserve that directory.
+///
+/// The current version also includes an explicit fresh-window request, which
+/// must not resume a dormant session the way the existing plain-launch request
+/// does.
 pub(crate) const CONTROL_VERSION: u32 = zmux::protocol::CONTROL_VERSION;
 // A 64 KiB argv payload can expand substantially when it contains many
 // one-character arguments and each value is represented as JSON. Keep enough
@@ -121,6 +125,9 @@ pub(crate) enum ProcessControlCommand {
         completion: Sender<bool>,
     },
     OpenWindow {
+        completion: Sender<bool>,
+    },
+    OpenNewWindow {
         completion: Sender<bool>,
     },
     OpenProject {
@@ -213,6 +220,7 @@ enum ControlRequestCommand {
         config_path: String,
     },
     OpenWindow,
+    OpenNewWindow,
     OpenProject {
         root: PathBuf,
         working_directory: Option<PathBuf>,
@@ -547,6 +555,14 @@ impl ProcessControlServer {
                             let (completion, completed) = channel();
                             let accepted = commands
                                 .unbounded_send(ProcessControlCommand::OpenWindow { completion })
+                                .is_ok()
+                                && wait_for_control_completion(&completed, &stopping_for_thread);
+                            if accepted { "ok" } else { "rejected" }
+                        }
+                        Some(ControlRequestCommand::OpenNewWindow) => {
+                            let (completion, completed) = channel();
+                            let accepted = commands
+                                .unbounded_send(ProcessControlCommand::OpenNewWindow { completion })
                                 .is_ok()
                                 && wait_for_control_completion(&completed, &stopping_for_thread);
                             if accepted { "ok" } else { "rejected" }
@@ -1041,6 +1057,31 @@ fn zeroize_control_request_secrets(request: &mut ControlRequest) {
     }
 }
 
+fn control_request_has_no_payload(request: &ControlRequest) -> bool {
+    request.runner_id.is_none()
+        && request.session_id.is_none()
+        && request.secret.is_none()
+        && request.icon.is_none()
+        && request.pane_theme.is_none()
+        && request.pane_id.is_none()
+        && request.pane_overlay.is_none()
+        && request.pane_overlay_font_size.is_none()
+        && request.pane_overlay_opacity.is_none()
+        && request.pane_overlay_color.is_none()
+        && request.attention_id.is_none()
+        && request.attention_summary.is_none()
+        && request.attention_body.is_none()
+        && request.tab_name.is_none()
+        && request.worktree_name.is_none()
+        && request.config_path.is_none()
+        && request.working_directory.is_none()
+        && request.split.is_none()
+        && request.profile.is_none()
+        && request.theme.is_none()
+        && request.scope.is_none()
+        && request.pane_request.is_none()
+}
+
 /// Compares the endpoint token without leaking how many leading bytes matched.
 /// This is the only authentication check guarding the process control socket,
 /// so it must not short-circuit the way `str` equality does.
@@ -1137,6 +1178,9 @@ fn decode_control_request(
                 && request.secret.is_none() =>
         {
             Some(ControlRequestCommand::OpenWindow)
+        }
+        "new_window" if control_request_has_no_payload(request) => {
+            Some(ControlRequestCommand::OpenNewWindow)
         }
         "open_project"
             if request.runner_id.is_none()
@@ -1630,6 +1674,14 @@ impl Drop for ProcessControlServer {
 }
 
 pub(crate) fn request_existing_process_window() -> Result<bool> {
+    request_existing_process_window_with_command("open_window")
+}
+
+pub(crate) fn request_existing_process_new_window() -> Result<bool> {
+    request_existing_process_window_with_command("new_window")
+}
+
+fn request_existing_process_window_with_command(command: &str) -> Result<bool> {
     let directory = crate::background_sessions::session_catalog_dir();
     let entries = match fs::read_dir(&directory) {
         Ok(entries) => entries,
@@ -1657,7 +1709,7 @@ pub(crate) fn request_existing_process_window() -> Result<bool> {
             let _ = fs::remove_file(endpoint.socket_path);
             continue;
         }
-        if send_open_window_request(&endpoint).unwrap_or(false) {
+        if send_open_window_request_with_command(&endpoint, command).unwrap_or(false) {
             return Ok(true);
         }
     }
@@ -2205,7 +2257,20 @@ pub(crate) fn request_process_tab_name(process_id: u32, request: TabNameRequest)
     send_set_tab_name_request(&endpoint, &request)
 }
 
+#[cfg(test)]
 fn send_open_window_request(endpoint: &ControlEndpoint) -> Result<bool> {
+    send_open_window_request_with_command(endpoint, "open_window")
+}
+
+#[cfg(test)]
+fn send_open_new_window_request(endpoint: &ControlEndpoint) -> Result<bool> {
+    send_open_window_request_with_command(endpoint, "new_window")
+}
+
+fn send_open_window_request_with_command(
+    endpoint: &ControlEndpoint,
+    command: &str,
+) -> Result<bool> {
     let mut stream = UnixStream::connect(&endpoint.socket_path)?;
     stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
     stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
@@ -2213,7 +2278,7 @@ fn send_open_window_request(endpoint: &ControlEndpoint) -> Result<bool> {
         &mut stream,
         &ControlRequest {
             token: endpoint.token.clone(),
-            command: "open_window".to_owned(),
+            command: command.to_owned(),
             runner_id: None,
             session_id: None,
             secret: None,

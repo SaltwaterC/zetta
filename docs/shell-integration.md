@@ -60,6 +60,11 @@ value. Combine it with `--split`/`-s` or `--profile`/`-p`; split names,
 profiles, and profile themes continue to complete dynamically. When no
 running process accepts the request, Zetta keeps the normal launch behavior.
 
+The standalone `--new-window` launch option is also offered as a long root
+completion candidate. Its `-w` spelling remains accepted by the parser but is
+omitted from completion candidates. It always opens a fresh OS window and never
+consumes a dormant session; it cannot be combined with other launch modifiers.
+
 The root `--command` option is offered as a long completion candidate. Its
 short `-e` spelling remains accepted by the parser but is omitted from the
 candidate list. Once `--command` or `-e` is present, completion stops treating

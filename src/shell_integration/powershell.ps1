@@ -217,7 +217,7 @@ $zettaCompletions = {
         & $zettaSplits
     } elseif ($previous -eq '--replace-pane' -or ($previous -eq '-r' -and $null -eq $subcommand)) {
         if ($wordToComplete -like '-*' -or [string]::IsNullOrEmpty($wordToComplete)) {
-            '--help', '--version', '--config', '--keymap', '--profile', '--split', '--theme', '--no-mux', '--command'
+            '--help', '--version', '--config', '--keymap', '--profile', '--split', '--theme', '--no-mux', '--new-window', '--command'
         } else {
             @()
         }
@@ -311,7 +311,7 @@ $zettaCompletions = {
         }
 # ZETTA_WORKTREE_INTEGRATION_END
     } elseif ($null -eq $subcommand) {
-        'benchmark', 'terminal-size', 'mux', 'profile', 'project', 'splits', 'pane', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'theme', 'overlay'ZETTA_WORKTREE_ROOT_COMMANDS, '--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme', '--no-mux', '--command'
+        'benchmark', 'terminal-size', 'mux', 'profile', 'project', 'splits', 'pane', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'theme', 'overlay'ZETTA_WORKTREE_ROOT_COMMANDS, '--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme', '--no-mux', '--new-window', '--command'
     } else {
         switch ($subcommand) {
             'benchmark' {
