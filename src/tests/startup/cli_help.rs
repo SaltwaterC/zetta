@@ -87,7 +87,10 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     assert!(help.contains("fresh OS window"));
     assert!(help.contains("-e, --command COMMAND [ARGUMENT ...]"));
     assert!(help.contains("zetta pane [OPTIONS] -- COMMAND [ARGUMENT ...]"));
-    assert!(help.contains("Run a command in an existing or new pane"));
+    assert!(help.contains("Run a command in a pane or wait on pane dependencies"));
+    assert!(help.contains("zetta pane wait LABEL[,LABEL ...]"));
+    assert!(help.contains("Run a command in a pane or wait on pane dependencies"));
+    assert!(!help.contains("zetta run"));
     assert!(help.contains("requires --split or --profile"));
     assert!(help.contains("zetta splits"));
     assert!(help.contains("List configured pane split templates"));
@@ -128,6 +131,9 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     assert!(pane_help().contains("-p, --pane LABEL"));
     assert!(pane_help().contains("-o, --overlay TEXT"));
     assert!(pane_help().contains("--overlay-size SIZE"));
+
+    assert!(pane_help().contains("zetta pane wait LABEL[,LABEL ...]"));
+    assert!(pane_help().contains("--allow-failure"));
 
     let theme_help_text = theme_help(None);
     assert!(theme_help_text.contains("zetta theme pane [OPTIONS] THEME"));

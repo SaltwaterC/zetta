@@ -872,6 +872,19 @@ impl Zetta {
         // process was holding, and the multiplexer resumes reading them.
         match self.hand_session_to_multiplexer(&mut tab, authentication.as_ref(), cx) {
             Ok(true) => {
+                let run_registry = crate::run_command::process_run_registry();
+                for pane in &tab.panes {
+                    run_registry.pane_closed(crate::run_command::RunPaneIdentity::new(
+                        tab.attention_id,
+                        pane.routing_id,
+                    ));
+                    for entry in &pane.stack.entries {
+                        run_registry.pane_closed(crate::run_command::RunPaneIdentity::new(
+                            tab.attention_id,
+                            entry.routing_id,
+                        ));
+                    }
+                }
                 self.mux_panes.forget_tab(tab_id);
                 for pane in &tab.panes {
                     self.mux_panes.forget_pane(pane.id);
@@ -2039,9 +2052,23 @@ impl Zetta {
         if !self.background_observed_panes.insert(pane_id) {
             return;
         }
-        cx.subscribe(
-            &terminal,
-            move |this, _, event: &TerminalEvent, cx| match event {
+        let run_identity = self.run_pane_identity(tab_id, pane_id);
+        let run_registry = crate::run_command::process_run_registry();
+        cx.subscribe(&terminal, move |this, _, event: &TerminalEvent, cx| {
+            if let Some(identity) = run_identity {
+                match event {
+                    TerminalEvent::TrackingReady => run_registry.tracking_ready(identity),
+                    TerminalEvent::CommandStarted { command } => {
+                        run_registry.command_started(identity, command.clone())
+                    }
+                    TerminalEvent::CommandFinished { exit_code } => {
+                        run_registry.command_finished(identity, *exit_code)
+                    }
+                    TerminalEvent::TerminalExited(_) => run_registry.terminal_lost(identity),
+                    _ => {}
+                }
+            }
+            match event {
                 TerminalEvent::TerminalExited(exit)
                     if exit.is_unexpected()
                         && this.retain_unexpected_terminal_exit(tab_id, pane_id, exit, cx) =>
@@ -2058,8 +2085,8 @@ impl Zetta {
                     this.reap_background_pane(pane_id, cx);
                 }
                 _ => {}
-            },
-        )
+            }
+        })
         .detach();
     }
 
@@ -2097,9 +2124,34 @@ impl Zetta {
         if !self.background_observed_panes.insert(entry_id) {
             return;
         }
-        cx.subscribe(
-            &terminal,
-            move |this, _, event: &TerminalEvent, cx| match event {
+        let run_identity = self.background_sessions.iter().find_map(|tab| {
+            let entry = tab
+                .pane(pane_id)?
+                .stack
+                .entries
+                .iter()
+                .find(|entry| entry.id == entry_id)?;
+            Some(crate::run_command::RunPaneIdentity::new(
+                tab.attention_id,
+                entry.routing_id,
+            ))
+        });
+        let run_registry = crate::run_command::process_run_registry();
+        cx.subscribe(&terminal, move |this, _, event: &TerminalEvent, cx| {
+            if let Some(identity) = run_identity {
+                match event {
+                    TerminalEvent::TrackingReady => run_registry.tracking_ready(identity),
+                    TerminalEvent::CommandStarted { command } => {
+                        run_registry.command_started(identity, command.clone())
+                    }
+                    TerminalEvent::CommandFinished { exit_code } => {
+                        run_registry.command_finished(identity, *exit_code)
+                    }
+                    TerminalEvent::TerminalExited(_) => run_registry.terminal_lost(identity),
+                    _ => {}
+                }
+            }
+            match event {
                 TerminalEvent::TaskFinished { exit_code } => {
                     let Some(tab_id) = this
                         .background_sessions
@@ -2135,13 +2187,16 @@ impl Zetta {
                         .and_then(|tab| tab.pane_mut(pane_id))
                         .and_then(|pane| pane.stack.remove(entry_id));
                     if removed.is_some() {
+                        if let Some(identity) = run_identity {
+                            run_registry.pane_closed(identity);
+                        }
                         this.background_observed_panes.remove(&entry_id);
                         this.publish_background_session_catalog(cx);
                     }
                 }
                 _ => {}
-            },
-        )
+            }
+        })
         .detach();
     }
 
@@ -2333,9 +2388,36 @@ impl Zetta {
         let terminal = view.read(cx).terminal().clone();
         let display_only = !terminal.read(cx).is_pty();
         terminal.update(cx, |terminal, cx| terminal.set_ui_visible(visible, cx));
+        let run_identity = self.run_pane_identity(tab_id, pane_id);
+        let run_registry = crate::run_command::process_run_registry();
+        if let Some(identity) = run_identity {
+            run_registry.pane_reopened(identity);
+        }
         if self.shared_panes.contains_key(&pane_id) {
             self.subscribe_shared_pane_size(pane_id, &terminal, window, cx);
         }
+
+        cx.subscribe_in(
+            &terminal,
+            window,
+            move |_, _, event: &TerminalEvent, _, _| {
+                let Some(identity) = run_identity else {
+                    return;
+                };
+                match event {
+                    TerminalEvent::TrackingReady => run_registry.tracking_ready(identity),
+                    TerminalEvent::CommandStarted { command } => {
+                        run_registry.command_started(identity, command.clone())
+                    }
+                    TerminalEvent::CommandFinished { exit_code } => {
+                        run_registry.command_finished(identity, *exit_code)
+                    }
+                    TerminalEvent::TerminalExited(_) => run_registry.terminal_lost(identity),
+                    _ => {}
+                }
+            },
+        )
+        .detach();
 
         let pane_label = self
             .tabs
@@ -2430,17 +2512,37 @@ impl Zetta {
         });
         let terminal = view.read(cx).terminal().clone();
         terminal.update(cx, |terminal, cx| terminal.set_ui_visible(visible, cx));
+        let run_identity = self.run_stacked_pane_identity(tab_id, pane_id, entry_id);
+        let run_registry = crate::run_command::process_run_registry();
+        if let Some(identity) = run_identity {
+            run_registry.pane_reopened(identity);
+        }
         cx.subscribe_in(
             &terminal,
             window,
-            move |this, terminal, event: &TerminalEvent, _window, cx| match event {
-                TerminalEvent::TaskFinished { exit_code } => {
-                    this.stacked_task_finished(tab_id, pane_id, entry_id, *exit_code, cx);
+            move |this, terminal, event: &TerminalEvent, _window, cx| {
+                if let Some(identity) = run_identity {
+                    match event {
+                        TerminalEvent::TrackingReady => run_registry.tracking_ready(identity),
+                        TerminalEvent::CommandStarted { command } => {
+                            run_registry.command_started(identity, command.clone())
+                        }
+                        TerminalEvent::CommandFinished { exit_code } => {
+                            run_registry.command_finished(identity, *exit_code)
+                        }
+                        TerminalEvent::TerminalExited(_) => run_registry.terminal_lost(identity),
+                        _ => {}
+                    }
                 }
-                TerminalEvent::ResizeRequested { .. } => {
-                    terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
+                match event {
+                    TerminalEvent::TaskFinished { exit_code } => {
+                        this.stacked_task_finished(tab_id, pane_id, entry_id, *exit_code, cx);
+                    }
+                    TerminalEvent::ResizeRequested { .. } => {
+                        terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
+                    }
+                    _ => {}
                 }
-                _ => {}
             },
         )
         .detach();
@@ -2963,6 +3065,9 @@ impl Zetta {
             let Some(built) = built else {
                 continue;
             };
+            crate::run_command::process_run_registry().pane_reopened(
+                crate::run_command::RunPaneIdentity::new(tab.attention_id, routing_id),
+            );
             if let Some(child_events) = child_events {
                 // Only the multiplexer is the process's parent, so this is the one
                 // route by which the terminal can learn that it ended.

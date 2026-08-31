@@ -5,13 +5,103 @@ fi
 
 if [[ -z ${__ZETTA_CWD_TRACKING_INSTALLED:-} ]]; then
     __ZETTA_CWD_TRACKING_INSTALLED=1
-    __zetta_report_cwd() {
-        printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
+    __ZETTA_LIFECYCLE_TRACKING_INSTALLED=1
+    if [[ -n ${ZETTA_PANE_ROUTING_ID:-${ZETTA_PANE_ID:-}} ]]; then
+        __ZETTA_LIFECYCLE_TRACKING_ENABLED=1
+    else
+        __ZETTA_LIFECYCLE_TRACKING_ENABLED=0
+    fi
+    __ZETTA_COMMAND_STARTED=0
+    __zetta_at_prompt=0
+    __zetta_report_tracking_ready() {
+        [[ ${__ZETTA_LIFECYCLE_TRACKING_ENABLED:-0} == 1 ]] || return
+        printf '\033]2;zetta-event:tracking-ready\033\\'
     }
-    if [[ $(declare -p PROMPT_COMMAND 2>/dev/null) == "declare -a"* ]]; then
+    __zetta_report_command_started() {
+        [[ ${__ZETTA_LIFECYCLE_TRACKING_ENABLED:-0} == 1 ]] || return
+        [[ ${__zetta_at_prompt:-0} == 1 ]] || return
+        __zetta_at_prompt=0
+        case "$BASH_COMMAND" in
+            __zetta_report_cwd|__zetta_mark_prompt) return ;;
+        esac
+        __ZETTA_COMMAND_STARTED=1
+        printf '\033]2;zetta-event:command-started:%s\033\\' "$BASH_COMMAND"
+    }
+    __zetta_report_cwd() {
+        local status=$?
+        if [[ ${__ZETTA_LIFECYCLE_TRACKING_ENABLED:-0} == 1 && ${__ZETTA_COMMAND_STARTED:-0} == 1 ]]; then
+            printf '\033]2;zetta-event:command-finished:%s\033\\' "$status"
+            __ZETTA_COMMAND_STARTED=0
+        fi
+        printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
+        return "$status"
+    }
+    __zetta_mark_prompt() {
+        __zetta_at_prompt=1
+    }
+    if [[ ${__ZETTA_LIFECYCLE_TRACKING_ENABLED:-0} == 1 ]]; then
+        if [[ $(declare -p PROMPT_COMMAND 2>/dev/null) == "declare -a"* ]]; then
+            PROMPT_COMMAND=(__zetta_report_cwd "${PROMPT_COMMAND[@]}" __zetta_mark_prompt)
+        else
+            PROMPT_COMMAND="__zetta_report_cwd${PROMPT_COMMAND:+;$PROMPT_COMMAND};__zetta_mark_prompt"
+        fi
+        trap '__zetta_report_command_started' DEBUG
+    elif [[ $(declare -p PROMPT_COMMAND 2>/dev/null) == "declare -a"* ]]; then
         PROMPT_COMMAND+=(__zetta_report_cwd)
     else
         PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND;}__zetta_report_cwd"
+    fi
+    __zetta_report_tracking_ready
+fi
+
+# Upgrade a shell that loaded an older CWD-only integration. Keep this
+# separate from the CWD guard: the shell may already have
+# __ZETTA_CWD_TRACKING_INSTALLED set when a new Zetta binary is installed.
+if [[ -z ${__ZETTA_LIFECYCLE_TRACKING_INSTALLED:-} ||
+    ( -n ${ZETTA_PANE_ROUTING_ID:-${ZETTA_PANE_ID:-}} &&
+        ${__ZETTA_LIFECYCLE_TRACKING_ENABLED:-0} != 1 ) ]]; then
+    __ZETTA_LIFECYCLE_TRACKING_INSTALLED=1
+    if [[ -n ${ZETTA_PANE_ROUTING_ID:-${ZETTA_PANE_ID:-}} ]]; then
+        __ZETTA_LIFECYCLE_TRACKING_ENABLED=1
+        __ZETTA_COMMAND_STARTED=0
+        __zetta_at_prompt=0
+        __zetta_report_tracking_ready() {
+            [[ ${__ZETTA_LIFECYCLE_TRACKING_ENABLED:-0} == 1 ]] || return
+            printf '\033]2;zetta-event:tracking-ready\033\\'
+        }
+        __zetta_report_command_started() {
+            [[ ${__ZETTA_LIFECYCLE_TRACKING_ENABLED:-0} == 1 ]] || return
+            [[ ${__zetta_at_prompt:-0} == 1 ]] || return
+            __zetta_at_prompt=0
+            case "$BASH_COMMAND" in
+                __zetta_report_cwd|__zetta_mark_prompt) return ;;
+            esac
+            __ZETTA_COMMAND_STARTED=1
+            printf '\033]2;zetta-event:command-started:%s\033\\' "$BASH_COMMAND"
+        }
+        # An older integration already registered this function in
+        # PROMPT_COMMAND. Redefining it upgrades that registration in place.
+        __zetta_report_cwd() {
+            local status=$?
+            if [[ ${__ZETTA_LIFECYCLE_TRACKING_ENABLED:-0} == 1 && ${__ZETTA_COMMAND_STARTED:-0} == 1 ]]; then
+                printf '\033]2;zetta-event:command-finished:%s\033\\' "$status"
+                __ZETTA_COMMAND_STARTED=0
+            fi
+            printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
+            return "$status"
+        }
+        __zetta_mark_prompt() {
+            __zetta_at_prompt=1
+        }
+        if [[ $(declare -p PROMPT_COMMAND 2>/dev/null) == "declare -a"* ]]; then
+            PROMPT_COMMAND+=(__zetta_mark_prompt)
+        else
+            PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND;}__zetta_mark_prompt"
+        fi
+        trap '__zetta_report_command_started' DEBUG
+        __zetta_report_tracking_ready
+    else
+        __ZETTA_LIFECYCLE_TRACKING_ENABLED=0
     fi
 fi
 
@@ -100,11 +190,15 @@ _zetta_compgen() {
 }
 
 _zetta_complete() {
-    local current previous command profile_operation profile_command_index=-1 command_option_index=-1
+    local current previous command pane_operation profile_operation profile_command_index=-1 command_option_index=-1
     local -a config_args=()
     current=${COMP_WORDS[COMP_CWORD]}
     previous=${COMP_WORDS[COMP_CWORD-1]}
     command=${COMP_WORDS[1]}
+    pane_operation=''
+    if [[ $command == pane && ${COMP_WORDS[2]} == wait ]]; then
+        pane_operation=wait
+    fi
 
     local index
     for (( index = 1; index < COMP_CWORD; index++ )); do
@@ -248,8 +342,57 @@ _zetta_complete() {
         done < <(zetta pane --list 2>/dev/null)
     }
 
+    _zetta_complete_run_pane_labels() {
+        COMPREPLY=()
+        local prefix='' partial="$current" label selected_label duplicate
+        local -a selected=()
+        if [[ $current == *,* ]]; then
+            prefix="${current%,*},"
+            partial=${current##*,}
+            IFS=',' read -r -a selected <<< "${current%,*}"
+        fi
+        while IFS= read -r label; do
+            [[ $label == "$partial"* ]] || continue
+            duplicate=0
+            for selected_label in "${selected[@]}"; do
+                if [[ $selected_label == "$label" ]]; then
+                    duplicate=1
+                    break
+                fi
+            done
+            (( duplicate )) || COMPREPLY+=("$prefix$label")
+        done < <(zetta pane --list 2>/dev/null)
+    }
+
+    if [[ $pane_operation == wait ]]; then
+        local wait_delimiter=0 wait_dependency=0 argument
+        for (( index = 3; index < COMP_CWORD; index++ )); do
+            argument=${COMP_WORDS[index]}
+            if [[ $argument == -- ]]; then
+                wait_delimiter=1
+                break
+            elif [[ $argument != --allow-failure && $argument != -a ]]; then
+                wait_dependency=1
+            fi
+        done
+        if (( wait_delimiter )); then
+            COMPREPLY=()
+        elif [[ $current == -* ]]; then
+            _zetta_compgen '--allow-failure --help --'
+        elif [[ $previous == wait || $previous == --allow-failure || $previous == -a || $current == *,* || $wait_dependency == 0 ]]; then
+            _zetta_complete_run_pane_labels
+        else
+            _zetta_compgen '--allow-failure --help --'
+        fi
+        return
+    fi
+
     case "$previous" in
         --command|-e)
+            COMPREPLY=()
+            return
+            ;;
+        --)
             COMPREPLY=()
             return
             ;;
@@ -679,7 +822,11 @@ _zetta_complete() {
             _zetta_compgen '--help'
             ;;
         pane)
-            _zetta_compgen '--direction --label --pane --overlay --overlay-size --overlay-opacity --overlay-color --stack --list --help'
+            if (( COMP_CWORD == 2 )); then
+                _zetta_compgen 'wait --direction --label --pane --overlay --overlay-size --overlay-opacity --overlay-color --stack --list --help'
+            else
+                _zetta_compgen '--direction --label --pane --overlay --overlay-size --overlay-opacity --overlay-color --stack --list --help'
+            fi
             ;;
         tabicon)
             if [[ $current == -* ]]; then

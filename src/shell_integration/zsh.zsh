@@ -4,11 +4,76 @@ if [[ -n ${ZETTA_HOST_EXECUTABLE:-} ]]; then
 fi
 
 if (( ! $+functions[__zetta_report_cwd] )); then
+    typeset -g __ZETTA_LIFECYCLE_TRACKING_INSTALLED=1
+    typeset -g __ZETTA_LIFECYCLE_TRACKING_VERSION=3
+    if [[ -n ${ZETTA_PANE_ROUTING_ID:-${ZETTA_PANE_ID:-}} ]]; then
+        typeset -g __ZETTA_LIFECYCLE_TRACKING_ENABLED=1
+    else
+        typeset -g __ZETTA_LIFECYCLE_TRACKING_ENABLED=0
+    fi
+    typeset -g __ZETTA_COMMAND_STARTED=0
+    function __zetta_report_tracking_ready() {
+        (( __ZETTA_LIFECYCLE_TRACKING_ENABLED )) || return
+        printf '\033]2;zetta-event:tracking-ready\033\\'
+    }
+    function __zetta_report_preexec() {
+        (( __ZETTA_LIFECYCLE_TRACKING_ENABLED )) || return
+        __ZETTA_COMMAND_STARTED=1
+        printf '\033]2;zetta-event:command-started:%s\033\\' "$1"
+    }
     function __zetta_report_cwd() {
+        local zetta_status=$?
+        if (( __ZETTA_LIFECYCLE_TRACKING_ENABLED && __ZETTA_COMMAND_STARTED )); then
+            printf '\033]2;zetta-event:command-finished:%s\033\\' "$zetta_status"
+            __ZETTA_COMMAND_STARTED=0
+        fi
         [[ "$PWD" == /* ]] && printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
+        return $zetta_status
     }
     autoload -Uz add-zsh-hook
     add-zsh-hook precmd __zetta_report_cwd
+    (( __ZETTA_LIFECYCLE_TRACKING_ENABLED )) && add-zsh-hook preexec __zetta_report_preexec
+    __zetta_report_tracking_ready
+fi
+
+# Upgrade a shell that loaded an older CWD-only integration. The old script
+# already registered __zetta_report_cwd with precmd, so redefining that
+# function upgrades the existing hook without duplicating it.
+if [[ ${__ZETTA_LIFECYCLE_TRACKING_VERSION:-0} != 3 ||
+    ( -n ${ZETTA_PANE_ROUTING_ID:-${ZETTA_PANE_ID:-}} &&
+        ${__ZETTA_LIFECYCLE_TRACKING_ENABLED:-0} != 1 ) ]]; then
+    typeset -g __ZETTA_LIFECYCLE_TRACKING_INSTALLED=1
+    typeset -g __ZETTA_LIFECYCLE_TRACKING_VERSION=3
+    if [[ -n ${ZETTA_PANE_ROUTING_ID:-${ZETTA_PANE_ID:-}} ]]; then
+        typeset -g __ZETTA_LIFECYCLE_TRACKING_ENABLED=1
+        typeset -g __ZETTA_COMMAND_STARTED=0
+        function __zetta_report_tracking_ready() {
+            (( __ZETTA_LIFECYCLE_TRACKING_ENABLED )) || return
+            printf '\033]2;zetta-event:tracking-ready\033\\'
+        }
+        function __zetta_report_preexec() {
+            (( __ZETTA_LIFECYCLE_TRACKING_ENABLED )) || return
+            __ZETTA_COMMAND_STARTED=1
+            printf '\033]2;zetta-event:command-started:%s\033\\' "$1"
+        }
+        function __zetta_report_cwd() {
+            local zetta_status=$?
+            if (( __ZETTA_LIFECYCLE_TRACKING_ENABLED && __ZETTA_COMMAND_STARTED )); then
+                printf '\033]2;zetta-event:command-finished:%s\033\\' "$zetta_status"
+                __ZETTA_COMMAND_STARTED=0
+            fi
+            [[ "$PWD" == /* ]] && printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
+            return $zetta_status
+        }
+        autoload -Uz add-zsh-hook
+        (( ${precmd_functions[(I)__zetta_report_cwd]:-0} == 0 )) &&
+            add-zsh-hook precmd __zetta_report_cwd
+        (( ${preexec_functions[(I)__zetta_report_preexec]:-0} == 0 )) &&
+            add-zsh-hook preexec __zetta_report_preexec
+        __zetta_report_tracking_ready
+    else
+        typeset -g __ZETTA_LIFECYCLE_TRACKING_ENABLED=0
+    fi
 fi
 
 if (( ! ${+EDITOR} )); then
@@ -148,6 +213,27 @@ _zetta_pane_labels() {
     compadd -- "${(@f)$(zetta pane --list 2>/dev/null)}"
 }
 
+_zetta_run_pane_labels() {
+    local value=${words[CURRENT]} prefix='' partial=$value label selected_label duplicate
+    local -a selected=() labels=("${(@f)$(zetta pane --list 2>/dev/null)}")
+    if [[ $value == *,* ]]; then
+        prefix="${value%,*},"
+        partial=${value##*,}
+        selected=("${(@s/,/)${value%,*}}")
+    fi
+    for label in "${labels[@]}"; do
+        [[ $label == "$partial"* ]] || continue
+        duplicate=0
+        for selected_label in "${selected[@]}"; do
+            if [[ $selected_label == "$label" ]]; then
+                duplicate=1
+                break
+            fi
+        done
+        (( duplicate )) || compadd -- "$prefix$label"
+    done
+}
+
 _zmux_session_ids() {
     local -a mux_list_command=(zetta mux list)
     [[ ${_zetta_mux_completion_command:-} == zmux ]] && mux_list_command=(zmux list)
@@ -190,9 +276,13 @@ _zetta_sound_names() {
 }
 
 _zetta() {
-    local previous=${words[CURRENT-1]} profile_operation='' profile_command_index=-1 command_option_index=-1
+    local previous=${words[CURRENT-1]} pane_operation='' profile_operation='' profile_command_index=-1 command_option_index=-1
     local index
     local -a config_args=()
+
+    if [[ ${words[2]} == pane && ${words[3]} == wait ]]; then
+        pane_operation=wait
+    fi
 
     for (( index = 2; index < CURRENT; index++ )); do
         case ${words[index]} in
@@ -266,6 +356,29 @@ _zetta() {
     if (( profile_command_index >= 0 && CURRENT == profile_command_index + 1 )); then
         compadd -S ' ' -- list themes disable enable theme icon default add remove
         _zetta_options --config --help
+        return
+    fi
+
+    if [[ $pane_operation == wait ]]; then
+        local wait_delimiter=0 wait_dependency=0 argument
+        for (( index = 4; index < CURRENT; index++ )); do
+            argument=${words[index]}
+            if [[ $argument == -- ]]; then
+                wait_delimiter=1
+                break
+            elif [[ $argument != --allow-failure && $argument != -a ]]; then
+                wait_dependency=1
+            fi
+        done
+        if (( wait_delimiter )); then
+            return
+        elif [[ ${words[CURRENT]} == -* ]]; then
+            _zetta_options --allow-failure --help --
+        elif [[ $previous == wait || $previous == --allow-failure || $previous == -a || ${words[CURRENT]} == *,* || $wait_dependency == 0 ]]; then
+            _zetta_run_pane_labels
+        else
+            _zetta_options --allow-failure --help --
+        fi
         return
     fi
 
@@ -657,6 +770,9 @@ _zetta() {
             fi
             ;;
         pane)
+            if (( CURRENT == 3 )); then
+                compadd -S ' ' -- wait
+            fi
             _zetta_options --direction --label --pane --overlay --overlay-size --overlay-opacity --overlay-color --stack --list --help
             ;;
         tabicon)

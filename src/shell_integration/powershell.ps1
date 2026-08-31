@@ -1,10 +1,48 @@
 # Zetta shell integration for PowerShell.
 $terminalTrackerActive = Get-Variable -Name __ZettaCwdTrackerInstalled -Scope Global -ErrorAction SilentlyContinue
+$zettaPaneIdentityAvailable =
+    (-not [string]::IsNullOrEmpty($env:ZETTA_PANE_ROUTING_ID)) -or
+    (-not [string]::IsNullOrEmpty($env:ZETTA_PANE_ID))
 if (-not $terminalTrackerActive) {
     $global:__ZettaCwdTrackerInstalled = $true
     $global:__ZettaOriginalPrompt = $function:prompt
+}
+
+# Install, or upgrade, the lifecycle half of the tracker. Keeping the prompt
+# implementation in one place is important: sourcing a newer integration must
+# not create a second CWD marker or wrap the saved prompt recursively.
+function global:__zetta_install_lifecycle_tracking([bool] $trackingEnabled) {
+    $global:__ZettaLifecycleTrackerInstalled = $true
+    $global:__ZettaLifecycleTrackingEnabled = $trackingEnabled
+    $global:__ZettaCommandStarted = $false
+    if ($null -eq (Get-Variable -Name __ZettaOriginalPrompt -Scope Global -ErrorAction SilentlyContinue)) {
+        $global:__ZettaOriginalPrompt = $function:prompt
+    }
+    $global:__ZettaOriginalCommandValidationHandler = $null
+    function global:__zetta_report_tracking_ready {
+        if (-not $global:__ZettaLifecycleTrackingEnabled) { return }
+        [Console]::Write("$([char]27)]2;zetta-event:tracking-ready$([char]27)\")
+    }
+    function global:__zetta_report_command_started([string] $command) {
+        if (-not $global:__ZettaLifecycleTrackingEnabled) { return }
+        if ($global:__ZettaCommandStarted) { return }
+        $global:__ZettaCommandStarted = $true
+        [Console]::Write("$([char]27)]2;zetta-event:command-started:$command$([char]27)\")
+    }
     function global:prompt {
+        $promptSucceeded = $?
         try {
+            if ($global:__ZettaLifecycleTrackingEnabled -and $global:__ZettaCommandStarted) {
+                $status = if ($promptSucceeded) {
+                    0
+                } elseif ($null -ne $global:LASTEXITCODE -and $global:LASTEXITCODE -ne 0) {
+                    [int]$global:LASTEXITCODE
+                } else {
+                    1
+                }
+                [Console]::Write("$([char]27)]2;zetta-event:command-finished:$status$([char]27)\")
+                $global:__ZettaCommandStarted = $false
+            }
             $zettaDirectory = $ExecutionContext.SessionState.Path.CurrentFileSystemLocation.ProviderPath
             [Console]::Write("$([char]27)]2;zetta-cwd:$zettaDirectory$([char]27)\")
             [Console]::Write("$([char]27)[0m")
@@ -15,6 +53,33 @@ if (-not $terminalTrackerActive) {
             "PS $($ExecutionContext.SessionState.Path.CurrentLocation)> "
         }
     }
+    __zetta_report_tracking_ready
+    if ($global:__ZettaLifecycleTrackingEnabled) {
+        $zettaReadLine = Get-Command Set-PSReadLineOption -ErrorAction SilentlyContinue
+        if ($null -ne $zettaReadLine -and $zettaReadLine.Parameters.ContainsKey('CommandValidationHandler')) {
+            try {
+                $global:__ZettaOriginalCommandValidationHandler = (Get-PSReadLineOption).CommandValidationHandler
+                $global:__ZettaCommandValidationHandler = {
+                    param([System.Management.Automation.Language.CommandAst] $commandAst)
+                    $command = $commandAst.Extent.Text
+                    if (-not [string]::IsNullOrWhiteSpace($command)) {
+                        __zetta_report_command_started $command
+                    }
+                    if ($null -ne $global:__ZettaOriginalCommandValidationHandler) {
+                        return & $global:__ZettaOriginalCommandValidationHandler $commandAst
+                    }
+                    return $true
+                }
+                Set-PSReadLineOption -CommandValidationHandler $global:__ZettaCommandValidationHandler
+            } catch {}
+        }
+    }
+}
+
+$zettaLifecycleTracker = Get-Variable -Name __ZettaLifecycleTrackerInstalled -Scope Global -ErrorAction SilentlyContinue
+if ($null -eq $zettaLifecycleTracker -or
+    ($zettaPaneIdentityAvailable -and -not $global:__ZettaLifecycleTrackingEnabled)) {
+    __zetta_install_lifecycle_tracking $zettaPaneIdentityAvailable
 }
 
 if (-not (Test-Path Env:EDITOR)) {
@@ -94,6 +159,27 @@ $zettaThemes = { param($scope) @(& zetta theme $scope --list 2>$null) }
 $zettaSplits = { @(& zetta splits 2>$null) }
 $zettaProjects = { @(& zetta project list 2>$null) }
 $zettaPaneLabels = { @(& zetta pane --list 2>$null) }
+$zettaRunPaneLabels = {
+    param($wordToComplete)
+    $wordToComplete = [string]$wordToComplete
+    $prefix = ''
+    $partial = $wordToComplete
+    $selected = @()
+    $comma = $wordToComplete.LastIndexOf(',')
+    if ($comma -ge 0) {
+        $prefix = $wordToComplete.Substring(0, $comma + 1)
+        $partial = $wordToComplete.Substring($comma + 1)
+        if ($comma -gt 0) {
+            $selected = @($wordToComplete.Substring(0, $comma).Split(','))
+        }
+    }
+    foreach ($label in @(& zetta pane --list 2>$null)) {
+        $label = [string]$label
+        if ($label.StartsWith($partial, [StringComparison]::Ordinal) -and $selected -notcontains $label) {
+            "$prefix$label"
+        }
+    }
+}
 
 # zetta-default/zetta-ok/zetta-alarm/zetta-gong are bundled tones Zetta plays itself, so
 # they always work; the rest are the current platform's own system sound
@@ -143,6 +229,10 @@ $zettaCompletions = {
         if ($words[$index] -in '--command', '-e') {
             # --command owns the rest of argv, including tokens that happen to
             # look like Zetta options or subcommands.
+            return @()
+        }
+        if ($words[$index] -eq '--' -and $words[1] -eq 'pane' -and $words.Count -gt 2 -and $words[2] -eq 'wait') {
+            # `pane wait --` owns the rest of argv too.
             return @()
         }
     }
@@ -221,6 +311,12 @@ $zettaCompletions = {
         } else {
             @()
         }
+    } elseif ($subcommand -eq 'pane' -and $words.Count -gt 2 -and $words[2] -eq 'wait' -and $words -notcontains '--' -and (
+        $previous -eq 'wait' -or
+        $previous -in '--allow-failure', '-a' -or
+        $wordToComplete -like '*,*'
+    )) {
+        & $zettaRunPaneLabels $wordToComplete
     } elseif ($previous -in '--pane', '-p' -and $subcommand -eq 'pane') {
         & $zettaPaneLabels
     } elseif ($previous -in '--direction', '-d' -and $subcommand -eq 'pane') {
@@ -335,7 +431,13 @@ $zettaCompletions = {
                 else { '--json', '--help' }
             }
             'splits' { '--help' }
-            'pane' { '--direction', '--label', '--pane', '--overlay', '--overlay-size', '--overlay-opacity', '--overlay-color', '--stack', '--list', '--help' }
+            'pane' {
+                if ($words.Count -gt 2 -and $words[2] -eq 'wait') {
+                    '--allow-failure', '--help', '--'
+                } else {
+                    'wait', '--direction', '--label', '--pane', '--overlay', '--overlay-size', '--overlay-opacity', '--overlay-color', '--stack', '--list', '--help'
+                }
+            }
             'profile' {
                 if ([string]::IsNullOrEmpty($profileOperation) -or ($profileOperationIndex -eq ($words.Count - 1) -and -not [string]::IsNullOrEmpty($wordToComplete)) -or $profileOperation -notin 'list', 'themes', 'disable', 'enable', 'theme', 'dark-theme', 'icon', 'default', 'add', 'remove') {
                     'list', 'themes', 'disable', 'enable', 'theme', 'dark-theme', 'icon', 'default', 'add', 'remove', '--config', '--help'

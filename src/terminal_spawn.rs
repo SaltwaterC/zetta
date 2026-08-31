@@ -1,6 +1,60 @@
 use super::*;
 use crate::worktree_detection::terminal_event_requires_worktree_detection;
 
+/// Returns the shell command used to load this process's shell integration
+/// into an interactive native shell.  The command is sent after the shell's
+/// startup files have completed so a stale `zetta` found earlier on PATH
+/// cannot leave the pane with CWD-only tracking.
+fn shell_integration_startup_command(shell: &Shell) -> Option<Vec<u8>> {
+    let (program, arguments) = shell.program_and_args();
+    let has_command = arguments.iter().any(|argument| {
+        let argument = argument.to_ascii_lowercase();
+        matches!(
+            argument.as_str(),
+            "-c" | "--command"
+                | "/c"
+                | "/k"
+                | "-command"
+                | "-commandwithargs"
+                | "-encodedcommand"
+                | "-encodedarguments"
+                | "-file"
+        ) || (argument.starts_with('-') && argument[1..].contains('c'))
+    });
+    if has_command {
+        return None;
+    }
+
+    let shell_name = Path::new(&program)
+        .file_name()?
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    #[cfg(not(windows))]
+    let command = match shell_name.as_str() {
+        "bash" | "bash.exe" => {
+            r#"if [[ ${__ZETTA_LIFECYCLE_TRACKING_INSTALLED:-0} != 1 || ${__ZETTA_LIFECYCLE_TRACKING_ENABLED:-0} != 1 ]]; then eval "$("$ZETTA_HOST_EXECUTABLE" init bash)"; fi"#
+        }
+        "zsh" | "zsh.exe" => {
+            r#"if [[ ${__ZETTA_LIFECYCLE_TRACKING_VERSION:-0} != 3 || ( -n ${ZETTA_PANE_ROUTING_ID:-${ZETTA_PANE_ID:-}} && ${__ZETTA_LIFECYCLE_TRACKING_ENABLED:-0} != 1 ) ]]; then eval "$("$ZETTA_HOST_EXECUTABLE" init zsh)"; fi"#
+        }
+        "fish" | "fish.exe" => {
+            r#"if not set -q __ZETTA_LIFECYCLE_TRACKING_INSTALLED; or test "$__ZETTA_LIFECYCLE_TRACKING_ENABLED" != 1; "$ZETTA_HOST_EXECUTABLE" init fish | source; end"#
+        }
+        _ => return None,
+    };
+    #[cfg(windows)]
+    let command = match shell_name.as_str() {
+        "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe" => {
+            r#"if (-not $global:__ZettaLifecycleTrackerInstalled -or -not $global:__ZettaLifecycleTrackingEnabled) { & $env:ZETTA_HOST_EXECUTABLE init powershell | Out-String | Invoke-Expression }"#
+        }
+        _ => return None,
+    };
+
+    let mut command = command.as_bytes().to_vec();
+    command.push(b'\r');
+    Some(command)
+}
+
 impl Zetta {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn spawn_terminal(
@@ -138,6 +192,7 @@ impl Zetta {
             window_id: cx.entity_id().as_u64(),
         };
         let handover = request.into_handover();
+        let run_identity = self.run_pane_identity(tab_id, pane_id);
         let build_executor = cx.background_executor().clone();
         let terminal_executor = build_executor.clone();
         let build = build_executor.spawn(async move {
@@ -164,39 +219,64 @@ impl Zetta {
                             )
                         });
                         this.configure_terminal_view_silent_mode(tab_id, &view, cx);
+                        let run_registry = crate::run_command::process_run_registry();
+                        if let Some(identity) = run_identity {
+                            run_registry.pane_reopened(identity);
+                        }
                         cx.subscribe_in(
                             &terminal,
                             window,
-                            move |this, _, event: &TerminalEvent, window, cx| match event {
-                                TerminalEvent::TerminalExited(exit)
-                                    if exit.is_unexpected()
-                                        && this.retain_unexpected_terminal_exit(
-                                            tab_id, pane_id, exit, cx,
-                                        ) =>
-                                {
-                                    this.publish_background_session_catalog(cx);
-                                    this.sync_visible_terminals(cx);
-                                    this.focus_active(window, cx);
+                            move |this, _, event: &TerminalEvent, window, cx| {
+                                if let Some(identity) = run_identity {
+                                    match event {
+                                        TerminalEvent::TrackingReady => {
+                                            run_registry.tracking_ready(identity)
+                                        }
+                                        TerminalEvent::CommandStarted { command } => {
+                                            run_registry.command_started(identity, command.clone())
+                                        }
+                                        TerminalEvent::CommandFinished { exit_code } => {
+                                            run_registry.command_finished(identity, *exit_code)
+                                        }
+                                        TerminalEvent::TerminalExited(_) => {
+                                            run_registry.terminal_lost(identity)
+                                        }
+                                        _ => {}
+                                    }
                                 }
-                                TerminalEvent::ResizeRequested { rows, columns } => {
-                                    this.resize_pane_to(
-                                        tab_id,
-                                        pane_id,
-                                        Some(*columns),
-                                        Some(*rows),
-                                        window,
-                                        cx,
-                                    );
+                                match event {
+                                    TerminalEvent::TerminalExited(exit)
+                                        if exit.is_unexpected()
+                                            && this.retain_unexpected_terminal_exit(
+                                                tab_id, pane_id, exit, cx,
+                                            ) =>
+                                    {
+                                        this.publish_background_session_catalog(cx);
+                                        this.sync_visible_terminals(cx);
+                                        this.focus_active(window, cx);
+                                    }
+                                    TerminalEvent::ResizeRequested { rows, columns } => {
+                                        this.resize_pane_to(
+                                            tab_id,
+                                            pane_id,
+                                            Some(*columns),
+                                            Some(*rows),
+                                            window,
+                                            cx,
+                                        );
+                                    }
+                                    TerminalEvent::GridSizeChanged => cx.notify(),
+                                    event if terminal_event_requires_worktree_detection(event) => {
+                                        this.schedule_worktree_detection_for_pane(
+                                            tab_id, pane_id, cx,
+                                        );
+                                        this.schedule_project_detection_for_pane(
+                                            tab_id, pane_id, window, cx,
+                                        );
+                                        cx.notify();
+                                    }
+                                    _ => {}
                                 }
-                                TerminalEvent::GridSizeChanged => cx.notify(),
-                                event if terminal_event_requires_worktree_detection(event) => {
-                                    this.schedule_worktree_detection_for_pane(tab_id, pane_id, cx);
-                                    this.schedule_project_detection_for_pane(
-                                        tab_id, pane_id, window, cx,
-                                    );
-                                    cx.notify();
-                                }
-                                _ => {}
                             },
                         )
                         .detach();
@@ -459,7 +539,15 @@ impl Zetta {
         let mut combined_environment = self.project_environment_for_tab(tab_id);
         combined_environment.extend(environment_overrides);
         let is_wsl = is_wsl_shell(&profile.command);
-        let Some(attention_id) = self.attention_id_for_tab(tab_id) else {
+        let Some((attention_id, pane_routing_id)) = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .and_then(|tab| {
+                tab.pane(pane_id)
+                    .map(|pane| (tab.attention_id, pane.routing_id))
+            })
+        else {
             if let Some(pane) = self
                 .tabs
                 .iter_mut()
@@ -538,6 +626,7 @@ impl Zetta {
             std::process::id(),
             attention_id,
             pane_id,
+            pane_routing_id,
             self.no_mux,
         );
         #[cfg(windows)]
@@ -550,6 +639,9 @@ impl Zetta {
             );
             add_wsl_environment_variables(&mut environment);
         }
+        let shell_integration_startup_command = (!is_wsl)
+            .then(|| shell_integration_startup_command(&shell))
+            .flatten();
         let mux_provider = match self.mux_provider_for_tab(tab_id, cx) {
             Ok(provider) => provider,
             Err(error) => {
@@ -614,10 +706,29 @@ impl Zetta {
                             )
                         });
                         this.configure_terminal_view_silent_mode(tab_id, &view, cx);
+                        let run_registry = crate::run_command::process_run_registry();
+                        let run_identity =
+                            crate::run_command::RunPaneIdentity::new(attention_id, pane_routing_id);
+                        run_registry.pane_reopened(run_identity);
                         cx.subscribe_in(
                             &terminal,
                             window,
                             move |this, _, event: &TerminalEvent, window, cx| {
+                                match event {
+                                    TerminalEvent::TrackingReady => {
+                                        run_registry.tracking_ready(run_identity)
+                                    }
+                                    TerminalEvent::CommandStarted { command } => {
+                                        run_registry.command_started(run_identity, command.clone())
+                                    }
+                                    TerminalEvent::CommandFinished { exit_code } => {
+                                        run_registry.command_finished(run_identity, *exit_code)
+                                    }
+                                    TerminalEvent::TerminalExited(_) => {
+                                        run_registry.terminal_lost(run_identity)
+                                    }
+                                    _ => {}
+                                }
                                 match event {
                                     TerminalEvent::TerminalExited(exit)
                                         if exit.is_unexpected()
@@ -759,7 +870,12 @@ impl Zetta {
                                 }
                             };
                             if stored_in_background {
-                                this.observe_background_terminal(tab_id, pane_id, terminal, cx);
+                                this.observe_background_terminal(
+                                    tab_id,
+                                    pane_id,
+                                    terminal.clone(),
+                                    cx,
+                                );
                                 this.publish_background_session_catalog(cx);
                             }
                         }
@@ -772,6 +888,20 @@ impl Zetta {
                         this.schedule_terminal_spawn_notify(cx);
                         if tracked_multi_command_launch {
                             this.finish_multi_command_launch(window, cx);
+                        }
+                        if let Some(command) = shell_integration_startup_command.as_ref() {
+                            let startup_handshake = terminal.update(cx, |terminal, _| {
+                                terminal.start_init_command_startup_handshake()
+                            });
+                            let command = command.clone();
+                            let terminal_for_startup = terminal.clone();
+                            cx.spawn(async move |_this, cx| {
+                                startup_handshake.await;
+                                terminal_for_startup.update(cx, |terminal, cx| {
+                                    terminal.write_init_command_after_startup(command, cx);
+                                });
+                            })
+                            .detach();
                         }
                     })
                     .ok();
@@ -821,6 +951,7 @@ pub(crate) fn apply_terminal_environment_overrides<S>(
     process_id: u32,
     attention_id: u64,
     pane_id: u64,
+    pane_routing_id: u64,
     no_mux: bool,
 ) where
     S: std::hash::BuildHasher,
@@ -836,6 +967,10 @@ pub(crate) fn apply_terminal_environment_overrides<S>(
     environment.insert("ZETTA_PROCESS_ID".to_owned(), process_id.to_string());
     environment.insert("ZETTA_ATTENTION_ID".to_owned(), attention_id.to_string());
     environment.insert("ZETTA_PANE_ID".to_owned(), pane_id.to_string());
+    environment.insert(
+        "ZETTA_PANE_ROUTING_ID".to_owned(),
+        pane_routing_id.to_string(),
+    );
     environment.insert(
         zmux::NO_MUX_ENVIRONMENT_VARIABLE.to_owned(),
         if no_mux { "1" } else { "0" }.to_owned(),
@@ -951,6 +1086,20 @@ impl Zetta {
             );
             return;
         };
+        let pane_routing_id = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .and_then(|tab| {
+                tab.pane(pane_id).and_then(|pane| {
+                    pane.stack
+                        .entries
+                        .iter()
+                        .find(|entry| entry.id == entry_id)
+                        .map(|entry| entry.routing_id)
+                })
+            })
+            .unwrap_or(entry_id);
         let shell = stacked_task_shell(&profile.command, &command, wsl_directory.as_deref());
         let mut environment = if is_wsl {
             let mut environment = HashMap::default();
@@ -1015,6 +1164,7 @@ impl Zetta {
             std::process::id(),
             attention_id,
             entry_id,
+            pane_routing_id,
             self.no_mux,
         );
         #[cfg(windows)]
@@ -1118,10 +1268,26 @@ impl Zetta {
                             )
                         });
                         this.configure_terminal_view_silent_mode(tab_id, &view, cx);
+                        let run_registry = crate::run_command::process_run_registry();
+                        let run_identity =
+                            crate::run_command::RunPaneIdentity::new(attention_id, pane_routing_id);
+                        run_registry.pane_reopened(run_identity);
                         cx.subscribe_in(
                             &terminal,
                             window,
                             move |this, terminal, event: &TerminalEvent, _window, cx| match event {
+                                TerminalEvent::TrackingReady => {
+                                    run_registry.tracking_ready(run_identity)
+                                }
+                                TerminalEvent::CommandStarted { command } => {
+                                    run_registry.command_started(run_identity, command.clone())
+                                }
+                                TerminalEvent::CommandFinished { exit_code } => {
+                                    run_registry.command_finished(run_identity, *exit_code)
+                                }
+                                TerminalEvent::TerminalExited(_) => {
+                                    run_registry.terminal_lost(run_identity)
+                                }
                                 TerminalEvent::TaskFinished { exit_code } => {
                                     this.stacked_task_finished(
                                         tab_id, pane_id, entry_id, *exit_code, cx,

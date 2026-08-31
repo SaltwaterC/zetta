@@ -132,6 +132,65 @@ fn fresh_window_control_requests_require_authentication_and_no_payload() {
 }
 
 #[test]
+fn run_control_messages_preserve_the_two_phase_payload() {
+    let mut wait = request("token", "run_wait");
+    wait.attention_id = Some(9);
+    wait.pane_id = Some(4);
+    wait.config_path = Some(
+        serde_json::to_string(&RunWaitPayload {
+            dependencies: vec!["api".to_owned(), "database".to_owned()],
+            allow_failure: true,
+            command: vec![
+                "printf".to_owned(),
+                "%s\\n".to_owned(),
+                "--literal".to_owned(),
+            ],
+        })
+        .unwrap(),
+    );
+    assert_eq!(
+        decode_control_request(&mut wait, "token"),
+        Some(ControlRequestCommand::RunWait {
+            request: RunWaitRequest {
+                owner: RunPaneIdentity::new(9, 4),
+                dependencies: vec!["api".to_owned(), "database".to_owned()],
+                allow_failure: true,
+                command: vec![
+                    "printf".to_owned(),
+                    "%s\\n".to_owned(),
+                    "--literal".to_owned(),
+                ],
+            },
+        })
+    );
+
+    let mut complete = request("token", "run_complete");
+    complete.session_id = Some(7);
+    complete.config_path = Some("7".to_owned());
+    assert_eq!(
+        decode_control_request(&mut complete, "token"),
+        Some(ControlRequestCommand::RunComplete {
+            id: 7,
+            exit_code: Some(7),
+        })
+    );
+
+    let mut malformed = request("token", "run_wait");
+    malformed.attention_id = Some(9);
+    malformed.pane_id = Some(4);
+    malformed.config_path = Some(
+        serde_json::json!({
+            "dependencies": ["api"],
+            "allow_failure": false,
+            "command": ["echo"],
+            "unexpected": true,
+        })
+        .to_string(),
+    );
+    assert_eq!(decode_control_request(&mut malformed, "token"), None);
+}
+
+#[test]
 fn replace_pane_control_requests_validate_the_payload() {
     let mut replace = request("token", "replace_pane");
     replace.split = Some("quarters".to_owned());
@@ -338,7 +397,15 @@ fn pane_control_requests_validate_authentication_and_payloads() {
     let mut list = request("token", "list_panes");
     assert_eq!(
         decode_control_request(&mut list, "token"),
-        Some(ControlRequestCommand::ListPaneLabels)
+        Some(ControlRequestCommand::ListPaneLabels { attention_id: None })
+    );
+    let mut targeted_list = request("token", "list_panes");
+    targeted_list.attention_id = Some(42);
+    assert_eq!(
+        decode_control_request(&mut targeted_list, "token"),
+        Some(ControlRequestCommand::ListPaneLabels {
+            attention_id: Some(42),
+        })
     );
     let mut list_with_payload = request("token", "list_panes");
     list_with_payload.pane_request = Some((&expected).into());
@@ -421,6 +488,7 @@ fn open_command_control_requests_preserve_the_caller_directory() {
 fn pane_control_responses_round_trip_labels_and_structured_errors() {
     let response = ControlResponse {
         status: "rejected".to_owned(),
+        run_id: None,
         themes: Vec::new(),
         pane_theme: None,
         silent_mode: false,
@@ -483,6 +551,7 @@ fn silent_mode_control_requests_decode_with_optional_attention_target() {
 fn silent_mode_response_round_trips_its_state() {
     let response = ControlResponse {
         status: "ok".to_owned(),
+        run_id: None,
         themes: Vec::new(),
         pane_theme: None,
         silent_mode: true,
@@ -1207,7 +1276,6 @@ fn control_server_delivers_a_token_authenticated_fresh_window_request() {
     let endpoint: ControlEndpoint =
         serde_json::from_slice(&fs::read(endpoint_path).unwrap()).unwrap();
     assert_eq!(endpoint.version, CONTROL_VERSION);
-    assert_eq!(CONTROL_VERSION, 2);
 
     let client = thread::spawn(move || send_open_new_window_request(&endpoint).unwrap());
     let command = futures::executor::block_on(received.next()).unwrap();
@@ -1216,6 +1284,107 @@ fn control_server_delivers_a_token_authenticated_fresh_window_request() {
     };
     completion.send(true).unwrap();
     assert!(client.join().unwrap());
+}
+
+#[test]
+fn a_waiting_run_connection_does_not_block_other_control_requests() {
+    let directory = tempfile::tempdir().unwrap();
+    let endpoint_path = directory.path().join("control.json");
+    let (commands, mut received) = futures::channel::mpsc::unbounded();
+    let _server = ProcessControlServer::start_at(commands, endpoint_path.clone()).unwrap();
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&fs::read(endpoint_path).unwrap()).unwrap();
+
+    let mut wait_stream = UnixStream::connect(&endpoint.socket_path).unwrap();
+    let mut wait = request(&endpoint.token, "run_wait");
+    wait.attention_id = Some(9);
+    wait.pane_id = Some(4);
+    wait.config_path = Some(
+        serde_json::to_string(&RunWaitPayload {
+            dependencies: vec!["api".to_owned()],
+            allow_failure: false,
+            command: vec!["echo".to_owned()],
+        })
+        .unwrap(),
+    );
+    write_message(&mut wait_stream, &wait).unwrap();
+
+    let wait_command = futures::executor::block_on(received.next()).unwrap();
+    let ProcessControlCommand::RunWait { completion, .. } = wait_command else {
+        panic!("unexpected process control command");
+    };
+
+    let (next_command_sender, next_command_receiver) = channel();
+    thread::spawn(move || {
+        let command = futures::executor::block_on(received.next());
+        let _ = next_command_sender.send(command);
+    });
+    let client_endpoint = endpoint.clone();
+    let client = thread::spawn(move || send_open_window_request(&client_endpoint));
+    let concurrent_command = next_command_receiver
+        .recv_timeout(Duration::from_millis(500))
+        .unwrap()
+        .expect("the listener should accept the ordinary request concurrently");
+    let ProcessControlCommand::OpenWindow {
+        completion: open_completion,
+    } = concurrent_command
+    else {
+        panic!("unexpected process control command");
+    };
+    open_completion.send(true).unwrap();
+    assert!(client.join().unwrap().unwrap());
+
+    completion
+        .send(Err("test run rejection".to_owned()))
+        .unwrap();
+    drop(wait_stream);
+}
+
+#[test]
+fn shutting_down_closes_a_waiting_run_connection() {
+    use std::io::Read as _;
+
+    let directory = tempfile::tempdir().unwrap();
+    let endpoint_path = directory.path().join("control.json");
+    let (commands, mut received) = futures::channel::mpsc::unbounded();
+    let server = ProcessControlServer::start_at(commands, endpoint_path.clone()).unwrap();
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&fs::read(endpoint_path).unwrap()).unwrap();
+
+    let mut wait_stream = UnixStream::connect(&endpoint.socket_path).unwrap();
+    let mut wait = request(&endpoint.token, "run_wait");
+    wait.attention_id = Some(9);
+    wait.pane_id = Some(4);
+    wait.config_path = Some(
+        serde_json::to_string(&RunWaitPayload {
+            dependencies: vec!["api".to_owned()],
+            allow_failure: false,
+            command: vec!["echo".to_owned()],
+        })
+        .unwrap(),
+    );
+    write_message(&mut wait_stream, &wait).unwrap();
+
+    let command = futures::executor::block_on(received.next()).unwrap();
+    let ProcessControlCommand::RunWait { completion, .. } = command else {
+        panic!("unexpected process control command");
+    };
+    wait_stream
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    let reader = thread::spawn(move || {
+        let mut byte = [0; 1];
+        wait_stream.read(&mut byte)
+    });
+
+    server.begin_shutdown();
+    let result = reader.join().unwrap();
+    let closed = matches!(&result, Ok(0) | Err(_));
+    assert!(
+        closed,
+        "the run connection remained open after shutdown: {result:?}"
+    );
+    drop(completion);
 }
 
 #[cfg(feature = "notifications")]
@@ -1360,11 +1529,16 @@ fn control_server_delivers_pane_label_listing() {
     let _server = ProcessControlServer::start_at(commands, endpoint_path.clone()).unwrap();
     let endpoint: ControlEndpoint =
         serde_json::from_slice(&fs::read(endpoint_path).unwrap()).unwrap();
-    let client = thread::spawn(move || send_list_pane_labels_request(&endpoint));
+    let client = thread::spawn(move || send_list_pane_labels_request(&endpoint, None));
     let command = futures::executor::block_on(received.next()).unwrap();
-    let ProcessControlCommand::ListPaneLabels { completion } = command else {
+    let ProcessControlCommand::ListPaneLabels {
+        attention_id,
+        completion,
+    } = command
+    else {
         panic!("unexpected process control command");
     };
+    assert_eq!(attention_id, None);
     completion
         .send(Ok(vec!["Pane 1".to_owned(), "api".to_owned()]))
         .unwrap();

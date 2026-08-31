@@ -375,7 +375,11 @@ impl TerminalView {
                 }
                 // The view already repaints through `terminal_observer`; this is
                 // for the chrome outside it, which subscribes separately.
-                Event::ResizeRequested { .. } | Event::GridSizeChanged => {}
+                Event::ResizeRequested { .. }
+                | Event::GridSizeChanged
+                | Event::TrackingReady
+                | Event::CommandStarted { .. }
+                | Event::CommandFinished { .. } => {}
                 Event::TitleChanged => cx.emit(TerminalViewEvent::TitleChanged),
                 Event::CloseTerminal => cx.emit(TerminalViewEvent::Close),
                 Event::NewNavigationTarget(target) => {

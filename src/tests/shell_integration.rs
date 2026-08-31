@@ -14,13 +14,21 @@ fn lock_bash_tests() -> std::sync::MutexGuard<'static, ()> {
 }
 
 fn bash_command() -> std::process::Command {
-    let mut command = std::process::Command::new("bash");
+    clean_shell_command("bash")
+}
+
+fn clean_shell_command(program: &str) -> std::process::Command {
+    let mut command = std::process::Command::new(program);
     // Do not let a user's shell startup environment change the exit status or
     // behavior of a generated script under test.
     command
         .env_remove("BASH_ENV")
         .env_remove("BASHOPTS")
-        .env_remove("SHELLOPTS");
+        .env_remove("SHELLOPTS")
+        .env_remove("ZETTA_PROCESS_ID")
+        .env_remove("ZETTA_ATTENTION_ID")
+        .env_remove("ZETTA_PANE_ID")
+        .env_remove("ZETTA_PANE_ROUTING_ID");
     command
 }
 
@@ -56,6 +64,11 @@ fn supported_shells_generate_completion_and_tftp_shortcut() {
         assert!(script.contains("ZETTA_NO_MUX"));
         assert!(script.contains("--direction"));
         assert!(script.contains("--pane"));
+        assert!(script.contains("zetta-event:tracking-ready"));
+        assert!(script.contains("zetta-event:command-started:"));
+        assert!(script.contains("zetta-event:command-finished:"));
+        assert!(!script.contains("run --wait"));
+        assert!(script.contains("allow-failure"));
         assert!(script.contains("replace-pane"));
         assert!(script.contains("--new-window"));
         assert!(!script.contains(" -w"));
@@ -76,6 +89,58 @@ fn supported_shells_generate_completion_and_tftp_shortcut() {
             assert!(script.contains("--copy"));
         }
     }
+}
+
+#[test]
+fn bash_pane_wait_completion_fetches_origin_pane_labels_and_preserves_commas() {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let _bash_test_lock = lock_bash_tests();
+    if !bash_command()
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return;
+    }
+
+    let script = ShellIntegration::Bash.script();
+    let driver = format!(
+        "{script}\nprintf '\\n'\nzetta() {{ if [[ $1 == pane && $2 == --list ]]; then printf '%s\\n' api db deploy; fi; }}\nCOMP_WORDS=(zetta pane wait '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'first:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta pane wait api,)\nCOMP_CWORD=3\n_zetta_complete\nprintf 'second:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta pane wait api -- '')\nCOMP_CWORD=5\n_zetta_complete\nprintf 'after-delimiter:%s\\n' \"${{COMPREPLY[@]}}\"\n"
+    );
+    let mut child = bash_command()
+        .args(["--noprofile", "--norc"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(driver.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "Bash pane wait completion script failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let completions = String::from_utf8_lossy(&output.stdout);
+    for label in ["api", "db", "deploy"] {
+        assert!(
+            completions
+                .lines()
+                .any(|line| line == format!("first:{label}")),
+            "missing first pane wait label {label:?}: {completions}"
+        );
+    }
+    assert!(completions.lines().any(|line| line == "second:api,db"));
+    assert!(completions.lines().any(|line| line == "second:api,deploy"));
+    assert!(!completions.lines().any(|line| line == "second:api,api"));
+    assert!(completions.lines().any(|line| line == "after-delimiter:"));
 }
 
 #[cfg(not(feature = "worktree"))]
@@ -119,6 +184,63 @@ fn shell_integration_reports_the_shell_cwd_while_children_run() {
         ShellIntegration::Zsh
             .script()
             .contains("add-zsh-hook precmd __zetta_report_cwd")
+    );
+}
+
+#[test]
+fn zsh_lifecycle_tracker_does_not_assign_to_read_only_status() {
+    let zsh = ShellIntegration::Zsh.script();
+
+    assert!(zsh.contains("local zetta_status=$?"));
+    assert!(!zsh.contains("local status=$?"));
+    assert!(zsh.contains("__ZETTA_LIFECYCLE_TRACKING_VERSION:-0} != 3"));
+}
+
+#[test]
+fn zsh_reload_replaces_an_already_installed_broken_tracker() {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let script = ShellIntegration::Zsh.script();
+    let driver = format!(
+        "{prelude}\n{script}\n__ZETTA_COMMAND_STARTED=1\nfalse\n__zetta_report_cwd\nexit 0\n",
+        prelude = r#"function __zetta_report_cwd() {
+    local status=$?
+    return $status
+}
+typeset -g __ZETTA_LIFECYCLE_TRACKING_INSTALLED=1
+typeset -g __ZETTA_LIFECYCLE_TRACKING_ENABLED=1
+typeset -g __ZETTA_LIFECYCLE_TRACKING_VERSION=2"#,
+        script = script,
+    );
+    let mut child = match clean_shell_command("zsh")
+        .env("ZETTA_PANE_ID", "7")
+        .args(["-f"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => panic!("failed to launch zsh: {error}"),
+    };
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(driver.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "zsh failed to reload its lifecycle tracker:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("zetta-event:command-finished:1"),
+        "{stdout}"
     );
 }
 
@@ -585,11 +707,7 @@ fn worktree_wrappers_pass_help_through_without_capturing_it_as_a_path() {
 #[cfg(all(unix, feature = "worktree"))]
 #[test]
 fn posix_zwt_help_does_not_change_directory_or_inject_path_only() {
-    use std::{
-        io::Write as _,
-        os::unix::fs::PermissionsExt as _,
-        process::{Command, Stdio},
-    };
+    use std::{io::Write as _, os::unix::fs::PermissionsExt as _, process::Stdio};
 
     let _bash_test_lock = lock_bash_tests();
     let temporary = tempfile::tempdir().unwrap();
@@ -616,7 +734,7 @@ fn posix_zwt_help_does_not_change_directory_or_inject_path_only() {
         let version = if shell == "bash" {
             bash_command().arg("--version").output()
         } else {
-            Command::new(shell).arg("--version").output()
+            clean_shell_command(shell).arg("--version").output()
         };
         if version.is_err() {
             continue;
@@ -636,7 +754,7 @@ fn posix_zwt_help_does_not_change_directory_or_inject_path_only() {
         let mut command = if shell == "bash" {
             bash_command()
         } else {
-            Command::new(shell)
+            clean_shell_command(shell)
         };
         if shell == "bash" {
             command.args(["--noprofile", "--norc"]);
@@ -811,7 +929,7 @@ fn zsh_accepts_the_generated_integration_with_a_preexisting_pbcopy_alias() {
         "alias pbcopy='xclip -selection clipboard'\nalias pbpaste='xclip -selection clipboard -o'\n{script}"
     );
 
-    let mut child = match std::process::Command::new("zsh")
+    let mut child = match clean_shell_command("zsh")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -1811,6 +1929,7 @@ fn fish_script_emits_long_option_candidates_for_every_command_context() {
         "theme_tab",
         "splits",
         "pane",
+        "pane_wait",
         "overlay",
         "ztftp",
         "zntfy",
@@ -1828,9 +1947,11 @@ fn fish_script_emits_long_option_candidates_for_every_command_context() {
 
 #[test]
 fn fish_displays_long_option_candidates_and_supports_short_option_values() {
-    use std::process::Command;
-
-    if Command::new("fish").arg("--version").output().is_err() {
+    if clean_shell_command("fish")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
         return;
     }
 
@@ -1959,6 +2080,7 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
         (
             "zetta pane ",
             &[
+                "wait",
                 "--direction",
                 "--label",
                 "--pane",
@@ -2099,7 +2221,7 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
         ("zcopy ", &["--pboard", "--help"][..]),
         ("zpaste ", &["--pboard", "--prefer", "--help"][..]),
     ] {
-        let output = Command::new("fish")
+        let output = clean_shell_command("fish")
             .args([
                 "--no-config",
                 "-c",
@@ -2142,9 +2264,11 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
 
 #[test]
 fn fish_omits_daemon_only_mux_candidates_in_no_mux_shells() {
-    use std::process::Command;
-
-    if Command::new("fish").arg("--version").output().is_err() {
+    if clean_shell_command("fish")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
         return;
     }
 
@@ -2152,7 +2276,7 @@ fn fish_omits_daemon_only_mux_candidates_in_no_mux_shells() {
     let script_file = tempfile::NamedTempFile::new().unwrap();
     fs::write(script_file.path(), script).unwrap();
     for line in ["zetta mux ", "zmux "] {
-        let output = Command::new("fish")
+        let output = clean_shell_command("fish")
             .args([
                 "--no-config",
                 "-c",
@@ -2211,9 +2335,11 @@ fn fish_omits_daemon_only_mux_candidates_in_no_mux_shells() {
 // subcommand names, which are only valid as the very first argument.
 #[test]
 fn profile_and_theme_root_flags_keep_completing_each_other() {
-    use std::process::Command;
-
-    if Command::new("fish").arg("--version").output().is_err() {
+    if clean_shell_command("fish")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
         return;
     }
 
@@ -2233,7 +2359,7 @@ fn profile_and_theme_root_flags_keep_completing_each_other() {
             &["--theme", "benchmark"][..],
         ),
     ] {
-        let output = Command::new("fish")
+        let output = clean_shell_command("fish")
             .args([
                 "--no-config",
                 "-c",
@@ -2271,9 +2397,11 @@ fn profile_and_theme_root_flags_keep_completing_each_other() {
 
 #[test]
 fn fish_does_not_repeat_options_and_completes_vi_files() {
-    use std::process::Command;
-
-    if Command::new("fish").arg("--version").output().is_err() {
+    if clean_shell_command("fish")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
         return;
     }
 
@@ -2282,7 +2410,7 @@ fn fish_does_not_repeat_options_and_completes_vi_files() {
     fs::write(script_file.path(), script).unwrap();
 
     for line in ["zetta vi --help ", "zetta copy --help ", "zcopy --help "] {
-        let output = Command::new("fish")
+        let output = clean_shell_command("fish")
             .args([
                 "--no-config",
                 "-c",
@@ -2301,7 +2429,7 @@ fn fish_does_not_repeat_options_and_completes_vi_files() {
         );
     }
 
-    let output = Command::new("fish")
+    let output = clean_shell_command("fish")
         .args([
             "--no-config",
             "-c",
@@ -2319,7 +2447,7 @@ fn fish_does_not_repeat_options_and_completes_vi_files() {
         "missing --help completion for zetta vi --: {completions}"
     );
 
-    let output = Command::new("fish")
+    let output = clean_shell_command("fish")
         .args([
             "--no-config",
             "-c",

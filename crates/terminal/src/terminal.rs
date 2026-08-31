@@ -726,6 +726,20 @@ pub enum Event {
     CloseTerminal,
     Bell,
     Wakeup,
+    /// The shell integration has installed the lifecycle hooks used by
+    /// `zetta pane wait`.
+    TrackingReady,
+    /// A shell command has started. The command text is informational; the
+    /// registry uses the event to distinguish an active command from an idle
+    /// shell while it waits for the corresponding result.
+    CommandStarted {
+        command: String,
+    },
+    /// A shell command has finished. `None` means the shell could not provide a
+    /// trustworthy exit status and therefore cannot satisfy a dependency.
+    CommandFinished {
+        exit_code: Option<i32>,
+    },
     /// Reports completion of a terminal backed by a task. Unlike
     /// [`Event::CloseTerminal`], this event is emitted even when the task is
     /// configured to remain visible after it exits.
@@ -1235,6 +1249,7 @@ pub(crate) enum TerminalBackendEvent {
 
 const REPORTED_WORKING_DIRECTORY_TITLE_PREFIX: &str = "zetta-cwd:";
 const REPORTED_FOREGROUND_COMMAND_TITLE_PREFIX: &str = "zetta-cmd:";
+const REPORTED_LIFECYCLE_EVENT_PREFIX: &str = "zetta-event:";
 
 #[cfg(any(windows, test))]
 const POWERSHELL_CWD_TRACKER: &str = include_str!("terminal/powershell_cwd_tracker.ps1");
@@ -1361,6 +1376,34 @@ fn reported_foreground_command_from_title(title: &str) -> Option<String> {
         return None;
     }
     Some(command.to_owned())
+}
+
+fn lifecycle_event_from_title(title: &str) -> Option<Event> {
+    let event = title.strip_prefix(REPORTED_LIFECYCLE_EVENT_PREFIX)?;
+    match event {
+        "tracking-ready" => Some(Event::TrackingReady),
+        command if command.starts_with("command-started:") => {
+            let command = command.strip_prefix("command-started:")?;
+            (!command.is_empty() && !command.chars().any(char::is_control)).then(|| {
+                Event::CommandStarted {
+                    command: command.to_owned(),
+                }
+            })
+        }
+        status if status.starts_with("command-finished:") => {
+            let status = status.strip_prefix("command-finished:")?;
+            if status == "unknown" {
+                return Some(Event::CommandFinished { exit_code: None });
+            }
+            status
+                .parse::<i32>()
+                .ok()
+                .map(|exit_code| Event::CommandFinished {
+                    exit_code: Some(exit_code),
+                })
+        }
+        _ => None,
+    }
 }
 
 /// Reduces a shell-reported command marker to a safe command name for exit
@@ -3067,6 +3110,10 @@ impl Terminal {
     fn process_event(&mut self, event: TerminalBackendEvent, cx: &mut Context<Self>) {
         match event {
             TerminalBackendEvent::Title(title) => {
+                if let Some(event) = lifecycle_event_from_title(&title) {
+                    cx.emit(event);
+                    return;
+                }
                 if let Some(directory) = reported_working_directory_from_title(&title) {
                     let changed =
                         self.reported_working_directory.as_deref() != Some(directory.as_str());
@@ -4917,6 +4964,16 @@ impl Terminal {
         }
     }
 
+    /// Returns the shell ownership decision from a fresh foreground-process
+    /// lookup. One-shot callers use this when a shell lifecycle marker may
+    /// still be queued behind another control request.
+    pub fn foreground_process_is_shell_context_now(&self) -> Option<bool> {
+        match &self.terminal_type {
+            TerminalType::Pty { info, .. } => info.foreground_process_is_shell_context_now(),
+            TerminalType::DisplayOnly => None,
+        }
+    }
+
     /// Returns the working directory of the process that's connected to the PTY.
     /// That means it returns the working directory of the local shell or program
     /// that's running inside the terminal.
@@ -6397,6 +6454,37 @@ mod tests {
             reported_foreground_command_from_title("zetta-cmd:with\ncontrol"),
             None
         );
+    }
+
+    #[test]
+    fn lifecycle_titles_parse_ready_start_and_exit_status_markers() {
+        assert_eq!(
+            lifecycle_event_from_title("zetta-event:tracking-ready"),
+            Some(Event::TrackingReady)
+        );
+        assert_eq!(
+            lifecycle_event_from_title("zetta-event:command-started:cargo test"),
+            Some(Event::CommandStarted {
+                command: "cargo test".to_owned()
+            })
+        );
+        assert_eq!(
+            lifecycle_event_from_title("zetta-event:command-finished:0"),
+            Some(Event::CommandFinished { exit_code: Some(0) })
+        );
+        assert_eq!(
+            lifecycle_event_from_title("zetta-event:command-finished:unknown"),
+            Some(Event::CommandFinished { exit_code: None })
+        );
+        assert_eq!(
+            lifecycle_event_from_title("zetta-event:command-started:"),
+            None
+        );
+        assert_eq!(
+            lifecycle_event_from_title("zetta-event:command-finished:not-a-status"),
+            None
+        );
+        assert_eq!(lifecycle_event_from_title("ordinary title"), None);
     }
 
     #[cfg(windows)]

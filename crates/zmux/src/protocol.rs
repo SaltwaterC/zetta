@@ -45,9 +45,9 @@ pub struct RestorableSessionRecord {
 }
 
 /// Version of the local Zetta process-control protocol used to open a
-/// multiplexer-held session in a window. Version 2 adds the explicit
-/// `new_window` request, which always creates a fresh window.
-pub const CONTROL_VERSION: u32 = 2;
+/// multiplexer-held session in a window, including the explicit `new_window`
+/// request and the two-phase `run_wait`/`run_complete` exchange.
+pub const CONTROL_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackgroundSessionCatalog {

@@ -1,11 +1,11 @@
 use std::{
-    fs,
+    env, fs,
     io::{BufRead as _, BufReader, Read as _, Write as _},
     path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc::{Receiver, RecvTimeoutError, Sender, channel},
+        mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel},
     },
     thread,
     time::{Duration, Instant},
@@ -30,6 +30,9 @@ use crate::command_panes::{
     MAX_PANE_COMMAND_BYTES, PaneCommand, pane_command_byte_len, parse_pane_direction,
 };
 use crate::pane::{OverlayFontSize, PaneOverlayRequest, overlay_color_from_value};
+use crate::run_command::{
+    RunPaneIdentity, RunRegistration, RunResolution, RunWaitRequest, process_run_registry,
+};
 
 /// Bumped when a control command's meaning changes, so a Zetta that cannot
 /// serve a request is not sent one.
@@ -151,7 +154,12 @@ pub(crate) enum ProcessControlCommand {
         request: PaneCommand,
         completion: Sender<std::result::Result<(), String>>,
     },
+    RunWait {
+        request: RunWaitRequest,
+        completion: Sender<std::result::Result<RunRegistration, String>>,
+    },
     ListPaneLabels {
+        attention_id: Option<u64>,
         completion: Sender<std::result::Result<Vec<String>, String>>,
     },
     ReconnectSession {
@@ -238,7 +246,16 @@ enum ControlRequestCommand {
     RunPane {
         request: PaneCommand,
     },
-    ListPaneLabels,
+    RunWait {
+        request: RunWaitRequest,
+    },
+    RunComplete {
+        id: u64,
+        exit_code: Option<i32>,
+    },
+    ListPaneLabels {
+        attention_id: Option<u64>,
+    },
     ReconnectSession {
         runner_id: u64,
         session_id: u64,
@@ -328,6 +345,14 @@ struct ControlRequest {
     #[serde(default)]
     scope: Option<String>,
     pane_request: Option<PaneControlRequest>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RunWaitPayload {
+    dependencies: Vec<String>,
+    allow_failure: bool,
+    command: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -466,6 +491,8 @@ impl PaneControlRequest {
 #[derive(Serialize, Deserialize)]
 struct ControlResponse {
     status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    run_id: Option<u64>,
     #[serde(default)]
     themes: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -532,377 +559,475 @@ impl ProcessControlServer {
                     let Ok(mut stream) = stream else {
                         continue;
                     };
-                    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
-                    let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
-                    let mut response_themes = Vec::new();
-                    let mut response_pane_theme = None;
-                    let mut response_silent_mode = false;
-                    let mut response_pane_labels = Vec::new();
-                    let mut response_error = None;
-                    let status = match handle_control_request(&mut stream, &token) {
-                        Some(ControlRequestCommand::ReloadConfiguration { config_path }) => {
-                            let (completion, completed) = channel();
-                            let accepted = commands
-                                .unbounded_send(ProcessControlCommand::ReloadConfiguration {
+                    let commands = commands.clone();
+                    let token = token.clone();
+                    let stopping_for_thread = stopping_for_thread.clone();
+                    let _ = thread::Builder::new()
+                        .name("zetta-process-control-request".to_owned())
+                        .spawn(move || {
+                            let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                            let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+                            let mut response_themes = Vec::new();
+                            let mut response_pane_theme = None;
+                            let mut response_silent_mode = false;
+                            let mut response_pane_labels = Vec::new();
+                            let mut response_error = None;
+                            let status = match handle_control_request(&mut stream, &token) {
+                                Some(ControlRequestCommand::ReloadConfiguration {
                                     config_path,
-                                    completion,
-                                })
-                                .is_ok()
-                                && wait_for_control_completion(&completed, &stopping_for_thread);
-                            if accepted { "ok" } else { "rejected" }
-                        }
-                        Some(ControlRequestCommand::OpenWindow) => {
-                            let (completion, completed) = channel();
-                            let accepted = commands
-                                .unbounded_send(ProcessControlCommand::OpenWindow { completion })
-                                .is_ok()
-                                && wait_for_control_completion(&completed, &stopping_for_thread);
-                            if accepted { "ok" } else { "rejected" }
-                        }
-                        Some(ControlRequestCommand::OpenNewWindow) => {
-                            let (completion, completed) = channel();
-                            let accepted = commands
-                                .unbounded_send(ProcessControlCommand::OpenNewWindow { completion })
-                                .is_ok()
-                                && wait_for_control_completion(&completed, &stopping_for_thread);
-                            if accepted { "ok" } else { "rejected" }
-                        }
-                        Some(ControlRequestCommand::OpenProject {
-                            root,
-                            working_directory,
-                        }) => {
-                            let (completion, completed) = channel();
-                            let accepted = commands
-                                .unbounded_send(ProcessControlCommand::OpenProject {
+                                }) => {
+                                    let (completion, completed) = channel();
+                                    let accepted = commands
+                                        .unbounded_send(
+                                            ProcessControlCommand::ReloadConfiguration {
+                                                config_path,
+                                                completion,
+                                            },
+                                        )
+                                        .is_ok()
+                                        && wait_for_control_completion(
+                                            &completed,
+                                            &stopping_for_thread,
+                                        );
+                                    if accepted { "ok" } else { "rejected" }
+                                }
+                                Some(ControlRequestCommand::OpenWindow) => {
+                                    let (completion, completed) = channel();
+                                    let accepted = commands
+                                        .unbounded_send(ProcessControlCommand::OpenWindow {
+                                            completion,
+                                        })
+                                        .is_ok()
+                                        && wait_for_control_completion(
+                                            &completed,
+                                            &stopping_for_thread,
+                                        );
+                                    if accepted { "ok" } else { "rejected" }
+                                }
+                                Some(ControlRequestCommand::OpenNewWindow) => {
+                                    let (completion, completed) = channel();
+                                    let accepted = commands
+                                        .unbounded_send(ProcessControlCommand::OpenNewWindow {
+                                            completion,
+                                        })
+                                        .is_ok()
+                                        && wait_for_control_completion(
+                                            &completed,
+                                            &stopping_for_thread,
+                                        );
+                                    if accepted { "ok" } else { "rejected" }
+                                }
+                                Some(ControlRequestCommand::OpenProject {
                                     root,
                                     working_directory,
-                                    completion,
-                                })
-                                .is_ok()
-                                && wait_for_control_completion(&completed, &stopping_for_thread);
-                            if accepted { "ok" } else { "rejected" }
-                        }
-                        Some(ControlRequestCommand::ReloadProjects) => {
-                            let (completion, completed) = channel();
-                            let accepted = commands
-                                .unbounded_send(ProcessControlCommand::ReloadProjects {
-                                    completion,
-                                })
-                                .is_ok()
-                                && wait_for_control_completion(&completed, &stopping_for_thread);
-                            if accepted { "ok" } else { "rejected" }
-                        }
-                        Some(ControlRequestCommand::ReplacePane {
-                            split,
-                            profile,
-                            theme,
-                        }) => {
-                            let (completion, completed) = channel();
-                            let accepted = commands
-                                .unbounded_send(ProcessControlCommand::ReplacePane {
-                                    request: ReplacePaneRequest {
-                                        split,
-                                        profile,
-                                        theme,
-                                    },
-                                    completion,
-                                })
-                                .is_ok()
-                                && wait_for_control_completion(&completed, &stopping_for_thread);
-                            if accepted { "ok" } else { "rejected" }
-                        }
-                        Some(ControlRequestCommand::OpenCommand {
-                            request,
-                            working_directory,
-                        }) => {
-                            let (completion, completed) = channel();
-                            let accepted = commands
-                                .unbounded_send(ProcessControlCommand::OpenCommand {
+                                }) => {
+                                    let (completion, completed) = channel();
+                                    let accepted = commands
+                                        .unbounded_send(ProcessControlCommand::OpenProject {
+                                            root,
+                                            working_directory,
+                                            completion,
+                                        })
+                                        .is_ok()
+                                        && wait_for_control_completion(
+                                            &completed,
+                                            &stopping_for_thread,
+                                        );
+                                    if accepted { "ok" } else { "rejected" }
+                                }
+                                Some(ControlRequestCommand::ReloadProjects) => {
+                                    let (completion, completed) = channel();
+                                    let accepted = commands
+                                        .unbounded_send(ProcessControlCommand::ReloadProjects {
+                                            completion,
+                                        })
+                                        .is_ok()
+                                        && wait_for_control_completion(
+                                            &completed,
+                                            &stopping_for_thread,
+                                        );
+                                    if accepted { "ok" } else { "rejected" }
+                                }
+                                Some(ControlRequestCommand::ReplacePane {
+                                    split,
+                                    profile,
+                                    theme,
+                                }) => {
+                                    let (completion, completed) = channel();
+                                    let accepted = commands
+                                        .unbounded_send(ProcessControlCommand::ReplacePane {
+                                            request: ReplacePaneRequest {
+                                                split,
+                                                profile,
+                                                theme,
+                                            },
+                                            completion,
+                                        })
+                                        .is_ok()
+                                        && wait_for_control_completion(
+                                            &completed,
+                                            &stopping_for_thread,
+                                        );
+                                    if accepted { "ok" } else { "rejected" }
+                                }
+                                Some(ControlRequestCommand::OpenCommand {
                                     request,
                                     working_directory,
-                                    completion,
-                                })
-                                .is_ok()
-                                && wait_for_control_completion(&completed, &stopping_for_thread);
-                            if accepted { "ok" } else { "rejected" }
-                        }
-                        Some(ControlRequestCommand::RunPane { request }) => {
-                            let (completion, completed) = channel();
-                            if commands
-                                .unbounded_send(ProcessControlCommand::RunPane {
-                                    request,
-                                    completion,
-                                })
-                                .is_err()
-                            {
-                                "rejected"
-                            } else {
-                                match wait_for_result_completion(&completed, &stopping_for_thread) {
-                                    Some(Ok(())) => "ok",
-                                    Some(Err(message)) => {
-                                        response_error = Some(ControlError {
-                                            code: "pane_rejected".to_owned(),
-                                            message,
-                                        });
-                                        "rejected"
-                                    }
-                                    None => "rejected",
+                                }) => {
+                                    let (completion, completed) = channel();
+                                    let accepted = commands
+                                        .unbounded_send(ProcessControlCommand::OpenCommand {
+                                            request,
+                                            working_directory,
+                                            completion,
+                                        })
+                                        .is_ok()
+                                        && wait_for_control_completion(
+                                            &completed,
+                                            &stopping_for_thread,
+                                        );
+                                    if accepted { "ok" } else { "rejected" }
                                 }
-                            }
-                        }
-                        Some(ControlRequestCommand::ListPaneLabels) => {
-                            let (completion, completed) = channel();
-                            if commands
-                                .unbounded_send(ProcessControlCommand::ListPaneLabels {
-                                    completion,
-                                })
-                                .is_err()
-                            {
-                                "rejected"
-                            } else {
-                                match wait_for_result_completion(&completed, &stopping_for_thread) {
-                                    Some(Ok(labels)) => {
-                                        response_pane_labels = labels;
-                                        "ok"
-                                    }
-                                    Some(Err(message)) => {
-                                        response_error = Some(ControlError {
-                                            code: "pane_list_rejected".to_owned(),
-                                            message,
-                                        });
+                                Some(ControlRequestCommand::RunPane { request }) => {
+                                    let (completion, completed) = channel();
+                                    if commands
+                                        .unbounded_send(ProcessControlCommand::RunPane {
+                                            request,
+                                            completion,
+                                        })
+                                        .is_err()
+                                    {
                                         "rejected"
+                                    } else {
+                                        match wait_for_result_completion(
+                                            &completed,
+                                            &stopping_for_thread,
+                                        ) {
+                                            Some(Ok(())) => "ok",
+                                            Some(Err(message)) => {
+                                                response_error = Some(ControlError {
+                                                    code: "pane_rejected".to_owned(),
+                                                    message,
+                                                });
+                                                "rejected"
+                                            }
+                                            None => "rejected",
+                                        }
                                     }
-                                    None => "rejected",
                                 }
-                            }
-                        }
-                        Some(ControlRequestCommand::ReconnectSession {
-                            runner_id,
-                            session_id,
-                            attention_id,
-                            secret,
-                        }) => {
-                            let (completion, completed) = channel();
-                            let result = if commands
-                                .unbounded_send(ProcessControlCommand::ReconnectSession {
+                                Some(ControlRequestCommand::RunWait { request }) => {
+                                    serve_run_wait_connection(
+                                        &mut stream,
+                                        &commands,
+                                        &stopping_for_thread,
+                                        &token,
+                                        request,
+                                    );
+                                    return;
+                                }
+                                Some(ControlRequestCommand::RunComplete { .. }) => "rejected",
+                                Some(ControlRequestCommand::ListPaneLabels { attention_id }) => {
+                                    let (completion, completed) = channel();
+                                    if commands
+                                        .unbounded_send(ProcessControlCommand::ListPaneLabels {
+                                            attention_id,
+                                            completion,
+                                        })
+                                        .is_err()
+                                    {
+                                        "rejected"
+                                    } else {
+                                        match wait_for_result_completion(
+                                            &completed,
+                                            &stopping_for_thread,
+                                        ) {
+                                            Some(Ok(labels)) => {
+                                                response_pane_labels = labels;
+                                                "ok"
+                                            }
+                                            Some(Err(message)) => {
+                                                response_error = Some(ControlError {
+                                                    code: "pane_list_rejected".to_owned(),
+                                                    message,
+                                                });
+                                                "rejected"
+                                            }
+                                            None => "rejected",
+                                        }
+                                    }
+                                }
+                                Some(ControlRequestCommand::ReconnectSession {
                                     runner_id,
                                     session_id,
                                     attention_id,
                                     secret,
-                                    completion,
-                                })
-                                .is_ok()
-                            {
-                                wait_for_reconnect_completion(&completed, &stopping_for_thread)
-                            } else {
-                                ReconnectSessionResult::Rejected
-                            };
-                            reconnect_session_status(result)
-                        }
-                        Some(ControlRequestCommand::ResumeDiskSession {
-                            session_id,
-                            identity_paths,
-                            identity_passphrases,
-                            secret,
-                        }) => {
-                            let (completion, completed) = channel();
-                            let result = if commands
-                                .unbounded_send(ProcessControlCommand::ResumeDiskSession {
+                                }) => {
+                                    let (completion, completed) = channel();
+                                    let result = if commands
+                                        .unbounded_send(ProcessControlCommand::ReconnectSession {
+                                            runner_id,
+                                            session_id,
+                                            attention_id,
+                                            secret,
+                                            completion,
+                                        })
+                                        .is_ok()
+                                    {
+                                        wait_for_reconnect_completion(
+                                            &completed,
+                                            &stopping_for_thread,
+                                        )
+                                    } else {
+                                        ReconnectSessionResult::Rejected
+                                    };
+                                    reconnect_session_status(result)
+                                }
+                                Some(ControlRequestCommand::ResumeDiskSession {
                                     session_id,
                                     identity_paths,
                                     identity_passphrases,
                                     secret,
-                                    completion,
-                                })
-                                .is_ok()
-                            {
-                                wait_for_reconnect_completion(&completed, &stopping_for_thread)
-                            } else {
-                                ReconnectSessionResult::Rejected
-                            };
-                            reconnect_session_status(result)
-                        }
-                        Some(ControlRequestCommand::SetTabIcon { icon }) => {
-                            let (completion, completed) = channel();
-                            let accepted = commands
-                                .unbounded_send(ProcessControlCommand::SetTabIcon {
-                                    icon,
-                                    completion,
-                                })
-                                .is_ok()
-                                && wait_for_control_completion(&completed, &stopping_for_thread);
-                            if accepted { "ok" } else { "rejected" }
-                        }
-                        Some(ControlRequestCommand::SetTheme { scope, theme }) => {
-                            let (completion, completed) = channel();
-                            let accepted = commands
-                                .unbounded_send(ProcessControlCommand::SetTheme {
-                                    scope,
-                                    theme,
-                                    completion,
-                                })
-                                .is_ok()
-                                && wait_for_control_completion(&completed, &stopping_for_thread);
-                            if accepted { "ok" } else { "rejected" }
-                        }
-                        Some(ControlRequestCommand::ListThemes) => {
-                            let (completion, completed) = channel();
-                            let accepted = commands
-                                .unbounded_send(ProcessControlCommand::ListThemes { completion })
-                                .is_ok();
-                            match accepted
-                                .then(|| {
-                                    wait_for_theme_list_completion(&completed, &stopping_for_thread)
-                                })
-                                .flatten()
-                            {
-                                Some(themes) => {
-                                    response_themes = themes;
-                                    "ok"
+                                }) => {
+                                    let (completion, completed) = channel();
+                                    let result = if commands
+                                        .unbounded_send(ProcessControlCommand::ResumeDiskSession {
+                                            session_id,
+                                            identity_paths,
+                                            identity_passphrases,
+                                            secret,
+                                            completion,
+                                        })
+                                        .is_ok()
+                                    {
+                                        wait_for_reconnect_completion(
+                                            &completed,
+                                            &stopping_for_thread,
+                                        )
+                                    } else {
+                                        ReconnectSessionResult::Rejected
+                                    };
+                                    reconnect_session_status(result)
                                 }
-                                None => "rejected",
-                            }
-                        }
-                        Some(ControlRequestCommand::GetPaneTheme {
-                            attention_id,
-                            pane_id,
-                        }) => {
-                            let (completion, completed) = channel();
-                            if commands
-                                .unbounded_send(ProcessControlCommand::GetPaneTheme {
+                                Some(ControlRequestCommand::SetTabIcon { icon }) => {
+                                    let (completion, completed) = channel();
+                                    let accepted = commands
+                                        .unbounded_send(ProcessControlCommand::SetTabIcon {
+                                            icon,
+                                            completion,
+                                        })
+                                        .is_ok()
+                                        && wait_for_control_completion(
+                                            &completed,
+                                            &stopping_for_thread,
+                                        );
+                                    if accepted { "ok" } else { "rejected" }
+                                }
+                                Some(ControlRequestCommand::SetTheme { scope, theme }) => {
+                                    let (completion, completed) = channel();
+                                    let accepted = commands
+                                        .unbounded_send(ProcessControlCommand::SetTheme {
+                                            scope,
+                                            theme,
+                                            completion,
+                                        })
+                                        .is_ok()
+                                        && wait_for_control_completion(
+                                            &completed,
+                                            &stopping_for_thread,
+                                        );
+                                    if accepted { "ok" } else { "rejected" }
+                                }
+                                Some(ControlRequestCommand::ListThemes) => {
+                                    let (completion, completed) = channel();
+                                    let accepted = commands
+                                        .unbounded_send(ProcessControlCommand::ListThemes {
+                                            completion,
+                                        })
+                                        .is_ok();
+                                    match accepted
+                                        .then(|| {
+                                            wait_for_theme_list_completion(
+                                                &completed,
+                                                &stopping_for_thread,
+                                            )
+                                        })
+                                        .flatten()
+                                    {
+                                        Some(themes) => {
+                                            response_themes = themes;
+                                            "ok"
+                                        }
+                                        None => "rejected",
+                                    }
+                                }
+                                Some(ControlRequestCommand::GetPaneTheme {
                                     attention_id,
                                     pane_id,
-                                    completion,
-                                })
-                                .is_err()
-                            {
-                                "rejected"
-                            } else {
-                                match wait_for_result_completion(&completed, &stopping_for_thread) {
-                                    Some(Ok(theme)) => {
-                                        response_pane_theme = Some(theme);
-                                        "ok"
-                                    }
-                                    Some(Err(message)) => {
-                                        response_error = Some(ControlError {
-                                            code: "pane_theme_unavailable".to_owned(),
-                                            message,
-                                        });
+                                }) => {
+                                    let (completion, completed) = channel();
+                                    if commands
+                                        .unbounded_send(ProcessControlCommand::GetPaneTheme {
+                                            attention_id,
+                                            pane_id,
+                                            completion,
+                                        })
+                                        .is_err()
+                                    {
                                         "rejected"
+                                    } else {
+                                        match wait_for_result_completion(
+                                            &completed,
+                                            &stopping_for_thread,
+                                        ) {
+                                            Some(Ok(theme)) => {
+                                                response_pane_theme = Some(theme);
+                                                "ok"
+                                            }
+                                            Some(Err(message)) => {
+                                                response_error = Some(ControlError {
+                                                    code: "pane_theme_unavailable".to_owned(),
+                                                    message,
+                                                });
+                                                "rejected"
+                                            }
+                                            None => "rejected",
+                                        }
                                     }
-                                    None => "rejected",
                                 }
-                            }
-                        }
-                        Some(ControlRequestCommand::SetPaneOverlay {
-                            text,
-                            font_size,
-                            opacity,
-                            color,
-                        }) => {
-                            let (completion, completed) = channel();
-                            let color = color.and_then(|value| overlay_color_from_value(&value));
-                            let accepted = commands
-                                .unbounded_send(ProcessControlCommand::SetPaneOverlay {
+                                Some(ControlRequestCommand::SetPaneOverlay {
                                     text,
                                     font_size,
                                     opacity,
                                     color,
-                                    completion,
-                                })
-                                .is_ok()
-                                && wait_for_control_completion(&completed, &stopping_for_thread);
-                            if accepted { "ok" } else { "rejected" }
-                        }
-                        Some(ControlRequestCommand::SetTabAttention {
-                            attention_id,
-                            summary,
-                            body,
-                        }) => {
-                            let (completion, completed) = channel();
-                            let accepted = commands
-                                .unbounded_send(ProcessControlCommand::SetTabAttention {
-                                    request: TabAttentionRequest {
-                                        attention_id,
-                                        summary,
-                                        body,
-                                    },
-                                    completion,
-                                })
-                                .is_ok()
-                                && wait_for_control_completion(&completed, &stopping_for_thread);
-                            if accepted { "ok" } else { "rejected" }
-                        }
-                        Some(ControlRequestCommand::FocusTab { attention_id }) => {
-                            let (completion, completed) = channel();
-                            let accepted = commands
-                                .unbounded_send(ProcessControlCommand::FocusTab {
+                                }) => {
+                                    let (completion, completed) = channel();
+                                    let color =
+                                        color.and_then(|value| overlay_color_from_value(&value));
+                                    let accepted = commands
+                                        .unbounded_send(ProcessControlCommand::SetPaneOverlay {
+                                            text,
+                                            font_size,
+                                            opacity,
+                                            color,
+                                            completion,
+                                        })
+                                        .is_ok()
+                                        && wait_for_control_completion(
+                                            &completed,
+                                            &stopping_for_thread,
+                                        );
+                                    if accepted { "ok" } else { "rejected" }
+                                }
+                                Some(ControlRequestCommand::SetTabAttention {
                                     attention_id,
-                                    completion,
-                                })
-                                .is_ok()
-                                && wait_for_control_completion(&completed, &stopping_for_thread);
-                            if accepted { "ok" } else { "rejected" }
-                        }
-                        Some(ControlRequestCommand::SetTabName { attention_id, name }) => {
-                            let (completion, completed) = channel();
-                            let accepted = commands
-                                .unbounded_send(ProcessControlCommand::SetTabName {
-                                    request: TabNameRequest { attention_id, name },
-                                    completion,
-                                })
-                                .is_ok()
-                                && wait_for_control_completion(&completed, &stopping_for_thread);
-                            if accepted { "ok" } else { "rejected" }
-                        }
-                        Some(ControlRequestCommand::SetWorktreeName { attention_id, name }) => {
-                            let (completion, completed) = channel();
-                            let accepted = commands
-                                .unbounded_send(ProcessControlCommand::SetWorktreeName {
-                                    request: WorktreeNameRequest { attention_id, name },
-                                    completion,
-                                })
-                                .is_ok()
-                                && wait_for_control_completion(&completed, &stopping_for_thread);
-                            if accepted { "ok" } else { "rejected" }
-                        }
-                        Some(ControlRequestCommand::GetSilentMode { attention_id }) => {
-                            let (completion, completed) = channel();
-                            if commands
-                                .unbounded_send(ProcessControlCommand::GetSilentMode {
+                                    summary,
+                                    body,
+                                }) => {
+                                    let (completion, completed) = channel();
+                                    let accepted = commands
+                                        .unbounded_send(ProcessControlCommand::SetTabAttention {
+                                            request: TabAttentionRequest {
+                                                attention_id,
+                                                summary,
+                                                body,
+                                            },
+                                            completion,
+                                        })
+                                        .is_ok()
+                                        && wait_for_control_completion(
+                                            &completed,
+                                            &stopping_for_thread,
+                                        );
+                                    if accepted { "ok" } else { "rejected" }
+                                }
+                                Some(ControlRequestCommand::FocusTab { attention_id }) => {
+                                    let (completion, completed) = channel();
+                                    let accepted = commands
+                                        .unbounded_send(ProcessControlCommand::FocusTab {
+                                            attention_id,
+                                            completion,
+                                        })
+                                        .is_ok()
+                                        && wait_for_control_completion(
+                                            &completed,
+                                            &stopping_for_thread,
+                                        );
+                                    if accepted { "ok" } else { "rejected" }
+                                }
+                                Some(ControlRequestCommand::SetTabName { attention_id, name }) => {
+                                    let (completion, completed) = channel();
+                                    let accepted = commands
+                                        .unbounded_send(ProcessControlCommand::SetTabName {
+                                            request: TabNameRequest { attention_id, name },
+                                            completion,
+                                        })
+                                        .is_ok()
+                                        && wait_for_control_completion(
+                                            &completed,
+                                            &stopping_for_thread,
+                                        );
+                                    if accepted { "ok" } else { "rejected" }
+                                }
+                                Some(ControlRequestCommand::SetWorktreeName {
                                     attention_id,
-                                    completion,
-                                })
-                                .is_err()
-                            {
-                                "rejected"
-                            } else if let Some(silent_mode) =
-                                wait_for_silent_mode_completion(&completed, &stopping_for_thread)
-                            {
-                                response_silent_mode = silent_mode;
-                                "ok"
-                            } else {
-                                "rejected"
-                            }
-                        }
-                        None => "rejected",
-                    };
-                    let status = if status == "ok" && stopping_for_thread.load(Ordering::Acquire) {
-                        "rejected"
-                    } else {
-                        status
-                    };
-                    let _ = write_message(
-                        &mut stream,
-                        &ControlResponse {
-                            status: status.to_owned(),
-                            themes: response_themes,
-                            pane_theme: response_pane_theme,
-                            silent_mode: response_silent_mode,
-                            pane_labels: response_pane_labels,
-                            error: response_error,
-                        },
-                    );
+                                    name,
+                                }) => {
+                                    let (completion, completed) = channel();
+                                    let accepted = commands
+                                        .unbounded_send(ProcessControlCommand::SetWorktreeName {
+                                            request: WorktreeNameRequest { attention_id, name },
+                                            completion,
+                                        })
+                                        .is_ok()
+                                        && wait_for_control_completion(
+                                            &completed,
+                                            &stopping_for_thread,
+                                        );
+                                    if accepted { "ok" } else { "rejected" }
+                                }
+                                Some(ControlRequestCommand::GetSilentMode { attention_id }) => {
+                                    let (completion, completed) = channel();
+                                    if commands
+                                        .unbounded_send(ProcessControlCommand::GetSilentMode {
+                                            attention_id,
+                                            completion,
+                                        })
+                                        .is_err()
+                                    {
+                                        "rejected"
+                                    } else if let Some(silent_mode) =
+                                        wait_for_silent_mode_completion(
+                                            &completed,
+                                            &stopping_for_thread,
+                                        )
+                                    {
+                                        response_silent_mode = silent_mode;
+                                        "ok"
+                                    } else {
+                                        "rejected"
+                                    }
+                                }
+                                None => "rejected",
+                            };
+                            let status =
+                                if status == "ok" && stopping_for_thread.load(Ordering::Acquire) {
+                                    "rejected"
+                                } else {
+                                    status
+                                };
+                            let _ = write_message(
+                                &mut stream,
+                                &ControlResponse {
+                                    status: status.to_owned(),
+                                    run_id: None,
+                                    themes: response_themes,
+                                    pane_theme: response_pane_theme,
+                                    silent_mode: response_silent_mode,
+                                    pane_labels: response_pane_labels,
+                                    error: response_error,
+                                },
+                            );
+                        });
                 }
             })
             .context("starting the Zetta process control thread")?;
@@ -922,12 +1047,299 @@ impl ProcessControlServer {
         if self.stopping.swap(true, Ordering::AcqRel) {
             return;
         }
+        process_run_registry().shutdown();
         // Stop advertising this process before GPUI begins shutting down. A new
         // launch must start its own application instead of handing off to a
         // process that can no longer keep the requested window alive.
         let _ = fs::remove_file(&self.endpoint_path);
         let _ = UnixStream::connect(&self.socket_path);
         let _ = fs::remove_file(&self.socket_path);
+    }
+}
+
+fn serve_run_wait_connection(
+    stream: &mut UnixStream,
+    commands: &UnboundedSender<ProcessControlCommand>,
+    stopping: &AtomicBool,
+    token: &str,
+    request: RunWaitRequest,
+) {
+    let Ok(mut client_stream) = stream.try_clone() else {
+        let _ = write_message(
+            stream,
+            &ControlResponse {
+                status: "rejected".to_owned(),
+                run_id: None,
+                themes: Vec::new(),
+                pane_theme: None,
+                silent_mode: false,
+                pane_labels: Vec::new(),
+                error: Some(ControlError {
+                    code: "process_unavailable".to_owned(),
+                    message: "the Zetta process could not monitor the run connection".to_owned(),
+                }),
+            },
+        );
+        return;
+    };
+    let _ = client_stream.set_read_timeout(None);
+    let (client_request_sender, client_requests) = channel();
+    let monitor_token = token.to_owned();
+    if thread::Builder::new()
+        .name("zetta-run-connection".to_owned())
+        .spawn(move || {
+            let request = handle_control_request(&mut client_stream, &monitor_token);
+            let _ = client_request_sender.send(request);
+        })
+        .is_err()
+    {
+        let _ = write_message(
+            stream,
+            &ControlResponse {
+                status: "rejected".to_owned(),
+                run_id: None,
+                themes: Vec::new(),
+                pane_theme: None,
+                silent_mode: false,
+                pane_labels: Vec::new(),
+                error: Some(ControlError {
+                    code: "process_unavailable".to_owned(),
+                    message: "the Zetta process could not monitor the run connection".to_owned(),
+                }),
+            },
+        );
+        return;
+    }
+
+    let (completion, completed) = channel();
+    if commands
+        .unbounded_send(ProcessControlCommand::RunWait {
+            request,
+            completion,
+        })
+        .is_err()
+    {
+        let _ = write_message(
+            stream,
+            &ControlResponse {
+                status: "rejected".to_owned(),
+                run_id: None,
+                themes: Vec::new(),
+                pane_theme: None,
+                silent_mode: false,
+                pane_labels: Vec::new(),
+                error: Some(ControlError {
+                    code: "process_unavailable".to_owned(),
+                    message: "the Zetta process is no longer accepting run requests".to_owned(),
+                }),
+            },
+        );
+        return;
+    }
+
+    let registration = match wait_for_run_registration(&completed, stopping, &client_requests) {
+        RunWaitRegistration::Registered(Ok(registration)) => registration,
+        RunWaitRegistration::Registered(Err(message)) => {
+            let _ = write_message(
+                stream,
+                &ControlResponse {
+                    status: "failed".to_owned(),
+                    run_id: None,
+                    themes: Vec::new(),
+                    pane_theme: None,
+                    silent_mode: false,
+                    pane_labels: Vec::new(),
+                    error: Some(ControlError {
+                        code: "run_rejected".to_owned(),
+                        message,
+                    }),
+                },
+            );
+            shutdown_run_connection(stream);
+            return;
+        }
+        RunWaitRegistration::ClientDisconnected => return,
+        RunWaitRegistration::Stopping => {
+            shutdown_run_connection(stream);
+            return;
+        }
+        RunWaitRegistration::NoRegistration => {
+            let _ = write_message(
+                stream,
+                &ControlResponse {
+                    status: "rejected".to_owned(),
+                    run_id: None,
+                    themes: Vec::new(),
+                    pane_theme: None,
+                    silent_mode: false,
+                    pane_labels: Vec::new(),
+                    error: Some(ControlError {
+                        code: "run_rejected".to_owned(),
+                        message: "the Zetta process did not accept the run request".to_owned(),
+                    }),
+                },
+            );
+            shutdown_run_connection(stream);
+            return;
+        }
+    };
+    let id = registration.id;
+    let _ = stream.set_read_timeout(None);
+    let resolution = loop {
+        if stopping.load(Ordering::Acquire) {
+            process_run_registry().connection_lost(id);
+            shutdown_run_connection(stream);
+            return;
+        }
+        match registration.recv_timeout(CONTROL_COMPLETION_POLL_INTERVAL) {
+            Ok(resolution) => break resolution,
+            Err(RecvTimeoutError::Timeout) => match client_requests.try_recv() {
+                Ok(_) | Err(TryRecvError::Disconnected) => {
+                    process_run_registry().connection_lost(id);
+                    shutdown_run_connection(stream);
+                    return;
+                }
+                Err(TryRecvError::Empty) => {}
+            },
+            Err(RecvTimeoutError::Disconnected) => {
+                process_run_registry().connection_lost(id);
+                shutdown_run_connection(stream);
+                return;
+            }
+        }
+    };
+    match resolution.resolution {
+        RunResolution::Failed => {
+            let _ = write_message(
+                stream,
+                &ControlResponse {
+                    status: "failed".to_owned(),
+                    run_id: Some(id),
+                    themes: Vec::new(),
+                    pane_theme: None,
+                    silent_mode: false,
+                    pane_labels: Vec::new(),
+                    error: Some(ControlError {
+                        code: "run_dependency_failed".to_owned(),
+                        message: resolution
+                            .message
+                            .unwrap_or_else(|| "a run dependency failed".to_owned()),
+                    }),
+                },
+            );
+            process_run_registry().connection_lost(id);
+            shutdown_run_connection(stream);
+        }
+        RunResolution::Ready => {
+            if write_message(
+                stream,
+                &ControlResponse {
+                    status: "ready".to_owned(),
+                    run_id: Some(id),
+                    themes: Vec::new(),
+                    pane_theme: None,
+                    silent_mode: false,
+                    pane_labels: Vec::new(),
+                    error: None,
+                },
+            )
+            .is_err()
+            {
+                process_run_registry().connection_lost(id);
+                return;
+            }
+
+            let completed = loop {
+                if stopping.load(Ordering::Acquire) {
+                    process_run_registry().connection_lost(id);
+                    shutdown_run_connection(stream);
+                    return;
+                }
+                match client_requests.recv_timeout(CONTROL_COMPLETION_POLL_INTERVAL) {
+                    Ok(request) => break request,
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => break None,
+                }
+            };
+            match completed {
+                Some(ControlRequestCommand::RunComplete {
+                    id: completed_id,
+                    exit_code,
+                }) if completed_id == id => {
+                    process_run_registry().complete(id, exit_code);
+                    let _ = write_message(
+                        stream,
+                        &ControlResponse {
+                            status: "ok".to_owned(),
+                            run_id: Some(id),
+                            themes: Vec::new(),
+                            pane_theme: None,
+                            silent_mode: false,
+                            pane_labels: Vec::new(),
+                            error: None,
+                        },
+                    );
+                }
+                _ => process_run_registry().connection_lost(id),
+            }
+        }
+    }
+}
+
+fn shutdown_run_connection(stream: &UnixStream) {
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+}
+
+enum RunWaitRegistration {
+    Registered(std::result::Result<RunRegistration, String>),
+    ClientDisconnected,
+    NoRegistration,
+    Stopping,
+}
+
+/// Registration is the only part of process control that may legitimately
+/// outlive the ordinary two-second request budget: the UI thread can be busy
+/// opening a window or restoring a background session. Keep watching the
+/// client while it is queued so a dropped wrapper cannot leave a run node
+/// owning its pane indefinitely.
+fn wait_for_run_registration(
+    completed: &Receiver<std::result::Result<RunRegistration, String>>,
+    stopping: &AtomicBool,
+    client_requests: &Receiver<Option<ControlRequestCommand>>,
+) -> RunWaitRegistration {
+    let mut client_disconnected = false;
+    loop {
+        if stopping.load(Ordering::Acquire) {
+            return RunWaitRegistration::Stopping;
+        }
+        match completed.recv_timeout(CONTROL_COMPLETION_POLL_INTERVAL) {
+            Ok(registration) => {
+                return if client_disconnected {
+                    if let Ok(registration) = registration {
+                        process_run_registry().connection_lost(registration.id);
+                    }
+                    RunWaitRegistration::ClientDisconnected
+                } else {
+                    RunWaitRegistration::Registered(registration)
+                };
+            }
+            Err(RecvTimeoutError::Timeout) if !client_disconnected => {
+                match client_requests.try_recv() {
+                    Ok(_) | Err(TryRecvError::Disconnected) => {
+                        client_disconnected = true;
+                    }
+                    Err(TryRecvError::Empty) => {}
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                return if client_disconnected {
+                    RunWaitRegistration::ClientDisconnected
+                } else {
+                    RunWaitRegistration::NoRegistration
+                };
+            }
+        }
     }
 }
 
@@ -1112,7 +1524,12 @@ fn decode_control_request(
     }
     if !matches!(
         request.command.as_str(),
-        "reload_configuration" | "open_project" | "resume_disk_session" | "open_command"
+        "reload_configuration"
+            | "open_project"
+            | "resume_disk_session"
+            | "open_command"
+            | "run_wait"
+            | "run_complete"
     ) && request.config_path.is_some()
     {
         zeroize_control_request_secrets(request);
@@ -1134,7 +1551,9 @@ fn decode_control_request(
         zeroize_control_request_secrets(request);
         return None;
     }
-    if request.command != "get_pane_theme" && request.pane_id.is_some() {
+    if !matches!(request.command.as_str(), "get_pane_theme" | "run_wait")
+        && request.pane_id.is_some()
+    {
         zeroize_control_request_secrets(request);
         return None;
     }
@@ -1146,7 +1565,9 @@ fn decode_control_request(
             | "set_worktree_name"
             | "get_silent_mode"
             | "get_pane_theme"
+            | "list_panes"
             | "reconnect_session"
+            | "run_wait"
     ) && request.attention_id.is_some())
         || (request.command != "set_tab_attention"
             && (request.attention_summary.is_some() || request.attention_body.is_some()))
@@ -1287,6 +1708,93 @@ fn decode_control_request(
                 theme,
             })
         }
+        "run_wait"
+            if request.runner_id.is_none()
+                && request.session_id.is_none()
+                && request.secret.is_none()
+                && request.icon.is_none()
+                && request.pane_theme.is_none()
+                && request.pane_overlay.is_none()
+                && request.pane_overlay_font_size.is_none()
+                && request.pane_overlay_opacity.is_none()
+                && request.pane_overlay_color.is_none()
+                && request.attention_summary.is_none()
+                && request.attention_body.is_none()
+                && request.tab_name.is_none()
+                && request.worktree_name.is_none()
+                && request.working_directory.is_none()
+                && request.split.is_none()
+                && request.profile.is_none()
+                && request.theme.is_none()
+                && request.scope.is_none()
+                && request.pane_request.is_none()
+                && request.attention_id.is_some()
+                && request.pane_id.is_some() =>
+        {
+            let owner = RunPaneIdentity::new(request.attention_id.take()?, request.pane_id.take()?);
+            if owner.attention_id == 0 || owner.routing_id == 0 {
+                zeroize_control_request_secrets(request);
+                return None;
+            }
+            let mut encoded_payload = request.config_path.take()?;
+            let payload = serde_json::from_str::<RunWaitPayload>(&encoded_payload);
+            encoded_payload.zeroize();
+            let Ok(payload) = payload else {
+                zeroize_control_request_secrets(request);
+                return None;
+            };
+            if payload.dependencies.is_empty()
+                || payload.dependencies.iter().any(String::is_empty)
+                || payload.command.is_empty()
+                || payload.command.first().is_some_and(String::is_empty)
+                || pane_command_byte_len(&payload.command) > MAX_PANE_COMMAND_BYTES
+            {
+                zeroize_control_request_secrets(request);
+                return None;
+            }
+            Some(ControlRequestCommand::RunWait {
+                request: RunWaitRequest {
+                    owner,
+                    dependencies: payload.dependencies,
+                    allow_failure: payload.allow_failure,
+                    command: payload.command,
+                },
+            })
+        }
+        "run_complete"
+            if request.runner_id.is_none()
+                && request.session_id.is_some()
+                && request.secret.is_none()
+                && request.icon.is_none()
+                && request.pane_theme.is_none()
+                && request.pane_id.is_none()
+                && request.pane_overlay.is_none()
+                && request.pane_overlay_font_size.is_none()
+                && request.pane_overlay_opacity.is_none()
+                && request.pane_overlay_color.is_none()
+                && request.attention_id.is_none()
+                && request.attention_summary.is_none()
+                && request.attention_body.is_none()
+                && request.tab_name.is_none()
+                && request.worktree_name.is_none()
+                && request.working_directory.is_none()
+                && request.split.is_none()
+                && request.profile.is_none()
+                && request.theme.is_none()
+                && request.scope.is_none()
+                && request.pane_request.is_none() =>
+        {
+            let id = request.session_id.take()?;
+            if id == 0 {
+                zeroize_control_request_secrets(request);
+                return None;
+            }
+            let mut encoded_exit_code = request.config_path.take()?;
+            let exit_code = serde_json::from_str::<Option<i32>>(&encoded_exit_code).ok();
+            encoded_exit_code.zeroize();
+            let exit_code = exit_code?;
+            Some(ControlRequestCommand::RunComplete { id, exit_code })
+        }
         "run_pane"
             if request.runner_id.is_none()
                 && request.session_id.is_none()
@@ -1365,7 +1873,9 @@ fn decode_control_request(
                 && request.pane_overlay_font_size.is_none()
                 && request.pane_overlay_opacity.is_none()
                 && request.pane_overlay_color.is_none()
-                && request.attention_id.is_none()
+                && request
+                    .attention_id
+                    .is_none_or(|attention_id| attention_id != 0)
                 && request.attention_summary.is_none()
                 && request.attention_body.is_none()
                 && request.tab_name.is_none()
@@ -1376,7 +1886,9 @@ fn decode_control_request(
                 && request.theme.is_none()
                 && request.pane_request.is_none() =>
         {
-            Some(ControlRequestCommand::ListPaneLabels)
+            Some(ControlRequestCommand::ListPaneLabels {
+                attention_id: request.attention_id.take(),
+            })
         }
         "reconnect_session"
             if request.icon.is_none()
@@ -1916,6 +2428,35 @@ pub(crate) fn request_existing_process_command(
 }
 
 pub(crate) fn request_existing_process_pane_labels() -> Result<Option<Vec<String>>> {
+    // A completion request originates in a particular pane. Prefer its
+    // process identity so another Zetta window cannot supply unrelated labels
+    // when several processes are running on the same machine.
+    let attention_id = env::var("ZETTA_ATTENTION_ID")
+        .ok()
+        .map(|attention_id| {
+            attention_id
+                .parse::<u64>()
+                .context("ZETTA_ATTENTION_ID must be a positive attention ID")
+                .and_then(|attention_id| {
+                    anyhow::ensure!(
+                        attention_id != 0,
+                        "ZETTA_ATTENTION_ID must be a positive attention ID"
+                    );
+                    Ok(attention_id)
+                })
+        })
+        .transpose()?;
+    if let Ok(process_id) = env::var("ZETTA_PROCESS_ID") {
+        let process_id = process_id
+            .parse::<u32>()
+            .context("ZETTA_PROCESS_ID must be a positive process ID")?;
+        anyhow::ensure!(
+            process_id != 0,
+            "ZETTA_PROCESS_ID must be a positive process ID"
+        );
+        return request_process_pane_labels(process_id, attention_id);
+    }
+
     let directory = crate::background_sessions::session_catalog_dir();
     let entries = match fs::read_dir(&directory) {
         Ok(entries) => entries,
@@ -1944,7 +2485,7 @@ pub(crate) fn request_existing_process_pane_labels() -> Result<Option<Vec<String
             let _ = fs::remove_file(endpoint.socket_path);
             continue;
         }
-        match send_list_pane_labels_request(&endpoint) {
+        match send_list_pane_labels_request(&endpoint, attention_id) {
             Ok(Some(labels)) => return Ok(Some(labels)),
             Ok(None) => {}
             Err(error) => last_error = Some(error),
@@ -1954,6 +2495,37 @@ pub(crate) fn request_existing_process_pane_labels() -> Result<Option<Vec<String
         return Err(error);
     }
     Ok(None)
+}
+
+fn request_process_pane_labels(
+    process_id: u32,
+    attention_id: Option<u64>,
+) -> Result<Option<Vec<String>>> {
+    let endpoint_path = control_endpoint_path(process_id);
+    let contents = match fs::read(&endpoint_path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "reading Zetta process control endpoint {}",
+                    endpoint_path.display()
+                )
+            });
+        }
+    };
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&contents).context("parsing Zetta process control endpoint")?;
+    anyhow::ensure!(
+        endpoint.version == CONTROL_VERSION && endpoint.process_id == process_id,
+        "Zetta process control endpoint is outdated"
+    );
+    if !process_is_running(process_id) {
+        let _ = fs::remove_file(endpoint_path);
+        let _ = fs::remove_file(endpoint.socket_path);
+        return Ok(None);
+    }
+    send_list_pane_labels_request(&endpoint, attention_id)
 }
 
 pub(crate) fn request_existing_process_tab_icon(icon: Option<IconName>) -> Result<bool> {
@@ -2153,6 +2725,131 @@ pub(crate) fn request_process_tab_attention(
         "Zetta process control endpoint is outdated"
     );
     send_set_tab_attention_request(&endpoint, &request)
+}
+
+pub(crate) struct RunWaitConnection {
+    stream: UnixStream,
+    id: u64,
+    token: String,
+    pub(crate) command: Vec<String>,
+}
+
+impl RunWaitConnection {
+    pub(crate) fn complete(&mut self, exit_code: Option<i32>) -> Result<()> {
+        let encoded_exit_code = serde_json::to_string(&exit_code)?;
+        write_message(
+            &mut self.stream,
+            &ControlRequest {
+                token: self.token.clone(),
+                command: "run_complete".to_owned(),
+                runner_id: None,
+                session_id: Some(self.id),
+                secret: None,
+                icon: None,
+                pane_theme: None,
+                pane_id: None,
+                pane_overlay: None,
+                pane_overlay_font_size: None,
+                pane_overlay_opacity: None,
+                pane_overlay_color: None,
+                attention_id: None,
+                attention_summary: None,
+                attention_body: None,
+                tab_name: None,
+                worktree_name: None,
+                config_path: Some(encoded_exit_code),
+                working_directory: None,
+                split: None,
+                profile: None,
+                theme: None,
+                scope: None,
+                pane_request: None,
+            },
+        )?;
+        let response = read_message::<ControlResponse>(&mut self.stream)?;
+        anyhow::ensure!(
+            response.status == "ok",
+            "the Zetta process did not acknowledge the run result"
+        );
+        Ok(())
+    }
+}
+
+pub(crate) fn request_process_run_wait(
+    process_id: u32,
+    request: RunWaitRequest,
+) -> Result<RunWaitConnection> {
+    anyhow::ensure!(process_id != 0, "process ID must be positive");
+    let endpoint_path = control_endpoint_path(process_id);
+    let contents = fs::read(&endpoint_path).with_context(|| {
+        format!(
+            "reading Zetta process control endpoint {}",
+            endpoint_path.display()
+        )
+    })?;
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&contents).context("parsing Zetta process control endpoint")?;
+    anyhow::ensure!(
+        endpoint.version == CONTROL_VERSION && endpoint.process_id == process_id,
+        "Zetta process control endpoint is outdated"
+    );
+    let command = request.command.clone();
+    let payload = serde_json::to_string(&RunWaitPayload {
+        dependencies: request.dependencies,
+        allow_failure: request.allow_failure,
+        command: request.command,
+    })?;
+    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
+    stream.set_read_timeout(None)?;
+    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    write_message(
+        &mut stream,
+        &ControlRequest {
+            token: endpoint.token.clone(),
+            command: "run_wait".to_owned(),
+            runner_id: None,
+            session_id: None,
+            secret: None,
+            icon: None,
+            pane_theme: None,
+            pane_id: Some(request.owner.routing_id),
+            pane_overlay: None,
+            pane_overlay_font_size: None,
+            pane_overlay_opacity: None,
+            pane_overlay_color: None,
+            attention_id: Some(request.owner.attention_id),
+            attention_summary: None,
+            attention_body: None,
+            tab_name: None,
+            worktree_name: None,
+            config_path: Some(payload),
+            working_directory: None,
+            split: None,
+            profile: None,
+            theme: None,
+            scope: None,
+            pane_request: None,
+        },
+    )?;
+    let response = read_message::<ControlResponse>(&mut stream)?;
+    match response.status.as_str() {
+        "ready" => Ok(RunWaitConnection {
+            stream,
+            id: response
+                .run_id
+                .context("the Zetta process returned a run without an ID")?,
+            token: endpoint.token,
+            command,
+        }),
+        "failed" | "rejected" => {
+            let message = response
+                .error
+                .map(|error| error.message)
+                .unwrap_or_else(|| "run dependencies were not satisfied".to_owned());
+            anyhow::bail!("{message}");
+        }
+        status => anyhow::bail!("unexpected response to run_wait: {status}"),
+    }
 }
 
 #[cfg(feature = "syntax-highlighting")]
@@ -2683,7 +3380,10 @@ fn send_open_command_request(
     Ok(false)
 }
 
-fn send_list_pane_labels_request(endpoint: &ControlEndpoint) -> Result<Option<Vec<String>>> {
+fn send_list_pane_labels_request(
+    endpoint: &ControlEndpoint,
+    attention_id: Option<u64>,
+) -> Result<Option<Vec<String>>> {
     let mut stream = UnixStream::connect(&endpoint.socket_path)?;
     stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
     stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
@@ -2702,7 +3402,7 @@ fn send_list_pane_labels_request(endpoint: &ControlEndpoint) -> Result<Option<Ve
             pane_overlay_font_size: None,
             pane_overlay_opacity: None,
             pane_overlay_color: None,
-            attention_id: None,
+            attention_id,
             attention_summary: None,
             attention_body: None,
             tab_name: None,

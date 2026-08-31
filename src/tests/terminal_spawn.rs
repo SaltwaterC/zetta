@@ -19,6 +19,28 @@ fn native_stacked_commands_use_one_interactive_shell_command() {
     );
 }
 
+#[cfg(not(windows))]
+#[test]
+fn native_shell_bootstrap_loads_the_owner_integration_only_when_needed() {
+    let command = String::from_utf8(
+        shell_integration_startup_command(&Shell::Program("zsh".to_owned())).unwrap(),
+    )
+    .unwrap();
+    assert!(command.starts_with(
+        "if [[ ${__ZETTA_LIFECYCLE_TRACKING_VERSION:-0} != 3 || ( -n ${ZETTA_PANE_ROUTING_ID:-${ZETTA_PANE_ID:-}} && ${__ZETTA_LIFECYCLE_TRACKING_ENABLED:-0} != 1 ) ]]; then "
+    ));
+    assert!(command.contains(r#"eval "$("$ZETTA_HOST_EXECUTABLE" init zsh)"; fi"#));
+    assert!(command.ends_with('\r'));
+    assert!(
+        shell_integration_startup_command(&Shell::WithArguments {
+            program: "zsh".to_owned(),
+            args: vec!["-i".to_owned(), "-c".to_owned(), "make lint".to_owned()],
+            title_override: None,
+        })
+        .is_none()
+    );
+}
+
 #[test]
 fn pane_template_environment_overrides_merge_without_replacing_zetta_variables() {
     let mut environment = HashMap::from([
@@ -31,7 +53,7 @@ fn pane_template_environment_overrides_merge_without_replacing_zetta_variables()
         ("ZETTA_PROCESS_ID".to_owned(), "spoofed".to_owned()),
     ]);
 
-    apply_terminal_environment_overrides(&mut environment, &overrides, 42, 7, 9, false);
+    apply_terminal_environment_overrides(&mut environment, &overrides, 42, 7, 9, 11, false);
 
     assert_eq!(environment["PATH"], "custom-path");
     assert_eq!(environment["ROLE"], "server");
@@ -39,6 +61,7 @@ fn pane_template_environment_overrides_merge_without_replacing_zetta_variables()
     assert_eq!(environment["ZETTA_PROCESS_ID"], "42");
     assert_eq!(environment["ZETTA_ATTENTION_ID"], "7");
     assert_eq!(environment["ZETTA_PANE_ID"], "9");
+    assert_eq!(environment["ZETTA_PANE_ROUTING_ID"], "11");
     assert_eq!(environment["ZETTA_NO_MUX"], "0");
 }
 
@@ -47,7 +70,7 @@ fn no_mux_terminal_environment_is_explicit_and_cannot_be_overridden() {
     let mut environment = HashMap::new();
     let overrides = HashMap::from([("ZETTA_NO_MUX".to_owned(), "0".to_owned())]);
 
-    apply_terminal_environment_overrides(&mut environment, &overrides, 42, 7, 9, true);
+    apply_terminal_environment_overrides(&mut environment, &overrides, 42, 7, 9, 11, true);
 
     assert_eq!(environment["ZETTA_NO_MUX"], "1");
 }

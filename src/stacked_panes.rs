@@ -100,6 +100,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let run_identity = self.run_stacked_pane_identity(tab_id, pane_id, entry_id);
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
             let (removed, close_host) = {
                 let Some(pane) = tab.pane_mut(pane_id) else {
@@ -111,6 +112,9 @@ impl Zetta {
             };
             if removed.is_none() {
                 return;
+            }
+            if let Some(identity) = run_identity {
+                crate::run_command::process_run_registry().pane_closed(identity);
             }
             self.background_observed_panes.remove(&entry_id);
             if close_host {
@@ -131,6 +135,9 @@ impl Zetta {
             .and_then(|tab| tab.pane_mut(pane_id))
             .and_then(|pane| pane.stack.remove(entry_id));
         if removed.is_some() {
+            if let Some(identity) = run_identity {
+                crate::run_command::process_run_registry().pane_closed(identity);
+            }
             self.background_observed_panes.remove(&entry_id);
             self.publish_background_session_catalog(cx);
         }
@@ -268,6 +275,7 @@ impl Zetta {
         exit_code: Option<i32>,
         cx: &mut Context<Self>,
     ) {
+        let run_identity = self.run_stacked_pane_identity(tab_id, pane_id, entry_id);
         let mut found = false;
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
             if let Some(entry) = tab.pane_mut(pane_id).and_then(|pane| {
@@ -297,6 +305,9 @@ impl Zetta {
             found = true;
         }
         if found {
+            if let Some(identity) = run_identity {
+                crate::run_command::process_run_registry().command_finished(identity, exit_code);
+            }
             if !self.tabs.iter().any(|tab| tab.id == tab_id) {
                 self.publish_background_session_catalog(cx);
             }

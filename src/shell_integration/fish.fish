@@ -6,8 +6,73 @@ if set -q ZETTA_HOST_EXECUTABLE; and test -n "$ZETTA_HOST_EXECUTABLE"
 end
 
 if not functions -q __zetta_report_cwd
+    set -g __ZETTA_LIFECYCLE_TRACKING_INSTALLED 1
+    if set -q ZETTA_PANE_ROUTING_ID
+        set -g __ZETTA_LIFECYCLE_TRACKING_ENABLED 1
+    else if set -q ZETTA_PANE_ID
+        set -g __ZETTA_LIFECYCLE_TRACKING_ENABLED 1
+    else
+        set -g __ZETTA_LIFECYCLE_TRACKING_ENABLED 0
+    end
+    set -g __ZETTA_COMMAND_STARTED 0
+    function __zetta_report_tracking_ready
+        test "$__ZETTA_LIFECYCLE_TRACKING_ENABLED" = 1; or return
+        printf '\033]2;zetta-event:tracking-ready\033\\'
+    end
+    function __zetta_report_preexec --on-event fish_preexec
+        test "$__ZETTA_LIFECYCLE_TRACKING_ENABLED" = 1; or return
+        set -g __ZETTA_COMMAND_STARTED 1
+        printf '\033]2;zetta-event:command-started:%s\033\\' "$argv[1]"
+    end
     function __zetta_report_cwd --on-event fish_prompt
+        set -l command_status $status
+        if test "$__ZETTA_LIFECYCLE_TRACKING_ENABLED" = 1; and test "$__ZETTA_COMMAND_STARTED" = 1
+            printf '\033]2;zetta-event:command-finished:%s\033\\' "$command_status"
+            set -g __ZETTA_COMMAND_STARTED 0
+        end
         printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
+    end
+    __zetta_report_tracking_ready
+end
+
+# Upgrade a shell that loaded an older CWD-only integration. Removing the old
+# event functions also removes their event subscriptions before the upgraded
+# definitions are installed.
+set -l __zetta_lifecycle_needs_install 0
+if not set -q __ZETTA_LIFECYCLE_TRACKING_INSTALLED
+    set -g __ZETTA_LIFECYCLE_TRACKING_INSTALLED 1
+    set __zetta_lifecycle_needs_install 1
+else if set -q ZETTA_PANE_ROUTING_ID; or set -q ZETTA_PANE_ID
+    if test "$__ZETTA_LIFECYCLE_TRACKING_ENABLED" != 1
+        set __zetta_lifecycle_needs_install 1
+    end
+end
+if test "$__zetta_lifecycle_needs_install" = 1
+    if set -q ZETTA_PANE_ROUTING_ID; or set -q ZETTA_PANE_ID
+        set -g __ZETTA_LIFECYCLE_TRACKING_ENABLED 1
+        set -g __ZETTA_COMMAND_STARTED 0
+        functions -e __zetta_report_cwd 2>/dev/null
+        functions -e __zetta_report_preexec 2>/dev/null
+        function __zetta_report_tracking_ready
+            test "$__ZETTA_LIFECYCLE_TRACKING_ENABLED" = 1; or return
+            printf '\033]2;zetta-event:tracking-ready\033\\'
+        end
+        function __zetta_report_preexec --on-event fish_preexec
+            test "$__ZETTA_LIFECYCLE_TRACKING_ENABLED" = 1; or return
+            set -g __ZETTA_COMMAND_STARTED 1
+            printf '\033]2;zetta-event:command-started:%s\033\\' "$argv[1]"
+        end
+        function __zetta_report_cwd --on-event fish_prompt
+            set -l command_status $status
+            if test "$__ZETTA_LIFECYCLE_TRACKING_ENABLED" = 1; and test "$__ZETTA_COMMAND_STARTED" = 1
+                printf '\033]2;zetta-event:command-finished:%s\033\\' "$command_status"
+                set -g __ZETTA_COMMAND_STARTED 0
+            end
+            printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
+        end
+        __zetta_report_tracking_ready
+    else
+        set -g __ZETTA_LIFECYCLE_TRACKING_ENABLED 0
     end
 end
 
@@ -158,6 +223,30 @@ end
 
 function __zetta_pane_labels
     zetta pane --list 2>/dev/null
+end
+
+function __zetta_pane_wait
+    set -l words (commandline -opc)
+    test (count $words) -ge 3
+    and test "$words[2]" = pane
+    and test "$words[3]" = wait
+end
+
+function __zetta_run_pane_labels
+    set -l current (commandline -ct)
+    set -l prefix ''
+    set -l partial $current
+    set -l selected
+    if string match -q '*,*' -- "$current"
+        set prefix (string replace -r '[^,]*$' '' -- "$current")
+        set partial (string replace -r '^.*,' '' -- "$current")
+        set selected (string split ',' -- (string replace -r ',[^,]*$' '' -- "$current"))
+    end
+    for label in (__zetta_pane_labels)
+        string match -q -- "$partial*" "$label"; or continue
+        contains -- "$label" $selected; and continue
+        printf '%s%s\n' "$prefix" "$label"
+    end
 end
 
 # zetta-default/zetta-ok/zetta-alarm/zetta-gong are bundled tones Zetta plays itself, so
@@ -468,6 +557,7 @@ function __zetta_long_options
             printf '%s\t%s\n' --help 'Print help'
         case pane
             printf '%s\t%s\n' \
+                wait 'Wait for pane commands before running a command' \
                 --direction 'Direction for a new split' \
                 --label 'Label for a new split pane' \
                 --pane 'Target pane label' \
@@ -477,6 +567,11 @@ function __zetta_long_options
                 --overlay-color 'Overlay text color' \
                 --stack 'Run in a stacked task pane' \
                 --list 'List pane labels' \
+                --help 'Print help'
+        case pane_wait
+            printf '%s\t%s\n' \
+                --allow-failure 'Continue after a dependency fails' \
+                -- 'Execute the remaining values as exact argv' \
                 --help 'Print help'
         case theme
             printf '%s\t%s\n' \
@@ -711,24 +806,30 @@ complete -c zetta -n '__fish_seen_subcommand_from project' -l help -d 'Print hel
 complete -c zetta -n '__zetta_project_is add remove open' -l path -r -d 'Project root'
 complete -c zetta -n '__zetta_project_is add' -a '(__fish_complete_directories)'
 complete -c zetta -n '__zetta_project_is open remove' -a '(__zetta_projects)'
-complete -c zetta -n '__fish_seen_subcommand_from pane' -l direction -r -a 'left right up down' -d 'Direction for a new split'
-complete -c zetta -n '__fish_seen_subcommand_from pane' -l label -r -d 'Label for a new split pane'
-complete -c zetta -n '__fish_seen_subcommand_from pane' -l pane -r -a '(__zetta_pane_labels)' -d 'Target pane label'
-complete -c zetta -n '__fish_seen_subcommand_from pane' -l overlay -r -d 'Overlay text for a new split pane'
-complete -c zetta -n '__fish_seen_subcommand_from pane' -l overlay-size -r -a 'sm base lg xl 2xl 3xl' -d 'Overlay font size'
-complete -c zetta -n '__fish_seen_subcommand_from pane' -l overlay-opacity -r -d 'Overlay opacity percentage'
-complete -c zetta -n '__fish_seen_subcommand_from pane' -l overlay-color -r -a 'ZETTA_OVERLAY_COLORS' -d 'Overlay text color'
-complete -c zetta -n '__fish_seen_subcommand_from pane' -l stack -d 'Run in a stacked task pane'
-complete -c zetta -n '__fish_seen_subcommand_from pane' -l list -d 'List pane labels'
-complete -c zetta -n '__fish_seen_subcommand_from pane' -l help -d 'Print help'
-complete -c zetta -n '__fish_seen_subcommand_from pane' -a '(__zetta_long_options pane)'
-complete -c zetta -s d -r -a 'left right up down' -n '__fish_seen_subcommand_from pane; and __zetta_short_option -d'
-complete -c zetta -s l -r -n '__fish_seen_subcommand_from pane; and __zetta_short_option -l'
-complete -c zetta -s p -r -a '(__zetta_pane_labels)' -n '__fish_seen_subcommand_from pane; and __zetta_short_option -p'
-complete -c zetta -s o -r -n '__fish_seen_subcommand_from pane; and __zetta_short_option -o'
-complete -c zetta -s S -r -a 'sm base lg xl 2xl 3xl' -n '__fish_seen_subcommand_from pane; and __zetta_short_option -S'
-complete -c zetta -s O -r -n '__fish_seen_subcommand_from pane; and __zetta_short_option -O'
-complete -c zetta -s c -r -a 'ZETTA_OVERLAY_COLORS' -n '__fish_seen_subcommand_from pane; and __zetta_short_option -c'
+complete -c zetta -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait' -a wait -d 'Wait for pane commands before running a command'
+complete -c zetta -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait' -l direction -r -a 'left right up down' -d 'Direction for a new split'
+complete -c zetta -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait' -l label -r -d 'Label for a new split pane'
+complete -c zetta -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait' -l pane -r -a '(__zetta_pane_labels)' -d 'Target pane label'
+complete -c zetta -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait' -l overlay -r -d 'Overlay text for a new split pane'
+complete -c zetta -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait' -l overlay-size -r -a 'sm base lg xl 2xl 3xl' -d 'Overlay font size'
+complete -c zetta -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait' -l overlay-opacity -r -d 'Overlay opacity percentage'
+complete -c zetta -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait' -l overlay-color -r -a 'ZETTA_OVERLAY_COLORS' -d 'Overlay text color'
+complete -c zetta -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait' -l stack -d 'Run in a stacked task pane'
+complete -c zetta -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait' -l list -d 'List pane labels'
+complete -c zetta -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait' -a '(__zetta_long_options pane)'
+complete -c zetta -s d -r -a 'left right up down' -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait; and __zetta_short_option -d'
+complete -c zetta -s l -r -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait; and __zetta_short_option -l'
+complete -c zetta -s p -r -a '(__zetta_pane_labels)' -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait; and __zetta_short_option -p'
+complete -c zetta -s o -r -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait; and __zetta_short_option -o'
+complete -c zetta -s S -r -a 'sm base lg xl 2xl 3xl' -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait; and __zetta_short_option -S'
+complete -c zetta -s O -r -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait; and __zetta_short_option -O'
+complete -c zetta -s c -r -a 'ZETTA_OVERLAY_COLORS' -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait; and __zetta_short_option -c'
+complete -c zetta -n '__zetta_pane_wait; and not __fish_seen_argument --' -r -a '(__zetta_run_pane_labels)' -d 'Wait for comma-separated pane labels'
+complete -c zetta -n '__zetta_pane_wait; and not __fish_seen_argument --' -l allow-failure -d 'Continue after a dependency fails'
+complete -c zetta -n '__zetta_pane_wait; and not __fish_seen_argument --' -l help -d 'Print help'
+complete -c zetta -n '__zetta_pane_wait; and not __fish_seen_argument --' -a '(__zetta_long_options pane_wait)'
+complete -c zetta -s a -n '__zetta_pane_wait; and not __fish_seen_argument --; and __zetta_short_option -a'
 complete -c zetta -n '__fish_seen_subcommand_from edit' -l delete-after -d 'Delete a managed buffer after editing'
 complete -c zetta -n '__fish_seen_subcommand_from edit' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from edit' -a '(__zetta_long_options edit)'

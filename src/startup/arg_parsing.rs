@@ -11,6 +11,7 @@ use crate::command_panes::{
 };
 use crate::profile_cli::{ProfileCommand, parse_profile_args};
 use crate::project_cli::{ProjectCommand, parse_project_args};
+use crate::run_command::PaneWaitCommand;
 #[cfg(feature = "worktree")]
 use zwt::{WorktreeCommand, WorktreeInvocation, parse_worktree_args_for};
 
@@ -27,6 +28,7 @@ pub(crate) enum StartupMode {
     /// preserved instead of being interpreted as Zetta options.
     Command(Vec<String>),
     Pane(PaneCommand),
+    PaneWait(PaneWaitCommand),
     Attention(AttentionCommand),
     #[cfg(feature = "worktree")]
     Worktree(WorktreeCommand),
@@ -112,6 +114,75 @@ pub(crate) struct StartupArgs {
     pub(crate) profile_workload: PerformanceWorkload,
     pub(crate) profile_external_terminal: bool,
     pub(crate) tftp_command: Option<TftpCommand>,
+}
+
+pub(crate) fn parse_pane_wait_args(args: &[OsString]) -> Result<PaneWaitCommand> {
+    let mut dependencies = None;
+    let mut allow_failure = false;
+    let mut after_delimiter = false;
+    let mut command = Vec::new();
+    let arguments = args.iter();
+
+    for argument in arguments {
+        if after_delimiter {
+            command.push(argument.to_string_lossy().into_owned());
+            continue;
+        }
+        match argument.to_string_lossy().as_ref() {
+            "--" => after_delimiter = true,
+            "--help" | "-h" => {
+                println!("{}", pane_help());
+                std::process::exit(0);
+            }
+            "--allow-failure" | "-a" => {
+                anyhow::ensure!(!allow_failure, "--allow-failure may only be specified once");
+                allow_failure = true;
+            }
+            option if option.starts_with('-') => {
+                anyhow::bail!("unknown pane wait option {option:?}")
+            }
+            value => {
+                anyhow::ensure!(
+                    dependencies.is_none(),
+                    "pane wait accepts one comma-separated dependency list"
+                );
+                let mut parsed_dependencies = Vec::new();
+                let mut seen = std::collections::HashSet::new();
+                for dependency in value.split(',') {
+                    anyhow::ensure!(!dependency.is_empty(), "pane wait labels must not be empty");
+                    anyhow::ensure!(
+                        seen.insert(dependency),
+                        "pane wait cannot list the same pane label more than once"
+                    );
+                    parsed_dependencies.push(dependency.to_owned());
+                }
+                anyhow::ensure!(
+                    !parsed_dependencies.is_empty(),
+                    "pane wait requires a pane label"
+                );
+                dependencies = Some(parsed_dependencies);
+            }
+        }
+    }
+
+    let dependencies = dependencies.context("zetta pane wait requires dependency labels")?;
+    anyhow::ensure!(
+        after_delimiter,
+        "zetta pane wait requires -- before COMMAND"
+    );
+    anyhow::ensure!(
+        !command.is_empty(),
+        "zetta pane wait requires a command after --"
+    );
+    anyhow::ensure!(
+        command.first().is_none_or(|program| !program.is_empty()),
+        "zetta pane wait requires a non-empty command name"
+    );
+    Ok(PaneWaitCommand {
+        dependencies,
+        allow_failure,
+        command,
+    })
 }
 
 pub(crate) fn parse_attention_args(args: &[OsString]) -> Result<StartupArgs> {
@@ -481,6 +552,11 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
         });
     }
     if arguments.first().is_some_and(|argument| argument == "pane") {
+        let mode = if arguments.get(1).is_some_and(|argument| argument == "wait") {
+            StartupMode::PaneWait(parse_pane_wait_args(&arguments[2..])?)
+        } else {
+            StartupMode::Pane(parse_pane_args(&arguments[1..])?)
+        };
         return Ok(StartupArgs {
             config_path: None,
             keymap_path: None,
@@ -489,7 +565,7 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             replace_pane: false,
             theme_override: None,
             no_mux: false,
-            mode: StartupMode::Pane(parse_pane_args(&arguments[1..])?),
+            mode,
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,
@@ -1672,15 +1748,23 @@ fn path_with_entry_first(path: Option<&std::ffi::OsStr>, entry: &Path) -> Option
 
 pub(crate) fn native_terminal_environment() -> Vec<(String, String)> {
     let mut environment = Vec::new();
-    // A native Linux Zetta can be launched from a Windows-hosted WSL pane.
-    // Do not let that pane's host-routing marker leak into terminals owned by
-    // the native application; its executable directory below must win there.
-    #[cfg(not(windows))]
-    environment.push(("ZETTA_HOST_EXECUTABLE".to_owned(), String::new()));
+    // A native Zetta can be launched beside another installation (for example
+    // a debug build beside the installed application). Point shell
+    // integration at the executable that owns this terminal instead of
+    // relying on the shell's eventual PATH ordering. On Linux this also
+    // replaces a Windows-host routing marker inherited by the application with
+    // the native executable's path.
+    let executable = env::current_exe().ok();
+    environment.push((
+        "ZETTA_HOST_EXECUTABLE".to_owned(),
+        executable
+            .as_ref()
+            .map(|executable| executable.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    ));
 
-    let Some(executable_directory) = env::current_exe()
-        .ok()
-        .and_then(|executable| executable.parent().map(Path::to_path_buf))
+    let Some(executable_directory) =
+        executable.and_then(|executable| executable.parent().map(Path::to_path_buf))
     else {
         return environment;
     };

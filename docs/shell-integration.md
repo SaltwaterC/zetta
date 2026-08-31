@@ -129,6 +129,13 @@ use `--overlay TEXT` with `--overlay-size`, `--overlay-opacity`, and
 `--overlay-color` to configure them. Commands still begin after `--`,
 preserving their exact argument boundaries.
 
+The `pane wait` operation completes its dependency list from the originating
+Zetta process as well. It accepts a comma-separated list of exact base-pane
+labels, preserving any labels already entered before the comma; completion
+stops after the required `--` delimiter. `--allow-failure` and `--help` are
+offered as long options, while the short spelling remains accepted by the
+parser without adding noise to the candidate list.
+
 `zetta overlay`'s text (`--text`/`-t`) and opacity (`--opacity`/`-o`) flags
 take free-form values. Its color flag (`--color`/`-c`) completes the fixed
 named presets `black`, `white`, `gray`, `red`, `orange`, `yellow`, `green`,

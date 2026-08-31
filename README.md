@@ -145,6 +145,18 @@ reports an error instead of opening a new window when none is available.
 New split panes can show an overlay with `--overlay TEXT`; use
 `--overlay-size`, `--overlay-opacity`, and `--overlay-color` to style it.
 
+Wait for labeled base panes before running an external command from a Zetta
+pane:
+
+```sh
+zetta pane wait api,db -- npm run integration
+```
+
+The child inherits the pane's standard streams, environment, and working
+directory. Use `--allow-failure` when a known nonzero dependency is acceptable.
+An idle dependency waits for its next command; its previous result is not
+reused.
+
 Manage persistent profiles without opening the settings UI with
 `zetta profile list`, `zetta profile themes`, and the profile mutation
 commands documented in the [configuration guide](docs/configuration.md).

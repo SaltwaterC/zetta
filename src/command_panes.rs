@@ -1,4 +1,5 @@
 use super::*;
+use crate::run_command::{RunCommandRegistry, RunPaneIdentity, RunRegistration, RunWaitRequest};
 
 /// Maximum UTF-8 payload accepted for one command-pane invocation. The process
 /// control framing has a little extra room for JSON and authentication fields.
@@ -221,10 +222,100 @@ fn resolve_pane_id(tab: &Tab, requested: Option<&str>) -> Result<u64> {
 }
 
 impl Zetta {
-    pub(crate) fn command_pane_labels(&self) -> Vec<String> {
-        self.tabs
-            .get(self.active_tab)
-            .map(|tab| tab.panes.iter().map(TerminalPane::label).collect())
+    pub(crate) fn register_run_wait(
+        &self,
+        request: RunWaitRequest,
+        registry: &RunCommandRegistry,
+        cx: &App,
+    ) -> Result<RunRegistration> {
+        let tab = self
+            .tabs
+            .iter()
+            .find(|tab| tab.attention_id == request.owner.attention_id)
+            .or_else(|| {
+                self.background_sessions
+                    .iter()
+                    .find(|tab| tab.attention_id == request.owner.attention_id)
+            })
+            .context("the originating Zetta tab is no longer available")?;
+        anyhow::ensure!(
+            tab.panes.iter().any(|pane| {
+                pane.routing_id == request.owner.routing_id
+                    || pane
+                        .stack
+                        .entries
+                        .iter()
+                        .any(|entry| entry.routing_id == request.owner.routing_id)
+            }),
+            "the originating pane is no longer available"
+        );
+
+        let labels = tab
+            .panes
+            .iter()
+            .map(TerminalPane::label)
+            .collect::<Vec<_>>();
+        let mut dependencies = Vec::with_capacity(request.dependencies.len());
+        for label in &request.dependencies {
+            let matches = tab
+                .panes
+                .iter()
+                .filter(|pane| pane.label() == *label)
+                .map(|pane| RunPaneIdentity::new(tab.attention_id, pane.routing_id))
+                .collect::<Vec<_>>();
+            match matches.as_slice() {
+                [dependency] => dependencies.push(*dependency),
+                [] => anyhow::bail!(
+                    "no base pane named {label:?} in the originating tab; available panes: {}",
+                    labels.join(", ")
+                ),
+                _ => anyhow::bail!("base pane label {label:?} is ambiguous in the originating tab"),
+            }
+        }
+
+        // The dependency's PTY can already have a foreground command while
+        // its OSC command-start marker is still queued for the terminal entity
+        // update. Observe the OS foreground process at this registration point
+        // so a stale successful result cannot release a second wait early.
+        for dependency in &dependencies {
+            let Some(terminal) = tab
+                .panes
+                .iter()
+                .find(|pane| pane.routing_id == dependency.routing_id)
+                .and_then(|pane| pane.terminal.as_ref())
+            else {
+                continue;
+            };
+            if terminal.read(cx).foreground_process_is_shell_context_now() == Some(false) {
+                registry.command_started(*dependency, "foreground command".to_owned());
+            }
+        }
+
+        registry.register(
+            request.owner,
+            dependencies,
+            request.allow_failure,
+            request.command,
+        )
+    }
+
+    pub(crate) fn command_pane_labels_for_attention(
+        &self,
+        attention_id: Option<u64>,
+    ) -> Vec<String> {
+        let tab = match attention_id {
+            Some(attention_id) => self
+                .tabs
+                .iter()
+                .find(|tab| tab.attention_id == attention_id)
+                .or_else(|| {
+                    self.background_sessions
+                        .iter()
+                        .find(|tab| tab.attention_id == attention_id)
+                }),
+            None => self.tabs.get(self.active_tab),
+        };
+        tab.map(|tab| tab.panes.iter().map(TerminalPane::label).collect())
             .unwrap_or_default()
     }
 

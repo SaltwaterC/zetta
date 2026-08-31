@@ -6,6 +6,78 @@ use crate::cli_services::SerialCommand;
 #[cfg(feature = "worktree")]
 use zwt::WorktreeCommand;
 
+#[test]
+fn pane_wait_preserves_dependencies_and_exact_command_arguments() {
+    let arguments = parse_args_from([
+        OsString::from("pane"),
+        OsString::from("wait"),
+        OsString::from("api,db"),
+        OsString::from("-a"),
+        OsString::from("--"),
+        OsString::from("python"),
+        OsString::from("-c"),
+        OsString::from("print('hello world')"),
+        OsString::from("--literal-option"),
+        OsString::new(),
+    ])
+    .unwrap();
+
+    assert_eq!(
+        arguments.mode,
+        StartupMode::PaneWait(crate::run_command::PaneWaitCommand {
+            dependencies: vec!["api".to_owned(), "db".to_owned()],
+            allow_failure: true,
+            command: vec![
+                "python".to_owned(),
+                "-c".to_owned(),
+                "print('hello world')".to_owned(),
+                "--literal-option".to_owned(),
+                String::new(),
+            ],
+        })
+    );
+}
+
+#[test]
+fn pane_wait_rejects_malformed_syntax() {
+    for arguments in [
+        vec!["pane", "wait", "--", "echo"],
+        vec!["pane", "wait", "", "--", "echo"],
+        vec!["pane", "wait", "api,,db", "--", "echo"],
+        vec!["pane", "wait", "api,api", "--", "echo"],
+        vec!["pane", "wait", "api", "echo"],
+        vec!["pane", "wait", "api", "--"],
+        vec!["pane", "wait", "api", "--wait", "db", "--", "echo"],
+        vec!["pane", "wait", "--wait", "api", "--", "echo"],
+        vec!["pane", "wait", "api", "--allow-failure", "-a", "--", "echo"],
+    ] {
+        assert!(
+            parse_args_from(arguments.iter().map(|argument| OsString::from(*argument))).is_err(),
+            "expected pane wait arguments to be rejected: {arguments:?}"
+        );
+    }
+    assert!(parse_args_from([OsString::from("run")]).is_err());
+}
+
+#[test]
+fn pane_wait_accepts_flags_before_or_after_the_dependency_list() {
+    for arguments in [
+        ["pane", "wait", "-a", "api", "--", "echo"],
+        ["pane", "wait", "api", "-a", "--", "echo"],
+    ] {
+        assert_eq!(
+            parse_args_from(arguments.iter().map(|argument| OsString::from(*argument)))
+                .unwrap()
+                .mode,
+            StartupMode::PaneWait(crate::run_command::PaneWaitCommand {
+                dependencies: vec!["api".to_owned()],
+                allow_failure: true,
+                command: vec!["echo".to_owned()],
+            })
+        );
+    }
+}
+
 #[cfg(windows)]
 #[test]
 fn executable_directory_is_prepended_to_native_terminal_path() {
@@ -42,11 +114,14 @@ fn executable_directory_is_prepended_to_native_terminal_path() {
 
 #[cfg(not(windows))]
 #[test]
-fn native_terminal_does_not_inherit_windows_host_zetta_routing() {
-    assert!(
+fn native_terminal_points_shell_integration_at_this_executable() {
+    let executable = env::current_exe().unwrap();
+    assert_eq!(
         native_terminal_environment()
             .iter()
-            .any(|(name, value)| { name == "ZETTA_HOST_EXECUTABLE" && value.is_empty() })
+            .find(|(name, _)| name == "ZETTA_HOST_EXECUTABLE")
+            .map(|(_, value)| value.as_str()),
+        Some(executable.to_string_lossy().as_ref())
     );
 }
 

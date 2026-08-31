@@ -167,6 +167,34 @@ its style. Overlay options apply only to newly created splits. A stopped base
 shell cannot receive a direct command, and the CLI returns an error when no
 accepting Zetta process is available rather than silently opening a new window.
 
+## CLI pane waits
+
+Run an external command after labeled base panes in the originating tab have
+run a command successfully:
+
+```sh
+zetta pane wait api,db -- npm run integration
+zetta pane wait build --allow-failure -- ./collect-logs
+```
+
+`zetta pane wait` must be invoked from a Zetta pane. Its comma-separated
+dependency list contains exact, case-sensitive labels for base panes in that
+tab; stacked task entries are not dependencies. The command waits for every
+active dependency. If a dependency is idle when the wait is registered, its
+previous result is not reused: the wait remains pending until the next command
+starts and finishes. Missing, ambiguous, or closed panes fail the wait, and an
+observed command with no exit status cannot satisfy it. Use `--allow-failure`
+when a known nonzero dependency result should still release the command;
+structural lookup failures remain errors. The command after `--` is executed
+with inherited standard streams, environment, and working directory, and its
+exit status is returned by `zetta pane wait`.
+
+The lifecycle hooks are installed by `zetta init` and are upgraded when the
+integration is sourced again, so an existing shell can use the new tracking
+without recreating the pane. Results from commands run before tracking was
+enabled cannot be recovered; rerun the dependency command after reloading the
+integration.
+
 Tab names follow the active terminal process. Press `Ctrl-Shift-R` or double-click
 a tab to set a persistent name. Use `Ctrl-Shift-Y` or the tab context menu
 to choose a tab icon. Submit an empty name to resume automatic naming.

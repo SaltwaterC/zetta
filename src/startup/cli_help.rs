@@ -129,6 +129,7 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         "zetta vi [OPTIONS] [FILE ...]",
         "zetta pane [OPTIONS] -- COMMAND [ARGUMENT ...]",
         "zetta pane --list",
+        "zetta pane wait LABEL[,LABEL ...] [--allow-failure] -- COMMAND [ARGUMENT ...]",
         "zetta profile <COMMAND>",
         "zetta project <COMMAND>",
         "zetta attention [OPTIONS] [SUMMARY] [BODY]",
@@ -175,7 +176,10 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         ("overlay", "Non-persistently show text over the active pane"),
         ("edit", "Edit files with $EDITOR, falling back to Zetta vi"),
         ("vi", "Edit files with Zetta's built-in vi"),
-        ("pane", "Run a command in an existing or new pane"),
+        (
+            "pane",
+            "Run a command in a pane or wait on pane dependencies",
+        ),
         ("profile", "List and manage profiles"),
         ("attention", "Mark the originating tab as needing attention"),
         ("project", "List, add, remove, or open projects"),
@@ -511,8 +515,19 @@ pub(crate) fn pane_help() -> String {
         ("-L, --list", "Print labels for panes in the active tab"),
         ("-h, --help", "Print help"),
     ]);
+    let wait_options = format_help_table([
+        (
+            "-a, --allow-failure",
+            "Run after a known nonzero dependency result; structural failures still fail",
+        ),
+        (
+            "--",
+            "End options; execute the remaining values as exact argv",
+        ),
+        ("-h, --help", "Print help"),
+    ]);
     format!(
-        "Run a command in an existing or newly created pane\n\nUsage: zetta pane [OPTIONS] -- COMMAND [ARGUMENT ...]\n       zetta pane --list\n\nWithout --direction, the command is sent to the selected pane's existing base shell. With --stack, it runs in a task-backed stacked terminal. With --direction, a new split is created relative to the active pane; up and down split horizontally, while left and right split vertically. Commands are passed as exact argv values, and must follow --. An overlay can be shown on a newly created split with --overlay.\n\nOptions:\n{options}\n\nExamples:\n  zetta pane --direction right --label api --overlay API -- npm run dev\n  zetta pane --direction up --overlay TESTS --overlay-color cyan -- cargo test\n  zetta pane --pane api -- make test\n  zetta pane --pane api --stack -- tail -f server.log"
+        "Run a command in an existing or newly created pane, or wait for pane commands\n\nUsage: zetta pane [OPTIONS] -- COMMAND [ARGUMENT ...]\n       zetta pane --list\n       zetta pane wait LABEL[,LABEL ...] [--allow-failure] -- COMMAND [ARGUMENT ...]\n\nWithout --direction, the command is sent to the selected pane's existing base shell. With --stack, it runs in a task-backed stacked terminal. With --direction, a new split is created relative to the active pane; up and down split horizontally, while left and right split vertically. Commands are passed as exact argv values, and must follow --. An overlay can be shown on a newly created split with --overlay.\n\n`pane wait` runs an external command in the current pane after every exact-label base-pane dependency in the originating tab starts and finishes successfully. An idle dependency waits for its next command, so a previous result is not reused. Use --allow-failure for known nonzero dependency results; missing, ambiguous, closed, and unavailable dependencies still fail.\n\nOptions:\n{options}\n\nWait options:\n{wait_options}\n\nExamples:\n  zetta pane --direction right --label api --overlay API -- npm run dev\n  zetta pane --direction up --overlay TESTS --overlay-color cyan -- cargo test\n  zetta pane --pane api -- make test\n  zetta pane --pane api --stack -- tail -f server.log\n  zetta pane wait api,db -- npm run integration\n  zetta pane wait build --allow-failure -- ./collect-logs"
     )
 }
 

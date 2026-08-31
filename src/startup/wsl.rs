@@ -63,6 +63,7 @@ where
         "ZETTA_PROCESS_ID/u",
         "ZETTA_ATTENTION_ID/u",
         "ZETTA_PANE_ID/u",
+        "ZETTA_PANE_ROUTING_ID/u",
         "ZETTA_THEME/u",
         "ZETTA_NO_MUX/u",
     ] {
@@ -422,17 +423,33 @@ pub(crate) fn paths_for_external_editor(arguments: &[String]) -> Vec<String> {
 }
 
 #[cfg(windows)]
-const MSYS2_BASH_TRACKER: &str = r#"__zetta_preexec() {
+const MSYS2_BASH_TRACKER: &str = r#"__zetta_at_prompt=0
+__zetta_command_started=0
+__zetta_preexec() {
     [[ "$__zetta_at_prompt" == 1 ]] || return
     __zetta_at_prompt=0
+    case "$BASH_COMMAND" in
+        __zetta_precmd|__zetta_mark_prompt) return ;;
+    esac
+    __zetta_command_started=1
+    printf '\033]2;zetta-event:command-started:%s\033\\' "$BASH_COMMAND"
     printf '\033]2;zetta-cmd:%s\033\\' "$BASH_COMMAND"
 }
 __zetta_precmd() {
+    local status=$?
+    if [[ "$__zetta_command_started" == 1 ]]; then
+        printf '\033]2;zetta-event:command-finished:%s\033\\' "$status"
+        __zetta_command_started=0
+    fi
     printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
     printf '\033]2;zetta-cmd:bash\033\\'
+    return "$status"
+}
+__zetta_mark_prompt() {
     __zetta_at_prompt=1
 }
-trap '__zetta_preexec' DEBUG"#;
+trap '__zetta_preexec' DEBUG
+printf '\033]2;zetta-event:tracking-ready\033\\'"#;
 
 #[cfg(windows)]
 const MSYS2_ZSH_TRACKER: &str = r#"if [[ -n ${ZETTA_ORIGINAL_ZDOTDIR+x} ]]; then
@@ -445,33 +462,59 @@ original_zdotdir="${ZDOTDIR:-$HOME}"
 [[ -r "$original_zdotdir/.zshenv" ]] && source "$original_zdotdir/.zshenv"
 
 function __zetta_report_cwd() {
+    local zetta_status=$?
+    if (( __ZETTA_COMMAND_STARTED )); then
+        printf '\033]2;zetta-event:command-finished:%s\033\\' "$zetta_status"
+        __ZETTA_COMMAND_STARTED=0
+    fi
     [[ "$PWD" == /* ]] && printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
     printf '\033]2;zetta-cmd:zsh\033\\'
+    return $zetta_status
 }
 function __zetta_report_preexec() {
+    __ZETTA_COMMAND_STARTED=1
+    printf '\033]2;zetta-event:command-started:%s\033\\' "$1"
     printf '\033]2;zetta-cmd:%s\033\\' "$1"
 }
+typeset -g __ZETTA_COMMAND_STARTED=0
 autoload -Uz add-zsh-hook
 add-zsh-hook precmd __zetta_report_cwd
 add-zsh-hook preexec __zetta_report_preexec
 command rm -rf -- "$ZETTA_INTEGRATION_ZDOTDIR"
 unset ZETTA_ORIGINAL_ZDOTDIR ZETTA_INTEGRATION_ZDOTDIR original_zdotdir
+printf '\033]2;zetta-event:tracking-ready\033\\'
 "#;
 
 #[cfg(windows)]
-const CYGWIN_BASH_TRACKER: &str = r#"__zetta_preexec() {
+const CYGWIN_BASH_TRACKER: &str = r#"__zetta_at_prompt=0
+__zetta_command_started=0
+__zetta_preexec() {
     [[ "$__zetta_at_prompt" == 1 ]] || return
     __zetta_at_prompt=0
+    case "$BASH_COMMAND" in
+        __zetta_precmd|__zetta_mark_prompt) return ;;
+    esac
+    __zetta_command_started=1
+    printf '\033]2;zetta-event:command-started:%s\033\\' "$BASH_COMMAND"
     printf '\033]2;zetta-cmd:%s\033\\' "$BASH_COMMAND"
 }
 __zetta_precmd() {
+    local status=$?
+    if [[ "$__zetta_command_started" == 1 ]]; then
+        printf '\033]2;zetta-event:command-finished:%s\033\\' "$status"
+        __zetta_command_started=0
+    fi
     case "$PWD" in
         /*) printf '\033]7;file://localhost%s\033\\\033]2;zetta-cwd:%s\033\\' "$PWD" "$PWD" ;;
     esac
     printf '\033]2;zetta-cmd:bash\033\\'
+    return "$status"
+}
+__zetta_mark_prompt() {
     __zetta_at_prompt=1
 }
-trap '__zetta_preexec' DEBUG"#;
+trap '__zetta_preexec' DEBUG
+printf '\033]2;zetta-event:tracking-ready\033\\'"#;
 
 #[cfg(windows)]
 const CYGWIN_ZSH_TRACKER: &str = r#"if [[ -n ${ZETTA_ORIGINAL_ZDOTDIR+x} ]]; then
@@ -484,21 +527,31 @@ original_zdotdir="${ZDOTDIR:-$HOME}"
 [[ -r "$original_zdotdir/.zshenv" ]] && source "$original_zdotdir/.zshenv"
 
 function __zetta_report_cwd() {
+    local zetta_status=$?
+    if (( __ZETTA_COMMAND_STARTED )); then
+        printf '\033]2;zetta-event:command-finished:%s\033\\' "$zetta_status"
+        __ZETTA_COMMAND_STARTED=0
+    fi
     [[ "$PWD" == /* ]] && printf '\033]7;file://localhost%s\033\\\033]2;zetta-cwd:%s\033\\' "$PWD" "$PWD"
     printf '\033]2;zetta-cmd:zsh\033\\'
+    return $zetta_status
 }
 function __zetta_report_preexec() {
+    __ZETTA_COMMAND_STARTED=1
+    printf '\033]2;zetta-event:command-started:%s\033\\' "$1"
     printf '\033]2;zetta-cmd:%s\033\\' "$1"
 }
+typeset -g __ZETTA_COMMAND_STARTED=0
 autoload -Uz add-zsh-hook
 add-zsh-hook precmd __zetta_report_cwd
 add-zsh-hook preexec __zetta_report_preexec
 command rm -rf -- "$ZETTA_INTEGRATION_ZDOTDIR"
 unset ZETTA_ORIGINAL_ZDOTDIR ZETTA_INTEGRATION_ZDOTDIR original_zdotdir
+printf '\033]2;zetta-event:tracking-ready\033\\'
 "#;
 
 #[cfg(windows)]
-const CYGWIN_FISH_TRACKER: &str = r#"function __zetta_report_cwd --on-event fish_prompt; if string match -qr '^/' -- "$PWD"; printf '\033]7;file://localhost%s\033\\' "$PWD"; printf '\033]2;zetta-cwd:%s\033\\' "$PWD"; end; printf '\033]2;zetta-cmd:fish\033\\'; end; function __zetta_report_preexec --on-event fish_preexec; printf '\033]2;zetta-cmd:%s\033\\' "$argv[1]"; end"#;
+const CYGWIN_FISH_TRACKER: &str = r#"set -g __ZETTA_COMMAND_STARTED 0; function __zetta_report_cwd --on-event fish_prompt; set -l command_status $status; if test "$__ZETTA_COMMAND_STARTED" = 1; printf '\033]2;zetta-event:command-finished:%s\033\\' "$command_status"; set -g __ZETTA_COMMAND_STARTED 0; end; if string match -qr '^/' -- "$PWD"; printf '\033]7;file://localhost%s\033\\' "$PWD"; printf '\033]2;zetta-cwd:%s\033\\' "$PWD"; end; printf '\033]2;zetta-cmd:fish\033\\'; end; function __zetta_report_preexec --on-event fish_preexec; set -g __ZETTA_COMMAND_STARTED 1; printf '\033]2;zetta-event:command-started:%s\033\\' "$argv[1]"; printf '\033]2;zetta-cmd:%s\033\\' "$argv[1]"; end; printf '\033]2;zetta-event:tracking-ready\033\\'"#;
 
 #[cfg(windows)]
 fn cygwin_nushell_tracker(config_path: &str) -> String {
@@ -506,14 +559,22 @@ fn cygwin_nushell_tracker(config_path: &str) -> String {
         r#"let zetta_user_config = ($nu.default-config-dir | path join 'config.nu')
 if ($zetta_user_config | path exists) {{ source $zetta_user_config }}
 $env.config.hooks.pre_prompt = ($env.config.hooks.pre_prompt | append {{||
+    if ($env.ZETTA_COMMAND_STARTED? | default false) {{
+        let status = ($env.LAST_EXIT_CODE? | default 0)
+        print -n $"\e]2;zetta-event:command-finished:($status)\e\\"
+        $env.ZETTA_COMMAND_STARTED = false
+    }}
     print -n $"\e]7;file://localhost($env.PWD)\e\\"
     print -n $"\e]2;zetta-cwd:($env.PWD)\e\\"
     print -n "\e]2;zetta-cmd:nu\e\\"
 }})
 $env.config.hooks.pre_execution = ($env.config.hooks.pre_execution | append {{||
     let command = (commandline)
+    $env.ZETTA_COMMAND_STARTED = true
+    print -n $"\e]2;zetta-event:command-started:($command)\e\\"
     print -n $"\e]2;zetta-cmd:($command)\e\\"
 }})
+print -n "\e]2;zetta-event:tracking-ready\e\\"
 ^rm -f -- '{}'
 "#,
         config_path.replace('\'', "''")
@@ -602,7 +663,7 @@ pub(crate) fn msys2_cwd_tracking_environment(
             Ok(vec![(
                 "PROMPT_COMMAND".to_owned(),
                 format!(
-                    "{MSYS2_BASH_TRACKER}{};__zetta_precmd",
+                    "{MSYS2_BASH_TRACKER}__zetta_precmd{};__zetta_mark_prompt",
                     existing
                         .filter(|command| !command.is_empty())
                         .map(|command| format!(";{command}"))
@@ -793,7 +854,7 @@ pub(crate) fn ensure_cygwin_environment<S>(
 #[cfg(windows)]
 fn cygwin_bash_prompt_command(existing: Option<&str>) -> String {
     format!(
-        "{CYGWIN_BASH_TRACKER}{};__zetta_precmd",
+        "{CYGWIN_BASH_TRACKER}__zetta_precmd{};__zetta_mark_prompt",
         existing
             .filter(|command| !command.is_empty())
             .map(|command| format!(";{command}"))
@@ -854,24 +915,38 @@ case "${shell##*/}" in
     bash)
         zetta_full_prompt_command="$(cat <<'ZETTA_BASH_PROMPT'
 __zetta_preexec() {
+    [[ "${__zetta_at_prompt:-0}" == 1 ]] || return
+    __zetta_at_prompt=0
     case "$BASH_COMMAND" in
-        __zetta_precmd) return ;;
+        __zetta_precmd|__zetta_mark_prompt) return ;;
     esac
+    __zetta_command_started=1
+    printf '\033]2;zetta-event:command-started:%s\033\\' "$BASH_COMMAND"
     printf '\033]2;zetta-cmd:%s\033\\' "$BASH_COMMAND"
 }
 __zetta_precmd() {
+    local status=$?
     if [[ ${_zetta_integration_attempted:-0} != 1 && -n ${ZETTA_HOST_EXECUTABLE:-} ]] &&
         ! declare -F _zetta_complete >/dev/null; then
         _zetta_integration_attempted=1
         eval "$("$ZETTA_HOST_EXECUTABLE" init bash)"
     fi
+    if [[ "$__zetta_command_started" == 1 ]]; then
+        printf '\033]2;zetta-event:command-finished:%s\033\\' "$status"
+        __zetta_command_started=0
+    fi
     case "$PWD" in
         /*) printf '\033]7;file://localhost%s\033\\\033]2;zetta-cwd:%s\033\\' "$PWD" "$PWD" ;;
     esac
     printf '\033]2;zetta-cmd:%s\033\\' "$ZETTA_SHELL_NAME"
+    return "$status"
+}
+__zetta_mark_prompt() {
+    __zetta_at_prompt=1
 }
 trap '__zetta_preexec' DEBUG
-PROMPT_COMMAND="__zetta_precmd${ZETTA_ORIGINAL_PROMPT_COMMAND:+;${ZETTA_ORIGINAL_PROMPT_COMMAND}}"
+PROMPT_COMMAND="__zetta_precmd${ZETTA_ORIGINAL_PROMPT_COMMAND:+;${ZETTA_ORIGINAL_PROMPT_COMMAND}};__zetta_mark_prompt"
+printf '\033]2;zetta-event:tracking-ready\033\\'
 __zetta_precmd
 ZETTA_BASH_PROMPT
 )"
@@ -881,7 +956,7 @@ ZETTA_BASH_PROMPT
         exec "$shell" -l
         ;;
     fish)
-        exec "$shell" -l -C 'function __zetta_report_cwd --on-event fish_prompt; if string match -qr "^/" -- "$PWD"; printf "\033]7;file://localhost%s\033\\" "$PWD"; printf "\033]2;zetta-cwd:%s\033\\" "$PWD"; end; printf "\033]2;zetta-cmd:%s\033\\" "$ZETTA_SHELL_NAME"; end; function __zetta_report_preexec --on-event fish_preexec; printf "\033]2;zetta-cmd:%s\033\\" "$argv[1]"; end; if test -n "$ZETTA_HOST_EXECUTABLE"; and not functions -q __zetta_at_subcommand; $ZETTA_HOST_EXECUTABLE init fish | source; end'
+        exec "$shell" -l -C 'set -g __ZETTA_COMMAND_STARTED 0; function __zetta_report_cwd --on-event fish_prompt; set -l command_status $status; if test "$__ZETTA_COMMAND_STARTED" = 1; printf "\033]2;zetta-event:command-finished:%s\033\\" "$command_status"; set -g __ZETTA_COMMAND_STARTED 0; end; if string match -qr "^/" -- "$PWD"; printf "\033]7;file://localhost%s\033\\" "$PWD"; printf "\033]2;zetta-cwd:%s\033\\" "$PWD"; end; printf "\033]2;zetta-cmd:%s\033\\" "$ZETTA_SHELL_NAME"; end; function __zetta_report_preexec --on-event fish_preexec; set -g __ZETTA_COMMAND_STARTED 1; printf "\033]2;zetta-event:command-started:%s\033\\" "$argv[1]"; printf "\033]2;zetta-cmd:%s\033\\" "$argv[1]"; end; printf "\033]2;zetta-event:tracking-ready\033\\"; if test -n "$ZETTA_HOST_EXECUTABLE"; and not functions -q __zetta_at_subcommand; $ZETTA_HOST_EXECUTABLE init fish | source; end'
         ;;
     zsh)
         integration_zdotdir="$(mktemp -d "${TMPDIR:-/tmp}/zetta-zsh-XXXXXX" 2>/dev/null || true)"
@@ -897,12 +972,21 @@ if [[ -n ${ZETTA_HOST_EXECUTABLE:-} ]]; then
 fi
 
 function __zetta_report_cwd() {
+    local zetta_status=$?
+    if (( __ZETTA_COMMAND_STARTED )); then
+        printf '\033]2;zetta-event:command-finished:%s\033\\' "$zetta_status"
+        __ZETTA_COMMAND_STARTED=0
+    fi
     [[ "$PWD" == /* ]] && printf '\033]7;file://localhost%s\033\\\033]2;zetta-cwd:%s\033\\' "$PWD" "$PWD"
     printf '\033]2;zetta-cmd:%s\033\\' "$ZETTA_SHELL_NAME"
+    return $zetta_status
 }
 function __zetta_report_preexec() {
+    __ZETTA_COMMAND_STARTED=1
+    printf '\033]2;zetta-event:command-started:%s\033\\' "$1"
     printf '\033]2;zetta-cmd:%s\033\\' "$1"
 }
+typeset -g __ZETTA_COMMAND_STARTED=0
 function __zetta_load_shell_integration() {
     add-zsh-hook -d precmd __zetta_load_shell_integration
     if [[ -n ${ZETTA_HOST_EXECUTABLE:-} ]] && (( ! $+functions[_zetta] )); then
@@ -915,6 +999,7 @@ add-zsh-hook precmd __zetta_report_cwd
 add-zsh-hook preexec __zetta_report_preexec
 command rm -rf -- "$ZETTA_INTEGRATION_ZDOTDIR"
 unset ZETTA_ORIGINAL_ZDOTDIR ZETTA_INTEGRATION_ZDOTDIR
+printf '\033]2;zetta-event:tracking-ready\033\\'
 ZETTA_ZSHENV
             ZDOTDIR="$integration_zdotdir"
             export ZDOTDIR

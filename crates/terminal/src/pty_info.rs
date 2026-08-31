@@ -307,6 +307,20 @@ impl PtyProcessInfo {
         let foreground =
             (*self.last_foreground_pid.lock()).or_else(|| self.resolve_foreground_pid())?;
 
+        self.foreground_process_is_shell_context_for(foreground)
+    }
+
+    /// Returns the shell ownership decision using a fresh foreground-process
+    /// lookup. One-shot control requests, such as `zetta pane wait`, must not
+    /// release against a previous command result while a newly started
+    /// foreground process is still waiting to emit its shell lifecycle marker.
+    pub(crate) fn foreground_process_is_shell_context_now(&self) -> Option<bool> {
+        let foreground = self.resolve_foreground_pid()?;
+
+        self.foreground_process_is_shell_context_for(foreground)
+    }
+
+    fn foreground_process_is_shell_context_for(&self, foreground: Pid) -> Option<bool> {
         let shell = self.pid_getter.fallback_pid();
         if shell.as_u32() == 0 {
             return None;
@@ -531,6 +545,7 @@ mod tests {
     fn foreground_process_identity_matches_the_pty_shell_pid() {
         let shell = PtyProcessInfo::new(ProcessIdGetter::new(-1, std::process::id()));
         assert!(shell.foreground_process_is_shell());
+        assert_eq!(shell.foreground_process_is_shell_context_now(), Some(true));
 
         let unknown = PtyProcessInfo::new(ProcessIdGetter::new(-1, 0));
         assert!(!unknown.foreground_process_is_shell());

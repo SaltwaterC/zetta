@@ -1388,6 +1388,19 @@ impl Zetta {
             .collect::<Vec<_>>();
         self.projects
             .forget_tab(tab_id, closed_pane_ids.iter().copied());
+        let run_registry = crate::run_command::process_run_registry();
+        for pane in &self.tabs[index].panes {
+            run_registry.pane_closed(crate::run_command::RunPaneIdentity::new(
+                self.tabs[index].attention_id,
+                pane.routing_id,
+            ));
+            for entry in &pane.stack.entries {
+                run_registry.pane_closed(crate::run_command::RunPaneIdentity::new(
+                    self.tabs[index].attention_id,
+                    entry.routing_id,
+                ));
+            }
+        }
         for pane_id in &closed_pane_ids {
             self.drop_shared_pane(*pane_id);
             self.release_mux_pane(tab_id, *pane_id, cx);
@@ -1435,6 +1448,9 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(identity) = self.run_pane_identity(tab_id, pane_id) {
+            crate::run_command::process_run_registry().pane_closed(identity);
+        }
         if self.retain_stacked_entries_after_base_exit(tab_id, pane_id, window, cx) {
             return;
         }
@@ -1602,6 +1618,9 @@ impl Zetta {
         }
 
         self.cancel_tab_search_for_tab(tab_id, cx);
+        if let Some(identity) = self.run_pane_identity(tab_id, pane_id) {
+            crate::run_command::process_run_registry().pane_closed(identity);
+        }
         let layout = {
             let tab = &mut self.tabs[tab_index];
             tab.remove_pane(pane_id);
@@ -2896,6 +2915,14 @@ impl Zetta {
         self.tabs.iter().any(|tab| tab.attention_id == attention_id)
     }
 
+    pub(crate) fn has_tab_by_attention_id(&self, attention_id: u64) -> bool {
+        self.has_visible_tab_by_attention_id(attention_id)
+            || self
+                .background_sessions
+                .iter()
+                .any(|tab| tab.attention_id == attention_id)
+    }
+
     pub(crate) fn pane_theme_by_attention_id(
         &self,
         attention_id: u64,
@@ -3010,6 +3037,46 @@ impl Zetta {
                     .find(|tab| tab.id == tab_id)
                     .map(|tab| tab.attention_id)
             })
+    }
+
+    pub(crate) fn run_pane_identity(
+        &self,
+        tab_id: u64,
+        pane_id: u64,
+    ) -> Option<crate::run_command::RunPaneIdentity> {
+        let tab = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .or_else(|| self.background_sessions.iter().find(|tab| tab.id == tab_id))?;
+        let pane = tab.panes.iter().find(|pane| pane.id == pane_id)?;
+        Some(crate::run_command::RunPaneIdentity::new(
+            tab.attention_id,
+            pane.routing_id,
+        ))
+    }
+
+    pub(crate) fn run_stacked_pane_identity(
+        &self,
+        tab_id: u64,
+        pane_id: u64,
+        entry_id: u64,
+    ) -> Option<crate::run_command::RunPaneIdentity> {
+        let tab = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .or_else(|| self.background_sessions.iter().find(|tab| tab.id == tab_id))?;
+        let entry = tab
+            .pane(pane_id)?
+            .stack
+            .entries
+            .iter()
+            .find(|entry| entry.id == entry_id)?;
+        Some(crate::run_command::RunPaneIdentity::new(
+            tab.attention_id,
+            entry.routing_id,
+        ))
     }
 
     fn tab_content_is_focused(

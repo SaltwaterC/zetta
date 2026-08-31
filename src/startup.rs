@@ -23,8 +23,9 @@ use crate::process_control::{
     request_existing_process_project_with_working_directory,
     request_existing_process_projects_reload, request_existing_process_replace_pane,
     request_existing_process_tab_icon, request_existing_process_theme,
-    request_existing_process_theme_list, request_process_tab_attention,
+    request_existing_process_theme_list, request_process_run_wait, request_process_tab_attention,
 };
+use crate::run_command::{PaneWaitCommand, RunWaitRequest, process_run_registry};
 #[cfg(feature = "worktree")]
 use zwt::{WorktreeInvocation, run_for as run_worktree};
 
@@ -1070,6 +1071,9 @@ impl ApplicationOpenUrlsExt for gpui::Application {
 
 pub(crate) fn run() -> Result<()> {
     let args = parse_args()?;
+    if let StartupMode::PaneWait(command) = &args.mode {
+        return run_wait_command(command.clone());
+    }
     if args.mode == StartupMode::NewWindow
         && should_handoff_to_existing_process(&args)
         && request_existing_process_new_window()?
@@ -1957,7 +1961,45 @@ pub(crate) fn run() -> Result<()> {
                             });
                             let _ = completion.send(result);
                         }
-                        ProcessControlCommand::ListPaneLabels { completion } => {
+                        ProcessControlCommand::RunWait {
+                            request,
+                            completion,
+                        } => {
+                            let result = cx.update(|cx| -> Result<_, String> {
+                                if !cx
+                                    .global::<ZettaProcessState>()
+                                    .control_server
+                                    .is_accepting()
+                                {
+                                    return Err("the Zetta process is shutting down".to_owned());
+                                }
+                                for entity in process_zetta_entities(cx) {
+                                    if !entity
+                                        .read(cx)
+                                        .has_tab_by_attention_id(request.owner.attention_id)
+                                    {
+                                        continue;
+                                    }
+                                    return entity
+                                        .update(cx, |zetta, cx| {
+                                            zetta
+                                                .register_run_wait(
+                                                    request,
+                                                    &process_run_registry(),
+                                                    cx,
+                                                )
+                                                .map_err(|error| format!("{error:#}"))
+                                        })
+                                        .map_err(|error| format!("{error:#}"));
+                                }
+                                Err("the originating Zetta tab is no longer available".to_owned())
+                            });
+                            let _ = completion.send(result);
+                        }
+                        ProcessControlCommand::ListPaneLabels {
+                            attention_id,
+                            completion,
+                        } => {
                             let result = cx.update(|cx| -> Result<Vec<String>, String> {
                                 if !cx
                                     .global::<ZettaProcessState>()
@@ -1965,6 +2007,20 @@ pub(crate) fn run() -> Result<()> {
                                     .is_accepting()
                                 {
                                     return Err("the Zetta process is shutting down".to_owned());
+                                }
+                                if let Some(attention_id) = attention_id {
+                                    for entity in process_zetta_entities(cx) {
+                                        if !entity.read(cx).has_tab_by_attention_id(attention_id) {
+                                            continue;
+                                        }
+                                        return Ok(entity.update(cx, |zetta, _| {
+                                            zetta.command_pane_labels_for_attention(Some(
+                                                attention_id,
+                                            ))
+                                        }));
+                                    }
+                                    return Err("the originating Zetta tab is no longer available"
+                                        .to_owned());
                                 }
                                 let Some(window_id) =
                                     cx.active_window().map(|window| window.window_id())
@@ -1974,7 +2030,9 @@ pub(crate) fn run() -> Result<()> {
                                     );
                                 };
                                 gpui::WindowHandle::<Zetta>::new(window_id)
-                                    .update(cx, |zetta, _, _| Ok(zetta.command_pane_labels()))
+                                    .update(cx, |zetta, _, _| {
+                                        Ok(zetta.command_pane_labels_for_attention(None))
+                                    })
                                     .map_err(|error| format!("{error:#}"))?
                             });
                             let _ = completion.send(result);
@@ -2413,6 +2471,56 @@ pub(crate) fn run() -> Result<()> {
         result.map_err(anyhow::Error::msg)?;
     }
     Ok(())
+}
+
+fn run_wait_command(command: PaneWaitCommand) -> Result<()> {
+    let process_id = env::var("ZETTA_PROCESS_ID")
+        .context("zetta pane wait must be invoked inside a Zetta terminal")?
+        .parse::<u32>()
+        .context("ZETTA_PROCESS_ID must be a positive process ID")?;
+    let attention_id = env::var("ZETTA_ATTENTION_ID")
+        .context("zetta pane wait must be invoked inside a Zetta terminal")?
+        .parse::<u64>()
+        .context("ZETTA_ATTENTION_ID must be a positive attention ID")?;
+    // `ZETTA_PANE_ID` is retained as a compatibility fallback for shells
+    // started before the stable routing variable was introduced. New panes
+    // always use the routing ID, so pane moves continue to follow the stable
+    // identity rather than the remapped layout ID.
+    let routing_id = match env::var("ZETTA_PANE_ROUTING_ID") {
+        Ok(value) => value
+            .parse::<u64>()
+            .context("ZETTA_PANE_ROUTING_ID must be a positive pane routing ID")?,
+        Err(_) => env::var("ZETTA_PANE_ID")
+            .context("ZETTA_PANE_ROUTING_ID and ZETTA_PANE_ID are missing; restart this pane to enable zetta pane wait")?
+            .parse::<u64>()
+            .context("ZETTA_PANE_ID must be a positive pane routing ID")?,
+    };
+    anyhow::ensure!(
+        process_id != 0,
+        "ZETTA_PROCESS_ID must be a positive process ID"
+    );
+    anyhow::ensure!(
+        attention_id != 0,
+        "ZETTA_ATTENTION_ID must be a positive attention ID"
+    );
+    anyhow::ensure!(routing_id != 0, "pane routing ID must be positive");
+
+    let mut connection = request_process_run_wait(
+        process_id,
+        RunWaitRequest {
+            owner: crate::run_command::RunPaneIdentity::new(attention_id, routing_id),
+            dependencies: command.dependencies,
+            allow_failure: command.allow_failure,
+            command: command.command,
+        },
+    )?;
+    let child_status = std::process::Command::new(&connection.command[0])
+        .args(&connection.command[1..])
+        .status()
+        .with_context(|| format!("failed to start command {:?}", connection.command[0]))?;
+    let exit_code = child_status.code();
+    connection.complete(exit_code)?;
+    std::process::exit(exit_code.unwrap_or(1));
 }
 
 fn shell_integration_configuration_message(
