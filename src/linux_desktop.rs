@@ -20,36 +20,36 @@ const GROUPS_END: &str = "# ZETTA MANAGED PROFILE GROUPS END";
 pub(crate) fn update_profile_actions(
     profiles: &[Profile],
     hidden_profiles: &HashSet<String>,
-) -> Result<()> {
+) -> Result<bool> {
     let Some(home) = env::var_os("HOME") else {
-        return Ok(());
+        return Ok(false);
     };
     let path = user_desktop_entry_path(Path::new(&home));
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(_) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Ok(false),
     };
     if !metadata.file_type().is_file() || !is_writable(&metadata) {
-        return Ok(());
+        return Ok(false);
     }
     let contents = match fs::read_to_string(&path) {
         Ok(contents) => contents,
-        Err(_) => return Ok(()),
+        Err(_) => return Ok(false),
     };
     let executable = match env::current_exe() {
         Ok(executable) => executable,
-        Err(_) => return Ok(()),
+        Err(_) => return Ok(false),
     };
     let Some(updated) =
         render_managed_desktop_entry(&contents, &executable, profiles, hidden_profiles)
     else {
-        return Ok(());
+        return Ok(false);
     };
     if updated == contents {
-        return Ok(());
+        return Ok(false);
     }
-    replace_desktop_file(&path, &updated, &metadata.permissions())
+    replace_desktop_file(&path, &updated, &metadata.permissions()).map(|()| true)
 }
 
 fn user_desktop_entry_path(home: &Path) -> PathBuf {
@@ -97,8 +97,11 @@ fn render_managed_desktop_entry(
     // GNOME Shell caches GDesktopAppInfo and does not compare the Actions key
     // when deciding whether an existing app is stale. Change the main
     // command line with a harmless, private argument so a profile-list change
-    // also refreshes the cached action groups. The profile action commands
-    // themselves remain exactly the user-facing commands promised by Zetta.
+    // also refreshes the cached action groups. Keep the primary command an
+    // ordinary application launch so a stale Dock fallback is handed to the
+    // existing process; the launcher update path repairs the window
+    // association after the cache refresh instead of creating another window.
+    // The profile action commands themselves remain fresh-window commands.
     replace_main_exec(
         &contents,
         &executable,
@@ -137,7 +140,7 @@ fn replace_main_exec(contents: &str, executable: &str, generation: u64) -> Optio
     }
     let (line_start, line_end) = exec_line?;
     let replacement =
-        format!("Exec={executable} --new-window --zetta-profile-actions-generation {generation}\n");
+        format!("Exec={executable} --zetta-profile-actions-generation {generation}\n");
     let mut updated = String::with_capacity(contents.len() + replacement.len());
     updated.push_str(&contents[..line_start]);
     updated.push_str(&replacement);

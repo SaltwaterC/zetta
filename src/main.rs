@@ -321,6 +321,8 @@ struct ZettaProcessState {
     config_file_stamp: ConfigFileStamp,
     configuration_error: Option<String>,
     no_mux: bool,
+    #[cfg(target_os = "linux")]
+    linux_desktop_reassociation_generation: u64,
     control_server: ProcessControlServer,
     _quit_subscription: Subscription,
 }

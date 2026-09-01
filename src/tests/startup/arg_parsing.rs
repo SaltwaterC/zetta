@@ -1397,6 +1397,18 @@ fn ordinary_and_explicit_new_window_launches_are_handoff_eligible() {
 }
 
 #[test]
+fn profile_action_generation_preserves_normal_application_handoff() {
+    let args = parse_args_from([
+        OsString::from("--zetta-profile-actions-generation"),
+        OsString::from("123"),
+    ])
+    .unwrap();
+
+    assert_eq!(args.mode, StartupMode::Application);
+    assert!(should_handoff_to_existing_process(&args));
+}
+
+#[test]
 fn explicit_new_window_rejects_unrelated_options() {
     for arguments in [
         vec!["--config", "config.json"],

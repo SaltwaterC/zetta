@@ -203,8 +203,8 @@ icon paths directly, so it works even when the desktop session does not have
 `~/.local/bin` in its `PATH`. The installer also adds `~/.local/bin` to
 the installing user's shell startup file, and `make uninstall` removes that
 PATH entry. The desktop entry's **New Window** action invokes
-`zetta --new-window`, so choosing New Window from a GNOME or other desktop dock
-creates another OS window instead of activating or reopening the existing one.
+`zetta --new-window`; visible profiles are added as additional actions while
+Zetta is running. The primary launch keeps normal activate-or-reopen behavior.
 
 For a system-wide installation, run `sudo make install PREFIX=/usr`.
 

@@ -118,9 +118,9 @@ the command line literally, preserves the caller's working directory, and
 opens a new tab in an existing Zetta process when one accepts the request.
 Use `zetta --new-window` (or `zetta -w`) to always create a separate OS window;
 plain `zetta` retains its activate-or-reopen behavior. The Linux desktop
-entry uses this explicit mode for both its normal launch command and its **New Window**
-action, so Ubuntu Dock's fallback launch path also creates a window in the
-existing process.
+entry's **New Window** action uses this explicit mode, while its normal launch
+command retains ordinary activate-or-reopen behavior so Ubuntu Dock can recover
+from a stale window association without creating an extra window.
 Choose **Set as Default Terminal** from the application menu or command palette
 to register Zetta as the preferred terminal for the current desktop. Linux
 registers Zetta with `xdg-terminal-exec` and also updates the supported desktop's

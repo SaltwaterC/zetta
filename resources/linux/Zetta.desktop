@@ -5,7 +5,7 @@ Name=Zetta
 GenericName=Terminal Emulator
 Comment=A high-performance terminal emulator
 TryExec=zetta
-Exec=zetta --new-window
+Exec=zetta
 # ZETTA MANAGED PROFILE ACTIONS BEGIN
 Actions=new-window;
 # ZETTA MANAGED PROFILE ACTIONS END

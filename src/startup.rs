@@ -400,6 +400,59 @@ pub(crate) fn process_zetta_entities(cx: &App) -> Vec<Entity<Zetta>> {
         .collect()
 }
 
+// GNOME Shell refreshes its desktop-entry cache asynchronously. When the
+// primary Exec line changes, its app cache drops the old ShellApp but does not
+// retrack windows that still belong to it. Re-publishing the app ID after the
+// cache refresh makes Mutter notify the window tracker, which then associates
+// the window with the current Zetta.desktop entry.
+#[cfg(target_os = "linux")]
+const LINUX_DESKTOP_REASSOCIATION_DELAY: Duration = Duration::from_secs(7);
+#[cfg(target_os = "linux")]
+const LINUX_DESKTOP_REASSOCIATION_GAP: Duration = Duration::from_millis(100);
+
+#[cfg(target_os = "linux")]
+pub(crate) fn schedule_linux_desktop_window_reassociation(cx: &mut App) {
+    let generation = {
+        let process = cx.global_mut::<ZettaProcessState>();
+        process.linux_desktop_reassociation_generation = process
+            .linux_desktop_reassociation_generation
+            .wrapping_add(1);
+        process.linux_desktop_reassociation_generation
+    };
+    let executor = cx.background_executor().clone();
+    cx.spawn(async move |cx| {
+        executor.timer(LINUX_DESKTOP_REASSOCIATION_DELAY).await;
+        let window_ids = cx.update(|cx| {
+            let process = cx.global::<ZettaProcessState>();
+            (process.linux_desktop_reassociation_generation == generation)
+                .then(|| process.windows.keys().copied().collect::<Vec<_>>())
+        });
+        let Some(window_ids) = window_ids else {
+            return;
+        };
+        let temporary_app_id = format!("{ZETTA_APP_ID}-reassociation-{generation}");
+
+        cx.update(|cx| {
+            for window_id in &window_ids {
+                let _ = gpui::WindowHandle::<Zetta>::new(*window_id).update(cx, |_, window, _| {
+                    window.set_app_id(&temporary_app_id);
+                    window.refresh();
+                });
+            }
+        });
+        executor.timer(LINUX_DESKTOP_REASSOCIATION_GAP).await;
+        cx.update(|cx| {
+            for window_id in &window_ids {
+                let _ = gpui::WindowHandle::<Zetta>::new(*window_id).update(cx, |_, window, _| {
+                    window.set_app_id(ZETTA_APP_ID);
+                    window.refresh();
+                });
+            }
+        });
+    })
+    .detach();
+}
+
 pub(crate) fn reload_projects_in_other_windows(current_window: WindowId, cx: &mut App) {
     if !cx.has_global::<ZettaProcessState>() {
         return;
@@ -492,7 +545,12 @@ fn reload_process_configuration(cx: &mut App) -> Result<()> {
             config.hidden_profiles.clone(),
         );
         #[cfg(target_os = "linux")]
-        linux_desktop::update_profile_actions(&config.profiles, &config.hidden_profiles).log_err();
+        if linux_desktop::update_profile_actions(&config.profiles, &config.hidden_profiles)
+            .log_err()
+            .unwrap_or(false)
+        {
+            schedule_linux_desktop_window_reassociation(cx);
+        }
         #[cfg(target_os = "macos")]
         update_native_macos_dock_menu(cx, &config.profiles, &config.hidden_profiles);
     }
@@ -1629,8 +1687,10 @@ pub(crate) fn run() -> Result<()> {
                 );
             }
             #[cfg(target_os = "linux")]
-            linux_desktop::update_profile_actions(&config.profiles, &config.hidden_profiles)
-                .log_err();
+            let linux_desktop_actions_changed =
+                linux_desktop::update_profile_actions(&config.profiles, &config.hidden_profiles)
+                    .log_err()
+                    .unwrap_or(false);
             cx.set_http_client(http_client);
             menu::init();
             zed_actions::init();
@@ -1679,6 +1739,8 @@ pub(crate) fn run() -> Result<()> {
                 config_file_stamp: config_file_stamp(&config.config_path),
                 configuration_error: configuration_error.clone(),
                 no_mux: args.no_mux,
+                #[cfg(target_os = "linux")]
+                linux_desktop_reassociation_generation: 0,
                 control_server,
                 _quit_subscription: quit_subscription,
             });
@@ -2627,6 +2689,10 @@ pub(crate) fn run() -> Result<()> {
                     )
                     .expect("failed to open Zetta window");
                 }
+            }
+            #[cfg(target_os = "linux")]
+            if linux_desktop_actions_changed {
+                schedule_linux_desktop_window_reassociation(cx);
             }
         });
     if report_requested {

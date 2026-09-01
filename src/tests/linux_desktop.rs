@@ -30,8 +30,9 @@ fn renders_visible_profile_actions_and_preserves_new_window() {
     .unwrap();
 
     assert!(rendered.contains("Actions=new-window;profile-1;profile-2;"));
+    assert!(rendered.contains("Exec=/usr/bin/zetta --zetta-profile-actions-generation "));
     assert!(
-        rendered.contains("Exec=/usr/bin/zetta --new-window --zetta-profile-actions-generation ")
+        !rendered.contains("Exec=/usr/bin/zetta --new-window --zetta-profile-actions-generation ")
     );
     assert!(
         rendered.contains("[Desktop Action new-window]\nName=New Window\nExec=zetta --new-window")

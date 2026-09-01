@@ -260,7 +260,12 @@ impl Zetta {
             config.hidden_profiles.clone(),
         );
         #[cfg(target_os = "linux")]
-        linux_desktop::update_profile_actions(&config.profiles, &config.hidden_profiles).log_err();
+        if linux_desktop::update_profile_actions(&config.profiles, &config.hidden_profiles)
+            .log_err()
+            .unwrap_or(false)
+        {
+            crate::startup::schedule_linux_desktop_window_reassociation(cx);
+        }
         #[cfg(target_os = "macos")]
         update_native_macos_dock_menu(cx, &config.profiles, &config.hidden_profiles);
 

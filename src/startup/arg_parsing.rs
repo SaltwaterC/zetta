@@ -1398,6 +1398,9 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             // GNOME Shell uses this private no-op argument to notice changes
             // to the dynamically generated desktop action list. It is
             // written by the Linux desktop integration and is not user CLI.
+            // It deliberately does not change the startup mode: the primary
+            // desktop command must retain normal application activation
+            // semantics.
             "--zetta-profile-actions-generation" => {
                 args.next()
                     .context("--zetta-profile-actions-generation requires a value")?
