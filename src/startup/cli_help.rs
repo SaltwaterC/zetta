@@ -166,7 +166,7 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
             "Control, list, reconnect, and resume background sessions",
         ),
         #[cfg(feature = "worktree")]
-        ("wt", "Create and integrate Git worktrees"),
+        ("wt", "Create, integrate, or abort Git worktrees"),
         ("splits", "List configured pane split templates"),
         ("tabicon", "Set the active tab's icon override"),
         (

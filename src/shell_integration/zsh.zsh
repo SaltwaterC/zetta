@@ -149,6 +149,28 @@ function zwt {
             [[ -n $worktree_path ]] || return 1
             builtin cd -- "$worktree_path"
             ;;
+        abort)
+            local worktree_path path_only_arg
+            local -a operation_args=("${@[2,-1]}")
+            for path_only_arg in "${operation_args[@]}"; do
+                if [[ $path_only_arg == --help || $path_only_arg == -h ]]; then
+                    command zwt abort "${operation_args[@]}"
+                    return
+                fi
+                if [[ $path_only_arg == --path-only || $path_only_arg == -P ]]; then
+                    path_only_arg=1
+                else
+                    path_only_arg=''
+                fi
+            done
+            if [[ $path_only_arg == 1 ]]; then
+                worktree_path=$(command zwt abort "${operation_args[@]}") || return
+            else
+                worktree_path=$(command zwt abort --path-only "${operation_args[@]}") || return
+            fi
+            [[ -n $worktree_path ]] || return 1
+            builtin cd -- "$worktree_path"
+            ;;
         *)
             command zwt "$@"
             ;;
@@ -813,9 +835,9 @@ _zetta() {
 # ZETTA_WORKTREE_INTEGRATION_BEGIN
         wt)
             if (( CURRENT == 3 )); then
-                compadd -S ' ' -- new done status rerere
+                compadd -S ' ' -- new done abort status rerere
                 _zetta_options --help
-            elif [[ $words[3] == new || $words[3] == done ]]; then
+            elif [[ $words[3] == new || $words[3] == done || $words[3] == abort ]]; then
                 if [[ $words[3] == new ]]; then
                     _zetta_options --copy --path-only --help
                 else

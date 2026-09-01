@@ -38,15 +38,17 @@ Completion intentionally offers the same catalog IDs for `share` and
 
 It also provides `zwt`, a shell function wrapper for the standalone Git
 worktree executable. `zwt new NAME` invokes `command zwt new --path-only NAME`
-and changes into the created worktree; `zwt done` similarly changes into the
-integrated source worktree. Other `zwt` operations pass through to the external
+and changes into the created worktree; `zwt done` and `zwt abort` similarly
+change into the source worktree. Other `zwt` operations pass through to the external
 `zwt` executable. Arguments are forwarded as literal shell arguments, so nested
 names and paths containing spaces are supported. The completion scripts offer
-`new`, `done`, `status`, and `rerere` for `zwt`; Zetta's root completion also
+`new`, `done`, `abort`, `status`, and `rerere` for `zwt`; Zetta's root completion also
 offers `wt`. They include the long
 `--copy` and `--path-only` flags, and filesystem completion for copy paths. The
 short `-c` and `-P` forms remain accepted by the CLI but are omitted from the
 candidate list to keep completion concise.
+The abort wrapper injects the path-only flag when needed and changes into the
+source worktree only after cleanup succeeds; help is passed through unchanged.
 
 Builds made with `WORKTREE=0` omit the `zwt` wrapper and its completion entries.
 

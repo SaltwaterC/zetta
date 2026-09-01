@@ -440,10 +440,12 @@ branches:
 zwt new feature/api
 zwt status
 zwt done
+zwt abort
 ```
 
-The same operations are available as `zetta wt new`, `zetta wt status`, and
-`zetta wt done` when the full Zetta build includes the `worktree` feature.
+The same operations are available as `zetta wt new`, `zetta wt status`,
+`zetta wt done`, and `zetta wt abort` when the full Zetta build includes
+the `worktree` feature.
 
 `new NAME` creates `wt/NAME` from the current attached branch, records the
 source branch in `wtbranch.<branch>.base`, and creates the worktree below
@@ -511,11 +513,21 @@ stage them with `git add`, and rerun `zwt done` (or `zetta wt done`).
 Run `zwt rerere` once to enable Git's `rerere.enabled` and
 `rerere.autoupdate` helpers for repeated conflicts.
 
-When `new NAME` or `done` is run from a terminal opened by Zetta, the originating
-tab records its worktree title after the Git operation succeeds. That title is
-kept until a successful `done` explicitly clears it. Terminal-side tab-name
-requests remain available for ordinary tabs, but are masked while a worktree
-title is active; terminal title changes likewise cannot replace it. Live
+`abort` also runs from the current linked `wt/*` worktree created by `new`, but
+it intentionally discards that worktree without rebasing, merging, checking out,
+or fast-forwarding the recorded source branch. The source branch must still
+exist and be checked out in its separate non-bare source worktree; that source
+worktree may be dirty. Abort force-removes the current worktree, deletes its
+temporary branch with `git branch -D`, and clears the recorded metadata. Untracked
+files, unmerged commits, and an in-progress rebase in the current worktree are
+discarded. Invalid source-worktree state is rejected before removal.
+
+When `new NAME`, `done`, or `abort` is run from a terminal opened by Zetta, the
+originating tab records its worktree title after the Git operation succeeds.
+That title is kept until a successful `done` or `abort` explicitly clears it.
+Terminal-side tab-name requests remain available for ordinary tabs, but are
+masked while a worktree title is active; terminal title changes likewise cannot
+replace it. Live
 shell-CWD detection can replace the seed when the shell reports a different
 linked worktree, and it remains stable while a child process is in the
 foreground because shell integration reports the shell's directory separately
@@ -526,10 +538,10 @@ manual rename reveals it again. Missing or unavailable Zetta process control
 never changes the Git result or `--path-only` output.
 
 The standalone CLI never changes the caller's directory. After enabling shell
-integration, `zwt new NAME` changes into the new worktree and `zwt done`
-changes into the integrated source worktree. Use `--path-only` (or `-P`) with
-`new` or `done` when scripting; it reserves standard output for exactly one
-path, while errors and `new`'s phase progress remain on standard error.
+integration, `zwt new NAME` changes into the new worktree and `zwt done` or
+`zwt abort` changes into the source worktree. Use `--path-only` (or `-P`) with
+`new`, `done`, or `abort` when scripting; it reserves standard output for exactly
+one path, while errors and `new`'s phase progress remain on standard error.
 
 ## Pane split templates
 

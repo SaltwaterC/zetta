@@ -9,6 +9,7 @@ fn standalone_binary_prints_its_usage() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.starts_with("Zetta Git worktree workflow\n\nUsage: zwt <COMMAND>"));
+    assert!(stdout.contains("zwt abort [OPTIONS]"));
 }
 
 #[test]

@@ -128,6 +128,19 @@ function zwt {
             if ($LASTEXITCODE -ne 0 -or $path.Count -ne 1) { return }
             Set-Location -LiteralPath $path[0]
         }
+        'abort' {
+            $operationArgs = @($args | Select-Object -Skip 1)
+            if ($operationArgs -contains '--help' -or $operationArgs -contains '-h') {
+                & $zwtApplication abort @operationArgs
+                return
+            } elseif ($operationArgs -contains '--path-only' -or $operationArgs -contains '-P') {
+                $path = @(& $zwtApplication abort @operationArgs)
+            } else {
+                $path = @(& $zwtApplication abort --path-only @operationArgs)
+            }
+            if ($LASTEXITCODE -ne 0 -or $path.Count -ne 1) { return }
+            Set-Location -LiteralPath $path[0]
+        }
         default {
             & $zwtApplication @args
         }
@@ -397,10 +410,10 @@ $zettaCompletions = {
 # ZETTA_WORKTREE_INTEGRATION_BEGIN
     } elseif ZETTA_WORKTREE_COMPLETION_CHECK {
         if ([string]::IsNullOrEmpty($worktreeOperation)) {
-            'new', 'done', 'status', 'rerere', '--help'
+            'new', 'done', 'abort', 'status', 'rerere', '--help'
         } elseif ($worktreeOperation -eq 'new') {
             '--copy', '--path-only', '--help'
-        } elseif ($worktreeOperation -eq 'done') {
+        } elseif ($worktreeOperation -eq 'done' -or $worktreeOperation -eq 'abort') {
             '--path-only', '--help'
         } else {
             '--help'
@@ -506,10 +519,10 @@ $zettaCompletions = {
 # ZETTA_WORKTREE_INTEGRATION_BEGIN
             ZETTA_WORKTREE_SWITCH_CASE {
                 if ([string]::IsNullOrEmpty($worktreeOperation)) {
-                    'new', 'done', 'status', 'rerere', '--help'
+                    'new', 'done', 'abort', 'status', 'rerere', '--help'
                 } elseif ($worktreeOperation -eq 'new') {
                     '--copy', '--path-only', '--help'
-                } elseif ($worktreeOperation -eq 'done') {
+                } elseif ($worktreeOperation -eq 'done' -or $worktreeOperation -eq 'abort') {
                     '--path-only', '--help'
                 } else {
                     '--help'

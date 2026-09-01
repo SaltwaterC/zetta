@@ -182,11 +182,14 @@ context. Launching plain `zetta` from such a worktree still starts the first
 terminal in the worktree's current directory. Ordinary, detached, and
 unregistered worktrees keep the normal discovery and trust flow.
 
-Use `zwt new NAME`, `zwt done`, `zwt status`, and `zwt rerere` for the Git
+Use `zwt new NAME`, `zwt done`, `zwt abort`, `zwt status`, and `zwt rerere` for the Git
 worktree workflow; the same operations are available as `zetta wt ...` in a
 full Zetta build. The direct commands never change the caller's directory;
-generated shell integration provides the `zwt new` and `zwt done` wrappers that
-enter the resulting worktree, including paths with spaces and nested names.
+generated shell integration provides the `zwt new`, `zwt done`, and
+`zwt abort` wrappers that enter the corresponding worktree, including paths with spaces
+and nested names.
+`zwt abort` discards the current managed worktree, its temporary branch, and metadata
+without changing the recorded source branch; the source worktree may be dirty.
 `zwt new` also recursively initializes source
 submodules at their pinned commits, reusing initialized source checkouts as
 local object references and falling back to configured submodule remotes when a
@@ -200,8 +203,8 @@ and metadata. See [Using Zetta](docs/usage.md#git-worktrees) for configuration
 and safety details. Zetta detects linked worktrees from each pane's
 interactive-shell directory, preserving nested names such as `feature/api`;
 the active pane supplies the automatic title. A successful `new NAME` records
-the originating tab's worktree title, and only a successful `done` clears that
-record. Terminal-side title requests remain available for ordinary tabs, but
+the originating tab's worktree title, and only a successful `done` or `abort`
+clears that record. Terminal-side title requests remain available for ordinary tabs, but
 are masked while a worktree title is active. A live detected worktree name can
 replace the seed when the shell reports a different linked worktree. Manual
 renames take precedence over the worktree title, and an empty manual rename

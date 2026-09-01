@@ -87,6 +87,9 @@ pub enum WorktreeCommand {
     Done {
         path_only: bool,
     },
+    Abort {
+        path_only: bool,
+    },
     Status,
     Rerere,
 }
@@ -116,6 +119,7 @@ pub fn parse_worktree_args_for(
     match operation.as_ref() {
         "new" => parse_new_args(&arguments[1..], invocation),
         "done" => parse_done_args(&arguments[1..], invocation),
+        "abort" => parse_abort_args(&arguments[1..], invocation),
         "status" => parse_no_arguments(
             "status",
             &arguments[1..],
@@ -203,21 +207,42 @@ fn parse_done_args(
     arguments: &[OsString],
     invocation: WorktreeInvocation,
 ) -> Result<WorktreeCommand> {
+    let path_only = parse_path_only_args(arguments, "done", invocation, worktree_done_help_for)?;
+    Ok(WorktreeCommand::Done { path_only })
+}
+
+fn parse_abort_args(
+    arguments: &[OsString],
+    invocation: WorktreeInvocation,
+) -> Result<WorktreeCommand> {
+    let path_only = parse_path_only_args(arguments, "abort", invocation, worktree_abort_help_for)?;
+    Ok(WorktreeCommand::Abort { path_only })
+}
+
+fn parse_path_only_args(
+    arguments: &[OsString],
+    operation: &str,
+    invocation: WorktreeInvocation,
+    help: fn(WorktreeInvocation) -> String,
+) -> Result<bool> {
     let mut path_only = false;
     for argument in arguments {
         match argument.to_string_lossy().as_ref() {
             "--help" | "-h" => {
-                println!("{}", worktree_done_help_for(invocation));
+                println!("{}", help(invocation));
                 std::process::exit(0);
             }
             PATH_ONLY_OPTION | "-P" => {
                 anyhow::ensure!(!path_only, "{PATH_ONLY_OPTION} may only be specified once");
                 path_only = true;
             }
-            value => anyhow::bail!("unknown {} done argument {value:?}", invocation.command()),
+            value => anyhow::bail!(
+                "unknown {} {operation} argument {value:?}",
+                invocation.command()
+            ),
         }
     }
-    Ok(WorktreeCommand::Done { path_only })
+    Ok(path_only)
 }
 
 fn parse_no_arguments(
@@ -256,16 +281,36 @@ pub fn worktree_help() -> String {
 pub fn worktree_help_for(invocation: WorktreeInvocation) -> String {
     let command = invocation.command();
     format!(
-        "Zetta Git worktree workflow\n\nUsage: {command} <COMMAND>\n       {command} new [OPTIONS] NAME\n       {command} done [OPTIONS]\n       {command} status\n       {command} rerere\n\nCommands:\n{}\n\nThe direct CLI never changes the caller directory. Generated shell integration provides\nzwt, which changes directory after successful new or done operations.\n\nWorktree roots:\n  Git reads effective wt.root configuration. Configure a repository with:\n    git config --local wt.root ../project-worktrees\n  Relative values resolve from the repository main worktree root. Without wt.root, Zetta\n  uses sibling directory <repository>-worktrees. NAME may contain nested components such\n  as feature/api, which creates <wt.root>/feature/api.\n\nRecommended setup:\n  {command} rerere\n  This enables rerere.enabled and rerere.autoupdate globally so repeated conflicts can\n  be resolved automatically after you resolve and stage them once.",
+        "Zetta Git worktree workflow\n\nUsage: {command} <COMMAND>\n       {command} new [OPTIONS] NAME\n       {command} done [OPTIONS]\n       {command} abort [OPTIONS]\n       {command} status\n       {command} rerere\n\nCommands:\n{}\n\nThe direct CLI never changes the caller directory. Generated shell integration provides\nzwt, which changes directory after successful new, done, or abort operations.\n\nWorktree roots:\n  Git reads effective wt.root configuration. Configure a repository with:\n    git config --local wt.root ../project-worktrees\n  Relative values resolve from the repository main worktree root. Without wt.root, Zetta\n  uses sibling directory <repository>-worktrees. NAME may contain nested components such\n  as feature/api, which creates <wt.root>/feature/api.\n\nRecommended setup:\n  {command} rerere\n  This enables rerere.enabled and rerere.autoupdate globally so repeated conflicts can\n  be resolved automatically after you resolve and stage them once.",
         format_help_table([
             ("new", "Create a wt/NAME worktree from the current branch"),
             (
                 "done",
                 "Rebase, integrate, and remove the current wt/* worktree",
             ),
+            ("abort", "Discard and remove the current wt/* worktree"),
             ("status", "Show the current worktree workflow state"),
             ("rerere", "Enable Git recorded conflict-resolution helpers",),
         ]),
+        command = command,
+    )
+}
+
+pub fn worktree_abort_help() -> String {
+    worktree_abort_help_for(WorktreeInvocation::Standalone)
+}
+
+pub fn worktree_abort_help_for(invocation: WorktreeInvocation) -> String {
+    let command = invocation.command();
+    let options = format_help_table([
+        (
+            "-P, --path-only",
+            "Print exactly the preserved source worktree path",
+        ),
+        ("-h, --help", "Print help"),
+    ]);
+    format!(
+        "Discard and remove the current temporary worktree\n\nUsage: {command} abort [OPTIONS]\n\nThe current worktree must be a linked, non-bare worktree on a wt/* branch created by\n{command} new, with recorded source metadata. The recorded source branch must still\nexist and be checked out in its original separate non-bare worktree. The source worktree\nmay be dirty. Abort force-removes the current worktree, deletes its temporary branch with\ngit branch -D, and clears the recorded metadata. It discards all changes in the current\nworktree, including untracked files and an in-progress rebase. It never rebases, merges,\nchecks out, or fast-forwards the source branch. Validation completes before removal.\n\nOptions:\n{options}\n\nThe direct CLI does not change directory. Generated shell integration makes zwt abort\nchange into the preserved source worktree after successful cleanup. The path-only output\nis emitted only after the worktree, branch, and metadata have all been cleaned up.",
         command = command,
     )
 }
@@ -327,8 +372,8 @@ pub fn worktree_status_help_for(invocation: WorktreeInvocation) -> String {
             "wt.root ../project-worktrees; relative values resolve from the repository root. If it\n",
             "is unset, Zetta uses sibling <repository>-worktrees.\n\n",
             "Run {} rerere before integrating worktrees to enable Git's recorded conflict\n",
-            "resolution helpers. The direct CLI never changes directory; generated zwt new and\n",
-            "zwt done wrappers enter worktrees only after successful operations."
+            "resolution helpers. The direct CLI never changes directory; generated zwt new,\n",
+            "zwt done, and zwt abort wrappers enter worktrees only after successful operations."
         ),
         invocation.command(),
         invocation.command(),
@@ -341,7 +386,7 @@ pub fn worktree_rerere_help() -> String {
 
 pub fn worktree_rerere_help_for(invocation: WorktreeInvocation) -> String {
     format!(
-        "Enable Git rerere for the worktree workflow\n\nUsage: {} rerere\n\nRuns git config --global rerere.enabled true and git config --global\nrerere.autoupdate true. This is the recommended shortcut before using {} done,\nespecially when the same conflicts recur. The optional wt.root setting does not affect\nrerere; configure it per repository with git config --local wt.root PATH, where a\nrelative PATH is resolved from the repository root and the default is sibling\n<repository>-worktrees. Generated shell integration provides zwt new and zwt done,\nwhich enter the resulting worktrees after successful operations.",
+        "Enable Git rerere for the worktree workflow\n\nUsage: {} rerere\n\nRuns git config --global rerere.enabled true and git config --global\nrerere.autoupdate true. This is the recommended shortcut before using {} done,\nespecially when the same conflicts recur. The optional wt.root setting does not affect\nrerere; configure it per repository with git config --local wt.root PATH, where a\nrelative PATH is resolved from the repository root and the default is sibling\n<repository>-worktrees. Generated shell integration provides zwt new, zwt done, and\nzwt abort, which enter the resulting worktrees after successful operations.",
         invocation.command(),
         invocation.command(),
     )
@@ -367,6 +412,9 @@ fn run_at(
             copy_paths,
         } => run_new(name, *path_only, copy_paths, current_directory, invocation),
         WorktreeCommand::Done { path_only } => run_done(*path_only, current_directory, invocation),
+        WorktreeCommand::Abort { path_only } => {
+            run_abort(*path_only, current_directory, invocation)
+        }
         WorktreeCommand::Status => run_status(current_directory, invocation),
         WorktreeCommand::Rerere => run_rerere(current_directory),
     }
@@ -679,6 +727,83 @@ fn run_done(
             current_branch,
             source_branch,
             repository.current_worktree.display()
+        );
+    }
+    Ok(())
+}
+
+fn run_abort(
+    path_only: bool,
+    current_directory: Option<&Path>,
+    invocation: WorktreeInvocation,
+) -> Result<()> {
+    let command = invocation.command();
+    let repository = discover_repository(current_directory)?;
+    let current_branch = repository.current_branch.clone().context(format!(
+        "{command} abort requires an attached branch; detached worktrees cannot be aborted"
+    ))?;
+    anyhow::ensure!(
+        current_branch.starts_with(WORKTREE_BRANCH_PREFIX)
+            && current_branch.len() > WORKTREE_BRANCH_PREFIX.len(),
+        "{command} abort only operates on wt/* worktree branches"
+    );
+    anyhow::ensure!(
+        !repository.current_entry.bare
+            && !same_path(&repository.current_worktree, &repository.root),
+        "{command} abort must be run from a linked Git worktree, not the repository main worktree"
+    );
+
+    let metadata_key = metadata_key(&current_branch);
+    let source_branch = read_metadata(&repository.current_worktree, &metadata_key)?
+        .context("the current wt/* branch has no recorded source branch metadata")?;
+    anyhow::ensure!(
+        !source_branch.is_empty(),
+        "the current wt/* branch has an empty recorded source branch"
+    );
+
+    // Validate every source-worktree invariant before removing the current
+    // worktree. Unlike done, abort deliberately permits source dirtiness.
+    let source = source_worktree_without_cleanliness(&repository, &source_branch)?;
+    let source_path = source.path.clone();
+
+    let remove_arguments = vec![
+        os("worktree"),
+        os("remove"),
+        os("--force"),
+        os("--"),
+        repository.current_worktree.as_os_str().to_os_string(),
+    ];
+    let remove_output = run_git(Some(&source_path), &remove_arguments)?;
+    if !remove_output.status.success() {
+        return Err(git_error("git worktree remove --force", &remove_output));
+    }
+
+    let delete_arguments = vec![os("branch"), os("-D"), os("--"), os(&current_branch)];
+    let delete_output = run_git(Some(&source_path), &delete_arguments)?;
+    if !delete_output.status.success() {
+        return Err(git_error("git branch -D", &delete_output));
+    }
+
+    let unset_arguments = vec![
+        os("config"),
+        os("--local"),
+        os("--unset-all"),
+        os(&metadata_key),
+    ];
+    let unset_output = run_git(Some(&source_path), &unset_arguments)?;
+    if !unset_output.status.success() && unset_output.status.code() != Some(5) {
+        return Err(git_error("git config --unset-all", &unset_output));
+    }
+
+    request_originating_worktree_name(None);
+    if path_only {
+        println!("{}", source_path.display());
+    } else {
+        println!(
+            "Aborted {} and removed the temporary worktree {} without changing {}.",
+            current_branch,
+            repository.current_worktree.display(),
+            source_branch
         );
     }
     Ok(())
@@ -1212,6 +1337,15 @@ fn rollback_new_worktree(
 }
 
 fn source_worktree(repository: &Repository, source_branch: &str) -> Result<WorktreeEntry> {
+    let source = source_worktree_without_cleanliness(repository, source_branch)?;
+    ensure_clean(&source.path, "source worktree")?;
+    Ok(source)
+}
+
+fn source_worktree_without_cleanliness(
+    repository: &Repository,
+    source_branch: &str,
+) -> Result<WorktreeEntry> {
     let reference = format!("refs/heads/{source_branch}");
     let reference_arguments = vec![os("rev-parse"), os("--verify"), os(&reference)];
     let reference_output = run_git(Some(&repository.current_worktree), &reference_arguments)?;
@@ -1246,7 +1380,6 @@ fn source_worktree(repository: &Repository, source_branch: &str) -> Result<Workt
         "source worktree {} is no longer on branch {source_branch:?}",
         source.path.display()
     );
-    ensure_clean(&source.path, "source worktree")?;
     Ok(source)
 }
 

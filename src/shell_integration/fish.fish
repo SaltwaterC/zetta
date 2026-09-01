@@ -145,6 +145,21 @@ function zwt --description 'Zetta Git worktree workflow'
             test (count $path) -eq 1
             or return 1
             builtin cd -- $path[1]
+        case abort
+            set -l operation_args $argv[2..-1]
+            set -l path
+            if contains -- --help $operation_args; or contains -- -h $operation_args
+                command zwt abort $operation_args
+                return $status
+            else if contains -- --path-only $operation_args; or contains -- -P $operation_args
+                set path (command zwt abort $operation_args)
+            else
+                set path (command zwt abort --path-only $operation_args)
+            end
+            or return
+            test (count $path) -eq 1
+            or return 1
+            builtin cd -- $path[1]
         case '*'
             command zwt $argv
     end
@@ -620,6 +635,7 @@ function __zetta_long_options
             printf '%s\t%s\n' \
                 new 'Create a worktree' \
                 done 'Integrate and remove the current worktree' \
+                abort 'Discard and remove the current worktree' \
                 status 'Show worktree state' \
                 rerere 'Enable Git rerere' \
                 --help 'Print help'
@@ -732,7 +748,7 @@ complete -c zetta -n '__zetta_at_root' -a splits -d 'List configured pane split 
 complete -c zetta -n '__zetta_at_root' -a pane -d 'Run a command in a pane'
 complete -c zetta -n '__zetta_at_root' -a overlay -d 'Non-persistently show text over the active pane'
 # ZETTA_WORKTREE_INTEGRATION_BEGIN
-complete -c zetta -n '__zetta_at_root' -a wt -d 'Create and integrate Git worktrees'
+complete -c zetta -n '__zetta_at_root' -a wt -d 'Create, integrate, or abort Git worktrees'
 # ZETTA_WORKTREE_INTEGRATION_END
 complete -c zetta -n '__zetta_at_subcommand benchmark' -a output -d 'Write and time a text payload'
 complete -c zetta -n '__zetta_at_subcommand notify' -a cleanup -d 'Reap stale desktop notification worker processes'
@@ -974,20 +990,20 @@ complete -c zetta -n '__fish_seen_subcommand_from overlay' -l reset -d 'Clear th
 complete -c zetta -n '__fish_seen_subcommand_from overlay' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from overlay' -a '(__zetta_long_options overlay)'
 # ZETTA_WORKTREE_INTEGRATION_BEGIN
-complete -c zetta -n '__zetta_at_subcommand wt' -a 'new done status rerere'
+complete -c zetta -n '__zetta_at_subcommand wt' -a 'new done abort status rerere'
 complete -c zetta -n '__fish_seen_subcommand_from wt' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from wt' -a '(__zetta_long_options wt)'
-complete -c zetta -n '__fish_seen_subcommand_from wt; and __fish_seen_subcommand_from new done' -l path-only -d 'Print only the resulting path'
+complete -c zetta -n '__fish_seen_subcommand_from wt; and __fish_seen_subcommand_from new done abort' -l path-only -d 'Print only the resulting path'
 complete -c zetta -n '__fish_seen_subcommand_from wt; and __fish_seen_subcommand_from new' -l copy -r -F -d 'Copy a source-worktree path (repeatable)'
 complete -c zetta -s c -r -F -n '__fish_seen_subcommand_from wt; and __fish_seen_subcommand_from new; and __zetta_short_option -c'
 # ZETTA_WORKTREE_INTEGRATION_END
 # ZETTA_WORKTREE_INTEGRATION_BEGIN
 complete -c zwt -f
-complete -c zwt -n '__fish_use_subcommand' -a 'new done status rerere'
-complete -c zwt -n '__fish_seen_subcommand_from new done' -l path-only -d 'Print only the resulting path'
+complete -c zwt -n '__fish_use_subcommand' -a 'new done abort status rerere'
+complete -c zwt -n '__fish_seen_subcommand_from new done abort' -l path-only -d 'Print only the resulting path'
 complete -c zwt -n '__fish_seen_subcommand_from new' -l copy -r -F -d 'Copy a source-worktree path (repeatable)'
 complete -c zwt -s c -r -F -n '__fish_seen_subcommand_from new; and __zetta_short_option -c'
-complete -c zwt -n '__fish_seen_subcommand_from new done status rerere' -l help -d 'Print help'
+complete -c zwt -n '__fish_seen_subcommand_from new done abort status rerere' -l help -d 'Print help'
 # ZETTA_WORKTREE_INTEGRATION_END
 complete -c zmux -f
 complete -c zmux -n '__fish_use_subcommand' -a list -d 'List the sessions the multiplexer is holding'

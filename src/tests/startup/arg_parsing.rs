@@ -153,6 +153,16 @@ fn worktree_subcommand_is_available_without_cli_services() {
         ])
         .is_ok()
     );
+    assert_eq!(
+        parse_args_from([
+            OsString::from("wt"),
+            OsString::from("abort"),
+            OsString::from("-P"),
+        ])
+        .unwrap()
+        .mode,
+        StartupMode::Worktree(WorktreeCommand::Abort { path_only: true })
+    );
 }
 
 #[test]

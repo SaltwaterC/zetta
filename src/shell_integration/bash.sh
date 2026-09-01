@@ -163,6 +163,28 @@ zwt() {
             [[ -n $path ]] || return 1
             builtin cd -- "$path"
             ;;
+        abort)
+            local path path_only_arg
+            local -a operation_args=("${@:2}")
+            for path_only_arg in "${operation_args[@]}"; do
+                if [[ $path_only_arg == --help || $path_only_arg == -h ]]; then
+                    command zwt abort "${operation_args[@]}"
+                    return
+                fi
+                if [[ $path_only_arg == --path-only || $path_only_arg == -P ]]; then
+                    path_only_arg=1
+                else
+                    path_only_arg=''
+                fi
+            done
+            if [[ $path_only_arg == 1 ]]; then
+                path=$(command zwt abort "${operation_args[@]}") || return
+            else
+                path=$(command zwt abort --path-only "${operation_args[@]}") || return
+            fi
+            [[ -n $path ]] || return 1
+            builtin cd -- "$path"
+            ;;
         *)
             command zwt "$@"
             ;;
@@ -854,8 +876,8 @@ _zetta_complete() {
 # ZETTA_WORKTREE_INTEGRATION_BEGIN
         wt)
             if (( COMP_CWORD == 2 )); then
-                _zetta_compgen 'new done status rerere --help'
-            elif [[ ${COMP_WORDS[2]} == new || ${COMP_WORDS[2]} == done ]]; then
+                _zetta_compgen 'new done abort status rerere --help'
+            elif [[ ${COMP_WORDS[2]} == new || ${COMP_WORDS[2]} == done || ${COMP_WORDS[2]} == abort ]]; then
                 if [[ ${COMP_WORDS[2]} == new ]]; then
                     _zetta_compgen '--copy --path-only --help' 1
                 else

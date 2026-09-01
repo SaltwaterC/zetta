@@ -80,7 +80,7 @@ fn supported_shells_generate_completion_and_tftp_shortcut() {
         }
         assert!(script.contains("zmux"));
         #[cfg(feature = "worktree")]
-        for operation in ["new", "done", "status", "rerere"] {
+        for operation in ["new", "done", "abort", "status", "rerere"] {
             assert!(script.contains(operation));
         }
         #[cfg(feature = "worktree")]
@@ -502,7 +502,7 @@ fn bash_worktree_completion_offers_operations_and_long_worktree_options() {
     );
     let completions = String::from_utf8_lossy(&output.stdout);
     for prefix in ["operation:", "wrapper:"] {
-        for operation in ["new", "done", "status", "rerere"] {
+        for operation in ["new", "done", "abort", "status", "rerere"] {
             assert!(
                 completions
                     .lines()
@@ -648,14 +648,16 @@ fn bash_zwt_changes_directory_for_nested_paths_with_spaces() {
     let start = temporary.path().join("start directory");
     let new_path = temporary.path().join("new worktree/feature api");
     let done_path = temporary.path().join("source worktree");
+    let abort_path = temporary.path().join("abort source worktree");
     std::fs::create_dir_all(&start).unwrap();
     std::fs::create_dir_all(&new_path).unwrap();
     std::fs::create_dir_all(&done_path).unwrap();
+    std::fs::create_dir_all(&abort_path).unwrap();
 
     let fake_zwt = temporary.path().join("zwt");
     std::fs::write(
         &fake_zwt,
-        "#!/bin/sh\ncase \"$1\" in\n  new) printf '%s\\n' \"$ZETTA_TEST_NEW\" ;;\n  done) printf '%s\\n' \"$ZETTA_TEST_DONE\" ;;\n  *) exit 0 ;;\nesac\n",
+        "#!/bin/sh\ncase \"$1\" in\n  new) printf '%s\\n' \"$ZETTA_TEST_NEW\" ;;\n  done) printf '%s\\n' \"$ZETTA_TEST_DONE\" ;;\n  abort) printf '%s\\n' \"$ZETTA_TEST_ABORT\" ;;\n  *) exit 0 ;;\nesac\n",
     )
     .unwrap();
     let mut permissions = std::fs::metadata(&fake_zwt).unwrap().permissions();
@@ -669,7 +671,7 @@ fn bash_zwt_changes_directory_for_nested_paths_with_spaces() {
 
     let script = ShellIntegration::Bash.script();
     let driver = format!(
-        "{script}\ncd '{}'\nzwt new --path-only 'feature/api'\nprintf 'new:%s\\n' \"$PWD\"\nzwt done --path-only\nprintf 'done:%s\\n' \"$PWD\"\n",
+        "{script}\ncd '{}'\nzwt new --path-only 'feature/api'\nprintf 'new:%s\\n' \"$PWD\"\nzwt done --path-only\nprintf 'done:%s\\n' \"$PWD\"\nzwt abort\nprintf 'abort:%s\\n' \"$PWD\"\n",
         start.display()
     );
     let mut child = bash_command()
@@ -679,6 +681,7 @@ fn bash_zwt_changes_directory_for_nested_paths_with_spaces() {
         .env("PATH", path)
         .env("ZETTA_TEST_NEW", &new_path)
         .env("ZETTA_TEST_DONE", &done_path)
+        .env("ZETTA_TEST_ABORT", &abort_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -707,6 +710,11 @@ fn bash_zwt_changes_directory_for_nested_paths_with_spaces() {
             .lines()
             .any(|line| line == format!("done:{}", done_path.display()))
     );
+    assert!(
+        output
+            .lines()
+            .any(|line| line == format!("abort:{}", abort_path.display()))
+    );
 }
 
 #[cfg(feature = "worktree")]
@@ -714,17 +722,21 @@ fn bash_zwt_changes_directory_for_nested_paths_with_spaces() {
 fn worktree_wrappers_pass_help_through_without_capturing_it_as_a_path() {
     let bash = ShellIntegration::Bash.script();
     assert!(bash.contains("$path_only_arg == --help || $path_only_arg == -h"));
+    assert!(bash.contains("command zwt abort --path-only"));
 
     let zsh = ShellIntegration::Zsh.script();
     assert!(zsh.contains("$path_only_arg == --help || $path_only_arg == -h"));
+    assert!(zsh.contains("command zwt abort --path-only"));
 
     let fish = ShellIntegration::Fish.script();
     assert!(fish.contains("contains -- --help $operation_args; or contains -- -h $operation_args"));
+    assert!(fish.contains("command zwt abort --path-only"));
 
     let powershell = ShellIntegration::PowerShell.script();
     assert!(
         powershell.contains("$operationArgs -contains '--help' -or $operationArgs -contains '-h'")
     );
+    assert!(powershell.contains("& $zwtApplication abort --path-only"));
 }
 
 #[cfg(all(unix, feature = "worktree"))]

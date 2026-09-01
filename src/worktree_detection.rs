@@ -215,7 +215,7 @@ impl Zetta {
         };
         if is_wsl {
             // The reported WSL path belongs to a different filesystem. The
-            // explicit `wt new`/`wt done` control path remains authoritative.
+            // explicit `wt new`/`wt done`/`wt abort` control paths remain authoritative.
             return;
         }
         let Some((directory, can_clear)) = directory else {

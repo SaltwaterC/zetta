@@ -2062,7 +2062,7 @@ pub(crate) struct Tab {
     pub(crate) custom_title: Option<String>,
     /// A worktree title supplied by `wt new`. CWD detection may provide a
     /// fresher title, but terminal-side title updates can never replace this
-    /// seed; `wt done` explicitly clears it.
+    /// seed; `wt done` and `wt abort` explicitly clear it.
     pub(crate) worktree_seed_title: Option<String>,
     /// A lower-priority title supplied by process control. It remains
     /// available outside a worktree, but is masked by the active worktree

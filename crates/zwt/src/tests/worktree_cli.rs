@@ -297,6 +297,10 @@ fn parses_worktree_commands_and_path_only_aliases() {
         WorktreeCommand::Done { path_only: true }
     );
     assert_eq!(
+        parse_worktree_args(&[OsString::from("abort"), OsString::from("-P")]).unwrap(),
+        WorktreeCommand::Abort { path_only: true }
+    );
+    assert_eq!(
         parse_worktree_args(&[OsString::from("status")]).unwrap(),
         WorktreeCommand::Status
     );
@@ -373,16 +377,21 @@ fn rejects_invalid_worktree_arguments() {
     assert!(
         parse_worktree_args(&[OsString::from("status"), OsString::from("--path-only")]).is_err()
     );
+    assert!(parse_worktree_args(&[OsString::from("abort"), OsString::from("--unknown")]).is_err());
 }
 
 #[test]
 fn worktree_help_covers_the_workflow() {
     assert!(worktree_help().contains("wt.root"));
     assert!(worktree_help().contains("zwt rerere"));
+    assert!(worktree_help().contains("zwt abort [OPTIONS]"));
     assert!(worktree_new_help().contains("--copy"));
     assert!(worktree_new_help().contains("--path-only"));
     assert!(worktree_new_help().contains("phase progress"));
     assert!(worktree_done_help().contains("stage"));
+    assert!(worktree_abort_help().contains("never rebases"));
+    assert!(worktree_abort_help().contains("source worktree\nmay be dirty"));
+    assert!(worktree_abort_help().contains("--path-only"));
     assert!(worktree_status_help().contains("never creates"));
     assert!(worktree_status_help().contains("nested paths"));
     assert!(worktree_status_help().contains("copy-on-write"));
@@ -801,6 +810,101 @@ fn successful_done_clears_the_originating_worktree_name_after_cleanup() {
 }
 
 #[test]
+fn abort_discards_dirty_current_worktree_without_changing_dirty_source() {
+    let fixture = GitFixture::new();
+    let worktree = fixture.create_worktree("abort-dirty");
+    fixture.commit(&worktree, "committed", "temporary\n", "temporary commit");
+    fs::write(worktree.join("untracked"), "discard me\n").unwrap();
+
+    fs::write(fixture.root.join("file"), "source dirty\n").unwrap();
+    fixture.git(&fixture.root, &["add", "file"]);
+    fs::write(fixture.root.join("source-untracked"), "keep me\n").unwrap();
+    let source_head = fixture.git(&fixture.root, &["rev-parse", "refs/heads/main"]);
+    let source_file = fs::read_to_string(fixture.root.join("file")).unwrap();
+    let source_status = fixture.git(
+        &fixture.root,
+        &[
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+        ],
+    );
+    let root = fixture.root.clone();
+
+    in_directory(&fixture, &worktree, || {
+        run(&WorktreeCommand::Abort { path_only: true }).unwrap();
+    });
+
+    assert!(!worktree.exists());
+    assert_eq!(
+        fixture.git(&root, &["branch", "--list", "wt/abort-dirty"]),
+        ""
+    );
+    assert_eq!(
+        fixture
+            .git_output(&root, &["config", "--get", "wtbranch.wt/abort-dirty.base"],)
+            .status
+            .code(),
+        Some(1)
+    );
+    assert_eq!(
+        fixture.git(&root, &["rev-parse", "refs/heads/main"]),
+        source_head
+    );
+    assert_eq!(fs::read_to_string(root.join("file")).unwrap(), source_file);
+    assert_eq!(
+        fixture.git(
+            &root,
+            &[
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+                "--ignore-submodules=none",
+            ],
+        ),
+        source_status
+    );
+}
+
+#[test]
+fn successful_abort_clears_the_originating_worktree_name_after_cleanup() {
+    let fixture = GitFixture::new();
+    let worktree = fixture.create_worktree("abort-name");
+
+    let (result, requests) = in_directory(&fixture, &worktree, || {
+        capture_worktree_name_requests(|| run(&WorktreeCommand::Abort { path_only: true }))
+    });
+
+    result.unwrap();
+    assert_eq!(requests, vec![None]);
+    assert!(!worktree.exists());
+}
+
+#[test]
+fn failed_abort_does_not_clear_the_originating_worktree_name_or_remove_worktree() {
+    let fixture = GitFixture::new();
+    let worktree = fixture.create_worktree("abort-invalid-source");
+    fixture.git(&fixture.root, &["switch", "-c", "other"]);
+
+    let (result, requests) = in_directory(&fixture, &worktree, || {
+        capture_worktree_name_requests(|| run(&WorktreeCommand::Abort { path_only: true }))
+    });
+
+    assert!(result.is_err());
+    assert!(requests.is_empty());
+    assert!(worktree.exists());
+    assert!(
+        fixture
+            .git(
+                &fixture.root,
+                &["branch", "--list", "wt/abort-invalid-source"]
+            )
+            .contains("wt/abort-invalid-source")
+    );
+}
+
+#[test]
 fn failed_done_does_not_clear_the_originating_worktree_name() {
     let fixture = GitFixture::new();
     let worktree = fixture.create_worktree("keep-name");
@@ -842,6 +946,55 @@ fn integrates_and_forcibly_removes_a_worktree_containing_submodules() {
             .status
             .code(),
         Some(1)
+    );
+}
+
+#[cfg(feature = "recursive-submodules")]
+#[test]
+fn abort_forcibly_removes_dirty_submodules_and_preserves_dirty_source() {
+    let fixture = GitFixture::new();
+    fixture.allow_file_protocol();
+    let remote = fixture.create_repository("remote");
+    fixture.add_submodule(&fixture.root, &remote, "vendor/remote");
+    let worktree = fixture.create_worktree("abort-submodule");
+
+    fs::write(worktree.join("vendor/remote/untracked"), "discard me\n").unwrap();
+    fs::write(
+        fixture.root.join("vendor/remote/source-untracked"),
+        "keep me\n",
+    )
+    .unwrap();
+    let source_status = fixture.git(
+        &fixture.root,
+        &[
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+        ],
+    );
+    let root = fixture.root.clone();
+
+    in_directory(&fixture, &worktree, || {
+        run(&WorktreeCommand::Abort { path_only: true }).unwrap();
+    });
+
+    assert!(!worktree.exists());
+    assert_eq!(
+        fixture.git(&root, &["branch", "--list", "wt/abort-submodule"]),
+        ""
+    );
+    assert_eq!(
+        fixture.git(
+            &root,
+            &[
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+                "--ignore-submodules=none",
+            ],
+        ),
+        source_status
     );
 }
 
@@ -1022,6 +1175,31 @@ fn continues_a_conflicting_rebase_after_staging_resolution() {
     assert_eq!(
         fs::read_to_string(fixture.root.join("file")).unwrap(),
         "resolved\n"
+    );
+}
+
+#[test]
+fn abort_removes_a_worktree_with_an_in_progress_rebase() {
+    let fixture = GitFixture::new();
+    let worktree = fixture.create_worktree("abort-rebase");
+    fixture.commit(&worktree, "file", "temporary\n", "temporary change");
+    fixture.commit(&fixture.root, "file", "source\n", "source change");
+    let source_file = fs::read_to_string(fixture.root.join("file")).unwrap();
+    let rebase = fixture.git_output(&worktree, &["rebase", "main"]);
+    assert!(!rebase.status.success());
+
+    in_directory(&fixture, &worktree, || {
+        run(&WorktreeCommand::Abort { path_only: false }).unwrap();
+    });
+
+    assert!(!worktree.exists());
+    assert_eq!(
+        fixture.git(&fixture.root, &["branch", "--list", "wt/abort-rebase"]),
+        ""
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.root.join("file")).unwrap(),
+        source_file
     );
 }
 
