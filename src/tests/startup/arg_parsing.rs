@@ -1339,10 +1339,28 @@ fn output_benchmark_subcommand_bypasses_application_startup() {
 }
 
 #[test]
-fn application_and_explicit_new_window_launches_are_handoff_eligible() {
+fn ordinary_and_explicit_new_window_launches_are_handoff_eligible() {
     let plain = parse_args_from(Vec::<OsString>::new()).unwrap();
     let new_window = parse_args_from([OsString::from("--new-window")]).unwrap();
     let short_new_window = parse_args_from([OsString::from("-w")]).unwrap();
+    let profile_new_window = parse_args_from([
+        OsString::from("--new-window"),
+        OsString::from("--profile"),
+        OsString::from("System"),
+    ])
+    .unwrap();
+    let short_profile_new_window = parse_args_from([
+        OsString::from("-w"),
+        OsString::from("-p"),
+        OsString::from("System"),
+    ])
+    .unwrap();
+    let reverse_profile_new_window = parse_args_from([
+        OsString::from("--profile"),
+        OsString::from("System"),
+        OsString::from("--new-window"),
+    ])
+    .unwrap();
     let profile = parse_args_from([OsString::from("--profile"), OsString::from("System")]).unwrap();
     let split = parse_args_from([OsString::from("--split"), OsString::from("quarters")]).unwrap();
     let mux = parse_args_from([OsString::from("mux")]).unwrap();
@@ -1353,6 +1371,11 @@ fn application_and_explicit_new_window_launches_are_handoff_eligible() {
     assert_eq!(new_window, short_new_window);
     assert_eq!(new_window.mode, StartupMode::NewWindow);
     assert!(should_handoff_to_existing_process(&new_window));
+    assert_eq!(profile_new_window, short_profile_new_window);
+    assert_eq!(profile_new_window, reverse_profile_new_window);
+    assert_eq!(profile_new_window.mode, StartupMode::NewWindow);
+    assert_eq!(profile_new_window.profile.as_deref(), Some("System"));
+    assert!(should_handoff_to_existing_process(&profile_new_window));
     assert!(!should_handoff_to_existing_process(&profile));
     assert!(!should_handoff_to_existing_process(&split));
     assert!(!should_handoff_to_existing_process(&mux));
@@ -1364,11 +1387,10 @@ fn application_and_explicit_new_window_launches_are_handoff_eligible() {
 }
 
 #[test]
-fn explicit_new_window_is_standalone() {
+fn explicit_new_window_rejects_unrelated_options() {
     for arguments in [
         vec!["--config", "config.json"],
         vec!["--keymap", "keymap.json"],
-        vec!["--profile", "System"],
         vec!["--split", "quarters"],
         vec!["--replace-pane"],
         vec!["--theme", "Dracula"],
@@ -1390,14 +1412,14 @@ fn explicit_new_window_is_standalone() {
         ])
         .is_err()
     );
-    assert!(
-        parse_args_from([
-            OsString::from("-w"),
-            OsString::from("--profile"),
-            OsString::from("System")
-        ])
-        .is_err()
-    );
+    let profile_new_window = parse_args_from([
+        OsString::from("-w"),
+        OsString::from("--profile"),
+        OsString::from("System"),
+    ])
+    .unwrap();
+    assert_eq!(profile_new_window.mode, StartupMode::NewWindow);
+    assert_eq!(profile_new_window.profile.as_deref(), Some("System"));
 }
 
 #[test]
@@ -1771,6 +1793,8 @@ fn launch_profile_selects_an_available_profile_without_changing_the_configured_d
             icon: ProfileIcon::Bash,
         },
     ];
+
+    config.hidden_profiles.insert("wsl: ubuntu".to_owned());
 
     let profile = select_launch_profile(&config, Some("wsl: ubuntu"))
         .unwrap()

@@ -850,6 +850,36 @@ fn native_macos_menus(
 }
 
 #[cfg(target_os = "macos")]
+fn native_macos_dock_menu(
+    profiles: &[Profile],
+    hidden_profiles: &HashSet<String>,
+) -> Vec<MenuItem> {
+    let mut items = vec![MenuItem::action("New Window", NewWindow)];
+    items.extend(
+        profiles
+            .iter()
+            .filter(|profile| !profile_is_hidden(profile, hidden_profiles))
+            .map(|profile| {
+                MenuItem::action(
+                    profile.name.clone(),
+                    OpenProfileWindow {
+                        profile: profile.name.clone(),
+                    },
+                )
+            }),
+    );
+    items
+}
+#[cfg(target_os = "macos")]
+pub(crate) fn update_native_macos_dock_menu(
+    cx: &mut App,
+    profiles: &[Profile],
+    hidden_profiles: &HashSet<String>,
+) {
+    cx.set_dock_menu(native_macos_dock_menu(profiles, hidden_profiles));
+}
+
+#[cfg(target_os = "macos")]
 pub(crate) fn update_native_macos_menus(
     cx: &mut App,
     profiles: &[Profile],

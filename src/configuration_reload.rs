@@ -255,7 +255,14 @@ impl Zetta {
         self.profile_shortcut_slots = profile_count;
 
         #[cfg(windows)]
-        windows_integration::update_profile_jump_list(config.profiles.clone());
+        windows_integration::update_profile_jump_list(
+            config.profiles.clone(),
+            config.hidden_profiles.clone(),
+        );
+        #[cfg(target_os = "linux")]
+        linux_desktop::update_profile_actions(&config.profiles, &config.hidden_profiles).log_err();
+        #[cfg(target_os = "macos")]
+        update_native_macos_dock_menu(cx, &config.profiles, &config.hidden_profiles);
 
         if config.pane_controls_hidden_by_default
             != self.launch_config.pane_controls_hidden_by_default
@@ -272,6 +279,9 @@ impl Zetta {
         self.profiles = config.profiles.clone();
         self.working_directory = config.working_directory.clone();
         self.launch_config = config;
+        if let Some(editor) = self.settings_editor.as_mut() {
+            editor.refresh_configuration(&self.launch_config)?;
+        }
         // Rebuilt here rather than lazily at the next detach: the recipients may
         // have changed, and a `github:` alias among them is a network fetch that
         // must not land on the keystroke that detaches a tab.

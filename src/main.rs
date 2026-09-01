@@ -235,6 +235,14 @@ fn action_is_enabled_in_build(name: &str) -> bool {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = zetta, no_json, no_register)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OpenProfileWindow {
+    pub(crate) profile: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
 #[action(namespace = zetta)]
 #[serde(deny_unknown_fields)]
@@ -296,6 +304,12 @@ const FRAME_BUDGET_60_HZ: Duration = Duration::from_nanos(16_666_667);
 
 type ProcessBackgroundSessionEntry = (u64, u64, String, String);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ConfigFileStamp {
+    pub(crate) modified: Option<SystemTime>,
+    pub(crate) len: u64,
+}
+
 struct ZettaProcessState {
     windows: HashMap<WindowId, Entity<Zetta>>,
     dormant: Vec<Entity<Zetta>>,
@@ -304,6 +318,7 @@ struct ZettaProcessState {
     silent_mode: SilentModeState,
     background_session_entries: Arc<[ProcessBackgroundSessionEntry]>,
     config: Config,
+    config_file_stamp: ConfigFileStamp,
     configuration_error: Option<String>,
     no_mux: bool,
     control_server: ProcessControlServer,
@@ -370,6 +385,8 @@ mod title_bar_render;
 use title_bar_render::*;
 mod window_frame;
 use window_frame::*;
+#[cfg(target_os = "linux")]
+mod linux_desktop;
 mod view_boundary;
 use view_boundary::{ZettaSubview, overlay_boundary, overlay_boundary_root};
 mod project_context;

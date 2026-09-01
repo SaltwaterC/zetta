@@ -62,7 +62,9 @@ pub(crate) use keybindings::{
 #[cfg(test)]
 pub(crate) use keybindings::{RENAME_TAB_KEYBINDING, keymap_keystroke_alias};
 #[cfg(target_os = "macos")]
-pub(crate) use keybindings::{install_native_macos_menus, update_native_macos_menus};
+pub(crate) use keybindings::{
+    install_native_macos_menus, update_native_macos_dock_menu, update_native_macos_menus,
+};
 #[cfg(windows)]
 pub(crate) use wsl::Msys2Shell;
 use wsl::paths_for_external_editor;
@@ -280,53 +282,60 @@ pub(crate) fn open_zetta_window(
     initial_command: Option<Vec<String>>,
     initial_working_directory: Option<PathBuf>,
     initial_launch: Option<crate::app::TerminalLaunch>,
+    activation_token: Option<String>,
     cx: &mut App,
 ) -> Result<()> {
     let options = zetta_window_options(cx);
-    cx.open_window(options, move |window, cx| {
-        window.set_window_title("Zetta");
-        let zetta = cx.new(|cx| {
-            Zetta::new(
-                config,
-                configuration_error,
-                ZettaLaunchOptions {
-                    initial_profile,
-                    initial_project,
-                    launch_theme_override,
-                    no_mux,
-                    initial_command,
-                    initial_working_directory,
-                    initial_launch,
-                },
-                window,
-                cx,
-            )
-        });
-        track_zetta_window(&zetta, window, cx);
-        prepare_background_tabs_before_window_close(&zetta, window, cx);
-        if let Some(name) = launch_split {
-            zetta.update(cx, |zetta, cx| {
-                zetta.apply_pane_split_template(&ApplyPaneSplitTemplate { name }, window, cx)
+    let window_handle = cx
+        .open_window(options, move |window, cx| {
+            window.set_window_title("Zetta");
+            let zetta = cx.new(|cx| {
+                Zetta::new(
+                    config,
+                    configuration_error,
+                    ZettaLaunchOptions {
+                        initial_profile,
+                        initial_project,
+                        launch_theme_override,
+                        no_mux,
+                        initial_command,
+                        initial_working_directory,
+                        initial_launch,
+                    },
+                    window,
+                    cx,
+                )
             });
-        }
-        if profile_pane_stress {
-            zetta.update(cx, |zetta, cx| {
-                zetta.configure_pane_profile_stress(window, cx)
-            });
-        }
-        if enable_performance_overlay {
-            zetta.update(cx, |zetta, cx| {
-                zetta.toggle_performance_overlay(&TogglePerformanceOverlay, window, cx)
-            });
-        }
-        if let Some((options, status)) = performance_report {
-            zetta.update(cx, |zetta, cx| {
-                zetta.start_performance_report(options, status, cx)
-            });
-        }
-        zetta
-    })
-    .context("opening Zetta window")?;
+            track_zetta_window(&zetta, window, cx);
+            prepare_background_tabs_before_window_close(&zetta, window, cx);
+            if let Some(name) = launch_split {
+                zetta.update(cx, |zetta, cx| {
+                    zetta.apply_pane_split_template(&ApplyPaneSplitTemplate { name }, window, cx)
+                });
+            }
+            if profile_pane_stress {
+                zetta.update(cx, |zetta, cx| {
+                    zetta.configure_pane_profile_stress(window, cx)
+                });
+            }
+            if enable_performance_overlay {
+                zetta.update(cx, |zetta, cx| {
+                    zetta.toggle_performance_overlay(&TogglePerformanceOverlay, window, cx)
+                });
+            }
+            if let Some((options, status)) = performance_report {
+                zetta.update(cx, |zetta, cx| {
+                    zetta.start_performance_report(options, status, cx)
+                });
+            }
+            zetta
+        })
+        .context("opening Zetta window")?;
+    if let Some(activation_token) = activation_token {
+        window_handle.update(cx, |_, window, _| {
+            gpui_platform::activate_window_with_token(window, &activation_token)
+        })?;
+    }
     cx.activate(true);
     Ok(())
 }
@@ -432,6 +441,113 @@ pub(crate) fn zetta_for_runner(runner_id: u64, cx: &App) -> Option<Entity<Zetta>
         .runners
         .get(&runner_id)
         .cloned()
+}
+
+/// How often the configuration file is checked for changes made outside the
+/// settings UI. The check is metadata-only while the file is unchanged, so it
+/// does not add work to rendering or input handling.
+const CONFIGURATION_FILE_POLL: Duration = Duration::from_secs(1);
+
+fn config_file_stamp(path: &Path) -> ConfigFileStamp {
+    let Ok(metadata) = fs::metadata(path) else {
+        return ConfigFileStamp {
+            modified: None,
+            len: 0,
+        };
+    };
+    ConfigFileStamp {
+        modified: metadata.modified().ok(),
+        len: metadata.len(),
+    }
+}
+
+fn reload_process_configuration(cx: &mut App) -> Result<()> {
+    let (config_path, keymap_override) = {
+        let process = cx.global::<ZettaProcessState>();
+        (
+            process.config.config_path.clone(),
+            process.config.keymap_override.clone(),
+        )
+    };
+    let config_stamp = config_file_stamp(&config_path);
+    let config = Config::load(Some(&config_path), keymap_override)?;
+    let entities = process_zetta_entities(cx);
+    let has_entities = !entities.is_empty();
+    for entity in entities {
+        entity
+            .update(cx, |zetta, cx| {
+                zetta.reload_configuration_from_process(config.clone(), cx)
+            })
+            .with_context(|| {
+                format!("applying reloaded configuration {}", config_path.display())
+            })?;
+    }
+    // A process can receive a request before its first window has been
+    // attached. Keep launcher integrations correct in that small window too;
+    // normal entities update them as part of their reload path.
+    if !has_entities {
+        #[cfg(windows)]
+        windows_integration::update_profile_jump_list(
+            config.profiles.clone(),
+            config.hidden_profiles.clone(),
+        );
+        #[cfg(target_os = "linux")]
+        linux_desktop::update_profile_actions(&config.profiles, &config.hidden_profiles).log_err();
+        #[cfg(target_os = "macos")]
+        update_native_macos_dock_menu(cx, &config.profiles, &config.hidden_profiles);
+    }
+    let process = cx.global_mut::<ZettaProcessState>();
+    process.config = config;
+    process.config_file_stamp = config_stamp;
+    process.configuration_error = None;
+    Ok(())
+}
+
+fn reload_process_configuration_if_changed(cx: &mut App) -> Result<bool> {
+    let (config_path, last_stamp) = {
+        let process = cx.global::<ZettaProcessState>();
+        (
+            process.config.config_path.clone(),
+            process.config_file_stamp,
+        )
+    };
+    if config_file_stamp(&config_path) == last_stamp {
+        return Ok(false);
+    }
+    reload_process_configuration(cx)?;
+    Ok(true)
+}
+
+/// Keeps every open window, native launcher, and the process-wide launch
+/// configuration in sync with edits made directly to config.json. Profile
+/// lists are read during this idle watcher rather than during rendering.
+fn start_configuration_watcher(cx: &mut App) {
+    let (config_path, mut last_seen) = {
+        let process = cx.global::<ZettaProcessState>();
+        (
+            process.config.config_path.clone(),
+            process.config_file_stamp,
+        )
+    };
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor()
+                .timer(CONFIGURATION_FILE_POLL)
+                .await;
+            let changed = config_file_stamp(&config_path);
+            if changed == last_seen {
+                continue;
+            }
+            last_seen = changed;
+            if let Err(error) = cx.update(reload_process_configuration) {
+                eprintln!(
+                    "Could not reload {} after it changed: {error:#}",
+                    config_path.display()
+                );
+            }
+        }
+    })
+    .detach();
 }
 
 /// How often the multiplexer's published catalog is checked for changes.
@@ -640,17 +756,19 @@ pub(crate) fn open_dormant_or_new_window(cx: &mut App) -> Result<()> {
         .flatten();
     if let Some(zetta) = dormant {
         let zetta_for_window = zetta.clone();
-        let result = cx.open_window(zetta_window_options(cx), move |window, cx| {
+        match cx.open_window(zetta_window_options(cx), move |window, cx| {
             window.set_window_title("Zetta");
             zetta_for_window.update(cx, |zetta, cx| zetta.attach_to_reopened_window(window, cx));
             track_zetta_window(&zetta_for_window, window, cx);
             prepare_background_tabs_before_window_close(&zetta_for_window, window, cx);
             zetta_for_window
-        });
-        if let Err(error) = result {
-            cx.global_mut::<ZettaProcessState>().dormant.push(zetta);
-            return Err(error).context("opening Zetta window");
-        }
+        }) {
+            Ok(_) => (),
+            Err(error) => {
+                cx.global_mut::<ZettaProcessState>().dormant.push(zetta);
+                return Err(error).context("opening Zetta window");
+            }
+        };
         cx.activate(true);
         Ok(())
     } else {
@@ -668,6 +786,7 @@ pub(crate) fn open_dormant_or_new_window(cx: &mut App) -> Result<()> {
             None,
             None,
             None,
+            None,
             cx,
         )
     }
@@ -675,7 +794,16 @@ pub(crate) fn open_dormant_or_new_window(cx: &mut App) -> Result<()> {
 
 /// Opens a new OS window from process-wide configuration without selecting a
 /// dormant entity or applying a project from another window.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn open_fresh_zetta_window(cx: &mut App) -> Result<()> {
+    open_fresh_zetta_window_with_profile_and_activation_token(cx, None, None)
+}
+
+fn open_fresh_zetta_window_with_profile_and_activation_token(
+    cx: &mut App,
+    profile_name: Option<String>,
+    activation_token: Option<String>,
+) -> Result<()> {
     let (config, configuration_error, no_mux) = {
         let process = cx.global::<ZettaProcessState>();
         (
@@ -684,10 +812,11 @@ pub(crate) fn open_fresh_zetta_window(cx: &mut App) -> Result<()> {
             process.no_mux,
         )
     };
+    let initial_profile = select_launch_profile(&config, profile_name.as_deref())?;
     open_zetta_window(
         config,
         configuration_error,
-        None,
+        initial_profile,
         None,
         None,
         None,
@@ -698,6 +827,7 @@ pub(crate) fn open_fresh_zetta_window(cx: &mut App) -> Result<()> {
         None,
         None,
         None,
+        activation_token,
         cx,
     )
 }
@@ -729,6 +859,7 @@ fn open_windows_handoff_window(
         None,
         None,
         Some(crate::app::TerminalLaunch::Handoff(request)),
+        None,
         cx,
     )
 }
@@ -1074,9 +1205,15 @@ pub(crate) fn run() -> Result<()> {
     if let StartupMode::PaneWait(command) = &args.mode {
         return run_wait_command(command.clone());
     }
+    let new_window_activation_token = (args.mode == StartupMode::NewWindow)
+        .then(|| env::var("XDG_ACTIVATION_TOKEN").ok())
+        .flatten();
     if args.mode == StartupMode::NewWindow
         && should_handoff_to_existing_process(&args)
-        && request_existing_process_new_window()?
+        && request_existing_process_new_window(
+            args.profile.as_deref(),
+            new_window_activation_token.as_deref(),
+        )?
     {
         return Ok(());
     }
@@ -1378,7 +1515,11 @@ pub(crate) fn run() -> Result<()> {
     if let StartupMode::RegisterWindowsShell(shortcut_path) = &args.mode {
         let (config, _) =
             load_startup_config(args.config_path.as_deref(), args.keymap_path.clone());
-        return windows_integration::register_shell_integration(shortcut_path, &config.profiles);
+        return windows_integration::register_shell_integration(
+            shortcut_path,
+            &config.profiles,
+            &config.hidden_profiles,
+        );
     }
     #[cfg(windows)]
     if args.mode == StartupMode::UnregisterWindowsShell {
@@ -1482,8 +1623,14 @@ pub(crate) fn run() -> Result<()> {
             #[cfg(windows)]
             {
                 cx.set_app_identity(ZETTA_APP_ID, "Zetta");
-                windows_integration::update_profile_jump_list(config.profiles.clone());
+                windows_integration::update_profile_jump_list(
+                    config.profiles.clone(),
+                    config.hidden_profiles.clone(),
+                );
             }
+            #[cfg(target_os = "linux")]
+            linux_desktop::update_profile_actions(&config.profiles, &config.hidden_profiles)
+                .log_err();
             cx.set_http_client(http_client);
             menu::init();
             zed_actions::init();
@@ -1501,6 +1648,8 @@ pub(crate) fn run() -> Result<()> {
                 &config.hidden_profiles,
                 config.default_profile,
             );
+            #[cfg(target_os = "macos")]
+            update_native_macos_dock_menu(cx, &config.profiles, &config.hidden_profiles);
             #[cfg(windows)]
             let handoff_control_tx = control_tx.clone();
             let control_server = ProcessControlServer::start(control_tx)
@@ -1527,11 +1676,13 @@ pub(crate) fn run() -> Result<()> {
                 silent_mode: SilentModeState::default(),
                 background_session_entries: Arc::from([]),
                 config: config.clone(),
+                config_file_stamp: config_file_stamp(&config.config_path),
                 configuration_error: configuration_error.clone(),
                 no_mux: args.no_mux,
                 control_server,
                 _quit_subscription: quit_subscription,
             });
+            start_configuration_watcher(cx);
             silent_mode::start_observer(cx);
             if !args.no_mux {
                 start_multiplexer_session_watcher(cx);
@@ -1587,6 +1738,15 @@ pub(crate) fn run() -> Result<()> {
             #[cfg(target_os = "macos")]
             cx.on_action(|_: &NewWindow, cx| {
                 open_fresh_zetta_window(cx).log_err();
+            });
+            #[cfg(target_os = "macos")]
+            cx.on_action(|action: &OpenProfileWindow, cx| {
+                open_fresh_zetta_window_with_profile_and_activation_token(
+                    cx,
+                    Some(action.profile.clone()),
+                    None,
+                )
+                .log_err();
             });
             cx.spawn(async move |cx| {
                 while let Some(command) = control_rx.next().await {
@@ -1675,42 +1835,19 @@ pub(crate) fn run() -> Result<()> {
                                 {
                                     return false;
                                 }
-                                let process = cx.global::<ZettaProcessState>();
                                 if crate::process_control::config_path_identity(
-                                    &process.config.config_path,
+                                    &cx.global::<ZettaProcessState>().config.config_path,
                                 ) != config_path
                                 {
                                     return false;
                                 }
-                                let config_path = process.config.config_path.clone();
-                                let keymap_override = process.config.keymap_override.clone();
-                                let config = match Config::load(Some(&config_path), keymap_override)
-                                {
-                                    Ok(config) => config,
+                                match reload_process_configuration(cx) {
+                                    Ok(()) => true,
                                     Err(error) => {
-                                        eprintln!(
-                                            "Could not reload {}: {error:#}",
-                                            config_path.display()
-                                        );
-                                        return false;
-                                    }
-                                };
-                                let entities = process_zetta_entities(cx);
-                                for entity in entities {
-                                    if let Err(error) = entity.update(cx, |zetta, cx| {
-                                        zetta.reload_configuration_from_process(config.clone(), cx)
-                                    }) {
-                                        eprintln!(
-                                            "Could not apply reloaded configuration {}: {error:#}",
-                                            config_path.display()
-                                        );
-                                        return false;
+                                        eprintln!("Could not reload {config_path}: {error:#}");
+                                        false
                                     }
                                 }
-                                let process = cx.global_mut::<ZettaProcessState>();
-                                process.config = config;
-                                process.configuration_error = None;
-                                true
                             });
                             let _ = completion.send(accepted);
                         }
@@ -1722,6 +1859,11 @@ pub(crate) fn run() -> Result<()> {
                                     .is_accepting()
                                 {
                                     return false;
+                                }
+                                if let Err(error) = reload_process_configuration_if_changed(cx) {
+                                    eprintln!(
+                                        "Could not refresh configuration before opening a window: {error:#}"
+                                    );
                                 }
 
                                 match open_dormant_or_new_window(cx) {
@@ -1736,7 +1878,11 @@ pub(crate) fn run() -> Result<()> {
                             });
                             let _ = completion.send(opened);
                         }
-                        ProcessControlCommand::OpenNewWindow { completion } => {
+                        ProcessControlCommand::OpenNewWindow {
+                            profile,
+                            activation_token,
+                            completion,
+                        } => {
                             let opened = cx.update(|cx| {
                                 if !cx
                                     .global::<ZettaProcessState>()
@@ -1745,14 +1891,29 @@ pub(crate) fn run() -> Result<()> {
                                 {
                                     return false;
                                 }
-
-                                match open_fresh_zetta_window(cx) {
-                                    Ok(()) => true,
-                                    Err(error) => {
-                                        eprintln!(
-                                            "Could not open the requested fresh Zetta window: {error:#}"
-                                        );
-                                        false
+                                let profile_requested = profile.is_some();
+                                let refresh_error =
+                                    reload_process_configuration_if_changed(cx).err();
+                                if let Some(error) = refresh_error.as_ref() {
+                                    eprintln!(
+                                        "Could not refresh configuration before opening a fresh window: {error:#}"
+                                    );
+                                }
+                                if refresh_error.is_some() && profile_requested {
+                                    false
+                                } else {
+                                    match open_fresh_zetta_window_with_profile_and_activation_token(
+                                        cx,
+                                        profile,
+                                        activation_token,
+                                    ) {
+                                        Ok(()) => true,
+                                        Err(error) => {
+                                            eprintln!(
+                                                "Could not open the requested fresh Zetta window: {error:#}"
+                                            );
+                                            false
+                                        }
                                     }
                                 }
                             });
@@ -2440,7 +2601,12 @@ pub(crate) fn run() -> Result<()> {
 
             if !is_embedding {
                 if explicit_new_window {
-                    open_fresh_zetta_window(cx).expect("failed to open Zetta window");
+                    open_fresh_zetta_window_with_profile_and_activation_token(
+                        cx,
+                        args.profile.clone(),
+                        new_window_activation_token.clone(),
+                    )
+                    .expect("failed to open Zetta window");
                 } else {
                     open_zetta_window(
                         config,
@@ -2455,6 +2621,7 @@ pub(crate) fn run() -> Result<()> {
                         args.no_mux,
                         initial_command,
                         initial_working_directory,
+                        None,
                         None,
                         cx,
                     )

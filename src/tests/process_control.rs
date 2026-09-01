@@ -99,10 +99,41 @@ fn control_requests_require_the_endpoint_token() {
 }
 
 #[test]
-fn fresh_window_control_requests_require_authentication_and_no_payload() {
+fn fresh_window_control_requests_require_authentication_and_optional_activation_token() {
     assert_eq!(
         decode_control_request(&mut request("correct", "new_window"), "correct"),
-        Some(ControlRequestCommand::OpenNewWindow)
+        Some(ControlRequestCommand::OpenNewWindow {
+            profile: None,
+            activation_token: None,
+        })
+    );
+    let mut with_token = request("correct", "new_window");
+    with_token.config_path = Some("wayland-activation-token".to_owned());
+    assert_eq!(
+        decode_control_request(&mut with_token, "correct"),
+        Some(ControlRequestCommand::OpenNewWindow {
+            profile: None,
+            activation_token: Some("wayland-activation-token".to_owned()),
+        })
+    );
+    let mut with_profile = request("correct", "new_window");
+    with_profile.profile = Some("WSL: Ubuntu".to_owned());
+    assert_eq!(
+        decode_control_request(&mut with_profile, "correct"),
+        Some(ControlRequestCommand::OpenNewWindow {
+            profile: Some("WSL: Ubuntu".to_owned()),
+            activation_token: None,
+        })
+    );
+    let mut with_profile_and_token = request("correct", "new_window");
+    with_profile_and_token.profile = Some("WSL: Ubuntu".to_owned());
+    with_profile_and_token.config_path = Some("wayland-activation-token".to_owned());
+    assert_eq!(
+        decode_control_request(&mut with_profile_and_token, "correct"),
+        Some(ControlRequestCommand::OpenNewWindow {
+            profile: Some("WSL: Ubuntu".to_owned()),
+            activation_token: Some("wayland-activation-token".to_owned()),
+        })
     );
     assert_eq!(
         decode_control_request(&mut request("wrong", "new_window"), "correct"),
@@ -115,7 +146,7 @@ fn fresh_window_control_requests_require_authentication_and_no_payload() {
             ..request("correct", "new_window")
         },
         ControlRequest {
-            config_path: Some("config.json".to_owned()),
+            profile: Some(String::new()),
             ..request("correct", "new_window")
         },
         ControlRequest {
@@ -124,6 +155,10 @@ fn fresh_window_control_requests_require_authentication_and_no_payload() {
         },
         ControlRequest {
             working_directory: Some("/tmp".to_owned()),
+            ..request("correct", "new_window")
+        },
+        ControlRequest {
+            config_path: Some("x".repeat(MAX_ACTIVATION_TOKEN_BYTES + 1)),
             ..request("correct", "new_window")
         },
     ] {
@@ -1277,11 +1312,21 @@ fn control_server_delivers_a_token_authenticated_fresh_window_request() {
         serde_json::from_slice(&fs::read(endpoint_path).unwrap()).unwrap();
     assert_eq!(endpoint.version, CONTROL_VERSION);
 
-    let client = thread::spawn(move || send_open_new_window_request(&endpoint).unwrap());
+    let client = thread::spawn(move || {
+        send_open_new_window_request_with_profile_and_token(&endpoint, "WSL: Ubuntu", "dock-token")
+            .unwrap()
+    });
     let command = futures::executor::block_on(received.next()).unwrap();
-    let ProcessControlCommand::OpenNewWindow { completion } = command else {
+    let ProcessControlCommand::OpenNewWindow {
+        profile,
+        activation_token,
+        completion,
+    } = command
+    else {
         panic!("unexpected process control command");
     };
+    assert_eq!(profile.as_deref(), Some("WSL: Ubuntu"));
+    assert_eq!(activation_token.as_deref(), Some("dock-token"));
     completion.send(true).unwrap();
     assert!(client.join().unwrap());
 }
@@ -1604,7 +1649,7 @@ fn control_client_continues_startup_when_fresh_window_is_rejected() {
 
     let client = thread::spawn(move || send_open_new_window_request(&endpoint).unwrap());
     let command = futures::executor::block_on(received.next()).unwrap();
-    let ProcessControlCommand::OpenNewWindow { completion } = command else {
+    let ProcessControlCommand::OpenNewWindow { completion, .. } = command else {
         panic!("unexpected process control command");
     };
     completion.send(false).unwrap();

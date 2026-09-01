@@ -2254,6 +2254,10 @@ fn paints_only_background(cell: &Cell, point: Point, hovered_link: Option<&Range
 }
 
 pub fn is_blank(cell: &Cell) -> bool {
+    if cell.is_hidden() {
+        return true;
+    }
+
     if cell.character() != ' ' {
         return false;
     }

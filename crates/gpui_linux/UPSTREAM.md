@@ -21,6 +21,9 @@ Retain these Zetta patches when synchronizing:
 - keep `set_input_focus` in `X11Window::activate`, which upstream dropped in
   `f4178619ac`; without it a window manager that ignores `_NET_ACTIVE_WINDOW`
   never focuses the activated window;
+- route compositor-issued activation tokens through a local pending-token
+  helper consumed by the next Wayland window activation, keeping this behavior
+  in Zetta's platform fork rather than changing GPUI's upstream trait;
 - omit Zed's platform notification API because Zetta owns notifications at the
   application layer.
 

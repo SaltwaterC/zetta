@@ -40,6 +40,18 @@ pub fn prompt_for_paths_in(
     }
 }
 
+/// Activates a newly opened window using a compositor-issued token when the
+/// current platform supports token-based activation.
+pub fn activate_window_with_token(window: &gpui::Window, activation_token: &str) {
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    gpui_linux::set_next_activation_token(activation_token);
+
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    let _ = activation_token;
+
+    window.activate_window();
+}
+
 /// Returns a background executor for the current platform.
 pub fn background_executor() -> gpui::BackgroundExecutor {
     current_platform(true).background_executor()

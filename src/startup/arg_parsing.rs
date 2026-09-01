@@ -1395,6 +1395,16 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
                 );
                 mode = StartupMode::WindowsEmbedding;
             }
+            // GNOME Shell uses this private no-op argument to notice changes
+            // to the dynamically generated desktop action list. It is
+            // written by the Linux desktop integration and is not user CLI.
+            "--zetta-profile-actions-generation" => {
+                args.next()
+                    .context("--zetta-profile-actions-generation requires a value")?
+                    .to_string_lossy()
+                    .parse::<u64>()
+                    .context("--zetta-profile-actions-generation requires a number")?;
+            }
             "--command" | "-e" => {
                 anyhow::ensure!(
                     mode == StartupMode::Application,
@@ -1415,7 +1425,11 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
         }
     }
     anyhow::ensure!(
-        profile.is_none() || matches!(mode, StartupMode::Application | StartupMode::Command(_)),
+        profile.is_none()
+            || matches!(
+                mode,
+                StartupMode::Application | StartupMode::NewWindow | StartupMode::Command(_)
+            ),
         "--profile cannot be combined with another startup mode"
     );
     anyhow::ensure!(
@@ -1446,10 +1460,6 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
         anyhow::ensure!(
             keymap.is_none(),
             "--new-window cannot be combined with --keymap"
-        );
-        anyhow::ensure!(
-            profile.is_none(),
-            "--new-window cannot be combined with --profile"
         );
         anyhow::ensure!(
             split.is_none(),
@@ -1708,6 +1718,9 @@ fn parse_profile_root_config(arguments: &[OsString]) -> Result<Option<PathBuf>> 
 }
 
 pub(crate) fn should_handoff_to_existing_process(args: &StartupArgs) -> bool {
+    // Plain `--profile` launches intentionally remain independent processes;
+    // only the explicit fresh-window mode can carry a profile to an existing
+    // process.
     matches!(
         args.mode,
         StartupMode::Application | StartupMode::NewWindow | StartupMode::Command(_)
@@ -1715,7 +1728,7 @@ pub(crate) fn should_handoff_to_existing_process(args: &StartupArgs) -> bool {
         && args.keymap_path.is_none()
         && !args.replace_pane
         && !args.no_mux
-        && args.profile.is_none()
+        && (args.profile.is_none() || args.mode == StartupMode::NewWindow)
         && args.split.is_none()
 }
 

@@ -57,6 +57,9 @@ use crate::run_command::{
 /// 18 adds an optional working directory to open-project requests, so opening
 /// a registered project from a managed worktree can preserve that directory.
 ///
+/// A New Window request may carry an optional profile name and a short-lived Wayland activation token in
+/// the private string payload so an existing process can focus its surface.
+///
 /// The current version also includes an explicit fresh-window request, which
 /// must not resume a dormant session the way the existing plain-launch request
 /// does.
@@ -65,6 +68,7 @@ pub(crate) const CONTROL_VERSION: u32 = zmux::protocol::CONTROL_VERSION;
 // one-character arguments and each value is represented as JSON. Keep enough
 // framing headroom for that worst case as well as the endpoint token.
 const MAX_CONTROL_MESSAGE_BYTES: usize = 256 * 1024;
+const MAX_ACTIVATION_TOKEN_BYTES: usize = 4096;
 const CONTROL_COMPLETION_TIMEOUT: Duration = Duration::from_secs(2);
 const CONTROL_COMPLETION_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const CONTROL_CLIENT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -131,6 +135,8 @@ pub(crate) enum ProcessControlCommand {
         completion: Sender<bool>,
     },
     OpenNewWindow {
+        profile: Option<String>,
+        activation_token: Option<String>,
         completion: Sender<bool>,
     },
     OpenProject {
@@ -228,7 +234,10 @@ enum ControlRequestCommand {
         config_path: String,
     },
     OpenWindow,
-    OpenNewWindow,
+    OpenNewWindow {
+        profile: Option<String>,
+        activation_token: Option<String>,
+    },
     OpenProject {
         root: PathBuf,
         working_directory: Option<PathBuf>,
@@ -604,10 +613,15 @@ impl ProcessControlServer {
                                         );
                                     if accepted { "ok" } else { "rejected" }
                                 }
-                                Some(ControlRequestCommand::OpenNewWindow) => {
+                                Some(ControlRequestCommand::OpenNewWindow {
+                                    profile,
+                                    activation_token,
+                                }) => {
                                     let (completion, completed) = channel();
                                     let accepted = commands
                                         .unbounded_send(ProcessControlCommand::OpenNewWindow {
+                                            profile,
+                                            activation_token,
                                             completion,
                                         })
                                         .is_ok()
@@ -1469,7 +1483,7 @@ fn zeroize_control_request_secrets(request: &mut ControlRequest) {
     }
 }
 
-fn control_request_has_no_payload(request: &ControlRequest) -> bool {
+fn control_request_has_new_window_payload(request: &ControlRequest) -> bool {
     request.runner_id.is_none()
         && request.session_id.is_none()
         && request.secret.is_none()
@@ -1485,13 +1499,19 @@ fn control_request_has_no_payload(request: &ControlRequest) -> bool {
         && request.attention_body.is_none()
         && request.tab_name.is_none()
         && request.worktree_name.is_none()
-        && request.config_path.is_none()
         && request.working_directory.is_none()
         && request.split.is_none()
-        && request.profile.is_none()
+        && request
+            .profile
+            .as_deref()
+            .is_none_or(|profile| !profile.is_empty())
         && request.theme.is_none()
         && request.scope.is_none()
         && request.pane_request.is_none()
+        && request
+            .config_path
+            .as_deref()
+            .is_none_or(|token| token.len() <= MAX_ACTIVATION_TOKEN_BYTES)
 }
 
 /// Compares the endpoint token without leaking how many leading bytes matched.
@@ -1530,6 +1550,7 @@ fn decode_control_request(
             | "open_command"
             | "run_wait"
             | "run_complete"
+            | "new_window"
     ) && request.config_path.is_some()
     {
         zeroize_control_request_secrets(request);
@@ -1600,8 +1621,11 @@ fn decode_control_request(
         {
             Some(ControlRequestCommand::OpenWindow)
         }
-        "new_window" if control_request_has_no_payload(request) => {
-            Some(ControlRequestCommand::OpenNewWindow)
+        "new_window" if control_request_has_new_window_payload(request) => {
+            Some(ControlRequestCommand::OpenNewWindow {
+                profile: request.profile.take(),
+                activation_token: request.config_path.take().filter(|token| !token.is_empty()),
+            })
         }
         "open_project"
             if request.runner_id.is_none()
@@ -2186,14 +2210,21 @@ impl Drop for ProcessControlServer {
 }
 
 pub(crate) fn request_existing_process_window() -> Result<bool> {
-    request_existing_process_window_with_command("open_window")
+    request_existing_process_window_with_command("open_window", None, None)
 }
 
-pub(crate) fn request_existing_process_new_window() -> Result<bool> {
-    request_existing_process_window_with_command("new_window")
+pub(crate) fn request_existing_process_new_window(
+    profile: Option<&str>,
+    activation_token: Option<&str>,
+) -> Result<bool> {
+    request_existing_process_window_with_command("new_window", profile, activation_token)
 }
 
-fn request_existing_process_window_with_command(command: &str) -> Result<bool> {
+fn request_existing_process_window_with_command(
+    command: &str,
+    profile: Option<&str>,
+    activation_token: Option<&str>,
+) -> Result<bool> {
     let directory = crate::background_sessions::session_catalog_dir();
     let entries = match fs::read_dir(&directory) {
         Ok(entries) => entries,
@@ -2221,7 +2252,9 @@ fn request_existing_process_window_with_command(command: &str) -> Result<bool> {
             let _ = fs::remove_file(endpoint.socket_path);
             continue;
         }
-        if send_open_window_request_with_command(&endpoint, command).unwrap_or(false) {
+        if send_open_window_request_with_command(&endpoint, command, profile, activation_token)
+            .unwrap_or(false)
+        {
             return Ok(true);
         }
     }
@@ -2956,17 +2989,33 @@ pub(crate) fn request_process_tab_name(process_id: u32, request: TabNameRequest)
 
 #[cfg(test)]
 fn send_open_window_request(endpoint: &ControlEndpoint) -> Result<bool> {
-    send_open_window_request_with_command(endpoint, "open_window")
+    send_open_window_request_with_command(endpoint, "open_window", None, None)
 }
 
 #[cfg(test)]
 fn send_open_new_window_request(endpoint: &ControlEndpoint) -> Result<bool> {
-    send_open_window_request_with_command(endpoint, "new_window")
+    send_open_window_request_with_command(endpoint, "new_window", None, None)
+}
+
+#[cfg(test)]
+fn send_open_new_window_request_with_profile_and_token(
+    endpoint: &ControlEndpoint,
+    profile: &str,
+    activation_token: &str,
+) -> Result<bool> {
+    send_open_window_request_with_command(
+        endpoint,
+        "new_window",
+        Some(profile),
+        Some(activation_token),
+    )
 }
 
 fn send_open_window_request_with_command(
     endpoint: &ControlEndpoint,
     command: &str,
+    profile: Option<&str>,
+    activation_token: Option<&str>,
 ) -> Result<bool> {
     let mut stream = UnixStream::connect(&endpoint.socket_path)?;
     stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
@@ -2991,10 +3040,10 @@ fn send_open_window_request_with_command(
             attention_body: None,
             tab_name: None,
             worktree_name: None,
-            config_path: None,
+            config_path: activation_token.map(str::to_owned),
             working_directory: None,
             split: None,
-            profile: None,
+            profile: profile.map(str::to_owned),
             theme: None,
             scope: None,
             pane_request: None,

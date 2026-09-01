@@ -293,6 +293,38 @@ impl SettingsEditor {
         self.dropdown_query.clear();
     }
 
+    /// Refresh the global configuration form after an external configuration
+    /// reload. The form is deliberately kept while the settings dialog is
+    /// open, so it otherwise becomes a snapshot of the profile list from when
+    /// the dialog was opened.
+    ///
+    /// A dirty form is left alone: replacing it would discard edits the user
+    /// has not saved yet. A clean form has no local state to preserve, so it
+    /// can be rebuilt from the newly resolved configuration and the file on
+    /// disk.
+    pub(crate) fn refresh_configuration(&mut self, config: &Config) -> Result<()> {
+        if self.configuration_dirty {
+            return Ok(());
+        }
+
+        let configuration = ConfigurationForm::load(&config.config_path, config)?;
+        let mut pane_template_names = configuration.pane_templates.names();
+        pane_template_names.sort();
+
+        self.configuration = configuration;
+        self.profile_names = config
+            .profiles
+            .iter()
+            .map(|profile| profile.name.clone())
+            .collect::<Vec<_>>()
+            .into();
+        self.pane_template_names = pane_template_names.into();
+        self.clear_dropdown();
+        self.focus_scroll_request = None;
+        invalidate_controls_cache(self);
+        Ok(())
+    }
+
     pub(crate) fn dismiss_profile_draft(&mut self) {
         self.profile_draft = None;
         self.clear_dropdown();

@@ -70,3 +70,34 @@ fn jump_list_icons_use_embedded_resources_or_executable_icons() {
         (executable_path, 0)
     );
 }
+
+#[cfg(windows)]
+#[test]
+fn jump_list_profile_actions_open_fresh_profile_windows() {
+    assert_eq!(
+        profile_jump_list_arguments("PowerShell"),
+        "--new-window --profile PowerShell"
+    );
+    assert_eq!(
+        profile_jump_list_arguments("WSL: Ubuntu"),
+        r#"--new-window --profile "WSL: Ubuntu""#
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn jump_list_omits_hidden_profiles() {
+    let profile = |name: &str| Profile {
+        name: name.to_owned(),
+        command: task::Shell::System,
+        theme: None,
+        dark_theme: None,
+        icon: crate::profile_icon::ProfileIcon::Zetta,
+    };
+    let profiles = [profile("Visible"), profile("Hidden")];
+    let hidden_profiles = std::collections::HashSet::from(["hidden".to_owned()]);
+    let names = visible_profile_jump_list_profiles(&profiles, &hidden_profiles)
+        .map(|profile| profile.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["Visible"]);
+}

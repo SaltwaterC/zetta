@@ -31,7 +31,9 @@ use wayland_protocols_plasma::blur::client::org_kde_kwin_blur;
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1;
 
 use crate::linux::wayland::{display::WaylandDisplay, serial::SerialKind};
-use crate::linux::{Globals, Output, WaylandClientStatePtr, get_window};
+use crate::linux::{
+    Globals, Output, WaylandClientStatePtr, get_window, take_next_activation_token,
+};
 use gpui::{
     AnyWindowHandle, Bounds, Capslock, Decorations, DevicePixels, GpuSpecs, Modifiers, Pixels,
     PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
@@ -1762,6 +1764,14 @@ impl PlatformWindow for WaylandWindow {
     }
 
     fn activate(&self) {
+        if let Some(activation_token) = take_next_activation_token() {
+            let state = self.borrow();
+            if let Some(activation) = state.globals.activation.as_ref() {
+                activation.activate(activation_token, &state.surface);
+                return;
+            }
+        }
+
         // Try to request an activation token. Even though the activation is likely going to be rejected,
         // KWin and Mutter can use the app_id to visually indicate we're requesting attention.
         let state = self.borrow();

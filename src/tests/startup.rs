@@ -208,12 +208,21 @@ fn linux_desktop_entry_matches_app_id() {
     let makefile = include_str!("../../Makefile");
     assert!(desktop_entry.contains(&format!("\nIcon={ZETTA_APP_ID}\n")));
     assert!(desktop_entry.contains(&format!("\nStartupWMClass={ZETTA_APP_ID}\n")));
+    assert!(desktop_entry.contains("# ZETTA MANAGED PROFILE ACTIONS BEGIN"));
+    assert!(desktop_entry.contains("# ZETTA MANAGED PROFILE ACTIONS END"));
     assert!(desktop_entry.contains("\nActions=new-window;\n"));
+    assert!(desktop_entry.contains("\nExec=zetta --new-window\n"));
     assert!(
         desktop_entry
             .contains("[Desktop Action new-window]\nName=New Window\nExec=zetta --new-window\n")
     );
-    assert!(makefile.contains("-e 's|^Exec=zetta$$|Exec=$(BINDIR)/zetta|'"));
+    assert!(
+        makefile.contains("-e \"s|^Exec=zetta --new-window$$|Exec=$(BINDIR)/zetta --new-window|\"")
+    );
+    assert!(makefile.contains("desktop_source=\"$$desktop_entry\""));
+    assert!(makefile.contains("ZETTA MANAGED PROFILE GROUPS BEGIN"));
+    assert!(makefile.contains("mv -f \"$$desktop_tmp\" \"$$desktop_entry\""));
+    assert!(!makefile.contains("-e 's|^Exec=zetta$$|Exec=$(BINDIR)/zetta|'"));
     assert!(!makefile.contains("-e 's|^Exec=.*|Exec=$(BINDIR)/zetta|'"));
 }
 

@@ -25,6 +25,31 @@ pub(crate) use x11::*;
 
 use std::{path::PathBuf, rc::Rc};
 
+#[cfg(feature = "wayland")]
+use std::sync::{Mutex, OnceLock};
+
+#[cfg(feature = "wayland")]
+static NEXT_ACTIVATION_TOKEN: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+#[cfg(feature = "wayland")]
+pub(crate) fn set_next_activation_token(activation_token: &str) {
+    *NEXT_ACTIVATION_TOKEN
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+        (!activation_token.is_empty()).then(|| activation_token.to_owned());
+}
+
+#[cfg(not(feature = "wayland"))]
+pub(crate) fn set_next_activation_token(_activation_token: &str) {}
+
+#[cfg(feature = "wayland")]
+pub(crate) fn take_next_activation_token() -> Option<String> {
+    NEXT_ACTIVATION_TOKEN
+        .get()
+        .and_then(|token| token.lock().ok()?.take())
+}
+
 /// A path picker rooted at a starting directory.
 ///
 /// `Platform::prompt_for_paths` cannot express one and `PathPromptOptions` is

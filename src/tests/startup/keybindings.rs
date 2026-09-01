@@ -807,6 +807,43 @@ fn native_macos_menus_duplicate_the_title_bar_menus() {
     assert_eq!(action_names, [MinimizeWindow.name(), ZoomWindow.name()]);
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn native_macos_dock_menu_contains_visible_profile_actions() {
+    let profiles = vec![
+        Profile {
+            name: "Visible".to_owned(),
+            command: Shell::System,
+            theme: None,
+            dark_theme: None,
+            icon: ProfileIcon::Zetta,
+        },
+        Profile {
+            name: "Hidden".to_owned(),
+            command: Shell::System,
+            theme: None,
+            dark_theme: None,
+            icon: ProfileIcon::Zetta,
+        },
+    ];
+    let hidden_profiles = HashSet::from(["hidden".to_owned()]);
+    let items = native_macos_dock_menu(&profiles, &hidden_profiles);
+    let profile_actions = items
+        .into_iter()
+        .filter_map(|item| match item {
+            MenuItem::Action { name, action, .. } => action
+                .as_any()
+                .downcast_ref::<OpenProfileWindow>()
+                .map(|profile| (name.to_string(), profile.profile.clone())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        profile_actions,
+        vec![("Visible".to_owned(), "Visible".to_owned())]
+    );
+}
+
 #[test]
 fn sharing_a_tab_has_its_own_shortcut() {
     // Sharing is a workflow of its own, not a step inside detaching, so it has

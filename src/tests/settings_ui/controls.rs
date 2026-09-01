@@ -189,6 +189,40 @@ fn dismissing_the_profile_modal_clears_each_draft_dropdown() {
     }
 }
 
+#[test]
+fn reloading_a_clean_configuration_editor_shows_new_configured_profiles() {
+    let path = std::env::temp_dir().join(format!(
+        "zetta-settings-profile-refresh-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let old_config = Config::parse("{}", Some(&path), None).unwrap();
+    let mut editor = configuration_editor(&old_config);
+
+    std::fs::write(
+        &path,
+        r#"{"profiles":[{"name":"x","program":"x","args":[] }]}"#,
+    )
+    .unwrap();
+    let new_config = Config::load(Some(&path), None).unwrap();
+
+    editor.refresh_configuration(&new_config).unwrap();
+
+    let profile = editor
+        .configuration
+        .profiles
+        .iter()
+        .find(|profile| profile.name.text == "x")
+        .expect("the newly configured profile should be in the form");
+    assert_eq!(profile.program.text, "x");
+    assert!(editor.profile_names.iter().any(|name| name == "x"));
+
+    std::fs::remove_file(path).unwrap();
+}
+
 /// A Configuration-page editor with no files behind it: the form falls back to
 /// its bundled defaults when the path does not exist, which is all the tab order
 /// depends on.

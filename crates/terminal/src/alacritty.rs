@@ -637,6 +637,11 @@ impl Cell {
     }
 
     #[inline]
+    pub fn is_hidden(&self) -> bool {
+        self.cell.flags.contains(Flags::HIDDEN)
+    }
+
+    #[inline]
     pub fn is_wide_char_spacer(&self) -> bool {
         self.cell.flags.contains(Flags::WIDE_CHAR_SPACER)
     }
@@ -944,6 +949,11 @@ pub(super) fn clear_saved_screen(term: &mut Term<ZedListener>) {
     if (new_cursor.line.0 as usize) < term.screen_lines() - 1 {
         term.grid_mut().reset_region((new_cursor.line + 1)..);
     }
+}
+
+pub(super) fn clear_current_line(term: &mut Term<ZedListener>) {
+    let cursor_line = term.grid().cursor.point.line;
+    term.grid_mut().reset_region(cursor_line..=cursor_line);
 }
 
 pub(super) fn shrink_to_used(term: &mut Term<ZedListener>) {

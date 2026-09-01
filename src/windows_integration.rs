@@ -4,6 +4,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use std::{
+    collections::HashSet,
     env,
     ffi::c_void,
     os::windows::io::{AsRawHandle as _, FromRawHandle as _, IntoRawHandle as _, OwnedHandle},
@@ -56,7 +57,7 @@ use windows::{
 };
 use windows_core::{HRESULT, Ref, interface};
 
-use crate::{Profile, ZETTA_APP_ID};
+use crate::{Profile, ZETTA_APP_ID, profile_is_hidden};
 
 const PKEY_APP_USER_MODEL_ID: PROPERTYKEY = PROPERTYKEY {
     fmtid: GUID::from_u128(0x9f4c2855_9f79_4b39_a8d0_e1d42de1d5f3),
@@ -654,12 +655,16 @@ impl Drop for ComApartment {
     }
 }
 
-pub(crate) fn register_shell_integration(shortcut_path: &Path, profiles: &[Profile]) -> Result<()> {
+pub(crate) fn register_shell_integration(
+    shortcut_path: &Path,
+    profiles: &[Profile],
+    hidden_profiles: &HashSet<String>,
+) -> Result<()> {
     let _ = register_terminal_server()?;
     let _apartment = ComApartment::initialize().context("initializing COM")?;
     set_process_app_id()?;
     set_shortcut_app_id(shortcut_path)?;
-    write_profile_jump_list(profiles)
+    write_profile_jump_list(profiles, hidden_profiles)
 }
 
 fn gui_executable() -> Result<PathBuf> {
@@ -1041,7 +1046,7 @@ pub(crate) fn is_default_terminal() -> bool {
         .is_some_and(|value| value.eq_ignore_ascii_case(ZETTA_TERMINAL_HANDOFF_CLSID_TEXT))
 }
 
-pub(crate) fn update_profile_jump_list(profiles: Vec<Profile>) {
+pub(crate) fn update_profile_jump_list(profiles: Vec<Profile>, hidden_profiles: HashSet<String>) {
     let generation = JUMP_LIST_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
     if let Err(error) = thread::Builder::new()
         .name("zetta-jump-list".to_owned())
@@ -1054,7 +1059,7 @@ pub(crate) fn update_profile_jump_list(profiles: Vec<Profile>) {
             }
             let result = ComApartment::initialize()
                 .context("initializing COM")
-                .and_then(|_apartment| write_profile_jump_list(&profiles));
+                .and_then(|_apartment| write_profile_jump_list(&profiles, &hidden_profiles));
             if let Err(error) = result {
                 eprintln!("Could not update the Zetta profile Jump List: {error:#}");
             }
@@ -1092,7 +1097,16 @@ fn set_shortcut_app_id(shortcut_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn write_profile_jump_list(profiles: &[Profile]) -> Result<()> {
+fn visible_profile_jump_list_profiles<'a>(
+    profiles: &'a [Profile],
+    hidden_profiles: &'a HashSet<String>,
+) -> impl Iterator<Item = &'a Profile> {
+    profiles
+        .iter()
+        .filter(move |profile| !profile_is_hidden(profile, hidden_profiles))
+}
+
+fn write_profile_jump_list(profiles: &[Profile], hidden_profiles: &HashSet<String>) -> Result<()> {
     let target = env::current_exe()
         .context("finding the Zetta executable")?
         .with_file_name("zetta-gui.exe");
@@ -1117,7 +1131,7 @@ fn write_profile_jump_list(profiles: &[Profile]) -> Result<()> {
             let tasks: IObjectCollection =
                 CoCreateInstance(&EnumerableObjectCollection, None, CLSCTX_INPROC_SERVER)
                     .context("creating the profile task collection")?;
-            for profile in profiles {
+            for profile in visible_profile_jump_list_profiles(profiles, hidden_profiles) {
                 let link = create_profile_link(&target, profile)?;
                 tasks
                     .AddObject(&link)
@@ -1141,10 +1155,7 @@ fn create_profile_link(target: &Path, profile: &Profile) -> Result<IShellLinkW> 
         let (icon_path, icon_index) = profile.icon.jump_list_icon_location(target);
         let icon_path = HSTRING::from(icon_path.as_os_str());
         let target = HSTRING::from(target.as_os_str());
-        let arguments = HSTRING::from(format!(
-            "--profile {}",
-            quote_windows_argument(&profile.name)
-        ));
+        let arguments = HSTRING::from(profile_jump_list_arguments(&profile.name));
         let description = HSTRING::from(format!("Open Zetta with {}", profile.name));
         link.SetPath(&target)
             .context("setting the profile target")?;
@@ -1169,6 +1180,13 @@ fn create_profile_link(target: &Path, profile: &Profile) -> Result<IShellLinkW> 
             .context("committing profile task properties")?;
         Ok(link)
     }
+}
+
+fn profile_jump_list_arguments(profile_name: &str) -> String {
+    format!(
+        "--new-window --profile {}",
+        quote_windows_argument(profile_name)
+    )
 }
 
 fn quote_windows_argument(argument: &str) -> String {
