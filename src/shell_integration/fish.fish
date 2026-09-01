@@ -1,4 +1,22 @@
 # Zetta shell integration for Fish.
+if not functions -q __zetta_capture_startup_history
+    function __zetta_capture_startup_history --on-event fish_postexec
+        if string match -q -- '*__zed_init_command_history_*' "$argv[1]"
+            set -g __zetta_startup_history_command "$argv[1]"
+            commandline -f repaint
+        end
+    end
+end
+if not functions -q __zetta_remove_startup_history
+    function __zetta_remove_startup_history --on-event fish_prompt
+        if set -q __zetta_startup_history_command
+            builtin history delete --case-sensitive --exact -- "$__zetta_startup_history_command" >/dev/null 2>/dev/null
+            builtin history save
+            set -e __zetta_startup_history_command
+        end
+    end
+end
+
 if set -q ZETTA_HOST_EXECUTABLE; and test -n "$ZETTA_HOST_EXECUTABLE"
     function zetta
         command $ZETTA_HOST_EXECUTABLE $argv

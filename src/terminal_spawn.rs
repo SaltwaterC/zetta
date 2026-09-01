@@ -639,6 +639,10 @@ impl Zetta {
             );
             add_wsl_environment_variables(&mut environment);
         }
+        #[cfg(not(windows))]
+        if let Err(error) = configure_zsh_history_environment(&shell, &mut environment, pane_id) {
+            log::warn!("could not configure early zsh history filtering: {error:#}");
+        }
         let shell_integration_startup_command = (!is_wsl)
             .then(|| shell_integration_startup_command(&shell))
             .flatten();
@@ -1466,4 +1470,52 @@ impl Zetta {
             self.publish_background_session_catalog(cx);
         }
     }
+}
+
+#[cfg(not(windows))]
+fn configure_zsh_history_environment<S>(
+    shell: &Shell,
+    environment: &mut HashMap<String, String, S>,
+    pane_id: u64,
+) -> Result<()>
+where
+    S: std::hash::BuildHasher,
+{
+    let program = shell.program();
+    let is_zsh = Path::new(&program)
+        .file_stem()
+        .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("zsh"));
+    if !is_zsh || shell_integration_startup_command(shell).is_none() {
+        return Ok(());
+    }
+
+    let directory = tempfile::Builder::new()
+        .prefix(&format!("zetta-zsh-history-{pane_id}-"))
+        .tempdir()
+        .context("creating temporary zsh history directory")?;
+    let zshenv = directory.path().join(".zshenv");
+    fs::write(&zshenv, ZSH_EARLY_HISTORY_INTEGRATION.as_bytes())
+        .with_context(|| format!("writing {}", zshenv.display()))?;
+    let directory = directory.keep();
+    let directory = directory
+        .to_str()
+        .context("temporary zsh history directory is not valid UTF-8")?
+        .to_owned();
+
+    let original_zdotdir = environment
+        .get("ZDOTDIR")
+        .cloned()
+        .filter(|value| !value.is_empty());
+    environment.insert("ZETTA_ZSH_HISTORY_ZDOTDIR".to_owned(), directory.clone());
+    environment.insert(
+        "ZETTA_ZSH_ORIGINAL_ZDOTDIR_SET".to_owned(),
+        u8::from(original_zdotdir.is_some()).to_string(),
+    );
+    if let Some(original_zdotdir) = original_zdotdir {
+        environment.insert("ZETTA_ZSH_ORIGINAL_ZDOTDIR".to_owned(), original_zdotdir);
+    } else {
+        environment.remove("ZETTA_ZSH_ORIGINAL_ZDOTDIR");
+    }
+    environment.insert("ZDOTDIR".to_owned(), directory);
+    Ok(())
 }

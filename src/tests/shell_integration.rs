@@ -197,6 +197,29 @@ fn zsh_lifecycle_tracker_does_not_assign_to_read_only_status() {
 }
 
 #[test]
+fn zsh_integration_filters_zetta_startup_history() {
+    let zsh = ShellIntegration::Zsh.script();
+
+    assert!(zsh.contains("function __zetta_filter_startup_history()"));
+    assert!(zsh.contains("__zed_init_command_history_"));
+    assert!(zsh.contains("fc -p"));
+    assert!(zsh.contains("add-zsh-hook zshaddhistory __zetta_filter_startup_history"));
+}
+
+#[test]
+fn fish_integration_filters_zetta_startup_history() {
+    let fish = ShellIntegration::Fish.script();
+
+    assert!(fish.contains("function __zetta_capture_startup_history"));
+    assert!(fish.contains("--on-event fish_postexec"));
+    assert!(fish.contains("__zed_init_command_history_"));
+    assert!(fish.contains("builtin history delete --case-sensitive --exact"));
+    assert!(fish.contains("commandline -f repaint"));
+    assert!(fish.contains("function __zetta_remove_startup_history"));
+    assert!(fish.contains("--on-event fish_prompt"));
+}
+
+#[test]
 fn zsh_reload_replaces_an_already_installed_broken_tracker() {
     use std::io::Write as _;
     use std::process::Stdio;

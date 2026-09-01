@@ -706,6 +706,9 @@ const BASH_INTEGRATION: &str = include_str!("shell_integration/bash.sh");
 const FISH_INTEGRATION: &str = include_str!("shell_integration/fish.fish");
 const POWERSHELL_INTEGRATION: &str = include_str!("shell_integration/powershell.ps1");
 const ZSH_INTEGRATION: &str = include_str!("shell_integration/zsh.zsh");
+#[cfg(not(windows))]
+pub(crate) const ZSH_EARLY_HISTORY_INTEGRATION: &str =
+    include_str!("shell_integration/zsh_history.zsh");
 
 #[cfg(test)]
 #[path = "tests/shell_integration.rs"]

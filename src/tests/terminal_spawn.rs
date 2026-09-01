@@ -41,6 +41,36 @@ fn native_shell_bootstrap_loads_the_owner_integration_only_when_needed() {
     );
 }
 
+#[cfg(not(windows))]
+#[test]
+fn native_zsh_history_filter_is_installed_before_startup_command() {
+    let mut environment = HashMap::from([
+        ("HOME".to_owned(), "/home/tester".to_owned()),
+        ("ZDOTDIR".to_owned(), "/home/tester/config".to_owned()),
+    ]);
+
+    configure_zsh_history_environment(
+        &Shell::Program("zsh".to_owned()),
+        &mut environment,
+        987654321,
+    )
+    .unwrap();
+
+    let directory = PathBuf::from(&environment["ZETTA_ZSH_HISTORY_ZDOTDIR"]);
+    let script = fs::read_to_string(directory.join(".zshenv")).unwrap();
+    assert!(script.contains("zshaddhistory"));
+    assert!(script.contains("fc -p"));
+    assert_eq!(environment["ZDOTDIR"], directory.to_str().unwrap());
+    assert_eq!(
+        environment["ZETTA_ZSH_ORIGINAL_ZDOTDIR"],
+        "/home/tester/config"
+    );
+    assert_eq!(environment["ZETTA_ZSH_ORIGINAL_ZDOTDIR_SET"], "1");
+
+    fs::remove_file(directory.join(".zshenv")).unwrap();
+    fs::remove_dir(directory).unwrap();
+}
+
 #[test]
 fn pane_template_environment_overrides_merge_without_replacing_zetta_variables() {
     let mut environment = HashMap::from([

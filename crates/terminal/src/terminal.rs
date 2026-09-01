@@ -86,7 +86,7 @@ use crate::alacritty::{
     AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittyPty, AlacrittySearch,
     AlacrittyTerm, AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, PtyIo, PtySender,
     RegexSearches, ScrollbackSearch, WakeupGate, ZedListener, append_text_to_term, apply_config,
-    clear_saved_screen, content_text, display_offset, display_only_term_config,
+    clear_current_line, clear_saved_screen, content_text, display_offset, display_only_term_config,
     find_from_terminal_point, full_content_range, last_non_empty_lines, make_content, new_term,
     open_pty, pty_options, pty_term_config, resize, screen_lines, scroll_display, scroll_to_point,
     selection_text, set_default_cursor_style, set_selection as set_term_selection, shrink_to_used,
@@ -1682,6 +1682,8 @@ impl Drop for TerminalSyncDiagnostic {
 }
 
 const INIT_COMMAND_STARTUP_MARKER_PREFIX: &str = "__zed_init_command_ready_";
+const INIT_COMMAND_STARTUP_DONE_TITLE_PREFIX: &str = "zetta-init-command-done:";
+const INIT_COMMAND_STARTUP_HISTORY_MARKER_PREFIX: &str = "__zed_init_command_history_";
 const INIT_COMMAND_STARTUP_MARKER_SUFFIX: &str = "__";
 const INIT_COMMAND_STARTUP_MARKER_SEARCH_LINES: usize = 64;
 
@@ -1716,10 +1718,32 @@ fn init_command_startup_marker(marker_id: u64) -> String {
     format!("{INIT_COMMAND_STARTUP_MARKER_PREFIX}{marker_id}{INIT_COMMAND_STARTUP_MARKER_SUFFIX}")
 }
 
+fn init_command_startup_done_title(marker_id: u64) -> String {
+    format!("{INIT_COMMAND_STARTUP_DONE_TITLE_PREFIX}{marker_id}")
+}
+
+fn init_command_startup_history_marker(marker_id: u64) -> String {
+    format!(
+        "{INIT_COMMAND_STARTUP_HISTORY_MARKER_PREFIX}{marker_id}{INIT_COMMAND_STARTUP_MARKER_SUFFIX}"
+    )
+}
+
 fn init_command_startup_marker_command(shell_kind: ShellKind, marker_id: u64) -> String {
     // Split the marker across the command so its echo can't satisfy the
     // handshake; only the command's output contains the contiguous marker.
+    let marker = format!(
+        "printf '\\033[8m%s%s%s\\033[0m\\n' {INIT_COMMAND_STARTUP_MARKER_PREFIX} {marker_id} {INIT_COMMAND_STARTUP_MARKER_SUFFIX}"
+    );
+    let done_marker =
+        format!("printf '\\033]2;{INIT_COMMAND_STARTUP_DONE_TITLE_PREFIX}%s\\033\\\\' {marker_id}");
+    let history_marker = init_command_startup_history_marker(marker_id);
     match shell_kind {
+        ShellKind::Posix => format!(
+            " if [ -n \"${{BASH_VERSION:-}}\" ]; then builtin history -d -1 2>/dev/null || :; fi; stty -echo; {marker}; IFS= read -r __zed_init_command_ready_payload; if [ -n \"$__zed_init_command_ready_payload\" ]; then eval \"$__zed_init_command_ready_payload\"; fi; stty echo; {done_marker}; : # {history_marker}"
+        ),
+        ShellKind::Fish => format!(
+            " stty -echo -icanon min 1; {marker}; read --null __zed_init_command_ready_payload; if test -n \"$__zed_init_command_ready_payload\"; eval \"$__zed_init_command_ready_payload\"; end; stty echo icanon; {done_marker}; # {history_marker}"
+        ),
         ShellKind::PowerShell | ShellKind::Pwsh => format!(
             "Write-Output ('{INIT_COMMAND_STARTUP_MARKER_PREFIX}' + '{marker_id}' + '{INIT_COMMAND_STARTUP_MARKER_SUFFIX}')"
         ),
@@ -1733,15 +1757,9 @@ fn init_command_startup_marker_command(shell_kind: ShellKind, marker_id: u64) ->
                 "print $\"{INIT_COMMAND_STARTUP_MARKER_PREFIX}({marker_id}){INIT_COMMAND_STARTUP_MARKER_SUFFIX}\""
             )
         }
-        ShellKind::Posix
-        | ShellKind::Csh
-        | ShellKind::Tcsh
-        | ShellKind::Rc
-        | ShellKind::Fish
-        | ShellKind::Xonsh
-        | ShellKind::Elvish => format!(
-            "printf '%s%s%s\\n' {INIT_COMMAND_STARTUP_MARKER_PREFIX} {marker_id} {INIT_COMMAND_STARTUP_MARKER_SUFFIX}"
-        ),
+        ShellKind::Csh | ShellKind::Tcsh | ShellKind::Rc | ShellKind::Xonsh | ShellKind::Elvish => {
+            marker
+        }
     }
 }
 
@@ -2064,7 +2082,11 @@ impl TerminalBuilder {
             task_exit_code: None,
             keyboard_input_sent: false,
             init_command_startup_marker: None,
+            init_command_startup_done_title: None,
+            init_command_startup_suppress_render: false,
             init_command_startup_tx: None,
+            init_command_startup_echo_disabled: false,
+            init_command_startup_uses_nul: false,
             event_loop_task: Task::ready(Ok(())),
             background_executor: background_executor.clone(),
             path_style,
@@ -2685,7 +2707,11 @@ impl TerminalBuilder {
                 task_exit_code: None,
                 keyboard_input_sent: false,
                 init_command_startup_marker: None,
+                init_command_startup_done_title: None,
+                init_command_startup_suppress_render: false,
                 init_command_startup_tx: None,
+                init_command_startup_echo_disabled: false,
+                init_command_startup_uses_nul: false,
                 event_loop_task: Task::ready(Ok(())),
                 background_executor,
                 path_style,
@@ -2948,7 +2974,21 @@ pub struct Terminal {
     task_exit_code: Option<i32>,
     keyboard_input_sent: bool,
     init_command_startup_marker: Option<String>,
+    /// A private title emitted after the payload has been evaluated and echo
+    /// has been restored.
+    init_command_startup_done_title: Option<String>,
+    /// Keeps the frame from changing while the hidden startup command is
+    /// being entered. Fish redraws its command line itself, so PTY echo
+    /// settings cannot make this interval invisible.
+    init_command_startup_suppress_render: bool,
     init_command_startup_tx: Option<Sender<()>>,
+    /// POSIX-like startup handshakes disable PTY echo and wait for the
+    /// programmatically-generated command as a `read` payload. Keep this set
+    /// until that payload is written, or until real input needs to cancel it.
+    init_command_startup_echo_disabled: bool,
+    /// Fish's NUL-delimited `read` requires noncanonical terminal input,
+    /// which is restored when the startup payload finishes or is cancelled.
+    init_command_startup_uses_nul: bool,
     event_loop_task: Task<Result<(), anyhow::Error>>,
     background_executor: BackgroundExecutor,
     path_style: PathStyle,
@@ -3110,6 +3150,11 @@ impl Terminal {
     fn process_event(&mut self, event: TerminalBackendEvent, cx: &mut Context<Self>) {
         match event {
             TerminalBackendEvent::Title(title) => {
+                if self.init_command_startup_done_title.as_deref() == Some(title.as_str()) {
+                    self.init_command_startup_done_title = None;
+                    self.release_init_command_startup_render();
+                    return;
+                }
                 if let Some(event) = lifecycle_event_from_title(&title) {
                     cx.emit(event);
                     return;
@@ -3810,6 +3855,7 @@ impl Terminal {
     pub fn input(&mut self, input: impl Into<Cow<'static, [u8]>>) {
         self.keyboard_input_sent = true;
         self.complete_init_command_startup_handshake();
+        self.cancel_init_command_startup();
         self.write_input(input);
     }
 
@@ -3927,9 +3973,16 @@ impl Terminal {
 
         let marker_id = NEXT_INIT_COMMAND_STARTUP_MARKER_ID.fetch_add(1, Ordering::Relaxed);
         self.init_command_startup_marker = Some(init_command_startup_marker(marker_id));
+        let shell_kind = interaction_shell_kind(&self.template.shell, self.path_style);
+        let hides_startup_command = matches!(shell_kind, ShellKind::Posix | ShellKind::Fish);
+        self.init_command_startup_done_title =
+            hides_startup_command.then(|| init_command_startup_done_title(marker_id));
+        self.init_command_startup_suppress_render = hides_startup_command;
         self.init_command_startup_tx = Some(startup_tx);
 
-        let shell_kind = interaction_shell_kind(&self.template.shell, self.path_style);
+        self.init_command_startup_echo_disabled =
+            matches!(shell_kind, ShellKind::Posix | ShellKind::Fish);
+        self.init_command_startup_uses_nul = matches!(shell_kind, ShellKind::Fish);
         let mut input = init_command_startup_marker_command(shell_kind, marker_id).into_bytes();
         input.push(b'\x0d');
         self.write_to_pty(input);
@@ -3944,9 +3997,8 @@ impl Terminal {
 
         let has_marker = {
             let term = self.term.lock_unfair();
-            last_non_empty_lines(&term, INIT_COMMAND_STARTUP_MARKER_SEARCH_LINES)
-                .iter()
-                .any(|line| line.contains(marker))
+            let lines = last_non_empty_lines(&term, INIT_COMMAND_STARTUP_MARKER_SEARCH_LINES);
+            lines.iter().any(|line| line.contains(marker))
         };
 
         if has_marker {
@@ -3961,6 +4013,13 @@ impl Terminal {
                 Ok(()) | Err(async_channel::TrySendError::Full(())) => {}
                 Err(async_channel::TrySendError::Closed(())) => {}
             }
+        }
+    }
+
+    fn release_init_command_startup_render(&mut self) {
+        if self.init_command_startup_suppress_render {
+            self.init_command_startup_suppress_render = false;
+            self.content_dirty = true;
         }
     }
 
@@ -3982,22 +4041,65 @@ impl Terminal {
     ) -> bool {
         // Ends the handshake even if the marker was never seen (timeout
         // fallback), so detection stops scanning on every wakeup.
+        let marker_was_pending = self.init_command_startup_marker.is_some();
         self.complete_init_command_startup_handshake();
 
         if self.keyboard_input_sent || self.child_exited.is_some() || self.terminal_exit_reported {
+            self.cancel_init_command_startup();
             return false;
         }
 
+        if marker_was_pending {
+            // The shell did not acknowledge the wrapper. Do not leave the
+            // terminal displaying its old frame forever while falling back to
+            // the original direct-input behavior.
+            self.init_command_startup_done_title = None;
+            self.release_init_command_startup_render();
+        }
         self.clear_for_init_command(cx);
         self.write_init_command(input);
+        if self.init_command_startup_uses_nul {
+            self.write_to_pty(b"\0");
+        }
+        // The POSIX-like marker command evaluates this line as its payload and
+        // restores PTY echo after the evaluation completes.
+        self.init_command_startup_echo_disabled = false;
+        self.init_command_startup_uses_nul = false;
         true
+    }
+
+    fn cancel_init_command_startup(&mut self) {
+        if !self.init_command_startup_echo_disabled {
+            return;
+        }
+
+        self.init_command_startup_echo_disabled = false;
+        // The marker command is waiting in `read` for the startup payload.
+        // An empty payload cancels it; the marker command then restores echo
+        // before the real keystrokes that raced the handshake.
+        if self.init_command_startup_uses_nul {
+            self.write_to_pty(b"\0");
+        } else {
+            self.write_to_pty(b"\r");
+        }
+        self.init_command_startup_done_title = None;
+        if self.init_command_startup_suppress_render {
+            let mut term = self.term.lock_unfair();
+            clear_saved_screen(&mut term);
+            clear_current_line(&mut term);
+        }
+        self.release_init_command_startup_render();
+        self.init_command_startup_uses_nul = false;
     }
 
     fn clear_for_init_command(&mut self, cx: &mut Context<Self>) {
         let mut term = self.term.lock_unfair();
         clear_saved_screen(&mut term);
-        self.last_content = make_content(&term, &mut self.last_content);
-        self.content_revision = self.content_revision.wrapping_add(1);
+        if !self.init_command_startup_suppress_render {
+            self.last_content = make_content(&term, &mut self.last_content);
+            self.content_revision = self.content_revision.wrapping_add(1);
+        }
+        self.content_dirty = true;
         drop(term);
         self.reset_cwd_history();
         cx.emit(Event::Wakeup);
@@ -4199,7 +4301,7 @@ impl Terminal {
             self.process_terminal_event(&e, &mut terminal, window, cx)
         }
 
-        if self.content_dirty {
+        if self.content_dirty && !self.init_command_startup_suppress_render {
             self.last_content = make_content(&terminal, &mut self.last_content);
             self.content_dirty = false;
             self.content_revision = self.content_revision.wrapping_add(1);
@@ -5164,6 +5266,10 @@ impl Terminal {
             self.child_exited = Some(exit_status.clone());
         }
         self.complete_init_command_startup_handshake();
+        self.init_command_startup_done_title = None;
+        self.release_init_command_startup_render();
+        self.init_command_startup_echo_disabled = false;
+        self.init_command_startup_uses_nul = false;
 
         let exited = TerminalExited {
             exit_code: exit_status.as_ref().and_then(|status| status.code()),
@@ -5386,6 +5492,10 @@ impl Terminal {
             self.child_exited = Some(e);
         }
         self.complete_init_command_startup_handshake();
+        self.init_command_startup_done_title = None;
+        self.release_init_command_startup_render();
+        self.init_command_startup_echo_disabled = false;
+        self.init_command_startup_uses_nul = false;
         let task = match &mut self.task {
             Some(task) => task,
             None => {
@@ -7723,6 +7833,8 @@ mod tests {
     fn test_init_command_startup_marker_commands_do_not_contain_marker() {
         let marker_id = 42;
         let marker = init_command_startup_marker(marker_id);
+        let done_marker = init_command_startup_done_title(marker_id);
+        let history_marker = init_command_startup_history_marker(marker_id);
 
         for shell_kind in [
             ShellKind::Posix,
@@ -7741,6 +7853,36 @@ mod tests {
             assert!(
                 !command.contains(&marker),
                 "startup marker command for {shell_kind:?} should not contain the full marker, got {command:?}"
+            );
+            assert!(
+                !command.contains(&done_marker),
+                "startup completion command for {shell_kind:?} should not contain the full marker, got {command:?}"
+            );
+            assert_eq!(
+                command.contains(&history_marker),
+                matches!(shell_kind, ShellKind::Posix | ShellKind::Fish),
+                "startup history filtering should match the shell kind: {shell_kind:?}"
+            );
+            assert_eq!(
+                command.contains("builtin history -d -1"),
+                shell_kind == ShellKind::Posix,
+                "Bash-compatible startup history should be removed before the handshake: {shell_kind:?}"
+            );
+            assert_eq!(
+                command.contains("HISTORY_IGNORE"),
+                false,
+                "startup history filtering must happen in the shell hook: {shell_kind:?}"
+            );
+            assert_eq!(
+                command.starts_with(" "),
+                matches!(shell_kind, ShellKind::Posix | ShellKind::Fish),
+                "startup marker echo handling should match the shell kind: {shell_kind:?}"
+            );
+            assert_eq!(
+                command.contains("read --null __zed_init_command_ready_payload")
+                    && command.contains("stty -echo -icanon min 1"),
+                shell_kind == ShellKind::Fish,
+                "Fish startup payloads must use a noninteractive NUL read: {shell_kind:?}"
             );
         }
     }
@@ -8008,10 +8150,59 @@ mod tests {
             Err(async_channel::TryRecvError::Empty)
         ));
 
+        let marker_output = format!("\x1b[8m{marker}\x1b[0m");
         terminal.update(cx, |terminal, cx| {
-            terminal.write_output(marker.as_bytes(), cx);
+            terminal.write_output(marker_output.as_bytes(), cx);
         });
         assert!(startup_rx.try_recv().is_ok());
+    }
+
+    #[gpui::test]
+    async fn startup_render_is_suppressed_until_completion_marker(cx: &mut TestAppContext) {
+        let window = cx.add_empty_window();
+        let terminal = window.new(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+
+        let initial_revision = window.update_window_entity(&terminal, |terminal, window, cx| {
+            terminal.sync(window, cx);
+            terminal.content_revision()
+        });
+
+        let done_marker = init_command_startup_done_title(4243);
+        terminal.update(window, |terminal, cx| {
+            terminal.init_command_startup_done_title = Some(done_marker.clone());
+            terminal.init_command_startup_suppress_render = true;
+            terminal.write_output(b"generated startup command", cx);
+        });
+        let suppressed_revision = window.update_window_entity(&terminal, |terminal, window, cx| {
+            terminal.sync(window, cx);
+            terminal.content_revision()
+        });
+        assert_eq!(
+            suppressed_revision, initial_revision,
+            "internal startup output must not replace the visible frame"
+        );
+
+        terminal.update(window, |terminal, cx| {
+            terminal.process_event(TerminalBackendEvent::Title(done_marker.clone()), cx);
+        });
+        let released_revision = window.update_window_entity(&terminal, |terminal, window, cx| {
+            terminal.sync(window, cx);
+            terminal.content_revision()
+        });
+        assert!(
+            released_revision > suppressed_revision,
+            "the hidden completion marker must release the deferred frame"
+        );
     }
 
     #[test]
@@ -9529,6 +9720,7 @@ mod tests {
         });
 
         terminal.update(cx, |terminal, cx| {
+            terminal.init_command_startup_echo_disabled = true;
             terminal.write_output(b"startup output\nprompt", cx);
         });
 
@@ -9543,6 +9735,125 @@ mod tests {
         );
         let input_log = terminal.update(cx, |terminal, _| terminal.take_input_log());
         assert_eq!(input_log, vec![b"agent\r".to_vec()]);
+        let pty_write_log = terminal.update(cx, |terminal, _| terminal.take_pty_write_log());
+        assert_eq!(pty_write_log, vec![b"agent\r".to_vec()]);
+    }
+
+    #[gpui::test]
+    async fn startup_echo_is_restored_before_user_input(cx: &mut TestAppContext) {
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+
+        terminal.update(cx, |terminal, _| {
+            terminal.init_command_startup_echo_disabled = true;
+            terminal.input(b"user input".to_vec());
+        });
+
+        let pty_write_log = terminal.update(cx, |terminal, _| terminal.take_pty_write_log());
+        assert_eq!(pty_write_log, vec![b"\r".to_vec(), b"user input".to_vec()]);
+    }
+
+    #[gpui::test]
+    async fn fish_startup_echo_cancellation_uses_a_nul_terminator(cx: &mut TestAppContext) {
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+
+        terminal.update(cx, |terminal, _| {
+            terminal.init_command_startup_echo_disabled = true;
+            terminal.init_command_startup_uses_nul = true;
+            terminal.input(b"user input".to_vec());
+        });
+
+        let pty_write_log = terminal.update(cx, |terminal, _| terminal.take_pty_write_log());
+        assert_eq!(pty_write_log, vec![b"\0".to_vec(), b"user input".to_vec()]);
+    }
+
+    #[gpui::test]
+    async fn startup_render_cancellation_discards_internal_command(cx: &mut TestAppContext) {
+        let window = cx.add_empty_window();
+        let terminal = window.new(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+
+        window.update_window_entity(&terminal, |terminal, window, cx| {
+            terminal.sync(window, cx);
+        });
+        terminal.update(window, |terminal, cx| {
+            terminal.init_command_startup_done_title = Some(init_command_startup_done_title(4244));
+            terminal.init_command_startup_suppress_render = true;
+            terminal.init_command_startup_echo_disabled = true;
+            terminal.write_output(b"generated startup command", cx);
+            terminal.input(b"user input".to_vec());
+        });
+        window.update_window_entity(&terminal, |terminal, window, cx| {
+            terminal.sync(window, cx);
+        });
+
+        let content = terminal.update(window, |terminal, _| {
+            terminal
+                .last_content
+                .cells
+                .iter()
+                .map(|cell| cell.character())
+                .collect::<String>()
+        });
+        assert!(
+            !content.contains("generated startup command"),
+            "cancelling startup must not publish the generated command"
+        );
+    }
+
+    #[gpui::test]
+    async fn fish_startup_command_uses_nul_terminated_payload(cx: &mut TestAppContext) {
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+
+        terminal.update(cx, |terminal, _| {
+            terminal.init_command_startup_echo_disabled = true;
+            terminal.init_command_startup_uses_nul = true;
+        });
+        let wrote = terminal.update(cx, |terminal, cx| {
+            terminal.write_init_command_after_startup(b"agent\r".to_vec(), cx)
+        });
+        assert!(wrote);
+
+        let pty_write_log = terminal.update(cx, |terminal, _| terminal.take_pty_write_log());
+        assert_eq!(pty_write_log, vec![b"agent\r".to_vec(), b"\0".to_vec()]);
     }
 
     #[gpui::test]

@@ -1,4 +1,17 @@
 # Zetta shell integration for Zsh.
+if (( ! $+functions[__zetta_filter_startup_history] )); then
+    function __zetta_filter_startup_history() {
+        if [[ "$1" == *"__zed_init_command_history_"* ]]; then
+            fc -p
+            return 1
+        fi
+        return 0
+    }
+fi
+autoload -Uz add-zsh-hook
+(( ${zshaddhistory_functions[(I)__zetta_filter_startup_history]:-0} == 0 )) &&
+    add-zsh-hook zshaddhistory __zetta_filter_startup_history
+
 if [[ -n ${ZETTA_HOST_EXECUTABLE:-} ]]; then
     function zetta { command "$ZETTA_HOST_EXECUTABLE" "$@"; }
 fi
