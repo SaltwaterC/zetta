@@ -25,6 +25,10 @@ use ui::IconName;
 use crate::config::Config;
 use crate::profile_icon::ProfileIcon;
 use crate::project::{ProjectConfig, validate_project_fields};
+use crate::project_commands::{
+    parse_command_environment, validate_command_environment_entry, validate_command_name,
+    validate_command_string, validate_environment_entry,
+};
 use crate::settings_editor::{PaneTemplatesForm, TextField};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,6 +36,10 @@ pub(crate) enum ProjectTextField {
     WorkingDirectory,
     EnvironmentName(usize),
     EnvironmentValue(usize),
+    CommandName(usize),
+    Command(usize),
+    CommandEnvironmentName(usize, usize),
+    CommandEnvironmentValue(usize, usize),
     ProfileName(usize),
     ProfileProgram(usize),
     ProfileArguments(usize),
@@ -41,6 +49,15 @@ pub(crate) enum ProjectTextField {
 pub(crate) struct ProjectEnvironmentForm {
     pub(crate) name: TextField,
     pub(crate) value: TextField,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ProjectCommandForm {
+    pub(crate) name: TextField,
+    pub(crate) command: TextField,
+    pub(crate) environment: Vec<ProjectEnvironmentForm>,
+    /// Preserve the object form when it has no nested environment entries.
+    pub(crate) object: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -98,6 +115,7 @@ pub(crate) struct ProjectForm {
     pub(crate) default_tab_icon: ProjectTabIcon,
     pub(crate) inactive_pane_opacity: Option<f32>,
     pub(crate) environment: Vec<ProjectEnvironmentForm>,
+    pub(crate) commands: Vec<ProjectCommandForm>,
     pub(crate) initial_split: Option<String>,
     pub(crate) profiles: Vec<ProjectProfileForm>,
     pub(crate) pane_templates: PaneTemplatesForm,
@@ -139,6 +157,7 @@ impl ProjectForm {
         // the builder never fails on a directory that has since been moved.
         let mut overlay = object.clone();
         overlay.remove("env");
+        overlay.remove("commands");
         overlay.remove("initial_split");
         let effective = Config::parse_overlay(
             &serde_json::to_string(&Value::Object(overlay))?,
@@ -195,6 +214,19 @@ impl ProjectForm {
             .transpose()?
             .unwrap_or_default();
         environment.sort_by(|left, right| left.name.text.cmp(&right.name.text));
+        let mut commands = match object.get("commands") {
+            Some(value) => {
+                let entries = value
+                    .as_object()
+                    .context("commands must be an object of command strings or objects")?;
+                entries
+                    .iter()
+                    .map(|(name, value)| parse_command_form(name, value))
+                    .collect::<Result<Vec<_>>>()?
+            }
+            None => Vec::new(),
+        };
+        commands.sort_by(|left, right| left.name.text.cmp(&right.name.text));
         let profiles = object
             .get("profiles")
             .map(|value| {
@@ -224,6 +256,7 @@ impl ProjectForm {
             default_tab_icon,
             inactive_pane_opacity,
             environment,
+            commands,
             initial_split: string("initial_split"),
             profiles,
             pane_templates,
@@ -240,6 +273,24 @@ impl ProjectForm {
             ProjectTextField::EnvironmentValue(index) => self
                 .environment
                 .get_mut(index)
+                .map(|entry| &mut entry.value),
+            ProjectTextField::CommandName(index) => self
+                .commands
+                .get_mut(index)
+                .map(|command| &mut command.name),
+            ProjectTextField::Command(index) => self
+                .commands
+                .get_mut(index)
+                .map(|command| &mut command.command),
+            ProjectTextField::CommandEnvironmentName(command_index, environment_index) => self
+                .commands
+                .get_mut(command_index)
+                .and_then(|command| command.environment.get_mut(environment_index))
+                .map(|entry| &mut entry.name),
+            ProjectTextField::CommandEnvironmentValue(command_index, environment_index) => self
+                .commands
+                .get_mut(command_index)
+                .and_then(|command| command.environment.get_mut(environment_index))
                 .map(|entry| &mut entry.value),
             ProjectTextField::ProfileName(index) => self
                 .profiles
@@ -305,24 +356,36 @@ impl ProjectForm {
         let mut names = HashSet::new();
         for entry in &self.environment {
             let name = entry.name.text.as_str();
-            anyhow::ensure!(
-                !name.is_empty() && !name.contains(['=', '\0']),
-                "environment variable names must not be empty or contain '='"
-            );
-            anyhow::ensure!(
-                !name
-                    .get(..6)
-                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("ZETTA_")),
-                "environment variables may not override reserved ZETTA_* variables"
-            );
-            anyhow::ensure!(
-                !entry.value.text.contains('\0'),
-                "environment values must not contain NUL"
-            );
+            validate_environment_entry(name, &entry.value.text, "environment")?;
             anyhow::ensure!(
                 names.insert(name.to_ascii_uppercase()),
                 "duplicate environment variable {name:?}"
             );
+        }
+
+        let mut command_names = HashSet::new();
+        for command in &self.commands {
+            let name = command.name.text.trim();
+            validate_command_name(name)?;
+            anyhow::ensure!(
+                command_names.insert(name.to_owned()),
+                "duplicate project command {name:?}"
+            );
+            validate_command_string(&command.command.text)?;
+
+            let mut environment_names = HashSet::new();
+            for entry in &command.environment {
+                validate_command_environment_entry(
+                    &entry.name.text,
+                    &entry.value.text,
+                    "project command environment",
+                )?;
+                anyhow::ensure!(
+                    environment_names.insert(entry.name.text.to_ascii_uppercase()),
+                    "duplicate project command environment variable {:?}",
+                    entry.name.text
+                );
+            }
         }
 
         let mut profile_names = HashSet::new();
@@ -405,6 +468,15 @@ impl ProjectForm {
                 ),
             );
         }
+        if !self.commands.is_empty() {
+            let mut command_entries = self.commands.iter().collect::<Vec<_>>();
+            command_entries.sort_by_key(|command| command.name.text.trim().to_owned());
+            let commands = command_entries
+                .into_iter()
+                .map(|command| (command.name.text.trim().to_owned(), command_value(command)))
+                .collect::<Map<String, Value>>();
+            root.insert("commands".into(), Value::Object(commands));
+        }
         if let Some(name) = self.resolved_initial_split() {
             root.insert("initial_split".into(), json!(name));
         }
@@ -437,6 +509,76 @@ pub(crate) fn arguments(text: &str) -> Vec<&str> {
 
 fn non_empty(text: &str) -> Option<&str> {
     Some(text.trim()).filter(|text| !text.is_empty())
+}
+
+fn parse_command_form(name: &str, value: &Value) -> Result<ProjectCommandForm> {
+    validate_command_name(name)?;
+    match value {
+        Value::String(command) => {
+            validate_command_string(command)?;
+            Ok(ProjectCommandForm {
+                name: TextField::new(name),
+                command: TextField::new(command),
+                environment: Vec::new(),
+                object: false,
+            })
+        }
+        Value::Object(object) => {
+            if let Some(field) = object
+                .keys()
+                .find(|field| !matches!(field.as_str(), "command" | "env"))
+            {
+                anyhow::bail!("unrecognized project command field {field:?}");
+            }
+            let command = object
+                .get("command")
+                .and_then(Value::as_str)
+                .context("project command objects require a string command field")?;
+            let environment = object
+                .get("env")
+                .map(parse_command_environment)
+                .transpose()?
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(name, value)| ProjectEnvironmentForm {
+                    name: TextField::new(name),
+                    value: TextField::new(value),
+                })
+                .collect();
+            validate_command_string(command)?;
+            Ok(ProjectCommandForm {
+                name: TextField::new(name),
+                command: TextField::new(command),
+                environment,
+                object: true,
+            })
+        }
+        _ => anyhow::bail!(
+            "project command {name:?} must be a string or an object with command and env"
+        ),
+    }
+}
+
+fn command_value(command: &ProjectCommandForm) -> Value {
+    if !command.object && command.environment.is_empty() {
+        return json!(command.command.text);
+    }
+    let mut object = Map::new();
+    object.insert("command".into(), json!(command.command.text));
+    if !command.environment.is_empty() {
+        let mut environment = command.environment.iter().collect::<Vec<_>>();
+        environment.sort_by_key(|entry| entry.name.text.clone());
+        object.insert(
+            "env".into(),
+            Value::Object(
+                environment
+                    .iter()
+                    .map(|entry| (entry.name.text.clone(), json!(entry.value.text)))
+                    .collect(),
+            ),
+        );
+    }
+    Value::Object(object)
 }
 
 fn parse_profile_form(value: &Value) -> Result<ProjectProfileForm> {

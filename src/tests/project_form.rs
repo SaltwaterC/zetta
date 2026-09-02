@@ -42,6 +42,7 @@ fn an_absent_field_stays_absent_so_it_keeps_inheriting() {
     assert_eq!(form.inactive_pane_opacity, None);
     assert!(form.working_directory.text.is_empty());
     assert!(form.environment.is_empty());
+    assert!(form.commands.is_empty());
     assert!(form.profiles.is_empty());
     assert_eq!(form.initial_split, None);
     // A file of `{}` must round-trip to `{}`: writing resolved defaults back
@@ -125,6 +126,80 @@ fn a_profile_program_serializes_with_its_arguments_and_icon() {
             }]
         })
     );
+}
+
+#[test]
+fn project_commands_round_trip_in_sorted_string_and_object_forms() {
+    let source = json!({
+        "commands": {
+            "test:unit": "cargo test",
+            "build": {
+                "command": "echo $FOO && cargo build",
+                "env": {"FOO": "bar"}
+            }
+        }
+    });
+    let form = parse(&serde_json::to_string(&source).unwrap(), &base_config());
+    assert_eq!(
+        form.commands
+            .iter()
+            .map(|command| command.name.text.as_str())
+            .collect::<Vec<_>>(),
+        ["build", "test:unit"]
+    );
+    assert!(form.commands[0].object);
+    assert!(!form.commands[1].object);
+    assert_eq!(saved(&form), source);
+
+    let mut form = parse("{}", &base_config());
+    form.commands.push(ProjectCommandForm {
+        name: TextField::new("deploy"),
+        command: TextField::new("cargo deploy"),
+        environment: vec![ProjectEnvironmentForm {
+            name: TextField::new("TARGET"),
+            value: TextField::new("staging"),
+        }],
+        object: false,
+    });
+    assert_eq!(
+        saved(&form),
+        json!({
+            "commands": {
+                "deploy": {
+                    "command": "cargo deploy",
+                    "env": {"TARGET": "staging"}
+                }
+            }
+        })
+    );
+}
+
+#[test]
+fn project_command_rows_reject_invalid_names_and_environments() {
+    let mut form = parse("{}", &base_config());
+    let command = |name: &str, environment: Vec<ProjectEnvironmentForm>| ProjectCommandForm {
+        name: TextField::new(name),
+        command: TextField::new("echo ok"),
+        environment,
+        object: true,
+    };
+    let env = |name: &str| ProjectEnvironmentForm {
+        name: TextField::new(name),
+        value: TextField::new("value"),
+    };
+
+    for name in ["-build", "has space", "--list"] {
+        form.commands = vec![command(name, Vec::new())];
+        assert!(form.validate().is_err(), "{name:?} should fail");
+    }
+    form.commands = vec![command("build", vec![env("ZETTA_TOKEN")])];
+    assert!(form.validate().is_err());
+    form.commands = vec![command("build", vec![env("1FOO")])];
+    assert!(form.validate().is_err());
+    form.commands = vec![command("build", vec![env("FOO"), env("foo")])];
+    assert!(form.validate().is_err());
+    form.commands = vec![command("build", Vec::new())];
+    form.validate().unwrap();
 }
 
 #[test]

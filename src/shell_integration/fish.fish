@@ -247,6 +247,38 @@ function __zetta_projects
     zetta project list 2>/dev/null
 end
 
+function __zetta_project_commands
+    zetta cmd --list 2>/dev/null
+end
+
+function __zetta_cmd
+    set -l words (commandline -opc)
+    test (count $words) -ge 2
+    and test "$words[2]" = cmd
+end
+
+function __zetta_cmd_needs_name
+    set -l words (commandline -opc)
+    test (count $words) -eq 2
+    and test "$words[2]" = cmd
+end
+
+function __zetta_cmd_needs_delimiter
+    set -l words (commandline -opc)
+    test (count $words) -ge 3
+    and test "$words[2]" = cmd
+    and not contains -- -- $words[3..-1]
+    and not contains -- "$words[3]" --list --help
+end
+
+function __zetta_cmd_has_name
+    set -l words (commandline -opc)
+    test (count $words) -ge 3
+    and test "$words[2]" = cmd
+    and not contains -- -- $words[3..-1]
+    and not contains -- "$words[3]" --list --help
+end
+
 function __zetta_project_is
     set -l words (commandline -opc)
     test (count $words) -ge 3
@@ -606,6 +638,11 @@ function __zetta_long_options
                 --allow-failure 'Continue after a dependency fails' \
                 -- 'Execute the remaining values as exact argv' \
                 --help 'Print help'
+        case cmd
+            printf '%s\t%s\n' \
+                --list 'List registered project command names' \
+                --help 'Print help' \
+                -- 'Pass the remaining values as shell-quoted arguments'
         case theme
             printf '%s\t%s\n' \
                 pane 'Change the active pane theme' \
@@ -732,6 +769,7 @@ complete -c zetta -n '__zetta_at_root' -a terminal-size -d 'Print the current te
 complete -c zetta -n '__zetta_at_root' -a mux -d 'Control the session multiplexer'
 complete -c zetta -n '__zetta_at_root' -a profile -d 'List and manage profiles'
 complete -c zetta -n '__zetta_at_root' -a project -d 'List and manage projects'
+complete -c zetta -n '__zetta_at_root' -a cmd -d 'Run a registered project command in the active pane'
 complete -c zetta -n '__zetta_at_root' -a edit -d 'Edit files with EDITOR or Zetta vi'
 complete -c zetta -n '__zetta_at_root' -a vi -d "Edit files with Zetta's built-in vi"
 complete -c zetta -n '__zetta_at_root' -a init -d 'Generate shell integration'
@@ -840,6 +878,15 @@ complete -c zetta -n '__fish_seen_subcommand_from project' -l help -d 'Print hel
 complete -c zetta -n '__zetta_project_is add remove open' -l path -r -d 'Project root'
 complete -c zetta -n '__zetta_project_is add' -a '(__fish_complete_directories)'
 complete -c zetta -n '__zetta_project_is open remove' -a '(__zetta_projects)'
+complete -c zetta -n '__zetta_cmd_needs_name' -a '(__zetta_project_commands)' -d 'Registered project command'
+complete -c zetta -n '__zetta_cmd_needs_delimiter' -a '--' -d 'Pass arguments to the command'
+complete -c zetta -n '__zetta_cmd_needs_delimiter' -a '--help' -d 'Print help'
+complete -c zetta -n '__zetta_cmd_needs_delimiter' -l help -d 'Print help'
+complete -c zetta -n '__zetta_cmd_needs_name' -l list -d 'List registered project command names'
+complete -c zetta -n '__zetta_cmd_needs_name' -l help -d 'Print help'
+complete -c zetta -n '__zetta_cmd_needs_name' -a '(__zetta_long_options cmd)'
+complete -c zetta -n '__zetta_cmd_has_name' -l help -d 'Print help'
+complete -c zetta -n '__zetta_cmd_has_name' -a '--' -d 'Pass arguments to the command'
 complete -c zetta -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait' -a wait -d 'Wait for pane commands before running a command'
 complete -c zetta -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait' -l direction -r -a 'left right up down' -d 'Direction for a new split'
 complete -c zetta -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait' -l label -r -d 'Label for a new split pane'

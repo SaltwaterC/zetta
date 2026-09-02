@@ -244,6 +244,10 @@ _zetta_projects() {
     compadd -- "${(@f)$(zetta project list 2>/dev/null)}"
 }
 
+_zetta_project_commands() {
+    compadd -- "${(@f)$(zetta cmd --list 2>/dev/null)}"
+}
+
 _zetta_pane_labels() {
     compadd -- "${(@f)$(zetta pane --list 2>/dev/null)}"
 }
@@ -340,6 +344,32 @@ _zetta() {
                 ;;
         esac
     done
+    if [[ ${words[2]} == cmd && CURRENT > 2 ]]; then
+        local cmd_delimiter=0
+        for (( index = 3; index < CURRENT; index++ )); do
+            if [[ ${words[index]} == -- ]]; then
+                cmd_delimiter=1
+                break
+            fi
+        done
+        if (( cmd_delimiter )); then
+            return
+        elif [[ ${words[3]} == --list || ${words[3]} == --help ]]; then
+            return
+        elif (( CURRENT == 3 )); then
+            if [[ ${words[CURRENT]} == -* ]]; then
+                _zetta_options --help --list --
+            else
+                _zetta_project_commands
+                _zetta_options --help --list --
+            fi
+        elif [[ ${words[CURRENT]} == -* ]]; then
+            _zetta_options --help --
+        else
+            _zetta_options --help --
+        fi
+        return
+    fi
     if (( profile_command_index >= 0 )); then
         index=$((profile_command_index + 1))
         while (( index < CURRENT )); do
@@ -383,7 +413,7 @@ _zetta() {
     fi
 
     if (( CURRENT == 2 )); then
-        compadd -S ' ' -- benchmark terminal-size mux profile project edit vi init serial http tftp notify attention copy paste splits pane tabicon theme overlay ZETTA_WORKTREE_ROOT_COMMAND
+        compadd -S ' ' -- benchmark terminal-size mux profile project cmd edit vi init serial http tftp notify attention copy paste splits pane tabicon theme overlay ZETTA_WORKTREE_ROOT_COMMAND
         _zetta_options --help --version --config --keymap --profile --split --replace-pane --theme --no-mux --new-window --command
         return
     fi
@@ -802,6 +832,22 @@ _zetta() {
                         ;;
                     list) _zetta_options --help ;;
                 esac
+            fi
+            ;;
+        cmd)
+            if [[ $words[3] == --list || $words[3] == --help ]]; then
+                return
+            elif (( CURRENT == 3 )); then
+                if [[ $words[CURRENT] == -* ]]; then
+                    _zetta_options --help --list --
+                else
+                    _zetta_project_commands
+                    _zetta_options --help --list --
+                fi
+            elif [[ $words[CURRENT] == -* ]]; then
+                _zetta_options --help --
+            else
+                _zetta_options --help --
             fi
             ;;
         pane)

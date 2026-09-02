@@ -11,6 +11,7 @@ const WORKTREE_BRANCH_PREFIX: &str = "refs/heads/wt/";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorktreeMetadata {
     pub(crate) name: String,
+    pub(crate) root: PathBuf,
     pub(crate) main_root: PathBuf,
 }
 
@@ -30,7 +31,7 @@ pub(crate) fn terminal_event_requires_worktree_detection(event: &TerminalEvent) 
 /// directory that simply is not a matching worktree, so an explicit WSL or
 /// remote title is not cleared by an inspection that the host cannot perform.
 pub(crate) fn detect_worktree_metadata(path: &Path) -> Result<Option<WorktreeMetadata>> {
-    let Some((commondir, branch)) = inspect_linked_worktree(path)? else {
+    let Some((root, commondir, branch)) = inspect_linked_worktree(path)? else {
         return Ok(None);
     };
     let common_gitdir = read_gitdir_metadata_pointer(&commondir)?;
@@ -51,11 +52,12 @@ pub(crate) fn detect_worktree_metadata(path: &Path) -> Result<Option<WorktreeMet
     );
     Ok(Some(WorktreeMetadata {
         name: branch,
+        root,
         main_root,
     }))
 }
 
-fn inspect_linked_worktree(path: &Path) -> Result<Option<(PathBuf, String)>> {
+fn inspect_linked_worktree(path: &Path) -> Result<Option<(PathBuf, PathBuf, String)>> {
     let directory = fs::canonicalize(path)
         .with_context(|| format!("canonicalizing terminal directory {}", path.display()))?;
     anyhow::ensure!(
@@ -107,14 +109,18 @@ fn inspect_linked_worktree(path: &Path) -> Result<Option<(PathBuf, String)>> {
         !branch.is_empty() && !branch.contains(['\r', '\n', '\0']),
         "linked worktree HEAD contains an invalid wt/* branch"
     );
-    Ok(Some((commondir, branch.to_owned())))
+    let root = git_marker
+        .parent()
+        .context("Git marker has no worktree root")?
+        .to_path_buf();
+    Ok(Some((root, commondir, branch.to_owned())))
 }
 
 /// Inspect a native directory for a matching linked worktree and return only
 /// its title. Project resolution uses [`detect_worktree_metadata`] when it
 /// also needs the canonical main-worktree root.
 pub(crate) fn detect_worktree_name(path: &Path) -> Result<Option<String>> {
-    Ok(inspect_linked_worktree(path)?.map(|(_, branch)| branch))
+    Ok(inspect_linked_worktree(path)?.map(|(_, _, branch)| branch))
 }
 
 fn find_git_marker(directory: &Path) -> Result<Option<PathBuf>> {

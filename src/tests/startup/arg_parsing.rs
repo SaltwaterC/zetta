@@ -184,6 +184,42 @@ fn project_subcommand_is_available_without_cli_services() {
 }
 
 #[test]
+fn project_command_subcommand_lists_and_preserves_delimited_arguments() {
+    assert_eq!(
+        parse_args_from([OsString::from("cmd"), OsString::from("--list")])
+            .unwrap()
+            .mode,
+        StartupMode::ProjectCommand(crate::project_commands::ProjectCommandInvocation::List)
+    );
+    assert_eq!(
+        parse_args_from([
+            OsString::from("cmd"),
+            OsString::from("test:unit"),
+            OsString::from("--"),
+            OsString::from("--release"),
+            OsString::from("two words"),
+        ])
+        .unwrap()
+        .mode,
+        StartupMode::ProjectCommand(crate::project_commands::ProjectCommandInvocation::Run {
+            name: "test:unit".to_owned(),
+            arguments: vec!["--release".to_owned(), "two words".to_owned()],
+        })
+    );
+    for arguments in [
+        vec!["cmd"],
+        vec!["cmd", "build", "--release"],
+        vec!["cmd", "-l", "build"],
+        vec!["cmd", "--unknown"],
+    ] {
+        assert!(
+            parse_args_from(arguments.iter().map(|argument| OsString::from(*argument))).is_err(),
+            "expected project command arguments to be rejected: {arguments:?}"
+        );
+    }
+}
+
+#[test]
 fn tabicon_subcommand_parses_icons_and_dynamic_listing() {
     assert_eq!(
         parse_args_from([OsString::from("tabicon"), OsString::from("terminal")])

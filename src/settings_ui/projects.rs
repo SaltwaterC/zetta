@@ -1,17 +1,22 @@
 use super::*;
 use crate::project::{
-    ProjectConfig, ProjectRegistry, canonical_project_root, ensure_project_config,
+    ProjectConfig, ProjectRegistry, canonical_project_root, ensure_project_config, paths_equal,
     resolve_registered_project,
 };
 use crate::project_form::{
-    self, PROJECT_INHERIT_LABEL, ProjectEnvironmentForm, ProjectForm, ProjectProfileForm,
-    ProjectTabIcon, ProjectTextField,
+    self, PROJECT_INHERIT_LABEL, ProjectCommandForm, ProjectEnvironmentForm, ProjectForm,
+    ProjectProfileForm, ProjectTabIcon, ProjectTextField,
 };
 
 /// The Projects tab's configuration builder for one registered project.
 #[derive(Clone)]
 pub(crate) struct ProjectEditor {
+    /// Registered project identity. Managed worktrees keep the main repository
+    /// here so the builder still belongs to the row that opened it.
     pub(crate) root: PathBuf,
+    /// The configuration root currently being edited. This can be a managed
+    /// worktree when the active pane is inside one with its own project file.
+    pub(crate) config_root: PathBuf,
     /// Position in `SettingsEditor::project_roots`, so closing the builder can
     /// return focus to the row it was opened from.
     pub(crate) index: usize,
@@ -100,6 +105,30 @@ pub(crate) fn project_controls(editor: &SettingsEditor) -> Vec<SettingsControl> 
         ]);
     }
     controls.push(SettingsControl::AddProjectEnvironment);
+    for (command_index, command) in form.commands.iter().enumerate() {
+        controls.extend([
+            SettingsControl::Input(SettingsInput::Project(ProjectTextField::CommandName(
+                command_index,
+            ))),
+            SettingsControl::RemoveProjectCommand(command_index),
+            SettingsControl::Input(SettingsInput::Project(ProjectTextField::Command(
+                command_index,
+            ))),
+        ]);
+        for (environment_index, _) in command.environment.iter().enumerate() {
+            controls.extend([
+                SettingsControl::Input(SettingsInput::Project(
+                    ProjectTextField::CommandEnvironmentName(command_index, environment_index),
+                )),
+                SettingsControl::Input(SettingsInput::Project(
+                    ProjectTextField::CommandEnvironmentValue(command_index, environment_index),
+                )),
+                SettingsControl::RemoveProjectCommandEnvironment(command_index, environment_index),
+            ]);
+        }
+        controls.push(SettingsControl::AddProjectCommandEnvironment(command_index));
+    }
+    controls.push(SettingsControl::AddProjectCommand);
     for index in 0..form.profiles.len() {
         controls.extend(project_profile_controls(index));
     }
@@ -233,6 +262,23 @@ pub(crate) fn prompt_start_directory(pane_directory: Option<PathBuf>) -> Option<
     pane_directory.or_else(|| env::current_dir().ok())
 }
 
+fn settings_project_config_root(
+    registered_root: &Path,
+    current_directory: Option<&Path>,
+    registry: &ProjectRegistry,
+) -> PathBuf {
+    let Some(current_directory) = current_directory else {
+        return registered_root.to_path_buf();
+    };
+    let resolution = resolve_registered_project(current_directory, registry);
+    resolution
+        .root
+        .as_ref()
+        .filter(|root| paths_equal(root, registered_root))
+        .and(resolution.config_root)
+        .unwrap_or_else(|| registered_root.to_path_buf())
+}
+
 impl Zetta {
     fn refresh_settings_project_roots(&mut self, cx: &mut Context<Self>) {
         if let Some(editor) = self.settings_editor.as_mut() {
@@ -364,6 +410,11 @@ impl Zetta {
         let Some(root) = editor.project_roots.get(index).cloned() else {
             return;
         };
+        let config_root = settings_project_config_root(
+            &root,
+            self.project_prompt_directory(cx).as_deref(),
+            &self.projects.registry,
+        );
         if let Some(editor) = self.settings_editor.as_mut() {
             editor.project_loading = true;
             editor.message = Some((false, "Loading the project configuration…".to_owned()));
@@ -372,7 +423,7 @@ impl Zetta {
         let base = self.launch_config.clone();
         let executor = cx.background_executor().clone();
         let this = cx.entity().downgrade();
-        let load_root = root.clone();
+        let load_root = config_root.clone();
         window
             .spawn(cx, async move |cx| {
                 let loaded = executor
@@ -387,6 +438,7 @@ impl Zetta {
                         Ok(form) => {
                             editor.project = Some(ProjectEditor {
                                 root,
+                                config_root,
                                 index,
                                 form,
                                 dirty: false,
@@ -427,7 +479,7 @@ impl Zetta {
             .settings_editor
             .as_ref()
             .and_then(project_editor)
-            .map(|project| ProjectConfig::path_for(&project.root))
+            .map(|project| ProjectConfig::path_for(&project.config_root))
         else {
             return;
         };
@@ -472,7 +524,7 @@ impl Zetta {
             return;
         }
         let form = project.form.clone();
-        let root = project.root.clone();
+        let config_root = project.config_root.clone();
         if let Some(editor) = self.settings_editor.as_mut() {
             if let Some(project) = editor.project.as_mut() {
                 project.save_in_progress = true;
@@ -482,7 +534,7 @@ impl Zetta {
         let base = self.launch_config.clone();
         let executor = cx.background_executor().clone();
         let this = cx.entity().downgrade();
-        let save_root = root.clone();
+        let save_root = config_root.clone();
         window
             .spawn(cx, async move |cx| {
                 let result = executor
@@ -649,6 +701,40 @@ impl Zetta {
                 }
                 form.environment.remove(index);
                 focus = SettingsControl::AddProjectEnvironment;
+            }
+            SettingsControl::AddProjectCommand => {
+                form.commands.push(ProjectCommandForm {
+                    name: TextField::default(),
+                    command: TextField::default(),
+                    environment: Vec::new(),
+                    object: false,
+                });
+            }
+            SettingsControl::RemoveProjectCommand(index) => {
+                if index >= form.commands.len() {
+                    return;
+                }
+                form.commands.remove(index);
+                focus = SettingsControl::AddProjectCommand;
+            }
+            SettingsControl::AddProjectCommandEnvironment(command_index) => {
+                let Some(command) = form.commands.get_mut(command_index) else {
+                    return;
+                };
+                command.environment.push(ProjectEnvironmentForm {
+                    name: TextField::default(),
+                    value: TextField::default(),
+                });
+            }
+            SettingsControl::RemoveProjectCommandEnvironment(command_index, environment_index) => {
+                let Some(command) = form.commands.get_mut(command_index) else {
+                    return;
+                };
+                if environment_index >= command.environment.len() {
+                    return;
+                }
+                command.environment.remove(environment_index);
+                focus = SettingsControl::AddProjectCommandEnvironment(command_index);
             }
             SettingsControl::AddProjectProfile => {
                 form.profiles.push(ProjectProfileForm {

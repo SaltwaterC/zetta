@@ -44,7 +44,7 @@ fn registered_detection_loads_once_then_reuses_the_cached_project() {
 }
 
 #[test]
-fn registered_main_projects_resolve_managed_worktree_aliases() {
+fn registered_main_projects_resolve_managed_worktree_aliases_and_local_configs() {
     let temporary = tempfile::tempdir().unwrap();
     let main = temporary.path().join("project");
     let linked = temporary.path().join("worktrees").join("feature");
@@ -84,6 +84,7 @@ fn registered_main_projects_resolve_managed_worktree_aliases() {
 
     let resolution = resolve_registered_project(&child, &registry);
     assert_eq!(resolution.root, Some(main.clone()));
+    assert_eq!(resolution.config_root, Some(main.clone()));
     assert_eq!(
         resolution
             .managed_worktree
@@ -93,8 +94,27 @@ fn registered_main_projects_resolve_managed_worktree_aliases() {
     );
 
     let detection = detect_project_for_directory(&child, &registry, &base_config(), &[]);
-    assert_eq!(detection.registered_root, Some(main));
+    assert_eq!(detection.registered_root, Some(main.clone()));
     assert!(detection.config.unwrap().is_ok());
+    assert!(detection.offer_root.is_none());
+
+    fs::create_dir_all(linked.join(PROJECT_CONFIG_DIRECTORY)).unwrap();
+    fs::write(
+        ProjectConfig::path_for(&linked),
+        r#"{"commands":{"worktree":"echo local"}}"#,
+    )
+    .unwrap();
+    let linked = fs::canonicalize(linked).unwrap();
+    let resolution = resolve_registered_project(&child, &registry);
+    assert_eq!(resolution.root, Some(main.clone()));
+    assert_eq!(resolution.config_root, Some(linked.clone()));
+    assert!(resolution.managed_worktree.is_some());
+
+    let detection = detect_project_for_directory(&child, &registry, &base_config(), &[]);
+    assert_eq!(detection.registered_root, Some(main));
+    let project = detection.config.unwrap().unwrap();
+    assert_eq!(project.root, linked);
+    assert_eq!(project.commands["worktree"].command, "echo local");
     assert!(detection.offer_root.is_none());
 }
 
@@ -269,6 +289,7 @@ fn icon_test_project(icon: Option<IconName>) -> ProjectConfig {
         theme: None,
         dark_theme: None,
         environment: HashMap::new(),
+        commands: std::collections::BTreeMap::new(),
         initial_split: None,
     }
 }
@@ -444,6 +465,7 @@ fn active_project_theme_overrides_a_profile_theme_it_never_mentioned(
             theme: Some("Solarized Dark".to_owned()),
             dark_theme: Some("Gruvbox Dark".to_owned()),
             environment: HashMap::new(),
+            commands: std::collections::BTreeMap::new(),
             initial_split: None,
         };
 
@@ -497,6 +519,7 @@ fn active_project_theme_overrides_a_profile_theme_it_never_mentioned(
             theme: None,
             dark_theme: None,
             environment: HashMap::new(),
+            commands: std::collections::BTreeMap::new(),
             initial_split: None,
         };
         let theme = resolve_project_profile_theme(&profile, Some(&project_without_theme), cx)

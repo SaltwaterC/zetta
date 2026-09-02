@@ -31,7 +31,8 @@ for active development.
   and icons, and
   installable Zed themes
 - Registered projects with repository-local themes, environment, profiles,
-  pane templates, initial layouts, live command-palette scoping, and a
+  pane templates, initial layouts, package-style shell commands, live
+  command-palette scoping, and a
   command-palette entry that opens each registered project
 - Serial consoles plus built-in HTTP and TFTP tools, usable from panes or the
   CLI
@@ -173,14 +174,28 @@ detected asynchronously and offered in the UI. The Settings **Projects** tab
 builds a project's configuration with typed controls, pane-template editor
 included, and leaves anything set to *Inherit* out of the file. See
 [Projects](docs/configuration.md#projects) for supported fields, WSL behavior,
-and the template-command trust boundary.
+registered commands, and the template/command trust boundary.
 
-Zetta-managed `wt/*` linked worktrees automatically use the configuration of
-their already-registered main repository. No separate worktree registration or
-import offer is created, and moving within the worktree keeps the same project
-context. Launching plain `zetta` from such a worktree still starts the first
-terminal in the worktree's current directory. Ordinary, detached, and
-unregistered worktrees keep the normal discovery and trust flow.
+Project commands use the shell of the active profile and run in the existing
+active pane:
+
+```sh
+zetta cmd --list
+zetta cmd build -- --release
+```
+
+Command strings may contain shell syntax and command environments are scoped to
+the invocation. Treat project configuration as executable code and register
+only repositories you trust.
+
+Zetta-managed `wt/*` linked worktrees keep their already-registered main
+repository as the project identity, but use the worktree's own
+`.zetta/config.json` when it exists; otherwise they fall back to the main
+project's file. No separate worktree registration or import offer is created,
+and moving within the worktree keeps the same project context. Launching plain
+`zetta` from such a worktree still starts the first terminal in the worktree's
+current directory. Ordinary, detached, and unregistered worktrees keep the
+normal discovery and trust flow.
 
 Use `zwt new NAME`, `zwt done`, `zwt abort`, `zwt status`, and `zwt rerere` for the Git
 worktree workflow; the same operations are available as `zetta wt ...` in a

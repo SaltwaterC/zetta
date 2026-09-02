@@ -169,25 +169,81 @@ LINUX_USER_ZWT_PATH := $(LINUX_USER_BIN_DIR)/zwt
 
 WINDOWS_ZWT_ARGS := $(if $(call tool_enabled,$(WORKTREE)), -SourceZwtBinary "$(BUILD_TARGET_DIR)/zwt.exe",)
 
-.PHONY: build fmt test lint install install-binary install-capabilities install-assets install-user-path uninstall \
+.PHONY: all build fmt test lint install install-binary install-capabilities install-assets install-user-path uninstall \
 	uninstall-binary uninstall-assets uninstall-user-path refresh-desktop-caches clean
+
+all: fmt lint test build
+
+# Parallel execution helper: runs command for each item in $(1), collects results
+# Usage: $(call parallel_for,items,command_template,description)
+# command_template should use $$item for the current item
+define parallel_for
+	@items="$(1)"; \
+	cmd_template='$(2)'; \
+	desc="$(3)"; \
+	tmpdir=$$(mktemp -d); \
+	trap 'rm -rf "$$tmpdir"' EXIT; \
+	pids=""; \
+	idx=0; \
+	for item in $$items; do \
+		idx=$$((idx + 1)); \
+		( \
+			eval "$$cmd_template" >"$$tmpdir/out.$$idx" 2>"$$tmpdir/err.$$idx"; \
+			echo $$? >"$$tmpdir/status.$$idx"; \
+			echo "$$item" >"$$tmpdir/name.$$idx"; \
+		) & \
+		pids="$$pids $$!"; \
+	done; \
+	failed=0; \
+	for pid in $$pids; do \
+		wait $$pid || true; \
+	done; \
+	for f in "$$tmpdir"/name.*; do \
+		[ -f "$$f" ] || continue; \
+		idx=$${f##*.}; \
+		name=$$(cat "$$f"); \
+		status=$$(cat "$$tmpdir/status.$$idx"); \
+		if [ "$$status" -eq 0 ]; then \
+			printf "  \033[32m✓\033[0m %s\n" "$$name"; \
+		else \
+			printf "  \033[31m✗\033[0m %s\n" "$$name"; \
+			failed=1; \
+		fi; \
+	done; \
+	if [ $$failed -eq 1 ]; then \
+		echo ""; \
+		echo "$(3) failures:"; \
+		for f in "$$tmpdir"/name.*; do \
+			[ -f "$$f" ] || continue; \
+			idx=$${f##*.}; \
+			name=$$(cat "$$f"); \
+			status=$$(cat "$$tmpdir/status.$$idx"); \
+			if [ "$$status" -ne 0 ]; then \
+				echo "--- $$name ---"; \
+				cat "$$tmpdir/out.$$idx" 2>/dev/null || true; \
+				cat "$$tmpdir/err.$$idx" 2>/dev/null || true; \
+				echo ""; \
+			fi; \
+		done; \
+		exit 1; \
+	fi
+endef
 
 test:
 	$(CARGO_RUN) test --locked --quiet --no-default-features --features "$(BUILD_FEATURES)" -- --format=terse
-	for crate in $(ZETTA_TEST_CRATE_DIRS); do \
-		( cd "$$crate" && \
-			if [ "$$crate" = "crates/zmux" ]; then \
-				$(CARGO_RUN) build --locked --bin zmux --bin zmux-pty; \
-			fi && \
-			$(CARGO_RUN) test --locked --quiet -- --format=terse \
-		) || exit 1; \
-	done
+	$(call parallel_for,$(ZETTA_TEST_CRATE_DIRS), \
+		cd "$$item" && \
+		if [ "$$item" = "crates/zmux" ]; then \
+			$(CARGO_RUN) build --locked --bin zmux --bin zmux-pty; \
+		fi && \
+		$(CARGO_RUN) test --locked --quiet -- --format=terse, \
+		Crate tests)
 
 fmt:
 	$(CARGO) fmt --check
-	for crate in $(ZETTA_CRATE_DIRS); do \
-		$(CARGO) fmt --manifest-path "$$crate/Cargo.toml" --check || exit 1; \
-	done
+	$(call parallel_for,$(ZETTA_CRATE_DIRS), \
+		$(CARGO) fmt --manifest-path "$$item/Cargo.toml" --check, \
+		Format check)
 
 lint:
 	$(CARGO_RUN) clippy --locked --all-targets --no-default-features --features "$(BUILD_FEATURES)" -- -D warnings

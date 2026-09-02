@@ -171,6 +171,7 @@ $zettaTabIcons = { @(& zetta tabicon --list 2>$null) }
 $zettaThemes = { param($scope) @(& zetta theme $scope --list 2>$null) }
 $zettaSplits = { @(& zetta splits 2>$null) }
 $zettaProjects = { @(& zetta project list 2>$null) }
+$zettaProjectCommands = { @(& zetta cmd --list 2>$null) }
 $zettaPaneLabels = { @(& zetta pane --list 2>$null) }
 $zettaRunPaneLabels = {
     param($wordToComplete)
@@ -248,6 +249,10 @@ $zettaCompletions = {
             # `pane wait --` owns the rest of argv too.
             return @()
         }
+        if ($words[$index] -eq '--' -and $words[1] -eq 'cmd') {
+            # `cmd NAME --` owns the rest of argv too.
+            return @()
+        }
     }
     $previous = if ($words.Count -gt 1) { $words[$words.Count - 2] } else { '' }
     $last = if ($words.Count -gt 1) { $words[$words.Count - 1] } else { '' }
@@ -272,7 +277,7 @@ $zettaCompletions = {
         }
     }
     $subcommand = $words | Where-Object {
-        $_ -in 'benchmark', 'terminal-size', 'mux', 'splits', 'pane', 'profile', 'project', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'theme', 'overlay'ZETTA_WORKTREE_ROOT_COMMANDS
+        $_ -in 'benchmark', 'terminal-size', 'mux', 'splits', 'pane', 'profile', 'project', 'cmd', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'theme', 'overlay'ZETTA_WORKTREE_ROOT_COMMANDS
     } | Select-Object -First 1
     $worktreeCommand = $false
     $worktreeOperation = ''
@@ -313,6 +318,29 @@ $zettaCompletions = {
         if ($previous -in '--pboard', '-pboard') { 'general', 'ruler', 'find', 'font' }
         elseif ($previous -in '--prefer', '-prefer', '--Prefer', '-Prefer') { 'txt', 'rtf', 'ps' }
         else { '--pboard', '--prefer', '--help' }
+    } elseif ($subcommand -eq 'cmd') {
+        $delimiter = $false
+        for ($index = 2; $index -lt $words.Count; $index++) {
+            if ($words[$index] -eq '--') {
+                $delimiter = $true
+                break
+            }
+        }
+        if ($delimiter) {
+            @()
+        } elseif ($words.Count -ge 3 -and $words[2] -in '--list', '--help') {
+            @()
+        } elseif ($words.Count -le 2) {
+            @(& $zettaProjectCommands) + '--help', '--list', '--'
+        } elseif ($words.Count -eq 3 -and $wordToComplete -notlike '-*' -and -not [string]::IsNullOrEmpty($wordToComplete)) {
+            & $zettaProjectCommands
+        } elseif ($wordToComplete -like '-*') {
+            '--help', '--'
+        } elseif ($words.Count -eq 3 -and [string]::IsNullOrEmpty($wordToComplete)) {
+            '--help', '--'
+        } else {
+            @()
+        }
     } elseif (
         $previous -eq '--split' -or $last -eq '--split' -or
         (($previous -eq '-s' -or $last -eq '-s') -and $null -eq $subcommand)
@@ -420,7 +448,7 @@ $zettaCompletions = {
         }
 # ZETTA_WORKTREE_INTEGRATION_END
     } elseif ($null -eq $subcommand) {
-        'benchmark', 'terminal-size', 'mux', 'profile', 'project', 'splits', 'pane', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'theme', 'overlay'ZETTA_WORKTREE_ROOT_COMMANDS, '--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme', '--no-mux', '--new-window', '--command'
+        'benchmark', 'terminal-size', 'mux', 'profile', 'project', 'cmd', 'splits', 'pane', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'theme', 'overlay'ZETTA_WORKTREE_ROOT_COMMANDS, '--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme', '--no-mux', '--new-window', '--command'
     } else {
         switch ($subcommand) {
             'benchmark' {
@@ -482,6 +510,30 @@ $zettaCompletions = {
                     '--path', '--help'
                 } else {
                     '--help'
+                }
+            }
+            'cmd' {
+                $delimiter = $false
+                for ($index = 2; $index -lt $words.Count; $index++) {
+                    if ($words[$index] -eq '--') {
+                        $delimiter = $true
+                        break
+                    }
+                }
+                if ($delimiter) {
+                    @()
+                } elseif ($words.Count -ge 3 -and $words[2] -in '--list', '--help') {
+                    @()
+                } elseif ($words.Count -le 2) {
+                    @(& $zettaProjectCommands) + '--help', '--list', '--'
+                } elseif ($words.Count -eq 3 -and $wordToComplete -notlike '-*' -and -not [string]::IsNullOrEmpty($wordToComplete)) {
+                    & $zettaProjectCommands
+                } elseif ($wordToComplete -like '-*') {
+                    '--help', '--'
+                } elseif ($words.Count -eq 3 -and [string]::IsNullOrEmpty($wordToComplete)) {
+                    '--help', '--'
+                } else {
+                    @()
                 }
             }
             'init' { 'bash', 'fish', 'powershell', 'pwsh', 'zsh', '--help' }

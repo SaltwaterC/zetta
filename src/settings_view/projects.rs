@@ -101,7 +101,7 @@ fn render_project_list(
             div()
                 .text_xs()
                 .text_color(colors.text_muted)
-                .child("Edit config opens a builder for the project's theme, working directory, profiles, tab icon, environment, inactive-pane opacity, pane templates, and initial split. Register only trusted projects: templates may start commands."),
+                .child("Edit config opens a builder for the project's theme, working directory, profiles, tab icon, environment, commands, inactive-pane opacity, pane templates, and initial split. Register only trusted projects: templates and registered commands may execute arbitrary shell code."),
         )
         .child(
             h_flex().child(action_button(editor, "settings-add-project".to_owned(), "Add project".to_owned(), SettingsControl::AddProject, true, colors, handle)),
@@ -427,6 +427,161 @@ fn render_project_config(
                 "project-env-add".to_owned(),
                 "Add environment variable".to_owned(),
                 SettingsControl::AddProjectEnvironment,
+                true,
+                colors,
+                handle,
+            ))
+            .into_any_element(),
+    );
+
+    content.push(
+        section_heading(
+            "Commands",
+            "Registered commands run raw shell code in the active pane. Command environments override project environment values for that invocation and do not persist in the pane.",
+            colors,
+        )
+        .into_any_element(),
+    );
+    for (command_index, command) in form.commands.iter().enumerate() {
+        content.push(control_row(
+            editor,
+            format!("Command {} · name", command_index + 1),
+            &[
+                SettingsControl::Input(SettingsInput::Project(ProjectTextField::CommandName(
+                    command_index,
+                ))),
+                SettingsControl::RemoveProjectCommand(command_index),
+            ],
+            h_flex()
+                .gap_1()
+                .child(text_field(
+                    format!("project-command-name-{command_index}"),
+                    command.name.clone(),
+                    SettingsInput::Project(ProjectTextField::CommandName(command_index)),
+                    editor,
+                    colors,
+                    handle,
+                ))
+                .child(action_button(
+                    editor,
+                    format!("project-command-remove-{command_index}"),
+                    "×".to_owned(),
+                    SettingsControl::RemoveProjectCommand(command_index),
+                    true,
+                    colors,
+                    handle,
+                ))
+                .into_any_element(),
+            colors,
+        ));
+        content.push(control_row(
+            editor,
+            format!("Command {} · shell command", command_index + 1),
+            &[SettingsControl::Input(SettingsInput::Project(
+                ProjectTextField::Command(command_index),
+            ))],
+            text_field(
+                format!("project-command-command-{command_index}"),
+                command.command.clone(),
+                SettingsInput::Project(ProjectTextField::Command(command_index)),
+                editor,
+                colors,
+                handle,
+            ),
+            colors,
+        ));
+        for (environment_index, entry) in command.environment.iter().enumerate() {
+            content.push(control_row(
+                editor,
+                format!(
+                    "Command {} environment {} · name",
+                    command_index + 1,
+                    environment_index + 1
+                ),
+                &[
+                    SettingsControl::Input(SettingsInput::Project(
+                        ProjectTextField::CommandEnvironmentName(command_index, environment_index),
+                    )),
+                    SettingsControl::RemoveProjectCommandEnvironment(
+                        command_index,
+                        environment_index,
+                    ),
+                ],
+                h_flex()
+                    .gap_1()
+                    .child(text_field(
+                        format!("project-command-env-name-{command_index}-{environment_index}"),
+                        entry.name.clone(),
+                        SettingsInput::Project(ProjectTextField::CommandEnvironmentName(
+                            command_index,
+                            environment_index,
+                        )),
+                        editor,
+                        colors,
+                        handle,
+                    ))
+                    .child(action_button(
+                        editor,
+                        format!("project-command-env-remove-{command_index}-{environment_index}"),
+                        "×".to_owned(),
+                        SettingsControl::RemoveProjectCommandEnvironment(
+                            command_index,
+                            environment_index,
+                        ),
+                        true,
+                        colors,
+                        handle,
+                    ))
+                    .into_any_element(),
+                colors,
+            ));
+            content.push(control_row(
+                editor,
+                format!(
+                    "Command {} environment {} · value",
+                    command_index + 1,
+                    environment_index + 1
+                ),
+                &[SettingsControl::Input(SettingsInput::Project(
+                    ProjectTextField::CommandEnvironmentValue(command_index, environment_index),
+                ))],
+                text_field(
+                    format!("project-command-env-value-{command_index}-{environment_index}"),
+                    entry.value.clone(),
+                    SettingsInput::Project(ProjectTextField::CommandEnvironmentValue(
+                        command_index,
+                        environment_index,
+                    )),
+                    editor,
+                    colors,
+                    handle,
+                ),
+                colors,
+            ));
+        }
+        content.push(
+            h_flex()
+                .justify_end()
+                .child(action_button(
+                    editor,
+                    format!("project-command-env-add-{command_index}"),
+                    "Add command environment variable".to_owned(),
+                    SettingsControl::AddProjectCommandEnvironment(command_index),
+                    true,
+                    colors,
+                    handle,
+                ))
+                .into_any_element(),
+        );
+    }
+    content.push(
+        h_flex()
+            .justify_end()
+            .child(action_button(
+                editor,
+                "project-command-add".to_owned(),
+                "Add command".to_owned(),
+                SettingsControl::AddProjectCommand,
                 true,
                 colors,
                 handle,

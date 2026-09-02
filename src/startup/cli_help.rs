@@ -130,6 +130,8 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         "zetta pane [OPTIONS] -- COMMAND [ARGUMENT ...]",
         "zetta pane --list",
         "zetta pane wait LABEL[,LABEL ...] [--allow-failure] -- COMMAND [ARGUMENT ...]",
+        "zetta cmd --list",
+        "zetta cmd NAME [-- ARGUMENT ...]",
         "zetta profile <COMMAND>",
         "zetta project <COMMAND>",
         "zetta attention [OPTIONS] [SUMMARY] [BODY]",
@@ -183,6 +185,7 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         ("profile", "List and manage profiles"),
         ("attention", "Mark the originating tab as needing attention"),
         ("project", "List, add, remove, or open projects"),
+        ("cmd", "Run a registered project command in the active pane"),
         ("init", "Configure or generate shell integration"),
     ];
     if cfg!(feature = "serial-console") {
@@ -254,6 +257,23 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
     format!(
         "Zetta Terminal\n\n{usage}\n\nCommands:\n{commands}\n\nBuilt-in features:\n  {}\n\nProfiles accepted by --profile NAME (case-insensitive):\n  {profiles}\n\nOptions:\n{options}",
         features.join("\n  "),
+    )
+}
+
+pub(crate) fn command_help() -> String {
+    let options = format_help_table([
+        (
+            "-l, --list",
+            "List the registered command names for the current project",
+        ),
+        (
+            "--",
+            "End options; pass the remaining values as shell-quoted arguments",
+        ),
+        ("-h, --help", "Print help"),
+    ]);
+    format!(
+        "Run a registered project command in the active pane\n\nUsage: zetta cmd --list\n       zetta cmd NAME [-- ARGUMENT ...]\n\nThe current directory must be inside a registered project. NAME is matched exactly against the commands in .zetta/config.json. The command string is evaluated raw by the active pane's configured shell, so registered commands can execute arbitrary shell code. A command's env overrides the project's env for that invocation only; it is not left in the interactive pane.\n\nOptions:\n{options}"
     )
 }
 

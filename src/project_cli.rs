@@ -12,7 +12,7 @@ use crate::{
     project::{
         ProjectConfig, ProjectRegistry, ProjectRootResolution, canonical_project_root,
         ensure_project_config, find_repository_root, is_wsl_unc_path, resolve_registered_project,
-        resolve_registered_project_root,
+        resolve_registered_project_config_root, resolve_registered_project_root,
     },
 };
 
@@ -157,6 +157,7 @@ fn resolve_open_target_in_registry(
     let ProjectRootResolution {
         root,
         managed_worktree,
+        ..
     } = resolution;
     let root = root.with_context(|| {
         format!(
@@ -192,6 +193,7 @@ pub(crate) fn current_project_target() -> Result<Option<ProjectOpenTarget>> {
     let ProjectRootResolution {
         root,
         managed_worktree,
+        ..
     } = resolution;
     Ok(root.map(|root| ProjectOpenTarget {
         root,
@@ -207,9 +209,11 @@ pub(crate) fn current_project_target() -> Result<Option<ProjectOpenTarget>> {
 /// runs as its own process, so without it the editor highlighted with the
 /// application theme inside a project that selects a different one.
 pub(crate) fn current_project_config(base: &Config) -> Result<Option<ProjectConfig>> {
-    current_project_target()?
+    let current = absolute_path(None)?;
+    let registry = ProjectRegistry::load()?;
+    resolve_registered_project_config_root(&current, &registry)
         .as_ref()
-        .map(|target| ProjectConfig::load(&target.root, base))
+        .map(|root| ProjectConfig::load(root, base))
         .transpose()
 }
 
@@ -232,7 +236,7 @@ pub(crate) fn project_help(operation: Option<&str>) -> String {
     match operation {
         Some("add") => {
             format!(
-                "Register a Zetta project\n\nUsage: zetta project add [PATH]\n       zetta project add --path PATH\n\nCreates PATH/.zetta/config.json with an empty object when it does not exist, validates it, and records the canonical project root. Without PATH, the nearest native Git repository root is used, falling back to the current directory. WSL uses the exact current directory and is never scanned. Register only trusted projects: pane templates may launch commands.\n\nOptions:\n{}",
+                "Register a Zetta project\n\nUsage: zetta project add [PATH]\n       zetta project add --path PATH\n\nCreates PATH/.zetta/config.json with an empty object when it does not exist, validates it, and records the canonical project root. Without PATH, the nearest native Git repository root is used, falling back to the current directory. WSL uses the exact current directory and is never scanned. Register only trusted projects: pane templates and registered commands may execute arbitrary shell code.\n\nOptions:\n{}",
                 format_help_table([
                     ("-p, --path PATH", "Project root"),
                     ("-h, --help", "Print help"),
@@ -256,7 +260,7 @@ pub(crate) fn project_help(operation: Option<&str>) -> String {
         }
         Some("open") => {
             format!(
-                "Open a registered Zetta project\n\nUsage: zetta project open [PATH]\n       zetta project open --path PATH\n\nOpens the containing registered project in a new active tab of the running Zetta process, or starts Zetta when needed. A Zetta-managed wt/* worktree uses the registered main repository's configuration while preserving the requested worktree directory.\n\nOptions:\n{}",
+                "Open a registered Zetta project\n\nUsage: zetta project open [PATH]\n       zetta project open --path PATH\n\nOpens the containing registered project in a new active tab of the running Zetta process, or starts Zetta when needed. A Zetta-managed wt/* worktree keeps the registered main repository as its project identity, uses its own .zetta/config.json when present (otherwise the main project's file), and preserves the requested worktree directory.\n\nOptions:\n{}",
                 format_help_table([
                     ("-p, --path PATH", "Project root or a path inside it"),
                     ("-h, --help", "Print help"),

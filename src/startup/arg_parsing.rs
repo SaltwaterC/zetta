@@ -11,6 +11,7 @@ use crate::command_panes::{
 };
 use crate::profile_cli::{ProfileCommand, parse_profile_args};
 use crate::project_cli::{ProjectCommand, parse_project_args};
+use crate::project_commands::{ProjectCommandInvocation, parse_project_command_args};
 use crate::run_command::PaneWaitCommand;
 #[cfg(feature = "worktree")]
 use zwt::{WorktreeCommand, WorktreeInvocation, parse_worktree_args_for};
@@ -33,6 +34,7 @@ pub(crate) enum StartupMode {
     #[cfg(feature = "worktree")]
     Worktree(WorktreeCommand),
     Project(ProjectCommand),
+    ProjectCommand(ProjectCommandInvocation),
     #[cfg(cli_services)]
     CliService(CliServiceCommand),
     Profile(ProfileCommand),
@@ -543,6 +545,24 @@ pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Resul
             theme_override: None,
             no_mux: false,
             mode: StartupMode::Project(parse_project_args(&arguments[1..])?),
+            profile_report: None,
+            profile_duration: None,
+            profile_pane_stress: false,
+            profile_workload: PerformanceWorkload::Standard,
+            profile_external_terminal: false,
+            tftp_command: None,
+        });
+    }
+    if arguments.first().is_some_and(|argument| argument == "cmd") {
+        return Ok(StartupArgs {
+            config_path: None,
+            keymap_path: None,
+            profile: None,
+            split: None,
+            replace_pane: false,
+            theme_override: None,
+            no_mux: false,
+            mode: StartupMode::ProjectCommand(parse_project_command_args(&arguments[1..])?),
             profile_report: None,
             profile_duration: None,
             profile_pane_stress: false,

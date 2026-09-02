@@ -22,9 +22,11 @@ use crate::process_control::{
     request_existing_process_pane_labels, request_existing_process_pane_overlay,
     request_existing_process_project_with_working_directory,
     request_existing_process_projects_reload, request_existing_process_replace_pane,
-    request_existing_process_tab_icon, request_existing_process_theme,
-    request_existing_process_theme_list, request_process_run_wait, request_process_tab_attention,
+    request_existing_process_shell_command, request_existing_process_tab_icon,
+    request_existing_process_theme, request_existing_process_theme_list, request_process_run_wait,
+    request_process_tab_attention,
 };
+use crate::project_commands::{ProjectCommandInvocation, merge_command_environment};
 use crate::run_command::{PaneWaitCommand, RunWaitRequest, process_run_registry};
 #[cfg(feature = "worktree")]
 use zwt::{WorktreeInvocation, run_for as run_worktree};
@@ -52,9 +54,9 @@ use arg_parsing::{
     should_handoff_to_existing_process, should_replace_pane_in_existing_process,
     validate_launch_split,
 };
-pub(crate) use cli_help::format_help_table;
 #[cfg(not(feature = "tftp-client"))]
 pub(crate) use cli_help::{TftpCommand, parse_tftp_args, tftp_help};
+pub(crate) use cli_help::{command_help, format_help_table};
 pub(crate) use keybindings::{
     PROFILE_SHORTCUT_KEYS, keymap_keystroke_display, keymap_keystroke_storage, load_keybindings,
     profile_keybindings, profile_shortcut_label,
@@ -1263,6 +1265,37 @@ pub(crate) fn run() -> Result<()> {
     if let StartupMode::PaneWait(command) = &args.mode {
         return run_wait_command(command.clone());
     }
+    if let StartupMode::ProjectCommand(invocation) = &args.mode {
+        let (base, _) = load_startup_config(None, None);
+        let project = crate::project_cli::current_project_config(&base)?
+            .context("the current directory is not inside a registered Zetta project")?;
+        match invocation {
+            ProjectCommandInvocation::List => {
+                for name in project.commands.keys() {
+                    println!("{name}");
+                }
+            }
+            ProjectCommandInvocation::Run { name, arguments } => {
+                let command = project
+                    .commands
+                    .get(name)
+                    .with_context(|| format!("project command {name:?} is not registered"))?;
+                let request = crate::command_panes::ShellCommandRequest {
+                    command: command.command.clone(),
+                    arguments: arguments.clone(),
+                    environment: merge_command_environment(
+                        &project.environment,
+                        &command.environment,
+                    ),
+                };
+                anyhow::ensure!(
+                    request_existing_process_shell_command(request)?,
+                    "no running Zetta process accepted the project command request"
+                );
+            }
+        }
+        return Ok(());
+    }
     let new_window_activation_token = (args.mode == StartupMode::NewWindow)
         .then(|| env::var("XDG_ACTIVATION_TOKEN").ok())
         .flatten();
@@ -2179,6 +2212,35 @@ pub(crate) fn run() -> Result<()> {
                                     .update(cx, |zetta, window, cx| {
                                         zetta
                                             .run_command_pane(request, window, cx)
+                                            .map_err(|error| format!("{error:#}"))
+                                    })
+                                    .map_err(|error| format!("{error:#}"))?
+                            });
+                            let _ = completion.send(result);
+                        }
+                        ProcessControlCommand::RunShellCommand {
+                            request,
+                            completion,
+                        } => {
+                            let result = cx.update(|cx| -> Result<(), String> {
+                                if !cx
+                                    .global::<ZettaProcessState>()
+                                    .control_server
+                                    .is_accepting()
+                                {
+                                    return Err("the Zetta process is shutting down".to_owned());
+                                }
+                                let Some(window_id) =
+                                    cx.active_window().map(|window| window.window_id())
+                                else {
+                                    return Err(
+                                        "the running Zetta process has no active window".to_owned()
+                                    );
+                                };
+                                gpui::WindowHandle::<Zetta>::new(window_id)
+                                    .update(cx, |zetta, window, cx| {
+                                        zetta
+                                            .run_shell_command(request, window, cx)
                                             .map_err(|error| format!("{error:#}"))
                                     })
                                     .map_err(|error| format!("{error:#}"))?

@@ -44,6 +44,94 @@ fn pane_commands_are_quoted_as_shell_arguments() {
 }
 
 #[test]
+fn registered_shell_commands_keep_raw_code_and_scope_environment() {
+    let request = ShellCommandRequest {
+        command: "echo $FOO && printf".to_owned(),
+        arguments: vec!["two words".to_owned(), "$(touch marker)".to_owned()],
+        environment: BTreeMap::from([("FOO".to_owned(), "bar baz".to_owned())]),
+    };
+    let command = shell_command_for_profile(&Shell::Program("bash".to_owned()), &request).unwrap();
+    assert_eq!(
+        command,
+        "( export FOO='bar baz'; echo $FOO && printf 'two words' '$(touch marker)' )"
+    );
+
+    let powershell =
+        shell_command_for_profile(&Shell::Program("pwsh".to_owned()), &request).unwrap();
+    assert!(powershell.starts_with("& { $zetta_old_environment = @{};"));
+    assert!(powershell.contains("Set-Item -LiteralPath 'Env:FOO' -Value 'bar baz'"));
+    assert!(powershell.contains("try {"));
+    assert!(powershell.contains("finally {"));
+    assert!(powershell.contains("Remove-Item -LiteralPath 'Env:FOO'"));
+    assert!(powershell.ends_with(" }"));
+}
+
+#[test]
+fn registered_shell_commands_support_each_configured_shell_kind() {
+    let request = ShellCommandRequest {
+        command: "echo raw".to_owned(),
+        arguments: Vec::new(),
+        environment: BTreeMap::from([("FOO".to_owned(), "bar".to_owned())]),
+    };
+    for (program, marker) in [
+        ("sh", "( export"),
+        ("csh", "setenv FOO"),
+        ("tcsh", "setenv FOO"),
+        ("fish", "begin; set -lx FOO"),
+        ("powershell", "Set-Item -LiteralPath 'Env:FOO'"),
+        ("pwsh", "Set-Item -LiteralPath 'Env:FOO'"),
+        ("nu", "do { $env.FOO"),
+        ("cmd.exe", "cmd.exe /D /S /C"),
+        ("xonsh", "$FOO ="),
+        ("rc", "( FOO="),
+        ("elvish", "with-env [FOO bar]"),
+    ] {
+        let command = shell_command_for_profile(&Shell::Program(program.to_owned()), &request)
+            .unwrap_or_else(|error| panic!("{program} shell command failed: {error:#}"));
+        assert!(
+            command.contains(marker),
+            "{program} shell command did not use the expected scoped syntax: {command}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn registered_shell_commands_expand_raw_code_and_scope_environment() {
+    let request = ShellCommandRequest {
+        command: "printf '<%s>\\n' \"$FOO\"".to_owned(),
+        arguments: vec!["two words".to_owned(), "$(printf hacked)".to_owned()],
+        environment: BTreeMap::from([("FOO".to_owned(), "bar baz".to_owned())]),
+    };
+    let command = shell_command_for_profile(&Shell::Program("sh".to_owned()), &request).unwrap();
+    let output = std::process::Command::new("sh")
+        .args([
+            "-c",
+            &format!(
+                "{command}; if printenv FOO >/dev/null 2>&1; then printf '|leaked'; else printf '|unset'; fi"
+            ),
+        ])
+        .env_remove("FOO")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "sh failed: {output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "<bar baz>\n<two words>\n<$(printf hacked)>\n|unset"
+    );
+}
+
+#[test]
+fn registered_shell_commands_are_size_limited() {
+    let request = ShellCommandRequest {
+        command: "echo".to_owned(),
+        arguments: vec!["x".repeat(MAX_SHELL_COMMAND_BYTES)],
+        environment: BTreeMap::new(),
+    };
+    assert!(shell_command_for_profile(&Shell::Program("bash".to_owned()), &request).is_err());
+}
+
+#[test]
 fn pane_command_quoting_keeps_shell_metacharacters_literal() {
     let arguments = vec![
         "echo".to_owned(),

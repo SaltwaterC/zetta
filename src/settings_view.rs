@@ -226,7 +226,7 @@ impl Zetta {
                 "pane_split_templates · built-ins are read-only presets".to_owned()
             }
             SettingsPage::Projects => match project {
-                Some(project) => crate::project::ProjectConfig::path_for(&project.root)
+                Some(project) => crate::project::ProjectConfig::path_for(&project.config_root)
                     .display()
                     .to_string(),
                 None => self.projects.registry.path().display().to_string(),

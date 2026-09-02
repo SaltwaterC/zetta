@@ -72,6 +72,14 @@ short `-e` spelling remains accepted by the parser but is omitted from the
 candidate list. Once `--command` or `-e` is present, completion stops treating
 the remaining words as Zetta options because they belong to the child command.
 
+Project-command completion is dynamic as well. From a directory inside a
+registered project, `zetta cmd` runs `zetta cmd --list` when completing the
+command name, so newly added commands are available without regenerating the
+integration script. The command's `--list`, `--help`, and `--` options are
+offered by their long names; after `--`, completion stops because the remaining
+words belong to the registered command. Registered command strings are raw
+shell code, so only trust project configurations you intend to execute.
+
 If `EDITOR` is not already set, it defaults to `zetta vi`. When no `vi`
 command, alias, function, or other executable is already available, the
 integration adds `vi` as a wrapper for Zetta's built-in editor.

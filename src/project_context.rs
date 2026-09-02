@@ -1,7 +1,8 @@
 use super::*;
 use crate::project::{
-    ProjectConfig, ProjectRegistry, canonical_project_root, discover_project_config, paths_equal,
-    resolve_registered_project, resolve_registered_project_root,
+    ProjectConfig, ProjectRegistry, canonical_project_root, discover_project_config,
+    is_registered_project_config_root, paths_equal, resolve_registered_project,
+    resolve_registered_project_config_root, resolve_registered_project_root,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -99,8 +100,9 @@ impl ProjectState {
 
     pub(crate) fn clear_removed_roots(&mut self) {
         self.pane_roots
-            .retain(|_, root| self.registry.contains(root));
-        self.configs.retain(|root, _| self.registry.contains(root));
+            .retain(|_, root| is_registered_project_config_root(root, &self.registry));
+        self.configs
+            .retain(|root, _| is_registered_project_config_root(root, &self.registry));
         if self.offer.as_ref().is_some_and(|offer| {
             self.registry.contains(&offer.root)
                 || resolve_registered_project_root(&offer.root, &self.registry).is_some()
@@ -189,6 +191,7 @@ fn project_key(path: &Path) -> String {
 #[derive(Debug)]
 struct ProjectDetectionResult {
     registered_root: Option<PathBuf>,
+    config_root: Option<PathBuf>,
     config: Option<Result<ProjectConfig>>,
     offer_root: Option<PathBuf>,
 }
@@ -203,10 +206,14 @@ fn detect_project_for_directory(
     let directory = canonical.as_deref().unwrap_or(directory);
     let resolution = resolve_registered_project(directory, registry);
     if let Some(root) = resolution.root {
-        let config = (!loaded_roots.iter().any(|loaded| paths_equal(loaded, &root)))
-            .then(|| ProjectConfig::load(&root, base));
+        let config_root = resolution.config_root.unwrap_or_else(|| root.clone());
+        let config = (!loaded_roots
+            .iter()
+            .any(|loaded| paths_equal(loaded, &config_root)))
+        .then(|| ProjectConfig::load(&config_root, base));
         return ProjectDetectionResult {
             registered_root: Some(root),
+            config_root: Some(config_root),
             config,
             offer_root: None,
         };
@@ -214,6 +221,7 @@ fn detect_project_for_directory(
     let offer_root = discover_project_config(directory).ok().flatten();
     ProjectDetectionResult {
         registered_root: None,
+        config_root: None,
         config: None,
         offer_root,
     }
@@ -393,7 +401,8 @@ impl Zetta {
         let Some(generation) = self.projects.begin_detection(pane_id, directory.clone()) else {
             return;
         };
-        let resolved_root = resolve_registered_project(&directory, &self.projects.registry).root;
+        let resolved_root =
+            resolve_registered_project_config_root(&directory, &self.projects.registry);
         let left_project = self.projects.root_for_pane(pane_id).is_some_and(|root| {
             resolved_root
                 .as_ref()
@@ -465,8 +474,13 @@ impl Zetta {
         }
 
         match result.registered_root {
-            Some(root) => {
-                self.projects.pane_roots.insert(pane_id, root.clone());
+            Some(registered_root) => {
+                let config_root = result
+                    .config_root
+                    .unwrap_or_else(|| registered_root.clone());
+                self.projects
+                    .pane_roots
+                    .insert(pane_id, config_root.clone());
                 if let Some(config) = result.config {
                     match config {
                         Ok(config) => {
@@ -475,16 +489,16 @@ impl Zetta {
                                 .projects
                                 .offer
                                 .as_ref()
-                                .is_some_and(|offer| paths_equal(&offer.root, &root))
+                                .is_some_and(|offer| paths_equal(&offer.root, &registered_root))
                             {
                                 self.projects.offer = None;
                             }
                         }
                         Err(error) => {
-                            self.projects.configs.remove(&root);
+                            self.projects.configs.remove(&config_root);
                             self.configuration_error = Some(format!(
                                 "Could not load project configuration {}: {error:#}",
-                                ProjectConfig::path_for(&root).display()
+                                ProjectConfig::path_for(&config_root).display()
                             ));
                         }
                     }
@@ -753,12 +767,18 @@ impl Zetta {
             cx.notify();
             return;
         }
+        let config_root = working_directory
+            .as_deref()
+            .and_then(|directory| {
+                resolve_registered_project_config_root(directory, &self.projects.registry)
+            })
+            .unwrap_or_else(|| root.clone());
         let base = self.launch_config.clone();
         let executor = cx.background_executor().clone();
         let this = cx.entity().downgrade();
         window
             .spawn(cx, async move |cx| {
-                let project_root = root.clone();
+                let project_root = config_root.clone();
                 let result = executor
                     .spawn(async move { ProjectConfig::load(&project_root, &base) })
                     .await;
@@ -776,7 +796,7 @@ impl Zetta {
                     Err(error) => {
                         this.configuration_error = Some(format!(
                             "Could not open project {}: {error:#}",
-                            root.display()
+                            config_root.display()
                         ));
                         cx.notify();
                     }
@@ -855,7 +875,7 @@ impl Zetta {
             .projects
             .pane_roots
             .values()
-            .filter(|root| self.projects.registry.contains(root))
+            .filter(|root| is_registered_project_config_root(root, &self.projects.registry))
             .cloned()
             .collect::<HashSet<_>>();
         for root in roots {
@@ -899,7 +919,7 @@ impl Zetta {
             .projects
             .pane_roots
             .values()
-            .filter(|root| registry.contains(root))
+            .filter(|root| is_registered_project_config_root(root, &registry))
             .cloned()
             .collect::<HashSet<_>>();
         let configs = roots

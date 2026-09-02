@@ -183,6 +183,11 @@ fn documented_project_configuration_example_stays_valid() {
 
     assert_eq!(project.initial_split.as_deref(), Some("development"));
     assert_eq!(project.environment["PROJECT_ENV"], "development");
+    assert_eq!(project.commands["build"].command, "cargo build");
+    assert_eq!(
+        project.commands["check"].environment["COMMAND_NAME"],
+        "check"
+    );
     let leaves = project.effective.pane_split_templates["development"].pane_specifications();
     assert_eq!(
         leaves

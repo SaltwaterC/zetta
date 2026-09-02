@@ -89,6 +89,9 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     assert!(help.contains("zetta pane [OPTIONS] -- COMMAND [ARGUMENT ...]"));
     assert!(help.contains("Run a command in a pane or wait on pane dependencies"));
     assert!(help.contains("zetta pane wait LABEL[,LABEL ...]"));
+    assert!(help.contains("zetta cmd NAME [-- ARGUMENT ...]"));
+    assert!(help.contains("Run a registered project command in the active pane"));
+    assert!(command_help().contains("arbitrary shell code"));
     assert!(help.contains("Run a command in a pane or wait on pane dependencies"));
     assert!(!help.contains("zetta run"));
     assert!(help.contains("requires --split or --profile"));

@@ -172,6 +172,10 @@ pub(crate) enum SettingsControl {
     ProjectOpacity,
     AddProjectEnvironment,
     RemoveProjectEnvironment(usize),
+    AddProjectCommand,
+    RemoveProjectCommand(usize),
+    AddProjectCommandEnvironment(usize),
+    RemoveProjectCommandEnvironment(usize, usize),
     AddProjectProfile,
     RemoveProjectProfile(usize),
 }

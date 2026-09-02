@@ -8,6 +8,15 @@
   "env": {
     "PROJECT_ENV": "development"
   },
+  "commands": {
+    "build": "cargo build",
+    "check": {
+      "command": "echo $PROJECT_ENV && cargo test",
+      "env": {
+        "COMMAND_NAME": "check"
+      }
+    }
+  },
   "initial_split": "development",
   "pane_split_templates": {
     "development": {

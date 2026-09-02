@@ -2,7 +2,20 @@ use super::*;
 
 use crate::settings_editor::{ConfigurationForm, KeymapForm};
 use crate::settings_ui::pane_templates::templates;
-use std::collections::HashMap;
+use std::{collections::HashMap, path::Path, process::Command};
+
+fn git(directory: &Path, arguments: &[&str]) {
+    let output = Command::new("git")
+        .current_dir(directory)
+        .args(arguments)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {arguments:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
 
 fn base_config() -> Config {
     Config::parse(
@@ -83,6 +96,7 @@ fn test_editor(config: &Config, project: Option<ProjectEditor>) -> SettingsEdito
 fn test_project(config: &Config, source: &str) -> ProjectEditor {
     ProjectEditor {
         root: PathBuf::from("/projects/demo"),
+        config_root: PathBuf::from("/projects/demo"),
         index: 0,
         form: ProjectForm::parse(
             source,
@@ -107,6 +121,50 @@ fn the_project_picker_starts_at_the_active_panes_directory() {
         prompt_start_directory(None),
         std::env::current_dir().ok(),
         "a pane that reported no directory falls back to Zetta's own"
+    );
+}
+
+#[test]
+fn the_project_editor_uses_the_active_worktrees_local_config() {
+    let temporary = tempfile::tempdir().unwrap();
+    let main = temporary.path().join("project");
+    let linked = temporary.path().join("worktree");
+    fs::create_dir(&main).unwrap();
+    git(&main, &["init", "-q", "-b", "main"]);
+    git(&main, &["config", "user.email", "test@example.invalid"]);
+    git(&main, &["config", "user.name", "Zetta Test"]);
+    fs::write(main.join("file"), "base\n").unwrap();
+    git(&main, &["add", "file"]);
+    git(
+        &main,
+        &["-c", "commit.gpgsign=false", "commit", "-qm", "initial"],
+    );
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "wt/settings",
+            linked.to_str().unwrap(),
+        ],
+    );
+    fs::create_dir_all(linked.join(".zetta")).unwrap();
+    fs::write(
+        linked.join(".zetta/config.json"),
+        r#"{"commands":{"worktree":"echo local"}}"#,
+    )
+    .unwrap();
+
+    let mut registry = ProjectRegistry::load_from(temporary.path().join("registry.json")).unwrap();
+    registry.add(&main).unwrap();
+    let main = fs::canonicalize(main).unwrap();
+    let linked = fs::canonicalize(linked).unwrap();
+
+    assert_eq!(
+        settings_project_config_root(&main, Some(&linked), &registry),
+        linked
     );
 }
 
@@ -163,6 +221,52 @@ fn the_builder_replaces_the_list_controls_and_reaches_every_row() {
     // tab order.
     assert!(controls.contains(&SettingsControl::SelectPaneTemplate(0)));
     assert!(controls.contains(&SettingsControl::NewPaneTemplate));
+}
+
+#[test]
+fn project_command_controls_follow_nested_environment_order() {
+    let config = base_config();
+    let project = test_project(
+        &config,
+        r#"{
+            "commands": {
+                "check": {
+                    "command": "cargo test",
+                    "env": { "RUST_LOG": "debug" }
+                }
+            },
+            "profiles": [{ "name": "Toolbox" }]
+        }"#,
+    );
+    let editor = test_editor(&config, Some(project));
+    let controls = project_controls(&editor);
+    let command_controls = [
+        SettingsControl::Input(SettingsInput::Project(ProjectTextField::CommandName(0))),
+        SettingsControl::RemoveProjectCommand(0),
+        SettingsControl::Input(SettingsInput::Project(ProjectTextField::Command(0))),
+        SettingsControl::Input(SettingsInput::Project(
+            ProjectTextField::CommandEnvironmentName(0, 0),
+        )),
+        SettingsControl::Input(SettingsInput::Project(
+            ProjectTextField::CommandEnvironmentValue(0, 0),
+        )),
+        SettingsControl::RemoveProjectCommandEnvironment(0, 0),
+        SettingsControl::AddProjectCommandEnvironment(0),
+    ];
+    let start = controls
+        .iter()
+        .position(|control| control == &command_controls[0])
+        .expect("the command starts in the builder tab order");
+    assert_eq!(
+        &controls[start..start + command_controls.len()],
+        command_controls.as_slice()
+    );
+    assert!(
+        controls
+            .iter()
+            .position(|control| control == &SettingsControl::AddProjectCommand)
+            .is_some_and(|index| index >= start + command_controls.len())
+    );
 }
 
 #[test]

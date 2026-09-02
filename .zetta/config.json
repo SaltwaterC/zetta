@@ -1,5 +1,10 @@
 {
   "theme": "One Light",
   "dark_theme": "One Dark",
-  "default_tab_icon": "tool_terminal"
+  "default_tab_icon": "tool_terminal",
+  "commands": {
+    "all": {
+      "command": "make"
+    }
+  }
 }

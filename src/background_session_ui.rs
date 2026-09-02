@@ -1,6 +1,6 @@
 use super::*;
 use crate::mux::SharedPaneEntry;
-use crate::project::resolve_registered_project_root;
+use crate::project::resolve_registered_project_config_root;
 use crate::rename::resolve_tab_title;
 use crate::worktree_detection::terminal_event_requires_worktree_detection;
 
@@ -1648,9 +1648,9 @@ impl Zetta {
     }
 
     /// Resolves saved pane directories before any terminal view is built.
-    /// Each distinct registered root is read once, so all panes in a restore
-    /// see the same latest project configuration without multiplying I/O by
-    /// pane count.
+    /// Each distinct project config root is read once, so all panes in a
+    /// restore see the same latest project configuration without multiplying
+    /// I/O by pane count.
     fn prepare_restored_panes(
         &mut self,
         panes: Vec<(u64, String, Option<PathBuf>)>,
@@ -1674,7 +1674,7 @@ impl Zetta {
                     icon: ProfileIcon::default(),
                 });
             let project_root = match working_directory.as_deref() {
-                Some(directory) => resolve_registered_project_root(
+                Some(directory) => resolve_registered_project_config_root(
                     &restored_project_directory(&profile, directory),
                     &self.projects.registry,
                 ),

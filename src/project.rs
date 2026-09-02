@@ -11,6 +11,9 @@ use serde_json::{Map, Value};
 use tempfile::NamedTempFile;
 
 use crate::config::{Config, platform_config_dir};
+use crate::project_commands::{
+    RegisteredProjectCommand, parse_project_commands, validate_environment_entry,
+};
 use crate::worktree_detection::{WorktreeMetadata, detect_worktree_metadata};
 
 pub(crate) const PROJECT_CONFIG_DIRECTORY: &str = ".zetta";
@@ -27,6 +30,7 @@ pub(crate) struct ProjectConfig {
     pub(crate) theme: Option<String>,
     pub(crate) dark_theme: Option<String>,
     pub(crate) environment: HashMap<String, String>,
+    pub(crate) commands: std::collections::BTreeMap<String, RegisteredProjectCommand>,
     pub(crate) initial_split: Option<String>,
 }
 
@@ -58,6 +62,11 @@ impl ProjectConfig {
             .map(parse_project_environment)
             .transpose()?
             .unwrap_or_default();
+        let commands = object
+            .get("commands")
+            .map(parse_project_commands)
+            .transpose()?
+            .unwrap_or_default();
         let initial_split = object
             .get("initial_split")
             .map(|value| {
@@ -69,6 +78,7 @@ impl ProjectConfig {
 
         let mut overlay = object.clone();
         overlay.remove("env");
+        overlay.remove("commands");
         overlay.remove("initial_split");
         let overlay_source = serde_json::to_string(&Value::Object(overlay))?;
         let mut effective = Config::parse_overlay(&overlay_source, base.clone(), &path)?;
@@ -111,6 +121,7 @@ impl ProjectConfig {
             theme,
             dark_theme,
             environment,
+            commands,
             initial_split,
         })
     }
@@ -125,6 +136,7 @@ pub(crate) fn validate_project_fields(object: &Map<String, Value>) -> Result<()>
         "profiles",
         "default_tab_icon",
         "env",
+        "commands",
         "inactive_pane_opacity",
         "initial_split",
         "pane_split_templates",
@@ -145,23 +157,10 @@ fn parse_project_environment(value: &Value) -> Result<HashMap<String, String>> {
     object
         .iter()
         .map(|(name, value)| {
-            anyhow::ensure!(
-                !name.is_empty() && !name.contains(['=', '\0']),
-                "project environment variable names must not be empty or contain '=' or NUL"
-            );
-            anyhow::ensure!(
-                !name
-                    .get(..6)
-                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("ZETTA_")),
-                "project environment variables may not override reserved ZETTA_* variables"
-            );
             let value = value
                 .as_str()
                 .context("project environment values must be strings")?;
-            anyhow::ensure!(
-                !value.contains('\0'),
-                "project environment values must not contain NUL"
-            );
+            validate_environment_entry(name, value, "project environment")?;
             Ok((name.clone(), value.to_owned()))
         })
         .collect()
@@ -205,7 +204,13 @@ pub(crate) struct ProjectRegistry {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ProjectRootResolution {
+    /// The registered project root used for registry identity and project
+    /// opening. A managed worktree keeps its main repository here.
     pub(crate) root: Option<PathBuf>,
+    /// The root whose `.zetta/config.json` supplies the effective project
+    /// settings. A managed worktree with its own project file uses that file;
+    /// otherwise it falls back to the registered main repository.
+    pub(crate) config_root: Option<PathBuf>,
     /// Present only when `root` is a registered project reached through a
     /// Zetta-managed `wt/*` linked worktree. An unregistered or ordinary Git
     /// worktree deliberately falls through to normal directory matching.
@@ -329,8 +334,10 @@ impl ProjectRegistry {
 /// A Zetta-managed `wt/*` linked worktree lives beside its main repository, so
 /// a lexical ancestor lookup cannot find the main project. Git's linked
 /// worktree metadata gives us that main root; it is trusted only when the main
-/// root is already registered. Everything else uses the existing directory
-/// based lookup, preserving ordinary and detached worktree behavior.
+/// root is already registered. The main root remains the registry identity,
+/// while a worktree-local `.zetta/config.json`, when present, supplies the
+/// effective settings. Everything else uses the existing directory based
+/// lookup, preserving ordinary and detached worktree behavior.
 pub(crate) fn resolve_registered_project(
     directory: &Path,
     registry: &ProjectRegistry,
@@ -339,14 +346,22 @@ pub(crate) fn resolve_registered_project(
     if let Some(worktree) = worktree
         && let Some(root) = registry.matching_root(&worktree.main_root).cloned()
     {
+        let config_root = if ProjectConfig::path_for(&worktree.root).is_file() {
+            worktree.root.clone()
+        } else {
+            root.clone()
+        };
         return ProjectRootResolution {
             root: Some(root),
+            config_root: Some(config_root),
             managed_worktree: Some(worktree),
         };
     }
 
+    let root = registry.matching_root(directory).cloned();
     ProjectRootResolution {
-        root: registry.matching_root(directory).cloned(),
+        config_root: root.clone(),
+        root,
         managed_worktree: None,
     }
 }
@@ -356,6 +371,18 @@ pub(crate) fn resolve_registered_project_root(
     registry: &ProjectRegistry,
 ) -> Option<PathBuf> {
     resolve_registered_project(directory, registry).root
+}
+
+pub(crate) fn resolve_registered_project_config_root(
+    directory: &Path,
+    registry: &ProjectRegistry,
+) -> Option<PathBuf> {
+    resolve_registered_project(directory, registry).config_root
+}
+
+pub(crate) fn is_registered_project_config_root(root: &Path, registry: &ProjectRegistry) -> bool {
+    resolve_registered_project_config_root(root, registry)
+        .is_some_and(|resolved| paths_equal(&resolved, root))
 }
 
 pub(crate) fn ensure_project_config(root: &Path) -> Result<PathBuf> {

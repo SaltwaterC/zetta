@@ -29,6 +29,7 @@ fn request(token: &str, command: &str) -> ControlRequest {
         theme: None,
         scope: None,
         pane_request: None,
+        shell_command: None,
     }
 }
 
@@ -69,6 +70,7 @@ fn send_reconnect_session_request(
         theme: None,
         scope: None,
         pane_request: None,
+        shell_command: None,
     };
     let result = write_message(&mut stream, &request).and_then(|()| {
         let response = read_message::<ControlResponse>(&mut stream)?;
@@ -223,6 +225,66 @@ fn run_control_messages_preserve_the_two_phase_payload() {
         .to_string(),
     );
     assert_eq!(decode_control_request(&mut malformed, "token"), None);
+}
+
+#[test]
+fn shell_command_control_requests_round_trip_and_reject_unsupported_fields() {
+    let shell_request = ShellCommandRequest {
+        command: "echo $FOO".to_owned(),
+        arguments: vec!["two words".to_owned(), "--literal".to_owned()],
+        environment: BTreeMap::from([("FOO".to_owned(), "bar".to_owned())]),
+    };
+    let mut shell_control = request("token", "run_shell_command");
+    shell_control.shell_command = Some((&shell_request).into());
+
+    let encoded = serde_json::to_value(&shell_control).unwrap();
+    assert_eq!(encoded["command"], "run_shell_command");
+    assert_eq!(encoded["shell_command"]["command"], "echo $FOO");
+    assert_eq!(encoded["shell_command"]["arguments"][0], "two words");
+    assert_eq!(encoded["shell_command"]["environment"]["FOO"], "bar");
+    assert_eq!(
+        decode_control_request(&mut shell_control, "token"),
+        Some(ControlRequestCommand::RunShellCommand {
+            request: shell_request.clone(),
+        })
+    );
+
+    let mut with_pane_id = request("token", "run_shell_command");
+    with_pane_id.pane_id = Some(42);
+    with_pane_id.shell_command = Some((&shell_request).into());
+    assert_eq!(decode_control_request(&mut with_pane_id, "token"), None);
+
+    let mut with_invalid_environment = request("token", "run_shell_command");
+    with_invalid_environment.shell_command = Some(ShellCommandControlRequest {
+        command: "echo".to_owned(),
+        arguments: Vec::new(),
+        environment: BTreeMap::from([("ZETTA_PROCESS_ID".to_owned(), "spoof".to_owned())]),
+    });
+    assert_eq!(
+        decode_control_request(&mut with_invalid_environment, "token"),
+        None
+    );
+
+    let mut with_duplicate_environment = request("token", "run_shell_command");
+    with_duplicate_environment.shell_command = Some(ShellCommandControlRequest {
+        command: "echo".to_owned(),
+        arguments: Vec::new(),
+        environment: BTreeMap::from([
+            ("FOO".to_owned(), "one".to_owned()),
+            ("foo".to_owned(), "two".to_owned()),
+        ]),
+    });
+    assert_eq!(
+        decode_control_request(&mut with_duplicate_environment, "token"),
+        None
+    );
+
+    let mut shell_payload_on_other_command = request("token", "open_window");
+    shell_payload_on_other_command.shell_command = Some((&shell_request).into());
+    assert_eq!(
+        decode_control_request(&mut shell_payload_on_other_command, "token"),
+        None
+    );
 }
 
 #[test]
@@ -1135,6 +1197,7 @@ fn reconnect_requests_carry_a_session_target_and_optional_secret() {
         theme: None,
         scope: None,
         pane_request: None,
+        shell_command: None,
     };
     assert_eq!(
         decode_control_request(&mut request, "token"),
@@ -1522,6 +1585,38 @@ fn control_server_delivers_a_pane_command_and_reports_structured_rejection() {
     let error = client.join().unwrap().unwrap_err().to_string();
     assert!(error.contains("pane_rejected"));
     assert!(error.contains("no pane named"));
+}
+
+#[test]
+fn control_server_delivers_a_shell_command_and_reports_structured_rejection() {
+    let directory = tempfile::tempdir().unwrap();
+    let endpoint_path = directory.path().join("control.json");
+    let (commands, mut received) = futures::channel::mpsc::unbounded();
+    let _server = ProcessControlServer::start_at(commands, endpoint_path.clone()).unwrap();
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&fs::read(endpoint_path).unwrap()).unwrap();
+    let expected = ShellCommandRequest {
+        command: "echo $FOO".to_owned(),
+        arguments: vec!["two words".to_owned()],
+        environment: BTreeMap::from([("FOO".to_owned(), "bar".to_owned())]),
+    };
+    let client_request = expected.clone();
+    let client = thread::spawn(move || send_run_shell_command_request(&endpoint, &client_request));
+    let command = futures::executor::block_on(received.next()).unwrap();
+    let ProcessControlCommand::RunShellCommand {
+        request,
+        completion,
+    } = command
+    else {
+        panic!("unexpected process control command");
+    };
+    assert_eq!(request, expected);
+    completion
+        .send(Err("the active pane has no running base shell".to_owned()))
+        .unwrap();
+    let error = client.join().unwrap().unwrap_err().to_string();
+    assert!(error.contains("shell_command_rejected"));
+    assert!(error.contains("no running base shell"));
 }
 
 #[test]

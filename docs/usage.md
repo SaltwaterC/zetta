@@ -463,13 +463,14 @@ on demand by `new`; `status` only reports its resolved path and never creates
 directories.
 
 When the main repository is a registered Zetta project, a Zetta-managed
-`wt/*` linked worktree automatically inherits that project's configuration.
-The linked worktree is not added as a duplicate project and does not show an
-import offer; its main repository remains the project root while the terminal
-keeps the worktree directory. This applies only to worktrees created by
-Zetta's workflow and only when the main repository is already registered.
-Ordinary, detached, or otherwise unregistered worktrees follow the usual
-project discovery and trust flow.
+`wt/*` linked worktree keeps that repository as its project identity. If the
+worktree has its own `.zetta/config.json`, Zetta uses it for the effective
+settings; otherwise it falls back to the main project's file. The linked
+worktree is not added as a duplicate project and does not show an import offer,
+while the terminal keeps the worktree directory. This applies only to
+worktrees created by Zetta's workflow and only when the main repository is
+already registered. Ordinary, detached, or otherwise unregistered worktrees
+follow the usual project discovery and trust flow.
 
 `status` also reports whether the current `HEAD` contains submodules and lists
 detected submodule paths, including nested paths. It reports whether native
@@ -817,6 +818,14 @@ stay distinguishable and searchable. These entries follow the registry, so they
 appear as soon as a project is registered and disappear when it is removed. See
 [Projects](configuration.md#projects) for project configuration and trust
 details.
+
+Registered projects can define package-style commands in `.zetta/config.json`.
+Use `zetta cmd --list` from inside a project to print its command names, then
+run one in the existing active pane with `zetta cmd NAME -- ARGUMENT ...`.
+The command is a raw string evaluated by the active profile's shell; appended
+arguments are quoted and command-specific environment values are scoped to the
+invocation. `zetta cmd` can execute arbitrary shell code, so only trust command
+definitions from repositories you intend to run.
 
 ## Fullscreen
 

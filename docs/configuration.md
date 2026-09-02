@@ -40,13 +40,14 @@ registered project opens that project, and `project open` opens a new active
 tab in an existing Zetta process when possible. The deepest registered
 ancestor wins for nested projects.
 
-Zetta-managed `wt/*` linked worktrees are aliases for their registered main
-repository: Zetta loads the main project's `.zetta/config.json`, keeps the
-main root as the project context, and does not offer a second project import.
-The worktree only changes the initial terminal directory, so launching plain
-`zetta` or using `project open` from inside it starts there. This association
-requires the main repository to be registered already; ordinary, detached, and
-unregistered worktrees retain normal directory matching and import offers.
+Zetta-managed `wt/*` linked worktrees remain aliases for their registered main
+repository for project identity, but Zetta loads the worktree's own
+`.zetta/config.json` when it exists and falls back to the main project's file
+when it does not. The worktree is not offered as a second project import, and
+launching plain `zetta` or using `project open` from inside it starts there.
+This association requires the main repository to be registered already;
+ordinary, detached, and unregistered worktrees retain normal directory
+matching and import offers.
 
 Project configuration is an overlay on the normal configuration and supports
 these deliberately scoped fields:
@@ -57,6 +58,10 @@ these deliberately scoped fields:
   escape the project root, defaulting to the project root itself
 - `env`, an object of string environment variables; reserved `ZETTA_*` names
   cannot be replaced
+- `commands`, an object of named project commands. A command can be a shell
+  string (`"build": "cargo build"`) or an object with `command` and an
+  optional `env` object; command-specific environment values override the
+  project's `env` only for that invocation
 - `inactive_pane_opacity`
 - `pane_split_templates`
 - `initial_split`, naming a built-in or project-defined pane template
@@ -83,8 +88,9 @@ block startup or terminal input. WSL directories are not scanned; register a
 WSL project explicitly and its reported UNC path is matched lexically.
 
 Registration is a trust boundary. A project pane template can launch commands,
-both as a pane's own program and as stacked commands seeded beside it, so add
-only repositories whose `.zetta/config.json` you trust.
+both as a pane's own program and as stacked commands seeded beside it, and a
+registered project command can execute arbitrary shell code. Add only
+repositories whose `.zetta/config.json` you trust.
 
 The Settings **Projects** tab can add, open, edit, and unregister projects.
 **Edit config** opens a typed builder for every supported field, including the
@@ -97,6 +103,15 @@ project** validates the result the way loading it would — including that
 atomically, so a rejected edit never damages a working configuration. **Open in
 editor** is still available for hand-editing through Zetta's normal
 `$EDITOR`/built-in vi flow.
+
+Registered commands run in the existing active pane with the active profile's
+shell. From a directory inside a registered project, use `zetta cmd --list` to
+list its command names or `zetta cmd NAME -- ARGUMENT ...` to run one. The
+command string is evaluated by the shell, so expansions such as `$PROJECT_ENV`
+work as written; appended arguments are shell-quoted and command-specific
+environment values are scoped to that invocation. Listing does not require a
+running Zetta process, while running a command requires an active window and
+pane and never opens a fallback one.
 
 If configuration cannot be parsed, Zetta starts with safe defaults and shows
 the error in the window. Correct the file and press `Ctrl-Cmd-R` on macOS or

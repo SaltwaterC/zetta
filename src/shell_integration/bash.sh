@@ -309,6 +309,22 @@ _zetta_complete() {
         done < <(zetta project list 2>/dev/null)
     }
 
+    _zetta_complete_project_commands() {
+        COMPREPLY=()
+        local command_name
+        while IFS= read -r command_name; do
+            [[ $command_name == "$current"* ]] && COMPREPLY+=("$command_name")
+        done < <(zetta cmd --list 2>/dev/null)
+    }
+
+    _zetta_complete_project_command_options() {
+        local option
+        for option in "$@"; do
+            [[ $option == "$current"* ]] || continue
+            _zetta_option_used "$option" || COMPREPLY+=("$option")
+        done
+    }
+
     _zetta_complete_mux_session_ids() {
         COMPREPLY=()
         local session_id
@@ -405,6 +421,40 @@ _zetta_complete() {
             _zetta_complete_run_pane_labels
         else
             _zetta_compgen '--allow-failure --help --'
+        fi
+        return
+    fi
+
+    if [[ $command == cmd ]]; then
+        local cmd_delimiter=0
+        for (( index = 2; index < COMP_CWORD; index++ )); do
+            if [[ ${COMP_WORDS[index]} == -- ]]; then
+                cmd_delimiter=1
+                break
+            fi
+        done
+        if (( cmd_delimiter )); then
+            COMPREPLY=()
+        elif (( COMP_CWORD == 2 )); then
+            if [[ $current == -* ]]; then
+                _zetta_compgen '--help --list --'
+            else
+                _zetta_complete_project_commands
+                _zetta_complete_project_command_options '--help' '--list' '--'
+            fi
+        elif [[ ${COMP_WORDS[2]} == --list || ${COMP_WORDS[2]} == --help ]]; then
+            COMPREPLY=()
+        elif (( COMP_CWORD == 3 )); then
+            if [[ $current == -* ]]; then
+                _zetta_compgen '--help --'
+            else
+                COMPREPLY=()
+                _zetta_complete_project_command_options '--help' '--'
+            fi
+        elif [[ $current == -* ]]; then
+            _zetta_compgen '--help --'
+        else
+            COMPREPLY=()
         fi
         return
     fi
@@ -649,7 +699,7 @@ _zetta_complete() {
     esac
 
     if (( COMP_CWORD == 1 )); then
-        _zetta_compgen 'benchmark terminal-size mux pane profile project edit vi init serial http tftp notify attention copy paste splits tabicon theme overlay ZETTA_WORKTREE_ROOT_COMMAND --help --version --config --keymap --profile --split --replace-pane --theme --no-mux --new-window --command'
+        _zetta_compgen 'benchmark terminal-size mux pane profile project cmd edit vi init serial http tftp notify attention copy paste splits tabicon theme overlay ZETTA_WORKTREE_ROOT_COMMAND --help --version --config --keymap --profile --split --replace-pane --theme --no-mux --new-window --command'
         return
     fi
 
@@ -749,6 +799,27 @@ _zetta_complete() {
                         ;;
                     list) _zetta_compgen '--help' ;;
                 esac
+            fi
+            ;;
+        cmd)
+            if (( COMP_CWORD == 2 )); then
+                if [[ $current == -* ]]; then
+                    _zetta_compgen '--help --list --'
+                else
+                    _zetta_complete_project_commands
+                    _zetta_complete_project_command_options '--help' '--list' '--'
+                fi
+            elif [[ ${COMP_WORDS[2]} == --list || ${COMP_WORDS[2]} == --help ]]; then
+                COMPREPLY=()
+            elif (( COMP_CWORD == 3 )); then
+                if [[ $current == -* ]]; then
+                    _zetta_compgen '--help --'
+                else
+                    COMPREPLY=()
+                    _zetta_complete_project_command_options '--help' '--'
+                fi
+            else
+                COMPREPLY=()
             fi
             ;;
         benchmark)

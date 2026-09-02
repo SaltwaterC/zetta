@@ -17,6 +17,7 @@ mod profile_cli;
 mod profile_icon;
 mod project;
 mod project_cli;
+mod project_commands;
 mod project_form;
 mod run_command;
 #[cfg(feature = "serial-console")]

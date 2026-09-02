@@ -990,6 +990,10 @@ impl Zetta {
             | SettingsControl::ClearProjectTabIcon
             | SettingsControl::AddProjectEnvironment
             | SettingsControl::RemoveProjectEnvironment(_)
+            | SettingsControl::AddProjectCommand
+            | SettingsControl::RemoveProjectCommand(_)
+            | SettingsControl::AddProjectCommandEnvironment(_)
+            | SettingsControl::RemoveProjectCommandEnvironment(_, _)
             | SettingsControl::AddProjectProfile
             | SettingsControl::RemoveProjectProfile(_) => {
                 self.activate_project_config_control(control, window, cx)

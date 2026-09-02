@@ -1,4 +1,9 @@
 use super::*;
+use std::collections::BTreeMap;
+
+use crate::project_commands::{
+    MAX_SHELL_COMMAND_BYTES, validate_command_environment_entry, validate_command_string,
+};
 use crate::run_command::{RunCommandRegistry, RunPaneIdentity, RunRegistration, RunWaitRequest};
 
 /// Maximum UTF-8 payload accepted for one command-pane invocation. The process
@@ -14,6 +19,13 @@ pub(crate) struct PaneCommand {
     pub(crate) stack: bool,
     pub(crate) list: bool,
     pub(crate) command: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ShellCommandRequest {
+    pub(crate) command: String,
+    pub(crate) arguments: Vec<String>,
+    pub(crate) environment: BTreeMap<String, String>,
 }
 
 struct ResolvedPaneOverlay {
@@ -115,6 +127,222 @@ pub(crate) fn quote_pane_command_for_shell(profile: &Shell, command: &[String]) 
         quoted.push_str(&argument);
     }
     Ok(quoted)
+}
+
+fn shell_kind_for_profile(profile: &Shell) -> task::ShellKind {
+    if is_wsl_shell(profile) {
+        task::ShellKind::Posix
+    } else {
+        #[cfg(windows)]
+        if msys2_profile(profile).is_some() {
+            task::ShellKind::Posix
+        } else {
+            ShellBuilder::new(profile, true).kind()
+        }
+        #[cfg(not(windows))]
+        {
+            ShellBuilder::new(profile, false).kind()
+        }
+    }
+}
+
+fn quote_shell_value(kind: task::ShellKind, value: &str) -> Result<String> {
+    kind.try_quote(value)
+        .map(|value| value.into_owned())
+        .context("shell command contains a value that cannot be quoted")
+}
+
+fn quote_powershell_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn append_shell_arguments(
+    kind: task::ShellKind,
+    command: &str,
+    arguments: &[String],
+) -> Result<String> {
+    let mut command = command.to_owned();
+    for argument in arguments {
+        anyhow::ensure!(
+            !argument.contains('\0'),
+            "shell command arguments must not contain NUL"
+        );
+        command.push(' ');
+        command.push_str(&quote_shell_value(kind, argument)?);
+    }
+    Ok(command)
+}
+
+/// Builds the command text injected into an already-running profile shell.
+///
+/// The configured command remains raw so shell expansion and operators retain
+/// their normal meaning. Only invocation arguments and environment values are
+/// quoted. Environment changes are enclosed in a shell-specific scope.
+pub(crate) fn shell_command_for_profile(
+    profile: &Shell,
+    request: &ShellCommandRequest,
+) -> Result<String> {
+    validate_command_string(&request.command)?;
+    let kind = shell_kind_for_profile(profile);
+    let command = append_shell_arguments(kind, &request.command, &request.arguments)?;
+    for (name, value) in &request.environment {
+        validate_command_environment_entry(name, value, "shell command environment")?;
+    }
+    let payload_bytes = request.command.len()
+        + request.arguments.iter().map(String::len).sum::<usize>()
+        + request
+            .environment
+            .iter()
+            .map(|(name, value)| name.len() + value.len())
+            .sum::<usize>();
+    anyhow::ensure!(
+        payload_bytes <= MAX_SHELL_COMMAND_BYTES,
+        "shell command request exceeds the {} KiB limit",
+        MAX_SHELL_COMMAND_BYTES / 1024
+    );
+    if request.environment.is_empty() {
+        anyhow::ensure!(
+            command.len() <= MAX_SHELL_COMMAND_BYTES,
+            "shell command exceeds the {} KiB limit",
+            MAX_SHELL_COMMAND_BYTES / 1024
+        );
+        return Ok(command);
+    }
+
+    let scoped = match kind {
+        task::ShellKind::Posix => {
+            let assignments = request
+                .environment
+                .iter()
+                .map(|(name, value)| Ok(format!("{name}={}", quote_shell_value(kind, value)?)))
+                .collect::<Result<Vec<_>>>()?
+                .join(" ");
+            format!("( export {assignments}; {command} )")
+        }
+        task::ShellKind::Csh | task::ShellKind::Tcsh => {
+            let assignments = request
+                .environment
+                .iter()
+                .map(|(name, value)| {
+                    Ok(format!("setenv {name} {}", quote_shell_value(kind, value)?))
+                })
+                .collect::<Result<Vec<_>>>()?
+                .join("; ");
+            format!("( {assignments}; {command} )")
+        }
+        task::ShellKind::Fish => {
+            let assignments = request
+                .environment
+                .iter()
+                .map(|(name, value)| {
+                    Ok(format!(
+                        "set -lx {name} {}",
+                        quote_shell_value(kind, value)?
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?
+                .join("; ");
+            format!("begin; {assignments}; {command}; end")
+        }
+        task::ShellKind::PowerShell | task::ShellKind::Pwsh => {
+            let mut setup = vec![
+                "$zetta_old_environment = @{}".to_owned(),
+                "$zetta_had_environment = @{}".to_owned(),
+            ];
+            let mut assignments = Vec::with_capacity(request.environment.len());
+            let mut restores = Vec::with_capacity(request.environment.len());
+            for (name, value) in &request.environment {
+                let path = quote_powershell_literal(&format!("Env:{name}"));
+                let variable = quote_powershell_literal(name);
+                let value = quote_shell_value(kind, value)?;
+                setup.push(format!(
+                    "$zetta_had_environment[{path}] = Test-Path -LiteralPath {path}"
+                ));
+                setup.push(format!(
+                    "$zetta_old_environment[{path}] = [System.Environment]::GetEnvironmentVariable({variable}, 'Process')"
+                ));
+                assignments.push(format!("Set-Item -LiteralPath {path} -Value {value}"));
+                restores.push(format!(
+                    "if ($zetta_had_environment[{path}]) {{ Set-Item -LiteralPath {path} -Value $zetta_old_environment[{path}] }} else {{ Remove-Item -LiteralPath {path} -ErrorAction SilentlyContinue }}"
+                ));
+            }
+            format!(
+                "& {{ {}; try {{ {}; {} }} finally {{ {} }} }}",
+                setup.join("; "),
+                assignments.join("; "),
+                command,
+                restores.join("; ")
+            )
+        }
+        task::ShellKind::Nushell => {
+            let assignments = request
+                .environment
+                .iter()
+                .map(|(name, value)| {
+                    Ok(format!("$env.{name} = {}", quote_shell_value(kind, value)?))
+                })
+                .collect::<Result<Vec<_>>>()?
+                .join("; ");
+            format!("do {{ {assignments}; {command} }}")
+        }
+        task::ShellKind::Cmd => {
+            let assignments = request
+                .environment
+                .iter()
+                .map(|(name, value)| Ok(format!("set {name}={}", quote_shell_value(kind, value)?)))
+                .collect::<Result<Vec<_>>>()?
+                .join(" && ");
+            // A nested cmd process gives the interactive cmd.exe a scoped
+            // environment, while preserving cmd's raw command syntax.
+            format!("cmd.exe /D /S /C \"{assignments} && {command}\"")
+        }
+        task::ShellKind::Xonsh => {
+            let assignments = request
+                .environment
+                .iter()
+                .map(|(name, value)| {
+                    Ok(format!(
+                        "{prefix}{name} = {value}",
+                        prefix = "$",
+                        name = name,
+                        value = quote_shell_value(kind, value)?
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?
+                .join("; ");
+            format!("( {assignments}; {command} )")
+        }
+        task::ShellKind::Rc => {
+            let assignments = request
+                .environment
+                .iter()
+                .map(|(name, value)| Ok(format!("{name}={}", quote_shell_value(kind, value)?)))
+                .collect::<Result<Vec<_>>>()?
+                .join("; ");
+            format!("( {assignments}; {command} )")
+        }
+        task::ShellKind::Elvish => {
+            let entries = request
+                .environment
+                .iter()
+                .map(|(name, value)| {
+                    Ok(format!(
+                        "{} {}",
+                        quote_shell_value(kind, name)?,
+                        quote_shell_value(kind, value)?
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?
+                .join(" ");
+            format!("with-env [{entries}] {{ {command} }}")
+        }
+    };
+    anyhow::ensure!(
+        scoped.len() <= MAX_SHELL_COMMAND_BYTES,
+        "shell command exceeds the {} KiB limit",
+        MAX_SHELL_COMMAND_BYTES / 1024
+    );
+    Ok(scoped)
 }
 
 pub(crate) fn exact_pane_command_shell(
@@ -498,6 +726,48 @@ impl Zetta {
             (pane_id, pane.view.clone(), pane.profile.command.clone())
         };
         let command = quote_pane_command_for_shell(&profile, &request.command)?;
+        let tab = self
+            .tabs
+            .get_mut(self.active_tab)
+            .context("there is no active tab")?;
+        tab.activate_stack_entry(pane_id, PaneStackSelection::Base);
+        if let Some(pane) = tab.pane_mut(pane_id)
+            && view.is_none()
+        {
+            pane.pending_command = Some(command.clone());
+        }
+        if let Some(view) = view {
+            view.update(cx, |view, cx| {
+                view.apply_input(&TerminalInput::Text(format!("{command}\r")), cx)
+            });
+        }
+        self.focus_active(window, cx);
+        self.sync_visible_terminals(cx);
+        cx.notify();
+        Ok(())
+    }
+
+    pub(crate) fn run_shell_command(
+        &mut self,
+        request: ShellCommandRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let (pane_id, view, profile) = {
+            let tab = self
+                .tabs
+                .get(self.active_tab)
+                .context("there is no active tab")?;
+            let pane = tab
+                .active_pane()
+                .context("the active tab has no active pane")?;
+            anyhow::ensure!(
+                !pane.base_exited,
+                "the active pane has no running base shell"
+            );
+            (pane.id, pane.view.clone(), pane.profile.command.clone())
+        };
+        let command = shell_command_for_profile(&profile, &request)?;
         let tab = self
             .tabs
             .get_mut(self.active_tab)

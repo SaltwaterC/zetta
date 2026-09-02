@@ -1,4 +1,5 @@
 use std::{
+    collections::{BTreeMap, HashSet},
     env, fs,
     io::{BufRead as _, BufReader, Read as _, Write as _},
     path::{Path, PathBuf},
@@ -27,9 +28,13 @@ use ui::IconName;
 
 use crate::background_sessions::SessionSecret;
 use crate::command_panes::{
-    MAX_PANE_COMMAND_BYTES, PaneCommand, pane_command_byte_len, parse_pane_direction,
+    MAX_PANE_COMMAND_BYTES, PaneCommand, ShellCommandRequest, pane_command_byte_len,
+    parse_pane_direction,
 };
 use crate::pane::{OverlayFontSize, PaneOverlayRequest, overlay_color_from_value};
+use crate::project_commands::{
+    MAX_SHELL_COMMAND_BYTES, validate_command_environment_entry, validate_command_string,
+};
 use crate::run_command::{
     RunPaneIdentity, RunRegistration, RunResolution, RunWaitRequest, process_run_registry,
 };
@@ -56,6 +61,8 @@ use crate::run_command::{
 ///
 /// 18 adds an optional working directory to open-project requests, so opening
 /// a registered project from a managed worktree can preserve that directory.
+///
+/// 19 adds a raw shell-command request for registered project commands.
 ///
 /// A New Window request may carry an optional profile name and a short-lived Wayland activation token in
 /// the private string payload so an existing process can focus its surface.
@@ -160,6 +167,10 @@ pub(crate) enum ProcessControlCommand {
         request: PaneCommand,
         completion: Sender<std::result::Result<(), String>>,
     },
+    RunShellCommand {
+        request: ShellCommandRequest,
+        completion: Sender<std::result::Result<(), String>>,
+    },
     RunWait {
         request: RunWaitRequest,
         completion: Sender<std::result::Result<RunRegistration, String>>,
@@ -254,6 +265,9 @@ enum ControlRequestCommand {
     },
     RunPane {
         request: PaneCommand,
+    },
+    RunShellCommand {
+        request: ShellCommandRequest,
     },
     RunWait {
         request: RunWaitRequest,
@@ -354,6 +368,8 @@ struct ControlRequest {
     #[serde(default)]
     scope: Option<String>,
     pane_request: Option<PaneControlRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shell_command: Option<ShellCommandControlRequest>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -362,6 +378,55 @@ struct RunWaitPayload {
     dependencies: Vec<String>,
     allow_failure: bool,
     command: Vec<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShellCommandControlRequest {
+    command: String,
+    arguments: Vec<String>,
+    environment: BTreeMap<String, String>,
+}
+
+impl From<&ShellCommandRequest> for ShellCommandControlRequest {
+    fn from(request: &ShellCommandRequest) -> Self {
+        Self {
+            command: request.command.clone(),
+            arguments: request.arguments.clone(),
+            environment: request.environment.clone(),
+        }
+    }
+}
+
+impl ShellCommandControlRequest {
+    fn into_request(self) -> Option<ShellCommandRequest> {
+        let mut environment_names = HashSet::new();
+        if validate_command_string(&self.command).is_err()
+            || self
+                .arguments
+                .iter()
+                .any(|argument| argument.contains('\0'))
+            || self.environment.iter().any(|(name, value)| {
+                validate_command_environment_entry(name, value, "shell command environment")
+                    .is_err()
+                    || !environment_names.insert(name.to_ascii_uppercase())
+            })
+        {
+            return None;
+        }
+        let payload_bytes = self.command.len()
+            + self.arguments.iter().map(String::len).sum::<usize>()
+            + self
+                .environment
+                .iter()
+                .map(|(name, value)| name.len() + value.len())
+                .sum::<usize>();
+        (payload_bytes <= MAX_SHELL_COMMAND_BYTES).then_some(ShellCommandRequest {
+            command: self.command,
+            arguments: self.arguments,
+            environment: self.environment,
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -721,6 +786,33 @@ impl ProcessControlServer {
                                             Some(Err(message)) => {
                                                 response_error = Some(ControlError {
                                                     code: "pane_rejected".to_owned(),
+                                                    message,
+                                                });
+                                                "rejected"
+                                            }
+                                            None => "rejected",
+                                        }
+                                    }
+                                }
+                                Some(ControlRequestCommand::RunShellCommand { request }) => {
+                                    let (completion, completed) = channel();
+                                    if commands
+                                        .unbounded_send(ProcessControlCommand::RunShellCommand {
+                                            request,
+                                            completion,
+                                        })
+                                        .is_err()
+                                    {
+                                        "rejected"
+                                    } else {
+                                        match wait_for_result_completion(
+                                            &completed,
+                                            &stopping_for_thread,
+                                        ) {
+                                            Some(Ok(())) => "ok",
+                                            Some(Err(message)) => {
+                                                response_error = Some(ControlError {
+                                                    code: "shell_command_rejected".to_owned(),
                                                     message,
                                                 });
                                                 "rejected"
@@ -1542,6 +1634,10 @@ fn decode_control_request(
         zeroize_control_request_secrets(request);
         return None;
     }
+    if request.command != "run_shell_command" && request.shell_command.is_some() {
+        zeroize_control_request_secrets(request);
+        return None;
+    }
     if !matches!(
         request.command.as_str(),
         "reload_configuration"
@@ -1844,6 +1940,37 @@ fn decode_control_request(
                 .take()
                 .and_then(PaneControlRequest::into_command)
                 .map(|request| ControlRequestCommand::RunPane { request })
+        }
+        "run_shell_command"
+            if request.runner_id.is_none()
+                && request.session_id.is_none()
+                && request.secret.is_none()
+                && request.icon.is_none()
+                && request.pane_theme.is_none()
+                && request.pane_id.is_none()
+                && request.pane_overlay.is_none()
+                && request.pane_overlay_font_size.is_none()
+                && request.pane_overlay_opacity.is_none()
+                && request.pane_overlay_color.is_none()
+                && request.attention_id.is_none()
+                && request.attention_summary.is_none()
+                && request.attention_body.is_none()
+                && request.tab_name.is_none()
+                && request.worktree_name.is_none()
+                && request.config_path.is_none()
+                && request.working_directory.is_none()
+                && request.split.is_none()
+                && request.profile.is_none()
+                && request.theme.is_none()
+                && request.scope.is_none()
+                && request.pane_request.is_none()
+                && request.shell_command.is_some() =>
+        {
+            request
+                .shell_command
+                .take()
+                .and_then(ShellCommandControlRequest::into_request)
+                .map(|request| ControlRequestCommand::RunShellCommand { request })
         }
         "open_command"
             if request.runner_id.is_none()
@@ -2416,6 +2543,89 @@ pub(crate) fn request_existing_process_pane(request: PaneCommand) -> Result<bool
     Ok(false)
 }
 
+pub(crate) fn request_existing_process_shell_command(request: ShellCommandRequest) -> Result<bool> {
+    // A command invoked by a pane carries its owning Zetta process ID. Route
+    // through that endpoint first so another open Zetta process cannot accept
+    // the request merely because its endpoint was enumerated first.
+    if let Ok(process_id) = env::var("ZETTA_PROCESS_ID") {
+        let process_id = process_id
+            .parse::<u32>()
+            .context("ZETTA_PROCESS_ID must be a positive process ID")?;
+        anyhow::ensure!(
+            process_id != 0,
+            "ZETTA_PROCESS_ID must be a positive process ID"
+        );
+        return request_process_shell_command(process_id, &request);
+    }
+
+    let directory = crate::background_sessions::session_catalog_dir();
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).context("reading Zetta process control endpoints"),
+    };
+    let mut last_error = None;
+    for entry in entries {
+        let path = entry?.path();
+        if !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("control-") && name.ends_with(".json"))
+        {
+            continue;
+        }
+        let endpoint = match fs::read(&path)
+            .ok()
+            .and_then(|contents| serde_json::from_slice::<ControlEndpoint>(&contents).ok())
+        {
+            Some(endpoint) if endpoint.version == CONTROL_VERSION => endpoint,
+            _ => continue,
+        };
+        if !process_is_running(endpoint.process_id) {
+            let _ = fs::remove_file(path);
+            let _ = fs::remove_file(endpoint.socket_path);
+            continue;
+        }
+        match send_run_shell_command_request(&endpoint, &request) {
+            Ok(true) => return Ok(true),
+            Ok(false) => {}
+            Err(error) => last_error = Some(error),
+        }
+    }
+    if let Some(error) = last_error {
+        return Err(error);
+    }
+    Ok(false)
+}
+
+fn request_process_shell_command(process_id: u32, request: &ShellCommandRequest) -> Result<bool> {
+    let endpoint_path = control_endpoint_path(process_id);
+    let contents = match fs::read(&endpoint_path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "reading Zetta process control endpoint {}",
+                    endpoint_path.display()
+                )
+            });
+        }
+    };
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&contents).context("parsing Zetta process control endpoint")?;
+    anyhow::ensure!(
+        endpoint.version == CONTROL_VERSION && endpoint.process_id == process_id,
+        "Zetta process control endpoint is outdated"
+    );
+    if !process_is_running(process_id) {
+        let _ = fs::remove_file(endpoint_path);
+        let _ = fs::remove_file(endpoint.socket_path);
+        return Ok(false);
+    }
+    send_run_shell_command_request(&endpoint, request)
+}
+
 pub(crate) fn request_existing_process_command(
     request: PaneCommand,
     working_directory: Option<PathBuf>,
@@ -2797,6 +3007,7 @@ impl RunWaitConnection {
                 theme: None,
                 scope: None,
                 pane_request: None,
+                shell_command: None,
             },
         )?;
         let response = read_message::<ControlResponse>(&mut self.stream)?;
@@ -2862,6 +3073,7 @@ pub(crate) fn request_process_run_wait(
             theme: None,
             scope: None,
             pane_request: None,
+            shell_command: None,
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
@@ -3047,6 +3259,7 @@ fn send_open_window_request_with_command(
             theme: None,
             scope: None,
             pane_request: None,
+            shell_command: None,
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
@@ -3093,6 +3306,7 @@ fn send_open_project_request_with_working_directory(
             theme: None,
             scope: None,
             pane_request: None,
+            shell_command: None,
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
@@ -3130,6 +3344,7 @@ fn send_reload_projects_request(endpoint: &ControlEndpoint) -> Result<bool> {
             theme: None,
             scope: None,
             pane_request: None,
+            shell_command: None,
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
@@ -3171,6 +3386,7 @@ fn send_get_silent_mode_request(
             theme: None,
             scope: None,
             pane_request: None,
+            shell_command: None,
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
@@ -3215,6 +3431,7 @@ fn send_set_tab_attention_request(
             theme: None,
             scope: None,
             pane_request: None,
+            shell_command: None,
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
@@ -3253,6 +3470,7 @@ fn send_set_tab_name_request(endpoint: &ControlEndpoint, request: &TabNameReques
             theme: None,
             scope: None,
             pane_request: None,
+            shell_command: None,
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
@@ -3294,6 +3512,7 @@ fn send_set_worktree_name_request(
             theme: None,
             scope: None,
             pane_request: None,
+            shell_command: None,
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
@@ -3333,6 +3552,7 @@ fn send_focus_tab_request(endpoint: &ControlEndpoint, attention_id: u64) -> Resu
             theme: None,
             scope: None,
             pane_request: None,
+            shell_command: None,
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
@@ -3370,6 +3590,54 @@ fn send_run_pane_request(endpoint: &ControlEndpoint, request: &PaneCommand) -> R
             theme: None,
             scope: None,
             pane_request: Some(request.into()),
+            shell_command: None,
+        },
+    )?;
+    let response = read_message::<ControlResponse>(&mut stream)?;
+    if response.status == "ok" {
+        return Ok(true);
+    }
+    if let Some(error) = response.error {
+        anyhow::bail!("{}: {}", error.code, error.message);
+    }
+    Ok(false)
+}
+
+fn send_run_shell_command_request(
+    endpoint: &ControlEndpoint,
+    request: &ShellCommandRequest,
+) -> Result<bool> {
+    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
+    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    write_message(
+        &mut stream,
+        &ControlRequest {
+            token: endpoint.token.clone(),
+            command: "run_shell_command".to_owned(),
+            runner_id: None,
+            session_id: None,
+            secret: None,
+            icon: None,
+            pane_theme: None,
+            pane_id: None,
+            pane_overlay: None,
+            pane_overlay_font_size: None,
+            pane_overlay_opacity: None,
+            pane_overlay_color: None,
+            attention_id: None,
+            attention_summary: None,
+            attention_body: None,
+            tab_name: None,
+            worktree_name: None,
+            config_path: None,
+            working_directory: None,
+            split: None,
+            profile: None,
+            theme: None,
+            scope: None,
+            pane_request: None,
+            shell_command: Some(request.into()),
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
@@ -3417,6 +3685,7 @@ fn send_open_command_request(
             theme: None,
             scope: None,
             pane_request: Some(request.into()),
+            shell_command: None,
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
@@ -3463,6 +3732,7 @@ fn send_list_pane_labels_request(
             theme: None,
             scope: None,
             pane_request: None,
+            shell_command: None,
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
@@ -3509,6 +3779,7 @@ fn send_replace_pane_request(
             theme: request.theme.clone(),
             scope: None,
             pane_request: None,
+            shell_command: None,
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
@@ -3549,6 +3820,7 @@ fn send_reload_configuration_request(
             theme: None,
             scope: None,
             pane_request: None,
+            shell_command: None,
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
@@ -3589,6 +3861,7 @@ fn send_set_tab_icon_request(endpoint: &ControlEndpoint, icon: Option<IconName>)
             theme: None,
             scope: None,
             pane_request: None,
+            shell_command: None,
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
@@ -3630,6 +3903,7 @@ fn send_set_theme_request(
             theme,
             scope: Some(scope.name().to_owned()),
             pane_request: None,
+            shell_command: None,
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
@@ -3667,6 +3941,7 @@ fn send_list_themes_request(endpoint: &ControlEndpoint) -> Result<Option<Vec<Str
             theme: None,
             scope: None,
             pane_request: None,
+            shell_command: None,
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
@@ -3709,6 +3984,7 @@ fn send_get_pane_theme_request(
             theme: None,
             scope: None,
             pane_request: None,
+            shell_command: None,
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
@@ -3754,6 +4030,7 @@ fn send_set_overlay_request(
             theme: None,
             scope: None,
             pane_request: None,
+            shell_command: None,
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;

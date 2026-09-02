@@ -61,6 +61,7 @@ fn supported_shells_generate_completion_and_tftp_shortcut() {
         assert!(script.contains("zetta theme"));
         assert!(script.contains("zetta splits"));
         assert!(script.contains("zetta pane --list"));
+        assert!(script.contains("zetta cmd --list"));
         assert!(script.contains("ZETTA_NO_MUX"));
         assert!(script.contains("--direction"));
         assert!(script.contains("--pane"));
@@ -141,6 +142,125 @@ fn bash_pane_wait_completion_fetches_origin_pane_labels_and_preserves_commas() {
     assert!(completions.lines().any(|line| line == "second:api,deploy"));
     assert!(!completions.lines().any(|line| line == "second:api,api"));
     assert!(completions.lines().any(|line| line == "after-delimiter:"));
+}
+
+#[test]
+fn bash_project_command_completion_is_dynamic_and_stops_at_delimiter() {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let _bash_test_lock = lock_bash_tests();
+    if !bash_command()
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return;
+    }
+
+    let script = ShellIntegration::Bash.script();
+    let driver = format!(
+        "{script}\nzetta() {{ if [[ $1 == cmd && $2 == --list ]]; then printf '%s\\n' build check test:unit; fi; }}\nCOMP_WORDS=(zetta cmd '')\nCOMP_CWORD=2\n_zetta_complete\nprintf 'names:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta cmd t)\nCOMP_CWORD=2\n_zetta_complete\nprintf 'prefix:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta cmd build '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'after-name:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta cmd build -- '')\nCOMP_CWORD=4\n_zetta_complete\nprintf 'after-delimiter:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta cmd --list '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'after-list:%s\\n' \"${{COMPREPLY[@]}}\"\n"
+    );
+    let mut child = bash_command()
+        .args(["--noprofile", "--norc"])
+        .env_remove("ZETTA_HOST_EXECUTABLE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(driver.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "Bash project command completion failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let completions = String::from_utf8_lossy(&output.stdout);
+    for name in ["build", "check", "test:unit"] {
+        assert!(
+            completions
+                .lines()
+                .any(|line| line == format!("names:{name}")),
+            "missing dynamic project command {name:?}: {completions}"
+        );
+    }
+    for option in ["--help", "--list", "--"] {
+        assert!(
+            completions
+                .lines()
+                .any(|line| line == format!("names:{option}")),
+            "missing project command option {option:?} at the command-name prompt: {completions}"
+        );
+    }
+    assert!(completions.lines().any(|line| line == "prefix:test:unit"));
+    assert!(completions.lines().any(|line| line == "after-name:--help"));
+    assert!(completions.lines().any(|line| line == "after-name:--"));
+    assert!(!completions.lines().any(|line| line == "after-name:--list"));
+    assert!(completions.lines().any(|line| line == "after-delimiter:"));
+    assert!(completions.lines().any(|line| line == "after-list:"));
+}
+
+#[test]
+fn zsh_project_command_completion_offers_long_options_at_each_option_prompt() {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    if clean_shell_command("zsh")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+
+    let script = ShellIntegration::Zsh.script();
+    let driver = format!(
+        "{script}\nfunction zetta {{ if [[ $1 == cmd && $2 == --list ]]; then print -r -- build check; fi; }}\nfunction compadd {{ print -r -- \"${{stage}}:candidates:$*\"; }}\nfunction _zetta_options {{ print -r -- \"${{stage}}:options:$*\"; }}\nstage=empty\nwords=(zetta cmd '')\nCURRENT=3\n_zetta\nstage=name\nwords=(zetta cmd build '')\nCURRENT=4\n_zetta\nstage=list\nwords=(zetta cmd --list '')\nCURRENT=4\n_zetta\n"
+    );
+    let mut child = clean_shell_command("zsh")
+        .arg("-f")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(driver.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "Zsh project command completion failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let completions = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        completions
+            .lines()
+            .any(|line| line == "empty:candidates:-- build check"),
+        "unexpected Zsh command-name candidates: {completions}"
+    );
+    assert!(
+        completions
+            .lines()
+            .any(|line| line == "empty:options:--help --list --")
+    );
+    assert!(
+        completions
+            .lines()
+            .any(|line| line == "name:options:--help --")
+    );
+    assert!(!completions.lines().any(|line| line.starts_with("list:")));
 }
 
 #[cfg(not(feature = "worktree"))]
@@ -1906,9 +2026,14 @@ fn generated_scripts_only_offer_long_form_flags() {
         match shell {
             ShellIntegration::Bash => {
                 assert!(script.contains(
-                    "terminal-size mux pane profile project edit vi init serial http tftp notify attention copy paste splits tabicon theme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme --no-mux --new-window --command'"
+                    "terminal-size mux pane profile project cmd edit vi init serial http tftp notify attention copy paste splits tabicon theme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme --no-mux --new-window --command'"
                 ));
                 assert!(script.contains("auto zetta bash zsh fish"));
+                assert!(script.contains("_zetta_complete_project_commands"));
+                assert!(
+                    script
+                        .contains("_zetta_complete_project_command_options '--help' '--list' '--'")
+                );
             }
             ShellIntegration::Fish => {
                 assert!(script.contains("-l profile -r"));
@@ -1918,6 +2043,7 @@ fn generated_scripts_only_offer_long_form_flags() {
                     "-s c -r -n '__zetta_has_profile_subcommand; and __zetta_short_option -c'"
                 ));
                 assert!(script.contains("auto zetta bash zsh fish"));
+                assert!(script.contains("__zetta_project_commands"));
             }
             ShellIntegration::PowerShell => {
                 assert!(script.contains(
@@ -1925,12 +2051,16 @@ fn generated_scripts_only_offer_long_form_flags() {
                 ));
                 assert!(script.contains("'overlay', 'wt', '--help'"));
                 assert!(script.contains("'auto', 'zetta', 'bash', 'zsh', 'fish'"));
+                assert!(script.contains("$zettaProjectCommands"));
+                assert!(script.contains("@(& $zettaProjectCommands) + '--help', '--list', '--'"));
             }
             ShellIntegration::Zsh => {
                 assert!(
                     script.contains("_zetta_options --help --version --config --keymap --profile")
                 );
                 assert!(script.contains("auto zetta bash zsh fish"));
+                assert!(script.contains("_zetta_project_commands"));
+                assert!(script.contains("_zetta_options --help --list --"));
             }
         }
     }
@@ -1943,6 +2073,7 @@ fn fish_script_emits_long_option_candidates_for_every_command_context() {
     for context in [
         "root",
         "init",
+        "cmd",
         "serial",
         "http",
         "terminal-size",
@@ -2053,6 +2184,14 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
         ("zetta profile disable ", &["System", "WSL: Ubuntu"][..]),
         ("zetta profile theme ", &["System", "WSL: Ubuntu"][..]),
         ("zetta profile theme System ", &["Gruvbox Light Hard"][..]),
+        (
+            "zetta cmd ",
+            &["build", "check", "--list", "--help", "--"][..],
+        ),
+        ("zetta cmd b", &["build"][..]),
+        ("zetta cmd build ", &["--help", "--"][..]),
+        ("zetta cmd build -- ", &[][..]),
+        ("zetta cmd --list ", &[][..]),
         (
             "zetta -c profiles.json profile disable ",
             &["Configured Shell"][..],
@@ -2260,7 +2399,7 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
             .args([
                 "--no-config",
                 "-c",
-                "function zetta; if test \"$argv[1]\" = splits; printf '%s\\n' custom-layout quarters four-vertical three-left three-right; else if test \"$argv[1]\" = profile; and test \"$argv[2]\" = list; if test \"$argv[3]\" = --config; and test \"$argv[4]\" = profiles.json; printf '%s\\n' 'Configured Shell'; else; printf '%s\\n' System 'WSL: Ubuntu'; end; else if test \"$argv[1]\" = profile; and test \"$argv[2]\" = themes; printf '%s\\n' 'Gruvbox Light Hard'; else if test \"$argv[1]\" = theme; and test \"$argv[3]\" = --list; printf '%s\\n' 'Gruvbox Light Hard'; end; end; source $argv[1]; complete -C \"$argv[2]\"",
+                "function zetta; if test \"$argv[1]\" = cmd; and test \"$argv[2]\" = --list; printf '%s\\n' build check; else if test \"$argv[1]\" = splits; printf '%s\\n' custom-layout quarters four-vertical three-left three-right; else if test \"$argv[1]\" = profile; and test \"$argv[2]\" = list; if test \"$argv[3]\" = --config; and test \"$argv[4]\" = profiles.json; printf '%s\\n' 'Configured Shell'; else; printf '%s\\n' System 'WSL: Ubuntu'; end; else if test \"$argv[1]\" = profile; and test \"$argv[2]\" = themes; printf '%s\\n' 'Gruvbox Light Hard'; else if test \"$argv[1]\" = theme; and test \"$argv[3]\" = --list; printf '%s\\n' 'Gruvbox Light Hard'; end; end; source $argv[1]; complete -C \"$argv[2]\"",
                 "--",
                 script_file.path().to_str().unwrap(),
                 line,
