@@ -3,8 +3,9 @@ use std::{
     env,
     fs::{self, Metadata, Permissions},
     io::Write as _,
-    os::unix::fs::PermissionsExt as _,
+    os::unix::fs::{MetadataExt as _, PermissionsExt as _},
     path::{Path, PathBuf},
+    time::SystemTime,
 };
 
 use anyhow::{Context as _, Result};
@@ -16,6 +17,13 @@ const ACTIONS_BEGIN: &str = "# ZETTA MANAGED PROFILE ACTIONS BEGIN";
 const ACTIONS_END: &str = "# ZETTA MANAGED PROFILE ACTIONS END";
 const GROUPS_BEGIN: &str = "# ZETTA MANAGED PROFILE GROUPS BEGIN";
 const GROUPS_END: &str = "# ZETTA MANAGED PROFILE GROUPS END";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct DesktopEntryStamp {
+    pub(crate) inode: u64,
+    pub(crate) modified: Option<SystemTime>,
+    pub(crate) len: u64,
+}
 
 pub(crate) fn update_profile_actions(
     profiles: &[Profile],
@@ -54,6 +62,49 @@ pub(crate) fn update_profile_actions(
 
 fn user_desktop_entry_path(home: &Path) -> PathBuf {
     home.join(".local/share/applications/Zetta.desktop")
+}
+
+pub(crate) fn desktop_entry_stamp() -> DesktopEntryStamp {
+    let Some(home) = env::var_os("HOME") else {
+        return DesktopEntryStamp {
+            inode: 0,
+            modified: None,
+            len: 0,
+        };
+    };
+    let path = user_desktop_entry_path(Path::new(&home));
+    let Ok(metadata) = fs::symlink_metadata(&path) else {
+        return DesktopEntryStamp {
+            inode: 0,
+            modified: None,
+            len: 0,
+        };
+    };
+    DesktopEntryStamp {
+        inode: metadata.ino(),
+        modified: metadata.modified().ok(),
+        len: metadata.len(),
+    }
+}
+
+pub(crate) fn is_managed_user_desktop_entry() -> bool {
+    let Some(home) = env::var_os("HOME") else {
+        return false;
+    };
+    let path = user_desktop_entry_path(Path::new(&home));
+    let Ok(metadata) = fs::symlink_metadata(&path) else {
+        return false;
+    };
+    if !metadata.file_type().is_file() || !is_writable(&metadata) {
+        return false;
+    }
+    let Ok(contents) = fs::read_to_string(&path) else {
+        return false;
+    };
+    managed_marker_line(&contents, ACTIONS_BEGIN).is_some()
+        && managed_marker_line(&contents, ACTIONS_END).is_some()
+        && managed_marker_line(&contents, GROUPS_BEGIN).is_some()
+        && managed_marker_line(&contents, GROUPS_END).is_some()
 }
 
 fn is_writable(metadata: &Metadata) -> bool {

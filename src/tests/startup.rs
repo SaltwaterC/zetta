@@ -221,6 +221,11 @@ fn linux_desktop_entry_matches_app_id() {
     ));
     assert!(makefile.contains("desktop_source=\"$$desktop_entry\""));
     assert!(makefile.contains("ZETTA MANAGED PROFILE GROUPS BEGIN"));
+    assert!(
+        makefile.contains(
+            "test -f \"$$desktop_entry\" && cmp -s \"$$desktop_tmp\" \"$$desktop_entry\""
+        )
+    );
     assert!(makefile.contains("mv -f \"$$desktop_tmp\" \"$$desktop_entry\""));
     assert!(!makefile.contains("-e 's|^Exec=zetta$$|Exec=$(BINDIR)/zetta|'"));
     assert!(!makefile.contains("-e 's|^Exec=.*|Exec=$(BINDIR)/zetta|'"));

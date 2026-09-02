@@ -403,14 +403,12 @@ pub(crate) fn process_zetta_entities(cx: &App) -> Vec<Entity<Zetta>> {
 }
 
 // GNOME Shell refreshes its desktop-entry cache asynchronously. When the
-// primary Exec line changes, its app cache drops the old ShellApp but does not
-// retrack windows that still belong to it. Re-publishing the app ID after the
-// cache refresh makes Mutter notify the window tracker, which then associates
-// the window with the current Zetta.desktop entry.
+// primary Exec line changes, its app cache can drop the old ShellApp without
+// retracking windows that still belong to it. Re-publishing the app ID after
+// the cache refresh makes Mutter notify the window tracker, which then
+// associates the window with the current Zetta.desktop entry.
 #[cfg(target_os = "linux")]
-const LINUX_DESKTOP_REASSOCIATION_DELAY: Duration = Duration::from_secs(7);
-#[cfg(target_os = "linux")]
-const LINUX_DESKTOP_REASSOCIATION_GAP: Duration = Duration::from_millis(100);
+const LINUX_DESKTOP_REASSOCIATION_DELAY: Duration = Duration::from_secs(10);
 
 #[cfg(target_os = "linux")]
 pub(crate) fn schedule_linux_desktop_window_reassociation(cx: &mut App) {
@@ -432,20 +430,16 @@ pub(crate) fn schedule_linux_desktop_window_reassociation(cx: &mut App) {
         let Some(window_ids) = window_ids else {
             return;
         };
-        let temporary_app_id = format!("{ZETTA_APP_ID}-reassociation-{generation}");
-
         cx.update(|cx| {
             for window_id in &window_ids {
                 let _ = gpui::WindowHandle::<Zetta>::new(*window_id).update(cx, |_, window, _| {
-                    window.set_app_id(&temporary_app_id);
-                    window.refresh();
-                });
-            }
-        });
-        executor.timer(LINUX_DESKTOP_REASSOCIATION_GAP).await;
-        cx.update(|cx| {
-            for window_id in &window_ids {
-                let _ = gpui::WindowHandle::<Zetta>::new(*window_id).update(cx, |_, window, _| {
+                    // Mutter emits `notify::wm-class` for every Wayland
+                    // `set_app_id`, even when the value is unchanged. GNOME
+                    // Shell uses that notification to retrack the window,
+                    // so republish the stable ID after its desktop cache has
+                    // loaded the new entry. Passing through a temporary ID
+                    // can race with frame throttling and briefly creates a
+                    // second, unrelated app identity.
                     window.set_app_id(ZETTA_APP_ID);
                     window.refresh();
                 });
@@ -589,21 +583,45 @@ fn start_configuration_watcher(cx: &mut App) {
             process.config_file_stamp,
         )
     };
+    #[cfg(target_os = "linux")]
+    let mut desktop_entry_stamp = linux_desktop::desktop_entry_stamp();
     cx.spawn(async move |cx| {
         loop {
             cx.background_executor()
                 .timer(CONFIGURATION_FILE_POLL)
                 .await;
             let changed = config_file_stamp(&config_path);
-            if changed == last_seen {
-                continue;
+            if changed != last_seen {
+                last_seen = changed;
+                if let Err(error) = cx.update(reload_process_configuration) {
+                    eprintln!(
+                        "Could not reload {} after it changed: {error:#}",
+                        config_path.display()
+                    );
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    // A configuration reload can update the desktop entry
+                    // itself. Absorb that write so the desktop poll below
+                    // does not schedule a second repair for the same change.
+                    desktop_entry_stamp = linux_desktop::desktop_entry_stamp();
+                }
             }
-            last_seen = changed;
-            if let Err(error) = cx.update(reload_process_configuration) {
-                eprintln!(
-                    "Could not reload {} after it changed: {error:#}",
-                    config_path.display()
-                );
+
+            #[cfg(target_os = "linux")]
+            {
+                let current_stamp = linux_desktop::desktop_entry_stamp();
+                if current_stamp != desktop_entry_stamp {
+                    desktop_entry_stamp = current_stamp;
+                    // An installer may atomically replace the entry with
+                    // byte-for-byte identical content. That still causes
+                    // GNOME Shell to refresh its app cache, so repair any
+                    // managed entry replacement rather than relying on a
+                    // content diff.
+                    if linux_desktop::is_managed_user_desktop_entry() {
+                        cx.update(schedule_linux_desktop_window_reassociation);
+                    }
+                }
             }
         }
     })
@@ -1721,10 +1739,16 @@ pub(crate) fn run() -> Result<()> {
                 );
             }
             #[cfg(target_os = "linux")]
-            let linux_desktop_actions_changed =
+            let linux_desktop_entry_managed = {
                 linux_desktop::update_profile_actions(&config.profiles, &config.hidden_profiles)
-                    .log_err()
-                    .unwrap_or(false);
+                    .log_err();
+                // The desktop entry may have been replaced by the installer
+                // immediately before this process started. In that case its
+                // contents already match the current configuration and the
+                // updater reports no change, but GNOME Shell may still be
+                // holding the old cached app record.
+                linux_desktop::is_managed_user_desktop_entry()
+            };
             cx.set_http_client(http_client);
             menu::init();
             zed_actions::init();
@@ -2754,7 +2778,7 @@ pub(crate) fn run() -> Result<()> {
                 }
             }
             #[cfg(target_os = "linux")]
-            if linux_desktop_actions_changed {
+            if linux_desktop_entry_managed {
                 schedule_linux_desktop_window_reassociation(cx);
             }
         });
