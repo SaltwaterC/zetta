@@ -62,6 +62,13 @@ $installedZwtBinary = Join-Path $InstallDirectory "zwt.exe"
 $runtimeFileNames = @("conpty.dll", "OpenConsole.exe")
 $sourceDirectory = Split-Path -Parent $SourceBinary
 $pathMarker = Join-Path $InstallDirectory ".zetta-path-managed"
+$sourcePtyVersionMarker = Join-Path $repositoryRoot "resources\windows\zmux-pty.version"
+$installedPtyVersionMarker = Join-Path $InstallDirectory "zmux-pty.version"
+$ptyHostEndpoint = Join-Path $env:APPDATA "Zetta\sessions\zmux-host.json"
+# An installation made before the marker existed contains the version-1 host.
+# Keep this explicit: an unmarked helper must not be treated as compatible after
+# the host protocol marker is deliberately bumped.
+$legacyPtyProtocolVersion = "1"
 
 function Get-VersionedPath([string]$Path, [string]$Version) {
     $directory = Split-Path -Parent $Path
@@ -74,8 +81,7 @@ function Get-InstallFiles {
     $files = @(
         [pscustomobject]@{ Source = $SourceBinary; Destination = $installedBinary },
         [pscustomobject]@{ Source = $SourceGuiBinary; Destination = $installedGuiBinary },
-        [pscustomobject]@{ Source = $SourceMuxBinary; Destination = $installedMuxBinary },
-        [pscustomobject]@{ Source = $SourcePtyBinary; Destination = $installedPtyBinary }
+        [pscustomobject]@{ Source = $SourceMuxBinary; Destination = $installedMuxBinary }
     )
     if ($WorktreeEnabled) {
         $files += [pscustomobject]@{ Source = $SourceZwtBinary; Destination = $installedZwtBinary }
@@ -87,6 +93,10 @@ function Get-InstallFiles {
         }
     }
     return $files
+}
+
+function Get-PtyInstallFile {
+    return [pscustomobject]@{ Source = $SourcePtyBinary; Destination = $installedPtyBinary }
 }
 
 function Remove-DisabledWorktreeFiles {
@@ -106,6 +116,64 @@ function Remove-DisabledWorktreeFiles {
                 Write-Warning "Could not remove disabled worktree executable ${path}: $_"
             }
         }
+    }
+}
+
+function Get-PtyProtocolVersion([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Required Windows file not found at $Path. Run 'make build' first."
+    }
+    $version = [string]((Get-Content -LiteralPath $Path -Raw -ErrorAction Stop).Trim())
+    if ([string]::IsNullOrWhiteSpace($version) -or $version -notmatch "^[0-9]+$") {
+        throw "The Windows pseudoconsole host version marker at $Path is not a decimal version."
+    }
+    return $version
+}
+
+function Test-PtyInstallCurrent([string]$SourceVersion) {
+    if (-not (Test-Path -LiteralPath $installedPtyBinary -PathType Leaf)) {
+        return $false
+    }
+
+    if (Test-Path -LiteralPath $installedPtyVersionMarker -PathType Leaf) {
+        $installedVersion = [string](
+            (Get-Content -LiteralPath $installedPtyVersionMarker -Raw -ErrorAction Stop).Trim()
+        )
+    } else {
+        $installedVersion = $legacyPtyProtocolVersion
+    }
+    return $installedVersion -eq $SourceVersion
+}
+
+function Ensure-PtyVersionMarker([string]$SourceVersion) {
+    if (Test-Path -LiteralPath $installedPtyVersionMarker -PathType Leaf) {
+        return
+    }
+    Set-Content -LiteralPath $installedPtyVersionMarker -Value $SourceVersion -NoNewline -Encoding ASCII
+    Write-Host "Recorded the Windows pseudoconsole host protocol version at $installedPtyVersionMarker"
+}
+
+function Test-LivePtyHost {
+    if (-not (Test-Path -LiteralPath $ptyHostEndpoint -PathType Leaf)) {
+        return $false
+    }
+
+    try {
+        $endpoint = Get-Content -LiteralPath $ptyHostEndpoint -Raw -ErrorAction Stop | ConvertFrom-Json
+        $processId = [uint32]$endpoint.process_id
+    } catch {
+        throw "Could not safely inspect the Windows pseudoconsole host endpoint at $ptyHostEndpoint. Stop Zetta and remove the stale endpoint only after confirming that no sessions are running: $_"
+    }
+    if ($processId -eq 0) {
+        throw "The Windows pseudoconsole host endpoint at $ptyHostEndpoint has no usable process ID. Stop Zetta and remove the stale endpoint only after confirming that no sessions are running."
+    }
+
+    return $null -ne (Get-Process -Id ([int]$processId) -ErrorAction SilentlyContinue)
+}
+
+function Assert-PtyHostStopped {
+    if (Test-LivePtyHost) {
+        throw "Cannot replace zmux-pty.exe while a Windows pseudoconsole host is running (reported by $ptyHostEndpoint). Stop Zetta and its multiplexer sessions, then run make install again."
     }
 }
 
@@ -172,25 +240,49 @@ function Remove-InstallDirectoryFromUserPath {
 
 function Install-Binary {
     $installFiles = @(Get-InstallFiles)
-    foreach ($file in $installFiles) {
+    $ptyInstallFile = Get-PtyInstallFile
+    foreach ($file in @($installFiles) + @($ptyInstallFile)) {
         if (-not (Test-Path -LiteralPath $file.Source -PathType Leaf)) {
             throw "Required Windows file not found at $($file.Source). Run 'make build' first."
         }
     }
+
+    $sourcePtyVersion = Get-PtyProtocolVersion $sourcePtyVersionMarker
+    $replacePty = -not (Test-PtyInstallCurrent $sourcePtyVersion)
+    if ($replacePty) {
+        # This check must happen before Remove-DisabledWorktreeFiles, creating
+        # the install directory, or touching any staged/rollback generation.
+        Assert-PtyHostStopped
+    }
     Remove-DisabledWorktreeFiles
 
-    if (Test-InstallFilesCurrent $installFiles) {
+    if (-not $replacePty -and (Test-InstallFilesCurrent $installFiles)) {
+        Ensure-PtyVersionMarker $sourcePtyVersion
         Add-InstallDirectoryToUserPath
         Write-Host "Zetta and its Windows runtime are already current at $InstallDirectory"
         return
     }
 
     New-Item -ItemType Directory -Force -Path $InstallDirectory | Out-Null
+    if (-not $replacePty) {
+        Ensure-PtyVersionMarker $sourcePtyVersion
+    }
+
+    $filesToInstall = @($installFiles)
+    if ($replacePty) {
+        $filesToInstall += $ptyInstallFile
+    }
+
+    $previousPtyVersionMarkerExists = Test-Path -LiteralPath $installedPtyVersionMarker -PathType Leaf
+    $previousPtyVersionMarker = $null
+    if ($replacePty -and $previousPtyVersionMarkerExists) {
+        $previousPtyVersionMarker = [System.IO.File]::ReadAllBytes($installedPtyVersionMarker)
+    }
 
     # A running Windows image cannot be overwritten, but it can be renamed.
     # Remove the previous generation before staging so a failed cleanup leaves
     # the current installation untouched.
-    foreach ($file in $installFiles) {
+    foreach ($file in $filesToInstall) {
         foreach ($version in @("new", "old")) {
             $versionedPath = Get-VersionedPath $file.Destination $version
             if (Test-Path -LiteralPath $versionedPath) {
@@ -200,12 +292,12 @@ function Install-Binary {
     }
 
     try {
-        foreach ($file in $installFiles) {
+        foreach ($file in $filesToInstall) {
             $stagedPath = Get-VersionedPath $file.Destination "new"
             Copy-Item -LiteralPath $file.Source -Destination $stagedPath
         }
     } catch {
-        foreach ($file in $installFiles) {
+        foreach ($file in $filesToInstall) {
             $stagedPath = Get-VersionedPath $file.Destination "new"
             if (Test-Path -LiteralPath $stagedPath) {
                 Remove-Item -LiteralPath $stagedPath -Force
@@ -217,17 +309,20 @@ function Install-Binary {
     $archivedFiles = @()
     $activatedFiles = @()
     try {
-        foreach ($file in $installFiles) {
+        foreach ($file in $filesToInstall) {
             if (Test-Path -LiteralPath $file.Destination) {
                 $oldPath = Get-VersionedPath $file.Destination "old"
                 Move-Item -LiteralPath $file.Destination -Destination $oldPath
                 $archivedFiles += $file
             }
         }
-        foreach ($file in $installFiles) {
+        foreach ($file in $filesToInstall) {
             $stagedPath = Get-VersionedPath $file.Destination "new"
             Move-Item -LiteralPath $stagedPath -Destination $file.Destination
             $activatedFiles += $file
+        }
+        if ($replacePty) {
+            Set-Content -LiteralPath $installedPtyVersionMarker -Value $sourcePtyVersion -NoNewline -Encoding ASCII
         }
     } catch {
         $installError = $_
@@ -248,10 +343,24 @@ function Install-Binary {
                 }
             }
         }
-        foreach ($file in $installFiles) {
+        foreach ($file in $filesToInstall) {
             $stagedPath = Get-VersionedPath $file.Destination "new"
             if (Test-Path -LiteralPath $stagedPath) {
                 Remove-Item -LiteralPath $stagedPath -Force
+            }
+        }
+        if ($replacePty) {
+            try {
+                if ($previousPtyVersionMarkerExists) {
+                    [System.IO.File]::WriteAllBytes(
+                        $installedPtyVersionMarker,
+                        $previousPtyVersionMarker
+                    )
+                } elseif (Test-Path -LiteralPath $installedPtyVersionMarker) {
+                    Remove-Item -LiteralPath $installedPtyVersionMarker -Force
+                }
+            } catch {
+                Write-Warning "Could not restore ${installedPtyVersionMarker}: $_"
             }
         }
         throw $installError
@@ -314,6 +423,7 @@ function Uninstall-Binary {
     Unregister-WindowsIntegration
     Remove-InstallDirectoryFromUserPath
     $filesToRemove = @(Get-InstallFiles)
+    $filesToRemove += Get-PtyInstallFile
     if (-not $WorktreeEnabled) {
         $filesToRemove += [pscustomobject]@{ Source = $null; Destination = $installedZwtBinary }
     }
@@ -328,6 +438,10 @@ function Uninstall-Binary {
                 Write-Host "Removed $installedFile"
             }
         }
+    }
+    if (Test-Path -LiteralPath $installedPtyVersionMarker) {
+        Remove-Item -LiteralPath $installedPtyVersionMarker -Force
+        Write-Host "Removed $installedPtyVersionMarker"
     }
     if ((Test-Path -LiteralPath $InstallDirectory -PathType Container) -and
         -not (Get-ChildItem -LiteralPath $InstallDirectory -Force | Select-Object -First 1)) {

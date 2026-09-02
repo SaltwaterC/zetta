@@ -171,7 +171,15 @@ the console-native executable without opening an extra console window.
 Zetta can be reinstalled while it is running. Windows keeps the previous
 runtime under names such as `zetta.old.exe` until its processes exit. Repeating
 an identical install preserves that rollback generation; the next changed
-install removes it before activating the new one.
+install of those hash-checked application files removes it before activating
+the new one.
+
+The Windows `zmux-pty.exe` helper is tracked by the installed
+`zmux-pty.version` host-protocol marker rather than by its build bytes. A
+rebuild with the same host protocol preserves the helper and its locked
+generations, so it does not block an ordinary install. Bump the marker only
+for a deliberate host-protocol change; the installer then replaces the helper
+only after confirming that no live pseudoconsole host is using it.
 
 The shortcut exposes available profiles in its Windows Jump List, including
 when Zetta appears in Start Menu search. Zetta refreshes the entries after
