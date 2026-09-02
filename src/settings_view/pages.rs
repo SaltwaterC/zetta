@@ -373,7 +373,7 @@ pub(crate) fn render_settings_pages(
                 ),
                 setting_row(
                     "Hide title bar labels",
-                    "Hide text such as Menu, Profile, and Keep running",
+                    "Hide text such as Menu, Profile, and Keep running when available",
                     SettingsControl::Toggle(SettingsToggle::TitleBarLabels),
                     setting_toggle(
                         "settings-hide-title-bar-labels",
@@ -383,7 +383,7 @@ pub(crate) fn render_settings_pages(
                 ),
                 setting_row(
                     "Hide title bar buttons",
-                    "Hide title bar buttons such as Keep running and Detach",
+                    "Hide title bar buttons such as Keep running in --no-mux mode and Detach",
                     SettingsControl::Toggle(SettingsToggle::TitleBarButtons),
                     setting_toggle(
                         "settings-hide-title-bar-buttons",

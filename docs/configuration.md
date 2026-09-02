@@ -508,7 +508,9 @@ Broadcast remain on the left. If background sessions exist, the reconnect
 indicator always appears at the end of the title bar in compact mode.
 `hide_pane_size` defaults to `true` and hides the active pane dimensions from
 the title bar. `hide_title_bar_labels` and `hide_title_bar_buttons` default to
-`false`; they hide title-bar text and controls respectively. On macOS,
+`false`; they hide title-bar text and controls respectively. The Keep running
+control is shown only in `--no-mux` mode; normal daemon mode exposes Share Tab
+in tab menus and the command palette instead. On macOS,
 `hide_title_bar_menus` defaults to `true` and hides the Menu and Profile menus
 from the title bar. It is ignored on other platforms and is not shown in their
 settings editor.

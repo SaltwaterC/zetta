@@ -1,4 +1,5 @@
 use super::*;
+use crate::command_palette::action_available_in_launch_mode;
 use crate::rename::resolve_tab_title;
 
 /// The per-frame inputs the tab bar needs, gathered once by `Render for Zetta`
@@ -25,6 +26,7 @@ pub(crate) struct TabBarChrome {
     pub(crate) is_renaming_pinned: bool,
     pub(crate) selected_tab_index: usize,
     pub(crate) tab_move_mode_active: bool,
+    pub(crate) no_mux: bool,
     /// `Some(true)` when the user is stepping through the right overflow menu,
     /// `Some(false)` for the left one.
     pub(crate) overflow_selection: Option<bool>,
@@ -43,12 +45,17 @@ fn tab_auto_background_enabled(close_policy: &TabClosePolicy) -> bool {
 
 fn tab_leading_icons(
     background_tab: bool,
+    shared_tab: bool,
     silent_mode: bool,
     custom_icon: Option<IconName>,
     custom_icon_visible: bool,
 ) -> (Option<IconName>, Option<IconName>, Option<IconName>) {
     (
-        background_tab.then_some(IconName::Pin),
+        if shared_tab {
+            Some(IconName::Share)
+        } else {
+            background_tab.then_some(IconName::Pin)
+        },
         silent_mode.then_some(IconName::BellOff),
         custom_icon.filter(|_| custom_icon_visible),
     )
@@ -167,6 +174,7 @@ fn render_tabs_row(chrome: TabBarChrome) -> impl IntoElement {
         is_renaming_pinned,
         selected_tab_index,
         tab_move_mode_active,
+        no_mux,
         overflow_selection,
         border_color,
         left_menu_handle,
@@ -291,6 +299,7 @@ fn render_tabs_row(chrome: TabBarChrome) -> impl IntoElement {
                                 tab_count,
                                 pinned: index < pinned_count,
                                 tab_move_mode_active,
+                                no_mux,
                                 is_shrinking,
                                 is_renaming_tab,
                                 compact_mode,
@@ -392,6 +401,7 @@ struct TabChrome<'a> {
     tab_count: usize,
     pinned: bool,
     tab_move_mode_active: bool,
+    no_mux: bool,
     is_shrinking: bool,
     is_renaming_tab: bool,
     compact_mode: bool,
@@ -609,6 +619,7 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, tab_theme: Arc<Theme>, cx: &App)
         tab_count,
         pinned,
         tab_move_mode_active,
+        no_mux,
         is_shrinking,
         is_renaming_tab,
         compact_mode,
@@ -679,8 +690,9 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, tab_theme: Arc<Theme>, cx: &App)
     };
     let attention_tooltip = tab.attention.as_ref().map(TabAttention::tooltip_text);
     let tab_auto_background = tab_auto_background_enabled(&tab.close_policy);
-    let (pin_icon, silent_mode_icon, custom_icon) = tab_leading_icons(
+    let (lifecycle_icon, silent_mode_icon, custom_icon) = tab_leading_icons(
         tab_auto_background,
+        tab.shared,
         tab.silent_mode,
         tab.icon,
         pinned || !is_shrinking || (is_renaming_tab && selected),
@@ -689,7 +701,7 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, tab_theme: Arc<Theme>, cx: &App)
     let content = h_flex()
         .min_w_0()
         .gap_1()
-        .when_some(pin_icon, |content, icon| {
+        .when_some(lifecycle_icon, |content, icon| {
             content.child(
                 svg()
                     .path(icon.path())
@@ -873,12 +885,26 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, tab_theme: Arc<Theme>, cx: &App)
                             tab_silent_mode,
                         )
                         .separator()
-                        .action_checked(
-                            "Keep running",
-                            Box::new(ToggleAutoBackgroundTab),
-                            tab_auto_background,
+                        .when(
+                            action_available_in_launch_mode(ToggleAutoBackgroundTab.name(), no_mux),
+                            |menu| {
+                                menu.action_checked(
+                                    "Keep running",
+                                    Box::new(ToggleAutoBackgroundTab),
+                                    tab_auto_background,
+                                )
+                            },
                         )
-                        .action_checked("Share Tab", Box::new(ToggleTabSharing), tab_shared)
+                        .when(
+                            action_available_in_launch_mode(ToggleTabSharing.name(), no_mux),
+                            |menu| {
+                                menu.action_checked(
+                                    "Share Tab",
+                                    Box::new(ToggleTabSharing),
+                                    tab_shared,
+                                )
+                            },
+                        )
                         .action("Detach", Box::new(DetachTab))
                         .when(tab_move_menu_entry_available(tab_count), |menu| {
                             menu.separator().action_checked(

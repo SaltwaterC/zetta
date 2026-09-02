@@ -22,7 +22,7 @@ fn keep_running_context_menu_state_follows_tab_close_policy() {
 #[test]
 fn tab_silent_indicator_is_between_pin_and_custom_icon() {
     assert_eq!(
-        tab_leading_icons(true, true, Some(IconName::Terminal), true),
+        tab_leading_icons(true, false, true, Some(IconName::Terminal), true),
         (
             Some(IconName::Pin),
             Some(IconName::BellOff),
@@ -30,13 +30,49 @@ fn tab_silent_indicator_is_between_pin_and_custom_icon() {
         )
     );
     assert_eq!(
-        tab_leading_icons(false, false, Some(IconName::Terminal), false),
+        tab_leading_icons(false, false, false, Some(IconName::Terminal), false),
         (None, None, None)
     );
     assert_eq!(
-        tab_leading_icons(false, true, Some(IconName::Terminal), false),
+        tab_leading_icons(false, false, true, Some(IconName::Terminal), false),
         (None, Some(IconName::BellOff), None)
     );
+}
+
+#[test]
+fn shared_indicator_reuses_the_lifecycle_slot_and_wins_over_keep_running() {
+    assert_eq!(
+        tab_leading_icons(false, true, false, None, true),
+        (Some(IconName::Share), None, None)
+    );
+    assert_eq!(
+        tab_leading_icons(true, true, true, Some(IconName::Terminal), true),
+        (
+            Some(IconName::Share),
+            Some(IconName::BellOff),
+            Some(IconName::Terminal)
+        )
+    );
+}
+
+#[test]
+fn tab_lifecycle_context_actions_follow_the_launch_mode() {
+    assert!(action_available_in_launch_mode(
+        ToggleTabSharing.name(),
+        false
+    ));
+    assert!(!action_available_in_launch_mode(
+        ToggleAutoBackgroundTab.name(),
+        false
+    ));
+    assert!(action_available_in_launch_mode(
+        ToggleAutoBackgroundTab.name(),
+        true
+    ));
+    assert!(!action_available_in_launch_mode(
+        ToggleTabSharing.name(),
+        true
+    ));
 }
 
 #[test]

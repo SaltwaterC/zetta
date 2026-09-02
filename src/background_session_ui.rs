@@ -618,8 +618,8 @@ impl Zetta {
         // from the prompt means focus is on an overlay that has just been taken
         // down, and leaving it there leaves the window with nothing focused: no
         // pane takes typing, and every keybinding bound to `Zetta > Terminal`
-        // stops dispatching — which is why `Ctrl-Shift-K` could turn sharing on
-        // and then never turn it off, while the same action from the tab's
+        // stops dispatching — which is why a lifecycle action could turn sharing
+        // on and then never turn it off, while the same action from the tab's
         // context menu, dispatched directly, worked both ways.
         self.focus_active(window, cx);
     }

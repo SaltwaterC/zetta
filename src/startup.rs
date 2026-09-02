@@ -1659,6 +1659,7 @@ pub(crate) fn run() -> Result<()> {
             .transpose()?,
     };
     let keymap_path = config.keymap_path.clone();
+    let no_mux = args.no_mux;
     let profile_count = visible_profile_count(
         &effective_launch_config.profiles,
         &effective_launch_config.hidden_profiles,
@@ -1700,7 +1701,7 @@ pub(crate) fn run() -> Result<()> {
             load_user_themes(cx).log_err();
             ZettaAssets.load_fonts(cx).log_err();
             apply_config_settings(&config, cx).expect("failed to apply Zetta configuration");
-            load_keybindings(&keymap_path, profile_count, cx);
+            load_keybindings(&keymap_path, profile_count, args.no_mux, cx);
             #[cfg(target_os = "macos")]
             install_native_macos_menus(
                 cx,
@@ -2655,7 +2656,7 @@ pub(crate) fn run() -> Result<()> {
             cx.on_keyboard_layout_change(move |cx| {
                 let layout_keymap_path = layout_keymap_path.clone();
                 cx.defer(move |cx| {
-                    load_keybindings(&layout_keymap_path, profile_count, cx);
+                    load_keybindings(&layout_keymap_path, profile_count, no_mux, cx);
                 });
             })
             .detach();

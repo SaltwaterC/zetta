@@ -3,9 +3,9 @@ use crate::rename::resolve_tab_title;
 
 pub(crate) const TAB_MIN_WIDTH: Pixels = px(80.);
 pub(crate) const TAB_MAX_WIDTH: Pixels = px(180.);
-// Four pinned-tab indicators (keep-running pin, silent mode, attention, and
-// the tab icon), their gaps, and the tab's horizontal padding fit in this
-// fixed slot. A pinned tab never participates in unpinned overflow.
+// The lifecycle indicator, silent mode, attention, and tab icon, their gaps,
+// and the tab's horizontal padding fit in this fixed slot. A pinned tab never
+// participates in unpinned overflow.
 pub(crate) const PINNED_TAB_WIDTH: Pixels = px(76.);
 // Matches the new-tab button's own footprint (ml_1 + a 32px button + mr_2), so a
 // trigger reserved at the edge of the tab bar takes up the same visual space.
@@ -259,6 +259,10 @@ pub(crate) fn title_bar_shows_control_labels(
 
 pub(crate) fn title_bar_buttons_visible(compact_mode: bool, hide_buttons: bool) -> bool {
     !compact_mode && !hide_buttons
+}
+
+pub(crate) fn title_bar_keep_running_visible(no_mux: bool, show_title_bar_buttons: bool) -> bool {
+    no_mux && show_title_bar_buttons
 }
 
 pub(crate) fn title_bar_broadcast_visible(hide_buttons: bool) -> bool {
@@ -685,6 +689,7 @@ impl Zetta {
                         title_bar_background
                     },
                     tab_close_button_on_left: window_close_button_on_left(self.button_layout),
+                    no_mux: self.no_mux,
                     is_renaming_tab: self.is_renaming(),
                     tab_count: self.tabs.len(),
                     pinned_tab_count: pinned_tab_count(&self.tabs),
@@ -782,6 +787,7 @@ impl Zetta {
                 cx,
             ),
             show_title_bar_buttons,
+            self.no_mux,
             show_title_bar_control_labels,
             auto_background_tab,
             auto_background_protected,
@@ -1061,6 +1067,7 @@ impl Zetta {
         application_menu: AnyElement,
         profile_menu: AnyElement,
         show_title_bar_buttons: bool,
+        no_mux: bool,
         show_title_bar_control_labels: bool,
         auto_background_tab: bool,
         auto_background_protected: bool,
@@ -1243,38 +1250,44 @@ impl Zetta {
                     .when(show_title_bar_menus, |controls| {
                         controls.child(application_menu).child(profile_menu)
                     })
-                    .when(show_title_bar_buttons, |controls| {
-                        controls.child(
-                            Button::new(
-                                "auto-background-tab",
-                                if show_title_bar_control_labels {
-                                    "Keep running"
-                                } else {
-                                    ""
-                                },
-                            )
-                            .start_icon(Icon::new(IconName::Pin).size(IconSize::Small))
-                            .style(ButtonStyle::Subtle)
-                            .size(ButtonSize::Large)
-                            .toggle_state(auto_background_tab)
-                            .aria_label("Keep and share this tab after close")
-                            .tooltip(Tooltip::for_action_title(
-                                if auto_background_tab {
-                                    if auto_background_protected {
-                                        "Keep running and sharing after close is on · authentication required"
+                    .when(
+                        title_bar_keep_running_visible(no_mux, show_title_bar_buttons),
+                        |controls| {
+                            controls.child(
+                                Button::new(
+                                    "auto-background-tab",
+                                    if show_title_bar_control_labels {
+                                        "Keep running"
                                     } else {
-                                        "Keep running and sharing after close is on · no authentication"
-                                    }
-                                } else {
-                                    "Keep and share this tab after the tab or window is closed"
-                                },
-                                &ToggleAutoBackgroundTab,
-                            ))
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(ToggleAutoBackgroundTab), cx)
-                            }),
-                        )
-                    })
+                                        ""
+                                    },
+                                )
+                                .start_icon(Icon::new(IconName::Pin).size(IconSize::Small))
+                                .style(ButtonStyle::Subtle)
+                                .size(ButtonSize::Large)
+                                .toggle_state(auto_background_tab)
+                                .aria_label("Keep this tab running after close")
+                                .tooltip(Tooltip::for_action_title(
+                                    if auto_background_tab {
+                                        if auto_background_protected {
+                                            "Keep running after close is on · authentication required"
+                                        } else {
+                                            "Keep running after close is on · no authentication"
+                                        }
+                                    } else {
+                                        "Keep this tab running after the tab or window is closed"
+                                    },
+                                    &ToggleAutoBackgroundTab,
+                                ))
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(
+                                        Box::new(ToggleAutoBackgroundTab),
+                                        cx,
+                                    )
+                                }),
+                            )
+                        },
+                    )
                     .when(show_title_bar_buttons, |controls| {
                         controls.child(
                             Button::new(

@@ -67,6 +67,9 @@ fn compact_mode_hides_labels_and_regular_title_bar_buttons() {
     assert!(!title_bar_buttons_visible(true, false));
     assert!(title_bar_buttons_visible(false, false));
     assert!(!title_bar_buttons_visible(false, true));
+    assert!(title_bar_keep_running_visible(true, true));
+    assert!(!title_bar_keep_running_visible(false, true));
+    assert!(!title_bar_keep_running_visible(true, false));
 }
 
 #[test]

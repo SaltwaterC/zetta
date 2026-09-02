@@ -302,7 +302,7 @@ impl Zetta {
             return;
         }
         self.profile_shortcut_slots = slots;
-        load_keybindings(&self.launch_config.keymap_path, slots, cx);
+        load_keybindings(&self.launch_config.keymap_path, slots, self.no_mux, cx);
     }
 
     /// Applies the window's current system appearance and refreshes every

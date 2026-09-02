@@ -1,4 +1,5 @@
 use super::*;
+use crate::command_palette::action_available_in_launch_mode;
 use crate::rename::set_tab_title;
 
 impl Zetta {
@@ -27,6 +28,7 @@ impl Zetta {
             .available_actions(cx)
             .into_iter()
             .filter(|action| action_is_enabled_in_build(action.name()))
+            .filter(|action| action_available_in_launch_mode(action.name(), self.no_mux))
             .filter(|action| action.name() != ToggleCommandPalette.name())
             .filter(|action| action.name() != ApplyPaneSplitTemplate::name_for_type())
             .map(|action| {

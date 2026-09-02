@@ -701,6 +701,44 @@ fn auto_background_tab_uses_the_documented_shortcut() {
 }
 
 #[test]
+fn lifecycle_defaults_follow_the_launch_mode() {
+    let shortcut = gpui::Keystroke::parse("ctrl-shift-b").unwrap();
+    let old_sharing_shortcut = gpui::Keystroke::parse("ctrl-shift-k").unwrap();
+
+    for (no_mux, expected_action, unavailable_action) in [
+        (
+            false,
+            ToggleTabSharing.name(),
+            ToggleAutoBackgroundTab.name(),
+        ),
+        (
+            true,
+            ToggleAutoBackgroundTab.name(),
+            ToggleTabSharing.name(),
+        ),
+    ] {
+        let bindings = default_keybindings_for_mode(0, no_mux, &gpui::DummyKeyboardMapper);
+        let matching = bindings
+            .iter()
+            .filter(|binding| {
+                binding.match_keystrokes(std::slice::from_ref(&shortcut)) == Some(false)
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(matching.len(), 1);
+        assert_eq!(matching[0].action().name(), expected_action);
+        assert!(
+            bindings
+                .iter()
+                .all(|binding| binding.action().name() != unavailable_action)
+        );
+        assert!(bindings.iter().all(|binding| {
+            binding.match_keystrokes(std::slice::from_ref(&old_sharing_shortcut)) != Some(false)
+        }));
+    }
+}
+
+#[test]
 fn detach_tab_uses_the_tab_scoped_shortcut() {
     assert_eq!(DETACH_TAB_KEYBINDING, "ctrl-shift-d");
     let shortcut = gpui::Keystroke::parse(DETACH_TAB_KEYBINDING).unwrap();

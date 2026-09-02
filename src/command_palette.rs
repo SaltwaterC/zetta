@@ -2,7 +2,21 @@ use std::path::{Path, PathBuf};
 
 use gpui::{Action, ScrollStrategy, UniformListScrollHandle};
 
-use crate::{OpenProject, project::project_display_name};
+use crate::{
+    OpenProject, ToggleAutoBackgroundTab, ToggleTabSharing, project::project_display_name,
+};
+
+/// The two session-lifecycle actions are mode-specific. Keep explicit user
+/// keybindings usable, but only expose the action that can operate in this
+/// launch mode through built-in UI surfaces.
+pub(crate) fn action_available_in_launch_mode(action_name: &str, no_mux: bool) -> bool {
+    let unavailable_action = if no_mux {
+        ToggleTabSharing.name()
+    } else {
+        ToggleAutoBackgroundTab.name()
+    };
+    action_name != unavailable_action
+}
 
 pub struct PaletteCommand {
     pub name: String,

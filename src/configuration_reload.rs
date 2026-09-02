@@ -251,7 +251,7 @@ impl Zetta {
             }
         }
         let profile_count = visible_profile_count(&config.profiles, &config.hidden_profiles);
-        load_keybindings(&config.keymap_path, profile_count, cx);
+        load_keybindings(&config.keymap_path, profile_count, self.no_mux, cx);
         self.profile_shortcut_slots = profile_count;
 
         #[cfg(windows)]

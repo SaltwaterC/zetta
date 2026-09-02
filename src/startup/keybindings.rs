@@ -248,7 +248,7 @@ pub(crate) const RECONNECT_SESSION_KEYBINDING: &str = "ctrl-shift-a";
 
 pub(crate) const DETACH_TAB_KEYBINDING: &str = "ctrl-shift-d";
 
-pub(crate) const TOGGLE_TAB_SHARING_KEYBINDING: &str = "ctrl-shift-k";
+pub(crate) const TOGGLE_TAB_SHARING_KEYBINDING: &str = "ctrl-shift-b";
 
 pub(crate) const CLOSE_WINDOW_KEYBINDING: &str = "ctrl-shift-q";
 
@@ -528,10 +528,24 @@ pub(crate) fn stacked_pane_keybindings() -> [KeyBinding; 5] {
     ]
 }
 
+#[cfg(test)]
 fn default_keybindings(
     profile_count: usize,
     keyboard_mapper: &dyn PlatformKeyboardMapper,
 ) -> Vec<KeyBinding> {
+    default_keybindings_for_mode(profile_count, false, keyboard_mapper)
+}
+
+fn default_keybindings_for_mode(
+    profile_count: usize,
+    no_mux: bool,
+    keyboard_mapper: &dyn PlatformKeyboardMapper,
+) -> Vec<KeyBinding> {
+    let tab_lifecycle_keybinding = if no_mux {
+        auto_background_tab_keybinding()
+    } else {
+        toggle_tab_sharing_keybinding()
+    };
     let mut bindings = vec![
         KeyBinding::new("ctrl-shift-t", NewTab, Some("Zetta > Terminal")),
         KeyBinding::new("ctrl-shift-n", NewWindow, Some("Zetta > Terminal")),
@@ -539,9 +553,8 @@ fn default_keybindings(
         close_window_keybinding(),
         close_all_windows_keybinding(),
         detach_tab_keybinding(),
-        toggle_tab_sharing_keybinding(),
+        tab_lifecycle_keybinding,
         reconnect_session_keybinding(),
-        auto_background_tab_keybinding(),
         close_pane_keybinding(),
         KeyBinding::new(
             "ctrl-shift-o",
@@ -708,7 +721,7 @@ fn index_default_bindings(bindings: &[KeyBinding]) -> HashMap<DefaultBindingKey,
     indexed
 }
 
-pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut App) {
+pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, no_mux: bool, cx: &mut App) {
     cx.clear_key_bindings();
     match KeymapFile::load_asset_allow_partial_failure(settings::DEFAULT_KEYMAP_PATH, cx) {
         Ok(bindings) => cx.bind_keys(bindings),
@@ -718,7 +731,7 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, cx: &mut Ap
     // Build default bindings and collect a map of (action_name, context) -> keystrokes
     // for rebinding detection
     let keyboard_mapper = cx.keyboard_mapper().clone();
-    let bindings = default_keybindings(profile_count, keyboard_mapper.as_ref());
+    let bindings = default_keybindings_for_mode(profile_count, no_mux, keyboard_mapper.as_ref());
     let default_bindings_map = index_default_bindings(&bindings);
 
     cx.bind_keys(bindings);

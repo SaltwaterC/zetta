@@ -248,7 +248,7 @@ A backgrounded session belongs to the Zetta process that backgrounded it. No
 other window lists it in its reconnect picker, and the multiplexer refuses an
 attach from anywhere else — which is what backgrounding meant before the
 multiplexer held these sessions at all. `Ctrl-Shift-D` is not a way to hand a
-tab to another window; `Ctrl-Shift-K` is.
+tab to another window; in normal daemon mode, `Ctrl-Shift-B` is.
 
 Sharing is the separate, explicit request, and it works on a session in the
 background as well as one on screen:
@@ -259,7 +259,7 @@ zmux reconnect 12345:7:3  # open it in a Zetta window
 zmux unshare 12345:7:3   # the window that last held it owns it again
 ```
 
-`Ctrl-Shift-K` asks for the secret a joining window will have to present, exactly
+`Ctrl-Shift-B` asks for the secret a joining window will have to present, exactly
 as detaching asks for the one that will reattach a session — and, exactly as
 there, an empty dialog leaves the session unprotected. The terminal form has
 the same behavior: typed characters are masked with `*`, and Ctrl-C cancels
@@ -278,18 +278,19 @@ needs no secret and leaves the one it has in place.
 command that asked — a CLI is a process that exits a moment later. It therefore
 needs that window to still be running, and it refuses a session that is on
 screen, because a session several windows are driving may only be scoped back
-from the one showing it, which is what `Ctrl-Shift-K` does there.
+from the one showing it, which is what `Ctrl-Shift-B` does there.
 
 The scope outlives the window in normal daemon mode. A session detached with
 `Ctrl-Shift-D` whose Zetta has exited — closed or crashed — stays that process's,
 and no other window may attach it: ordinary detaching is not a slow way of
-sharing it. `Ctrl-Shift-B` is the exception: **Keep running** also shares the
-session, so the handoff is available to a new Zetta process after the window
-closes. `zmux list` says which process each still-scoped session belongs to. If
-that process is gone, run `zmux share SESSION` to change the scope, then
-`zmux reconnect SESSION` to open it. It can also be ended with `zmux kill SESSION`
-by the session owner or current holder, like any other protected administrative
-action.
+sharing it. In normal daemon mode, `Ctrl-Shift-B` is **Share Tab**, which makes
+the session joinable while it remains on screen. In `--no-mux` mode, the same
+shortcut is **Keep running** and retains the tab in the current Zetta process;
+sharing is unavailable. `zmux list` says which process each still-scoped
+session belongs to. If that process is gone, run `zmux share SESSION` to change
+the scope, then `zmux reconnect SESSION` to open it. It can also be ended with
+`zmux kill SESSION` by the session owner or current holder, like any other
+protected administrative action.
 
 With `zetta --no-mux`, the same **Detach** and **Keep running** actions retain
 the tab in the current Zetta process. Closing its last window leaves that
@@ -322,7 +323,8 @@ window remains usable.
 
 ## Sharing a tab between windows
 
-Sharing is its own workflow, not a step inside detaching. Use `Ctrl-Shift-K`,
+Sharing is its own workflow, not a step inside detaching. In normal daemon mode,
+use `Ctrl-Shift-B`,
 **Share Tab** in the tab's context menu, or **Zetta: Toggle Tab Sharing** in the
 command palette. The tab stays exactly where it is — same window, same panes,
 still reading its own terminals — and the session becomes visible to other Zetta
@@ -379,7 +381,7 @@ makes two extra hops. That costs tens of microseconds, not milliseconds — the
 multiplexer waits on the terminal rather than polling it on a timer, which is
 what keeps the difference below what anyone can perceive.
 
-`Ctrl-Shift-K` is a toggle, and switching it off scopes the session back to this
+`Ctrl-Shift-B` is a toggle, and switching it off scopes the session back to this
 window: it stops being listed and attachable, and its panes stop being relayed —
 this window reads its own terminals again.
 
@@ -399,15 +401,14 @@ What releases a pane is a viewer *going*: closing its tab, or its process ending
 There is also a last-resort timeout of half a minute for a window that has hung with
 a pane still attached, so one frozen window cannot hold a session for ever.
 
-Sharing and **Keep running** remain separate properties in daemon mode, but
-enabling **Keep running** requests both: the tab outlives this window and its
-session is shared by default. Sharing alone does not keep a session alive after
-every viewer goes, so a shared tab whose window closes without **Keep running**
-ends like any other. In `--no-mux` mode, **Keep running** only requests the
-process-local background owner because sharing is unavailable.
-If sharing is explicitly turned off before a keep-running tab closes, the
-handoff is private again. The authentication dialog covers both properties: a
-tab that already carries a secret reuses it, and a tab without one is asked.
+In normal daemon mode, **Share Tab** is the lifecycle control exposed by
+default. Sharing alone does not keep a session alive after every viewer goes,
+so a shared tab whose window closes ends like any other. In `--no-mux` mode,
+**Keep running** is the lifecycle control exposed by default; it only requests
+the process-local background owner because sharing is unavailable. An explicit
+user keymap can still invoke either action, and the authentication dialog
+covers whichever lifecycle action is used: a tab that already carries a secret
+reuses it, and a tab without one is asked.
 Worth answering rather than skipping — "running as you" is not the boundary that
 matters here, because a session's terminals may hold privileges the process
 joining them does not.
@@ -537,10 +538,10 @@ because the multiplexer publishes the catalog to disk. Use `zmux reconnect` or
 ## Session protection
 
 Every action that makes a session reachable beyond the window driving it asks the
-same question, in the same dialog: detaching a tab (`Ctrl-Shift-D`), keeping it
-running after close (`Ctrl-Shift-B`) and sharing it (`Ctrl-Shift-K`). Choose **No
-authentication** — or press Enter with both fields empty — or enter and confirm a
-secret.
+same question, in the same dialog: detaching a tab (`Ctrl-Shift-D`), sharing a
+tab in normal daemon mode (`Ctrl-Shift-B`), or keeping it running in
+`--no-mux` mode (`Ctrl-Shift-B`). Choose **No authentication** — or press Enter
+with both fields empty — or enter and confirm a secret.
 
 Protection is per session: unprotected sessions reconnect immediately, while
 protected sessions prompt for their secret. It is worth choosing one for a
@@ -662,12 +663,13 @@ can pick it back up.
 
 ## Automatically background a tab
 
-Use `Ctrl-Shift-B` or **Zetta: Toggle Auto Background Tab** in the command
-palette to keep a tab running when the tab or its window closes. **Keep running**
-also shares the session by default in daemon mode, so a new Zetta process can
-reconnect after the handoff. With `--no-mux`, it keeps the session in the same
-Zetta process without sharing. This setting is separate from the visual `Pin
-Tab` action, which only keeps a tab at the leading edge of the current tab bar.
+With `zetta --no-mux`, use `Ctrl-Shift-B` or **Zetta: Toggle Auto Background
+Tab** in the command palette to keep a tab running when the tab or its window
+closes. **Keep running** keeps the session in the same Zetta process without
+sharing. Normal daemon launches expose **Share Tab** on `Ctrl-Shift-B` instead;
+sharing and keeping a tab running are separate session properties there. This
+setting is separate from the visual `Pin Tab` action, which only keeps a tab at
+the leading edge of the current tab bar.
 
 Enabling the toggle asks for reattachment authentication immediately, in the same
 dialog detaching and sharing use: select **No authentication**, or enter and

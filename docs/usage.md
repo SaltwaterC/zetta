@@ -209,8 +209,9 @@ tab bar for the current session. Pinned tabs use a narrow icon-only slot; their
 title remains available through the tooltip and accessibility label, and the
 slot expands while the tab is renamed. Pinned tabs can be reordered among one
 another but cannot cross the pinned/unpinned boundary. This visual pin is
-independent from **Keep running**, which controls whether closing a tab moves
-its terminal session into the background.
+independent from the session-lifecycle control. Normal daemon launches expose
+**Share Tab**; `zetta --no-mux` exposes **Keep running**. Both use
+`Ctrl-Shift-B`, while `Ctrl-Shift-K` is unbound by default.
 
 ### Tab attention
 
@@ -838,6 +839,10 @@ which opens Zetta's title-bar menu on every platform. `Ctrl-Alt` combinations
 become `Ctrl-Cmd`; for example, paste-trim is `Ctrl-Cmd-V` on macOS and
 `Ctrl-Alt-V` on Windows/Linux.
 
+The session-lifecycle shortcut depends on the launch mode: in normal daemon
+mode `Ctrl-Shift-B` shares the active tab, while in `--no-mux` mode it toggles
+**Keep running**. `Ctrl-Shift-K` has no built-in binding.
+
 | Shortcut | Action |
 | --- | --- |
 | `Ctrl-Shift-T` | New tab |
@@ -848,7 +853,7 @@ become `Ctrl-Cmd`; for example, paste-trim is `Ctrl-Cmd-V` on macOS and
 | `Ctrl-Shift-W` | Close tab |
 | `Ctrl-Shift-G`, then `Left` / `Right` | Toggle tab-move mode and move the active tab without wrapping |
 | `Ctrl-Shift-D` | Detach the active tab into the background |
-| `Ctrl-Shift-B` | Toggle automatic backgrounding for the active tab |
+| `Ctrl-Shift-B` | Share the active tab (normal daemon mode); toggle **Keep running** (`--no-mux`) |
 | `Ctrl-Shift-A` | Reconnect the most recently detached tab |
 | `Ctrl-Shift-O` | Split active pane horizontally, adding a pane below |
 | `Ctrl-Shift-E` | Split active pane vertically, adding a pane on the right |

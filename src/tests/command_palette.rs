@@ -1,5 +1,8 @@
 use super::*;
-use crate::{OpenProject, ToggleTabMoveMode, ToggleTabPinning};
+use crate::{
+    NewTab, OpenProject, ToggleAutoBackgroundTab, ToggleTabMoveMode, ToggleTabPinning,
+    ToggleTabSharing,
+};
 gpui::actions!(command_palette_test, [First, Second]);
 
 #[test]
@@ -21,6 +24,28 @@ fn humanizes_action_names() {
         humanize_action_name("go_to_line::Deploy"),
         "go to line: deploy"
     );
+}
+
+#[test]
+fn lifecycle_actions_are_exposed_only_in_their_launch_mode() {
+    assert!(action_available_in_launch_mode(
+        ToggleTabSharing.name(),
+        false
+    ));
+    assert!(!action_available_in_launch_mode(
+        ToggleAutoBackgroundTab.name(),
+        false
+    ));
+    assert!(action_available_in_launch_mode(
+        ToggleAutoBackgroundTab.name(),
+        true
+    ));
+    assert!(!action_available_in_launch_mode(
+        ToggleTabSharing.name(),
+        true
+    ));
+    assert!(action_available_in_launch_mode(NewTab.name(), false));
+    assert!(action_available_in_launch_mode(NewTab.name(), true));
 }
 
 #[test]
