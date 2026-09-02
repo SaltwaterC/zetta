@@ -266,8 +266,11 @@ parent directories and rejects existing destinations and symlink collisions;
 along with current `HEAD` submodule paths and native CoW availability. A
 missing root is checked through its nearest existing ancestor.
 
-Run `zetta wt rerere` to enable the two global Git settings recommended for
-this workflow: `rerere.enabled=true` and `rerere.autoupdate=true`.
+Run `zetta wt config` to install the global Git settings recommended for this
+workflow: `pull.rebase=true`, `rebase.autoStash=true`,
+`alias.up=pull --rebase --autostash`, `rerere.enabled=true`, and
+`rerere.autoupdate=true`. The operation uses idempotent `--replace-all` writes,
+preserves unrelated configuration, and can be run repeatedly.
 
 ## Profiles and working directories
 

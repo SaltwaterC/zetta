@@ -44,10 +44,10 @@ pub(crate) fn format_help_table<'a>(rows: impl AsRef<[(&'a str, &'a str)]>) -> S
 pub use process_control::{WorktreeNameRequest, request_process_worktree_name};
 pub use worktree_cli::{
     WorktreeCommand, WorktreeInvocation, parse_worktree_args, parse_worktree_args_for, run,
-    run_for, worktree_abort_help, worktree_abort_help_for, worktree_done_help,
-    worktree_done_help_for, worktree_help, worktree_help_for, worktree_new_help,
-    worktree_new_help_for, worktree_rerere_help, worktree_rerere_help_for, worktree_status_help,
-    worktree_status_help_for,
+    run_for, worktree_abort_help, worktree_abort_help_for, worktree_config_help,
+    worktree_config_help_for, worktree_done_help, worktree_done_help_for, worktree_help,
+    worktree_help_for, worktree_new_help, worktree_new_help_for, worktree_status_help,
+    worktree_status_help_for, worktree_sync_help, worktree_sync_help_for,
 };
 
 /// Runs the standalone `zwt` command with the supplied arguments.

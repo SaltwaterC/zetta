@@ -148,6 +148,23 @@ function zwt {
 }
 # ZETTA_WORKTREE_INTEGRATION_END
 
+# ZETTA_WORKTREE_INTEGRATION_BEGIN
+$zettaWorktreeCommits = {
+    try {
+        $currentBranch = [string](& git branch --show-current 2>$null | Select-Object -First 1)
+        $currentBranch = $currentBranch.Trim()
+        if ([string]::IsNullOrEmpty($currentBranch)) { return }
+        $sourceBranch = [string](& git config --local --get "wtbranch.$currentBranch.base" 2>$null | Select-Object -First 1)
+        $sourceBranch = $sourceBranch.Trim()
+        if ([string]::IsNullOrEmpty($sourceBranch)) { return }
+        $splitPoint = [string](& git merge-base "refs/heads/$currentBranch" "refs/heads/$sourceBranch" 2>$null | Select-Object -First 1)
+        $splitPoint = $splitPoint.Trim()
+        if ([string]::IsNullOrEmpty($splitPoint)) { return }
+        @(& git rev-list --reverse "$splitPoint..refs/heads/$sourceBranch" 2>$null)
+    } catch {}
+}
+# ZETTA_WORKTREE_INTEGRATION_END
+
 function ztftp { & zetta tftp @args }
 function zntfy { & zetta notify @args }
 function zcopy { & zetta copy @args }
@@ -438,11 +455,30 @@ $zettaCompletions = {
 # ZETTA_WORKTREE_INTEGRATION_BEGIN
     } elseif ZETTA_WORKTREE_COMPLETION_CHECK {
         if ([string]::IsNullOrEmpty($worktreeOperation)) {
-            'new', 'done', 'abort', 'status', 'rerere', '--help'
+            'new', 'done', 'abort', 'status', 'sync', 'config', '--help'
         } elseif ($worktreeOperation -eq 'new') {
             '--copy', '--path-only', '--help'
         } elseif ($worktreeOperation -eq 'done' -or $worktreeOperation -eq 'abort') {
             '--path-only', '--help'
+        } elseif ($worktreeOperation -eq 'sync') {
+            $operationIndex = if ($commandName -eq 'zwt') { 1 } else { 2 }
+            $targetEnd = $words.Count
+            if ($targetEnd -gt ($operationIndex + 1) -and $words[$targetEnd - 1] -eq $wordToComplete) {
+                $targetEnd--
+            }
+            $targetCount = 0
+            for ($index = $operationIndex + 1; $index -lt $targetEnd; $index++) {
+                if ($words[$index] -notlike '-*' -and -not [string]::IsNullOrEmpty($words[$index])) {
+                    $targetCount++
+                }
+            }
+            if ($targetCount -eq 0 -and $wordToComplete -notlike '-*') {
+                & $zettaWorktreeCommits
+            } elseif ($wordToComplete -like '-*') {
+                '--help'
+            } else {
+                @()
+            }
         } else {
             '--help'
         }
@@ -571,11 +607,30 @@ $zettaCompletions = {
 # ZETTA_WORKTREE_INTEGRATION_BEGIN
             ZETTA_WORKTREE_SWITCH_CASE {
                 if ([string]::IsNullOrEmpty($worktreeOperation)) {
-                    'new', 'done', 'abort', 'status', 'rerere', '--help'
+                    'new', 'done', 'abort', 'status', 'sync', 'config', '--help'
                 } elseif ($worktreeOperation -eq 'new') {
                     '--copy', '--path-only', '--help'
                 } elseif ($worktreeOperation -eq 'done' -or $worktreeOperation -eq 'abort') {
                     '--path-only', '--help'
+                } elseif ($worktreeOperation -eq 'sync') {
+                    $operationIndex = if ($commandName -eq 'zwt') { 1 } else { 2 }
+                    $targetEnd = $words.Count
+                    if ($targetEnd -gt ($operationIndex + 1) -and $words[$targetEnd - 1] -eq $wordToComplete) {
+                        $targetEnd--
+                    }
+                    $targetCount = 0
+                    for ($index = $operationIndex + 1; $index -lt $targetEnd; $index++) {
+                        if ($words[$index] -notlike '-*' -and -not [string]::IsNullOrEmpty($words[$index])) {
+                            $targetCount++
+                        }
+                    }
+                    if ($targetCount -eq 0 -and $wordToComplete -notlike '-*') {
+                        & $zettaWorktreeCommits
+                    } elseif ($wordToComplete -like '-*') {
+                        '--help'
+                    } else {
+                        @()
+                    }
                 } else {
                     '--help'
                 }

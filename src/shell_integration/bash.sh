@@ -947,12 +947,24 @@ _zetta_complete() {
 # ZETTA_WORKTREE_INTEGRATION_BEGIN
         wt)
             if (( COMP_CWORD == 2 )); then
-                _zetta_compgen 'new done abort status rerere --help'
+                _zetta_compgen 'new done abort status sync config --help'
             elif [[ ${COMP_WORDS[2]} == new || ${COMP_WORDS[2]} == done || ${COMP_WORDS[2]} == abort ]]; then
                 if [[ ${COMP_WORDS[2]} == new ]]; then
                     _zetta_compgen '--copy --path-only --help' 1
                 else
                     _zetta_compgen '--path-only --help'
+                fi
+            elif [[ ${COMP_WORDS[2]} == sync ]]; then
+                if (( COMP_CWORD == 3 )); then
+                    if [[ $current == -* ]]; then
+                        _zetta_compgen '--help'
+                    else
+                        _zetta_complete_worktree_commits
+                    fi
+                elif [[ $current == -* ]]; then
+                    _zetta_compgen '--help'
+                else
+                    COMPREPLY=()
                 fi
             else
                 _zetta_compgen '--help'
@@ -963,6 +975,20 @@ _zetta_complete() {
 }
 
 # ZETTA_WORKTREE_INTEGRATION_BEGIN
+_zetta_complete_worktree_commits() {
+    COMPREPLY=()
+    local current_branch source_branch split_point commit
+    current_branch=$(git branch --show-current 2>/dev/null) || return
+    [[ -n $current_branch ]] || return
+    source_branch=$(git config --local --get "wtbranch.${current_branch}.base" 2>/dev/null) || return
+    [[ -n $source_branch ]] || return
+    split_point=$(git merge-base "refs/heads/${current_branch}" "refs/heads/${source_branch}" 2>/dev/null) || return
+    [[ -n $split_point ]] || return
+    while IFS= read -r commit; do
+        [[ $commit == "$current"* ]] && COMPREPLY+=("$commit")
+    done < <(git rev-list --reverse "${split_point}..refs/heads/${source_branch}" 2>/dev/null)
+}
+
 _zetta_complete_zwt() {
     local saved_words=("${COMP_WORDS[@]}")
     local saved_cword=$COMP_CWORD

@@ -91,7 +91,10 @@ pub enum WorktreeCommand {
         path_only: bool,
     },
     Status,
-    Rerere,
+    Sync {
+        commit: Option<String>,
+    },
+    Config,
 }
 
 pub fn parse_worktree_args(arguments: &[OsString]) -> Result<WorktreeCommand> {
@@ -126,10 +129,11 @@ pub fn parse_worktree_args_for(
             WorktreeCommand::Status,
             invocation,
         ),
-        "rerere" => parse_no_arguments(
-            "rerere",
+        "sync" => parse_sync_args(&arguments[1..], invocation),
+        "config" => parse_no_arguments(
+            "config",
             &arguments[1..],
-            WorktreeCommand::Rerere,
+            WorktreeCommand::Config,
             invocation,
         ),
         unknown => {
@@ -219,6 +223,33 @@ fn parse_abort_args(
     Ok(WorktreeCommand::Abort { path_only })
 }
 
+fn parse_sync_args(
+    arguments: &[OsString],
+    invocation: WorktreeInvocation,
+) -> Result<WorktreeCommand> {
+    let mut commit = None;
+    for argument in arguments {
+        match argument.to_string_lossy().as_ref() {
+            "--help" | "-h" => {
+                println!("{}", worktree_sync_help_for(invocation));
+                std::process::exit(0);
+            }
+            value if value.starts_with('-') => {
+                anyhow::bail!("unknown {} sync argument {value:?}", invocation.command())
+            }
+            value => {
+                anyhow::ensure!(
+                    commit.is_none(),
+                    "{} sync accepts at most one COMMIT",
+                    invocation.command()
+                );
+                commit = Some(value.to_owned());
+            }
+        }
+    }
+    Ok(WorktreeCommand::Sync { commit })
+}
+
 fn parse_path_only_args(
     arguments: &[OsString],
     operation: &str,
@@ -259,7 +290,7 @@ fn parse_no_arguments(
             "{}",
             match operation {
                 "status" => worktree_status_help_for(invocation),
-                "rerere" => worktree_rerere_help_for(invocation),
+                "config" => worktree_config_help_for(invocation),
                 _ => worktree_help_for(invocation),
             }
         );
@@ -281,7 +312,7 @@ pub fn worktree_help() -> String {
 pub fn worktree_help_for(invocation: WorktreeInvocation) -> String {
     let command = invocation.command();
     format!(
-        "Zetta Git worktree workflow\n\nUsage: {command} <COMMAND>\n       {command} new [OPTIONS] NAME\n       {command} done [OPTIONS]\n       {command} abort [OPTIONS]\n       {command} status\n       {command} rerere\n\nCommands:\n{}\n\nThe direct CLI never changes the caller directory. Generated shell integration provides\nzwt, which changes directory after successful new, done, or abort operations.\n\nWorktree roots:\n  Git reads effective wt.root configuration. Configure a repository with:\n    git config --local wt.root ../project-worktrees\n  Relative values resolve from the repository main worktree root. Without wt.root, Zetta\n  uses sibling directory <repository>-worktrees. NAME may contain nested components such\n  as feature/api, which creates <wt.root>/feature/api.\n\nRecommended setup:\n  {command} rerere\n  This enables rerere.enabled and rerere.autoupdate globally so repeated conflicts can\n  be resolved automatically after you resolve and stage them once.",
+        "Zetta Git worktree workflow\n\nUsage: {command} <COMMAND>\n       {command} new [OPTIONS] NAME\n       {command} done [OPTIONS]\n       {command} abort [OPTIONS]\n       {command} status\n       {command} sync [COMMIT]\n       {command} config\n\nCommands:\n{}\n\nThe direct CLI never changes the caller directory. Generated shell integration provides\nzwt, which changes directory after successful new, done, or abort operations; sync and\nconfig pass through without changing directory.\n\nWorktree roots:\n  Git reads effective wt.root configuration. Configure a repository with:\n    git config --local wt.root ../project-worktrees\n  Relative values resolve from the repository main worktree root. Without wt.root, Zetta\n  uses sibling directory <repository>-worktrees. NAME may contain nested components such\n  as feature/api, which creates <wt.root>/feature/api.\n\nRecommended setup:\n  {command} config\n  This configures Git's pull/rebase, autostash, update alias, and recorded\n  conflict-resolution helpers globally.",
         format_help_table([
             ("new", "Create a wt/NAME worktree from the current branch"),
             (
@@ -290,7 +321,8 @@ pub fn worktree_help_for(invocation: WorktreeInvocation) -> String {
             ),
             ("abort", "Discard and remove the current wt/* worktree"),
             ("status", "Show the current worktree workflow state"),
-            ("rerere", "Enable Git recorded conflict-resolution helpers",),
+            ("sync", "Rebase the current worktree onto the source branch",),
+            ("config", "Install the recommended global Git configuration"),
         ]),
         command = command,
     )
@@ -330,7 +362,7 @@ pub fn worktree_new_help_for(invocation: WorktreeInvocation) -> String {
         ("-h, --help", "Print help"),
     ]);
     format!(
-        "Create a Git worktree for a temporary wt/NAME branch\n\nUsage: {command} new [OPTIONS] NAME\n\nThe current worktree must be on an attached branch. Zetta creates branch wt/NAME,\nrecords that branch source in wtbranch.wt/NAME.base, and places the worktree at\n<wt.root>/NAME. Nested NAME values are supported. The default root is sibling\n<repository>-worktrees; configure a repository root with git config --local wt.root PATH.\nFor example, use git config --local wt.root ../project-worktrees. Relative PATH values\nresolve from the repository root. Existing paths, symlinks, and branches are rejected.\n\nIf the source commit contains submodules, new recursively initializes them at their\nrecorded commits. An initialized matching submodule checkout in the source worktree\nis reused as a local Git object reference when possible; otherwise Git uses the\nsubmodule's configured remote. If initialization fails, Zetta force-removes the\npartial worktree, deletes its branch, and clears its metadata.\n\nThe repeatable --copy PATH (or -c PATH) option copies a relative file, directory,\nor symlink from the current source worktree to the identical location in the new\nworktree. Paths may not be absolute, traverse a parent directory, or traverse an\nintermediate symlink. Existing destination paths and overlapping copy requests are\nrejected. Native copy-on-write cloning is used when the filesystem supports it, with\na regular recursive-copy fallback elsewhere. A copy failure removes the new\nworktree, branch, metadata, and directories created for its root.\n\nnew reports phase progress on standard error while creating the worktree,\ninitializing submodules, copying paths, and recording metadata.\n\nOptions:\n{options}\n\nUse zwt new NAME from generated shell integration to create the worktree and cd into\nit. The {command} rerere shortcut is recommended before the first conflict.",
+        "Create a Git worktree for a temporary wt/NAME branch\n\nUsage: {command} new [OPTIONS] NAME\n\nThe current worktree must be on an attached branch. Zetta creates branch wt/NAME,\nrecords that branch source in wtbranch.wt/NAME.base, and places the worktree at\n<wt.root>/NAME. Nested NAME values are supported. The default root is sibling\n<repository>-worktrees; configure a repository root with git config --local wt.root PATH.\nFor example, use git config --local wt.root ../project-worktrees. Relative PATH values\nresolve from the repository root. Existing paths, symlinks, and branches are rejected.\n\nIf the source commit contains submodules, new recursively initializes them at their\nrecorded commits. An initialized matching submodule checkout in the source worktree\nis reused as a local Git object reference when possible; otherwise Git uses the\nsubmodule's configured remote. If initialization fails, Zetta force-removes the\npartial worktree, deletes its branch, and clears its metadata.\n\nThe repeatable --copy PATH (or -c PATH) option copies a relative file, directory,\nor symlink from the current source worktree to the identical location in the new\nworktree. Paths may not be absolute, traverse a parent directory, or traverse an\nintermediate symlink. Existing destination paths and overlapping copy requests are\nrejected. Native copy-on-write cloning is used when the filesystem supports it, with\na regular recursive-copy fallback elsewhere. A copy failure removes the new\nworktree, branch, metadata, and directories created for its root.\n\nnew reports phase progress on standard error while creating the worktree,\ninitializing submodules, copying paths, and recording metadata.\n\nOptions:\n{options}\n\nUse zwt new NAME from generated shell integration to create the worktree and cd into\nit. Run {command} config before the first conflict.",
         command = command,
     )
 }
@@ -349,7 +381,7 @@ pub fn worktree_done_help_for(invocation: WorktreeInvocation) -> String {
         ("-h, --help", "Print help"),
     ]);
     format!(
-        "Integrate and remove the current temporary worktree\n\nUsage: {command} done [OPTIONS]\n\nThe current worktree must be a clean, attached wt/* branch created by {command} new.\nZetta rebases it onto the recorded source branch, verifies that the source worktree is\nstill attached to a clean worktree, fast-forwards that source worktree, removes the\ntemporary worktree and branch, and clears the source metadata. Submodule changes are\nincluded in the cleanliness checks. Worktrees whose current commit contains submodules\nare removed with Git's forced worktree cleanup after successful integration. If a rebase\nconflicts, resolve the files, stage the resolutions with git add, and rerun {command} done.\n\nOptions:\n{options}\n\nThe direct CLI does not change directory. zwt done changes into the source worktree\nafter success. The worktree destination uses the configured wt.root, or the sibling\n<repository>-worktrees default when wt.root is unset. For example, use git config --local\nwt.root ../project-worktrees. Run {command} rerere to enable Git recorded conflict-resolution\nhelpers.",
+        "Integrate and remove the current temporary worktree\n\nUsage: {command} done [OPTIONS]\n\nThe current worktree must be a clean, attached wt/* branch created by {command} new.\nZetta rebases it onto the recorded source branch, verifies that the source worktree is\nstill attached to a clean worktree, fast-forwards that source worktree, removes the\ntemporary worktree and branch, and clears the source metadata. Submodule changes are\nincluded in the cleanliness checks. Worktrees whose current commit contains submodules\nare removed with Git's forced worktree cleanup after successful integration. If a rebase\nconflicts, resolve the files, stage the resolutions with git add, and rerun {command} done.\n\nOptions:\n{options}\n\nThe direct CLI does not change directory. zwt done changes into the source worktree\nafter success. The worktree destination uses the configured wt.root, or the sibling\n<repository>-worktrees default when wt.root is unset. For example, use git config --local\nwt.root ../project-worktrees. Run {command} config to install Git's recorded conflict-resolution\nand autostash helpers.",
         command = command,
     )
 }
@@ -371,8 +403,8 @@ pub fn worktree_status_help_for(invocation: WorktreeInvocation) -> String {
             "its nearest existing ancestor. For example, configure it with git config --local\n",
             "wt.root ../project-worktrees; relative values resolve from the repository root. If it\n",
             "is unset, Zetta uses sibling <repository>-worktrees.\n\n",
-            "Run {} rerere before integrating worktrees to enable Git's recorded conflict\n",
-            "resolution helpers. The direct CLI never changes directory; generated zwt new,\n",
+            "Run {} config before integrating worktrees to install Git's recorded conflict\n",
+            "resolution and autostash helpers. The direct CLI never changes directory; generated zwt new,\n",
             "zwt done, and zwt abort wrappers enter worktrees only after successful operations."
         ),
         invocation.command(),
@@ -380,15 +412,27 @@ pub fn worktree_status_help_for(invocation: WorktreeInvocation) -> String {
     )
 }
 
-pub fn worktree_rerere_help() -> String {
-    worktree_rerere_help_for(WorktreeInvocation::Standalone)
+pub fn worktree_sync_help() -> String {
+    worktree_sync_help_for(WorktreeInvocation::Standalone)
 }
 
-pub fn worktree_rerere_help_for(invocation: WorktreeInvocation) -> String {
+pub fn worktree_sync_help_for(invocation: WorktreeInvocation) -> String {
+    let command = invocation.command();
     format!(
-        "Enable Git rerere for the worktree workflow\n\nUsage: {} rerere\n\nRuns git config --global rerere.enabled true and git config --global\nrerere.autoupdate true. This is the recommended shortcut before using {} done,\nespecially when the same conflicts recur. The optional wt.root setting does not affect\nrerere; configure it per repository with git config --local wt.root PATH, where a\nrelative PATH is resolved from the repository root and the default is sibling\n<repository>-worktrees. Generated shell integration provides zwt new, zwt done, and\nzwt abort, which enter the resulting worktrees after successful operations.",
-        invocation.command(),
-        invocation.command(),
+        "Synchronize the current temporary worktree with its source branch\n\nUsage: {command} sync [COMMIT]\n\nThe current worktree must be a linked, non-bare worktree on a managed wt/* branch\ncreated by {command} new, with recorded source metadata. Zetta finds the current\nmerge-base of the worktree branch and recorded source branch. Without COMMIT, sync\nrebases onto the latest source-branch tip. With COMMIT, the commit-ish must resolve to\na commit on the recorded source branch at or after that merge-base and at or before the\ncurrent source tip; the bounds are inclusive. This permits synchronizing to an\nintermediary source commit before syncing again after the split point advances. The\nsource worktree may be dirty and is never changed.\n\nSync runs git rebase --autostash --onto TARGET SPLIT_POINT with pinned commit IDs, so\nlocal tracked edits are preserved through the rebase. Untracked files are left to Git's\nnormal collision handling. If the rebase stops with conflicts, resolve them, stage the\nresolutions with git add, and rerun {command} sync, with or without COMMIT. If applying\nthe post-rebase autostash conflicts, the rebase is already finished; resolve the\nworking-tree conflicts manually. If a rebase is already active, sync continues it. A\nsupplied COMMIT must match Git's recorded rebase target. Sync never changes directory.\n\nThe optional wt.root setting is unrelated to sync; configure it per repository with\ngit config --local wt.root PATH, where a relative PATH is resolved from the repository\nroot and the default is sibling <repository>-worktrees.",
+        command = command,
+    )
+}
+
+pub fn worktree_config_help() -> String {
+    worktree_config_help_for(WorktreeInvocation::Standalone)
+}
+
+pub fn worktree_config_help_for(invocation: WorktreeInvocation) -> String {
+    let command = invocation.command();
+    format!(
+        "Install the recommended global Git configuration for the worktree workflow\n\nUsage: {command} config\n\nRuns idempotent git config --global --replace-all operations for pull.rebase=true,\nrebase.autoStash=true, alias.up=pull --rebase --autostash, rerere.enabled=true, and\nrerere.autoupdate=true. Only those five keys are changed; unrelated keys and other\nentries in their Git configuration sections are preserved. Configuration is validated\nthrough Git key lookups. Running {command} config repeatedly is safe and does not\nchange directory. The optional wt.root setting is separate and remains a per-repository\nsetting; configure it with git config --local wt.root PATH, where a relative PATH is\nresolved from the repository root and the default is sibling <repository>-worktrees.",
+        command = command,
     )
 }
 
@@ -416,7 +460,10 @@ fn run_at(
             run_abort(*path_only, current_directory, invocation)
         }
         WorktreeCommand::Status => run_status(current_directory, invocation),
-        WorktreeCommand::Rerere => run_rerere(current_directory),
+        WorktreeCommand::Sync { commit } => {
+            run_sync(commit.as_deref(), current_directory, invocation)
+        }
+        WorktreeCommand::Config => run_config(current_directory),
     }
 }
 
@@ -870,19 +917,160 @@ fn display_git_path(path: &Path) -> String {
         .replace(std::path::MAIN_SEPARATOR, "/")
 }
 
-fn run_rerere(current_directory: Option<&Path>) -> Result<()> {
+fn run_sync(
+    requested_commit: Option<&str>,
+    current_directory: Option<&Path>,
+    invocation: WorktreeInvocation,
+) -> Result<()> {
+    let command = invocation.command();
+    let repository = discover_repository(current_directory)?;
+    let current_branch = repository.current_branch.clone().context(format!(
+        "{command} sync requires an attached branch; detached worktrees cannot be synchronized"
+    ))?;
+    anyhow::ensure!(
+        current_branch.starts_with(WORKTREE_BRANCH_PREFIX)
+            && current_branch.len() > WORKTREE_BRANCH_PREFIX.len(),
+        "{command} sync only operates on wt/* worktree branches"
+    );
+    anyhow::ensure!(
+        !repository.current_entry.bare
+            && !same_path(&repository.current_worktree, &repository.root),
+        "{command} sync must be run from a linked Git worktree, not the repository main worktree"
+    );
+
+    let metadata_key = metadata_key(&current_branch);
+    let source_branch = read_metadata(&repository.current_worktree, &metadata_key)?
+        .context("the current wt/* branch has no recorded source branch metadata")?;
+    anyhow::ensure!(
+        !source_branch.is_empty(),
+        "the current wt/* branch has an empty recorded source branch"
+    );
+
+    if rebase_in_progress(&repository.current_worktree)? {
+        if let Some(requested_commit) = requested_commit {
+            let requested_target = resolve_commit(
+                &repository.current_worktree,
+                requested_commit,
+                &format!("{command} sync target {requested_commit:?}"),
+            )?;
+            let recorded_target = rebase_onto_commit(&repository.current_worktree)?
+                .context("the active rebase has no recorded target; rerun sync without a COMMIT")?;
+            anyhow::ensure!(
+                requested_target == recorded_target,
+                "{command} sync target {requested_commit:?} does not match the active rebase target {recorded_target}"
+            );
+        }
+
+        continue_sync_rebase(&repository.current_worktree, invocation)?;
+        if has_unmerged_entries(&repository.current_worktree)? {
+            return Err(autostash_conflict_after_success_error(invocation));
+        }
+        println!(
+            "Continued synchronization of {} with {}.",
+            current_branch, source_branch
+        );
+        return Ok(());
+    }
+
+    let _source = source_worktree_without_cleanliness(&repository, &source_branch)?;
+    let source_ref = format!("refs/heads/{source_branch}");
+    let source_tip = resolve_commit(
+        &repository.current_worktree,
+        &source_ref,
+        &format!("recorded source branch {source_branch:?}"),
+    )?;
+    let current_ref = format!("refs/heads/{current_branch}");
+    let split_point = merge_base(&repository.current_worktree, &current_ref, &source_ref)?;
+    let target = requested_commit
+        .map(|commit| {
+            resolve_commit(
+                &repository.current_worktree,
+                commit,
+                &format!("{command} sync target {commit:?}"),
+            )
+        })
+        .transpose()?
+        .unwrap_or_else(|| source_tip.clone());
+
+    if let Some(requested_commit) = requested_commit {
+        anyhow::ensure!(
+            is_ancestor(&repository.current_worktree, &split_point, &target)?,
+            "{command} sync target {requested_commit:?} is before the current split point {split_point}; the split point is an inclusive lower bound"
+        );
+        anyhow::ensure!(
+            is_ancestor(&repository.current_worktree, &target, &source_tip)?,
+            "{command} sync target {requested_commit:?} is not at or before the current tip of recorded source branch {source_branch:?}"
+        );
+    }
+
+    let rebase_arguments = vec![
+        os("rebase"),
+        os("--autostash"),
+        os("--onto"),
+        os(&target),
+        os(&split_point),
+    ];
+    let rebase_output = run_git(Some(&repository.current_worktree), &rebase_arguments)?;
+    if !rebase_output.status.success() {
+        if rebase_in_progress(&repository.current_worktree)? {
+            return Err(sync_conflict_error(&rebase_output, invocation));
+        }
+        if autostash_conflict(&rebase_output) {
+            return Err(autostash_conflict_error(&rebase_output, invocation));
+        }
+        return Err(git_error("git rebase --autostash", &rebase_output));
+    }
+
+    if has_unmerged_entries(&repository.current_worktree)? {
+        return Err(autostash_conflict_after_success_error(invocation));
+    }
+    anyhow::ensure!(
+        !rebase_in_progress(&repository.current_worktree)?,
+        "the worktree rebase is still in progress; resolve conflicts, stage the resolutions with git add, and rerun {command} sync"
+    );
+    println!(
+        "Synchronized {} with {} at {}.",
+        current_branch, source_branch, target
+    );
+    Ok(())
+}
+
+const GLOBAL_GIT_CONFIGURATION: [(&str, &str); 5] = [
+    ("pull.rebase", "true"),
+    ("rebase.autoStash", "true"),
+    ("alias.up", "pull --rebase --autostash"),
+    ("rerere.enabled", "true"),
+    ("rerere.autoupdate", "true"),
+];
+
+fn run_config(current_directory: Option<&Path>) -> Result<()> {
     let current_directory = current_directory
         .map(Path::to_path_buf)
         .or_else(test_current_directory)
         .or_else(|| env::current_dir().ok());
-    for (key, value) in [("rerere.enabled", "true"), ("rerere.autoupdate", "true")] {
-        let arguments = vec![os("config"), os("--global"), os(key), os(value)];
+    for (key, value) in GLOBAL_GIT_CONFIGURATION {
+        let arguments = vec![
+            os("config"),
+            os("--global"),
+            os("--replace-all"),
+            os(key),
+            os(value),
+        ];
         let output = run_git(current_directory.as_deref(), &arguments)?;
         if !output.status.success() {
-            return Err(git_error("git config --global", &output));
+            return Err(git_error("git config --global --replace-all", &output));
         }
     }
-    println!("Enabled Git rerere and rerere.autoupdate globally.");
+
+    for (key, expected) in GLOBAL_GIT_CONFIGURATION {
+        let arguments = vec![os("config"), os("--global"), os("--get"), os(key)];
+        let actual = git_text(current_directory.as_deref(), &arguments)?;
+        anyhow::ensure!(
+            actual == expected,
+            "git config --global {key} was set to {actual:?}, expected {expected:?}"
+        );
+    }
+    println!("Installed the recommended global Git configuration.");
     Ok(())
 }
 
@@ -1403,6 +1591,89 @@ fn ensure_clean(path: &Path, description: &str) -> Result<()> {
     Ok(())
 }
 
+fn resolve_commit(path: &Path, commitish: &str, description: &str) -> Result<String> {
+    let revision = format!("{commitish}^{{commit}}");
+    let arguments = vec![
+        os("rev-parse"),
+        os("--verify"),
+        os("--end-of-options"),
+        OsString::from(revision),
+    ];
+    let output = run_git(Some(path), &arguments)?;
+    anyhow::ensure!(
+        output.status.success(),
+        "{description} does not resolve to a commit: {}",
+        git_diagnostic(&output)
+    );
+    let commit = text_without_newline(&output.stdout);
+    anyhow::ensure!(
+        !commit.is_empty(),
+        "{description} resolved to an empty commit ID"
+    );
+    Ok(commit)
+}
+
+fn merge_base(path: &Path, left: &str, right: &str) -> Result<String> {
+    let arguments = vec![os("merge-base"), os(left), os(right)];
+    let output = run_git(Some(path), &arguments)?;
+    anyhow::ensure!(
+        output.status.success(),
+        "could not determine the current split point: {}",
+        git_diagnostic(&output)
+    );
+    let split_point = text_without_newline(&output.stdout);
+    anyhow::ensure!(
+        !split_point.is_empty(),
+        "the current worktree branch and recorded source branch have no common ancestor"
+    );
+    Ok(split_point)
+}
+
+fn is_ancestor(path: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
+    let arguments = vec![
+        os("merge-base"),
+        os("--is-ancestor"),
+        os(ancestor),
+        os(descendant),
+    ];
+    let output = run_git(Some(path), &arguments)?;
+    if output.status.success() {
+        return Ok(true);
+    }
+    if output.status.code() == Some(1) {
+        return Ok(false);
+    }
+    Err(git_error("git merge-base --is-ancestor", &output))
+}
+
+fn rebase_onto_commit(path: &Path) -> Result<Option<String>> {
+    for marker in ["rebase-merge", "rebase-apply"] {
+        for marker_path in rebase_marker_paths(path, marker)? {
+            let marker_path = if marker_path.is_absolute() {
+                marker_path
+            } else {
+                path.join(marker_path)
+            };
+            let onto_path = marker_path.join("onto");
+            let contents = match fs::read(&onto_path) {
+                Ok(contents) => contents,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("reading the active rebase target {}", onto_path.display())
+                    });
+                }
+            };
+            let onto = text_without_newline(&contents);
+            if onto.is_empty() {
+                continue;
+            }
+            return resolve_commit(path, &onto, "the active rebase target").map(Some);
+        }
+    }
+    Ok(None)
+}
+
 fn rebase_in_progress(path: &Path) -> Result<bool> {
     for marker in ["rebase-merge", "rebase-apply"] {
         for marker_path in rebase_marker_paths(path, marker)? {
@@ -1469,12 +1740,90 @@ fn continue_rebase(path: &Path, invocation: WorktreeInvocation) -> Result<()> {
     anyhow::bail!("git rebase did not finish after 1024 continuation attempts")
 }
 
+fn continue_sync_rebase(path: &Path, invocation: WorktreeInvocation) -> Result<()> {
+    for _ in 0..1024 {
+        if !rebase_in_progress(path)? {
+            return Ok(());
+        }
+        let arguments = vec![os("rebase"), os("--continue")];
+        let output = run_git_with_editor(path, &arguments)?;
+        if !output.status.success() {
+            if rebase_in_progress(path)? {
+                return Err(sync_conflict_error(&output, invocation));
+            }
+            if autostash_conflict(&output) {
+                return Err(autostash_conflict_error(&output, invocation));
+            }
+            return Err(git_error("git rebase --continue", &output));
+        }
+    }
+    anyhow::bail!("git rebase did not finish after 1024 continuation attempts")
+}
+
 fn conflict_error(output: &Output, invocation: WorktreeInvocation) -> anyhow::Error {
     anyhow::anyhow!(
         "rebase stopped with conflicts: {}. Resolve the conflicts, stage the resolutions with git add, and rerun {} done.",
         git_diagnostic(output),
         invocation.command()
     )
+}
+
+fn sync_conflict_error(output: &Output, invocation: WorktreeInvocation) -> anyhow::Error {
+    anyhow::anyhow!(
+        "sync rebase stopped with conflicts: {}. Resolve the conflicts, stage the resolutions with git add, and rerun {} sync.",
+        git_diagnostic(output),
+        invocation.command()
+    )
+}
+
+fn autostash_conflict(output: &Output) -> bool {
+    let diagnostic = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+    .to_ascii_lowercase();
+    diagnostic.contains("autostash")
+        && (diagnostic.contains("conflict") || diagnostic.contains("applying"))
+}
+
+fn autostash_conflict_error(output: &Output, invocation: WorktreeInvocation) -> anyhow::Error {
+    anyhow::anyhow!(
+        "sync rebase completed, but applying the autostash resulted in conflicts: {}. The rebase is no longer active; resolve the working-tree conflicts manually and do not rerun {} sync for this autostash.",
+        git_diagnostic(output),
+        invocation.command()
+    )
+}
+
+fn autostash_conflict_after_success_error(invocation: WorktreeInvocation) -> anyhow::Error {
+    anyhow::anyhow!(
+        "sync rebase completed, but applying the autostash resulted in conflicts. The rebase is no longer active; resolve the working-tree conflicts manually and do not rerun {} sync for this autostash.",
+        invocation.command()
+    )
+}
+
+fn has_unmerged_entries(path: &Path) -> Result<bool> {
+    let checks = [
+        vec![os("diff"), os("--name-only"), os("--diff-filter=U")],
+        vec![
+            os("diff"),
+            os("--cached"),
+            os("--name-only"),
+            os("--diff-filter=U"),
+        ],
+    ];
+    for arguments in checks {
+        let output = run_git(Some(path), &arguments)?;
+        anyhow::ensure!(
+            output.status.success(),
+            "could not inspect unmerged worktree entries: {}",
+            git_diagnostic(&output)
+        );
+        if !text_without_newline(&output.stdout).is_empty() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn read_metadata(repository: &Path, key: &str) -> Result<Option<String>> {

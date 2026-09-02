@@ -113,6 +113,50 @@ end
 complete -c zvi -F
 
 # ZETTA_WORKTREE_INTEGRATION_BEGIN
+function __zetta_worktree_commits
+    set -l words (commandline -opc)
+    set -l operation_index 3
+    if test "$words[1]" = zwt
+        set operation_index 2
+    end
+    set -l current_branch (git branch --show-current 2>/dev/null)
+    test (count $current_branch) -eq 1
+    or return
+    set current_branch $current_branch[1]
+    set -l source_branch (git config --local --get "wtbranch.$current_branch.base" 2>/dev/null)
+    test (count $source_branch) -eq 1
+    or return
+    set source_branch $source_branch[1]
+    set -l split_point (git merge-base "refs/heads/$current_branch" "refs/heads/$source_branch" 2>/dev/null)
+    test (count $split_point) -eq 1
+    or return
+    set split_point $split_point[1]
+    git rev-list --reverse "$split_point..refs/heads/$source_branch" 2>/dev/null
+end
+
+function __zetta_worktree_sync_target
+    set -l words (commandline -opc)
+    set -l current (commandline -ct)
+    string match -q -- '-*' "$current"
+    and return 1
+    set -l operation_index 3
+    if test "$words[1]" = zwt
+        set operation_index 2
+    end
+    test "$words[$operation_index]" = sync
+    or return 1
+    set -l target_count 0
+    set -l argument_index (math $operation_index + 1)
+    while test $argument_index -le (count $words)
+        if string match -q -- '-*' "$words[$argument_index]"
+            return 1
+        end
+        set target_count (math $target_count + 1)
+        set argument_index (math $argument_index + 1)
+    end
+    test $target_count -eq 0
+end
+
 function zwt --description 'Zetta Git worktree workflow'
     switch $argv[1]
         case new
@@ -674,7 +718,8 @@ function __zetta_long_options
                 done 'Integrate and remove the current worktree' \
                 abort 'Discard and remove the current worktree' \
                 status 'Show worktree state' \
-                rerere 'Enable Git rerere' \
+                sync 'Rebase the current worktree onto the source branch' \
+                config 'Install the recommended global Git configuration' \
                 --help 'Print help'
 # ZETTA_WORKTREE_INTEGRATION_END
         case terminal-size
@@ -786,7 +831,7 @@ complete -c zetta -n '__zetta_at_root' -a splits -d 'List configured pane split 
 complete -c zetta -n '__zetta_at_root' -a pane -d 'Run a command in a pane'
 complete -c zetta -n '__zetta_at_root' -a overlay -d 'Non-persistently show text over the active pane'
 # ZETTA_WORKTREE_INTEGRATION_BEGIN
-complete -c zetta -n '__zetta_at_root' -a wt -d 'Create, integrate, or abort Git worktrees'
+complete -c zetta -n '__zetta_at_root' -a wt -d 'Create, integrate, synchronize, configure, or abort Git worktrees'
 # ZETTA_WORKTREE_INTEGRATION_END
 complete -c zetta -n '__zetta_at_subcommand benchmark' -a output -d 'Write and time a text payload'
 complete -c zetta -n '__zetta_at_subcommand notify' -a cleanup -d 'Reap stale desktop notification worker processes'
@@ -1037,20 +1082,22 @@ complete -c zetta -n '__fish_seen_subcommand_from overlay' -l reset -d 'Clear th
 complete -c zetta -n '__fish_seen_subcommand_from overlay' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from overlay' -a '(__zetta_long_options overlay)'
 # ZETTA_WORKTREE_INTEGRATION_BEGIN
-complete -c zetta -n '__zetta_at_subcommand wt' -a 'new done abort status rerere'
+complete -c zetta -n '__zetta_at_subcommand wt' -a 'new done abort status sync config'
 complete -c zetta -n '__fish_seen_subcommand_from wt' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from wt' -a '(__zetta_long_options wt)'
 complete -c zetta -n '__fish_seen_subcommand_from wt; and __fish_seen_subcommand_from new done abort' -l path-only -d 'Print only the resulting path'
 complete -c zetta -n '__fish_seen_subcommand_from wt; and __fish_seen_subcommand_from new' -l copy -r -F -d 'Copy a source-worktree path (repeatable)'
 complete -c zetta -s c -r -F -n '__fish_seen_subcommand_from wt; and __fish_seen_subcommand_from new; and __zetta_short_option -c'
+complete -c zetta -n '__zetta_worktree_sync_target' -a '(__zetta_worktree_commits)' -d 'Source-branch commit'
 # ZETTA_WORKTREE_INTEGRATION_END
 # ZETTA_WORKTREE_INTEGRATION_BEGIN
 complete -c zwt -f
-complete -c zwt -n '__fish_use_subcommand' -a 'new done abort status rerere'
+complete -c zwt -n '__fish_use_subcommand' -a 'new done abort status sync config'
 complete -c zwt -n '__fish_seen_subcommand_from new done abort' -l path-only -d 'Print only the resulting path'
 complete -c zwt -n '__fish_seen_subcommand_from new' -l copy -r -F -d 'Copy a source-worktree path (repeatable)'
 complete -c zwt -s c -r -F -n '__fish_seen_subcommand_from new; and __zetta_short_option -c'
-complete -c zwt -n '__fish_seen_subcommand_from new done abort status rerere' -l help -d 'Print help'
+complete -c zwt -n '__fish_seen_subcommand_from new done abort status sync config' -l help -d 'Print help'
+complete -c zwt -n '__zetta_worktree_sync_target' -a '(__zetta_worktree_commits)' -d 'Source-branch commit'
 # ZETTA_WORKTREE_INTEGRATION_END
 complete -c zmux -f
 complete -c zmux -n '__fish_use_subcommand' -a list -d 'List the sessions the multiplexer is holding'

@@ -197,9 +197,9 @@ and moving within the worktree keeps the same project context. Launching plain
 current directory. Ordinary, detached, and unregistered worktrees keep the
 normal discovery and trust flow.
 
-Use `zwt new NAME`, `zwt done`, `zwt abort`, `zwt status`, and `zwt rerere` for the Git
-worktree workflow; the same operations are available as `zetta wt ...` in a
-full Zetta build. The direct commands never change the caller's directory;
+Use `zwt new NAME`, `zwt done`, `zwt abort`, `zwt status`, `zwt sync [COMMIT]`, and
+`zwt config` for the Git worktree workflow; the same operations are available as
+`zetta wt ...` in a full Zetta build. The direct commands never change the caller's directory;
 generated shell integration provides the `zwt new`, `zwt done`, and
 `zwt abort` wrappers that enter the corresponding worktree, including paths with spaces
 and nested names.
@@ -230,6 +230,17 @@ submodules, lists detected nested submodule paths, and reports native
 copy-on-write availability for the current worktree and resolved `wt.root`.
 `zwt new` emits phase progress on stderr while preserving its normal and
 `--path-only` stdout.
+`zwt sync` rebases the current managed worktree onto the latest recorded source-branch
+tip, or onto an intermediary commit selected from the inclusive range between the
+current merge-base and that tip. It uses pinned commit IDs with Git's
+`--autostash`; dirty edits in the current worktree are preserved when Git can reapply
+the stash, while a dirty source worktree remains unchanged. A rebase conflict is
+continued after resolving and staging files and rerunning `zwt sync`; a conflict while
+Git reapplies the completed rebase's autostash must be resolved manually. An active
+rebase can be continued with no target, or with the same target recorded by Git.
+`zwt config` idempotently installs the global `pull.rebase`, `rebase.autoStash`,
+`alias.up`, `rerere.enabled`, and `rerere.autoupdate` settings while preserving
+unrelated configuration.
 
 ## Multi-command prompt
 

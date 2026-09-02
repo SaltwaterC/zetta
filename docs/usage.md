@@ -440,13 +440,15 @@ branches:
 ```sh
 zwt new feature/api
 zwt status
+zwt sync
+zwt sync <source-commit>
+zwt config
 zwt done
 zwt abort
 ```
 
-The same operations are available as `zetta wt new`, `zetta wt status`,
-`zetta wt done`, and `zetta wt abort` when the full Zetta build includes
-the `worktree` feature.
+The same operations are available as `zetta wt ...` when the full Zetta build
+includes the `worktree` feature.
 
 `new NAME` creates `wt/NAME` from the current attached branch, records the
 source branch in `wtbranch.<branch>.base`, and creates the worktree below
@@ -512,8 +514,34 @@ branch, then removes the temporary worktree, branch, and metadata. A worktree
 whose current commit contains submodules is removed with Git's forced cleanup
 after integration. A conflict leaves the rebase in place: resolve the files,
 stage them with `git add`, and rerun `zwt done` (or `zetta wt done`).
-Run `zwt rerere` once to enable Git's `rerere.enabled` and
-`rerere.autoupdate` helpers for repeated conflicts.
+
+`sync` updates only the current managed worktree branch. It finds the current
+merge-base between that branch and the recorded source branch. Without a target,
+it rebases onto the latest source-branch tip. With `COMMIT`, it rebases onto that
+intermediary commit, provided the commit-ish resolves to a commit in the inclusive
+range from the merge-base through the current source tip. Commits before the split
+point, off the recorded source branch, and beyond its tip are rejected. For example:
+
+```sh
+zwt sync
+zwt sync origin/main~2
+```
+
+Sync runs `git rebase --autostash --onto TARGET SPLIT_POINT` with pinned commit IDs.
+The current worktree may be dirty; Git preserves tracked local edits through its
+autostash and handles untracked-file collisions normally. The source worktree may
+also be dirty and remains untouched. If the rebase stops with conflicts, resolve
+them, stage the resolutions with `git add`, and rerun `zwt sync` with the same target
+or no target. If Git finishes the rebase but cannot reapply the autostash, the rebase
+is no longer active and the resulting working-tree conflicts need manual resolution.
+Rerunning `zwt sync` while a rebase is active continues it; an optional target must
+match Git's recorded rebase target.
+
+Run `zwt config` once to install these global Git settings with idempotent
+`--replace-all` operations: `pull.rebase=true`, `rebase.autoStash=true`,
+`alias.up=pull --rebase --autostash`, `rerere.enabled=true`, and
+`rerere.autoupdate=true`. Other keys and additional entries in the same sections
+are preserved.
 
 `abort` also runs from the current linked `wt/*` worktree created by `new`, but
 it intentionally discards that worktree without rebasing, merging, checking out,

@@ -42,13 +42,20 @@ and changes into the created worktree; `zwt done` and `zwt abort` similarly
 change into the source worktree. Other `zwt` operations pass through to the external
 `zwt` executable. Arguments are forwarded as literal shell arguments, so nested
 names and paths containing spaces are supported. The completion scripts offer
-`new`, `done`, `abort`, `status`, and `rerere` for `zwt`; Zetta's root completion also
-offers `wt`. They include the long
+`new`, `done`, `abort`, `status`, `sync`, and `config` for `zwt`; Zetta's root completion also
+offers `wt`. `sync` completes commit IDs from the recorded source-branch range after
+the current merge-base. Sync can target the latest source tip or an intermediary commit
+in that range, and Git's autostash handles dirty current worktrees while leaving the
+source worktree unchanged. They include the long
 `--copy` and `--path-only` flags, and filesystem completion for copy paths. The
 short `-c` and `-P` forms remain accepted by the CLI but are omitted from the
 candidate list to keep completion concise.
 The abort wrapper injects the path-only flag when needed and changes into the
 source worktree only after cleanup succeeds; help is passed through unchanged.
+`sync` and `config` are pass-through operations, so neither wrapper changes directory.
+`zwt config` installs the global pull/rebase, autostash, update-alias, and
+recorded-conflict-resolution settings with idempotent writes while preserving
+unrelated configuration.
 
 Builds made with `WORKTREE=0` omit the `zwt` wrapper and its completion entries.
 

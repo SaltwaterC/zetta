@@ -163,6 +163,24 @@ fn worktree_subcommand_is_available_without_cli_services() {
         .mode,
         StartupMode::Worktree(WorktreeCommand::Abort { path_only: true })
     );
+    assert_eq!(
+        parse_args_from([
+            OsString::from("wt"),
+            OsString::from("sync"),
+            OsString::from("main~2"),
+        ])
+        .unwrap()
+        .mode,
+        StartupMode::Worktree(WorktreeCommand::Sync {
+            commit: Some("main~2".to_owned()),
+        })
+    );
+    assert_eq!(
+        parse_args_from([OsString::from("wt"), OsString::from("config")])
+            .unwrap()
+            .mode,
+        StartupMode::Worktree(WorktreeCommand::Config)
+    );
 }
 
 #[test]

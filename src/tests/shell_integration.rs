@@ -81,7 +81,7 @@ fn supported_shells_generate_completion_and_tftp_shortcut() {
         }
         assert!(script.contains("zmux"));
         #[cfg(feature = "worktree")]
-        for operation in ["new", "done", "abort", "status", "rerere"] {
+        for operation in ["new", "done", "abort", "status", "sync", "config"] {
             assert!(script.contains(operation));
         }
         #[cfg(feature = "worktree")]
@@ -599,7 +599,7 @@ fn bash_worktree_completion_offers_operations_and_long_worktree_options() {
 
     let script = ShellIntegration::Bash.script();
     let driver = format!(
-        "{script}\nCOMP_WORDS=(zetta wt '')\nCOMP_CWORD=2\n_zetta_complete\nprintf 'operation:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta wt new --)\nCOMP_CWORD=3\n_zetta_complete\nprintf 'option:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta wt new --copy Carg)\nCOMP_CWORD=4\n_zetta_complete\nprintf 'copy-path:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta wt new -c Carg)\nCOMP_CWORD=4\n_zetta_complete\nprintf 'short-copy-path:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zwt '')\nCOMP_CWORD=1\n_zetta_complete_zwt\nprintf 'wrapper:%s\\n' \"${{COMPREPLY[@]}}\"\n"
+        "{script}\ngit() {{ case \"$1 $2\" in branch\\ --show-current) printf '%s\\n' wt/feature ;; config\\ --local) printf '%s\\n' main ;; merge-base*) printf '%s\\n' split ;; rev-list*) printf '%s\\n' commit-one commit-two ;; esac; }}\nCOMP_WORDS=(zetta wt '')\nCOMP_CWORD=2\n_zetta_complete\nprintf 'operation:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta wt new --)\nCOMP_CWORD=3\n_zetta_complete\nprintf 'option:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta wt new --copy Carg)\nCOMP_CWORD=4\n_zetta_complete\nprintf 'copy-path:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta wt new -c Carg)\nCOMP_CWORD=4\n_zetta_complete\nprintf 'short-copy-path:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta wt sync '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'sync-commit:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zwt '')\nCOMP_CWORD=1\n_zetta_complete_zwt\nprintf 'wrapper:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zwt sync '')\nCOMP_CWORD=2\n_zetta_complete_zwt\nprintf 'wrapper-sync-commit:%s\\n' \"${{COMPREPLY[@]}}\"\n"
     );
     let mut child = bash_command()
         .args(["--noprofile", "--norc"])
@@ -622,12 +622,22 @@ fn bash_worktree_completion_offers_operations_and_long_worktree_options() {
     );
     let completions = String::from_utf8_lossy(&output.stdout);
     for prefix in ["operation:", "wrapper:"] {
-        for operation in ["new", "done", "abort", "status", "rerere"] {
+        for operation in ["new", "done", "abort", "status", "sync", "config"] {
             assert!(
                 completions
                     .lines()
                     .any(|line| line == format!("{prefix}{operation}")),
                 "expected {operation} after {prefix}: {completions}"
+            );
+        }
+    }
+    for prefix in ["sync-commit:", "wrapper-sync-commit:"] {
+        for commit in ["commit-one", "commit-two"] {
+            assert!(
+                completions
+                    .lines()
+                    .any(|line| line == format!("{prefix}{commit}")),
+                "expected {commit} after {prefix}: {completions}"
             );
         }
     }
@@ -949,6 +959,109 @@ fn posix_zwt_help_does_not_change_directory_or_inject_path_only() {
             std::fs::read_to_string(&args_file).unwrap(),
             "new\n--help\n",
             "{shell} zwt help wrapper changed the CLI arguments"
+        );
+    }
+}
+
+#[cfg(all(unix, feature = "worktree"))]
+#[test]
+fn posix_zwt_sync_and_config_pass_through_without_changing_directory() {
+    use std::{io::Write as _, os::unix::fs::PermissionsExt as _, process::Stdio};
+
+    let _bash_test_lock = lock_bash_tests();
+    let temporary = tempfile::tempdir().unwrap();
+    let start = temporary.path().join("start directory");
+    let args_file = temporary.path().join("zwt arguments");
+    std::fs::create_dir_all(&start).unwrap();
+
+    let fake_zwt = temporary.path().join("zwt");
+    std::fs::write(
+        &fake_zwt,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ZETTA_TEST_ARGS.$1\"\nprintf 'passed:%s\\n' \"$1\"\n",
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&fake_zwt).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fake_zwt, permissions).unwrap();
+
+    let mut path = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = std::env::split_paths(&path).collect::<Vec<_>>();
+    paths.insert(0, temporary.path().to_owned());
+    path = std::env::join_paths(paths).unwrap();
+
+    for shell in ["bash", "zsh"] {
+        let version = if shell == "bash" {
+            bash_command().arg("--version").output()
+        } else {
+            clean_shell_command(shell).arg("--version").output()
+        };
+        if version.is_err() {
+            continue;
+        }
+
+        let script = ShellIntegration::parse(shell).unwrap().script();
+        let prefix = if shell == "zsh" {
+            "compdef() { :; }\n"
+        } else {
+            ""
+        };
+        let driver = format!(
+            "{prefix}{script}\ncd '{}'\nzwt sync target\nprintf 'sync-cwd:%s\\n' \"$PWD\"\nzwt config\nprintf 'config-cwd:%s\\n' \"$PWD\"\n",
+            start.display()
+        );
+
+        let mut command = if shell == "bash" {
+            bash_command()
+        } else {
+            clean_shell_command(shell)
+        };
+        if shell == "bash" {
+            command.args(["--noprofile", "--norc"]);
+        } else {
+            command.arg("-f");
+        }
+        let mut child = command
+            .env_remove("ZETTA_HOST_EXECUTABLE")
+            .current_dir(&start)
+            .env("PATH", &path)
+            .env("ZETTA_TEST_ARGS", &args_file)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(driver.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{shell} zwt pass-through failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.lines().any(|line| line == "passed:sync"));
+        assert!(stdout.lines().any(|line| line == "passed:config"));
+        assert!(
+            stdout
+                .lines()
+                .any(|line| line == format!("sync-cwd:{}", start.display()))
+        );
+        assert!(
+            stdout
+                .lines()
+                .any(|line| line == format!("config-cwd:{}", start.display()))
+        );
+        assert_eq!(
+            std::fs::read_to_string(format!("{}.sync", args_file.display())).unwrap(),
+            "sync\ntarget\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(format!("{}.config", args_file.display())).unwrap(),
+            "config\n"
         );
     }
 }

@@ -881,13 +881,23 @@ _zetta() {
 # ZETTA_WORKTREE_INTEGRATION_BEGIN
         wt)
             if (( CURRENT == 3 )); then
-                compadd -S ' ' -- new done abort status rerere
+                compadd -S ' ' -- new done abort status sync config
                 _zetta_options --help
             elif [[ $words[3] == new || $words[3] == done || $words[3] == abort ]]; then
                 if [[ $words[3] == new ]]; then
                     _zetta_options --copy --path-only --help
                 else
                     _zetta_options --path-only --help
+                fi
+            elif [[ $words[3] == sync ]]; then
+                if (( CURRENT == 4 )); then
+                    if [[ $words[CURRENT] == -* ]]; then
+                        _zetta_options --help
+                    else
+                        _zetta_worktree_commits
+                    fi
+                elif [[ $words[CURRENT] == -* ]]; then
+                    _zetta_options --help
                 fi
             else
                 _zetta_options --help
@@ -1002,6 +1012,17 @@ _zpaste() {
 
 compdef _zetta zetta
 # ZETTA_WORKTREE_INTEGRATION_BEGIN
+_zetta_worktree_commits() {
+    local current_branch source_branch split_point
+    current_branch=$(git branch --show-current 2>/dev/null) || return
+    [[ -n $current_branch ]] || return
+    source_branch=$(git config --local --get "wtbranch.${current_branch}.base" 2>/dev/null) || return
+    [[ -n $source_branch ]] || return
+    split_point=$(git merge-base "refs/heads/${current_branch}" "refs/heads/${source_branch}" 2>/dev/null) || return
+    [[ -n $split_point ]] || return
+    compadd -- "${(@f)$(git rev-list --reverse "${split_point}..refs/heads/${source_branch}" 2>/dev/null)}"
+}
+
 _zwt() {
     local -a saved_words=("${words[@]}")
     local saved_current=$CURRENT

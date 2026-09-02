@@ -305,8 +305,18 @@ fn parses_worktree_commands_and_path_only_aliases() {
         WorktreeCommand::Status
     );
     assert_eq!(
-        parse_worktree_args(&[OsString::from("rerere")]).unwrap(),
-        WorktreeCommand::Rerere
+        parse_worktree_args(&[OsString::from("sync")]).unwrap(),
+        WorktreeCommand::Sync { commit: None }
+    );
+    assert_eq!(
+        parse_worktree_args(&[OsString::from("sync"), OsString::from("main~2")]).unwrap(),
+        WorktreeCommand::Sync {
+            commit: Some("main~2".to_owned())
+        }
+    );
+    assert_eq!(
+        parse_worktree_args(&[OsString::from("config")]).unwrap(),
+        WorktreeCommand::Config
     );
 }
 
@@ -378,12 +388,24 @@ fn rejects_invalid_worktree_arguments() {
         parse_worktree_args(&[OsString::from("status"), OsString::from("--path-only")]).is_err()
     );
     assert!(parse_worktree_args(&[OsString::from("abort"), OsString::from("--unknown")]).is_err());
+    assert!(
+        parse_worktree_args(&[
+            OsString::from("sync"),
+            OsString::from("HEAD"),
+            OsString::from("HEAD~1"),
+        ])
+        .is_err()
+    );
+    assert!(parse_worktree_args(&[OsString::from("sync"), OsString::from("--onto")]).is_err());
+    assert!(parse_worktree_args(&[OsString::from("config"), OsString::from("extra")]).is_err());
 }
 
 #[test]
 fn worktree_help_covers_the_workflow() {
     assert!(worktree_help().contains("wt.root"));
-    assert!(worktree_help().contains("zwt rerere"));
+    assert!(worktree_help().contains("zwt sync [COMMIT]"));
+    assert!(worktree_help().contains("zwt config"));
+    assert!(!worktree_help().contains("zwt rerere"));
     assert!(worktree_help().contains("zwt abort [OPTIONS]"));
     assert!(worktree_new_help().contains("--copy"));
     assert!(worktree_new_help().contains("--path-only"));
@@ -395,7 +417,8 @@ fn worktree_help_covers_the_workflow() {
     assert!(worktree_status_help().contains("never creates"));
     assert!(worktree_status_help().contains("nested paths"));
     assert!(worktree_status_help().contains("copy-on-write"));
-    assert!(worktree_rerere_help().contains("rerere.autoupdate"));
+    assert!(worktree_sync_help().contains("merge-base"));
+    assert!(worktree_config_help().contains("rebase.autoStash"));
 }
 
 #[test]
@@ -1291,11 +1314,246 @@ fn status_report_checks_existing_and_missing_configured_roots_without_creating_t
 }
 
 #[test]
-fn rerere_uses_the_isolated_global_git_config() {
+fn sync_rebases_to_the_latest_source_tip_and_preserves_work() {
+    let fixture = GitFixture::new();
+    let worktree = fixture.create_worktree("sync-latest");
+    fixture.commit(&worktree, "work", "work\n", "work");
+    fixture.commit(&fixture.root, "source", "source\n", "source");
+    let source_tip = fixture.git(&fixture.root, &["rev-parse", "main"]);
+    let root = fixture.root.clone();
+
+    in_directory(&fixture, &worktree, || {
+        run(&WorktreeCommand::Sync { commit: None }).unwrap();
+    });
+
+    assert_eq!(fixture.git(&worktree, &["rev-parse", "HEAD^1"]), source_tip);
+    assert_eq!(
+        fixture.git(&worktree, &["merge-base", "wt/sync-latest", "main"]),
+        source_tip
+    );
+    assert_eq!(fixture.git(&root, &["rev-parse", "main"]), source_tip);
+    assert_eq!(fs::read_to_string(worktree.join("work")).unwrap(), "work\n");
+}
+
+#[test]
+fn sync_accepts_an_intermediary_source_commit_then_uses_the_advanced_split_point() {
+    let fixture = GitFixture::new();
+    let worktree = fixture.create_worktree("sync-intermediary");
+    fixture.commit(&fixture.root, "source-one", "one\n", "source one");
+    let source_one = fixture.git(&fixture.root, &["rev-parse", "main"]);
+    fixture.commit(&worktree, "work-one", "work one\n", "work one");
+
+    in_directory(&fixture, &worktree, || {
+        run(&WorktreeCommand::Sync {
+            commit: Some(source_one.trim().to_owned()),
+        })
+        .unwrap();
+    });
+    assert_eq!(
+        fixture.git(&worktree, &["merge-base", "wt/sync-intermediary", "main"]),
+        source_one
+    );
+
+    fixture.commit(&fixture.root, "source-two", "two\n", "source two");
+    let source_two = fixture.git(&fixture.root, &["rev-parse", "main"]);
+    fixture.commit(&worktree, "work-two", "work two\n", "work two");
+    in_directory(&fixture, &worktree, || {
+        run(&WorktreeCommand::Sync { commit: None }).unwrap();
+    });
+
+    assert_eq!(
+        fixture.git(&worktree, &["merge-base", "wt/sync-intermediary", "main"]),
+        source_two
+    );
+    assert!(worktree.join("work-one").is_file());
+    assert!(worktree.join("work-two").is_file());
+}
+
+#[test]
+fn sync_allows_dirty_current_and_source_worktrees() {
+    let fixture = GitFixture::new();
+    let worktree = fixture.create_worktree("sync-dirty");
+    fixture.commit(&worktree, "work", "work\n", "work");
+    fixture.commit(&fixture.root, "source", "source\n", "source");
+    fs::write(worktree.join("file"), "local edit\n").unwrap();
+    fs::write(fixture.root.join("file"), "source local edit\n").unwrap();
+    fs::write(fixture.root.join("source-untracked"), "keep\n").unwrap();
+    let source_status = fixture.git(
+        &fixture.root,
+        &[
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+        ],
+    );
+
+    in_directory(&fixture, &worktree, || {
+        run(&WorktreeCommand::Sync { commit: None }).unwrap();
+    });
+
+    assert_eq!(
+        fs::read_to_string(worktree.join("file")).unwrap(),
+        "local edit\n"
+    );
+    assert_eq!(
+        fixture.git(
+            &fixture.root,
+            &[
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+                "--ignore-submodules=none",
+            ],
+        ),
+        source_status
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.root.join("source-untracked")).unwrap(),
+        "keep\n"
+    );
+}
+
+#[test]
+fn sync_accepts_the_split_point_as_a_noop_target() {
+    let fixture = GitFixture::new();
+    let worktree = fixture.create_worktree("sync-split-point");
+    let split_point = fixture.git(&fixture.root, &["rev-parse", "main"]);
+    fixture.commit(&fixture.root, "source", "source\n", "source");
+    fixture.commit(&worktree, "work", "work\n", "work");
+    let worktree_tip = fixture.git(&worktree, &["rev-parse", "HEAD"]);
+    let source_tip = fixture.git(&fixture.root, &["rev-parse", "main"]);
+
+    in_directory(&fixture, &worktree, || {
+        run(&WorktreeCommand::Sync {
+            commit: Some(split_point.trim().to_owned()),
+        })
+        .unwrap();
+    });
+
+    assert_eq!(fixture.git(&worktree, &["rev-parse", "HEAD"]), worktree_tip);
+    assert_eq!(
+        fixture.git(&fixture.root, &["rev-parse", "main"]),
+        source_tip
+    );
+}
+
+#[test]
+fn sync_validates_targets_against_the_current_source_range() {
+    let fixture = GitFixture::new();
+    fixture.commit(&fixture.root, "pre-split", "pre-split\n", "pre-split");
+    let worktree = fixture.create_worktree("sync-validation");
+    let split_point = fixture.git(&fixture.root, &["rev-parse", "main~1"]);
+    fixture.commit(&fixture.root, "source", "source\n", "source");
+    let source_tip = fixture.git(&fixture.root, &["rev-parse", "main"]);
+    fixture.commit(&worktree, "work", "work\n", "work");
+    fixture.git(&fixture.root, &["switch", "-c", "other"]);
+    fixture.commit(&fixture.root, "other", "other\n", "other");
+    let off_source = fixture.git(&fixture.root, &["rev-parse", "other"]);
+    fixture.git(&fixture.root, &["switch", "main"]);
+
+    let error = in_directory(&fixture, &worktree, || {
+        run(&WorktreeCommand::Sync {
+            commit: Some(split_point.trim().to_owned()),
+        })
+        .unwrap_err()
+    });
+    assert!(error.to_string().contains("before the current split point"));
+
+    let error = in_directory(&fixture, &worktree, || {
+        run(&WorktreeCommand::Sync {
+            commit: Some(off_source.trim().to_owned()),
+        })
+        .unwrap_err()
+    });
+    assert!(error.to_string().contains("not at or before"));
+
+    let error = in_directory(&fixture, &worktree, || {
+        run(&WorktreeCommand::Sync {
+            commit: Some("not-a-commit".to_owned()),
+        })
+        .unwrap_err()
+    });
+    assert!(error.to_string().contains("does not resolve to a commit"));
+    assert_eq!(
+        fixture.git(&fixture.root, &["rev-parse", "main"]),
+        source_tip
+    );
+}
+
+#[test]
+fn sync_conflicts_continue_with_the_same_target_or_without_one() {
+    let fixture = GitFixture::new();
+    let worktree = fixture.create_worktree("sync-conflict");
+    let split_point = fixture.git(&fixture.root, &["rev-parse", "main"]);
+    fixture.commit(&worktree, "file", "work\n", "work change");
+    fixture.commit(&fixture.root, "file", "source\n", "source change");
+    let source_tip = fixture.git(&fixture.root, &["rev-parse", "main"]);
+
+    let first_error = in_directory(&fixture, &worktree, || {
+        run(&WorktreeCommand::Sync {
+            commit: Some(source_tip.trim().to_owned()),
+        })
+        .unwrap_err()
+    });
+    assert!(
+        first_error
+            .to_string()
+            .contains("sync rebase stopped with conflicts")
+    );
+
+    let mismatch = in_directory(&fixture, &worktree, || {
+        run(&WorktreeCommand::Sync {
+            commit: Some(split_point.trim().to_owned()),
+        })
+        .unwrap_err()
+    });
+    assert!(
+        mismatch
+            .to_string()
+            .contains("does not match the active rebase target")
+    );
+    assert!(rebase_in_progress(&worktree).unwrap());
+
+    fs::write(worktree.join("file"), "resolved\n").unwrap();
+    fixture.git(&worktree, &["add", "file"]);
+    in_directory(&fixture, &worktree, || {
+        run(&WorktreeCommand::Sync { commit: None }).unwrap();
+    });
+    assert!(!rebase_in_progress(&worktree).unwrap());
+    assert_eq!(
+        fs::read_to_string(worktree.join("file")).unwrap(),
+        "resolved\n"
+    );
+}
+
+#[test]
+fn sync_distinguishes_conflicts_while_reapplying_the_autostash() {
+    let fixture = GitFixture::new();
+    let worktree = fixture.create_worktree("sync-autostash-conflict");
+    fixture.commit(&worktree, "work", "work\n", "work change");
+    fs::write(worktree.join("file"), "local edit\n").unwrap();
+    fixture.commit(&fixture.root, "file", "source edit\n", "source change");
+
+    let error = in_directory(&fixture, &worktree, || {
+        run(&WorktreeCommand::Sync { commit: None }).unwrap_err()
+    });
+    let message = error.to_string();
+    assert!(message.contains("applying the autostash"), "{message}");
+    assert!(!rebase_in_progress(&worktree).unwrap());
+    assert!(
+        fixture
+            .git(&worktree, &["status", "--porcelain"])
+            .contains("UU file")
+    );
+}
+
+#[test]
+fn config_uses_the_isolated_global_git_config() {
     let fixture = GitFixture::new();
     let root = fixture.root.clone();
     in_directory(&fixture, &root, || {
-        run(&WorktreeCommand::Rerere).unwrap();
+        run(&WorktreeCommand::Config).unwrap();
     });
     assert_eq!(
         fixture.git(&root, &["config", "--global", "--get", "rerere.enabled"]),
@@ -1305,4 +1563,50 @@ fn rerere_uses_the_isolated_global_git_config() {
         fixture.git(&root, &["config", "--global", "--get", "rerere.autoupdate"]),
         "true\n"
     );
+    assert_eq!(
+        fixture.git(&root, &["config", "--global", "--get", "pull.rebase"]),
+        "true\n"
+    );
+    assert_eq!(
+        fixture.git(&root, &["config", "--global", "--get", "rebase.autoStash"]),
+        "true\n"
+    );
+    assert_eq!(
+        fixture.git(&root, &["config", "--global", "--get", "alias.up"]),
+        "pull --rebase --autostash\n"
+    );
+}
+
+#[test]
+fn config_preserves_unrelated_entries_and_is_idempotent() {
+    let fixture = GitFixture::new();
+    fs::write(
+        &fixture.global_config,
+        "[rerere]\n\tstat = true\n[core]\n\teditor = test-editor\n[alias]\n\tdown = log --oneline\n[pull]\n\tff = only\n[rebase]\n\trebaseMerges = true\n",
+    )
+    .unwrap();
+    let root = fixture.root.clone();
+
+    in_directory(&fixture, &root, || {
+        run(&WorktreeCommand::Config).unwrap();
+        run(&WorktreeCommand::Config).unwrap();
+    });
+
+    for (key, value) in [
+        ("core.editor", "test-editor"),
+        ("alias.down", "log --oneline"),
+        ("pull.ff", "only"),
+        ("rebase.rebaseMerges", "true"),
+        ("rerere.stat", "true"),
+        ("pull.rebase", "true"),
+        ("rebase.autoStash", "true"),
+        ("alias.up", "pull --rebase --autostash"),
+        ("rerere.enabled", "true"),
+        ("rerere.autoupdate", "true"),
+    ] {
+        assert_eq!(
+            fixture.git(&root, &["config", "--global", "--get", key]),
+            format!("{value}\n")
+        );
+    }
 }
