@@ -42,17 +42,33 @@ is a sibling under `src/`.
 ### Application state and lifecycle
 
 - `app.rs`: `Zetta` struct, tab/pane lifecycle, and state that doesn't belong
-  to a narrower module below
+  to a narrower module below. A module directory — the root owns the struct,
+  the window's construction/resume/close, and the free predicates its actions
+  decide from; the actions are grouped by what they act on: `app/tabs.rs`
+  (open, close, pin, order, tab move mode), `app/panes.rs` (split, close,
+  focus, broadcast, and what a terminal's exit does to its pane),
+  `app/pane_templates.rs` (applying a pane template, and `--replace-pane`),
+  `app/window_actions.rs` (window actions and application-menu navigation),
+  and `app/attention.rs` (routing an attention ID to the tab that owns it)
 - `startup.rs`: `run()`'s startup-mode dispatch, the handoff-to-a-running-process
   sequence, the GUI launch (`ApplicationLaunch`), window/process lifecycle, and
   theme resolution (`resolve_profile_theme`); a module directory —
   `startup/cli_help.rs` (usage/help text), `startup/arg_parsing.rs`
-  (`StartupMode`/`StartupArgs` parsing), `startup/cli_modes.rs` (the
+  (`StartupMode`/`StartupArgs` parsing — itself a module directory: the root
+  holds the types, `StartupArgs::for_mode`, the plain launch's option loop and
+  `parse_subcommand`'s dispatch, with one parser per subcommand in
+  `startup/arg_parsing/subcommands.rs` and
+  `startup/arg_parsing/benchmark.rs`), `startup/cli_modes.rs` (the
   subcommands that never open a window — one function per `StartupMode`
   variant), `startup/process_control_loop.rs` (the event loop that applies
   `ProcessControlCommand`s, one handler per command),
   `startup/keybindings.rs` (keybinding constants/constructors and macOS
-  native menu construction), `startup/workload.rs` (the deterministic
+  native menu construction), `startup/window.rs` (opening, tracking and
+  closing this process's windows, and the quit policy that follows the last
+  close), `startup/watchers.rs` (the configuration/keymap and session-catalog
+  pollers, which read only when a file's stamp changes),
+  `startup/theming.rs` (theme loading, the baked Zetta overrides, and
+  keymap normalization/validation), `startup/workload.rs` (the deterministic
   producer workloads `zetta benchmark` drives the renderer with), and
   `startup/wsl.rs` (WSL/MSYS2 profile and working-directory integration)
 
@@ -60,7 +76,15 @@ is a sibling under `src/`.
   variant has to name the function that handles it rather than silently
   falling through to a GUI launch. Add the arm there, not another sequential
   test.
-- `pane.rs`: pane layout, tab models, terminal creation, and pane focus
+- `pane.rs`: pane layout, tab models, terminal creation, and pane focus. A
+  module directory — the root owns `TerminalPane` and the settings a spawn is
+  made with; `pane/layout.rs` (the `PaneLayout` split tree and every operation
+  that reshapes it), `pane/tab.rs` (`Tab`, and the maximize/minimize/focus
+  state that changes what it shows without changing the tree),
+  `pane/stack.rs` (`PaneStack`), and `pane/overlay.rs` (the overlay text,
+  font-size steps, and the colour model the style picker edits). The root
+  re-exports all four, so the rest of the crate still names them
+  `crate::pane::…`
 - `pane_resize.rs`: pane resize/move mode, keyboard and drag-based resizing
 - `pane_view_state.rs`: pane maximize/minimize/restore and font size
 - `pane_controls.rs`: per-pane control visibility and its idle timer
@@ -127,14 +151,22 @@ is a sibling under `src/`.
 
 ### Settings
 
-- `settings_editor.rs`: typed configuration/keymap forms and persistence,
-  including `PaneTemplatesForm`, which overlays either the built-in presets (the
-  user configuration) or the resolved user configuration (a project)
+- `settings_editor.rs`: typed configuration/keymap forms and persistence. A
+  module directory — `settings_editor/configuration.rs` (the Configuration
+  page's form, built over the file's parsed root so unknown keys survive a
+  round trip), `settings_editor/keymap.rs` (the Keymap page's form, merged with
+  the default template and stripped back to what was rebound), and
+  `settings_editor/pane_templates.rs` (`PaneTemplatesForm`, which overlays
+  either the built-in presets (the user configuration) or the resolved user
+  configuration (a project)). The root re-exports all three
 - `project_form.rs`: the typed form for a project's `.zetta/config.json` and its
   serialization; every field is optional because the file is an overlay
 - `settings_ui.rs`: settings state and event handling; a module directory —
   `settings_ui/keymap.rs` (capture, search cache), `settings_ui/controls.rs`
-  (control list, focus/scroll navigation, dropdowns),
+  (the control list and focus/scroll navigation),
+  `settings_ui/dropdowns.rs` (what a dropdown offers and what choosing an
+  option does), `settings_ui/editing.rs` (activating a control, text input,
+  toggles, sliders, and the numeric fields that repeat while held),
   `settings_ui/pane_templates.rs` (pane-template state, and the `templates`
   accessors that decide which form the editor edits),
   `settings_ui/projects.rs` (project registry actions and the project
@@ -176,7 +208,16 @@ is a sibling under `src/`.
 - `background_session_ui.rs`: background-session detach/store/reconnect and
   the reconnect picker; shared-mode panes (the `SharedPaneEntry` registry,
   arbitrated-size application, shared exit routing, and the revoke handover
-  that converts an exclusive pane to shared)
+  that converts an exclusive pane to shared). A module directory — the root
+  holds the state and predicates the transitions share;
+  `background_session_ui/detach.rs` (detach, protect, share, store),
+  `background_session_ui/reconnect.rs` (taking a session back, and its
+  authentication), `background_session_ui/restore.rs` (rebuilding the tab a
+  returned session becomes, and the picker entries),
+  `background_session_ui/observers.rs` (what a window watches on a background
+  pane, and the catalog it publishes),
+  `background_session_ui/multiplexer.rs` (handing a session to `zmux` and
+  attaching one from it), and `background_session_ui/shared_panes.rs`
 - `session_state.rs`: a tab as the multiplexer stores it — the opaque durable
   blob `zmux` round-trips without reading; see the module docs before adding a
   durable tab feature
@@ -185,11 +226,20 @@ is a sibling under `src/`.
 - `mux.rs`: `MuxRuntime`, the `zmux` client connection shared by every pane in
   the process, and its retention/recovery state
 - `mux_identity.rs`: identity-file resolution for multiplexer commands
-- `process_control.rs`: the per-process control socket — the request/response
-  protocol and `CONTROL_VERSION` history, the server (`ProcessControlServer`),
-  the client request functions, and endpoint discovery/reaping. Every
+- `process_control.rs`: the per-process control socket. Every
   `zetta <subcommand>` that has to reach a running window goes through here;
-  the decoded request is applied by `startup/process_control_loop.rs`
+  the decoded request is applied by `startup/process_control_loop.rs`. A module
+  directory — the root owns the wire format (`ControlRequest`,
+  `ControlResponse`, their payload types, the decoded `ControlRequestCommand`,
+  and the `CONTROL_VERSION` history), which stays there rather than in a
+  submodule so the four halves can read its private fields:
+  `process_control/server.rs` (`ProcessControlServer`, the listener thread and
+  the completion waits), `process_control/decode.rs` (`decode_control_request`,
+  which is what enforces the fields each command may carry),
+  `process_control/client.rs` (one function per subcommand that reaches a
+  window, all sent through `send_control_request`), and
+  `process_control/endpoint.rs` (endpoint discovery, publication, and the
+  dead-process reaping)
 - `run_command.rs`: the `zetta pane wait` registry shared by wrapper clients
   and terminal lifecycle events; deliberately GPUI-free
 - `command_panes.rs`: `PaneCommand`/`ShellCommandRequest` and the pane-opening

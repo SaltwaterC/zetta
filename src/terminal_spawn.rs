@@ -353,140 +353,18 @@ impl Zetta {
                             )
                         });
                         this.configure_terminal_view_silent_mode(tab_id, &view, cx);
-                        let run_registry = crate::run_command::process_run_registry();
-                        if let Some(identity) = run_identity {
-                            run_registry.pane_reopened(identity);
-                        }
-                        cx.subscribe_in(
+                        this.subscribe_spawned_terminal(
+                            tab_id,
+                            pane_id,
+                            run_identity,
                             &terminal,
                             window,
-                            move |this, _, event: &TerminalEvent, window, cx| {
-                                if let Some(identity) = run_identity {
-                                    match event {
-                                        TerminalEvent::TrackingReady => {
-                                            run_registry.tracking_ready(identity)
-                                        }
-                                        TerminalEvent::CommandStarted { command } => {
-                                            run_registry.command_started(identity, command.clone());
-                                            this.update_active_command(
-                                                tab_id,
-                                                pane_id,
-                                                crate::session_state::valid_restore_command(
-                                                    command,
-                                                ),
-                                            );
-                                        }
-                                        TerminalEvent::CommandFinished { exit_code } => {
-                                            run_registry.command_finished(identity, *exit_code);
-                                            this.update_active_command(tab_id, pane_id, None);
-                                        }
-                                        TerminalEvent::TerminalExited(_) => {
-                                            run_registry.terminal_lost(identity);
-                                            this.update_active_command(tab_id, pane_id, None);
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                match event {
-                                    TerminalEvent::TerminalExited(exit)
-                                        if exit.is_unexpected()
-                                            && this.retain_unexpected_terminal_exit(
-                                                tab_id, pane_id, exit, cx,
-                                            ) =>
-                                    {
-                                        this.publish_background_session_catalog(cx);
-                                        this.sync_visible_terminals(cx);
-                                        this.focus_active(window, cx);
-                                    }
-                                    TerminalEvent::ResizeRequested { rows, columns } => {
-                                        this.resize_pane_to(
-                                            tab_id,
-                                            pane_id,
-                                            Some(*columns),
-                                            Some(*rows),
-                                            window,
-                                            cx,
-                                        );
-                                    }
-                                    TerminalEvent::GridSizeChanged => cx.notify(),
-                                    event if terminal_event_requires_worktree_detection(event) => {
-                                        this.schedule_worktree_detection_for_pane(
-                                            tab_id, pane_id, cx,
-                                        );
-                                        this.schedule_project_detection_for_pane(
-                                            tab_id, pane_id, window, cx,
-                                        );
-                                        cx.notify();
-                                    }
-                                    _ => {}
-                                }
-                            },
-                        )
-                        .detach();
-                        cx.subscribe_in(
-                            &view,
-                            window,
-                            move |this, _, event, window, cx| match event {
-                                TerminalViewEvent::Close => {
-                                    this.terminal_closed(tab_id, pane_id, window, cx);
-                                }
-                                TerminalViewEvent::TitleChanged => {
-                                    this.schedule_worktree_detection_for_pane(tab_id, pane_id, cx);
-                                    this.schedule_project_detection_for_pane(
-                                        tab_id, pane_id, window, cx,
-                                    );
-                                    cx.notify();
-                                }
-                                TerminalViewEvent::Input(input) => {
-                                    this.broadcast_input(tab_id, pane_id, input, cx);
-                                }
-                                TerminalViewEvent::OpenEditor(request) => {
-                                    this.open_editor_in_new_pane(
-                                        tab_id,
-                                        pane_id,
-                                        request.clone(),
-                                        window,
-                                        cx,
-                                    );
-                                }
-                            },
-                        )
-                        .detach();
-                        let focus_handle = view.focus_handle(cx);
-                        let emit_input_events = this
-                            .tabs
-                            .iter()
-                            .find(|tab| tab.id == tab_id)
-                            .is_some_and(|tab| tab.broadcast_input);
-                        let input_enabled = this.terminal_input_enabled();
-                        view.update(cx, |view, cx| {
-                            view.set_emit_input_events(emit_input_events);
-                            view.set_input_enabled(input_enabled, cx);
-                        });
-                        cx.on_focus_in(&focus_handle, window, move |this, window, cx| {
-                            if let Some(tab) = this
-                                .tabs
-                                .iter_mut()
-                                .find(|tab| tab.id == tab_id)
-                                .filter(|tab| {
-                                    tab.pane(pane_id).is_some_and(|pane| !pane.base_exited)
-                                })
-                            {
-                                tab.activate_stack_entry(pane_id, PaneStackSelection::Base);
-                                cx.notify();
-                            }
-                            this.activate_current_project(window, cx);
-                            this.clear_active_tab_attention_if_focused(window, cx);
-                        })
-                        .detach();
+                            cx,
+                        );
+                        this.subscribe_spawned_terminal_view(tab_id, pane_id, &view, window, cx);
+                        let should_focus = this
+                            .configure_spawned_terminal_focus(tab_id, pane_id, &view, window, cx);
                         let tab_index = this.tabs.iter().position(|tab| tab.id == tab_id);
-                        let should_focus = tab_index.is_some_and(|index| {
-                            index == this.active_tab
-                                && this.tabs[index].active_pane == pane_id
-                                && this.tabs[index]
-                                    .pane(pane_id)
-                                    .is_some_and(|pane| pane.stack.selected_is_base())
-                        });
                         if let Some(pane) = tab_index
                             .and_then(|index| this.tabs.get_mut(index))
                             .and_then(|tab| tab.pane_mut(pane_id))
@@ -523,6 +401,180 @@ impl Zetta {
                 }
             })
             .detach();
+    }
+
+    /// Wires a freshly built terminal to the pane that owns it: the run
+    /// registry's view of the pane, unexpected exits, resize requests, and the
+    /// grid-size notify the cached title bar depends on.
+    ///
+    /// Shared with the Windows console handover, which builds its terminal from
+    /// an inherited console rather than by spawning one but observes it
+    /// identically. `run_identity` is absent only for a pane whose shell
+    /// integration cannot report, which is what the handover starts as.
+    fn subscribe_spawned_terminal(
+        &mut self,
+        tab_id: u64,
+        pane_id: u64,
+        run_identity: Option<crate::run_command::RunPaneIdentity>,
+        terminal: &Entity<Terminal>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let run_registry = crate::run_command::process_run_registry();
+        if let Some(identity) = run_identity {
+            run_registry.pane_reopened(identity);
+        }
+        cx.subscribe_in(
+            terminal,
+            window,
+            move |this, _, event: &TerminalEvent, window, cx| {
+                if let Some(identity) = run_identity {
+                    match event {
+                        TerminalEvent::TrackingReady => run_registry.tracking_ready(identity),
+                        TerminalEvent::CommandStarted { command } => {
+                            run_registry.command_started(identity, command.clone());
+                            this.update_active_command(
+                                tab_id,
+                                pane_id,
+                                crate::session_state::valid_restore_command(command),
+                            );
+                        }
+                        TerminalEvent::CommandFinished { exit_code } => {
+                            run_registry.command_finished(identity, *exit_code);
+                            this.update_active_command(tab_id, pane_id, None);
+                        }
+                        TerminalEvent::TerminalExited(_) => {
+                            run_registry.terminal_lost(identity);
+                            this.update_active_command(tab_id, pane_id, None);
+                        }
+                        _ => {}
+                    }
+                }
+                match event {
+                    TerminalEvent::TerminalExited(exit)
+                        if exit.is_unexpected()
+                            && this.retain_unexpected_terminal_exit(tab_id, pane_id, exit, cx) =>
+                    {
+                        this.publish_background_session_catalog(cx);
+                        this.sync_visible_terminals(cx);
+                        this.focus_active(window, cx);
+                    }
+                    TerminalEvent::ResizeRequested { rows, columns } => {
+                        this.resize_pane_to(
+                            tab_id,
+                            pane_id,
+                            Some(*columns),
+                            Some(*rows),
+                            window,
+                            cx,
+                        );
+                    }
+                    // The title bar reports the active pane's grid size, and
+                    // it renders inside a cached boundary that only a notify
+                    // on `Zetta` busts. Terminal output must not reach here;
+                    // only an actual change of the grid's dimensions does.
+                    TerminalEvent::GridSizeChanged => cx.notify(),
+                    event if terminal_event_requires_worktree_detection(event) => {
+                        // A program can change the terminal's ordinary OSC
+                        // title without changing its process metadata. Treat it
+                        // as a worktree-detection trigger too, so that a title
+                        // such as Codex's `switched-source` cannot become the
+                        // tab title while the shell remains in a linked
+                        // worktree.
+                        this.schedule_worktree_detection_for_pane(tab_id, pane_id, cx);
+                        this.schedule_project_detection_for_pane(tab_id, pane_id, window, cx);
+                        cx.notify();
+                    }
+                    _ => {}
+                }
+            },
+        )
+        .detach();
+    }
+
+    /// Wires the view built over that terminal: close, title changes,
+    /// broadcast input, and the editor a pane opens.
+    fn subscribe_spawned_terminal_view(
+        &mut self,
+        tab_id: u64,
+        pane_id: u64,
+        view: &Entity<TerminalView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.subscribe_in(
+            view,
+            window,
+            move |this, _, event, window, cx| match event {
+                TerminalViewEvent::Close => {
+                    this.terminal_closed(tab_id, pane_id, window, cx);
+                }
+                TerminalViewEvent::TitleChanged => {
+                    this.schedule_worktree_detection_for_pane(tab_id, pane_id, cx);
+                    this.schedule_project_detection_for_pane(tab_id, pane_id, window, cx);
+                    cx.notify();
+                }
+                TerminalViewEvent::Input(input) => {
+                    this.broadcast_input(tab_id, pane_id, input, cx);
+                }
+                TerminalViewEvent::OpenEditor(request) => {
+                    this.open_editor_in_new_pane(tab_id, pane_id, request.clone(), window, cx);
+                }
+            },
+        )
+        .detach();
+    }
+
+    /// Applies the tab's input state to a new view, routes its focus, and
+    /// reports whether this pane is the one that should take focus now.
+    ///
+    /// Answered before the view is stored on the pane, because it asks what the
+    /// tab looked like when the spawn was requested: a pane that is no longer
+    /// active by the time its terminal arrives must not steal focus.
+    fn configure_spawned_terminal_focus(
+        &mut self,
+        tab_id: u64,
+        pane_id: u64,
+        view: &Entity<TerminalView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let this = self;
+        let focus_handle = view.focus_handle(cx);
+        let emit_input_events = this
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .is_some_and(|tab| tab.broadcast_input);
+        let input_enabled = this.terminal_input_enabled();
+        view.update(cx, |view, cx| {
+            view.set_emit_input_events(emit_input_events);
+            view.set_input_enabled(input_enabled, cx);
+        });
+        cx.on_focus_in(&focus_handle, window, move |this, window, cx| {
+            if let Some(tab) = this
+                .tabs
+                .iter_mut()
+                .find(|tab| tab.id == tab_id)
+                .filter(|tab| tab.pane(pane_id).is_some_and(|pane| !pane.base_exited))
+            {
+                tab.activate_stack_entry(pane_id, PaneStackSelection::Base);
+                cx.notify();
+            }
+            this.activate_current_project(window, cx);
+            this.clear_active_tab_attention_if_focused(window, cx);
+        })
+        .detach();
+        this.tabs
+            .iter()
+            .position(|tab| tab.id == tab_id)
+            .is_some_and(|index| {
+                index == this.active_tab
+                    && this.tabs[index].active_pane == pane_id
+                    && this.tabs[index]
+                        .pane(pane_id)
+                        .is_some_and(|pane| pane.stack.selected_is_base())
+            })
     }
 
     /// Spawns the terminal a [`TerminalSpawnRequest`] describes. The single
@@ -728,145 +780,21 @@ impl Zetta {
                             )
                         });
                         this.configure_terminal_view_silent_mode(tab_id, &view, cx);
-                        let run_registry = crate::run_command::process_run_registry();
-                        let run_identity =
-                            crate::run_command::RunPaneIdentity::new(attention_id, pane_routing_id);
-                        run_registry.pane_reopened(run_identity);
-                        cx.subscribe_in(
+                        this.subscribe_spawned_terminal(
+                            tab_id,
+                            pane_id,
+                            Some(crate::run_command::RunPaneIdentity::new(
+                                attention_id,
+                                pane_routing_id,
+                            )),
                             &terminal,
                             window,
-                            move |this, _, event: &TerminalEvent, window, cx| {
-                                match event {
-                                    TerminalEvent::TrackingReady => {
-                                        run_registry.tracking_ready(run_identity)
-                                    }
-                                    TerminalEvent::CommandStarted { command } => {
-                                        run_registry.command_started(run_identity, command.clone());
-                                        this.update_active_command(
-                                            tab_id,
-                                            pane_id,
-                                            crate::session_state::valid_restore_command(command),
-                                        );
-                                    }
-                                    TerminalEvent::CommandFinished { exit_code } => {
-                                        run_registry.command_finished(run_identity, *exit_code);
-                                        this.update_active_command(tab_id, pane_id, None);
-                                    }
-                                    TerminalEvent::TerminalExited(_) => {
-                                        run_registry.terminal_lost(run_identity);
-                                        this.update_active_command(tab_id, pane_id, None);
-                                    }
-                                    _ => {}
-                                }
-                                match event {
-                                    TerminalEvent::TerminalExited(exit)
-                                        if exit.is_unexpected()
-                                            && this.retain_unexpected_terminal_exit(
-                                                tab_id, pane_id, exit, cx,
-                                            ) =>
-                                    {
-                                        this.publish_background_session_catalog(cx);
-                                        this.sync_visible_terminals(cx);
-                                        this.focus_active(window, cx);
-                                    }
-                                    TerminalEvent::ResizeRequested { rows, columns } => {
-                                        this.resize_pane_to(
-                                            tab_id,
-                                            pane_id,
-                                            Some(*columns),
-                                            Some(*rows),
-                                            window,
-                                            cx,
-                                        );
-                                    }
-                                    // The title bar reports the active pane's grid size, and
-                                    // it renders inside a cached boundary that only a notify
-                                    // on `Zetta` busts. Terminal output must not reach here;
-                                    // only an actual change of the grid's dimensions does.
-                                    TerminalEvent::GridSizeChanged => cx.notify(),
-                                    event if terminal_event_requires_worktree_detection(event) => {
-                                        // A program can change the terminal's ordinary OSC
-                                        // title without changing its process metadata. Treat it
-                                        // as a worktree-detection trigger too, so that a title
-                                        // such as Codex's `switched-source` cannot become the tab
-                                        // title while the shell remains in a linked worktree.
-                                        this.schedule_worktree_detection_for_pane(
-                                            tab_id, pane_id, cx,
-                                        );
-                                        this.schedule_project_detection_for_pane(
-                                            tab_id, pane_id, window, cx,
-                                        );
-                                        cx.notify();
-                                    }
-                                    _ => {}
-                                }
-                            },
-                        )
-                        .detach();
-                        cx.subscribe_in(
-                            &view,
-                            window,
-                            move |this, _, event, window, cx| match event {
-                                TerminalViewEvent::Close => {
-                                    this.terminal_closed(tab_id, pane_id, window, cx);
-                                }
-                                TerminalViewEvent::TitleChanged => {
-                                    this.schedule_worktree_detection_for_pane(tab_id, pane_id, cx);
-                                    this.schedule_project_detection_for_pane(
-                                        tab_id, pane_id, window, cx,
-                                    );
-                                    cx.notify();
-                                }
-                                TerminalViewEvent::Input(input) => {
-                                    this.broadcast_input(tab_id, pane_id, input, cx);
-                                }
-                                TerminalViewEvent::OpenEditor(request) => {
-                                    this.open_editor_in_new_pane(
-                                        tab_id,
-                                        pane_id,
-                                        request.clone(),
-                                        window,
-                                        cx,
-                                    );
-                                }
-                            },
-                        )
-                        .detach();
-                        let focus_handle = view.focus_handle(cx);
-                        let emit_input_events = this
-                            .tabs
-                            .iter()
-                            .find(|tab| tab.id == tab_id)
-                            .is_some_and(|tab| tab.broadcast_input);
-                        let input_enabled = this.terminal_input_enabled();
-                        view.update(cx, |view, cx| {
-                            view.set_emit_input_events(emit_input_events);
-                            view.set_input_enabled(input_enabled, cx);
-                        });
-                        cx.on_focus_in(&focus_handle, window, move |this, window, cx| {
-                            if let Some(tab) = this
-                                .tabs
-                                .iter_mut()
-                                .find(|tab| tab.id == tab_id)
-                                .filter(|tab| {
-                                    tab.pane(pane_id).is_some_and(|pane| !pane.base_exited)
-                                })
-                            {
-                                tab.activate_stack_entry(pane_id, PaneStackSelection::Base);
-                                cx.notify();
-                            }
-                            this.activate_current_project(window, cx);
-                            this.clear_active_tab_attention_if_focused(window, cx);
-                        })
-                        .detach();
+                            cx,
+                        );
+                        this.subscribe_spawned_terminal_view(tab_id, pane_id, &view, window, cx);
+                        let should_focus = this
+                            .configure_spawned_terminal_focus(tab_id, pane_id, &view, window, cx);
                         let tab_index = this.tabs.iter().position(|tab| tab.id == tab_id);
-                        let should_focus = tab_index.is_some_and(|index| {
-                            index == this.active_tab
-                                && this.tabs[index].active_pane == pane_id
-                                && this.tabs[index]
-                                    .pane(pane_id)
-                                    .is_some_and(|pane| pane.stack.selected_is_base())
-                        });
                         if let Some(pane) = tab_index
                             .and_then(|index| this.tabs.get_mut(index))
                             .and_then(|tab| tab.pane_mut(pane_id))

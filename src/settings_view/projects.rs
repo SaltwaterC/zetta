@@ -362,6 +362,22 @@ fn render_project_config(
         ));
     }
 
+    push_project_environment_rows(&mut content, editor, form, colors, handle);
+    push_project_command_rows(&mut content, editor, form, colors, handle);
+    push_project_profile_rows(&mut content, editor, form, colors, handle);
+    push_project_template_rows(&mut content, editor, form, colors, handle);
+    v_flex().children(content).into_any_element()
+}
+
+/// The environment rows: the variables every terminal started inside the
+/// project inherits.
+fn push_project_environment_rows(
+    content: &mut Vec<AnyElement>,
+    editor: &SettingsEditor,
+    form: &crate::project_form::ProjectForm,
+    colors: &ThemeColors,
+    handle: &WeakEntity<Zetta>,
+) {
     content.push(
         section_heading(
             "Environment",
@@ -433,7 +449,17 @@ fn render_project_config(
             ))
             .into_any_element(),
     );
+}
 
+/// The registered-command rows. A command's own environment overrides the
+/// project's for that invocation only.
+fn push_project_command_rows(
+    content: &mut Vec<AnyElement>,
+    editor: &SettingsEditor,
+    form: &crate::project_form::ProjectForm,
+    colors: &ThemeColors,
+    handle: &WeakEntity<Zetta>,
+) {
     content.push(
         section_heading(
             "Commands",
@@ -588,7 +614,16 @@ fn render_project_config(
             ))
             .into_any_element(),
     );
+}
 
+/// The profile-override rows, merged over the application profiles by name.
+fn push_project_profile_rows(
+    content: &mut Vec<AnyElement>,
+    editor: &SettingsEditor,
+    form: &crate::project_form::ProjectForm,
+    colors: &ThemeColors,
+    handle: &WeakEntity<Zetta>,
+) {
     content.push(
         section_heading(
             "Profiles",
@@ -759,7 +794,17 @@ fn render_project_config(
             ))
             .into_any_element(),
     );
+}
 
+/// The pane-template rows: the project's initial split, and the template
+/// editor overlaid on the application's templates.
+fn push_project_template_rows(
+    content: &mut Vec<AnyElement>,
+    editor: &SettingsEditor,
+    form: &crate::project_form::ProjectForm,
+    colors: &ThemeColors,
+    handle: &WeakEntity<Zetta>,
+) {
     content.push(
         section_heading(
             "Pane templates",
@@ -792,6 +837,4 @@ fn render_project_config(
             .child(render_pane_templates_page(editor, colors, handle))
             .into_any_element(),
     );
-
-    v_flex().children(content).into_any_element()
 }

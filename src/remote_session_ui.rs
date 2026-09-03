@@ -368,74 +368,7 @@ impl Zetta {
             .cloned()
             .collect::<Vec<_>>();
         let picker_scroll = picker.scroll.clone();
-        let row_colors = colors.clone();
-        let row_handle = handle.clone();
-        let rows = uniform_list(
-            "remote-session-list",
-            sessions.len(),
-            move |range: std::ops::Range<usize>, _, _| {
-                range
-                    .map(|index| {
-                        let session = &sessions[index];
-                        let row_handle = row_handle.clone();
-                        let title = if session.title.is_empty() {
-                            format!("Session {}", session.id)
-                        } else {
-                            session.title.clone()
-                        };
-                        let detail = if session.authentication_required {
-                            "Protected session · secret required".to_owned()
-                        } else {
-                            format!(
-                                "{} pane{}{}",
-                                session.panes.len(),
-                                if session.panes.len() == 1 { "" } else { "s" },
-                                if session.held {
-                                    " · already in use"
-                                } else {
-                                    ""
-                                }
-                            )
-                        };
-                        div()
-                            .id(("remote-session-row", index))
-                            .h_12()
-                            .w_full()
-                            .px_3()
-                            .flex()
-                            .flex_col()
-                            .justify_center()
-                            .cursor_pointer()
-                            .border_1()
-                            .border_color(if index == selected {
-                                row_colors.border_focused
-                            } else {
-                                transparent_black()
-                            })
-                            .when(index == selected, |row| row.bg(row_colors.element_selected))
-                            .hover(|style| style.bg(row_colors.element_hover))
-                            .on_click(move |_, window, cx| {
-                                row_handle
-                                    .update(cx, |this, cx| {
-                                        this.select_remote_session(index, window, cx)
-                                    })
-                                    .ok();
-                            })
-                            .child(div().text_sm().child(title))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(row_colors.text_muted)
-                                    .child(detail),
-                            )
-                    })
-                    .collect::<Vec<_>>()
-            },
-        )
-        .with_sizing_behavior(ListSizingBehavior::Infer)
-        .max_h(px(280.))
-        .track_scroll(&picker_scroll)
-        .on_scroll_wheel(|_, _, cx| cx.stop_propagation());
+        let rows = remote_session_rows(handle, colors, &picker_scroll, sessions, selected);
 
         let target_handle = handle.clone();
         let port_handle = handle.clone();
@@ -443,36 +376,7 @@ impl Zetta {
         let load_handle = handle.clone();
         let attach_handle = handle.clone();
         let has_suggestions = !suggestions.is_empty();
-        let suggestion_rows = suggestions
-            .into_iter()
-            .enumerate()
-            .map(|(index, suggestion)| {
-                let suggestion_handle = handle.clone();
-                let suggestion_label = suggestion.clone();
-                div()
-                    .id(("remote-session-suggestion", index))
-                    .h_7()
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .cursor_pointer()
-                    .text_xs()
-                    .text_color(colors.text_muted)
-                    .hover(|style| style.bg(colors.element_hover))
-                    .on_click(move |_, _, cx| {
-                        suggestion_handle
-                            .update(cx, |this, cx| {
-                                if let Some(picker) = this.remote_session_picker.as_mut() {
-                                    picker.target = TextField::new(suggestion.clone());
-                                    picker.field = RemoteSessionField::Port;
-                                    picker.invalidate_results();
-                                    cx.notify();
-                                }
-                            })
-                            .ok();
-                    })
-                    .child(suggestion_label)
-            });
+        let suggestion_rows = remote_session_suggestion_rows(handle, colors, suggestions);
 
         let session_list = div()
             .id("remote-session-list-panel")
@@ -704,4 +608,127 @@ impl Zetta {
                 .into_any_element(),
         )
     }
+}
+
+/// The session list: one row per session the remote host is holding.
+///
+/// Virtualized, because a host that has been up for a while can be holding
+/// more sessions than the panel shows at once.
+fn remote_session_rows(
+    handle: &WeakEntity<Zetta>,
+    colors: &ThemeColors,
+    picker_scroll: &gpui::UniformListScrollHandle,
+    sessions: Vec<zmux::protocol::BackgroundSessionSummary>,
+    selected: usize,
+) -> gpui::UniformList {
+    let row_colors = colors.clone();
+    let row_handle = handle.clone();
+    uniform_list(
+        "remote-session-list",
+        sessions.len(),
+        move |range: std::ops::Range<usize>, _, _| {
+            range
+                .map(|index| {
+                    let session = &sessions[index];
+                    let row_handle = row_handle.clone();
+                    let title = if session.title.is_empty() {
+                        format!("Session {}", session.id)
+                    } else {
+                        session.title.clone()
+                    };
+                    let detail = if session.authentication_required {
+                        "Protected session · secret required".to_owned()
+                    } else {
+                        format!(
+                            "{} pane{}{}",
+                            session.panes.len(),
+                            if session.panes.len() == 1 { "" } else { "s" },
+                            if session.held {
+                                " · already in use"
+                            } else {
+                                ""
+                            }
+                        )
+                    };
+                    div()
+                        .id(("remote-session-row", index))
+                        .h_12()
+                        .w_full()
+                        .px_3()
+                        .flex()
+                        .flex_col()
+                        .justify_center()
+                        .cursor_pointer()
+                        .border_1()
+                        .border_color(if index == selected {
+                            row_colors.border_focused
+                        } else {
+                            transparent_black()
+                        })
+                        .when(index == selected, |row| row.bg(row_colors.element_selected))
+                        .hover(|style| style.bg(row_colors.element_hover))
+                        .on_click(move |_, window, cx| {
+                            row_handle
+                                .update(cx, |this, cx| {
+                                    this.select_remote_session(index, window, cx)
+                                })
+                                .ok();
+                        })
+                        .child(div().text_sm().child(title))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(row_colors.text_muted)
+                                .child(detail),
+                        )
+                })
+                .collect::<Vec<_>>()
+        },
+    )
+    .with_sizing_behavior(ListSizingBehavior::Infer)
+    .max_h(px(280.))
+    .track_scroll(picker_scroll)
+    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+}
+
+/// The host suggestions under the target field, from the user's SSH
+/// configuration.
+fn remote_session_suggestion_rows(
+    handle: &WeakEntity<Zetta>,
+    colors: &ThemeColors,
+    suggestions: Vec<String>,
+) -> Vec<gpui::Stateful<gpui::Div>> {
+    let handle = handle.clone();
+    let colors = colors.clone();
+    suggestions
+        .into_iter()
+        .enumerate()
+        .map(|(index, suggestion)| {
+            let suggestion_handle = handle.clone();
+            let suggestion_label = suggestion.clone();
+            div()
+                .id(("remote-session-suggestion", index))
+                .h_7()
+                .px_2()
+                .flex()
+                .items_center()
+                .cursor_pointer()
+                .text_xs()
+                .text_color(colors.text_muted)
+                .hover(|style| style.bg(colors.element_hover))
+                .on_click(move |_, _, cx| {
+                    suggestion_handle
+                        .update(cx, |this, cx| {
+                            if let Some(picker) = this.remote_session_picker.as_mut() {
+                                picker.target = TextField::new(suggestion.clone());
+                                picker.field = RemoteSessionField::Port;
+                                picker.invalidate_results();
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                })
+                .child(suggestion_label)
+        })
+        .collect()
 }

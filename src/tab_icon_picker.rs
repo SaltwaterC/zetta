@@ -9,6 +9,7 @@ use gpui::{ScrollStrategy, SharedString, UniformListScrollHandle};
 use ui::IconName;
 
 use super::*;
+use gpui::{ListSizingBehavior, uniform_list};
 
 /// An icon paired with cached display and search labels, so filtering and
 /// rendering never have to re-run `format!("{icon:?}")` on the UI thread.
@@ -445,3 +446,270 @@ impl Zetta {
 #[cfg(test)]
 #[path = "tests/tab_icon_picker.rs"]
 mod tests;
+
+impl Zetta {
+    pub(crate) fn render_tab_icon_picker_overlay(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        self.tab_icon_picker.as_ref()?;
+
+        // Get options and picker state, then release the borrow
+        let (options, picker_state) = {
+            let picker = self.tab_icon_picker.as_mut().expect("checked above");
+            let opts = picker.options();
+            let state = (
+                picker.target,
+                picker.selected,
+                picker.scroll.clone(),
+                picker.entries(),
+            );
+            (opts, state)
+        };
+
+        let (target, selected_index, scroll_handle, entries) = picker_state;
+        let colors = self.window_theme(cx).colors().clone();
+        let handle = cx.entity().downgrade();
+
+        // Get selected icon for highlighting
+        let selected_icon = match target {
+            TabIconPickerTarget::Tab(tab_index) => {
+                self.tabs.get(tab_index).and_then(|tab| tab.icon)
+            }
+            TabIconPickerTarget::Default => self
+                .settings_editor
+                .as_ref()
+                .and_then(|editor| editor.configuration.default_tab_icon),
+            TabIconPickerTarget::ProjectDefault => self
+                .settings_editor
+                .as_ref()
+                .and_then(crate::settings_ui::project_editor)
+                .and_then(|project| project.form.default_tab_icon.icon()),
+        };
+
+        let picker = self.tab_icon_picker.as_ref()?;
+        let query = picker.query.clone();
+
+        // Grid constants
+        const ICON_CELL_WIDTH: Pixels = px(84.);
+        const ICON_CELL_HEIGHT: Pixels = px(68.);
+        const ICON_CELL_PADDING: Pixels = px(1.);
+        const ICON_GAP: Pixels = px(1.);
+        let row_height = ICON_CELL_HEIGHT + ICON_CELL_PADDING * 2. + ICON_GAP;
+
+        let row_count = options.len().div_ceil(TAB_ICON_COLUMNS);
+
+        // Build search bar
+        let search_handle = handle.clone();
+        // The picker has one field and it always holds the focus while the
+        // picker is open, so the frame is always the focused one.
+        let search = field_box("tab-icon-search", true, &colors)
+            .min_w_0()
+            .flex_1()
+            .when(query.select_all, |input| {
+                input.bg(colors.element_selection_background)
+            })
+            .text_color(colors.text)
+            .child(field_query_run(&query, Some("Search icons…"), &colors))
+            .on_click(move |_, window, cx| {
+                search_handle
+                    .update(cx, |this, cx| {
+                        this.tab_icon_picker_focus.focus(window, cx);
+                    })
+                    .ok();
+            });
+
+        let close_handle = handle.clone();
+        let close = div()
+            .id("close-tab-icon-picker")
+            .flex_none()
+            .px_3()
+            .py_1()
+            .rounded(px(4.))
+            .border_1()
+            .border_color(colors.element_selected)
+            .cursor_pointer()
+            .bg(colors.element_selected)
+            .text_color(colors.text)
+            .hover(|style| style.bg(colors.element_hover))
+            .tooltip(Tooltip::text("Close tab icon picker (Esc)"))
+            .on_click(move |_, window, cx| {
+                close_handle
+                    .update(cx, |this, cx| this.dismiss_tab_icon_picker(window, cx))
+                    .ok();
+            })
+            .child("Close");
+
+        // Virtualized icon grid using uniform_list
+        let row_colors = colors.clone();
+        let row_entries = entries.clone();
+        let row_handle = handle.clone();
+        let row_selected_icon = selected_icon;
+        let row_selected_index = selected_index;
+        let options_for_rows = options.clone();
+
+        let icon_rows = uniform_list(
+            "tab-icon-grid",
+            row_count,
+            move |range: std::ops::Range<usize>, _, _| {
+                let entries = row_entries.clone();
+                let options = &options_for_rows;
+                let row_handle = row_handle.clone();
+                let row_colors = row_colors.clone();
+                let row_selected_icon = row_selected_icon;
+                let row_selected_index = row_selected_index;
+
+                range
+                    .map(|row_index| {
+                        let row_start = row_index * TAB_ICON_COLUMNS;
+                        let row_end = (row_start + TAB_ICON_COLUMNS).min(options.len());
+                        let row_options = &options[row_start..row_end];
+
+                        let cells: Vec<AnyElement> = row_options
+                            .iter()
+                            .enumerate()
+                            .map(|(col_index, option)| {
+                                // Copy the option value since IconName is Copy
+                                let option = *option;
+                                let index = row_start + col_index;
+                                let icon = option
+                                    .and_then(|index| entries.get(index).map(|entry| entry.icon));
+                                let label = option
+                                    .and_then(|index| {
+                                        entries.get(index).map(|entry| entry.label.clone())
+                                    })
+                                    .unwrap_or_else(|| SharedString::new_static("None"));
+                                let keyboard_selected = index == row_selected_index;
+                                let icon_for_click = icon;
+                                let icon_handle = row_handle.clone();
+
+                                div()
+                                    .id(("tab-icon-option", index))
+                                    .w(ICON_CELL_WIDTH)
+                                    .h(ICON_CELL_HEIGHT)
+                                    .p_1()
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .justify_center()
+                                    .gap_1()
+                                    .rounded(px(4.))
+                                    .cursor_pointer()
+                                    .when(icon == row_selected_icon, |cell| {
+                                        cell.bg(row_colors.element_selected)
+                                    })
+                                    .when(keyboard_selected, |cell| {
+                                        cell.border_1().border_color(row_colors.border_focused)
+                                    })
+                                    .hover(|cell| cell.bg(row_colors.element_hover))
+                                    .when_some(icon, |cell, icon| {
+                                        cell.child(
+                                            Icon::new(icon)
+                                                .size(IconSize::Medium)
+                                                .color(Color::Custom(row_colors.icon)),
+                                        )
+                                    })
+                                    .when(icon.is_none(), |cell| {
+                                        cell.child(
+                                            Icon::new(IconName::Dash)
+                                                .size(IconSize::Medium)
+                                                .color(Color::Custom(row_colors.icon)),
+                                        )
+                                    })
+                                    .child(
+                                        Label::new(label.clone())
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Custom(row_colors.text))
+                                            .truncate(),
+                                    )
+                                    .tooltip(Tooltip::text(label))
+                                    .on_click(move |_, window, cx| {
+                                        icon_handle
+                                            .update(cx, |this, cx| {
+                                                this.set_tab_icon(icon_for_click, window, cx);
+                                            })
+                                            .ok();
+                                    })
+                                    .into_any_element()
+                            })
+                            .collect();
+
+                        div()
+                            .h(row_height)
+                            .flex()
+                            .gap_1()
+                            .children(cells)
+                            .into_any_element()
+                    })
+                    .collect()
+            },
+        )
+        .with_sizing_behavior(ListSizingBehavior::Infer)
+        .w_full()
+        .h_full()
+        .track_scroll(&scroll_handle)
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation());
+
+        let has_options = !options.is_empty();
+
+        Some(
+            div()
+                .id("tab-icon-picker-modal")
+                .absolute()
+                .inset_0()
+                .p_8()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(transparent_black().opacity(0.55))
+                .occlude()
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(px(720.))
+                        .h_full()
+                        .max_h(px(600.))
+                        .p_3()
+                        .flex()
+                        .flex_col()
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_color(colors.border)
+                        .bg(colors.elevated_surface_background)
+                        .text_color(colors.text)
+                        .shadow_lg()
+                        .child(h_flex().mb_3().gap_2().child(search).child(close))
+                        .child(
+                            div()
+                                .relative()
+                                .min_h_0()
+                                .flex_1()
+                                .overflow_hidden()
+                                .when(has_options, |container| container.child(icon_rows))
+                                .when(!has_options, |container| {
+                                    container.child(
+                                        div()
+                                            .w_full()
+                                            .py_6()
+                                            .flex()
+                                            .justify_center()
+                                            .text_color(colors.text_muted)
+                                            .child("No icons match your search"),
+                                    )
+                                })
+                        )
+                        .child(
+                            h_flex()
+                                .mt_2()
+                                .w_full()
+                                .justify_center()
+                                .text_color(colors.text_muted)
+                                .text_xs()
+                                .child("Tab / Shift-Tab: navigate icons  •  ↑/↓: navigate rows  •  ←/→: move cursor in search  •  Enter: select  •  Esc: close"),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+}

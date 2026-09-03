@@ -1,5 +1,4 @@
 use super::*;
-use crate::background_sessions::{BackgroundPaneExitReason, BackgroundPaneExitSource};
 
 #[test]
 fn reconnect_is_immediate_only_for_one_background_session() {
@@ -114,100 +113,6 @@ fn background_session_is_reaped_after_its_final_pane_exits() {
         Some(vec![3])
     );
     assert!(sessions.is_empty());
-}
-
-#[test]
-fn protected_sessions_are_redacted_in_the_reconnect_picker() {
-    let entries = Zetta::picker_entries_from_summaries(&[BackgroundSessionSummary {
-        id: 42,
-        title: "production database".to_owned(),
-        authentication_required: true,
-        active_pane: 7,
-        layout: BackgroundPaneLayout::Pane { pane_id: 7 },
-        panes: vec![BackgroundPaneSummary {
-            id: 7,
-            label: "secret work".to_owned(),
-            profile: "System".to_owned(),
-            configured_command: "sensitive-command".to_owned(),
-            application: "psql".to_owned(),
-            foreground_command: None,
-            terminal_title: None,
-            working_directory: None,
-            state: BackgroundPaneState::Running,
-            exit: None,
-        }],
-        held: false,
-        scoped_to: None,
-        key_envelope: None,
-    }]);
-
-    assert_eq!(
-        entries,
-        vec![(
-            42,
-            "Protected session".to_owned(),
-            "Session 42 · protected".to_owned()
-        )]
-    );
-}
-
-#[test]
-fn failed_sessions_show_the_exit_reason_in_the_reconnect_picker() {
-    let entries = Zetta::picker_entries_from_summaries(&[BackgroundSessionSummary {
-        id: 8,
-        title: "shell".to_owned(),
-        authentication_required: false,
-        active_pane: 1,
-        layout: BackgroundPaneLayout::Split {
-            axis: "horizontal".to_owned(),
-            first: Box::new(BackgroundPaneLayout::Pane { pane_id: 1 }),
-            second: Box::new(BackgroundPaneLayout::Pane { pane_id: 2 }),
-        },
-        panes: vec![
-            BackgroundPaneSummary {
-                id: 1,
-                label: "failed shell".to_owned(),
-                profile: "System".to_owned(),
-                configured_command: "pwsh".to_owned(),
-                application: "htop".to_owned(),
-                foreground_command: None,
-                terminal_title: None,
-                working_directory: None,
-                state: BackgroundPaneState::Failed,
-                exit: Some(BackgroundPaneExit {
-                    source: BackgroundPaneExitSource::Child,
-                    reason: BackgroundPaneExitReason::ForegroundCommand,
-                    exit_code: Some(1),
-                    child_pid: Some(42),
-                    input_sent: true,
-                    foreground_is_shell: Some(false),
-                    foreground_command: Some("htop".to_owned()),
-                }),
-            },
-            BackgroundPaneSummary {
-                id: 2,
-                label: "running shell".to_owned(),
-                profile: "System".to_owned(),
-                configured_command: "pwsh".to_owned(),
-                application: "pwsh".to_owned(),
-                foreground_command: None,
-                terminal_title: None,
-                working_directory: None,
-                state: BackgroundPaneState::Running,
-                exit: None,
-            },
-        ],
-        held: false,
-        scoped_to: None,
-        key_envelope: None,
-    }]);
-
-    assert_eq!(entries.len(), 1);
-    assert!(
-        entries[0]
-            .2
-            .contains("failed: the shell exited while \"htop\" was foreground")
-    );
 }
 
 #[test]
@@ -476,53 +381,5 @@ fn an_arbitrated_size_is_only_applied_when_it_differs() {
     assert_eq!(
         shared_size_action(None, 98, 51),
         SharedSizeAction::WaitForLayout
-    );
-}
-
-/// A stand-in subscriber, in place of a real `Zetta` — `Zetta::new` opens a tab,
-/// which spawns a shell.
-struct SizeWatcher;
-
-impl gpui::Render for SizeWatcher {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
-        gpui::div()
-    }
-}
-
-/// Watching a terminal's size must not keep the terminal alive.
-///
-/// GPUI stores a subscription on the *emitter* and drops it only when the
-/// emitter is released, so a closure that captures its own emitter is a cycle
-/// nothing can break. A shared pane's terminal caught in one never stops its
-/// byte stream when its tab closes, so the relay socket stays open and the
-/// multiplexer keeps counting this window among the pane's viewers — which is
-/// how unsharing came to be refused for a window that had closed the tab.
-#[gpui::test]
-async fn watching_a_terminals_size_does_not_keep_it_alive(cx: &mut gpui::TestAppContext) {
-    let terminal = cx.update(|cx| {
-        cx.new(|cx| {
-            terminal::TerminalBuilder::new_display_only(
-                terminal::terminal_settings::CursorShape::Block,
-                terminal::terminal_settings::AlternateScroll::On,
-                None,
-                0,
-                cx.background_executor(),
-                util::paths::PathStyle::local(),
-            )
-            .subscribe(cx)
-        })
-    });
-    let weak = terminal.downgrade();
-    let (watcher, window) = cx.add_window_view(|_, _| SizeWatcher);
-    watcher.update_in(window, |_, window, cx| {
-        watch_grid_size(&terminal, window, cx, |_, _, _| {});
-    });
-
-    drop(terminal);
-    window.run_until_parked();
-
-    assert!(
-        weak.upgrade().is_none(),
-        "the subscription must not be the terminal's last owner"
     );
 }

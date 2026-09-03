@@ -692,70 +692,19 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, tab_theme: Arc<Theme>, cx: &App)
         pinned || !is_shrinking || (is_renaming_tab && selected),
     );
     let accessible_title = full_title.clone();
-    let content = h_flex()
-        .min_w_0()
-        .gap_1()
-        .when_some(lifecycle_icon, |content, icon| {
-            content.child(
-                svg()
-                    .path(icon.path())
-                    .size(px(12.))
-                    .flex_none()
-                    .text_color(tab_icon),
-            )
-        })
-        .when_some(silent_mode_icon, |content, icon| {
-            content.child(
-                div()
-                    .id(("tab-silent-mode", tab.id as usize))
-                    .flex_none()
-                    .aria_label("Tab Silent Mode enabled")
-                    .tooltip(Tooltip::text(
-                        "Tab Silent Mode: terminal bells and notification sounds are muted",
-                    ))
-                    .child(svg().path(icon.path()).size(px(14.)).text_color(tab_icon)),
-            )
-        })
-        .when_some(attention_tooltip, |content, tooltip| {
-            content.child(
-                div()
-                    .id(("tab-attention", tab.id as usize))
-                    .size(px(7.))
-                    .flex_none()
-                    .rounded_full()
-                    .bg(tab_colors.text_accent)
-                    .aria_label("Attention required")
-                    .tooltip(Tooltip::text(tooltip)),
-            )
-        })
-        // The tab being renamed always keeps its custom icon, even if the
-        // rest of the bar is shrinking enough to hide everyone else's.
-        .when_some(custom_icon, |content, icon| {
-            content.child(
-                svg()
-                    .path(icon.path())
-                    .size(px(14.))
-                    .flex_none()
-                    .text_color(tab_icon),
-            )
-        })
-        .when(!pinned || is_renaming_this_tab, |content| {
-            content.child(
-                div()
-                    .id(("tab-title", tab.id as usize))
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_sm()
-                    .when(tab.tab_rename_selected(), |title| {
-                        title.bg(tab_colors.element_selection_background)
-                    })
-                    .text_color(tab_text)
-                    .child(title),
-            )
-        })
-        .into_any_element();
+    let content = render_tab_content(
+        tab,
+        tab_colors,
+        tab_text,
+        tab_icon,
+        title,
+        lifecycle_icon,
+        silent_mode_icon,
+        custom_icon,
+        attention_tooltip,
+        pinned,
+        is_renaming_this_tab,
+    );
     let tab_element = tab_bar_row_height(compact_mode, title_bar_height)
         .id(("tab", tab.id as usize))
         .w_full()
@@ -846,68 +795,18 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, tab_theme: Arc<Theme>, cx: &App)
                     }),
             )
         });
-    let menu_handle = handle.clone();
-    let tab_silent_mode = tab.silent_mode;
-    let tab_shared = tab.shared;
-    // The context menu activates this tab before it is rendered. Use
-    // the clicked tab's focus so its key context remains valid after
-    // that switch, including when the tab was previously inactive.
-    let action_context = tab.active_view().map(|view| view.focus_handle(cx));
-    let tab_element =
-        ui::right_click_menu::<ui::ContextMenu>(("tab-context-menu", tab.id as usize))
-            .menu(move |window, cx| {
-                menu_handle
-                    .update(cx, |this, cx| {
-                        this.active_tab = index;
-                        this.tab_overflow_selection_side = None;
-                        cx.notify();
-                    })
-                    .ok();
-                let action_context = action_context.clone();
-                ui::ContextMenu::build(window, cx, move |menu, _, _| {
-                    let menu = menu.when_some(action_context, |menu, focus| menu.context(focus));
-                    menu.action("Rename Tab", Box::new(RenameTab))
-                        .action("Change Tab Icon", Box::new(ChangeTabIcon))
-                        .action("Change Tab Theme", Box::new(ChangeTabTheme))
-                        .action_checked("Pin Tab", Box::new(ToggleTabPinning), pinned)
-                        .action_checked(
-                            "Tab Silent Mode",
-                            Box::new(ToggleTabSilentMode),
-                            tab_silent_mode,
-                        )
-                        .separator()
-                        .when(
-                            action_available_in_launch_mode(ToggleAutoBackgroundTab.name(), no_mux),
-                            |menu| {
-                                menu.action_checked(
-                                    "Keep running",
-                                    Box::new(ToggleAutoBackgroundTab),
-                                    tab_auto_background,
-                                )
-                            },
-                        )
-                        .when(
-                            action_available_in_launch_mode(ToggleTabSharing.name(), no_mux),
-                            |menu| {
-                                menu.action_checked(
-                                    "Share Tab",
-                                    Box::new(ToggleTabSharing),
-                                    tab_shared,
-                                )
-                            },
-                        )
-                        .action("Detach", Box::new(DetachTab))
-                        .when(tab_move_menu_entry_available(tab_count), |menu| {
-                            menu.separator().action_checked(
-                                "Tab Move Mode",
-                                Box::new(ToggleTabMoveMode),
-                                tab_move_mode_active,
-                            )
-                        })
-                })
-            })
-            .trigger(move |_, _, _| tab_element)
-            .into_any_element();
+    let tab_element = with_tab_context_menu(
+        tab_element,
+        tab,
+        index,
+        handle,
+        no_mux,
+        pinned,
+        tab_auto_background,
+        tab_count,
+        tab_move_mode_active,
+        cx,
+    );
     let tab_element = if pinned {
         pinned_tab_container(
             tab_element,
@@ -1030,3 +929,166 @@ fn render_tab_drop_surface(
 #[cfg(test)]
 #[path = "tests/tab_bar_render.rs"]
 mod tests;
+
+/// A tab's inner row: its lifecycle, silent-mode and profile icons, and its
+/// title.
+///
+/// A pinned tab shows only its icons, so the title is drawn only when the tab
+/// is unpinned or is being renamed — a rename has to show the buffer it is
+/// editing whatever the tab's width.
+#[allow(clippy::too_many_arguments)]
+fn render_tab_content(
+    tab: &Tab,
+    tab_colors: &ThemeColors,
+    tab_text: Hsla,
+    tab_icon: Hsla,
+    title: SharedString,
+    lifecycle_icon: Option<IconName>,
+    silent_mode_icon: Option<IconName>,
+    custom_icon: Option<IconName>,
+    attention_tooltip: Option<String>,
+    pinned: bool,
+    is_renaming_this_tab: bool,
+) -> AnyElement {
+    h_flex()
+        .min_w_0()
+        .gap_1()
+        .when_some(lifecycle_icon, |content, icon| {
+            content.child(
+                svg()
+                    .path(icon.path())
+                    .size(px(12.))
+                    .flex_none()
+                    .text_color(tab_icon),
+            )
+        })
+        .when_some(silent_mode_icon, |content, icon| {
+            content.child(
+                div()
+                    .id(("tab-silent-mode", tab.id as usize))
+                    .flex_none()
+                    .aria_label("Tab Silent Mode enabled")
+                    .tooltip(Tooltip::text(
+                        "Tab Silent Mode: terminal bells and notification sounds are muted",
+                    ))
+                    .child(svg().path(icon.path()).size(px(14.)).text_color(tab_icon)),
+            )
+        })
+        .when_some(attention_tooltip, |content, tooltip| {
+            content.child(
+                div()
+                    .id(("tab-attention", tab.id as usize))
+                    .size(px(7.))
+                    .flex_none()
+                    .rounded_full()
+                    .bg(tab_colors.text_accent)
+                    .aria_label("Attention required")
+                    .tooltip(Tooltip::text(tooltip)),
+            )
+        })
+        // The tab being renamed always keeps its custom icon, even if the
+        // rest of the bar is shrinking enough to hide everyone else's.
+        .when_some(custom_icon, |content, icon| {
+            content.child(
+                svg()
+                    .path(icon.path())
+                    .size(px(14.))
+                    .flex_none()
+                    .text_color(tab_icon),
+            )
+        })
+        .when(!pinned || is_renaming_this_tab, |content| {
+            content.child(
+                div()
+                    .id(("tab-title", tab.id as usize))
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_sm()
+                    .when(tab.tab_rename_selected(), |title| {
+                        title.bg(tab_colors.element_selection_background)
+                    })
+                    .text_color(tab_text)
+                    .child(title),
+            )
+        })
+        .into_any_element()
+}
+
+/// Wraps a rendered tab in its right-click menu.
+///
+/// The menu activates the tab it was opened on before it is built, and takes
+/// that tab's focus as its action context, so an action chosen from an
+/// inactive tab's menu still applies to the tab the user clicked.
+#[allow(clippy::too_many_arguments)]
+fn with_tab_context_menu(
+    tab_element: impl IntoElement + 'static,
+    tab: &Tab,
+    index: usize,
+    handle: &WeakEntity<Zetta>,
+    no_mux: bool,
+    pinned: bool,
+    tab_auto_background: bool,
+    tab_count: usize,
+    tab_move_mode_active: bool,
+    cx: &App,
+) -> AnyElement {
+    let menu_handle = handle.clone();
+    let tab_silent_mode = tab.silent_mode;
+    let tab_shared = tab.shared;
+    // The context menu activates this tab before it is rendered. Use
+    // the clicked tab's focus so its key context remains valid after
+    // that switch, including when the tab was previously inactive.
+    let action_context = tab.active_view().map(|view| view.focus_handle(cx));
+    ui::right_click_menu::<ui::ContextMenu>(("tab-context-menu", tab.id as usize))
+        .menu(move |window, cx| {
+            menu_handle
+                .update(cx, |this, cx| {
+                    this.active_tab = index;
+                    this.tab_overflow_selection_side = None;
+                    cx.notify();
+                })
+                .ok();
+            let action_context = action_context.clone();
+            ui::ContextMenu::build(window, cx, move |menu, _, _| {
+                let menu = menu.when_some(action_context, |menu, focus| menu.context(focus));
+                menu.action("Rename Tab", Box::new(RenameTab))
+                    .action("Change Tab Icon", Box::new(ChangeTabIcon))
+                    .action("Change Tab Theme", Box::new(ChangeTabTheme))
+                    .action_checked("Pin Tab", Box::new(ToggleTabPinning), pinned)
+                    .action_checked(
+                        "Tab Silent Mode",
+                        Box::new(ToggleTabSilentMode),
+                        tab_silent_mode,
+                    )
+                    .separator()
+                    .when(
+                        action_available_in_launch_mode(ToggleAutoBackgroundTab.name(), no_mux),
+                        |menu| {
+                            menu.action_checked(
+                                "Keep running",
+                                Box::new(ToggleAutoBackgroundTab),
+                                tab_auto_background,
+                            )
+                        },
+                    )
+                    .when(
+                        action_available_in_launch_mode(ToggleTabSharing.name(), no_mux),
+                        |menu| {
+                            menu.action_checked("Share Tab", Box::new(ToggleTabSharing), tab_shared)
+                        },
+                    )
+                    .action("Detach", Box::new(DetachTab))
+                    .when(tab_move_menu_entry_available(tab_count), |menu| {
+                        menu.separator().action_checked(
+                            "Tab Move Mode",
+                            Box::new(ToggleTabMoveMode),
+                            tab_move_mode_active,
+                        )
+                    })
+            })
+        })
+        .trigger(move |_, _, _| tab_element)
+        .into_any_element()
+}

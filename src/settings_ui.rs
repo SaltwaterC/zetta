@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 mod controls;
+mod dropdowns;
+mod editing;
 pub(crate) mod keymap;
 pub(crate) mod pane_templates;
 pub(crate) mod projects;
