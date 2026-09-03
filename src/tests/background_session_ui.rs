@@ -96,6 +96,7 @@ fn background_session_is_reaped_after_its_final_pane_exits() {
             base_exited: false,
             wsl_cwd_file: None,
             pending_command: None,
+            active_command: None,
             detected_worktree_title: None,
             worktree_detection_directory: None,
             worktree_detection_generation: 0,

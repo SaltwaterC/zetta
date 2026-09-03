@@ -571,6 +571,10 @@ pub(crate) struct TerminalPane {
     pub(crate) base_exited: bool,
     pub(crate) wsl_cwd_file: Option<PathBuf>,
     pub(crate) pending_command: Option<String>,
+    /// The command most recently reported by shell integration. Unlike a
+    /// foreground process argv this is shell input the user actually started,
+    /// so it is safe to offer as restore prefill.
+    pub(crate) active_command: Option<String>,
     /// Automatically detected linked-worktree name for this pane's
     /// interactive-shell directory.
     pub(crate) detected_worktree_title: Option<String>,
@@ -969,6 +973,7 @@ impl TerminalPane {
             base_exited: false,
             wsl_cwd_file: None,
             pending_command: None,
+            active_command: None,
             detected_worktree_title: None,
             worktree_detection_directory: None,
             worktree_detection_generation: 0,
@@ -2053,9 +2058,9 @@ pub(crate) struct Tab {
     /// them can join it and both then drive the same panes.
     ///
     /// Separate from `close_policy`: sharing says who may see the session now,
-    /// keep-running says whether it outlives this window. Enabling keep-running
-    /// also turns sharing on by default so the handoff remains reconnectable
-    /// from another process; the sharing toggle can still turn that offer off.
+    /// and a shared tab is handed back to the multiplexer when its last viewer
+    /// closes. `keep_running` remains the explicit lifecycle policy for an
+    /// unshared tab (and the process-local fallback in `--no-mux` mode).
     pub(crate) shared: bool,
     /// A title entered through the tab rename UI. This is the highest-priority
     /// title source and is intentionally separate from process/worktree state.

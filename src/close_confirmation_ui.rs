@@ -99,8 +99,9 @@ impl Zetta {
         let title = tab
             .map(|tab| tab_overflow_entry_label(tab, cx))
             .unwrap_or_else(|| "this tab".into());
-        let backgrounded =
-            tab.is_some_and(|tab| tab.close_policy.background_authentication().is_some());
+        let backgrounded = tab.is_some_and(|tab| {
+            tab.shared || tab.close_policy.background_authentication().is_some()
+        });
         let handle = cx.entity().downgrade();
         let cancel_handle = handle.clone();
         let confirm_handle = handle;

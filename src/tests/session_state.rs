@@ -71,6 +71,7 @@ fn populated_tab() -> Tab {
         a: 0.4,
     });
     pane.pending_command = Some("cargo test".to_owned());
+    pane.active_command = Some("cargo test --workspace".to_owned());
     pane.detected_worktree_title = Some("worktree".to_owned());
     tab
 }
@@ -165,6 +166,7 @@ fn a_panes_appearance_and_configuration_survive() {
     assert_eq!(after.overlay_opacity, before.overlay_opacity);
     assert_eq!(after.overlay_color, before.overlay_color);
     assert_eq!(after.pending_command, before.pending_command);
+    assert_eq!(after.active_command, before.active_command);
     assert_eq!(
         after.detected_worktree_title,
         before.detected_worktree_title
@@ -314,6 +316,7 @@ fn a_layout_that_does_not_match_its_panes_is_refused() {
         exit: None,
         base_exited: false,
         pending_command: None,
+        active_command: None,
         detected_worktree_title: None,
         stack: Vec::new(),
         selected_stacked: None,
@@ -403,6 +406,52 @@ fn a_command_still_running_at_detach_comes_back_saying_so() {
             .is_some_and(|error| error.contains("still running")),
         "{:?}",
         entry.error
+    );
+}
+
+#[test]
+fn restore_prefill_prefers_pending_command_and_validates_fallbacks() {
+    assert_eq!(
+        restore_prefill_from_commands(Some("pending"), Some("active")).as_deref(),
+        Some("pending")
+    );
+    assert_eq!(
+        restore_prefill_from_commands(None, Some("active")).as_deref(),
+        Some("active")
+    );
+    assert_eq!(restore_prefill_from_commands(None, None), None);
+    assert_eq!(
+        restore_prefill_from_commands(Some("bad\ncommand"), Some("active")).as_deref(),
+        Some("active")
+    );
+    assert_eq!(
+        restore_prefill_from_commands(
+            Some(&"x".repeat(MAX_RESTORE_COMMAND_BYTES + 1)),
+            Some("active")
+        )
+        .as_deref(),
+        Some("active")
+    );
+    assert_eq!(
+        restore_prefill_from_commands(Some("bad\tcommand"), None),
+        None
+    );
+}
+
+#[test]
+fn active_command_is_backward_compatible_when_missing_from_saved_state() {
+    let mut encoded =
+        serde_json::to_value(TabState::from_tab(&populated_tab(), &HashMap::new())).unwrap();
+    for pane in encoded["panes"].as_array_mut().unwrap() {
+        pane.as_object_mut().unwrap().remove("active_command");
+    }
+
+    let decoded = serde_json::from_value::<TabState>(encoded).unwrap();
+    assert!(
+        decoded
+            .panes
+            .iter()
+            .all(|pane| pane.active_command.is_none())
     );
 }
 

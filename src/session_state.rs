@@ -105,6 +105,10 @@ pub(crate) struct PaneState {
     pub(crate) exit: Option<BackgroundPaneExit>,
     pub(crate) base_exited: bool,
     pub(crate) pending_command: Option<String>,
+    /// Shell-reported input that was running when the session was detached.
+    /// Old session records predate this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) active_command: Option<String>,
     pub(crate) detected_worktree_title: Option<String>,
     /// The commands stacked on top of this pane's shell, and which of them is
     /// showing.
@@ -119,6 +123,28 @@ pub(crate) struct PaneState {
     /// The stacked command selected, by id; absent means the base shell.
     #[serde(default)]
     pub(crate) selected_stacked: Option<u64>,
+}
+
+/// The largest command text that can cross a restore boundary. Shell command
+/// markers are user-controlled terminal metadata, so control characters are
+/// rejected before they can become input to a fresh shell.
+pub(crate) const MAX_RESTORE_COMMAND_BYTES: usize = 64 * 1024;
+
+pub(crate) fn valid_restore_command(command: &str) -> Option<String> {
+    (!command.is_empty()
+        && command.len() <= MAX_RESTORE_COMMAND_BYTES
+        && !command.chars().any(char::is_control))
+    .then(|| command.to_owned())
+}
+
+#[cfg(feature = "session-persistence")]
+pub(crate) fn restore_prefill_from_commands(
+    pending_command: Option<&str>,
+    active_command: Option<&str>,
+) -> Option<String> {
+    pending_command
+        .and_then(valid_restore_command)
+        .or_else(|| active_command.and_then(valid_restore_command))
 }
 
 /// One command stacked on a pane.
@@ -377,6 +403,7 @@ impl TabState {
                     exit: pane.exit.clone(),
                     base_exited: pane.base_exited,
                     pending_command: pane.pending_command.clone(),
+                    active_command: pane.active_command.clone(),
                     detected_worktree_title: pane.detected_worktree_title.clone(),
                     stack: pane
                         .stack
@@ -487,6 +514,7 @@ impl TabState {
                 restored.exit = pane.exit;
                 restored.base_exited = pane.base_exited;
                 restored.pending_command = pane.pending_command;
+                restored.active_command = pane.active_command;
                 restored.detected_worktree_title = pane.detected_worktree_title;
                 restored.stack = restore_stack(pane.stack, pane.selected_stacked, &resolve_profile);
                 restored

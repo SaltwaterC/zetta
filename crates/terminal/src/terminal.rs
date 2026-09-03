@@ -1211,6 +1211,9 @@ enum InternalEvent {
     Scroll(Scroll),
     ScrollToPoint(Point),
     SetSelection(Option<Selection>),
+    /// Replays a restore after startup integration has completed. It remains
+    /// queued when layout has not supplied the real grid size yet.
+    ReplayFreshShell,
     UpdateSelection(GpuiPoint<Pixels>),
     FindHyperlink(GpuiPoint<Pixels>, bool),
     ProcessHyperlink(HyperlinkMatch, bool),
@@ -1805,6 +1808,7 @@ fn open_provided_pty(
     term: &Arc<AlacrittyTermLock>,
     output_processor: &mut Processor<StdSyncHandler>,
     console_palette: ConsolePalette,
+    _defer_replay: bool,
 ) -> Result<(
     AlacrittyPty,
     Option<alacritty_terminal::tty::AttachedChildEvents>,
@@ -1844,6 +1848,7 @@ fn open_provided_pty(
     term: &Arc<AlacrittyTermLock>,
     output_processor: &mut Processor<StdSyncHandler>,
     console_palette: ConsolePalette,
+    defer_replay: bool,
 ) -> Result<(
     AlacrittyPty,
     Option<alacritty_terminal::tty::AttachedChildEvents>,
@@ -1864,12 +1869,14 @@ fn open_provided_pty(
     })?;
     let (pty, child_events) =
         alacritty_terminal::tty::attach(handover.conout, handover.conin, handover.child_pid)?;
-    if !handover.replay.is_empty() {
+    if !defer_replay && !handover.replay.is_empty() {
         output_processor.advance(&mut *term.lock(), &handover.replay);
     }
-    // Windows has already replayed the retained output into the terminal,
-    // unlike Unix, which defers it until the terminal has been laid out.
-    Ok((pty, Some(child_events), Vec::new(), Some(handover.control)))
+    // Ordinary Windows handovers are replayed immediately because ConPTY has
+    // already been attached. Fresh-shell restores keep the bytes pending so
+    // they follow the same post-layout path as Unix and can be normalized.
+    let replay = defer_replay.then_some(handover.replay).unwrap_or_default();
+    Ok((pty, Some(child_events), replay, Some(handover.control)))
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -1882,6 +1889,7 @@ fn open_provided_pty(
     _term: &Arc<AlacrittyTermLock>,
     _output_processor: &mut Processor<StdSyncHandler>,
     _console_palette: ConsolePalette,
+    _defer_replay: bool,
 ) -> Result<(
     AlacrittyPty,
     Option<alacritty_terminal::tty::AttachedChildEvents>,
@@ -2076,6 +2084,11 @@ impl TerminalBuilder {
             },
             child_is_the_multiplexers: false,
             pending_replay: None,
+            terminal_size_initialized: terminal_bounds != TerminalBounds::default(),
+            fresh_shell_restore: false,
+            restore_startup_ready: false,
+            restore_prefill: None,
+            restore_prompt_boundary_sent: false,
             child_exited: None,
             child_process_ended: false,
             terminal_exit_reported: false,
@@ -2259,6 +2272,25 @@ impl TerminalBuilder {
         self
     }
 
+    /// Marks this builder as a disk restore. The provider replay remains
+    /// deferred until the shell's startup integration has finished, and the
+    /// fresh shell cannot fall back to a local PTY.
+    pub fn with_fresh_shell_restore(mut self) -> Self {
+        self.terminal.fresh_shell_restore = true;
+        self
+    }
+
+    /// Supplies command text for a restored shell prompt. Control characters
+    /// and commands over 64 KiB are rejected so persisted state cannot turn a
+    /// restore into an implicit submission or a control-sequence injection.
+    pub fn with_restore_prefill(mut self, command: Option<String>) -> Self {
+        self.terminal.restore_prefill = command.and_then(|command| {
+            (command.len() <= 64 * 1024 && !command.chars().any(|character| character.is_control()))
+                .then(|| command.into_bytes())
+        });
+        self
+    }
+
     /// Seeds the last known directory of a restored session. Live shell OSC
     /// metadata or foreground-process inspection takes precedence as soon as
     /// either becomes available, so this fills only the reconstruction gap.
@@ -2318,6 +2350,93 @@ impl TerminalBuilder {
         working_directory: Option<PathBuf>,
         task: Option<TaskState>,
         shell: Shell,
+        env: HashMap<String, String>,
+        cursor_shape: SettingsCursorShape,
+        alternate_scroll: AlternateScroll,
+        max_scroll_history_lines: Option<usize>,
+        path_hyperlink_regexes: Vec<String>,
+        path_hyperlink_timeout_ms: u64,
+        is_remote_terminal: bool,
+        window_id: u64,
+        completion_tx: Option<Sender<Option<ExitStatus>>>,
+        cx: &App,
+        activation_script: Vec<String>,
+        path_style: PathStyle,
+        pty_provider: Option<Arc<dyn PtyProvider>>,
+        initial_console_palette: Option<ConsolePalette>,
+    ) -> Task<Result<TerminalBuilder>> {
+        Self::new_with_console_palette_and_options(
+            working_directory,
+            task,
+            shell,
+            env,
+            cursor_shape,
+            alternate_scroll,
+            max_scroll_history_lines,
+            path_hyperlink_regexes,
+            path_hyperlink_timeout_ms,
+            is_remote_terminal,
+            window_id,
+            completion_tx,
+            cx,
+            activation_script,
+            path_style,
+            pty_provider,
+            initial_console_palette,
+            false,
+        )
+    }
+
+    /// Creates a terminal whose PTY must come from `pty_provider`. This is
+    /// used by disk restoration: a local fallback would silently create a
+    /// different session and make the restored pane impossible to reconnect.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_console_palette_for_restore(
+        working_directory: Option<PathBuf>,
+        task: Option<TaskState>,
+        shell: Shell,
+        env: HashMap<String, String>,
+        cursor_shape: SettingsCursorShape,
+        alternate_scroll: AlternateScroll,
+        max_scroll_history_lines: Option<usize>,
+        path_hyperlink_regexes: Vec<String>,
+        path_hyperlink_timeout_ms: u64,
+        is_remote_terminal: bool,
+        window_id: u64,
+        completion_tx: Option<Sender<Option<ExitStatus>>>,
+        cx: &App,
+        activation_script: Vec<String>,
+        path_style: PathStyle,
+        pty_provider: Option<Arc<dyn PtyProvider>>,
+        initial_console_palette: Option<ConsolePalette>,
+    ) -> Task<Result<TerminalBuilder>> {
+        Self::new_with_console_palette_and_options(
+            working_directory,
+            task,
+            shell,
+            env,
+            cursor_shape,
+            alternate_scroll,
+            max_scroll_history_lines,
+            path_hyperlink_regexes,
+            path_hyperlink_timeout_ms,
+            is_remote_terminal,
+            window_id,
+            completion_tx,
+            cx,
+            activation_script,
+            path_style,
+            pty_provider,
+            initial_console_palette,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_console_palette_and_options(
+        working_directory: Option<PathBuf>,
+        task: Option<TaskState>,
+        shell: Shell,
         mut env: HashMap<String, String>,
         cursor_shape: SettingsCursorShape,
         alternate_scroll: AlternateScroll,
@@ -2332,6 +2451,7 @@ impl TerminalBuilder {
         path_style: PathStyle,
         pty_provider: Option<Arc<dyn PtyProvider>>,
         initial_console_palette: Option<ConsolePalette>,
+        require_pty_provider: bool,
     ) -> Task<Result<TerminalBuilder>> {
         let version = release_channel::AppVersion::global(cx);
         let background_executor = cx.background_executor().clone();
@@ -2347,7 +2467,7 @@ impl TerminalBuilder {
         // Headless hosts (e.g. the eval CLI) have no controlling TTY, so PTY
         // allocation / acquiring a controlling terminal fails with `ENOTTY`.
         // When set, run the command as a plain subprocess instead.
-        let no_pty = HeadlessTerminal::is_enabled(cx);
+        let no_pty = HeadlessTerminal::is_enabled(cx) && !require_pty_provider;
         #[cfg(not(windows))]
         let child_signal_mask = match current_child_signal_mask()
             .context("failed to capture terminal child signal mask")
@@ -2356,6 +2476,9 @@ impl TerminalBuilder {
             Err(error) => return Task::ready(Err(error)),
         };
         let fut = async move {
+            if require_pty_provider && pty_provider.is_none() {
+                bail!("a restored terminal requires a multiplexer PTY provider");
+            }
             // Remove SHLVL so the spawned shell initializes it to 1, matching
             // the behavior of standalone terminal emulators like iTerm2/Kitty/Alacritty.
             env.remove("SHLVL");
@@ -2571,6 +2694,7 @@ impl TerminalBuilder {
                         &term,
                         &mut output_processor,
                         console_palette,
+                        require_pty_provider,
                     ),
                     None => open_pty(&pty_options, TerminalBounds::default(), window_id)
                         .map(|pty| (pty, None, Vec::new(), None))
@@ -2580,7 +2704,7 @@ impl TerminalBuilder {
                 // from opening. Falling back to a local process costs the
                 // session its ability to outlive this window, which is a far
                 // smaller loss than a terminal that refuses to start.
-                if let (Err(error), Some(_)) = (&opened, &pty_provider) {
+                if !require_pty_provider && let (Err(error), Some(_)) = (&opened, &pty_provider) {
                     log::warn!(
                         "the multiplexer could not open this terminal, starting it locally \
                          instead: {error:#}"
@@ -2702,6 +2826,11 @@ impl TerminalBuilder {
                 // `owns_child` reads from the template).
                 child_is_the_multiplexers: false,
                 pending_replay,
+                terminal_size_initialized: false,
+                fresh_shell_restore: false,
+                restore_startup_ready: false,
+                restore_prefill: None,
+                restore_prompt_boundary_sent: false,
                 child_exited: None,
                 child_process_ended: false,
                 terminal_exit_reported: false,
@@ -2967,6 +3096,17 @@ pub struct Terminal {
     /// width and then reflows it again, which is how a restored session ends
     /// up looking corrupted rather than resumed.
     pending_replay: Option<Vec<u8>>,
+    /// Whether a real pane layout has supplied the terminal's grid size. The
+    /// constructor's debug bounds are only a placeholder for PTYs.
+    terminal_size_initialized: bool,
+    /// A disk restore creates a new shell rather than reattaching the process
+    /// that produced the snapshot. Its replay waits for startup integration,
+    /// then becomes the primary screen with ordinary shell modes.
+    fresh_shell_restore: bool,
+    restore_startup_ready: bool,
+    /// Text to place at the fresh prompt, without submitting it.
+    restore_prefill: Option<Vec<u8>>,
+    restore_prompt_boundary_sent: bool,
     child_exited: Option<ExitStatus>,
     /// Set once the pty's child is known to have ended, as opposed to the pty
     /// merely having become unusable. Its process group ids are free to be
@@ -3319,6 +3459,34 @@ impl Terminal {
         self.selection_phase == SelectionPhase::Selecting
     }
 
+    /// Applies retained output once the fresh-shell restore has both completed
+    /// startup integration and received a real layout size. The same helper is
+    /// called from a resize and from the startup completion path: either one
+    /// may happen first, and the replay must not depend on that timing.
+    fn replay_pending(&mut self, term: &mut AlacrittyTerm) {
+        if self.fresh_shell_restore
+            && (!self.restore_startup_ready || !self.terminal_size_initialized)
+        {
+            return;
+        }
+        let Some(replay) = self.pending_replay.take() else {
+            return;
+        };
+        if self.fresh_shell_restore {
+            term.reset_for_fresh_shell_replay();
+        }
+        self.output_processor.advance(term, &replay);
+        if self.fresh_shell_restore {
+            // Alternate-screen normalization reserializes the two bounded
+            // buffers to merge the primary history with the saved screen.
+            // Release the original replay before that second bounded buffer
+            // is built.
+            drop(replay);
+            term.normalize_for_fresh_shell();
+            self.start_fresh_shell_input();
+        }
+    }
+
     fn process_terminal_event(
         &mut self,
         event: &InternalEvent,
@@ -3341,6 +3509,7 @@ impl Terminal {
                     || term.columns() != new_bounds.num_columns();
                 let columns_changed = term.columns() != new_bounds.num_columns();
                 self.last_content.terminal_bounds = new_bounds;
+                self.terminal_size_initialized = true;
 
                 #[cfg(windows)]
                 if let TerminalType::Pty { pty_tx, .. } = &self.terminal_type {
@@ -3368,9 +3537,7 @@ impl Terminal {
                 // The grid is now the size the pane actually has, which is the
                 // first moment a restored screen can be written without being
                 // wrapped at the wrong width.
-                if let Some(replay) = self.pending_replay.take() {
-                    self.output_processor.advance(term, &replay);
-                }
+                self.replay_pending(term);
                 if grid_size_changed {
                     cx.emit(Event::GridSizeChanged);
                 }
@@ -3386,6 +3553,7 @@ impl Terminal {
                     cx.emit(Event::Wakeup);
                 }
             }
+            InternalEvent::ReplayFreshShell => self.replay_pending(term),
             InternalEvent::Clear => {
                 trace!("Clearing");
                 clear_saved_screen(term);
@@ -3874,6 +4042,13 @@ impl Terminal {
     pub fn input(&mut self, input: impl Into<Cow<'static, [u8]>>) {
         let input: Cow<'static, [u8]> = input.into();
         self.keyboard_input_sent = true;
+        // A user who types while a restored screen is waiting for shell
+        // startup has taken ownership of the fresh prompt. Do not later append
+        // the saved interrupted command to that input.
+        if self.fresh_shell_restore && self.restore_prefill.is_some() {
+            self.restore_prefill = None;
+            self.restore_prompt_boundary_sent = true;
+        }
         if self.init_command_startup_done_title.is_some() {
             self.init_command_startup_pending_input
                 .extend_from_slice(input.as_ref());
@@ -4055,6 +4230,43 @@ impl Terminal {
     /// input.
     pub fn write_init_command(&mut self, input: impl Into<Cow<'static, [u8]>>) {
         self.write_input(input);
+    }
+
+    /// Allows a fresh-shell restore to reveal its replay after the shell
+    /// integration command has completed. The replay itself still waits for
+    /// the first real resize, which is when the terminal has its final grid
+    /// dimensions.
+    pub fn finish_fresh_shell_restore(&mut self, cx: &mut Context<Self>) {
+        if !self.fresh_shell_restore {
+            return;
+        }
+        self.restore_startup_ready = true;
+        self.complete_init_command_startup_handshake();
+        self.init_command_startup_done_title = None;
+        self.release_init_command_startup_render();
+        if self.pending_replay.is_some() {
+            self.events.push_back(InternalEvent::ReplayFreshShell);
+        } else {
+            self.start_fresh_shell_input();
+        }
+        cx.emit(Event::Wakeup);
+    }
+
+    /// Sends an empty line to the fresh shell after replay so its prompt is a
+    /// new boundary below the saved screen, then writes the saved command
+    /// without Enter. If the user typed first, [`Self::input`] has cancelled
+    /// the prefill and this method only preserves their input.
+    fn start_fresh_shell_input(&mut self) {
+        if self.restore_prompt_boundary_sent || self.child_exited.is_some() {
+            return;
+        }
+        self.restore_prompt_boundary_sent = true;
+        if !self.keyboard_input_sent {
+            self.write_to_pty(b"\r");
+            if let Some(prefill) = self.restore_prefill.take() {
+                self.write_init_command(prefill);
+            }
+        }
     }
 
     pub fn is_pty(&self) -> bool {
@@ -7138,6 +7350,237 @@ mod tests {
             content.matches("restored-screen").count(),
             1,
             "the screen must be replayed exactly once: {content:?}"
+        );
+    }
+
+    /// Disk restore reuses the ordinary replay boundary, then turns a possibly
+    /// alternate-screen snapshot into a normal shell prompt. The command is
+    /// written as input but deliberately has no carriage return of its own.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn a_fresh_shell_restore_normalizes_modes_and_prefills_without_enter(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        cx.executor().allow_parking();
+        let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let builder = cx.update(|cx| {
+            TerminalBuilder::new_byte_stream(
+                Box::new(CannedReader { bytes: Vec::new() }),
+                Box::new(RecordingWriter(written.clone())),
+                String::new(),
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .with_replay(b"\x1b[?1049h\x1b[?1h\x1b[2J\x1b[Hrestored-screen".to_vec())
+            .with_fresh_shell_restore()
+            .with_restore_prefill(Some("interrupted command".to_owned()))
+        });
+        let window = cx.add_empty_window();
+        let terminal = window.new(|cx| builder.subscribe(cx));
+        window.run_until_parked();
+        window.update_window_entity(&terminal, |terminal, window, cx| {
+            terminal.finish_fresh_shell_restore(cx);
+            terminal.set_size(TerminalBounds::new(
+                Pixels::from(10.),
+                Pixels::from(8.),
+                bounds(
+                    GpuiPoint::default(),
+                    size(Pixels::from(200. * 8.), Pixels::from(24. * 10.)),
+                ),
+            ));
+            terminal.sync(window, cx);
+        });
+        window.run_until_parked();
+
+        let content = terminal.update(window, |terminal, _| terminal.get_content());
+        assert!(content.contains("restored-screen"), "{content:?}");
+        let mode = terminal.update(window, |terminal, _| *terminal.term.lock().mode());
+        assert_eq!(mode, alacritty_terminal::term::TermMode::default());
+        // Byte-stream writes are delivered by their dedicated writer thread,
+        // and the prompt boundary and prefill are separate writes. Wait for
+        // the complete payload rather than stopping after the boundary's
+        // carriage return reaches the recording writer.
+        let expected = b"\rinterrupted command";
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while written.lock().unwrap().len() < expected.len() && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            written.lock().unwrap().as_slice(),
+            expected,
+            "restore prefill must not submit the saved command"
+        );
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn a_fresh_shell_restore_keeps_replayed_scrollback(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.executor().allow_parking();
+        let mut replay = Vec::new();
+        for line in 0..30 {
+            replay.extend_from_slice(format!("restored line {line}\r\n").as_bytes());
+        }
+        let builder = cx.update(|cx| {
+            TerminalBuilder::new_byte_stream(
+                Box::new(CannedReader { bytes: Vec::new() }),
+                Box::new(std::io::sink()),
+                String::new(),
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .with_replay(replay)
+            .with_fresh_shell_restore()
+        });
+        let window = cx.add_empty_window();
+        let terminal = window.new(|cx| builder.subscribe(cx));
+        window.run_until_parked();
+        window.update_window_entity(&terminal, |terminal, window, cx| {
+            terminal.finish_fresh_shell_restore(cx);
+            terminal.set_size(TerminalBounds::new(
+                Pixels::from(10.),
+                Pixels::from(8.),
+                bounds(
+                    GpuiPoint::default(),
+                    size(Pixels::from(40. * 8.), Pixels::from(5. * 10.)),
+                ),
+            ));
+            terminal.sync(window, cx);
+        });
+        window.run_until_parked();
+
+        let history_size =
+            terminal.update(window, |terminal, _| terminal.term.lock().history_size());
+        assert!(
+            history_size > 0,
+            "fresh-shell replay kept only the visible viewport"
+        );
+        let content = terminal.update(window, |terminal, _| terminal.get_content());
+        assert!(
+            content.contains("restored line 0"),
+            "the oldest replayed line is not in scrollback: {content:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn a_fresh_shell_restore_keeps_primary_scrollback_from_an_alternate_screen(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        cx.executor().allow_parking();
+        let mut replay = Vec::new();
+        for line in 0..30 {
+            replay.extend_from_slice(format!("shell line {line}\r\n").as_bytes());
+        }
+        replay.extend_from_slice(b"\x1b[?1049h\x1b[2J\x1b[Hrestored screen");
+        let builder = cx.update(|cx| {
+            TerminalBuilder::new_byte_stream(
+                Box::new(CannedReader { bytes: Vec::new() }),
+                Box::new(std::io::sink()),
+                String::new(),
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .with_replay(replay)
+            .with_fresh_shell_restore()
+        });
+        let window = cx.add_empty_window();
+        let terminal = window.new(|cx| builder.subscribe(cx));
+        window.run_until_parked();
+        window.update_window_entity(&terminal, |terminal, window, cx| {
+            terminal.finish_fresh_shell_restore(cx);
+            terminal.set_size(TerminalBounds::new(
+                Pixels::from(10.),
+                Pixels::from(8.),
+                bounds(
+                    GpuiPoint::default(),
+                    size(Pixels::from(40. * 8.), Pixels::from(5. * 10.)),
+                ),
+            ));
+            terminal.sync(window, cx);
+        });
+        window.run_until_parked();
+
+        let history_size =
+            terminal.update(window, |terminal, _| terminal.term.lock().history_size());
+        let content = terminal.update(window, |terminal, _| terminal.get_content());
+        assert!(
+            history_size > 0,
+            "alternate-screen normalization discarded the saved scrollback"
+        );
+        assert!(
+            content.contains("shell line 0"),
+            "the primary scrollback was discarded during normalization: {content:?}"
+        );
+        assert!(content.contains("restored screen"), "{content:?}");
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn user_input_before_fresh_restore_ready_cancels_prefill(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.executor().allow_parking();
+        let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let builder = cx.update(|cx| {
+            TerminalBuilder::new_byte_stream(
+                Box::new(CannedReader { bytes: Vec::new() }),
+                Box::new(RecordingWriter(written.clone())),
+                String::new(),
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .with_replay(b"saved screen".to_vec())
+            .with_fresh_shell_restore()
+            .with_restore_prefill(Some("interrupted command".to_owned()))
+        });
+        let window = cx.add_empty_window();
+        let terminal = window.new(|cx| builder.subscribe(cx));
+        window.run_until_parked();
+        window.update_window_entity(&terminal, |terminal, window, cx| {
+            terminal.input(b"user input".to_vec());
+            terminal.finish_fresh_shell_restore(cx);
+            terminal.set_size(TerminalBounds::new(
+                Pixels::from(10.),
+                Pixels::from(8.),
+                bounds(
+                    GpuiPoint::default(),
+                    size(Pixels::from(200. * 8.), Pixels::from(24. * 10.)),
+                ),
+            ));
+            terminal.sync(window, cx);
+        });
+        window.run_until_parked();
+
+        // Byte-stream writes are delivered by their dedicated writer thread,
+        // so the input may not have reached the recording writer when the
+        // GPUI test executor becomes idle.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while written.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            written.lock().unwrap().as_slice(),
+            b"user input",
+            "user input must cancel the saved prefill"
         );
     }
 

@@ -55,6 +55,12 @@ fn shell_integration_startup_command(shell: &Shell) -> Option<Vec<u8>> {
     Some(command)
 }
 
+#[derive(Clone)]
+struct RestoredTerminalOptions {
+    replay: Option<Vec<u8>>,
+    prefill: Option<String>,
+}
+
 impl Zetta {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn spawn_terminal(
@@ -114,6 +120,78 @@ impl Zetta {
             &terminal_settings,
             path_hyperlink_regexes,
             false,
+            window,
+            cx,
+        );
+    }
+
+    /// Starts a new shell in a daemon-created restore session. The saved
+    /// screen is handed to the provider as a one-shot replay, while the shell
+    /// itself is always created by the daemon from the saved profile and CWD.
+    #[cfg(feature = "session-persistence")]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn spawn_restored_terminal(
+        &mut self,
+        tab_id: u64,
+        pane_id: u64,
+        profile: Profile,
+        working_directory: Option<PathBuf>,
+        wsl_directory: Option<String>,
+        wsl_cwd_file: Option<PathBuf>,
+        environment_overrides: HashMap<String, String>,
+        replay: Option<Vec<u8>>,
+        prefill: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (pane_theme_override, tab_theme_override) = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .map(|tab| {
+                (
+                    tab.pane(pane_id)
+                        .and_then(|pane| pane.theme_override.as_deref()),
+                    tab.theme_override.as_deref(),
+                )
+            })
+            .unwrap_or((None, None));
+        let terminal_theme = match resolve_terminal_theme(
+            pane_theme_override,
+            tab_theme_override,
+            &profile,
+            self.project_config_for_tab(tab_id).map(Arc::as_ref),
+            cx,
+        ) {
+            Ok(theme) => theme,
+            Err(error) => {
+                if let Some(pane) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.id == tab_id)
+                    .and_then(|tab| tab.pane_mut(pane_id))
+                {
+                    pane.error = Some(format!("Could not apply profile theme: {error:#}"));
+                }
+                cx.notify();
+                return;
+            }
+        };
+        let mut settings = TerminalSpawnSettings::current(cx);
+        let path_hyperlink_regexes = settings.path_hyperlink_regexes(true);
+        self.spawn_terminal_with_theme_and_environment_options(
+            tab_id,
+            pane_id,
+            profile,
+            working_directory,
+            wsl_directory,
+            wsl_cwd_file,
+            terminal_theme,
+            &settings,
+            path_hyperlink_regexes,
+            environment_overrides,
+            false,
+            Some(RestoredTerminalOptions { replay, prefill }),
             window,
             cx,
         );
@@ -233,13 +311,22 @@ impl Zetta {
                                             run_registry.tracking_ready(identity)
                                         }
                                         TerminalEvent::CommandStarted { command } => {
-                                            run_registry.command_started(identity, command.clone())
+                                            run_registry.command_started(identity, command.clone());
+                                            this.update_active_command(
+                                                tab_id,
+                                                pane_id,
+                                                crate::session_state::valid_restore_command(
+                                                    command,
+                                                ),
+                                            );
                                         }
                                         TerminalEvent::CommandFinished { exit_code } => {
-                                            run_registry.command_finished(identity, *exit_code)
+                                            run_registry.command_finished(identity, *exit_code);
+                                            this.update_active_command(tab_id, pane_id, None);
                                         }
                                         TerminalEvent::TerminalExited(_) => {
-                                            run_registry.terminal_lost(identity)
+                                            run_registry.terminal_lost(identity);
+                                            this.update_active_command(tab_id, pane_id, None);
                                         }
                                         _ => {}
                                     }
@@ -467,6 +554,42 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.spawn_terminal_with_theme_and_environment_options(
+            tab_id,
+            pane_id,
+            profile,
+            working_directory,
+            wsl_directory,
+            wsl_cwd_file,
+            terminal_theme,
+            settings,
+            path_hyperlink_regexes,
+            environment_overrides,
+            tracked_multi_command_launch,
+            None,
+            window,
+            cx,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_terminal_with_theme_and_environment_options(
+        &mut self,
+        tab_id: u64,
+        pane_id: u64,
+        profile: Profile,
+        working_directory: Option<PathBuf>,
+        wsl_directory: Option<String>,
+        wsl_cwd_file: Option<PathBuf>,
+        terminal_theme: Option<Arc<Theme>>,
+        settings: &TerminalSpawnSettings,
+        path_hyperlink_regexes: Vec<String>,
+        environment_overrides: HashMap<String, String>,
+        tracked_multi_command_launch: bool,
+        restore_options: Option<RestoredTerminalOptions>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let shell = if is_wsl_shell(&profile.command) {
             wsl_shell_with_tracking(
                 profile.command.clone(),
@@ -500,7 +623,7 @@ impl Zetta {
         } else {
             profile.command.clone()
         };
-        self.spawn_terminal_with_shell_and_environment(
+        self.spawn_terminal_with_shell_and_environment_options(
             tab_id,
             pane_id,
             profile,
@@ -513,6 +636,7 @@ impl Zetta {
             path_hyperlink_regexes,
             environment_overrides,
             tracked_multi_command_launch,
+            restore_options,
             window,
             cx,
         );
@@ -533,6 +657,44 @@ impl Zetta {
         path_hyperlink_regexes: Vec<String>,
         environment_overrides: HashMap<String, String>,
         tracked_multi_command_launch: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.spawn_terminal_with_shell_and_environment_options(
+            tab_id,
+            pane_id,
+            profile,
+            shell,
+            working_directory,
+            _wsl_directory,
+            wsl_cwd_file,
+            terminal_theme,
+            settings,
+            path_hyperlink_regexes,
+            environment_overrides,
+            tracked_multi_command_launch,
+            None,
+            window,
+            cx,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_terminal_with_shell_and_environment_options(
+        &mut self,
+        tab_id: u64,
+        pane_id: u64,
+        profile: Profile,
+        shell: Shell,
+        working_directory: Option<PathBuf>,
+        _wsl_directory: Option<String>,
+        wsl_cwd_file: Option<PathBuf>,
+        terminal_theme: Option<Arc<Theme>>,
+        settings: &TerminalSpawnSettings,
+        path_hyperlink_regexes: Vec<String>,
+        environment_overrides: HashMap<String, String>,
+        tracked_multi_command_launch: bool,
+        restore_options: Option<RestoredTerminalOptions>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -646,7 +808,14 @@ impl Zetta {
         let shell_integration_startup_command = (!is_wsl)
             .then(|| shell_integration_startup_command(&shell))
             .flatten();
-        let mux_provider = match self.mux_provider_for_tab(tab_id, cx) {
+        let restore_replay = restore_options
+            .as_ref()
+            .and_then(|options| options.replay.clone());
+        let mux_provider = match self.mux_provider_for_tab_with_restore_replay(
+            tab_id,
+            restore_replay,
+            cx,
+        ) {
             Ok(provider) => provider,
             Err(error) => {
                 if let Some(pane) = self
@@ -665,32 +834,66 @@ impl Zetta {
         };
         let initial_console_palette =
             (!is_wsl).then(|| terminal::console_palette_for_theme(effective_theme.as_ref()));
-        let builder = TerminalBuilder::new_with_console_palette(
-            working_directory,
-            None,
-            shell,
-            environment,
-            settings.cursor_shape,
-            settings.alternate_scroll,
-            settings.max_scroll_history_lines,
-            path_hyperlink_regexes,
-            settings.path_hyperlink_timeout_ms,
-            false,
-            cx.entity_id().as_u64(),
-            None,
-            cx,
-            Vec::new(),
-            PathStyle::local(),
-            mux_provider
-                .clone()
-                .map(|provider| provider as Arc<dyn terminal::PtyProvider>),
-            initial_console_palette,
-        );
+        let restored_working_directory = restore_options
+            .is_some()
+            .then(|| working_directory.clone())
+            .flatten();
+        let builder = if restore_options.is_some() {
+            TerminalBuilder::new_with_console_palette_for_restore(
+                working_directory,
+                None,
+                shell,
+                environment,
+                settings.cursor_shape,
+                settings.alternate_scroll,
+                settings.max_scroll_history_lines,
+                path_hyperlink_regexes,
+                settings.path_hyperlink_timeout_ms,
+                false,
+                cx.entity_id().as_u64(),
+                None,
+                cx,
+                Vec::new(),
+                PathStyle::local(),
+                mux_provider
+                    .clone()
+                    .map(|provider| provider as Arc<dyn terminal::PtyProvider>),
+                initial_console_palette,
+            )
+        } else {
+            TerminalBuilder::new_with_console_palette(
+                working_directory,
+                None,
+                shell,
+                environment,
+                settings.cursor_shape,
+                settings.alternate_scroll,
+                settings.max_scroll_history_lines,
+                path_hyperlink_regexes,
+                settings.path_hyperlink_timeout_ms,
+                false,
+                cx.entity_id().as_u64(),
+                None,
+                cx,
+                Vec::new(),
+                PathStyle::local(),
+                mux_provider
+                    .clone()
+                    .map(|provider| provider as Arc<dyn terminal::PtyProvider>),
+                initial_console_palette,
+            )
+        };
 
         let this = cx.entity().downgrade();
         window
             .spawn(cx, async move |cx| match builder.await {
                 Ok(mut builder) => {
+                    if let Some(options) = restore_options.as_ref() {
+                        builder = builder
+                            .with_fresh_shell_restore()
+                            .with_restore_prefill(options.prefill.clone())
+                            .with_working_directory(restored_working_directory);
+                    }
                     this.update_in(cx, |this, window, cx| {
                         this.adopt_mux_pane(
                             tab_id,
@@ -723,13 +926,20 @@ impl Zetta {
                                         run_registry.tracking_ready(run_identity)
                                     }
                                     TerminalEvent::CommandStarted { command } => {
-                                        run_registry.command_started(run_identity, command.clone())
+                                        run_registry.command_started(run_identity, command.clone());
+                                        this.update_active_command(
+                                            tab_id,
+                                            pane_id,
+                                            crate::session_state::valid_restore_command(command),
+                                        );
                                     }
                                     TerminalEvent::CommandFinished { exit_code } => {
-                                        run_registry.command_finished(run_identity, *exit_code)
+                                        run_registry.command_finished(run_identity, *exit_code);
+                                        this.update_active_command(tab_id, pane_id, None);
                                     }
                                     TerminalEvent::TerminalExited(_) => {
-                                        run_registry.terminal_lost(run_identity)
+                                        run_registry.terminal_lost(run_identity);
+                                        this.update_active_command(tab_id, pane_id, None);
                                     }
                                     _ => {}
                                 }
@@ -851,7 +1061,9 @@ impl Zetta {
                             pane.base_exited = false;
                             pane.error = None;
                             pane.exit = None;
-                            if let Some(command) = pane.pending_command.take() {
+                            if restore_options.is_none()
+                                && let Some(command) = pane.pending_command.take()
+                            {
                                 view.update(cx, |view, cx| {
                                     view.apply_input(
                                         &TerminalInput::Text(format!("{command}\r")),
@@ -893,7 +1105,27 @@ impl Zetta {
                         if tracked_multi_command_launch {
                             this.finish_multi_command_launch(window, cx);
                         }
-                        if let Some(command) = shell_integration_startup_command.as_ref() {
+                        if restore_options.is_some() {
+                            let terminal_for_restore = terminal.clone();
+                            if let Some(command) = shell_integration_startup_command.as_ref() {
+                                let startup_handshake = terminal.update(cx, |terminal, _| {
+                                    terminal.start_init_command_startup_handshake()
+                                });
+                                let command = command.clone();
+                                cx.spawn(async move |_this, cx| {
+                                    startup_handshake.await;
+                                    terminal_for_restore.update(cx, |terminal, cx| {
+                                        terminal.write_init_command_after_startup(command, cx);
+                                        terminal.finish_fresh_shell_restore(cx);
+                                    });
+                                })
+                                .detach();
+                            } else {
+                                terminal_for_restore.update(cx, |terminal, cx| {
+                                    terminal.finish_fresh_shell_restore(cx);
+                                });
+                            }
+                        } else if let Some(command) = shell_integration_startup_command.as_ref() {
                             let startup_handshake = terminal.update(cx, |terminal, _| {
                                 terminal.start_init_command_startup_handshake()
                             });

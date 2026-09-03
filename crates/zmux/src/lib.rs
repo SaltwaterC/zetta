@@ -96,7 +96,7 @@ fn usage(no_mux: bool) -> String {
             ("list", "List the sessions this multiplexer is holding"),
             (
                 "resume SESSION",
-                "Resume an encrypted disk record; saved screens are read-only",
+                "Restore an encrypted disk record with fresh shells; original processes are not resumed",
             ),
             (
                 "stop",
@@ -116,11 +116,11 @@ fn usage(no_mux: bool) -> String {
             ),
             (
                 "kill SESSION_ID",
-                "End a session and everything running in it",
+                "End a live session and everything running in it, or discard a stale disk record",
             ),
             (
                 "forget SESSION_ID",
-                "Remove a session from the catalog without killing it",
+                "Remove a live session or stale disk record from the catalog",
             ),
         ])
     };
@@ -168,7 +168,7 @@ fn no_mux_environment() -> bool {
     std::env::var(NO_MUX_ENVIRONMENT_VARIABLE).is_ok_and(|value| value == "1")
 }
 
-const SESSION_ID_HELP: &str = "SESSION_ID is either the bare numeric session ID or the stable PROCESS:RUNNER:SESSION catalog identifier printed by `zmux list`. The bare form is accepted only when the numeric ID is unambiguous; use the full form when more than one catalog contains it. `share` changes a scoped session to shared mode and offers an optional secret; press Enter on an empty prompt for no protection. Entered characters are shown as `*`, and Ctrl-C cancels the prompt. `reconnect` is the command that opens it in a Zetta window. `resume` accepts the opaque numeric record ID from disk retention.";
+const SESSION_ID_HELP: &str = "SESSION_ID is either the bare numeric session ID or the stable PROCESS:RUNNER:SESSION catalog identifier printed by `zmux list`. The bare form is accepted only when the numeric ID is unambiguous; use the full form when more than one catalog contains it. `share` changes a scoped session to shared mode and offers an optional secret; press Enter on an empty prompt for no protection. Entered characters are shown as `*`, and Ctrl-C cancels the prompt. `reconnect` is the command that opens it in a Zetta window. `resume` accepts the opaque numeric record ID from disk retention; `kill` and `forget` can discard one when its daemon session is gone.";
 const NO_MUX_SESSION_ID_HELP: &str = "SESSION_ID is either the bare numeric session ID or the stable PROCESS:RUNNER:SESSION catalog identifier printed by `zmux list`. The bare form is accepted only when the numeric ID is unambiguous; use the full form when more than one catalog contains it. `reconnect` is the command that opens it in a Zetta window.";
 
 enum SessionArgument {
@@ -248,7 +248,7 @@ fn resolve_restorable_id(client: &client::Client, argument: SessionArgument) -> 
     Ok(id)
 }
 
-#[cfg(all(unix, feature = "session-persistence"))]
+#[cfg(feature = "session-persistence")]
 fn resolve_forget_id(argument: SessionArgument, directory: &std::path::Path) -> Result<u64> {
     match argument {
         SessionArgument::Bare(id) => {
@@ -285,6 +285,12 @@ fn resolve_forget_id(argument: SessionArgument, directory: &std::path::Path) -> 
             Ok(identifier.session_id)
         }
     }
+}
+
+#[cfg(feature = "session-persistence")]
+fn is_missing_session_error(error: &anyhow::Error, session_id: u64) -> bool {
+    let expected = format!("session {session_id} does not exist");
+    error.chain().any(|cause| cause.to_string() == expected)
 }
 
 fn ensure_unambiguous_session_id(
@@ -626,7 +632,7 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
             {
                 if reconnect::try_run_resume_disk_session(&session.to_string(), &identity_paths)? {
                     println!(
-                        "Resumed disk session {}; its saved screens are read-only; processes are not resumed.",
+                        "Restored disk session {}; fresh shells were started by a Zetta window; original processes were not resumed.",
                         session
                     );
                     return Ok(());
@@ -638,7 +644,7 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
                 let record_id = resolve_restorable_id(&client, session)?;
                 client.resume(record_id, &identity_paths)?;
                 println!(
-                    "Resumed disk session {record_id}; its saved screens are read-only; processes are not resumed."
+                    "Acknowledged disk session {record_id}; no Zetta window was available, so no fresh shells were started; original processes were not resumed."
                 );
                 Ok(())
             }
@@ -653,12 +659,34 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
         }
         Some("kill") => {
             let session = session.context_missing()?;
-            let Some(client) = client::Client::connect_existing()? else {
+            let directory = paths::session_catalog_dir();
+            if let Some(client) = client::Client::connect_existing()? {
+                let session = resolve_session_id(&client, session, &directory)?;
+                match client.kill(session) {
+                    Ok(()) => println!("Ended session {session}."),
+                    #[cfg(feature = "session-persistence")]
+                    Err(error) if is_missing_session_error(&error, session) => {
+                        anyhow::ensure!(
+                            persistence::forget_opaque_record(&directory, session)?,
+                            "session {session} does not exist"
+                        );
+                        println!("Forgot stale disk session {session}.");
+                    }
+                    Err(error) => return Err(error),
+                }
+            } else {
+                #[cfg(feature = "session-persistence")]
+                {
+                    let session = resolve_forget_id(session, &directory)?;
+                    anyhow::ensure!(
+                        persistence::forget_opaque_record(&directory, session)?,
+                        "session {session} does not exist"
+                    );
+                    println!("Forgot stale disk session {session}.");
+                }
+                #[cfg(not(feature = "session-persistence"))]
                 anyhow::bail!("no multiplexer is running");
-            };
-            let session = resolve_session_id(&client, session, &paths::session_catalog_dir())?;
-            client.kill(session)?;
-            println!("Ended session {session}.");
+            }
             Ok(())
         }
         command @ (Some("share") | Some("unshare")) => {
@@ -691,51 +719,48 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
         }
         Some("forget") => {
             let session = session.context_missing()?;
-            #[cfg(unix)]
+            #[cfg(feature = "session-persistence")]
             {
-                let session_id = {
-                    #[cfg(feature = "session-persistence")]
-                    {
-                        let directory = paths::session_catalog_dir();
-                        let session_id = resolve_forget_id(session, &directory)?;
-                        if let Some(client) = client::Client::connect_existing()? {
-                            client.forget(session_id)?;
-                        } else {
+                let directory = paths::session_catalog_dir();
+                let session_id = resolve_forget_id(session, &directory)?;
+                if let Some(client) = client::Client::connect_existing()? {
+                    match client.forget(session_id) {
+                        Ok(()) => {}
+                        Err(error) if is_missing_session_error(&error, session_id) => {
                             anyhow::ensure!(
                                 persistence::forget_opaque_record(&directory, session_id)?,
                                 "session {session_id} does not exist"
                             );
                         }
-                        session_id
+                        Err(error) => return Err(error),
                     }
-                    #[cfg(not(feature = "session-persistence"))]
-                    {
-                        let Some(client) = client::Client::connect_existing()? else {
-                            anyhow::bail!("no multiplexer is running");
-                        };
-                        let session_id =
-                            resolve_session_id(&client, session, &paths::session_catalog_dir())?;
-                        client.forget(session_id)?;
-                        session_id
-                    }
-                };
+                } else {
+                    anyhow::ensure!(
+                        persistence::forget_opaque_record(&directory, session_id)?,
+                        "session {session_id} does not exist"
+                    );
+                }
                 println!("Forgot session {session_id}.");
                 Ok(())
             }
-            #[cfg(windows)]
+            #[cfg(not(feature = "session-persistence"))]
             {
-                let Some(client) = client::Client::connect_existing()? else {
-                    anyhow::bail!("no multiplexer is running");
-                };
-                let session = resolve_session_id(&client, session, &paths::session_catalog_dir())?;
-                client.forget(session)?;
-                println!("Forgot session {session}.");
-                Ok(())
-            }
-            #[cfg(not(any(unix, windows)))]
-            {
-                let _ = session;
-                anyhow::bail!("the multiplexer is not yet supported on this platform")
+                #[cfg(any(unix, windows))]
+                {
+                    let Some(client) = client::Client::connect_existing()? else {
+                        anyhow::bail!("no multiplexer is running");
+                    };
+                    let session =
+                        resolve_session_id(&client, session, &paths::session_catalog_dir())?;
+                    client.forget(session)?;
+                    println!("Forgot session {session}.");
+                    Ok(())
+                }
+                #[cfg(not(any(unix, windows)))]
+                {
+                    let _ = session;
+                    anyhow::bail!("the multiplexer is not yet supported on this platform")
+                }
             }
         }
         Some("list") | None => catalog::print_session_catalogs(&paths::session_catalog_dir(), json),

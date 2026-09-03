@@ -2,7 +2,7 @@
 
 use std::ops::{Index, IndexMut, Range};
 use std::sync::{Arc, OnceLock, mpsc};
-use std::{cmp, mem, ptr, slice, str, thread};
+use std::{cmp, io::Write as _, mem, ptr, slice, str, thread};
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -22,8 +22,8 @@ use crate::term::color::Colors;
 use crate::vi_mode::{ViModeCursor, ViMotion};
 use crate::vte::ansi::{
     self, Attr, CharsetIndex, Color, CursorShape, CursorStyle, Handler, Hyperlink, KeyboardModes,
-    KeyboardModesApplyBehavior, NamedColor, NamedMode, NamedPrivateMode, PrivateMode, Rgb,
-    StandardCharset,
+    KeyboardModesApplyBehavior, NamedColor, NamedMode, NamedPrivateMode, PrivateMode, Processor,
+    Rgb, StandardCharset, StdSyncHandler,
 };
 
 pub mod cell;
@@ -814,6 +814,86 @@ impl<T> Term<T> {
 
         mem::swap(&mut self.grid, &mut self.inactive_grid);
         self.mode ^= TermMode::ALT_SCREEN;
+        self.selection = None;
+        self.mark_fully_damaged();
+    }
+
+    /// Clears terminal state before a saved screen is replayed into a fresh
+    /// shell. Startup output from that shell must not remain underneath the
+    /// restored screen, and an old alternate buffer must not be mistaken for
+    /// the new shell's primary buffer.
+    pub fn reset_for_fresh_shell_replay(&mut self)
+    where
+        T: EventListener,
+    {
+        self.reset_state();
+        self.mode = TermMode::default();
+        self.mark_fully_damaged();
+    }
+
+    /// Turns a replayed screen into the primary buffer of a fresh shell.
+    ///
+    /// A saved screen may have belonged to a full-screen program and therefore
+    /// be in the alternate buffer with application or mouse modes enabled. A
+    /// restored process is intentionally not revived, so leaving those modes
+    /// active would make the new shell inherit the old program's input
+    /// contract. Moving the active grid into the primary slot keeps the saved
+    /// text visible while making the new shell start from ordinary terminal
+    /// modes.
+    pub fn normalize_for_fresh_shell(&mut self)
+    where
+        T: EventListener,
+    {
+        if self.mode.contains(TermMode::ALT_SCREEN) {
+            // The alternate buffer has no scrollback of its own. The primary
+            // buffer, which is currently inactive, does: it is the shell
+            // output that was underneath the full-screen program. Replaying
+            // only the active alternate grid into the primary buffer would
+            // therefore make a restored TUI look correct while silently
+            // dropping all of the scrollback above it.
+            //
+            // Build one bounded stream from both buffers before resetting the
+            // terminal. Feeding that stream through the normal parser is
+            // important: Grid grows its history as output scrolls, whereas a
+            // direct buffer swap cannot attach the primary history to a grid
+            // that was created without one.
+            let primary = self.inactive_grid();
+            let alternate = self.grid();
+            let mut combined = Vec::new();
+            crate::snapshot::append_grid_snapshot(
+                &mut combined,
+                primary,
+                primary.total_lines(),
+                false,
+            );
+            // Push the saved shell screen completely into scrollback before
+            // placing the full-screen buffer at the top of the viewport. A
+            // single line feed would leave most of the shell screen visible
+            // underneath the restored TUI and, more importantly, would let
+            // the TUI overwrite those rows instead of retaining them.
+            write!(&mut combined, "\x1b[{};1H", self.screen_lines()).expect("write to Vec");
+            for _ in 0..self.screen_lines() {
+                combined.extend_from_slice(b"\r\n");
+            }
+            combined.extend_from_slice(b"\x1b[1;1H");
+            crate::snapshot::append_grid_snapshot(
+                &mut combined,
+                alternate,
+                alternate.total_lines(),
+                false,
+            );
+
+            self.reset_state();
+            Processor::<StdSyncHandler>::new().advance(self, &combined);
+        }
+        // Whether the saved stream ended in the alternate buffer or returned
+        // to the primary one, do not retain the other buffer's old process
+        // state for the fresh shell's next alternate-screen program.
+        self.inactive_grid.reset();
+        self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
+        self.keyboard_mode_stack = Default::default();
+        self.inactive_keyboard_mode_stack = Default::default();
+        self.mode = TermMode::default();
         self.selection = None;
         self.mark_fully_damaged();
     }
@@ -3417,6 +3497,22 @@ mod tests {
         term.title = Some("Test".into());
         term.set_title(None);
         assert_eq!(term.title, None);
+    }
+
+    #[test]
+    fn fresh_shell_normalization_keeps_saved_text_in_normal_modes() {
+        let size = TermSize::new(20, 5);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut processor = Processor::<StdSyncHandler>::new();
+        processor.advance(&mut term, b"\x1b[?1049h\x1b[?1h\x1b[2J\x1b[Hrestored text");
+        assert!(term.mode().contains(TermMode::ALT_SCREEN));
+        assert!(term.mode().contains(TermMode::APP_CURSOR));
+
+        term.normalize_for_fresh_shell();
+
+        assert_eq!(*term.mode(), TermMode::default());
+        assert_eq!(term.grid()[Line(0)][Column(0)].c, 'r');
+        assert_eq!(term.grid()[Line(0)][Column(9)].c, 't');
     }
 
     #[test]

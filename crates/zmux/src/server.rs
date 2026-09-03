@@ -336,9 +336,23 @@ struct Session {
 }
 
 #[cfg(feature = "session-persistence")]
+struct RestoredPane {
+    bytes: Vec<u8>,
+}
+
+#[cfg(feature = "session-persistence")]
 struct RestoredSession {
     request: crate::messages::ResumeRequest,
     restored_at: u64,
+    /// The peer identity that completed Resume. A protected lease must be
+    /// consumed by that same verified peer, not merely by a process naming the
+    /// same client id in its envelope.
+    authorized_peer: Option<u32>,
+    snapshots: Vec<RestoredPane>,
+    /// Number of successful base-pane handoffs made from this lease. Keep the
+    /// lease while later panes are still being materialized so they can consume
+    /// their saved screen and, for protected records, the same peer check.
+    spawned_panes: usize,
 }
 
 pub struct Daemon {
@@ -360,6 +374,11 @@ pub struct Daemon {
     catalog: Mutex<SessionCatalogPublisher>,
     retention: Mutex<Retention>,
     running: AtomicBool,
+    #[cfg(feature = "session-persistence")]
+    /// The private directory this daemon serves.  Keeping it here lets a
+    /// memory-fallback daemon recover or discard records left by an earlier
+    /// disk daemon without consulting process-global configuration again.
+    directory: PathBuf,
     /// This multiplexer's own executable, resolved once at startup.
     ///
     /// Resolving it at upgrade time is wrong: on Linux `/proc/self/exe` reads
@@ -396,7 +415,7 @@ impl Daemon {
         #[cfg(windows)] pty_host: crate::pty_host::HostClient,
     ) -> Self {
         #[cfg(feature = "session-persistence")]
-        let persistence_enabled = persistence.is_some();
+        let persistence_enabled = matches!(retention, Retention::Disk) && persistence.is_some();
         Self {
             sessions: Mutex::new(Vec::new()),
             sessions_condvar: Condvar::new(),
@@ -408,6 +427,8 @@ impl Daemon {
             )),
             retention: Mutex::new(retention),
             running: AtomicBool::new(true),
+            #[cfg(feature = "session-persistence")]
+            directory: directory.to_owned(),
             executable: resolve_own_executable(),
             #[cfg(windows)]
             pty_host,
@@ -582,7 +603,11 @@ pub fn run(
             resume_from.is_some(),
         )?
     } else {
-        None
+        // A temporary memory fallback must not make records from an earlier
+        // disk daemon disappear.  Reopen the store for listing, resume, and
+        // explicit cleanup, while `persistence_enabled` below keeps this
+        // recovery handle from persisting new memory-mode sessions.
+        PersistenceStore::open_with_recovery_state(&directory, None, false)?
     };
     #[cfg(feature = "session-persistence")]
     let next_session_id = crate::persistence::next_record_id(&directory)?;
@@ -897,7 +922,13 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
             Ok(())
         }
         Request::Spawn(request) => {
-            let response = spawn(daemon, request, &mut connection);
+            let response = spawn(
+                daemon,
+                request,
+                envelope.client_process_id,
+                peer_process_id,
+                &mut connection,
+            );
             match response {
                 Ok(()) => Ok(()),
                 Err(error) => {
@@ -920,9 +951,9 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
             envelope.client_process_id,
             &mut connection,
         ),
-        // The revoke handover's answer, from the client that was holding the
-        // pane. Its own connection, distinct from the one the attach that
-        // started the revoke is waiting on.
+        // A screen checkpoint from the client showing the pane. Its own
+        // connection is distinct from the shared connection; a revoke answer
+        // also wakes the attach that started the handover.
         Request::Snapshot {
             session_id,
             pane_id,
@@ -937,6 +968,7 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
             columns,
             lines,
             envelope.client_process_id,
+            peer_process_id,
             &mut connection,
         ),
         Request::Input { .. } => connection.send(&Response::Error {
@@ -1217,11 +1249,15 @@ fn configure_daemon(
         }
     }
     #[cfg(feature = "session-persistence")]
-    let persisted_sessions = sessions
-        .iter()
-        .filter(|session| session.keep || session.offered)
-        .map(persisted_live_session)
-        .collect::<Vec<_>>();
+    let persisted_sessions = if matches!(retention, Retention::Disk) {
+        sessions
+            .iter()
+            .filter(|session| session.keep || session.offered)
+            .map(persisted_live_session)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     drop(sessions);
 
     #[cfg(feature = "session-persistence")]
@@ -1233,25 +1269,39 @@ fn configure_daemon(
                 .context("flushing encrypted scrollback before changing retention")?;
         }
         if matches!(retention, Retention::Disk) && !persistence_recipients.is_empty() {
+            // Configure is the normal path used when a client brings an
+            // already-running daemon onto disk persistence. It is not an
+            // in-process executable handoff: any records left by an earlier
+            // daemon must become restorable even when the boot stamp is the
+            // same. Live sessions are written below as non-restorable again.
             PersistenceStore::open_with_recovery_state(
                 &session_catalog_dir(),
                 Some(&persistence_recipients),
-                true,
+                false,
             )?
         } else {
-            None
+            // Keep an existing disk catalog visible while a client has
+            // temporarily selected memory mode (for example because a GitHub
+            // recipient could not be resolved). This handle is read/cleanup
+            // only; the enabled flag below prevents new memory sessions from
+            // being written to it.
+            PersistenceStore::open_with_recovery_state(&session_catalog_dir(), None, false)?
         }
     };
 
     #[cfg(feature = "session-persistence")]
     {
-        if let Some(persistence) = next_persistence.as_mut() {
+        if matches!(retention, Retention::Disk)
+            && let Some(persistence) = next_persistence.as_mut()
+        {
             for session in &persisted_sessions {
                 persistence.save_session(session)?;
             }
         }
         let mut persistence = daemon.persistence.lock().unwrap();
-        let persistence_enabled = next_persistence.is_some();
+        let persistence_enabled = matches!(retention, Retention::Disk)
+            && !persistence_recipients.is_empty()
+            && next_persistence.is_some();
         *persistence = next_persistence;
         daemon
             .persistence_enabled
@@ -1263,7 +1313,52 @@ fn configure_daemon(
     Ok(())
 }
 
-fn spawn(daemon: &Arc<Daemon>, request: SpawnRequest, connection: &mut Connection) -> Result<()> {
+fn spawn(
+    daemon: &Arc<Daemon>,
+    request: SpawnRequest,
+    client_process_id: u32,
+    peer_process_id: Option<u32>,
+    connection: &mut Connection,
+) -> Result<()> {
+    #[cfg(not(feature = "session-persistence"))]
+    let _ = (client_process_id, peer_process_id);
+
+    // Keep the lease locked from authorization through the descriptor handoff.
+    // Two panes may be spawned concurrently during restore, but only the first
+    // successful handoff may materialize the saved session. A failed handoff
+    // leaves the lease in place for the next attempt.
+    #[cfg(feature = "session-persistence")]
+    let restored_guard = request.session_id.map(|_| daemon.restored.lock().unwrap());
+    #[cfg(feature = "session-persistence")]
+    let restored = request.session_id.and_then(|session_id| {
+        let restored_guard = restored_guard.as_ref()?;
+        restored_guard
+            .iter()
+            .find(|restored| restored.request.record_id == session_id)
+    });
+    #[cfg(feature = "session-persistence")]
+    if let Some(restored) = restored {
+        anyhow::ensure!(
+            restored.request.verifier.is_none() || restored.authorized_peer == peer_process_id,
+            "protected restored session can only be spawned by the peer that resumed it"
+        );
+    }
+    #[cfg(not(feature = "session-persistence"))]
+    let restored: Option<()> = None;
+
+    if let Some(session_id) = request.session_id {
+        let live = daemon
+            .sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|session| session.id == session_id);
+        anyhow::ensure!(
+            live || restored.is_some(),
+            "session {session_id} does not exist"
+        );
+    }
+
     #[cfg(unix)]
     let options = tty::Options {
         shell: request
@@ -1314,8 +1409,48 @@ fn spawn(daemon: &Arc<Daemon>, request: SpawnRequest, connection: &mut Connectio
     let retention = *daemon.retention.lock().unwrap();
 
     let mut sessions = daemon.sessions.lock().unwrap();
+    // `session.panes.len()` is the zero-based index of the pane being added
+    // until the pane is pushed below. Keep it before the push so the first
+    // restored shell receives snapshot zero rather than being shifted past it.
+    #[cfg(feature = "session-persistence")]
+    let restored_snapshot_index = sessions
+        .iter()
+        .find(|session| {
+            request
+                .session_id
+                .is_some_and(|session_id| session.id == session_id)
+        })
+        .map_or(0, |session| session.panes.len());
     let session_id = match request.session_id {
         Some(id) if sessions.iter().any(|session| session.id == id) => id,
+        #[cfg(feature = "session-persistence")]
+        Some(id) if restored.is_some() => {
+            let restored = restored.as_ref().expect("restore lease was checked");
+            let mut summary = restored.request.summary.clone();
+            summary.id = id;
+            let authentication = restored
+                .request
+                .verifier
+                .clone()
+                .map(SessionAuthentication::from_verifier)
+                .transpose()?;
+            sessions.push(Session {
+                id,
+                summary,
+                state: restored.request.state.clone(),
+                authentication,
+                key_envelope: restored.request.key_envelope.clone(),
+                failed_authentications: restored.request.failed_authentications,
+                refuse_until: (restored.request.backoff_seconds > 0).then(|| {
+                    Instant::now() + Duration::from_secs(restored.request.backoff_seconds)
+                }),
+                panes: Vec::new(),
+                keep: false,
+                offered: false,
+                owner: Some(client_process_id),
+            });
+            id
+        }
         _ => {
             let id = daemon.next_session_id.fetch_add(1, Ordering::Relaxed);
             sessions.push(Session {
@@ -1366,7 +1501,20 @@ fn spawn(daemon: &Arc<Daemon>, request: SpawnRequest, connection: &mut Connectio
         child_events,
         attachment: exclusive_attachment(request.client_process_id),
         size: request.size,
-        retained: retention.new_retained(request.size.columns, request.size.lines),
+        retained: {
+            let retained = retention.new_retained(request.size.columns, request.size.lines);
+            #[cfg(feature = "session-persistence")]
+            let retained = {
+                let mut retained = retained;
+                if let Some(snapshot) =
+                    restored.and_then(|restored| restored.snapshots.get(restored_snapshot_index))
+                {
+                    retained.seed(snapshot.bytes.clone());
+                }
+                retained
+            };
+            retained
+        },
         handed_over: None,
         handover_waiters: 0,
         exited: false,
@@ -1392,6 +1540,23 @@ fn spawn(daemon: &Arc<Daemon>, request: SpawnRequest, connection: &mut Connectio
         #[cfg(windows)]
         let _ = daemon.pty_host.close(console_id);
         return Err(error);
+    }
+    #[cfg(feature = "session-persistence")]
+    if let Some(session_id) = request.session_id
+        && restored.is_some()
+        && let Some(restored_guard) = restored_guard
+    {
+        let mut leases = restored_guard;
+        if let Some(lease) = leases
+            .iter_mut()
+            .find(|restored| restored.request.record_id == session_id)
+        {
+            lease.spawned_panes = lease.spawned_panes.saturating_add(1);
+            let expected_panes = lease.request.summary.panes.len().max(1);
+            if lease.spawned_panes >= expected_panes {
+                leases.retain(|restored| restored.request.record_id != session_id);
+            }
+        }
     }
     Ok(())
 }
@@ -2335,12 +2500,13 @@ fn remove_shared_client(
     wake_drain(daemon);
 }
 
-/// The revoke handover's answer: the holder stopped reading the pane and is
-/// giving back the screen it was showing.
+/// A client gives the daemon the screen it is showing.
 ///
-/// The snapshot seeds the retention, the pane becomes shared (even with no
-/// clients yet — the revoke is committed), and every attach waiting on the
-/// handover is woken to join.
+/// During a revoke handover, the snapshot seeds retention, the pane becomes
+/// shared (even with no clients yet — the revoke is committed), and every
+/// attach waiting on the handover is woken to join. During a live share, the
+/// exclusive attachment remains in place; the following share request then
+/// persists the checkpoint while the original client keeps reading the PTY.
 #[allow(clippy::too_many_arguments)]
 fn snapshot(
     daemon: &Arc<Daemon>,
@@ -2350,6 +2516,7 @@ fn snapshot(
     columns: u16,
     lines: u16,
     client_process_id: u32,
+    peer_process_id: Option<u32>,
     connection: &mut Connection,
 ) -> Result<()> {
     anyhow::ensure!(
@@ -2370,22 +2537,49 @@ fn snapshot(
             message: format!("session {session_id} has no pane {pane_id}"),
         });
     };
-    let Attachment::Revoking { holder } = pane.attachment else {
+    // On platforms with peer credentials, use the identity the socket vouched
+    // for whenever the caller is allowed to change a protected session. The
+    // envelope remains the fallback for unprotected sessions and for Windows
+    // builds where an unprotected request does not need an attestation.
+    let caller_process_id = control_process_id(client_process_id, peer_process_id);
+    let Some((revoking, holder)) = (match &pane.attachment {
+        Attachment::Revoking { holder } => Some((true, *holder)),
+        Attachment::Exclusive(holder) => Some((false, *holder)),
+        _ => None,
+    }) else {
         return connection.send(&Response::Error {
-            message: format!("session {session_id} pane {pane_id} is not being handed over"),
+            message: format!("session {session_id} pane {pane_id} is not showing exclusively"),
         });
     };
-    if holder != client_process_id {
+    if holder != caller_process_id {
         return connection.send(&Response::Error {
-            message: format!(
-                "session {session_id} pane {pane_id} is being handed over by another client"
-            ),
+            message: if revoking {
+                format!(
+                    "session {session_id} pane {pane_id} is being handed over by another client"
+                )
+            } else {
+                format!("session {session_id} pane {pane_id} is held by another client")
+            },
         });
+    }
+    if !revoking {
+        // A live share leaves the descriptor with this client. Seed the
+        // daemon's retained screen without changing the attachment, so a
+        // following Share request can persist it and the live tab keeps
+        // reading the PTY directly.
+        seed_retained_screen(pane, bytes);
+        pane.size = TerminalSize {
+            columns,
+            lines,
+            cell_width: 0,
+            cell_height: 0,
+        };
+        return connection.send(&Response::Ok);
     }
     // The holder is still showing this screen, so it is the one client that
     // must not be sent it back.
     pane.handed_over = Some(RevokeHandover {
-        client_process_id,
+        client_process_id: holder,
         output: Vec::new(),
     });
     seed_retained_screen(pane, bytes);
@@ -2398,7 +2592,18 @@ fn snapshot(
         cell_width: 0,
         cell_height: 0,
     };
+    #[cfg(feature = "session-persistence")]
+    let persisted = session.offered.then(|| persisted_live_session(session));
     drop(sessions);
+    #[cfg(feature = "session-persistence")]
+    if let Some(persisted) = persisted
+        && let Err(error) = persist_session(daemon, &persisted)
+    {
+        // The handover is already committed in memory. A persistence failure
+        // must not strand the pane in a revoke state; the next publication can
+        // retry the disk write.
+        log::warn!("could not persist the shared pane snapshot: {error:#}");
+    }
     daemon.sessions_condvar.notify_all();
     publish(daemon);
     wake_drain(daemon);
@@ -2620,12 +2825,12 @@ fn resume(
     daemon: &Arc<Daemon>,
     request: crate::messages::ResumeRequest,
     _client_process_id: u32,
-    _peer_process_id: Option<u32>,
+    peer_process_id: Option<u32>,
     connection: &mut Connection,
 ) -> Result<()> {
     #[cfg(not(feature = "session-persistence"))]
     {
-        let _ = (daemon, request);
+        let _ = (daemon, request, peer_process_id);
         connection.send(&Response::Error {
             message: "resume needs the session-persistence feature".to_owned(),
         })
@@ -2645,7 +2850,17 @@ fn resume(
             );
             snapshots.insert(snapshot.pane_id, connection.read_exact(snapshot.length)?);
         }
-        anyhow::ensure!(
+        // A daemon that was started before the memory-fallback recovery path
+        // was available may still be running without a persistence handle.
+        // Open a temporary recovery handle in that case so a disk record can
+        // still be resumed; it is deliberately not installed on the daemon,
+        // and therefore cannot make a memory-mode session durable.
+        let mut fallback_persistence = if daemon.persistence.lock().unwrap().is_none() {
+            PersistenceStore::open_with_recovery_state(&daemon.directory, None, false)?
+        } else {
+            None
+        };
+        let daemon_has_record =
             daemon
                 .persistence
                 .lock()
@@ -2656,7 +2871,15 @@ fn resume(
                         .records()
                         .iter()
                         .any(|record| record.id == request.record_id && record.restorable)
-                }),
+                });
+        let fallback_has_record = fallback_persistence.as_ref().is_some_and(|persistence| {
+            persistence
+                .records()
+                .iter()
+                .any(|record| record.id == request.record_id && record.restorable)
+        });
+        anyhow::ensure!(
+            daemon_has_record || fallback_has_record,
             "restorable session {} does not exist",
             request.record_id
         );
@@ -2670,7 +2893,21 @@ fn resume(
             "session {} is already live",
             request.record_id
         );
+        anyhow::ensure!(
+            !daemon
+                .restored
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|restored| restored.request.record_id == request.record_id),
+            "session {} is already being resumed",
+            request.record_id
+        );
         if let Some(verifier) = request.verifier.as_ref() {
+            anyhow::ensure!(
+                peer_process_id.is_some(),
+                "protected restores require a verified peer process"
+            );
             let authentication = SessionAuthentication::from_verifier(verifier.clone())?;
             let elapsed = unix_now().saturating_sub(request.updated_at);
             if request.backoff_seconds > elapsed {
@@ -2686,9 +2923,21 @@ fn resume(
                     crate::auth::failed_authentication_delay(request.failed_authentications)
                         .as_secs();
                 request.updated_at = unix_now();
-                if let Some(persistence) = daemon.persistence.lock().unwrap().as_mut() {
-                    persistence
-                        .update_session(&persisted_from_resume_request(&request, &snapshots))?;
+                let mut persistence = daemon.persistence.lock().unwrap();
+                if let Some(persistence) = persistence.as_mut() {
+                    persistence.update_authentication(
+                        request.record_id,
+                        request.updated_at,
+                        request.failed_authentications,
+                        request.backoff_seconds,
+                    )?;
+                } else if let Some(persistence) = fallback_persistence.as_mut() {
+                    persistence.update_authentication(
+                        request.record_id,
+                        request.updated_at,
+                        request.failed_authentications,
+                        request.backoff_seconds,
+                    )?;
                 }
                 return connection.send(&Response::AuthenticationFailed);
             }
@@ -2696,52 +2945,38 @@ fn resume(
         // The secret is only a request credential. It must not survive in the
         // daemon's restored-session memory after the verifier has been checked.
         request.secret = None;
-        if let Some(persistence) = daemon.persistence.lock().unwrap().as_mut() {
+        // The decrypted record is now represented by the authenticated lease.
+        // Removing the disk copy keeps it from being offered a second time or
+        // mistaken for a separate restore while the first handoff is in
+        // flight. A failed Spawn leaves the lease itself intact.
+        let mut persistence = daemon.persistence.lock().unwrap();
+        if let Some(persistence) = persistence.as_mut() {
+            persistence.forget(request.record_id)?;
+        } else if let Some(persistence) = fallback_persistence.as_mut() {
             persistence.forget(request.record_id)?;
         }
-        daemon.restored.lock().unwrap().push(RestoredSession {
-            request,
-            restored_at: unix_now(),
-        });
-        connection.send(&Response::Resumed {
-            session_id: daemon
-                .restored
-                .lock()
-                .unwrap()
-                .last()
-                .map(|restored| restored.request.record_id)
-                .unwrap_or_default(),
-        })
-    }
-}
-
-#[cfg(feature = "session-persistence")]
-fn persisted_from_resume_request(
-    request: &crate::messages::ResumeRequest,
-    snapshots: &HashMap<u64, Vec<u8>>,
-) -> PersistedSession {
-    PersistedSession {
-        id: request.record_id,
-        created_at: request.created_at,
-        updated_at: request.updated_at,
-        summary: request.summary.clone(),
-        state: request.state.clone(),
-        verifier: request.verifier.clone(),
-        key_envelope: request.key_envelope.clone(),
-        failed_authentications: request.failed_authentications,
-        backoff_seconds: request.backoff_seconds,
-        snapshots: request
+        drop(persistence);
+        let authorized_peer = request.verifier.as_ref().and(peer_process_id);
+        let snapshots = request
             .snapshots
             .iter()
             .filter_map(|snapshot| {
-                snapshots
-                    .get(&snapshot.pane_id)
-                    .map(|bytes| PersistedSnapshot {
-                        pane_id: snapshot.pane_id,
-                        bytes: bytes.clone(),
-                    })
+                snapshots.get(&snapshot.pane_id).map(|bytes| RestoredPane {
+                    bytes: bytes.clone(),
+                })
             })
-            .collect(),
+            .collect();
+        let resumed_session_id = request.record_id;
+        daemon.restored.lock().unwrap().push(RestoredSession {
+            request,
+            restored_at: unix_now(),
+            authorized_peer,
+            snapshots,
+            spawned_panes: 0,
+        });
+        connection.send(&Response::Resumed {
+            session_id: resumed_session_id,
+        })
     }
 }
 
@@ -2781,11 +3016,18 @@ fn detach(
         snapshots.insert(snapshot.pane_id, connection.read_exact(snapshot.length)?);
     }
     #[cfg(feature = "session-persistence")]
-    let persisted_snapshots = snapshots
+    let persisted_snapshots = request
+        .snapshots
         .iter()
-        .map(|(&pane_id, bytes)| PersistedSnapshot {
-            pane_id,
-            bytes: bytes.clone(),
+        .filter_map(|snapshot| {
+            snapshots
+                .get(&snapshot.pane_id)
+                .map(|bytes| PersistedSnapshot {
+                    pane_id: snapshot.pane_id,
+                    bytes: bytes.clone(),
+                    columns: None,
+                    lines: None,
+                })
         })
         .collect::<Vec<_>>();
 
@@ -2858,10 +3100,8 @@ fn detach(
     }
     #[cfg(feature = "session-persistence")]
     let persisted = daemon
-        .persistence
-        .lock()
-        .unwrap()
-        .is_some()
+        .persistence_enabled
+        .load(Ordering::Acquire)
         .then(|| PersistedSession {
             id: session.id,
             created_at: unix_now(),
@@ -2878,7 +3118,22 @@ fn detach(
                 .refuse_until
                 .map(|until| until.saturating_duration_since(Instant::now()).as_secs())
                 .unwrap_or_default(),
-            snapshots: persisted_snapshots,
+            snapshots: persisted_snapshots
+                .into_iter()
+                .map(|mut snapshot| {
+                    if let Some(pane) = session
+                        .panes
+                        .iter()
+                        .find(|pane| pane.id == snapshot.pane_id)
+                    {
+                        let (columns, lines) =
+                            terminal_size(pane).unwrap_or((pane.size.columns, pane.size.lines));
+                        snapshot.columns = Some(columns);
+                        snapshot.lines = Some(lines);
+                    }
+                    snapshot
+                })
+                .collect(),
         });
     #[cfg(feature = "session-persistence")]
     if let Some(persisted) = persisted {
@@ -2896,9 +3151,10 @@ fn detach(
 ///
 /// Everything a joining client needs is published here, exactly as a detach
 /// publishes it: the summary the catalog lists and the state a joining client
-/// rebuilds its tab from. What is *not* done is the rest of detaching — no
-/// snapshot is taken, no attachment is released, and `keep` is left alone — so
-/// the session carries on being displayed by the window that shared it.
+/// rebuilds its tab from. The client checkpoints each exclusive pane with
+/// [`Request::Snapshot`] immediately beforehand. What is *not* done is the rest
+/// of detaching — no attachment is released and `keep` is left alone — so the
+/// session carries on being displayed by the window that shared it.
 fn share(
     daemon: &Arc<Daemon>,
     request: crate::messages::ShareRequest,
@@ -3059,8 +3315,8 @@ fn set_session_scope(
     }
     session.offered = shared;
     #[cfg(feature = "session-persistence")]
-    if let Some(persistence) = daemon.persistence.lock().unwrap().as_mut() {
-        persistence.save_session(&persisted_live_session(session))?;
+    if daemon.persistence_enabled.load(Ordering::Acquire) {
+        persist_session(daemon, &persisted_live_session(session))?;
     }
     drop(sessions);
     publish(daemon);
@@ -3140,8 +3396,21 @@ fn session_control_authorized(session: &Session, peer_process_id: Option<u32>) -
 /// identified first, with [`Request::Attest`].
 #[cfg(windows)]
 fn attestation_needed(daemon: &Arc<Daemon>, request: &Request) -> bool {
+    #[cfg(feature = "session-persistence")]
+    if let Request::Spawn(SpawnRequest {
+        session_id: Some(session_id),
+        ..
+    }) = request
+    {
+        if daemon.restored.lock().unwrap().iter().any(|restored| {
+            restored.request.record_id == *session_id && restored.request.verifier.is_some()
+        }) {
+            return true;
+        }
+    }
     let session_id = match request {
         Request::Share(request) => Some(request.session_id),
+        Request::Snapshot { session_id, .. } => Some(*session_id),
         Request::Resize { session_id, .. }
         | Request::SetConsolePalette { session_id, .. }
         | Request::ClosePane { session_id, .. }
@@ -3313,6 +3582,23 @@ fn set_console_palette(
 fn kill(daemon: &Arc<Daemon>, session_id: u64, peer_process_id: Option<u32>) -> Result<()> {
     let mut sessions = daemon.sessions.lock().unwrap();
     let Some(session) = sessions.iter().find(|session| session.id == session_id) else {
+        drop(sessions);
+        #[cfg(feature = "session-persistence")]
+        {
+            let mut persistence = daemon.persistence.lock().unwrap();
+            if persistence.as_ref().is_some_and(|persistence| {
+                persistence
+                    .records()
+                    .iter()
+                    .any(|record| record.id == session_id)
+            }) {
+                persistence
+                    .as_mut()
+                    .expect("the persistence store was checked above")
+                    .forget(session_id)?;
+                return Ok(());
+            }
+        }
         anyhow::bail!("session {session_id} does not exist");
     };
     anyhow::ensure!(
@@ -3544,6 +3830,9 @@ fn publish(daemon: &Arc<Daemon>) {
 
 #[cfg(feature = "session-persistence")]
 fn persist_session(daemon: &Arc<Daemon>, session: &PersistedSession) -> Result<()> {
+    if !daemon.persistence_enabled.load(Ordering::Acquire) {
+        return Ok(());
+    }
     if let Some(persistence) = daemon.persistence.lock().unwrap().as_mut() {
         persistence.save_session(session)?;
     }
@@ -3571,9 +3860,15 @@ fn persisted_live_session(session: &Session) -> PersistedSession {
         snapshots: session
             .panes
             .iter()
-            .map(|pane| PersistedSnapshot {
-                pane_id: pane.id,
-                bytes: pane.retained.snapshot(),
+            .map(|pane| {
+                let (columns, lines) =
+                    terminal_size(pane).unwrap_or((pane.size.columns, pane.size.lines));
+                PersistedSnapshot {
+                    pane_id: pane.id,
+                    bytes: pane.retained.snapshot(),
+                    columns: Some(columns),
+                    lines: Some(lines),
+                }
             })
             .collect(),
     }

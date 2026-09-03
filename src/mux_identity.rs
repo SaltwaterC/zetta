@@ -56,7 +56,8 @@ fn expand_home(path: &str) -> PathBuf {
 }
 
 /// Whether a `zmux` command can need an identity, and so is worth reading
-/// configuration for. `resume` decrypts a disk record; `reconnect` may have to
+/// configuration for. `resume` decrypts a disk record for fresh-shell restore;
+/// `reconnect` may have to
 /// open a session sealed to the user's key. Everything else — `list` above all —
 /// is a short-lived process that should not pay for a file it will not use.
 pub(crate) fn command_uses_an_identity(arguments: &[std::ffi::OsString]) -> bool {

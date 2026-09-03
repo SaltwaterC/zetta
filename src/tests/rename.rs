@@ -30,6 +30,7 @@ fn tab(attention_id: u64, custom_title: Option<&str>) -> Tab {
         base_exited: false,
         wsl_cwd_file: None,
         pending_command: None,
+        active_command: None,
         detected_worktree_title: None,
         worktree_detection_directory: None,
         worktree_detection_generation: 0,

@@ -867,7 +867,7 @@ impl Zetta {
                                     SessionAuthenticationPromptMode::ResumeDisk { .. }
                                 ) =>
                                 {
-                                    "Resume encrypted disk session"
+                                    "Restore encrypted disk session"
                                 }
                                 None => "Authenticate protected session",
                             })

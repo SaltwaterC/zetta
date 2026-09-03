@@ -333,9 +333,10 @@ fn request_multiplexer_reconnect(
 }
 
 /// Gives a running Zetta process the disk-resume request and any identity
-/// passphrases needed to decrypt it. The GUI owns rebuilding the saved screen
-/// as a read-only tab; a standalone invocation falls back to restoring only in
-/// the daemon when no Zetta process is available.
+/// passphrases needed to decrypt it. The GUI rebuilds the record as a tab of
+/// fresh shells with the saved screen replayed into them; a standalone
+/// invocation falls back to acknowledgement-only resume when no Zetta process
+/// is available.
 #[cfg(feature = "session-persistence")]
 pub fn try_run_resume_disk_session(identifier: &str, identity_paths: &[PathBuf]) -> Result<bool> {
     #[cfg(not(any(unix, windows)))]

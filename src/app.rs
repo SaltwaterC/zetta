@@ -319,11 +319,14 @@ impl Zetta {
 
 fn background_authentication_for_close(
     policy: &TabClosePolicy,
-    background_if_pinned: bool,
+    shared: bool,
+    allow_background: bool,
     failed_pane: bool,
 ) -> Option<Option<SessionAuthentication>> {
-    if background_if_pinned && !failed_pane {
-        policy.background_authentication()
+    if allow_background && !failed_pane {
+        policy
+            .background_authentication()
+            .or_else(|| shared.then_some(None))
     } else {
         None
     }
@@ -716,7 +719,9 @@ impl Zetta {
         let tabs = std::mem::take(&mut self.tabs);
         let mut preserved_any = false;
         for tab in tabs {
-            if let Some(authentication) = tab.close_policy.background_authentication() {
+            if let Some(authentication) =
+                background_authentication_for_close(&tab.close_policy, tab.shared, true, false)
+            {
                 self.store_background_tab(tab, authentication, cx);
                 preserved_any = true;
             }
@@ -1369,6 +1374,7 @@ impl Zetta {
             .any(|pane| pane.exit.is_some());
         let background_authentication = background_authentication_for_close(
             &self.tabs[index].close_policy,
+            self.tabs[index].shared,
             background_if_pinned,
             has_failed_pane,
         );

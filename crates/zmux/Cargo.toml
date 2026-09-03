@@ -27,6 +27,7 @@ default = ["scrollback-buffer", "session-persistence"]
 scrollback-buffer = []
 # Encrypts detached-session state with age v1 files.
 session-persistence = [
+    "scrollback-buffer",
     "dep:age",
     "dep:age-core",
     "dep:base64",

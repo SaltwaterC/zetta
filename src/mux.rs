@@ -79,13 +79,6 @@ impl MuxRetentionState {
             degraded_reason: None,
         }
     }
-
-    #[cfg(feature = "session-persistence")]
-    fn can_resume_disk(&self) -> bool {
-        self.requested == Retention::Disk
-            && self.effective == Retention::Disk
-            && self.degraded_reason.is_none()
-    }
 }
 
 impl MuxRuntime {
@@ -179,11 +172,6 @@ impl MuxRuntime {
             .is_some()
     }
 
-    #[cfg(feature = "session-persistence")]
-    pub(crate) fn can_resume_disk(&self) -> bool {
-        self.retention_state.lock().unwrap().can_resume_disk()
-    }
-
     #[cfg(not(feature = "session-persistence"))]
     pub(crate) fn reconfigure_with_retention(&mut self, retention: Retention) -> Result<()> {
         // `Client::configure` may replace an older daemon in place. Keep this
@@ -254,11 +242,16 @@ impl MuxRuntime {
     /// Per pane rather than per tab because the caller needs to know which
     /// terminal the multiplexer created, and one provider serving several
     /// panes could not say which answer belonged to which.
-    pub(crate) fn provider(&self, session: MuxSession) -> Arc<MuxPtyProvider> {
+    pub(crate) fn provider_with_restore_replay(
+        &self,
+        session: MuxSession,
+        replay: Option<Vec<u8>>,
+    ) -> Arc<MuxPtyProvider> {
         Arc::new(MuxPtyProvider {
             runtime: self.clone(),
             session,
             opened: Mutex::new(None),
+            restore_replay: Mutex::new(replay),
         })
     }
 }
@@ -290,6 +283,10 @@ pub(crate) struct MuxPtyProvider {
     runtime: MuxRuntime,
     session: MuxSession,
     opened: Mutex<Option<OpenedPane>>,
+    /// A disk snapshot belongs to one fresh shell. Take it only after the
+    /// daemon has handed over the new PTY; ordinary panes retain the daemon's
+    /// normal replay behavior.
+    restore_replay: Mutex<Option<Vec<u8>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -337,7 +334,11 @@ impl PtyProvider for MuxPtyProvider {
             session_id: pane.session_id,
             pane_id: pane.pane_id,
         });
-        Ok(attached_pane_handover(pane, self.runtime.client().clone()))
+        let mut handover = attached_pane_handover(pane, self.runtime.client().clone());
+        if let Some(replay) = self.restore_replay.lock().unwrap().take() {
+            handover.replay = replay;
+        }
+        Ok(handover)
     }
 }
 
@@ -698,6 +699,15 @@ impl crate::Zetta {
         tab_id: u64,
         cx: &mut gpui::Context<Self>,
     ) -> Result<Option<Arc<MuxPtyProvider>>> {
+        self.mux_provider_for_tab_with_restore_replay(tab_id, None, cx)
+    }
+
+    pub(crate) fn mux_provider_for_tab_with_restore_replay(
+        &mut self,
+        tab_id: u64,
+        replay: Option<Vec<u8>>,
+        cx: &mut gpui::Context<Self>,
+    ) -> Result<Option<Arc<MuxPtyProvider>>> {
         if self.no_mux {
             return Ok(None);
         }
@@ -738,7 +748,7 @@ impl crate::Zetta {
             self.mux
                 .as_ref()
                 .context("multiplexer runtime disappeared during terminal spawn")?
-                .provider(session),
+                .provider_with_restore_replay(session, replay),
         ))
     }
 

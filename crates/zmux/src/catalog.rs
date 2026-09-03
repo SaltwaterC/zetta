@@ -443,7 +443,7 @@ pub fn print_session_catalogs(directory: &Path, json: bool) -> Result<()> {
                     .metadata_bytes
                     .saturating_add(record.snapshot_bytes)
                     .saturating_add(record.scrollback_bytes),
-                record.updated_at
+                display_timestamp(record.updated_at)
             );
             println!("  resume id: {}", record.id);
             if record.protected {
@@ -513,6 +513,47 @@ fn display_text(text: &str) -> String {
         }
     }
     display
+}
+
+/// Formats the persisted Unix timestamp without relying on the host's locale
+/// or timezone. The catalog is shared between the standalone client and the
+/// daemon, so an explicit UTC value keeps `zmux list` consistent everywhere.
+#[cfg(feature = "session-persistence")]
+fn display_timestamp(timestamp: u64) -> String {
+    const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
+
+    let days = timestamp / SECONDS_PER_DAY;
+    let seconds = timestamp % SECONDS_PER_DAY;
+    let days = i64::try_from(days).expect("Unix timestamps fit in i64 day counts");
+    let hour = seconds / (60 * 60);
+    let minute = seconds / 60 % 60;
+    let second = seconds % 60;
+
+    // Civil date conversion from a count of days since 1970-01-01. This is
+    // Gregorian-calendar arithmetic and avoids adding a timezone/formatting
+    // dependency to the small standalone multiplexer crate.
+    let z = days + 719_468;
+    let era = if z >= 0 {
+        z / 146_097
+    } else {
+        (z - 146_096) / 146_097
+    };
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_part = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_part + 2) / 5 + 1;
+    let month = month_part + if month_part < 10 { 3 } else { -9 };
+    let year = year + if month <= 2 { 1 } else { 0 };
+
+    format!(
+        "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} UTC",
+        hour = hour,
+        minute = minute,
+        second = second,
+    )
 }
 
 fn display_command(arguments: &[String]) -> String {

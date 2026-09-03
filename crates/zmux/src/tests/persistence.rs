@@ -189,6 +189,8 @@ fn disk_segments_are_encrypted_and_manifest_sizes_are_updated() {
             snapshots: vec![PersistedSnapshot {
                 pane_id: 2,
                 bytes: b"private screen".to_vec(),
+                columns: None,
+                lines: None,
             }],
         })
         .unwrap();
@@ -246,6 +248,185 @@ fn disk_segments_are_encrypted_and_manifest_sizes_are_updated() {
     assert_eq!(
         recovered.load_session(7, &identities).unwrap().snapshots[0].bytes,
         b"private screen"
+    );
+}
+
+#[cfg(feature = "scrollback-buffer")]
+#[test]
+fn dimensioned_disk_snapshots_replay_each_encrypted_pane_scrollback() {
+    let directory = tempfile::tempdir().unwrap();
+    let identity = age::x25519::Identity::generate();
+    let recipient = identity.to_public().to_string();
+    let mut store = PersistenceStore::open(directory.path(), &[recipient])
+        .unwrap()
+        .unwrap();
+    store
+        .save_session(&PersistedSession {
+            id: 17,
+            created_at: 1,
+            updated_at: 2,
+            summary: BackgroundSessionSummary {
+                id: 17,
+                title: "dimensioned".to_owned(),
+                authentication_required: false,
+                active_pane: 1,
+                layout: BackgroundPaneLayout::Pane { pane_id: 1 },
+                panes: Vec::new(),
+                held: false,
+                scoped_to: None,
+                key_envelope: None,
+            },
+            state: serde_json::Value::Null,
+            verifier: None,
+            key_envelope: None,
+            failed_authentications: 0,
+            backoff_seconds: 0,
+            snapshots: vec![
+                PersistedSnapshot {
+                    pane_id: 1,
+                    bytes: b"saved one\r\n".to_vec(),
+                    columns: Some(10),
+                    lines: Some(3),
+                },
+                PersistedSnapshot {
+                    pane_id: 2,
+                    bytes: b"saved two\r\n".to_vec(),
+                    columns: Some(20),
+                    lines: Some(3),
+                },
+            ],
+        })
+        .unwrap();
+    store.append_scrollback(17, 1, b"0123456789X").unwrap();
+    store.append_scrollback(17, 2, b"pane-two-only").unwrap();
+    store.flush_segments().unwrap();
+    store.update_authentication(17, 3, 1, 2).unwrap();
+
+    let identities = IdentitySet {
+        identities: vec![Box::new(identity)],
+    };
+    let restored = store.load_session(17, &identities).unwrap();
+    assert_eq!(restored.updated_at, 3);
+    assert_eq!(restored.failed_authentications, 1);
+    assert_eq!(restored.backoff_seconds, 2);
+    assert_eq!(restored.snapshots[0].columns, Some(10));
+    assert_eq!(restored.snapshots[0].lines, Some(3));
+    let first = String::from_utf8_lossy(&restored.snapshots[0].bytes);
+    let second = String::from_utf8_lossy(&restored.snapshots[1].bytes);
+    assert!(
+        first.contains("0123456789"),
+        "first pane lost its scrollback: {first:?}"
+    );
+    assert!(
+        first.contains('X'),
+        "the narrow pane did not wrap its final cell: {first:?}"
+    );
+    assert!(
+        !first.contains("pane-two-only"),
+        "pane scrollback crossed panes: {first:?}"
+    );
+    assert!(
+        second.contains("pane-two-only"),
+        "second pane lost its scrollback: {second:?}"
+    );
+    assert!(
+        !second.contains("0123456789"),
+        "pane scrollback crossed panes: {second:?}"
+    );
+}
+
+#[cfg(feature = "scrollback-buffer")]
+#[test]
+fn disk_restore_keeps_scrollback_when_replayed_into_a_fresh_terminal() {
+    use alacritty_terminal::{
+        event::VoidListener,
+        grid::Dimensions,
+        term::{Config, Term},
+        vte::ansi::{Processor, StdSyncHandler},
+    };
+
+    struct Size;
+
+    impl Dimensions for Size {
+        fn total_lines(&self) -> usize {
+            5
+        }
+
+        fn screen_lines(&self) -> usize {
+            5
+        }
+
+        fn columns(&self) -> usize {
+            40
+        }
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let identity = age::x25519::Identity::generate();
+    let recipient = identity.to_public().to_string();
+    let mut store = PersistenceStore::open(directory.path(), &[recipient])
+        .unwrap()
+        .unwrap();
+    let mut saved = Vec::new();
+    for line in 0..30 {
+        saved.extend_from_slice(format!("line {line}\r\n").as_bytes());
+    }
+    store
+        .save_session(&PersistedSession {
+            id: 18,
+            created_at: 1,
+            updated_at: 2,
+            summary: BackgroundSessionSummary {
+                id: 18,
+                title: "scrollback".to_owned(),
+                authentication_required: false,
+                active_pane: 1,
+                layout: BackgroundPaneLayout::Pane { pane_id: 1 },
+                panes: Vec::new(),
+                held: false,
+                scoped_to: None,
+                key_envelope: None,
+            },
+            state: serde_json::Value::Null,
+            verifier: None,
+            key_envelope: None,
+            failed_authentications: 0,
+            backoff_seconds: 0,
+            snapshots: vec![PersistedSnapshot {
+                pane_id: 1,
+                bytes: saved,
+                columns: Some(40),
+                lines: Some(5),
+            }],
+        })
+        .unwrap();
+    let mut later_output = Vec::new();
+    for line in 30..60 {
+        later_output.extend_from_slice(format!("line {line}\r\n").as_bytes());
+    }
+    store.append_scrollback(18, 1, &later_output).unwrap();
+    store.flush_segments().unwrap();
+
+    let identities = IdentitySet {
+        identities: vec![Box::new(identity)],
+    };
+    let restored = store.load_session(18, &identities).unwrap();
+    let replay = &restored.snapshots[0].bytes;
+    let mut term = Term::new(Config::default(), &Size, VoidListener);
+    Processor::<StdSyncHandler>::new().advance(&mut term, replay);
+
+    assert!(
+        term.history_size() > 0,
+        "disk restore produced only one viewport of output"
+    );
+    let replay = String::from_utf8_lossy(replay);
+    assert!(
+        replay.contains("line 0"),
+        "old scrollback was lost: {replay:?}"
+    );
+    assert!(
+        replay.contains("line 59"),
+        "latest persisted output was lost: {replay:?}"
     );
 }
 

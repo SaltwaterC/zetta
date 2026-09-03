@@ -115,6 +115,8 @@ fn store_session(directory: &Path, recipient: &str) {
             snapshots: vec![PersistedSnapshot {
                 pane_id: 1,
                 bytes: SCREEN.to_vec(),
+                columns: None,
+                lines: None,
             }],
         })
         .expect("saving the session record");

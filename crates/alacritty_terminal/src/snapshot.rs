@@ -154,7 +154,12 @@ pub fn ansi_snapshot<T>(term: &Term<T>, max_lines: usize) -> Vec<u8> {
 /// terminal-wide mode, so hiding it while restoring the primary buffer would
 /// also hide it before the alternate-screen program has been replayed; emit it
 /// once, after the active buffer instead.
-fn append_grid_snapshot(out: &mut Vec<u8>, grid: &Grid<Cell>, max_lines: usize, hide_cursor: bool) {
+pub(crate) fn append_grid_snapshot(
+    out: &mut Vec<u8>,
+    grid: &Grid<Cell>,
+    max_lines: usize,
+    hide_cursor: bool,
+) {
     // Walk from the oldest retained line to the bottom of the screen. Lines
     // above the requested limit are dropped from the top, which is where a
     // terminal loses history anyway.

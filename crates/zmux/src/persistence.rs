@@ -32,6 +32,7 @@ use hpke::{
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
+use crate::retention::Retention;
 use crate::{auth::SessionSecret, catalog, protocol::BackgroundSessionSummary, secret_prompt};
 
 const PQ_RECIPIENT_HRP: &str = "age1pq";
@@ -159,6 +160,13 @@ pub struct PersistedSession {
 pub struct PersistedSnapshot {
     pub pane_id: u64,
     pub bytes: Vec<u8>,
+    /// The terminal size used when this screen was captured. Old records did
+    /// not carry it, so both values are optional as one backward-compatible
+    /// pair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub columns: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines: Option<u16>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -186,10 +194,30 @@ struct SnapshotLocation {
     segment: u64,
     offset: u64,
     length: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    columns: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lines: Option<u16>,
+}
+
+/// Authentication backoff is updated by the daemon after a client has already
+/// decrypted a record. Keep that small mutable part in its own encrypted age
+/// file so a failed resume does not have to reconstruct snapshot locations (and
+/// accidentally lose their optional dimensions) through the wire schema.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedAuthentication {
+    updated_at: u64,
+    failed_authentications: u32,
+    backoff_seconds: u64,
 }
 
 fn snapshot_path(directory: &Path, session_id: u64, sequence: u64) -> PathBuf {
     directory.join(format!("session-{session_id}-bytes-segment-{sequence}.age"))
+}
+
+fn authentication_path(directory: &Path, session_id: u64) -> PathBuf {
+    directory.join(format!("session-{session_id}-auth.age"))
 }
 
 /// A parsed collection of age recipients.
@@ -370,6 +398,38 @@ impl IdentitySet {
             .context("reading age plaintext")?;
         Ok(plaintext)
     }
+
+    /// Decrypts an age file a chunk at a time. Persistence reconstruction uses
+    /// this for scrollback so the encrypted history never has to be assembled
+    /// in memory before it reaches the bounded terminal screen.
+    fn decrypt_file(
+        &self,
+        path: &Path,
+        mut consume: impl FnMut(&[u8]) -> Result<()>,
+    ) -> Result<()> {
+        let file = fs::File::open(path)
+            .with_context(|| format!("reading encrypted scrollback {}", path.display()))?;
+        let decryptor = age::Decryptor::new_buffered(age::armor::ArmoredReader::new(file))
+            .context("parsing age scrollback ciphertext")?;
+        let identities = self
+            .identities
+            .iter()
+            .map(|identity| identity.as_ref() as &dyn age::Identity);
+        let mut reader = decryptor
+            .decrypt(identities)
+            .context("decrypting age scrollback ciphertext")?;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let read = reader
+                .read(&mut buffer)
+                .context("reading decrypted age scrollback")?;
+            if read == 0 {
+                break;
+            }
+            consume(&buffer[..read])?;
+        }
+        Ok(())
+    }
 }
 
 /// Opens encrypted session metadata and snapshot bytes without opening the
@@ -393,17 +453,38 @@ fn load_session_from_persistence_directory(
     let plaintext = identities.decrypt(&ciphertext)?;
     let metadata: PersistedSessionMetadata =
         serde_json::from_slice(&plaintext).context("parsing encrypted session metadata")?;
-    let snapshots = load_snapshots(directory, id, &metadata.snapshots, identities)?;
+    let authentication = match fs::read(authentication_path(directory, id)) {
+        Ok(ciphertext) => Some(
+            serde_json::from_slice::<PersistedAuthentication>(&identities.decrypt(&ciphertext)?)
+                .context("parsing encrypted session authentication")?,
+        ),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("reading encrypted session authentication"),
+    };
+    let mut snapshots = load_snapshots(directory, id, &metadata.snapshots, identities)?;
+    restore_scrollback(directory, id, &mut snapshots, identities)?;
     Ok(PersistedSession {
         id: metadata.id,
         created_at: metadata.created_at,
-        updated_at: metadata.updated_at,
+        updated_at: authentication
+            .as_ref()
+            .map_or(metadata.updated_at, |authentication| {
+                authentication.updated_at
+            }),
         summary: metadata.summary,
         state: metadata.state,
         verifier: metadata.verifier,
         key_envelope: metadata.key_envelope,
-        failed_authentications: metadata.failed_authentications,
-        backoff_seconds: metadata.backoff_seconds,
+        failed_authentications: authentication
+            .as_ref()
+            .map_or(metadata.failed_authentications, |authentication| {
+                authentication.failed_authentications
+            }),
+        backoff_seconds: authentication
+            .as_ref()
+            .map_or(metadata.backoff_seconds, |authentication| {
+                authentication.backoff_seconds
+            }),
         snapshots,
     })
 }
@@ -442,9 +523,88 @@ fn load_snapshots(
             Ok(PersistedSnapshot {
                 pane_id: location.pane_id,
                 bytes: segment[offset..end].to_vec(),
+                columns: location.columns,
+                lines: location.lines,
             })
         })
         .collect()
+}
+
+/// Rebuilds a disk snapshot from its saved screen and the output segments the
+/// daemon flushed for that pane.
+///
+/// The screen is deliberately bounded by [`Retention::Disk`]. A segment is
+/// decrypted and fed to that screen before the next one is opened, so a large
+/// history costs one bounded terminal grid plus one age segment rather than a
+/// `Vec` containing the whole history.
+fn restore_scrollback(
+    directory: &Path,
+    session_id: u64,
+    snapshots: &mut [PersistedSnapshot],
+    identities: &IdentitySet,
+) -> Result<()> {
+    let mut retained = Vec::new();
+    let mut retained_by_pane = HashMap::new();
+    for (index, snapshot) in snapshots.iter().enumerate() {
+        let (Some(columns), Some(lines)) = (snapshot.columns, snapshot.lines) else {
+            continue;
+        };
+        let retained_index = retained.len();
+        retained_by_pane
+            .entry(snapshot.pane_id)
+            .or_insert(retained_index);
+        retained.push((index, Retention::Disk.new_retained(columns, lines)));
+    }
+    if retained.is_empty() {
+        // Records written before pane dimensions were persisted retain their
+        // exact old behavior: the saved screen is returned untouched.
+        return Ok(());
+    }
+
+    for (index, screen) in &mut retained {
+        // Move the saved screen into the bounded emulator. Cloning it here
+        // would briefly double the largest per-pane allocation before the
+        // first scrollback segment is even read.
+        screen.seed(std::mem::take(&mut snapshots[*index].bytes));
+    }
+
+    for path in scrollback_paths(directory, session_id)? {
+        let Some((pane_id, _)) = scrollback_path_parts(&path, session_id) else {
+            continue;
+        };
+        let Some(&retained_index) = retained_by_pane.get(&pane_id) else {
+            continue;
+        };
+        identities.decrypt_file(&path, |chunk| {
+            retained[retained_index].1.push(chunk);
+            Ok(())
+        })?;
+    }
+
+    for (index, screen) in retained {
+        snapshots[index].bytes = screen.snapshot();
+    }
+    Ok(())
+}
+
+fn scrollback_path_parts(path: &Path, session_id: u64) -> Option<(u64, u64)> {
+    let prefix = format!("session-{session_id}-pane-");
+    let name = path.file_name()?.to_str()?;
+    let (pane_id, sequence) = name
+        .strip_prefix(&prefix)?
+        .strip_suffix(".age")?
+        .split_once("-segment-")?;
+    Some((pane_id.parse().ok()?, sequence.parse().ok()?))
+}
+
+fn scrollback_paths(directory: &Path, session_id: u64) -> Result<Vec<PathBuf>> {
+    let mut paths = fs::read_dir(directory)
+        .with_context(|| format!("reading persistence directory {}", directory.display()))?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter_map(|path| scrollback_path_parts(&path, session_id).map(|parts| (parts, path)))
+        .collect::<Vec<_>>();
+    paths.sort_by_key(|((pane_id, sequence), _)| (*pane_id, *sequence));
+    Ok(paths.into_iter().map(|(_, path)| path).collect())
 }
 
 /// Parses one configured recipient. GitHub entries intentionally do not reach
@@ -1327,6 +1487,49 @@ impl PersistenceStore {
         self.write_session(session, true)
     }
 
+    /// Persists only authentication backoff after a failed resume. The main
+    /// record is encrypted to recipients the daemon can write to but cannot
+    /// decrypt, so a small encrypted sidecar is the only way to update these
+    /// counters without dropping snapshot geometry that was supplied by an
+    /// older client record.
+    pub fn update_authentication(
+        &mut self,
+        id: u64,
+        updated_at: u64,
+        failed_authentications: u32,
+        backoff_seconds: u64,
+    ) -> Result<()> {
+        let Some(record_index) = self
+            .manifest
+            .records
+            .iter()
+            .position(|record| record.id == id)
+        else {
+            anyhow::bail!("persisted session {id} does not exist");
+        };
+        let authentication = PersistedAuthentication {
+            updated_at,
+            failed_authentications,
+            backoff_seconds,
+        };
+        let plaintext =
+            serde_json::to_vec(&authentication).context("serializing session authentication")?;
+        let ciphertext = self.recipients.encrypt(&plaintext)?;
+        let path = authentication_path(&self.directory, id);
+        let previous_bytes = fs::metadata(&path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        atomic_write(&path, &ciphertext)?;
+        let new_bytes = ciphertext.len() as u64;
+        let record = &mut self.manifest.records[record_index];
+        record.metadata_bytes = record
+            .metadata_bytes
+            .saturating_sub(previous_bytes)
+            .saturating_add(new_bytes);
+        record.updated_at = record.updated_at.max(updated_at);
+        self.write_manifest()
+    }
+
     fn write_session(&mut self, session: &PersistedSession, restorable: bool) -> Result<()> {
         let (snapshots, snapshot_bytes) =
             self.write_snapshot_stream(session.id, &session.snapshots)?;
@@ -1346,6 +1549,10 @@ impl PersistenceStore {
             serde_json::to_vec(&metadata).context("serializing persisted session metadata")?;
         let ciphertext = self.recipients.encrypt(&plaintext)?;
         atomic_write(&self.session_path(session.id), &ciphertext)?;
+        // A complete session write carries the authoritative counters in its
+        // metadata, so an older failed-resume sidecar must not override it on
+        // the next load.
+        let _ = fs::remove_file(authentication_path(&self.directory, session.id));
         self.remove_unreferenced_snapshot_segments(session.id, &metadata.snapshots)?;
         let now = unix_now();
         let created_at = self
@@ -1434,28 +1641,12 @@ impl PersistenceStore {
     }
 
     pub fn read_scrollback(&self, id: u64, identities: &IdentitySet) -> Result<Vec<u8>> {
-        let prefix = format!("session-{id}-pane-");
-        let mut paths = fs::read_dir(&self.directory)
-            .with_context(|| format!("reading persistence directory {}", self.directory.display()))?
-            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .filter_map(|path| {
-                let name = path.file_name()?.to_str()?;
-                let (pane_id, sequence) = name
-                    .strip_prefix(&prefix)?
-                    .strip_suffix(".age")?
-                    .split_once("-segment-")?;
-                Some((
-                    pane_id.parse::<u64>().ok()?,
-                    sequence.parse::<u64>().ok()?,
-                    path,
-                ))
-            })
-            .collect::<Vec<_>>();
-        paths.sort_by_key(|(pane_id, sequence, _)| (*pane_id, *sequence));
         let mut output = Vec::new();
-        for (_, _, path) in paths {
-            let ciphertext = fs::read(path)?;
-            output.extend_from_slice(&identities.decrypt(&ciphertext)?);
+        for path in scrollback_paths(&self.directory, id)? {
+            identities.decrypt_file(&path, |chunk| {
+                output.extend_from_slice(chunk);
+                Ok(())
+            })?;
         }
         Ok(output)
     }
@@ -1494,6 +1685,8 @@ impl PersistenceStore {
                 segment: sequence,
                 offset,
                 length: snapshot.bytes.len() as u64,
+                columns: snapshot.columns,
+                lines: snapshot.lines,
             });
         }
         encrypted_bytes += self.flush_snapshot_segment(session_id, sequence, &segment)?;
@@ -1538,6 +1731,7 @@ impl PersistenceStore {
     pub fn forget(&mut self, id: u64) -> Result<()> {
         self.segments.retain(|(session_id, _), _| *session_id != id);
         let _ = fs::remove_file(self.session_path(id));
+        let _ = fs::remove_file(authentication_path(&self.directory, id));
         self.remove_unreferenced_snapshot_segments(id, &[])?;
         let prefix = format!("session-{id}-pane-");
         for entry in fs::read_dir(&self.directory)? {
@@ -1660,6 +1854,7 @@ impl PersistenceStore {
 
     fn remove_files(&self, id: u64) -> Result<()> {
         let _ = fs::remove_file(self.session_path(id));
+        let _ = fs::remove_file(authentication_path(&self.directory, id));
         self.remove_unreferenced_snapshot_segments(id, &[])?;
         let prefix = format!("session-{id}-pane-");
         for entry in fs::read_dir(&self.directory)? {
@@ -1744,6 +1939,7 @@ pub fn forget_opaque_record(base: &Path, id: u64) -> Result<bool> {
         return Ok(false);
     }
     let _ = fs::remove_file(directory.join(format!("session-{id}.age")));
+    let _ = fs::remove_file(authentication_path(&directory, id));
     let prefix = format!("session-{id}-pane-");
     for entry in fs::read_dir(&directory)? {
         let path = entry?.path();

@@ -289,8 +289,9 @@ impl ProtectedSessionAction {
             }
             Self::Share => {
                 "Choose the authentication a window joining this tab has to present; it can \
-                 then do everything this tab's terminals can already do. Press Enter with both \
-                 fields empty for no authentication."
+                 then do everything this tab's terminals can already do. When the last viewer \
+                 closes the tab or its window, the session continues running in the multiplexer. \
+                 Press Enter with both fields empty for no authentication."
             }
         }
     }
@@ -300,7 +301,7 @@ impl ProtectedSessionAction {
             Self::Detach => "Protect and detach",
             Self::KeepRunning if no_mux => "Protect and keep running",
             Self::KeepRunning => "Protect, keep, and share",
-            Self::Share => "Protect and share",
+            Self::Share => "Protect, share, and keep",
         }
     }
 }
@@ -735,6 +736,41 @@ impl Zetta {
         // leaves the secret it has in place. The sealed key, when there is one,
         // travels inside the authentication so it cannot be separated from the
         // verifier it belongs to.
+        if offered && runtime.retention().keeps_snapshot() {
+            // An exclusively attached pane is read by this window, so the
+            // daemon deliberately has no retained screen for it. Checkpoint
+            // each live pane before publishing the offer; otherwise a daemon
+            // restart between sharing and backgrounding would restore an empty
+            // pane. Panes already relayed through a shared connection are
+            // already retained by the daemon and cannot accept an exclusive
+            // checkpoint from this window.
+            let snapshots = tab
+                .panes
+                .iter()
+                .filter(|pane| !self.shared_panes.contains_key(&pane.id))
+                .filter_map(|pane| {
+                    let mux_pane_id = self.mux_panes.mux_pane_id(pane.id)?;
+                    let terminal = pane.terminal.as_ref()?.read(cx);
+                    let bounds = terminal.last_content().terminal_bounds;
+                    Some((
+                        mux_pane_id,
+                        terminal.ansi_snapshot(SNAPSHOT_LINES),
+                        bounds.num_columns() as u16,
+                        bounds.num_lines() as u16,
+                    ))
+                })
+                .collect::<Vec<_>>();
+            for (mux_pane_id, snapshot, columns, lines) in snapshots {
+                runtime
+                    .client()
+                    .send_snapshot(session_id, mux_pane_id, snapshot, columns, lines)
+                    .with_context(|| {
+                        format!(
+                            "checkpointing pane {mux_pane_id} before sharing session {session_id}"
+                        )
+                    })?;
+            }
+        }
         runtime
             .client()
             .share(session_id, summary, state, authentication.as_ref(), offered)?;
@@ -1162,20 +1198,12 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> ReconnectSessionResult {
-        if self.mux.as_ref().is_some_and(|runtime| {
-            runtime.requested_retention() == zmux::retention::Retention::Disk
-                && !runtime.can_resume_disk()
-        }) {
-            self.pane_output_error = Some(
-                "Encrypted disk resume is unavailable while disk persistence is being restored; \
-                 try again after the connection returns."
-                    .to_owned(),
-            );
-            cx.notify();
-            return ReconnectSessionResult::Rejected;
-        }
-        let runtime = if self.mux.as_ref().is_some_and(MuxRuntime::can_resume_disk) {
-            self.mux.clone().expect("disk runtime was present")
+        // The daemon can keep a recovery-only view of old disk records while
+        // its active retention is temporarily memory-backed. Reuse that
+        // connection instead of rejecting the restore before the request ever
+        // reaches the daemon.
+        let runtime = if let Some(runtime) = self.mux.clone() {
+            runtime
         } else {
             let runtime = match MuxRuntime::connect_for_disk_resume() {
                 Ok(runtime) => runtime,
@@ -1210,9 +1238,9 @@ impl Zetta {
                 return ReconnectSessionResult::Rejected;
             }
         };
-        // The daemon consumes the encrypted record before returning. Refresh
-        // the process-wide picker even if rebuilding the tab below fails, so
-        // the UI cannot keep offering a record that no longer exists.
+        // Refresh the process-wide picker even if rebuilding the tab below
+        // fails. The daemon now holds an authenticated restore lease; the
+        // consumed disk record is represented by that lease until handoff.
         cx.defer(refresh_process_background_sessions);
         let summary_title = persisted.summary.title.clone();
         let persisted_summary = persisted.summary;
@@ -1236,21 +1264,37 @@ impl Zetta {
             .iter()
             .filter_map(|pane| Some((pane.mux_pane_id?, pane.id)))
             .collect::<HashMap<_, _>>();
+        let mut replay_by_routing_id = snapshots
+            .into_iter()
+            .filter_map(|snapshot| {
+                snapshot_routing_ids
+                    .get(&snapshot.pane_id)
+                    .copied()
+                    .or_else(|| {
+                        state
+                            .panes
+                            .iter()
+                            .find(|pane| pane.id == snapshot.pane_id)
+                            .map(|pane| pane.id)
+                    })
+                    .map(|routing_id| (routing_id, snapshot.bytes))
+            })
+            .collect::<HashMap<_, _>>();
 
         // A disk record may have been written by a daemon that was alive when
         // the tab detached. Its pane IDs and exit details describe that old
         // process tree, not a process this restore is allowed to revive.
-        // The process cannot be revived from a disk snapshot, but the saved
-        // screen is kept below as a read-only terminal so resume does not lose
-        // the useful state the record actually contains.
+        // Every base pane below gets a new PTY-backed shell. Its saved screen is
+        // replayed into that shell after layout; no old process is reattached.
         state.keep_running = false;
         state.shared = false;
         for pane in &mut state.panes {
             pane.mux_pane_id = None;
             pane.exit = None;
             pane.base_exited = false;
-            pane.pending_command = None;
-            pane.stack.clear();
+            // Keep the task history, but always show the newly-created base
+            // shell rather than a stacked entry that belonged to the old
+            // process tree.
             pane.selected_stacked = None;
         }
         let tab_id = self.next_tab_id;
@@ -1278,53 +1322,101 @@ impl Zetta {
         };
         tab.close_policy = TabClosePolicy::Close;
         tab.shared = false;
-        // The catalog title is what the user selected. A display-only terminal
-        // has no process to emit a fresh title, so preserve it on the restored
-        // tab just as the live multiplexer attach path does.
+        // The catalog title is what the user selected. Preserve it until the
+        // fresh shell emits a replacement title, just as the live multiplexer
+        // attach path does.
         if tab.custom_title.is_none() && !summary_title.is_empty() {
             tab.process_title = Some(summary_title);
         }
-        let settings = TerminalSpawnSettings::current(cx);
-        for snapshot in snapshots {
-            if snapshot.bytes.is_empty() {
-                continue;
-            }
-            let builder = TerminalBuilder::new_display_only(
-                settings.cursor_shape,
-                settings.alternate_scroll,
-                settings.max_scroll_history_lines,
-                cx.entity_id().as_u64(),
-                cx.background_executor(),
-                PathStyle::local(),
-            )
-            .with_working_directory(
-                snapshot_routing_ids
-                    .get(&snapshot.pane_id)
-                    .and_then(|routing_id| restored_metadata.working_directory(*routing_id)),
-            )
-            .with_replay(snapshot.bytes);
-            let terminal = cx.new(|cx| builder.subscribe(cx));
-            let routing_id = snapshot_routing_ids
-                .get(&snapshot.pane_id)
-                .copied()
-                .unwrap_or(snapshot.pane_id);
-            if let Some(pane) = tab
-                .panes
-                .iter_mut()
-                .find(|pane| pane.routing_id == routing_id)
-            {
-                pane.terminal = Some(terminal);
-                pane.error = None;
-                pane.base_exited = true;
-            }
+
+        self.next_attention_id = self
+            .next_attention_id
+            .max(tab.attention_id.saturating_add(1));
+        if cx.has_global::<ZettaProcessState>() {
+            let process = cx.global_mut::<ZettaProcessState>();
+            process.next_attention_id = process
+                .next_attention_id
+                .max(tab.attention_id.saturating_add(1));
         }
-        for pane in &mut tab.panes {
-            pane.pending_command = None;
-            if pane.terminal.is_none() {
-                pane.error = Some(format!("Run: profile {}", pane.profile.name));
-            }
+
+        // The saved ids remain as routing ids for snapshot and command-state
+        // mapping, while pane ids are remapped into this window's namespace.
+        tab.reassign_ids(tab_id, &mut self.next_pane_id);
+        self.pane_controls_hidden_for
+            .extend(default_hidden_pane_controls(
+                self.launch_config.pane_controls_hidden_by_default,
+                tab.panes.iter().map(|pane| pane.id),
+            ));
+        self.bind_restored_projects(&tab, &restored_metadata);
+        let restore_spawns = tab
+            .panes
+            .iter_mut()
+            .map(|pane| {
+                let routing_id = pane.routing_id;
+                let saved_directory = restored_metadata.working_directory(routing_id);
+                let (working_directory, wsl_directory) = if is_wsl_shell(&pane.profile.command) {
+                    let wsl_directory = saved_directory
+                        .as_deref()
+                        .and_then(|directory| directory.to_str())
+                        .filter(|directory| directory.starts_with('/'))
+                        .map(str::to_owned)
+                        .or_else(|| Some("~".to_owned()));
+                    (None, wsl_directory)
+                } else {
+                    (saved_directory, None)
+                };
+                let prefill = crate::session_state::restore_prefill_from_commands(
+                    pane.pending_command.as_deref(),
+                    pane.active_command.as_deref(),
+                );
+                pane.pending_command = None;
+                pane.active_command = None;
+                (
+                    pane.id,
+                    pane.profile.clone(),
+                    working_directory,
+                    wsl_directory,
+                    wsl_cwd_tracking_file(&pane.profile, pane.id),
+                    pane.environment_overrides.clone(),
+                    replay_by_routing_id.remove(&routing_id),
+                    prefill,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        for terminal in std::mem::take(&mut self.visible_terminals) {
+            terminal.update(cx, |terminal, cx| terminal.set_ui_visible(false, cx));
         }
-        self.attach_reconnected_tab_with_metadata(tab, true, Some(restored_metadata), window, cx);
+        self.active_tab = insert_tab_in_pin_order(&mut self.tabs, tab);
+        self.mux_panes.adopt_session(tab_id, session_id);
+        cx.notify();
+
+        for (
+            pane_id,
+            profile,
+            working_directory,
+            wsl_directory,
+            wsl_cwd_file,
+            environment_overrides,
+            replay,
+            prefill,
+        ) in restore_spawns
+        {
+            self.spawn_restored_terminal(
+                tab_id,
+                pane_id,
+                profile,
+                working_directory,
+                wsl_directory,
+                wsl_cwd_file,
+                environment_overrides,
+                replay,
+                prefill,
+                window,
+                cx,
+            );
+        }
+        self.focus_active(window, cx);
         ReconnectSessionResult::Reconnected
     }
 
@@ -2069,6 +2161,17 @@ impl Zetta {
                 }
             }
             match event {
+                TerminalEvent::CommandStarted { command } => this.update_active_command(
+                    tab_id,
+                    pane_id,
+                    crate::session_state::valid_restore_command(command),
+                ),
+                TerminalEvent::CommandFinished { .. } | TerminalEvent::TerminalExited(_) => {
+                    this.update_active_command(tab_id, pane_id, None)
+                }
+                _ => {}
+            }
+            match event {
                 TerminalEvent::TerminalExited(exit)
                     if exit.is_unexpected()
                         && this.retain_unexpected_terminal_exit(tab_id, pane_id, exit, cx) =>
@@ -2088,6 +2191,34 @@ impl Zetta {
             }
         })
         .detach();
+    }
+
+    /// Keeps the durable pane model in step with shell lifecycle markers.
+    /// Foreground process argv is intentionally not used here: it can describe
+    /// an editor, interpreter, or helper rather than text the user entered.
+    pub(crate) fn update_active_command(
+        &mut self,
+        tab_id: u64,
+        pane_id: u64,
+        command: Option<String>,
+    ) {
+        if let Some(pane) = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id == tab_id)
+            .and_then(|tab| tab.pane_mut(pane_id))
+        {
+            pane.active_command = command;
+            return;
+        }
+        if let Some(pane) = self
+            .background_sessions
+            .iter_mut()
+            .find(|tab| tab.id == tab_id)
+            .and_then(|tab| tab.pane_mut(pane_id))
+        {
+            pane.active_command = command;
+        }
     }
 
     fn retain_background_stacked_entries_after_base_exit(
@@ -2400,7 +2531,19 @@ impl Zetta {
         cx.subscribe_in(
             &terminal,
             window,
-            move |_, _, event: &TerminalEvent, _, _| {
+            move |this, _, event: &TerminalEvent, _, _| {
+                if let TerminalEvent::CommandStarted { command } = event {
+                    this.update_active_command(
+                        tab_id,
+                        pane_id,
+                        crate::session_state::valid_restore_command(command),
+                    );
+                } else if matches!(
+                    event,
+                    TerminalEvent::CommandFinished { .. } | TerminalEvent::TerminalExited(_)
+                ) {
+                    this.update_active_command(tab_id, pane_id, None);
+                }
                 let Some(identity) = run_identity else {
                     return;
                 };

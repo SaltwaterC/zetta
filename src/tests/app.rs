@@ -509,9 +509,23 @@ fn exited_terminal_is_not_backgrounded_by_the_tab_pin() {
         authentication: None,
     };
 
-    assert!(background_authentication_for_close(&pinned, true, false).is_some());
-    assert!(background_authentication_for_close(&pinned, false, false).is_none());
-    assert!(background_authentication_for_close(&pinned, true, true).is_none());
+    assert!(background_authentication_for_close(&pinned, false, true, false).is_some());
+    assert!(background_authentication_for_close(&pinned, false, false, false).is_none());
+    assert!(background_authentication_for_close(&pinned, false, true, true).is_none());
+}
+
+#[test]
+fn a_shared_tab_is_backgrounded_when_it_closes() {
+    assert!(matches!(
+        background_authentication_for_close(&TabClosePolicy::Close, true, true, false),
+        Some(None)
+    ));
+    assert!(
+        background_authentication_for_close(&TabClosePolicy::Close, false, true, false).is_none()
+    );
+    assert!(
+        background_authentication_for_close(&TabClosePolicy::Close, true, true, true).is_none()
+    );
 }
 
 #[test]

@@ -21,6 +21,9 @@ use std::{
 #[cfg(feature = "session-persistence")]
 use age::secrecy::ExposeSecret as _;
 
+#[cfg(feature = "session-persistence")]
+use zmux::persistence::{PersistedSession, PersistedSnapshot, PersistenceStore};
+
 use zmux::{
     client::{AttachOutcome, Client},
     messages::{SpawnRequest, TerminalSize},
@@ -502,6 +505,354 @@ fn a_new_client_applies_disk_retention_to_an_existing_daemon() {
 
 #[cfg(feature = "session-persistence")]
 #[test]
+fn disk_recovery_after_memory_fallback_reenables_orphaned_records() {
+    let identity = age::x25519::Identity::generate();
+    let recipient = identity.to_public().to_string();
+    let daemon = TestDaemon::start();
+    let session_id = 91;
+
+    // A previous disk daemon would have marked its live record unavailable.
+    // Leave that record behind while the replacement daemon is still using
+    // the memory fallback, which is the state reached when recipient
+    // resolution temporarily cannot contact GitHub.
+    {
+        let mut store = PersistenceStore::open(&daemon.sessions_dir(), &[recipient])
+            .unwrap()
+            .unwrap();
+        store
+            .save_session(&PersistedSession {
+                id: session_id,
+                created_at: 1,
+                updated_at: 2,
+                summary: summary(session_id, 1),
+                state: serde_json::Value::Null,
+                verifier: None,
+                key_envelope: None,
+                failed_authentications: 0,
+                backoff_seconds: 0,
+                snapshots: Vec::new(),
+            })
+            .unwrap();
+    }
+
+    let client = daemon.client();
+    client
+        .configure_with_retention_and_persistence(
+            Retention::Disk,
+            zmux::persistence::PersistenceOptions {
+                recipients: vec![identity.to_public().to_string()],
+                identity: None,
+            },
+        )
+        .unwrap();
+
+    let (_, records) = client.list_with_restorable().unwrap();
+    assert!(
+        records
+            .iter()
+            .any(|record| record.id == session_id && record.restorable)
+    );
+    client.forget(session_id).unwrap();
+}
+
+#[cfg(feature = "session-persistence")]
+#[test]
+fn an_existing_memory_daemon_can_resume_a_disk_record() {
+    let identity = age::x25519::Identity::generate();
+    let recipient = identity.to_public().to_string();
+    let daemon = TestDaemon::start();
+    let session_id = 92;
+
+    // Create the record after the memory daemon is already running. This
+    // specifically exercises the recovery-only handle used when an older or
+    // fallback daemon has no persistence store of its own.
+    {
+        let mut store = PersistenceStore::open(&daemon.sessions_dir(), &[recipient])
+            .unwrap()
+            .unwrap();
+        store
+            .save_session(&PersistedSession {
+                id: session_id,
+                created_at: 1,
+                updated_at: 2,
+                summary: summary(session_id, 1),
+                state: serde_json::json!({"from": "disk"}),
+                verifier: None,
+                key_envelope: None,
+                failed_authentications: 0,
+                backoff_seconds: 0,
+                snapshots: vec![PersistedSnapshot {
+                    pane_id: 1,
+                    bytes: b"saved before the daemon restarted\r\n".to_vec(),
+                    columns: Some(80),
+                    lines: Some(24),
+                }],
+            })
+            .unwrap();
+    }
+
+    let identity_path = daemon.config.join("identity.txt");
+    std::fs::write(
+        &identity_path,
+        format!("{}\n", identity.to_string().expose_secret()),
+    )
+    .unwrap();
+    let client = daemon.client();
+    let restored = client
+        .resume(session_id, std::slice::from_ref(&identity_path))
+        .unwrap();
+    assert_eq!(restored.state, serde_json::json!({"from": "disk"}));
+    assert!(
+        String::from_utf8_lossy(&restored.snapshots[0].bytes)
+            .contains("saved before the daemon restarted"),
+        "the saved screen was not reconstructed: {:?}",
+        restored.snapshots[0].bytes
+    );
+
+    let pane = client
+        .spawn(spawn_request(
+            Some(session_id),
+            "printf 'fresh shell'; sleep 60",
+        ))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "fresh shell");
+    drop(descriptor);
+
+    match client.attach(session_id, Some(pane.pane_id), None).unwrap() {
+        AttachOutcome::Attached { pane, .. } => {
+            assert!(
+                String::from_utf8_lossy(&pane.replay).contains("saved before the daemon restarted"),
+                "the memory fallback lost the saved pane output"
+            );
+            drop(pane);
+        }
+        _ => panic!("expected the restored pane to remain PTY-backed"),
+    }
+    client.kill(session_id).unwrap();
+}
+
+#[cfg(feature = "session-persistence")]
+#[test]
+fn starting_in_memory_mode_keeps_old_disk_records_visible() {
+    let identity = age::x25519::Identity::generate();
+    let recipient = identity.to_public().to_string();
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().to_path_buf();
+    let sessions = daemon_sessions_dir(&config);
+    std::fs::create_dir_all(&sessions).unwrap();
+    let session_id = 95;
+    {
+        let mut store = PersistenceStore::open(&sessions, &[recipient])
+            .unwrap()
+            .unwrap();
+        store
+            .save_session(&PersistedSession {
+                id: session_id,
+                created_at: 1,
+                updated_at: 2,
+                summary: summary(session_id, 1),
+                state: serde_json::json!({"survived": true}),
+                verifier: None,
+                key_envelope: None,
+                failed_authentications: 0,
+                backoff_seconds: 0,
+                snapshots: Vec::new(),
+            })
+            .unwrap();
+        store
+            .save_session(&PersistedSession {
+                id: 97,
+                created_at: 1,
+                updated_at: 2,
+                summary: summary(97, 1),
+                state: serde_json::Value::Null,
+                verifier: None,
+                key_envelope: None,
+                failed_authentications: 0,
+                backoff_seconds: 0,
+                snapshots: Vec::new(),
+            })
+            .unwrap();
+    }
+
+    let process = Command::new(daemon_binary())
+        .args(["--daemon", "--retention", "memory"])
+        .env("XDG_CONFIG_HOME", &config)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(config.join("zmux.log")).unwrap())
+        .spawn()
+        .unwrap();
+    let daemon = TestDaemon {
+        process,
+        _directory: directory,
+        config,
+    };
+    daemon.wait_for_endpoint();
+    let client = daemon.client();
+
+    // This is the configuration request Zetta sends after connecting. It
+    // must not discard the recovery-only store opened during daemon startup.
+    client
+        .configure(Retention::Memory { bytes: 4096 }, Vec::new())
+        .unwrap();
+    let (_, records) = client.list_with_restorable().unwrap();
+    assert!(
+        records
+            .iter()
+            .any(|record| record.id == session_id && record.restorable),
+        "the memory startup hid the old disk record"
+    );
+    client.kill(97).unwrap();
+    assert!(
+        client
+            .list_with_restorable()
+            .unwrap()
+            .1
+            .iter()
+            .all(|record| record.id != 97),
+        "killing a stale disk record left it in the daemon catalog"
+    );
+
+    let identity_path = daemon.config.join("identity.txt");
+    std::fs::write(
+        &identity_path,
+        format!("{}\n", identity.to_string().expose_secret()),
+    )
+    .unwrap();
+    let restored = client
+        .resume(session_id, std::slice::from_ref(&identity_path))
+        .unwrap();
+    assert_eq!(restored.state, serde_json::json!({"survived": true}));
+    client.forget(session_id).unwrap();
+
+    // The recovery-only store must not turn the active memory policy back
+    // into disk persistence for sessions created after startup.
+    let pane = client.spawn(spawn_request(None, "sleep 60")).unwrap();
+    drop(std::fs::File::from(pane.descriptor));
+    client
+        .detach(
+            pane.session_id,
+            summary(pane.session_id, pane.pane_id),
+            serde_json::Value::Null,
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+    assert!(
+        zmux::persistence::read_opaque_records(&daemon.sessions_dir())
+            .unwrap()
+            .iter()
+            .all(|record| record.id != pane.session_id),
+        "memory-mode sessions were written to the recovery-only store"
+    );
+    client.kill(pane.session_id).unwrap();
+}
+
+#[cfg(feature = "session-persistence")]
+#[test]
+fn cli_kill_and_forget_remove_orphaned_disk_records_with_a_live_memory_daemon() {
+    let identity = age::x25519::Identity::generate();
+    let recipient = identity.to_public().to_string();
+    let daemon = TestDaemon::start();
+
+    for session_id in [93, 94] {
+        let mut store =
+            PersistenceStore::open(&daemon.sessions_dir(), std::slice::from_ref(&recipient))
+                .unwrap()
+                .unwrap();
+        store
+            .save_session(&PersistedSession {
+                id: session_id,
+                created_at: 1,
+                updated_at: 2,
+                summary: summary(session_id, 1),
+                state: serde_json::Value::Null,
+                verifier: None,
+                key_envelope: None,
+                failed_authentications: 0,
+                backoff_seconds: 0,
+                snapshots: Vec::new(),
+            })
+            .unwrap();
+    }
+
+    let run_cli = |command: &str, session_id: u64| {
+        Command::new(daemon_binary())
+            .arg(command)
+            .arg(session_id.to_string())
+            .env("XDG_CONFIG_HOME", &daemon.config)
+            .output()
+            .unwrap()
+    };
+    let killed = run_cli("kill", 93);
+    assert!(killed.status.success(), "kill stderr: {:?}", killed.stderr);
+    assert!(
+        String::from_utf8_lossy(&killed.stdout).contains("Forgot stale disk session 93"),
+        "kill stdout: {:?}",
+        killed.stdout
+    );
+    let forgotten = run_cli("forget", 94);
+    assert!(
+        forgotten.status.success(),
+        "forget stderr: {:?}",
+        forgotten.stderr
+    );
+    assert!(
+        zmux::persistence::read_opaque_records(&daemon.sessions_dir())
+            .unwrap()
+            .iter()
+            .all(|record| record.id != 93 && record.id != 94),
+        "orphaned records remain after CLI cleanup"
+    );
+}
+
+#[cfg(feature = "session-persistence")]
+#[test]
+fn cli_kill_removes_an_orphaned_disk_record_without_a_daemon() {
+    let identity = age::x25519::Identity::generate();
+    let recipient = identity.to_public().to_string();
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().to_path_buf();
+    let sessions = daemon_sessions_dir(&config);
+    std::fs::create_dir_all(&sessions).unwrap();
+    let mut store = PersistenceStore::open(&sessions, &[recipient])
+        .unwrap()
+        .unwrap();
+    store
+        .save_session(&PersistedSession {
+            id: 96,
+            created_at: 1,
+            updated_at: 2,
+            summary: summary(96, 1),
+            state: serde_json::Value::Null,
+            verifier: None,
+            key_envelope: None,
+            failed_authentications: 0,
+            backoff_seconds: 0,
+            snapshots: Vec::new(),
+        })
+        .unwrap();
+    drop(store);
+
+    let output = Command::new(daemon_binary())
+        .args(["kill", "96"])
+        .env("XDG_CONFIG_HOME", &config)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "kill stderr: {:?}", output.stderr);
+    assert!(
+        zmux::persistence::read_opaque_records(&sessions)
+            .unwrap()
+            .iter()
+            .all(|record| record.id != 96),
+        "the stale record survived kill without a daemon"
+    );
+}
+
+#[cfg(feature = "session-persistence")]
+#[test]
 fn reconfiguring_to_disk_keeps_an_existing_process_and_creates_encrypted_persistence() {
     let identity = age::x25519::Identity::generate();
     let daemon = TestDaemon::start();
@@ -690,7 +1041,13 @@ fn daemon_loss_makes_disk_records_restorable_and_resume_consumes_them() {
         .resume(pane.session_id, std::slice::from_ref(&identity_path))
         .unwrap();
     assert_eq!(restored.state, serde_json::json!({"restored": true}));
-    assert_eq!(restored.snapshots[0].bytes.len(), 96 * 1024);
+    assert_eq!(restored.snapshots[0].columns, Some(80));
+    assert_eq!(restored.snapshots[0].lines, Some(24));
+    assert!(!restored.snapshots[0].bytes.is_empty());
+    assert!(
+        restored.snapshots[0].bytes.len() < 96 * 1024,
+        "dimensioned restore should replace the raw snapshot with its bounded screen"
+    );
     let (_, records) = client.list_with_restorable().unwrap();
     assert!(
         records
@@ -698,6 +1055,138 @@ fn daemon_loss_makes_disk_records_restorable_and_resume_consumes_them() {
             .any(|record| record.id == pane.session_id && !record.restorable)
     );
     client.forget(pane.session_id).unwrap();
+    assert!(client.list_with_restorable().unwrap().1.is_empty());
+}
+
+#[cfg(feature = "session-persistence")]
+#[test]
+fn live_share_checkpoints_the_screen_before_daemon_loss() {
+    let identity = age::x25519::Identity::generate();
+    let mut daemon = TestDaemon::start_with_recipient(&identity.to_public().to_string());
+    let client = daemon.client();
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; sleep 60"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+
+    // This is the checkpoint Zetta sends while the pane is still exclusively
+    // attached to the window. Sharing used to persist the daemon's deliberately
+    // empty retained screen because only the window had been reading the PTY.
+    client
+        .send_snapshot(
+            pane.session_id,
+            pane.pane_id,
+            b"screen from live share\r\n".to_vec(),
+            80,
+            24,
+        )
+        .expect("checkpointing the live pane");
+    client
+        .share(
+            pane.session_id,
+            summary(pane.session_id, pane.pane_id),
+            serde_json::Value::Null,
+            None,
+            true,
+        )
+        .expect("sharing the live pane");
+    drop(descriptor);
+    drop(client);
+    daemon.restart_with_recovery();
+
+    let client = daemon.client();
+    let (_, records) = client.list_with_restorable().unwrap();
+    assert!(
+        records
+            .iter()
+            .any(|record| record.id == pane.session_id && record.restorable),
+        "the live share did not leave a restorable disk record: {records:?}"
+    );
+
+    let identity_path = daemon.config.join("identity.txt");
+    std::fs::write(
+        &identity_path,
+        format!("{}\n", identity.to_string().expose_secret()),
+    )
+    .unwrap();
+    let restored = client
+        .resume(pane.session_id, std::slice::from_ref(&identity_path))
+        .expect("resuming the live share after daemon loss");
+    assert!(
+        String::from_utf8_lossy(&restored.snapshots[0].bytes).contains("screen from live share"),
+        "the live share restored an empty screen: {:?}",
+        restored.snapshots[0].bytes
+    );
+    client.forget(pane.session_id).unwrap();
+}
+
+#[cfg(feature = "session-persistence")]
+#[test]
+fn disk_resume_spawns_a_fresh_shell_in_the_original_session() {
+    let identity = age::x25519::Identity::generate();
+    let mut daemon = TestDaemon::start_with_recipient(&identity.to_public().to_string());
+    let client = daemon.client();
+    let pane = client
+        .spawn(spawn_request(None, "printf old-process; sleep 60"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "old-process");
+    drop(descriptor);
+    client
+        .detach(
+            pane.session_id,
+            summary(pane.session_id, pane.pane_id),
+            serde_json::json!({"fresh_shell": true}),
+            None,
+            vec![(pane.pane_id, b"saved screen\r\n".to_vec())],
+        )
+        .unwrap();
+    drop(client);
+    daemon.restart_with_recovery();
+
+    let identity_path = daemon.config.join("identity.txt");
+    std::fs::write(
+        &identity_path,
+        format!("{}\n", identity.to_string().expose_secret()),
+    )
+    .unwrap();
+    let client = daemon.client();
+    client
+        .resume(pane.session_id, std::slice::from_ref(&identity_path))
+        .unwrap();
+
+    let restored = client
+        .spawn(spawn_request(
+            Some(pane.session_id),
+            "printf fresh-shell; read value; printf 'got:%s' \"$value\"; sleep 60",
+        ))
+        .unwrap();
+    assert_eq!(restored.session_id, pane.session_id);
+    let mut descriptor = std::fs::File::from(restored.descriptor);
+    read_until(&descriptor, "fresh-shell");
+    descriptor.write_all(b"from-user\n").unwrap();
+    read_until(&descriptor, "got:from-user");
+    drop(descriptor);
+
+    // The daemon also seeds its normal retained screen, so a later handoff
+    // sees the restored pane even though the first Zetta terminal consumed
+    // the one-shot replay locally.
+    match client
+        .attach(pane.session_id, Some(restored.pane_id), None)
+        .unwrap()
+    {
+        AttachOutcome::Attached { pane, .. } => {
+            assert!(
+                String::from_utf8_lossy(&pane.replay).contains("saved screen"),
+                "the restored daemon pane lost its saved screen"
+            );
+            drop(pane);
+        }
+        _ => panic!("unexpected attach result"),
+    }
+
+    client.kill(pane.session_id).unwrap();
     assert!(client.list_with_restorable().unwrap().1.is_empty());
 }
 
@@ -771,7 +1260,7 @@ fn protected_disk_resume_preserves_failed_authentication_backoff() {
     let ciphertext = std::fs::read(
         daemon
             .sessions_dir()
-            .join(format!("persistence/session-{}.age", pane.session_id)),
+            .join(format!("persistence/session-{}-auth.age", pane.session_id)),
     )
     .unwrap();
     let metadata: serde_json::Value =

@@ -20,16 +20,23 @@ snapshot of each pane's screen; `zmux` keeps reading the terminals so nothing
 blocks, and replays the snapshot and everything since when the session is
 attached again.
 
+When a tab is shared while it remains on screen, Zetta also checkpoints each
+exclusive pane when the offer is published. With disk retention this means a
+daemon restart before the tab is detached still has the last shared screen to
+restore; output produced after that checkpoint is captured once the pane is
+being read by `zmux`.
+
 `zmux` is also reachable as `zetta mux`, and takes the same arguments either
 way:
 
 ```sh
 zmux list             # the sessions being held
-zmux resume SESSION -i PATH # decrypt and restore an opaque disk record
+zmux resume SESSION -i PATH # restore a disk record with fresh shells when a Zetta window is available
 zmux share SESSION_ID    # make a scoped session shared/joinable
 zmux reconnect SESSION_ID # open it in a Zetta window
 zmux unshare SESSION_ID  # scope it back to the window that held it
-zmux kill SESSION_ID     # end a session and everything running in it
+zmux kill SESSION_ID     # end a live session or discard a stale disk record
+zmux forget SESSION_ID   # remove a live session or stale disk record
 zmux stop             # stop the multiplexer, once nothing is running in it
 zmux --upgrade        # replace the multiplexer, keeping its sessions
 ```
@@ -47,17 +54,31 @@ identity files; the configured identity path is used by the Zetta picker, and
 by `zmux resume` and `zmux reconnect`, when one is set. An explicit `--identity`
 adds to the configured one rather than replacing it.
 
+Resuming a disk record is a fresh-shell restore, not a process checkpoint. A
+Zetta window creates new PTY-backed shells in the original zmux session ID,
+replays each saved screen and flushed scrollback into the matching pane, and
+restores the saved working directory, profile, layout, and environment. If a
+command was interrupted, its saved pending input (or the shell-reported active
+command) is placed at the new prompt without pressing Enter. The old process is
+never reattached or rerun. Stacked task entries remain in the tab; entries that
+were starting or running when the record was written are marked failed because
+their task terminals are not recreated.
+
+When no Zetta window is available, standalone `zmux resume` only decrypts and
+acknowledges the record; it does not start a shell. A later restore needs a
+Zetta window to own the fresh PTY handoff.
+
 Disk retention can temporarily fall back to the configured in-memory screen
 when a `github:USER` recipient cannot be resolved because GitHub is
 unreachable. The daemon remains the owner, so detached sessions continue to be
 available to another Zetta process; the tradeoff is that sessions created while
 the fallback is active do not get new encrypted persistence files. Existing
-files are not removed or rewritten by the fallback. Zetta retries persistence
+encrypted record files are not rewritten by the fallback (its manifest may be
+refreshed to mark them restorable). Zetta retries persistence
 in the background after 5, 10, 20, 40, and then 60 seconds, repeating at most
 every 60 seconds, and restores disk retention in the same daemon when the
-lookup succeeds. The window shows an informational notice, and encrypted disk
-resume is unavailable until restoration; permanent recipient errors still
-fail the configuration.
+lookup succeeds. Existing disk records remain listed and resumable while the
+fallback is active; permanent recipient errors still fail the configuration.
 
 ### Protecting a session without a secret
 
@@ -291,11 +312,13 @@ The scope outlives the window in normal daemon mode. A session detached with
 `Ctrl-Shift-D` whose Zetta has exited — closed or crashed — stays that process's,
 and no other window may attach it: ordinary detaching is not a slow way of
 sharing it. In normal daemon mode, `Ctrl-Shift-B` is **Share Tab**, which makes
-the session joinable while it remains on screen. In `--no-mux` mode, the same
-shortcut is **Keep running** and retains the tab in the current Zetta process;
-sharing is unavailable. `zmux list` says which process each still-scoped
-session belongs to. If that process is gone, run `zmux share SESSION` to change
-the scope, then `zmux reconnect SESSION` to open it. It can also be ended with
+the session joinable while it remains on screen and hands it back to the
+multiplexer when its last viewer closes the tab or its window. In `--no-mux`
+mode, the same shortcut is **Keep running** and retains the tab in the current
+Zetta process; sharing is unavailable. `zmux list` says which process each
+still-scoped session belongs to. If that process is gone, run `zmux share
+SESSION` to change the scope, then `zmux reconnect SESSION` to open it. It can
+also be ended with
 `zmux kill SESSION` by the session owner or current holder, like any other
 protected administrative action.
 
@@ -362,9 +385,11 @@ a message rather than silently opening a second tab onto the same terminal.
 The screen handed over in step 2 is what every window that joins later starts
 from, however long after the share it arrives — the multiplexer keeps it, along
 with what the pane has printed since, rather than spending it on the first window
-to join. The window that handed it over is the exception: it never stopped
-showing that screen, so it is sent only what arrived afterwards. A full-screen
-program repaints just what it thinks has changed, so a window sent the wrong one
+to join. The initial live-share checkpoint also protects disk restore if the
+daemon goes away before a handover. The window that handed it over is the
+exception: it never stopped showing that screen, so it is sent only what arrived
+afterwards. A full-screen program repaints just what it thinks has changed, so a
+window sent the wrong one
 of those two would keep whatever it never repainted — htop's F-key bar drawn
 across the top of the window, or a screen with its static text missing.
 
@@ -409,13 +434,14 @@ There is also a last-resort timeout of half a minute for a window that has hung 
 a pane still attached, so one frozen window cannot hold a session for ever.
 
 In normal daemon mode, **Share Tab** is the lifecycle control exposed by
-default. Sharing alone does not keep a session alive after every viewer goes,
-so a shared tab whose window closes ends like any other. In `--no-mux` mode,
-**Keep running** is the lifecycle control exposed by default; it only requests
-the process-local background owner because sharing is unavailable. An explicit
-user keymap can still invoke either action, and the authentication dialog
-covers whichever lifecycle action is used: a tab that already carries a secret
-reuses it, and a tab without one is asked.
+default. A shared tab remains joinable while it is visible and is handed back
+to the multiplexer when its last viewer closes the tab or its window, so it can
+be reconnected later. In `--no-mux` mode, **Keep running** is the lifecycle
+control exposed by default; it requests the process-local background owner
+because sharing is unavailable. An explicit user keymap can still invoke
+either action, and the authentication dialog covers whichever lifecycle action
+is used: a tab that already carries a secret reuses it, and a tab without one
+is asked.
 Worth answering rather than skipping — "running as you" is not the boundary that
 matters here, because a session's terminals may hold privileges the process
 joining them does not.
@@ -674,9 +700,9 @@ With `zetta --no-mux`, use `Ctrl-Shift-B` or **Zetta: Toggle Auto Background
 Tab** in the command palette to keep a tab running when the tab or its window
 closes. **Keep running** keeps the session in the same Zetta process without
 sharing. Normal daemon launches expose **Share Tab** on `Ctrl-Shift-B` instead;
-sharing and keeping a tab running are separate session properties there. This
-setting is separate from the visual `Pin Tab` action, which only keeps a tab at
-the leading edge of the current tab bar.
+it keeps the tab joinable while visible and hands it back to zmux when the tab
+or its window closes. This setting is separate from the visual `Pin Tab`
+action, which only keeps a tab at the leading edge of the current tab bar.
 
 Enabling the toggle asks for reattachment authentication immediately, in the same
 dialog detaching and sharing use: select **No authentication**, or enter and

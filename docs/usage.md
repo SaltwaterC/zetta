@@ -210,8 +210,9 @@ title remains available through the tooltip and accessibility label, and the
 slot expands while the tab is renamed. Pinned tabs can be reordered among one
 another but cannot cross the pinned/unpinned boundary. This visual pin is
 independent from the session-lifecycle control. Normal daemon launches expose
-**Share Tab**; `zetta --no-mux` exposes **Keep running**. Both use
-`Ctrl-Shift-B`, while `Ctrl-Shift-K` is unbound by default.
+**Share Tab**, which keeps the session joinable while visible and hands it back
+to zmux when the tab or window closes; `zetta --no-mux` exposes **Keep running**.
+Both use `Ctrl-Shift-B`, while `Ctrl-Shift-K` is unbound by default.
 
 ### Tab attention
 
@@ -890,7 +891,7 @@ mode `Ctrl-Shift-B` shares the active tab, while in `--no-mux` mode it toggles
 | `Ctrl-Shift-W` | Close tab |
 | `Ctrl-Shift-G`, then `Left` / `Right` | Toggle tab-move mode and move the active tab without wrapping |
 | `Ctrl-Shift-D` | Detach the active tab into the background |
-| `Ctrl-Shift-B` | Share the active tab (normal daemon mode); toggle **Keep running** (`--no-mux`) |
+| `Ctrl-Shift-B` | Share and retain the active tab (normal daemon mode); toggle **Keep running** (`--no-mux`) |
 | `Ctrl-Shift-A` | Reconnect the most recently detached tab |
 | `Ctrl-Shift-O` | Split active pane horizontally, adding a pane below |
 | `Ctrl-Shift-E` | Split active pane vertically, adding a pane on the right |

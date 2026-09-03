@@ -104,6 +104,13 @@ fn session_identifiers_reject_missing_or_zero_components() {
     }
 }
 
+#[test]
+#[cfg(feature = "session-persistence")]
+fn persisted_timestamps_are_displayed_as_human_readable_utc() {
+    assert_eq!(display_timestamp(0), "1970-01-01 00:00:00 UTC");
+    assert_eq!(display_timestamp(1788380694), "2026-09-02 20:24:54 UTC");
+}
+
 fn catalog_with_session_ids(
     process_id: u32,
     runner_id: u64,

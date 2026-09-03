@@ -91,11 +91,15 @@ fn a_degraded_disk_runtime_keeps_the_requested_policy_separate_from_effective_me
 
     assert_eq!(state.requested, Retention::Disk);
     assert_eq!(state.effective, Retention::Memory { bytes: 8192 });
-    assert!(state.degraded_reason.is_some());
-    assert!(!state.can_resume_disk());
+    assert_eq!(
+        state.degraded_reason.as_deref(),
+        Some("GitHub is unavailable")
+    );
 
     let restored = MuxRetentionState::exact(Retention::Disk);
-    assert!(restored.can_resume_disk());
+    assert_eq!(restored.requested, Retention::Disk);
+    assert_eq!(restored.effective, Retention::Disk);
+    assert!(restored.degraded_reason.is_none());
 }
 
 #[cfg(feature = "session-persistence")]

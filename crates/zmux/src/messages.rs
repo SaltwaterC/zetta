@@ -60,14 +60,17 @@ pub enum Request {
         pane_id: Option<u64>,
         secret: Option<String>,
     },
-    /// The revoke handshake's answer: the client holding a pane's terminal
-    /// stopped reading it and is giving back the screen it was showing, so the
-    /// multiplexer can resume reading and relay the pane to every client that
-    /// attaches.
+    /// Gives the multiplexer a screen checkpoint from the client that is
+    /// showing a pane. During a revoke handover this is the screen that lets
+    /// the multiplexer resume reading and relay the pane to every client that
+    /// attaches. A live share uses the same one-shot message while the client
+    /// remains exclusive, so a persisted offer does not start with an empty
+    /// screen.
     ///
-    /// Sent over a fresh connection from the *revoked* client, after
-    /// [`Event::Revoke`]. The raw snapshot bytes follow the message. The
-    /// connection carries nothing else and closes afterwards.
+    /// Sent over a fresh connection from the client showing the pane. During a
+    /// revoke it follows [`Event::Revoke`]; during a live share it precedes the
+    /// [`Request::Share`] publication. The raw snapshot bytes follow the
+    /// message. The connection carries nothing else and closes afterwards.
     ///
     /// `columns`/`lines` are the size the holder was showing the pane at:
     /// shared clients join at that size until their own reports refine it,
@@ -307,9 +310,9 @@ pub struct ResumeSnapshot {
 ///
 /// Carries the same summary and state a detach does, and for the same reason:
 /// the catalog needs something to list, and a client that joins rebuilds its tab
-/// from the state. It carries no snapshots, because the panes are still being
-/// read by the sharing client — the screen a joining client starts from comes
-/// from the revoke handover, which is where the holder is asked for it.
+/// from the state. Snapshot bytes are sent separately with [`Request::Snapshot`]
+/// immediately beforehand: the panes are still being read by the sharing
+/// client, so the share publication itself must not carry a large raw payload.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ShareRequest {

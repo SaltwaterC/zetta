@@ -1011,9 +1011,13 @@ impl Client {
         self.set_console_palette_as(session_id, pane_id, palette, client_process_id)
     }
 
-    /// Answers a revoke: the screen this process was showing a pane, handed
-    /// back so the multiplexer can resume reading and relay the pane to every
-    /// client that attaches.
+    /// Sends a screen checkpoint for a pane this process is showing.
+    ///
+    /// During a revoke this is the screen handed back so the multiplexer can
+    /// resume reading and relay the pane to every client that attaches. A live
+    /// share uses the same request before publishing the session, while this
+    /// process remains exclusive, so disk persistence has a current screen to
+    /// save even if the window never gets as far as backgrounding the tab.
     ///
     /// `columns`/`lines` are the size the pane was being shown at, which the
     /// multiplexer records as the pane's size for shared clients to join at.
@@ -1025,13 +1029,16 @@ impl Client {
         columns: u16,
         lines: u16,
     ) -> Result<()> {
-        let mut connection = self.open(Request::Snapshot {
-            session_id,
-            pane_id,
-            length: bytes.len(),
-            columns,
-            lines,
-        })?;
+        let mut connection = self.open_attested(
+            Request::Snapshot {
+                session_id,
+                pane_id,
+                length: bytes.len(),
+                columns,
+                lines,
+            },
+            std::process::id(),
+        )?;
         connection.write_all(&bytes)?;
         match Self::receive(&mut connection)?.0 {
             Response::Ok => Ok(()),

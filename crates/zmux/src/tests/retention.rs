@@ -74,6 +74,29 @@ fn shown(retained: &Retained) -> Vec<String> {
         .collect()
 }
 
+#[cfg(feature = "scrollback-buffer")]
+fn decoded_history(retained: &Retained) -> Vec<String> {
+    use alacritty_terminal::{
+        event::VoidListener,
+        grid::Dimensions as _,
+        index::{Column, Line},
+        term::{Config, Term, cell::LineLength as _},
+        vte::ansi::{Processor, StdSyncHandler},
+    };
+
+    let mut term = Term::new(Config::default(), &GridSize::new(40, 5), VoidListener);
+    Processor::<StdSyncHandler>::new().advance(&mut term, &retained.snapshot());
+    let grid = term.grid();
+    (grid.topmost_line().0..=grid.bottommost_line().0)
+        .map(|line| {
+            let row = &grid[Line(line)];
+            (0..row.line_length().0)
+                .map(|column| row[Column(column)].c)
+                .collect()
+        })
+        .collect()
+}
+
 #[test]
 fn none_keeps_nothing_at_all() {
     // The mode for a memory-constrained host: the pane is still read, so its
@@ -140,6 +163,26 @@ fn scrollback_is_bounded_by_the_memory_budget() {
     assert!(
         !snapshot.contains("line 20"),
         "the oldest lines are the ones dropped: {snapshot:?}"
+    );
+}
+
+#[cfg(feature = "scrollback-buffer")]
+#[test]
+fn a_retained_snapshot_round_trip_keeps_lines_above_the_viewport() {
+    let mut retained = Retention::Memory { bytes: 2_048 }.new_retained(40, 5);
+    for line in 0..30 {
+        retained.push(format!("line {line}\r\n").as_bytes());
+    }
+
+    let history = decoded_history(&retained);
+    assert!(history.len() > 5, "the decoded terminal has no scrollback");
+    assert!(
+        history.iter().any(|line| line == "line 29"),
+        "the latest output is missing: {history:?}"
+    );
+    assert!(
+        history.iter().any(|line| line == "line 22"),
+        "output above one viewport was not restored: {history:?}"
     );
 }
 
