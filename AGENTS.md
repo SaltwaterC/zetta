@@ -43,12 +43,23 @@ is a sibling under `src/`.
 
 - `app.rs`: `Zetta` struct, tab/pane lifecycle, and state that doesn't belong
   to a narrower module below
-- `startup.rs`: `run()`, window/process lifecycle, and theme resolution
-  (`resolve_profile_theme`); a module directory — `startup/cli_help.rs`
-  (usage/help text), `startup/arg_parsing.rs` (`StartupMode`/`StartupArgs`
-  parsing), `startup/keybindings.rs` (keybinding constants/constructors and
-  macOS native menu construction), and `startup/wsl.rs` (WSL/MSYS2 profile
-  and working-directory integration)
+- `startup.rs`: `run()`'s startup-mode dispatch, the handoff-to-a-running-process
+  sequence, the GUI launch (`ApplicationLaunch`), window/process lifecycle, and
+  theme resolution (`resolve_profile_theme`); a module directory —
+  `startup/cli_help.rs` (usage/help text), `startup/arg_parsing.rs`
+  (`StartupMode`/`StartupArgs` parsing), `startup/cli_modes.rs` (the
+  subcommands that never open a window — one function per `StartupMode`
+  variant), `startup/process_control_loop.rs` (the event loop that applies
+  `ProcessControlCommand`s, one handler per command),
+  `startup/keybindings.rs` (keybinding constants/constructors and macOS
+  native menu construction), `startup/workload.rs` (the deterministic
+  producer workloads `zetta benchmark` drives the renderer with), and
+  `startup/wsl.rs` (WSL/MSYS2 profile and working-directory integration)
+
+  `run()` dispatches with one exhaustive `match` over `StartupMode`, so a new
+  variant has to name the function that handles it rather than silently
+  falling through to a GUI launch. Add the arm there, not another sequential
+  test.
 - `pane.rs`: pane layout, tab models, terminal creation, and pane focus
 - `pane_resize.rs`: pane resize/move mode, keyboard and drag-based resizing
 - `pane_view_state.rs`: pane maximize/minimize/restore and font size
@@ -171,7 +182,8 @@ is a sibling under `src/`.
 - `process_control.rs`: the per-process control socket — the request/response
   protocol and `CONTROL_VERSION` history, the server (`ProcessControlServer`),
   the client request functions, and endpoint discovery/reaping. Every
-  `zetta <subcommand>` that has to reach a running window goes through here
+  `zetta <subcommand>` that has to reach a running window goes through here;
+  the decoded request is applied by `startup/process_control_loop.rs`
 - `run_command.rs`: the `zetta pane wait` registry shared by wrapper clients
   and terminal lifecycle events; deliberately GPUI-free
 - `command_panes.rs`: `PaneCommand`/`ShellCommandRequest` and the pane-opening

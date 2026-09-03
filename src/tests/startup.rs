@@ -1,15 +1,6 @@
 use super::*;
 
 #[test]
-fn shell_integration_setup_message_explains_how_to_enable_a_new_configuration() {
-    let message = shell_integration_configuration_message(&ShellIntegrationConfiguration::Written(
-        PathBuf::from("/home/example/.zshrc"),
-    ));
-
-    assert!(message.contains("Start a new shell or reload this file"));
-}
-
-#[test]
 fn process_quits_only_without_windows_or_dormant_session_runners() {
     assert!(should_quit_after_window_closed(0, 0));
     assert!(!should_quit_after_window_closed(0, 1));
@@ -83,22 +74,6 @@ fn checkerboard_profiler_launches_the_background_workload() {
             ],
             title_override: Some("Terminal rendering profiler".to_owned()),
         }
-    );
-}
-
-#[test]
-fn checkerboard_background_changes_every_cell_on_each_frame() {
-    assert_ne!(
-        checkerboard_background(0, 0, 0),
-        checkerboard_background(0, 0, 1)
-    );
-    assert_ne!(
-        checkerboard_background(0, 0, 0),
-        checkerboard_background(0, 1, 0)
-    );
-    assert_eq!(
-        checkerboard_background(0, 0, 0),
-        checkerboard_background(0, 0, 2)
     );
 }
 
