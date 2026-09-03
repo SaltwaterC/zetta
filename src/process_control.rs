@@ -351,7 +351,13 @@ struct ControlEndpoint {
     token: String,
 }
 
-#[derive(Serialize, Deserialize)]
+/// Every field but `token` and `command` is optional, and a request sets only
+/// the ones its command actually carries. Construct one with
+/// `..Default::default()` rather than spelling out the rest as `None`:
+/// `decode_control_request` is what enforces which fields a command may carry,
+/// and a sender that lists all of them just makes adding a field a 20-site
+/// edit.
+#[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ControlRequest {
     token: String,
@@ -2427,28 +2433,29 @@ impl Drop for ProcessControlServer {
     }
 }
 
-pub(crate) fn request_existing_process_window() -> Result<bool> {
-    request_existing_process_window_with_command("open_window", None, None)
-}
-
-pub(crate) fn request_existing_process_new_window(
-    profile: Option<&str>,
-    activation_token: Option<&str>,
-) -> Result<bool> {
-    request_existing_process_window_with_command("new_window", profile, activation_token)
-}
-
-fn request_existing_process_window_with_command(
-    command: &str,
-    profile: Option<&str>,
-    activation_token: Option<&str>,
-) -> Result<bool> {
+/// Every live process-control endpoint in the session catalog, in directory
+/// order, having reaped the endpoint file and socket of any process that is
+/// gone.
+///
+/// The reaping is why this is one function rather than a loop per caller:
+/// every request that scans the catalog has to do it, and a caller that
+/// forgets leaves a stale endpoint behind that later requests keep trying to
+/// connect to. It also means a caller cannot accidentally skip the
+/// `CONTROL_VERSION` check and send a request to a Zetta too old to serve it.
+///
+/// The endpoints are collected rather than streamed so a directory-entry error
+/// still aborts the request with that error, as it did when each caller ran
+/// its own loop. There is one endpoint per running Zetta process, and every
+/// caller is a one-shot CLI path, so the vector costs nothing worth streaming
+/// for.
+fn live_control_endpoints() -> Result<Vec<ControlEndpoint>> {
     let directory = crate::background_sessions::session_catalog_dir();
     let entries = match fs::read_dir(&directory) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error).context("reading Zetta process control endpoints"),
     };
+    let mut endpoints = Vec::new();
     for entry in entries {
         let path = entry?.path();
         if !path
@@ -2470,6 +2477,83 @@ fn request_existing_process_window_with_command(
             let _ = fs::remove_file(endpoint.socket_path);
             continue;
         }
+        endpoints.push(endpoint);
+    }
+    Ok(endpoints)
+}
+
+/// The control endpoint for one specific Zetta process.
+///
+/// Fails rather than reporting absence: a caller that names a process ID read
+/// it from `ZETTA_PROCESS_ID`, so a missing endpoint means the process it was
+/// told to talk to is not serving, and saying so beats doing nothing quietly.
+/// Use [`live_control_endpoint`] where absence is an ordinary outcome.
+fn read_control_endpoint(process_id: u32) -> Result<ControlEndpoint> {
+    let endpoint_path = control_endpoint_path(process_id);
+    let contents = fs::read(&endpoint_path).with_context(|| {
+        format!(
+            "reading Zetta process control endpoint {}",
+            endpoint_path.display()
+        )
+    })?;
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&contents).context("parsing Zetta process control endpoint")?;
+    anyhow::ensure!(
+        endpoint.version == CONTROL_VERSION && endpoint.process_id == process_id,
+        "Zetta process control endpoint is outdated"
+    );
+    Ok(endpoint)
+}
+
+/// [`read_control_endpoint`] for callers that treat a process which is absent
+/// or gone as "nothing to do", reaping its stale endpoint and socket on the
+/// way. An outdated `CONTROL_VERSION` is still an error: the process is there,
+/// it just cannot serve the request.
+fn live_control_endpoint(process_id: u32) -> Result<Option<ControlEndpoint>> {
+    let endpoint_path = control_endpoint_path(process_id);
+    let contents = match fs::read(&endpoint_path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "reading Zetta process control endpoint {}",
+                    endpoint_path.display()
+                )
+            });
+        }
+    };
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&contents).context("parsing Zetta process control endpoint")?;
+    anyhow::ensure!(
+        endpoint.version == CONTROL_VERSION && endpoint.process_id == process_id,
+        "Zetta process control endpoint is outdated"
+    );
+    if !process_is_running(process_id) {
+        let _ = fs::remove_file(endpoint_path);
+        let _ = fs::remove_file(endpoint.socket_path);
+        return Ok(None);
+    }
+    Ok(Some(endpoint))
+}
+
+pub(crate) fn request_existing_process_window() -> Result<bool> {
+    request_existing_process_window_with_command("open_window", None, None)
+}
+
+pub(crate) fn request_existing_process_new_window(
+    profile: Option<&str>,
+    activation_token: Option<&str>,
+) -> Result<bool> {
+    request_existing_process_window_with_command("new_window", profile, activation_token)
+}
+
+fn request_existing_process_window_with_command(
+    command: &str,
+    profile: Option<&str>,
+    activation_token: Option<&str>,
+) -> Result<bool> {
+    for endpoint in live_control_endpoints()? {
         if send_open_window_request_with_command(&endpoint, command, profile, activation_token)
             .unwrap_or(false)
         {
@@ -2488,33 +2572,7 @@ pub(crate) fn request_existing_process_project_with_working_directory(
     root: &Path,
     working_directory: Option<&Path>,
 ) -> Result<bool> {
-    let directory = crate::background_sessions::session_catalog_dir();
-    let entries = match fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error).context("reading Zetta process control endpoints"),
-    };
-    for entry in entries {
-        let path = entry?.path();
-        if !path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("control-") && name.ends_with(".json"))
-        {
-            continue;
-        }
-        let endpoint = match fs::read(&path)
-            .ok()
-            .and_then(|contents| serde_json::from_slice::<ControlEndpoint>(&contents).ok())
-        {
-            Some(endpoint) if endpoint.version == CONTROL_VERSION => endpoint,
-            _ => continue,
-        };
-        if !process_is_running(endpoint.process_id) {
-            let _ = fs::remove_file(path);
-            let _ = fs::remove_file(endpoint.socket_path);
-            continue;
-        }
+    for endpoint in live_control_endpoints()? {
         if send_open_project_request_with_working_directory(&endpoint, root, working_directory)
             .unwrap_or(false)
         {
@@ -2525,67 +2583,15 @@ pub(crate) fn request_existing_process_project_with_working_directory(
 }
 
 pub(crate) fn request_existing_process_projects_reload() -> Result<bool> {
-    let directory = crate::background_sessions::session_catalog_dir();
-    let entries = match fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error).context("reading Zetta process control endpoints"),
-    };
     let mut accepted = false;
-    for entry in entries {
-        let path = entry?.path();
-        if !path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("control-") && name.ends_with(".json"))
-        {
-            continue;
-        }
-        let endpoint = match fs::read(&path)
-            .ok()
-            .and_then(|contents| serde_json::from_slice::<ControlEndpoint>(&contents).ok())
-        {
-            Some(endpoint) if endpoint.version == CONTROL_VERSION => endpoint,
-            _ => continue,
-        };
-        if !process_is_running(endpoint.process_id) {
-            let _ = fs::remove_file(path);
-            let _ = fs::remove_file(endpoint.socket_path);
-            continue;
-        }
+    for endpoint in live_control_endpoints()? {
         accepted |= send_reload_projects_request(&endpoint).unwrap_or(false);
     }
     Ok(accepted)
 }
 
 pub(crate) fn request_existing_process_replace_pane(request: ReplacePaneRequest) -> Result<bool> {
-    let directory = crate::background_sessions::session_catalog_dir();
-    let entries = match fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error).context("reading Zetta process control endpoints"),
-    };
-    for entry in entries {
-        let path = entry?.path();
-        if !path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("control-") && name.ends_with(".json"))
-        {
-            continue;
-        }
-        let endpoint = match fs::read(&path)
-            .ok()
-            .and_then(|contents| serde_json::from_slice::<ControlEndpoint>(&contents).ok())
-        {
-            Some(endpoint) if endpoint.version == CONTROL_VERSION => endpoint,
-            _ => continue,
-        };
-        if !process_is_running(endpoint.process_id) {
-            let _ = fs::remove_file(path);
-            let _ = fs::remove_file(endpoint.socket_path);
-            continue;
-        }
+    for endpoint in live_control_endpoints()? {
         if send_replace_pane_request(&endpoint, &request).unwrap_or(false) {
             return Ok(true);
         }
@@ -2594,34 +2600,8 @@ pub(crate) fn request_existing_process_replace_pane(request: ReplacePaneRequest)
 }
 
 pub(crate) fn request_existing_process_pane(request: PaneCommand) -> Result<bool> {
-    let directory = crate::background_sessions::session_catalog_dir();
-    let entries = match fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error).context("reading Zetta process control endpoints"),
-    };
     let mut last_error = None;
-    for entry in entries {
-        let path = entry?.path();
-        if !path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("control-") && name.ends_with(".json"))
-        {
-            continue;
-        }
-        let endpoint = match fs::read(&path)
-            .ok()
-            .and_then(|contents| serde_json::from_slice::<ControlEndpoint>(&contents).ok())
-        {
-            Some(endpoint) if endpoint.version == CONTROL_VERSION => endpoint,
-            _ => continue,
-        };
-        if !process_is_running(endpoint.process_id) {
-            let _ = fs::remove_file(path);
-            let _ = fs::remove_file(endpoint.socket_path);
-            continue;
-        }
+    for endpoint in live_control_endpoints()? {
         match send_run_pane_request(&endpoint, &request) {
             Ok(true) => return Ok(true),
             Ok(false) => {}
@@ -2649,34 +2629,8 @@ pub(crate) fn request_existing_process_shell_command(request: ShellCommandReques
         return request_process_shell_command(process_id, &request);
     }
 
-    let directory = crate::background_sessions::session_catalog_dir();
-    let entries = match fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error).context("reading Zetta process control endpoints"),
-    };
     let mut last_error = None;
-    for entry in entries {
-        let path = entry?.path();
-        if !path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("control-") && name.ends_with(".json"))
-        {
-            continue;
-        }
-        let endpoint = match fs::read(&path)
-            .ok()
-            .and_then(|contents| serde_json::from_slice::<ControlEndpoint>(&contents).ok())
-        {
-            Some(endpoint) if endpoint.version == CONTROL_VERSION => endpoint,
-            _ => continue,
-        };
-        if !process_is_running(endpoint.process_id) {
-            let _ = fs::remove_file(path);
-            let _ = fs::remove_file(endpoint.socket_path);
-            continue;
-        }
+    for endpoint in live_control_endpoints()? {
         match send_run_shell_command_request(&endpoint, &request) {
             Ok(true) => return Ok(true),
             Ok(false) => {}
@@ -2690,30 +2644,9 @@ pub(crate) fn request_existing_process_shell_command(request: ShellCommandReques
 }
 
 fn request_process_shell_command(process_id: u32, request: &ShellCommandRequest) -> Result<bool> {
-    let endpoint_path = control_endpoint_path(process_id);
-    let contents = match fs::read(&endpoint_path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!(
-                    "reading Zetta process control endpoint {}",
-                    endpoint_path.display()
-                )
-            });
-        }
-    };
-    let endpoint: ControlEndpoint =
-        serde_json::from_slice(&contents).context("parsing Zetta process control endpoint")?;
-    anyhow::ensure!(
-        endpoint.version == CONTROL_VERSION && endpoint.process_id == process_id,
-        "Zetta process control endpoint is outdated"
-    );
-    if !process_is_running(process_id) {
-        let _ = fs::remove_file(endpoint_path);
-        let _ = fs::remove_file(endpoint.socket_path);
+    let Some(endpoint) = live_control_endpoint(process_id)? else {
         return Ok(false);
-    }
+    };
     send_run_shell_command_request(&endpoint, request)
 }
 
@@ -2721,34 +2654,8 @@ pub(crate) fn request_existing_process_command(
     request: PaneCommand,
     working_directory: Option<PathBuf>,
 ) -> Result<bool> {
-    let directory = crate::background_sessions::session_catalog_dir();
-    let entries = match fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error).context("reading Zetta process control endpoints"),
-    };
     let mut last_error = None;
-    for entry in entries {
-        let path = entry?.path();
-        if !path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("control-") && name.ends_with(".json"))
-        {
-            continue;
-        }
-        let endpoint = match fs::read(&path)
-            .ok()
-            .and_then(|contents| serde_json::from_slice::<ControlEndpoint>(&contents).ok())
-        {
-            Some(endpoint) if endpoint.version == CONTROL_VERSION => endpoint,
-            _ => continue,
-        };
-        if !process_is_running(endpoint.process_id) {
-            let _ = fs::remove_file(path);
-            let _ = fs::remove_file(endpoint.socket_path);
-            continue;
-        }
+    for endpoint in live_control_endpoints()? {
         match send_open_command_request(&endpoint, &request, working_directory.as_deref()) {
             Ok(true) => return Ok(true),
             Ok(false) => {}
@@ -2791,34 +2698,8 @@ pub(crate) fn request_existing_process_pane_labels() -> Result<Option<Vec<String
         return request_process_pane_labels(process_id, attention_id);
     }
 
-    let directory = crate::background_sessions::session_catalog_dir();
-    let entries = match fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error).context("reading Zetta process control endpoints"),
-    };
     let mut last_error = None;
-    for entry in entries {
-        let path = entry?.path();
-        if !path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("control-") && name.ends_with(".json"))
-        {
-            continue;
-        }
-        let endpoint = match fs::read(&path)
-            .ok()
-            .and_then(|contents| serde_json::from_slice::<ControlEndpoint>(&contents).ok())
-        {
-            Some(endpoint) if endpoint.version == CONTROL_VERSION => endpoint,
-            _ => continue,
-        };
-        if !process_is_running(endpoint.process_id) {
-            let _ = fs::remove_file(path);
-            let _ = fs::remove_file(endpoint.socket_path);
-            continue;
-        }
+    for endpoint in live_control_endpoints()? {
         match send_list_pane_labels_request(&endpoint, attention_id) {
             Ok(Some(labels)) => return Ok(Some(labels)),
             Ok(None) => {}
@@ -2835,61 +2716,14 @@ fn request_process_pane_labels(
     process_id: u32,
     attention_id: Option<u64>,
 ) -> Result<Option<Vec<String>>> {
-    let endpoint_path = control_endpoint_path(process_id);
-    let contents = match fs::read(&endpoint_path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!(
-                    "reading Zetta process control endpoint {}",
-                    endpoint_path.display()
-                )
-            });
-        }
-    };
-    let endpoint: ControlEndpoint =
-        serde_json::from_slice(&contents).context("parsing Zetta process control endpoint")?;
-    anyhow::ensure!(
-        endpoint.version == CONTROL_VERSION && endpoint.process_id == process_id,
-        "Zetta process control endpoint is outdated"
-    );
-    if !process_is_running(process_id) {
-        let _ = fs::remove_file(endpoint_path);
-        let _ = fs::remove_file(endpoint.socket_path);
+    let Some(endpoint) = live_control_endpoint(process_id)? else {
         return Ok(None);
-    }
+    };
     send_list_pane_labels_request(&endpoint, attention_id)
 }
 
 pub(crate) fn request_existing_process_tab_icon(icon: Option<IconName>) -> Result<bool> {
-    let directory = crate::background_sessions::session_catalog_dir();
-    let entries = match fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error).context("reading Zetta process control endpoints"),
-    };
-    for entry in entries {
-        let path = entry?.path();
-        if !path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("control-") && name.ends_with(".json"))
-        {
-            continue;
-        }
-        let endpoint = match fs::read(&path)
-            .ok()
-            .and_then(|contents| serde_json::from_slice::<ControlEndpoint>(&contents).ok())
-        {
-            Some(endpoint) if endpoint.version == CONTROL_VERSION => endpoint,
-            _ => continue,
-        };
-        if !process_is_running(endpoint.process_id) {
-            let _ = fs::remove_file(path);
-            let _ = fs::remove_file(endpoint.socket_path);
-            continue;
-        }
+    for endpoint in live_control_endpoints()? {
         if send_set_tab_icon_request(&endpoint, icon).unwrap_or(false) {
             return Ok(true);
         }
@@ -2901,33 +2735,7 @@ pub(crate) fn request_existing_process_theme(
     scope: crate::ThemeScope,
     theme: Option<String>,
 ) -> Result<bool> {
-    let directory = crate::background_sessions::session_catalog_dir();
-    let entries = match fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error).context("reading Zetta process control endpoints"),
-    };
-    for entry in entries {
-        let path = entry?.path();
-        if !path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("control-") && name.ends_with(".json"))
-        {
-            continue;
-        }
-        let endpoint = match fs::read(&path)
-            .ok()
-            .and_then(|contents| serde_json::from_slice::<ControlEndpoint>(&contents).ok())
-        {
-            Some(endpoint) if endpoint.version == CONTROL_VERSION => endpoint,
-            _ => continue,
-        };
-        if !process_is_running(endpoint.process_id) {
-            let _ = fs::remove_file(path);
-            let _ = fs::remove_file(endpoint.socket_path);
-            continue;
-        }
+    for endpoint in live_control_endpoints()? {
         if send_set_theme_request(&endpoint, scope, theme.clone()).unwrap_or(false) {
             return Ok(true);
         }
@@ -2936,33 +2744,7 @@ pub(crate) fn request_existing_process_theme(
 }
 
 pub(crate) fn request_existing_process_theme_list() -> Result<Option<Vec<String>>> {
-    let directory = crate::background_sessions::session_catalog_dir();
-    let entries = match fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error).context("reading Zetta process control endpoints"),
-    };
-    for entry in entries {
-        let path = entry?.path();
-        if !path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("control-") && name.ends_with(".json"))
-        {
-            continue;
-        }
-        let endpoint = match fs::read(&path)
-            .ok()
-            .and_then(|contents| serde_json::from_slice::<ControlEndpoint>(&contents).ok())
-        {
-            Some(endpoint) if endpoint.version == CONTROL_VERSION => endpoint,
-            _ => continue,
-        };
-        if !process_is_running(endpoint.process_id) {
-            let _ = fs::remove_file(path);
-            let _ = fs::remove_file(endpoint.socket_path);
-            continue;
-        }
+    for endpoint in live_control_endpoints()? {
         if let Some(themes) = send_list_themes_request(&endpoint).unwrap_or(None) {
             return Ok(Some(themes));
         }
@@ -2971,33 +2753,7 @@ pub(crate) fn request_existing_process_theme_list() -> Result<Option<Vec<String>
 }
 
 pub(crate) fn request_existing_process_pane_overlay(request: PaneOverlayRequest) -> Result<bool> {
-    let directory = crate::background_sessions::session_catalog_dir();
-    let entries = match fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error).context("reading Zetta process control endpoints"),
-    };
-    for entry in entries {
-        let path = entry?.path();
-        if !path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("control-") && name.ends_with(".json"))
-        {
-            continue;
-        }
-        let endpoint = match fs::read(&path)
-            .ok()
-            .and_then(|contents| serde_json::from_slice::<ControlEndpoint>(&contents).ok())
-        {
-            Some(endpoint) if endpoint.version == CONTROL_VERSION => endpoint,
-            _ => continue,
-        };
-        if !process_is_running(endpoint.process_id) {
-            let _ = fs::remove_file(path);
-            let _ = fs::remove_file(endpoint.socket_path);
-            continue;
-        }
+    for endpoint in live_control_endpoints()? {
         if send_set_overlay_request(&endpoint, &request).unwrap_or(false) {
             return Ok(true);
         }
@@ -3006,34 +2762,8 @@ pub(crate) fn request_existing_process_pane_overlay(request: PaneOverlayRequest)
 }
 
 pub(crate) fn request_existing_process_configuration_reload(path: &Path) -> Result<bool> {
-    let directory = crate::background_sessions::session_catalog_dir();
-    let entries = match fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error).context("reading Zetta process control endpoints"),
-    };
     let config_path = config_path_identity(path);
-    for entry in entries {
-        let path = entry?.path();
-        if !path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("control-") && name.ends_with(".json"))
-        {
-            continue;
-        }
-        let endpoint = match fs::read(&path)
-            .ok()
-            .and_then(|contents| serde_json::from_slice::<ControlEndpoint>(&contents).ok())
-        {
-            Some(endpoint) if endpoint.version == CONTROL_VERSION => endpoint,
-            _ => continue,
-        };
-        if !process_is_running(endpoint.process_id) {
-            let _ = fs::remove_file(path);
-            let _ = fs::remove_file(endpoint.socket_path);
-            continue;
-        }
+    for endpoint in live_control_endpoints()? {
         if send_reload_configuration_request(&endpoint, &config_path).unwrap_or(false) {
             return Ok(true);
         }
@@ -3045,19 +2775,7 @@ pub(crate) fn request_process_tab_attention(
     process_id: u32,
     request: TabAttentionRequest,
 ) -> Result<bool> {
-    let endpoint_path = control_endpoint_path(process_id);
-    let contents = fs::read(&endpoint_path).with_context(|| {
-        format!(
-            "reading Zetta process control endpoint {}",
-            endpoint_path.display()
-        )
-    })?;
-    let endpoint: ControlEndpoint =
-        serde_json::from_slice(&contents).context("parsing Zetta process control endpoint")?;
-    anyhow::ensure!(
-        endpoint.version == CONTROL_VERSION && endpoint.process_id == process_id,
-        "Zetta process control endpoint is outdated"
-    );
+    let endpoint = read_control_endpoint(process_id)?;
     send_set_tab_attention_request(&endpoint, &request)
 }
 
@@ -3075,32 +2793,10 @@ impl RunWaitConnection {
             &mut self.stream,
             &ControlRequest {
                 token: self.token.clone(),
-                ssh_target: None,
-                ssh_port: None,
                 command: "run_complete".to_owned(),
-                runner_id: None,
                 session_id: Some(self.id),
-                secret: None,
-                icon: None,
-                pane_theme: None,
-                pane_id: None,
-                pane_overlay: None,
-                pane_overlay_font_size: None,
-                pane_overlay_opacity: None,
-                pane_overlay_color: None,
-                attention_id: None,
-                attention_summary: None,
-                attention_body: None,
-                tab_name: None,
-                worktree_name: None,
                 config_path: Some(encoded_exit_code),
-                working_directory: None,
-                split: None,
-                profile: None,
-                theme: None,
-                scope: None,
-                pane_request: None,
-                shell_command: None,
+                ..Default::default()
             },
         )?;
         let response = read_message::<ControlResponse>(&mut self.stream)?;
@@ -3117,19 +2813,7 @@ pub(crate) fn request_process_run_wait(
     request: RunWaitRequest,
 ) -> Result<RunWaitConnection> {
     anyhow::ensure!(process_id != 0, "process ID must be positive");
-    let endpoint_path = control_endpoint_path(process_id);
-    let contents = fs::read(&endpoint_path).with_context(|| {
-        format!(
-            "reading Zetta process control endpoint {}",
-            endpoint_path.display()
-        )
-    })?;
-    let endpoint: ControlEndpoint =
-        serde_json::from_slice(&contents).context("parsing Zetta process control endpoint")?;
-    anyhow::ensure!(
-        endpoint.version == CONTROL_VERSION && endpoint.process_id == process_id,
-        "Zetta process control endpoint is outdated"
-    );
+    let endpoint = read_control_endpoint(process_id)?;
     let command = request.command.clone();
     let payload = serde_json::to_string(&RunWaitPayload {
         dependencies: request.dependencies,
@@ -3143,32 +2827,11 @@ pub(crate) fn request_process_run_wait(
         &mut stream,
         &ControlRequest {
             token: endpoint.token.clone(),
-            ssh_target: None,
-            ssh_port: None,
             command: "run_wait".to_owned(),
-            runner_id: None,
-            session_id: None,
-            secret: None,
-            icon: None,
-            pane_theme: None,
             pane_id: Some(request.owner.routing_id),
-            pane_overlay: None,
-            pane_overlay_font_size: None,
-            pane_overlay_opacity: None,
-            pane_overlay_color: None,
             attention_id: Some(request.owner.attention_id),
-            attention_summary: None,
-            attention_body: None,
-            tab_name: None,
-            worktree_name: None,
             config_path: Some(payload),
-            working_directory: None,
-            split: None,
-            profile: None,
-            theme: None,
-            scope: None,
-            pane_request: None,
-            shell_command: None,
+            ..Default::default()
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
@@ -3205,19 +2868,7 @@ impl ProcessPaneThemeQuery {
         anyhow::ensure!(process_id != 0, "process ID must be positive");
         anyhow::ensure!(attention_id != 0, "attention ID must be positive");
         anyhow::ensure!(pane_id != Some(0), "pane ID must be positive");
-        let endpoint_path = control_endpoint_path(process_id);
-        let contents = fs::read(&endpoint_path).with_context(|| {
-            format!(
-                "reading Zetta process control endpoint {}",
-                endpoint_path.display()
-            )
-        })?;
-        let endpoint: ControlEndpoint =
-            serde_json::from_slice(&contents).context("parsing Zetta process control endpoint")?;
-        anyhow::ensure!(
-            endpoint.version == CONTROL_VERSION && endpoint.process_id == process_id,
-            "Zetta process control endpoint is outdated"
-        );
+        let endpoint = read_control_endpoint(process_id)?;
         Ok(Self {
             endpoint,
             attention_id,
@@ -3237,19 +2888,7 @@ pub(crate) fn request_process_silent_mode(
 ) -> Result<bool> {
     anyhow::ensure!(process_id != 0, "process ID must be positive");
     anyhow::ensure!(attention_id != Some(0), "attention ID must be positive");
-    let endpoint_path = control_endpoint_path(process_id);
-    let contents = fs::read(&endpoint_path).with_context(|| {
-        format!(
-            "reading Zetta process control endpoint {}",
-            endpoint_path.display()
-        )
-    })?;
-    let endpoint: ControlEndpoint =
-        serde_json::from_slice(&contents).context("parsing Zetta process control endpoint")?;
-    anyhow::ensure!(
-        endpoint.version == CONTROL_VERSION && endpoint.process_id == process_id,
-        "Zetta process control endpoint is outdated"
-    );
+    let endpoint = read_control_endpoint(process_id)?;
     send_get_silent_mode_request(&endpoint, attention_id)
 }
 
@@ -3258,19 +2897,7 @@ pub(crate) fn request_process_silent_mode(
 pub(crate) fn request_process_focus_tab(process_id: u32, attention_id: u64) -> Result<bool> {
     anyhow::ensure!(process_id != 0, "process ID must be positive");
     anyhow::ensure!(attention_id != 0, "attention ID must be positive");
-    let endpoint_path = control_endpoint_path(process_id);
-    let contents = fs::read(&endpoint_path).with_context(|| {
-        format!(
-            "reading Zetta process control endpoint {}",
-            endpoint_path.display()
-        )
-    })?;
-    let endpoint: ControlEndpoint =
-        serde_json::from_slice(&contents).context("parsing Zetta process control endpoint")?;
-    anyhow::ensure!(
-        endpoint.version == CONTROL_VERSION && endpoint.process_id == process_id,
-        "Zetta process control endpoint is outdated"
-    );
+    let endpoint = read_control_endpoint(process_id)?;
     send_focus_tab_request(&endpoint, attention_id)
 }
 
@@ -3278,19 +2905,7 @@ pub(crate) fn request_process_focus_tab(process_id: u32, attention_id: u64) -> R
 // honored outside a worktree and is masked by the active worktree title.
 #[allow(dead_code)]
 pub(crate) fn request_process_tab_name(process_id: u32, request: TabNameRequest) -> Result<bool> {
-    let endpoint_path = control_endpoint_path(process_id);
-    let contents = fs::read(&endpoint_path).with_context(|| {
-        format!(
-            "reading Zetta process control endpoint {}",
-            endpoint_path.display()
-        )
-    })?;
-    let endpoint: ControlEndpoint =
-        serde_json::from_slice(&contents).context("parsing Zetta process control endpoint")?;
-    anyhow::ensure!(
-        endpoint.version == CONTROL_VERSION && endpoint.process_id == process_id,
-        "Zetta process control endpoint is outdated"
-    );
+    let endpoint = read_control_endpoint(process_id)?;
     send_set_tab_name_request(&endpoint, &request)
 }
 
@@ -3324,43 +2939,15 @@ fn send_open_window_request_with_command(
     profile: Option<&str>,
     activation_token: Option<&str>,
 ) -> Result<bool> {
-    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
-    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    write_message(
-        &mut stream,
-        &ControlRequest {
-            token: endpoint.token.clone(),
-            ssh_target: None,
-            ssh_port: None,
-            command: command.to_owned(),
-            runner_id: None,
-            session_id: None,
-            secret: None,
-            icon: None,
-            pane_theme: None,
-            pane_id: None,
-            pane_overlay: None,
-            pane_overlay_font_size: None,
-            pane_overlay_opacity: None,
-            pane_overlay_color: None,
-            attention_id: None,
-            attention_summary: None,
-            attention_body: None,
-            tab_name: None,
-            worktree_name: None,
+    send_control_command(
+        endpoint,
+        command,
+        ControlRequest {
             config_path: activation_token.map(str::to_owned),
-            working_directory: None,
-            split: None,
             profile: profile.map(str::to_owned),
-            theme: None,
-            scope: None,
-            pane_request: None,
-            shell_command: None,
+            ..Default::default()
         },
-    )?;
-    let response = read_message::<ControlResponse>(&mut stream)?;
-    Ok(response.status == "ok")
+    )
 }
 
 #[allow(dead_code)]
@@ -3373,83 +2960,19 @@ fn send_open_project_request_with_working_directory(
     root: &Path,
     working_directory: Option<&Path>,
 ) -> Result<bool> {
-    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
-    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    write_message(
-        &mut stream,
-        &ControlRequest {
-            token: endpoint.token.clone(),
-            ssh_target: None,
-            ssh_port: None,
-            command: "open_project".to_owned(),
-            runner_id: None,
-            session_id: None,
-            secret: None,
-            icon: None,
-            pane_theme: None,
-            pane_id: None,
-            pane_overlay: None,
-            pane_overlay_font_size: None,
-            pane_overlay_opacity: None,
-            pane_overlay_color: None,
-            attention_id: None,
-            attention_summary: None,
-            attention_body: None,
-            tab_name: None,
-            worktree_name: None,
+    send_control_command(
+        endpoint,
+        "open_project",
+        ControlRequest {
             config_path: Some(root.to_string_lossy().into_owned()),
             working_directory: working_directory.map(|path| path.to_string_lossy().into_owned()),
-            split: None,
-            profile: None,
-            theme: None,
-            scope: None,
-            pane_request: None,
-            shell_command: None,
+            ..Default::default()
         },
-    )?;
-    let response = read_message::<ControlResponse>(&mut stream)?;
-    Ok(response.status == "ok")
+    )
 }
 
 fn send_reload_projects_request(endpoint: &ControlEndpoint) -> Result<bool> {
-    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
-    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    write_message(
-        &mut stream,
-        &ControlRequest {
-            token: endpoint.token.clone(),
-            ssh_target: None,
-            ssh_port: None,
-            command: "reload_projects".to_owned(),
-            runner_id: None,
-            session_id: None,
-            secret: None,
-            icon: None,
-            pane_theme: None,
-            pane_id: None,
-            pane_overlay: None,
-            pane_overlay_font_size: None,
-            pane_overlay_opacity: None,
-            pane_overlay_color: None,
-            attention_id: None,
-            attention_summary: None,
-            attention_body: None,
-            tab_name: None,
-            worktree_name: None,
-            config_path: None,
-            working_directory: None,
-            split: None,
-            profile: None,
-            theme: None,
-            scope: None,
-            pane_request: None,
-            shell_command: None,
-        },
-    )?;
-    let response = read_message::<ControlResponse>(&mut stream)?;
-    Ok(response.status == "ok")
+    send_control_command(endpoint, "reload_projects", ControlRequest::default())
 }
 
 #[cfg(feature = "notifications")]
@@ -3457,42 +2980,14 @@ fn send_get_silent_mode_request(
     endpoint: &ControlEndpoint,
     attention_id: Option<u64>,
 ) -> Result<bool> {
-    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
-    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    write_message(
-        &mut stream,
-        &ControlRequest {
-            token: endpoint.token.clone(),
-            ssh_target: None,
-            ssh_port: None,
-            command: "get_silent_mode".to_owned(),
-            runner_id: None,
-            session_id: None,
-            secret: None,
-            icon: None,
-            pane_theme: None,
-            pane_id: None,
-            pane_overlay: None,
-            pane_overlay_font_size: None,
-            pane_overlay_opacity: None,
-            pane_overlay_color: None,
+    let response = send_control_request(
+        endpoint,
+        "get_silent_mode",
+        ControlRequest {
             attention_id,
-            attention_summary: None,
-            attention_body: None,
-            tab_name: None,
-            worktree_name: None,
-            config_path: None,
-            working_directory: None,
-            split: None,
-            profile: None,
-            theme: None,
-            scope: None,
-            pane_request: None,
-            shell_command: None,
+            ..Default::default()
         },
     )?;
-    let response = read_message::<ControlResponse>(&mut stream)?;
     anyhow::ensure!(
         response.status == "ok",
         "target process rejected silent mode query"
@@ -3504,84 +2999,29 @@ fn send_set_tab_attention_request(
     endpoint: &ControlEndpoint,
     request: &TabAttentionRequest,
 ) -> Result<bool> {
-    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
-    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    write_message(
-        &mut stream,
-        &ControlRequest {
-            token: endpoint.token.clone(),
-            ssh_target: None,
-            ssh_port: None,
-            command: "set_tab_attention".to_owned(),
-            runner_id: None,
-            session_id: None,
-            secret: None,
-            icon: None,
-            pane_theme: None,
-            pane_id: None,
-            pane_overlay: None,
-            pane_overlay_font_size: None,
-            pane_overlay_opacity: None,
-            pane_overlay_color: None,
+    send_control_command(
+        endpoint,
+        "set_tab_attention",
+        ControlRequest {
             attention_id: Some(request.attention_id),
             attention_summary: Some(request.summary.clone()),
             attention_body: request.body.clone(),
-            tab_name: None,
-            worktree_name: None,
-            config_path: None,
-            working_directory: None,
-            split: None,
-            profile: None,
-            theme: None,
-            scope: None,
-            pane_request: None,
-            shell_command: None,
+            ..Default::default()
         },
-    )?;
-    let response = read_message::<ControlResponse>(&mut stream)?;
-    Ok(response.status == "ok")
+    )
 }
 
 #[allow(dead_code)]
 fn send_set_tab_name_request(endpoint: &ControlEndpoint, request: &TabNameRequest) -> Result<bool> {
-    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
-    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    write_message(
-        &mut stream,
-        &ControlRequest {
-            token: endpoint.token.clone(),
-            ssh_target: None,
-            ssh_port: None,
-            command: "set_tab_name".to_owned(),
-            runner_id: None,
-            session_id: None,
-            secret: None,
-            icon: None,
-            pane_theme: None,
-            pane_id: None,
-            pane_overlay: None,
-            pane_overlay_font_size: None,
-            pane_overlay_opacity: None,
-            pane_overlay_color: None,
+    send_control_command(
+        endpoint,
+        "set_tab_name",
+        ControlRequest {
             attention_id: Some(request.attention_id),
-            attention_summary: None,
-            attention_body: None,
             tab_name: request.name.clone(),
-            worktree_name: None,
-            config_path: None,
-            working_directory: None,
-            split: None,
-            profile: None,
-            theme: None,
-            scope: None,
-            pane_request: None,
-            shell_command: None,
+            ..Default::default()
         },
-    )?;
-    let response = read_message::<ControlResponse>(&mut stream)?;
-    Ok(response.status == "ok")
+    )
 }
 
 #[cfg(test)]
@@ -3589,124 +3029,39 @@ fn send_set_worktree_name_request(
     endpoint: &ControlEndpoint,
     request: &WorktreeNameRequest,
 ) -> Result<bool> {
-    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
-    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    write_message(
-        &mut stream,
-        &ControlRequest {
-            token: endpoint.token.clone(),
-            ssh_target: None,
-            ssh_port: None,
-            command: "set_worktree_name".to_owned(),
-            runner_id: None,
-            session_id: None,
-            secret: None,
-            icon: None,
-            pane_theme: None,
-            pane_id: None,
-            pane_overlay: None,
-            pane_overlay_font_size: None,
-            pane_overlay_opacity: None,
-            pane_overlay_color: None,
+    send_control_command(
+        endpoint,
+        "set_worktree_name",
+        ControlRequest {
             attention_id: Some(request.attention_id),
-            attention_summary: None,
-            attention_body: None,
-            tab_name: None,
             worktree_name: request.name.clone(),
-            config_path: None,
-            working_directory: None,
-            split: None,
-            profile: None,
-            theme: None,
-            scope: None,
-            pane_request: None,
-            shell_command: None,
+            ..Default::default()
         },
-    )?;
-    let response = read_message::<ControlResponse>(&mut stream)?;
-    Ok(response.status == "ok")
+    )
 }
 
 #[cfg(feature = "notifications")]
 #[allow(dead_code)]
 fn send_focus_tab_request(endpoint: &ControlEndpoint, attention_id: u64) -> Result<bool> {
-    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
-    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    write_message(
-        &mut stream,
-        &ControlRequest {
-            token: endpoint.token.clone(),
-            ssh_target: None,
-            ssh_port: None,
-            command: "focus_tab".to_owned(),
-            runner_id: None,
-            session_id: None,
-            secret: None,
-            icon: None,
-            pane_theme: None,
-            pane_id: None,
-            pane_overlay: None,
-            pane_overlay_font_size: None,
-            pane_overlay_opacity: None,
-            pane_overlay_color: None,
+    send_control_command(
+        endpoint,
+        "focus_tab",
+        ControlRequest {
             attention_id: Some(attention_id),
-            attention_summary: None,
-            attention_body: None,
-            tab_name: None,
-            worktree_name: None,
-            config_path: None,
-            working_directory: None,
-            split: None,
-            profile: None,
-            theme: None,
-            scope: None,
-            pane_request: None,
-            shell_command: None,
+            ..Default::default()
         },
-    )?;
-    let response = read_message::<ControlResponse>(&mut stream)?;
-    Ok(response.status == "ok")
+    )
 }
 
 fn send_run_pane_request(endpoint: &ControlEndpoint, request: &PaneCommand) -> Result<bool> {
-    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
-    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    write_message(
-        &mut stream,
-        &ControlRequest {
-            token: endpoint.token.clone(),
-            ssh_target: None,
-            ssh_port: None,
-            command: "run_pane".to_owned(),
-            runner_id: None,
-            session_id: None,
-            secret: None,
-            icon: None,
-            pane_theme: None,
-            pane_id: None,
-            pane_overlay: None,
-            pane_overlay_font_size: None,
-            pane_overlay_opacity: None,
-            pane_overlay_color: None,
-            attention_id: None,
-            attention_summary: None,
-            attention_body: None,
-            tab_name: None,
-            worktree_name: None,
-            config_path: None,
-            working_directory: None,
-            split: None,
-            profile: None,
-            theme: None,
-            scope: None,
+    let response = send_control_request(
+        endpoint,
+        "run_pane",
+        ControlRequest {
             pane_request: Some(request.into()),
-            shell_command: None,
+            ..Default::default()
         },
     )?;
-    let response = read_message::<ControlResponse>(&mut stream)?;
     if response.status == "ok" {
         return Ok(true);
     }
@@ -3720,42 +3075,14 @@ fn send_run_shell_command_request(
     endpoint: &ControlEndpoint,
     request: &ShellCommandRequest,
 ) -> Result<bool> {
-    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
-    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    write_message(
-        &mut stream,
-        &ControlRequest {
-            token: endpoint.token.clone(),
-            ssh_target: None,
-            ssh_port: None,
-            command: "run_shell_command".to_owned(),
-            runner_id: None,
-            session_id: None,
-            secret: None,
-            icon: None,
-            pane_theme: None,
-            pane_id: None,
-            pane_overlay: None,
-            pane_overlay_font_size: None,
-            pane_overlay_opacity: None,
-            pane_overlay_color: None,
-            attention_id: None,
-            attention_summary: None,
-            attention_body: None,
-            tab_name: None,
-            worktree_name: None,
-            config_path: None,
-            working_directory: None,
-            split: None,
-            profile: None,
-            theme: None,
-            scope: None,
-            pane_request: None,
+    let response = send_control_request(
+        endpoint,
+        "run_shell_command",
+        ControlRequest {
             shell_command: Some(request.into()),
+            ..Default::default()
         },
     )?;
-    let response = read_message::<ControlResponse>(&mut stream)?;
     if response.status == "ok" {
         return Ok(true);
     }
@@ -3770,42 +3097,15 @@ fn send_open_command_request(
     request: &PaneCommand,
     working_directory: Option<&Path>,
 ) -> Result<bool> {
-    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
-    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    write_message(
-        &mut stream,
-        &ControlRequest {
-            token: endpoint.token.clone(),
-            ssh_target: None,
-            ssh_port: None,
-            command: "open_command".to_owned(),
-            runner_id: None,
-            session_id: None,
-            secret: None,
-            icon: None,
-            pane_theme: None,
-            pane_id: None,
-            pane_overlay: None,
-            pane_overlay_font_size: None,
-            pane_overlay_opacity: None,
-            pane_overlay_color: None,
-            attention_id: None,
-            attention_summary: None,
-            attention_body: None,
-            tab_name: None,
-            worktree_name: None,
+    let response = send_control_request(
+        endpoint,
+        "open_command",
+        ControlRequest {
             config_path: working_directory.map(|path| path.to_string_lossy().into_owned()),
-            working_directory: None,
-            split: None,
-            profile: None,
-            theme: None,
-            scope: None,
             pane_request: Some(request.into()),
-            shell_command: None,
+            ..Default::default()
         },
     )?;
-    let response = read_message::<ControlResponse>(&mut stream)?;
     if response.status == "ok" {
         return Ok(true);
     }
@@ -3819,42 +3119,14 @@ fn send_list_pane_labels_request(
     endpoint: &ControlEndpoint,
     attention_id: Option<u64>,
 ) -> Result<Option<Vec<String>>> {
-    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
-    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    write_message(
-        &mut stream,
-        &ControlRequest {
-            token: endpoint.token.clone(),
-            ssh_target: None,
-            ssh_port: None,
-            command: "list_panes".to_owned(),
-            runner_id: None,
-            session_id: None,
-            secret: None,
-            icon: None,
-            pane_theme: None,
-            pane_id: None,
-            pane_overlay: None,
-            pane_overlay_font_size: None,
-            pane_overlay_opacity: None,
-            pane_overlay_color: None,
+    let response = send_control_request(
+        endpoint,
+        "list_panes",
+        ControlRequest {
             attention_id,
-            attention_summary: None,
-            attention_body: None,
-            tab_name: None,
-            worktree_name: None,
-            config_path: None,
-            working_directory: None,
-            split: None,
-            profile: None,
-            theme: None,
-            scope: None,
-            pane_request: None,
-            shell_command: None,
+            ..Default::default()
         },
     )?;
-    let response = read_message::<ControlResponse>(&mut stream)?;
     if response.status == "ok" {
         return Ok(Some(response.pane_labels));
     }
@@ -3868,129 +3140,44 @@ fn send_replace_pane_request(
     endpoint: &ControlEndpoint,
     request: &ReplacePaneRequest,
 ) -> Result<bool> {
-    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
-    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    write_message(
-        &mut stream,
-        &ControlRequest {
-            token: endpoint.token.clone(),
-            ssh_target: None,
-            ssh_port: None,
-            command: "replace_pane".to_owned(),
-            runner_id: None,
-            session_id: None,
-            secret: None,
-            icon: None,
-            pane_theme: None,
-            pane_id: None,
-            pane_overlay: None,
-            pane_overlay_font_size: None,
-            pane_overlay_opacity: None,
-            pane_overlay_color: None,
-            attention_id: None,
-            attention_summary: None,
-            attention_body: None,
-            tab_name: None,
-            worktree_name: None,
-            config_path: None,
-            working_directory: None,
+    send_control_command(
+        endpoint,
+        "replace_pane",
+        ControlRequest {
             split: request.split.clone(),
             profile: request.profile.clone(),
             theme: request.theme.clone(),
-            scope: None,
-            pane_request: None,
-            shell_command: None,
+            ..Default::default()
         },
-    )?;
-    let response = read_message::<ControlResponse>(&mut stream)?;
-    Ok(response.status == "ok")
+    )
 }
 
 fn send_reload_configuration_request(
     endpoint: &ControlEndpoint,
     config_path: &str,
 ) -> Result<bool> {
-    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
-    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    write_message(
-        &mut stream,
-        &ControlRequest {
-            token: endpoint.token.clone(),
-            ssh_target: None,
-            ssh_port: None,
-            command: "reload_configuration".to_owned(),
-            runner_id: None,
-            session_id: None,
-            secret: None,
-            icon: None,
-            pane_theme: None,
-            pane_id: None,
-            pane_overlay: None,
-            pane_overlay_font_size: None,
-            pane_overlay_opacity: None,
-            pane_overlay_color: None,
-            attention_id: None,
-            attention_summary: None,
-            attention_body: None,
-            tab_name: None,
-            worktree_name: None,
+    send_control_command(
+        endpoint,
+        "reload_configuration",
+        ControlRequest {
             config_path: Some(config_path.to_owned()),
-            working_directory: None,
-            split: None,
-            profile: None,
-            theme: None,
-            scope: None,
-            pane_request: None,
-            shell_command: None,
+            ..Default::default()
         },
-    )?;
-    let response = read_message::<ControlResponse>(&mut stream)?;
-    Ok(response.status == "ok")
+    )
 }
 
 fn send_set_tab_icon_request(endpoint: &ControlEndpoint, icon: Option<IconName>) -> Result<bool> {
-    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
-    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    write_message(
-        &mut stream,
-        &ControlRequest {
-            token: endpoint.token.clone(),
-            ssh_target: None,
-            ssh_port: None,
-            command: "set_tab_icon".to_owned(),
-            runner_id: None,
-            session_id: None,
-            secret: None,
+    send_control_command(
+        endpoint,
+        "set_tab_icon",
+        ControlRequest {
             icon: icon.map(|icon| {
                 let name: &'static str = icon.into();
                 name.to_owned()
             }),
-            pane_theme: None,
-            pane_id: None,
-            pane_overlay: None,
-            pane_overlay_font_size: None,
-            pane_overlay_opacity: None,
-            pane_overlay_color: None,
-            attention_id: None,
-            attention_summary: None,
-            attention_body: None,
-            tab_name: None,
-            worktree_name: None,
-            config_path: None,
-            working_directory: None,
-            split: None,
-            profile: None,
-            theme: None,
-            scope: None,
-            pane_request: None,
-            shell_command: None,
+            ..Default::default()
         },
-    )?;
-    let response = read_message::<ControlResponse>(&mut stream)?;
-    Ok(response.status == "ok")
+    )
 }
 
 fn send_set_theme_request(
@@ -3998,82 +3185,19 @@ fn send_set_theme_request(
     scope: crate::ThemeScope,
     theme: Option<String>,
 ) -> Result<bool> {
-    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
-    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    write_message(
-        &mut stream,
-        &ControlRequest {
-            token: endpoint.token.clone(),
-            ssh_target: None,
-            ssh_port: None,
-            command: "set_theme".to_owned(),
-            runner_id: None,
-            session_id: None,
-            secret: None,
-            icon: None,
-            pane_theme: None,
-            pane_id: None,
-            pane_overlay: None,
-            pane_overlay_font_size: None,
-            pane_overlay_opacity: None,
-            pane_overlay_color: None,
-            attention_id: None,
-            attention_summary: None,
-            attention_body: None,
-            tab_name: None,
-            worktree_name: None,
-            config_path: None,
-            working_directory: None,
-            split: None,
-            profile: None,
+    send_control_command(
+        endpoint,
+        "set_theme",
+        ControlRequest {
             theme,
             scope: Some(scope.name().to_owned()),
-            pane_request: None,
-            shell_command: None,
+            ..Default::default()
         },
-    )?;
-    let response = read_message::<ControlResponse>(&mut stream)?;
-    Ok(response.status == "ok")
+    )
 }
 
 fn send_list_themes_request(endpoint: &ControlEndpoint) -> Result<Option<Vec<String>>> {
-    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
-    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    write_message(
-        &mut stream,
-        &ControlRequest {
-            token: endpoint.token.clone(),
-            ssh_target: None,
-            ssh_port: None,
-            command: "list_themes".to_owned(),
-            runner_id: None,
-            session_id: None,
-            secret: None,
-            icon: None,
-            pane_theme: None,
-            pane_id: None,
-            pane_overlay: None,
-            pane_overlay_font_size: None,
-            pane_overlay_opacity: None,
-            pane_overlay_color: None,
-            attention_id: None,
-            attention_summary: None,
-            attention_body: None,
-            tab_name: None,
-            worktree_name: None,
-            config_path: None,
-            working_directory: None,
-            split: None,
-            profile: None,
-            theme: None,
-            scope: None,
-            pane_request: None,
-            shell_command: None,
-        },
-    )?;
-    let response = read_message::<ControlResponse>(&mut stream)?;
+    let response = send_control_request(endpoint, "list_themes", ControlRequest::default())?;
     Ok((response.status == "ok").then_some(response.themes))
 }
 
@@ -4083,42 +3207,15 @@ fn send_get_pane_theme_request(
     attention_id: u64,
     pane_id: Option<u64>,
 ) -> Result<Option<String>> {
-    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
-    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    write_message(
-        &mut stream,
-        &ControlRequest {
-            token: endpoint.token.clone(),
-            ssh_target: None,
-            ssh_port: None,
-            command: "get_pane_theme".to_owned(),
-            runner_id: None,
-            session_id: None,
-            secret: None,
-            icon: None,
-            pane_theme: None,
+    let response = send_control_request(
+        endpoint,
+        "get_pane_theme",
+        ControlRequest {
             pane_id,
-            pane_overlay: None,
-            pane_overlay_font_size: None,
-            pane_overlay_opacity: None,
-            pane_overlay_color: None,
             attention_id: Some(attention_id),
-            attention_summary: None,
-            attention_body: None,
-            tab_name: None,
-            worktree_name: None,
-            config_path: None,
-            working_directory: None,
-            split: None,
-            profile: None,
-            theme: None,
-            scope: None,
-            pane_request: None,
-            shell_command: None,
+            ..Default::default()
         },
     )?;
-    let response = read_message::<ControlResponse>(&mut stream)?;
     Ok((response.status == "ok")
         .then_some(response.pane_theme)
         .flatten())
@@ -4128,22 +3225,10 @@ fn send_set_overlay_request(
     endpoint: &ControlEndpoint,
     request: &PaneOverlayRequest,
 ) -> Result<bool> {
-    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
-    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    write_message(
-        &mut stream,
-        &ControlRequest {
-            token: endpoint.token.clone(),
-            ssh_target: None,
-            ssh_port: None,
-            command: "set_overlay".to_owned(),
-            runner_id: None,
-            session_id: None,
-            secret: None,
-            icon: None,
-            pane_theme: None,
-            pane_id: None,
+    send_control_command(
+        endpoint,
+        "set_overlay",
+        ControlRequest {
             pane_overlay: request.text.clone(),
             pane_overlay_font_size: request
                 .font_size
@@ -4151,28 +3236,55 @@ fn send_set_overlay_request(
                 .map(str::to_owned),
             pane_overlay_opacity: request.opacity,
             pane_overlay_color: request.color.clone(),
-            attention_id: None,
-            attention_summary: None,
-            attention_body: None,
-            tab_name: None,
-            worktree_name: None,
-            config_path: None,
-            working_directory: None,
-            split: None,
-            profile: None,
-            theme: None,
-            scope: None,
-            pane_request: None,
-            shell_command: None,
+            ..Default::default()
         },
-    )?;
-    let response = read_message::<ControlResponse>(&mut stream)?;
-    Ok(response.status == "ok")
+    )
 }
 
 /// Reads one newline-framed message. A reconnect request carries the session
 /// secret in this buffer, so it is zeroized on every exit path rather than left
 /// in freed heap memory.
+/// Sends one request on a fresh connection and reads the response.
+///
+/// The endpoint owns both the token and the connection, so callers pass only
+/// the payload fields and the command name. Wiring the token in at each call
+/// site let a request be built against one endpoint's token and sent to
+/// another, and cost every sender three lines of timeout setup that must not
+/// drift: `CONTROL_CLIENT_TIMEOUT` is what stops a wedged window from hanging
+/// a CLI invocation.
+///
+/// `request_process_run_wait` connects for itself: it keeps the stream after
+/// the first response and reads with no timeout, because a run wrapper blocks
+/// for as long as its dependencies take.
+fn send_control_request(
+    endpoint: &ControlEndpoint,
+    command: &str,
+    request: ControlRequest,
+) -> Result<ControlResponse> {
+    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
+    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    write_message(
+        &mut stream,
+        &ControlRequest {
+            token: endpoint.token.clone(),
+            command: command.to_owned(),
+            ..request
+        },
+    )?;
+    read_message::<ControlResponse>(&mut stream)
+}
+
+/// [`send_control_request`] for the senders that only care whether the target
+/// process accepted the command.
+fn send_control_command(
+    endpoint: &ControlEndpoint,
+    command: &str,
+    request: ControlRequest,
+) -> Result<bool> {
+    Ok(send_control_request(endpoint, command, request)?.status == "ok")
+}
+
 fn read_message<T: DeserializeOwned>(stream: &mut UnixStream) -> Result<T> {
     let mut bytes = Zeroizing::new(Vec::new());
     let mut reader = BufReader::new(stream).take((MAX_CONTROL_MESSAGE_BYTES + 1) as u64);

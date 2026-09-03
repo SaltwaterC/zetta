@@ -35,20 +35,41 @@ git submodule update --init
 ## Application architecture
 
 Keep `src/main.rs` limited to crate wiring, actions, shared imports/constants,
-and the process entry point. Put behavior in the module that owns it:
+and the process entry point. Put behavior in the module that owns it. The
+groups below are a routing table, not a layering rule: every module named here
+is a sibling under `src/`.
+
+### Application state and lifecycle
 
 - `app.rs`: `Zetta` struct, tab/pane lifecycle, and state that doesn't belong
   to a narrower module below
+- `startup.rs`: `run()`, window/process lifecycle, and theme resolution
+  (`resolve_profile_theme`); a module directory — `startup/cli_help.rs`
+  (usage/help text), `startup/arg_parsing.rs` (`StartupMode`/`StartupArgs`
+  parsing), `startup/keybindings.rs` (keybinding constants/constructors and
+  macOS native menu construction), and `startup/wsl.rs` (WSL/MSYS2 profile
+  and working-directory integration)
+- `pane.rs`: pane layout, tab models, terminal creation, and pane focus
+- `pane_resize.rs`: pane resize/move mode, keyboard and drag-based resizing
+- `pane_view_state.rs`: pane maximize/minimize/restore and font size
+- `pane_controls.rs`: per-pane control visibility and its idle timer
+- `stacked_panes.rs`: command terminals that share a pane's layout region
+  (`PaneStack` entry lifecycle)
+- `rename.rs`: tab and pane rename state
 - `terminal_spawn.rs`: terminal process spawning and its event wiring
+- `default_terminal.rs`: registering and detecting Zetta as the system's
+  default terminal, and the desktop-environment detection that needs
 - `configuration_reload.rs`: settings/keymap file editing and configuration
   reload
-- `rename.rs`: tab and pane rename state
-- `app_render.rs`: top-level `Render for Zetta` composition (action
-  registration, overlay collection, and the tab-icon-picker/overlay-style-picker
-  overlays); delegates to `title_bar_render.rs` and `tab_body_render.rs`
 - `view_boundary.rs`: `ZettaSubview`, the entity wrapper that lets part of the
   render tree be cached and be the target of its own scroll/hover
   notifications; see "Render boundaries" below
+
+### Rendering
+
+- `app_render.rs`: top-level `Render for Zetta` composition (action
+  registration, overlay collection, and the tab-icon-picker/overlay-style-picker
+  overlays); delegates to `title_bar_render.rs` and `tab_body_render.rs`
 - `title_bar_render.rs`: title bar composition, its menus (application,
   profile, reconnect), the layout predicates the bar shares with the tab bar,
   and `title_bar_chrome_height`, which sizes the cached chrome boundary
@@ -56,25 +77,39 @@ and the process entry point. Put behavior in the module that owns it:
   that hosts them
 - `tab_body_render.rs`: tab body composition (maximized-pane bar, minimized
   pane shelf, pane content wiring)
-- `pane.rs`: pane layout, tab models, terminal creation, and pane focus
-- `pane_resize.rs`: pane resize/move mode, keyboard and drag-based resizing
 - `pane_render.rs`: pane layout and resize-gutter rendering
-- `pane_view_state.rs`: pane maximize/minimize/restore and font size
-- `pane_overlay.rs`: per-pane overlay text and style picker
-- `pane_controls.rs`: per-pane control visibility and its idle timer
-- `pane_theme_picker.rs`: per-pane theme picker model and overlay
-- `background_session_ui.rs`: background-session detach/store/reconnect and
-  the reconnect picker; shared-mode panes (the `SharedPaneEntry` registry,
-  arbitrated-size application, shared exit routing, and the revoke handover
-  that converts an exclusive pane to shared)
-- `byte_stream_pane.rs`: shared pane opener for byte-stream-backed panes
-  (HTTP/TFTP server log panes, the serial console)
-- `cli_service_stubs.rs`: disabled-build fallbacks for CLI-service actions
+- `window_frame.rs`: window decorations (`WindowFrameGeometry`), window
+  controls, and resize edges
 - `performance.rs`: frame collection, performance metrics, and the
   performance overlay
+
+### Overlays, pickers, and prompts
+
+- `text_edit.rs`: the shared single-line editing primitives — cursor/selection
+  arithmetic and the clipboard chords every text field and picker query uses
 - `tab_search.rs`: cross-pane scrollback search and its overlay
 - `tab_icon_picker.rs`: tab icon picker model, rendering, and the
   `Zetta` methods that drive it
+- `pane_theme_picker.rs`: per-pane theme picker model and overlay
+- `pane_overlay.rs`: per-pane overlay text and style picker
+- `command_palette.rs`: palette model and matching
+- `command_palette_ui.rs`: palette interaction, rendering, and its overlay
+- `multi_command.rs`: the multi-command prompt's model, its completion
+  catalog, and completion-context parsing
+- `multi_command_ui.rs`: multi-command prompt interaction, rendering, and its
+  overlay
+- `close_confirmation_ui.rs`: the pinned-tab close confirmation
+- `session_auth_ui.rs`: the session passphrase/secret prompt, its field model,
+  and the protect/reconnect flows that submit it
+- `remote_session_ui.rs`: the remote-session picker; SSH discovery is kept off
+  the render path deliberately, see the module docs
+- `serial_console_ui.rs`, `http_server_ui.rs`, `tftp_server_ui.rs`: the
+  per-service prompts that open a byte-stream pane
+- `server_ui.rs`: `ServerRoot` resolution shared by the HTTP and TFTP prompts,
+  including the WSL path translation
+
+### Settings
+
 - `settings_editor.rs`: typed configuration/keymap forms and persistence,
   including `PaneTemplatesForm`, which overlays either the built-in presets (the
   user configuration) or the resolved user configuration (a project)
@@ -100,6 +135,88 @@ and the process entry point. Put behavior in the module that owns it:
   `action_button`/`control_row`/`text_field`/`dropdown_field` helpers the denser
   forms share)
 
+### Configuration, profiles, and projects
+
+- `config.rs`: the typed `Config`/`Profile` model, its parsing, and the
+  overlay rules project configuration layers on top of it
+- `project.rs`: `ProjectConfig`, `ProjectRegistry`, and project field
+  validation
+- `project_context.rs`: the active project for a window, project detection for
+  a directory, and the theme/profile resolution that follows from it
+- `project_cli.rs`: `zetta project` argument parsing and its non-open commands
+- `project_commands.rs`: registered project commands and their name/command/
+  environment validation
+- `profile_cli.rs`: `zetta profile` argument parsing and command results
+- `profile_icon.rs`: `ProfileIcon`, automatic icon selection for a program,
+  and executable icon extraction
+- `theme_extensions.rs`: theme-extension discovery and installation
+
+### Sessions, multiplexing, and process control
+
+- `background_sessions.rs`: the application's half of background sessions —
+  the runner, the catalog directory, and the parts that need GPUI; the schema,
+  verifier and publisher live in the `zmux` crate
+- `background_session_ui.rs`: background-session detach/store/reconnect and
+  the reconnect picker; shared-mode panes (the `SharedPaneEntry` registry,
+  arbitrated-size application, shared exit routing, and the revoke handover
+  that converts an exclusive pane to shared)
+- `session_state.rs`: a tab as the multiplexer stores it — the opaque durable
+  blob `zmux` round-trips without reading; see the module docs before adding a
+  durable tab feature
+- `session_auto_protect.rs`: the automatic-protection policy for stored
+  sessions
+- `mux.rs`: `MuxRuntime`, the `zmux` client connection shared by every pane in
+  the process, and its retention/recovery state
+- `mux_identity.rs`: identity-file resolution for multiplexer commands
+- `process_control.rs`: the per-process control socket — the request/response
+  protocol and `CONTROL_VERSION` history, the server (`ProcessControlServer`),
+  the client request functions, and endpoint discovery/reaping. Every
+  `zetta <subcommand>` that has to reach a running window goes through here
+- `run_command.rs`: the `zetta pane wait` registry shared by wrapper clients
+  and terminal lifecycle events; deliberately GPUI-free
+- `command_panes.rs`: `PaneCommand`/`ShellCommandRequest` and the pane-opening
+  side of `zetta pane` and registered project commands
+- `silent_mode.rs`: silent-mode state, the system do-not-disturb query, and
+  `FocusStatusAccess`
+
+### CLI services and servers
+
+- `cli_services.rs`: CLI service dispatch; a module directory —
+  `cli_services/serial.rs`, `cli_services/servers.rs` (HTTP + TFTP server),
+  `cli_services/notify.rs`, `cli_services/clipboard.rs`, and
+  `cli_services/raw_terminal.rs`
+- `cli_service_stubs.rs`: disabled-build fallbacks for CLI-service actions
+- `byte_stream_pane.rs`: shared pane opener for byte-stream-backed panes
+  (HTTP/TFTP server log panes, the serial console)
+- `http_server.rs`: the embedded HTTP file server and the log stream its pane
+  reads
+- `tftp.rs`: shared TFTP packet/opcode types; a module directory —
+  `tftp/server.rs` and `tftp/client.rs`
+- `serial_console.rs`: serial device detection and the serial field model
+- `notification_sounds.rs`: built-in notification sounds and their synthesis
+- `output_benchmark.rs`: the `zetta benchmark output` workloads and results
+
+### Platform and shell integration
+
+- `windows_integration.rs`: the Windows Terminal handoff ABI and console
+  handover; gated to Windows at its `mod` declaration
+- `linux_desktop.rs`: the managed user desktop entry and its profile actions
+- `shell_integration.rs`: the shell integration scripts, their placeholder
+  substitution (including the completion trees), and shell detection
+- `worktree_detection.rs`: linked-worktree detection for a pane's shell
+  directory
+
+### Viewers and assets
+
+- `vi_syntax.rs`: grammar loading and syntax highlighting for `zetta vi`; see
+  "Performance profiling" before changing when grammars are compiled
+- `zetta_assets.rs`: embedded assets
+
+Prefer extending these modules over growing `main.rs`. If a module becomes
+difficult to navigate, split it by responsibility rather than creating a
+generic helpers module. Keep rendering code separate from state transitions
+where practical.
+
 Every keyboard-reachable settings control has to *show* focus and has to be
 scrolled into view, or the page is unusable from the keyboard even though its
 tab order is complete. Rows carry that: `control_row` (and `setting_row` on the
@@ -111,29 +228,6 @@ estimates the offset from a control's position in the tab order;
 `widgets::track_focus_scroll` finishes it from the element's laid-out bounds, so
 new focusable elements should be wrapped in it (a plain `overflow_y_scroll` div
 honours neither `Window::request_autoscroll` nor `ScrollHandle::scroll_to_item`).
-- `command_palette.rs`: palette model and matching
-- `command_palette_ui.rs`: palette interaction, rendering, and its overlay
-- `window_frame.rs`: window decorations (`WindowFrameGeometry`), window
-  controls, and resize edges
-- `startup.rs`: `run()`, window/process lifecycle, and theme resolution
-  (`resolve_profile_theme`); a module directory — `startup/cli_help.rs`
-  (usage/help text), `startup/arg_parsing.rs` (`StartupMode`/`StartupArgs`
-  parsing), `startup/keybindings.rs` (keybinding constants/constructors and
-  macOS native menu construction), and `startup/wsl.rs` (WSL/MSYS2 profile
-  and working-directory integration)
-- `cli_services.rs`: CLI service dispatch; a module directory —
-  `cli_services/serial.rs`, `cli_services/servers.rs` (HTTP + TFTP server),
-  `cli_services/notify.rs`, `cli_services/clipboard.rs`, and
-  `cli_services/raw_terminal.rs`
-- `tftp.rs`: shared TFTP packet/opcode types; a module directory —
-  `tftp/server.rs` and `tftp/client.rs`
-- `theme_extensions.rs`: theme-extension discovery and installation
-- `zetta_assets.rs`: embedded assets
-
-Prefer extending these modules over growing `main.rs`. If a module becomes
-difficult to navigate, split it by responsibility rather than creating a
-generic helpers module. Keep rendering code separate from state transitions
-where practical.
 
 Prefer splitting a module by responsibility once it approaches roughly 1500
 lines rather than letting it keep growing. Never let a single `render`
