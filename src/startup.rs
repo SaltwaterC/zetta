@@ -348,7 +348,6 @@ pub(crate) fn open_zetta_window(
                 .await;
             window_handle
                 .update(cx, |zetta, window, cx| match surface.as_str() {
-
                     "palette" => {
                         zetta.toggle_command_palette(&ToggleCommandPalette, window, cx);
                         if let Some(palette) = zetta.command_palette.as_mut() {

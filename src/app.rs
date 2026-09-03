@@ -1340,13 +1340,13 @@ impl Zetta {
         cx.notify();
 
         match launch {
-            TerminalLaunch::Spawn => self.spawn_terminal(
-                tab_id,
-                pane_id,
-                profile,
-                working_directory,
-                wsl_directory,
-                wsl_cwd_file,
+            TerminalLaunch::Spawn => self.spawn_terminal_for_pane(
+                TerminalSpawnRequest {
+                    working_directory,
+                    wsl_directory,
+                    wsl_cwd_file,
+                    ..TerminalSpawnRequest::new(tab_id, pane_id, profile)
+                },
                 window,
                 cx,
             ),
@@ -1825,13 +1825,13 @@ impl Zetta {
                 .with_pending_command(pending_command),
         );
         tab.activate_pane(pane_id);
-        self.spawn_terminal(
-            tab_id,
-            pane_id,
-            profile,
-            working_directory,
-            wsl_directory,
-            wsl_cwd_file,
+        self.spawn_terminal_for_pane(
+            TerminalSpawnRequest {
+                working_directory,
+                wsl_directory,
+                wsl_cwd_file,
+                ..TerminalSpawnRequest::new(tab_id, pane_id, profile)
+            },
             window,
             cx,
         );
@@ -2511,18 +2511,17 @@ impl Zetta {
         let spawn_count = new_panes.len() + usize::from(replacing_active) + stacked_launches.len();
         if replacing_active {
             let path_hyperlink_regexes = terminal_settings.path_hyperlink_regexes(spawn_count == 1);
-            self.spawn_terminal_with_theme_and_environment(
-                tab_id,
-                active_pane_id,
-                active_leaf.profile.clone(),
-                working_directories[0].0.clone(),
-                working_directories[0].1.clone(),
-                active_wsl_cwd_file,
-                terminal_themes[0].clone(),
+            self.spawn_terminal(
+                TerminalSpawnRequest {
+                    working_directory: working_directories[0].0.clone(),
+                    wsl_directory: working_directories[0].1.clone(),
+                    wsl_cwd_file: active_wsl_cwd_file,
+                    terminal_theme: terminal_themes[0].clone(),
+                    path_hyperlink_regexes,
+                    environment: active_leaf.environment.clone(),
+                    ..TerminalSpawnRequest::new(tab_id, active_pane_id, active_leaf.profile.clone())
+                },
                 &terminal_settings,
-                path_hyperlink_regexes,
-                active_leaf.environment.clone(),
-                false,
                 window,
                 cx,
             );
@@ -2531,18 +2530,17 @@ impl Zetta {
             let leaf_index = index + 1;
             let path_hyperlink_regexes = terminal_settings
                 .path_hyperlink_regexes(index + 1 + usize::from(replacing_active) == spawn_count);
-            self.spawn_terminal_with_theme_and_environment(
-                tab_id,
-                pane_id,
-                leaves[leaf_index].profile.clone(),
-                working_directories[leaf_index].0.clone(),
-                working_directories[leaf_index].1.clone(),
-                wsl_cwd_file,
-                terminal_themes[leaf_index].clone(),
+            self.spawn_terminal(
+                TerminalSpawnRequest {
+                    working_directory: working_directories[leaf_index].0.clone(),
+                    wsl_directory: working_directories[leaf_index].1.clone(),
+                    wsl_cwd_file,
+                    terminal_theme: terminal_themes[leaf_index].clone(),
+                    path_hyperlink_regexes,
+                    environment: leaves[leaf_index].environment.clone(),
+                    ..TerminalSpawnRequest::new(tab_id, pane_id, leaves[leaf_index].profile.clone())
+                },
                 &terminal_settings,
-                path_hyperlink_regexes,
-                leaves[leaf_index].environment.clone(),
-                false,
                 window,
                 cx,
             );
@@ -2552,14 +2550,16 @@ impl Zetta {
             stacked_launches.into_iter().enumerate()
         {
             self.spawn_stacked_terminal(
-                tab_id,
-                pane_id,
-                entry_id,
-                command,
-                leaves[leaf_index].profile.clone(),
-                working_directories[leaf_index].0.clone(),
-                working_directories[leaf_index].1.clone(),
-                terminal_themes[leaf_index].clone(),
+                StackedTerminalSpawnRequest {
+                    tab_id,
+                    pane_id,
+                    entry_id,
+                    command,
+                    profile: leaves[leaf_index].profile.clone(),
+                    working_directory: working_directories[leaf_index].0.clone(),
+                    wsl_directory: working_directories[leaf_index].1.clone(),
+                    terminal_theme: terminal_themes[leaf_index].clone(),
+                },
                 &mut terminal_settings,
                 index + 1 == stacked_count,
                 window,
@@ -2656,17 +2656,16 @@ impl Zetta {
         pane.environment_overrides.clear();
         pane.wsl_cwd_file = wsl_cwd_file.clone();
         self.retain_open_visible_terminals();
-        self.spawn_terminal_with_theme(
-            tab_id,
-            active_pane_id,
-            profile,
-            working_directory,
-            wsl_directory,
-            wsl_cwd_file,
-            terminal_theme,
+        self.spawn_terminal(
+            TerminalSpawnRequest {
+                working_directory,
+                wsl_directory,
+                wsl_cwd_file,
+                terminal_theme,
+                path_hyperlink_regexes,
+                ..TerminalSpawnRequest::new(tab_id, active_pane_id, profile)
+            },
             &terminal_settings,
-            path_hyperlink_regexes,
-            false,
             window,
             cx,
         );

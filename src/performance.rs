@@ -411,13 +411,11 @@ impl Zetta {
 
         let working_directory = self.working_directory.clone();
         for pane_id in added_pane_ids {
-            self.spawn_terminal(
-                tab_id,
-                pane_id,
-                profile.clone(),
-                working_directory.clone(),
-                None,
-                None,
+            self.spawn_terminal_for_pane(
+                TerminalSpawnRequest {
+                    working_directory: working_directory.clone(),
+                    ..TerminalSpawnRequest::new(tab_id, pane_id, profile.clone())
+                },
                 window,
                 cx,
             );

@@ -105,6 +105,75 @@ fn no_mux_terminal_environment_is_explicit_and_cannot_be_overridden() {
     assert_eq!(environment["ZETTA_NO_MUX"], "1");
 }
 
+/// The interactive pane and the stacked command terminal build their
+/// environment through the same [`TerminalEnvironment`], so the identity a
+/// terminal reports to shell integration is the tracked id the caller passed
+/// — the pane id for the former, the stack entry id for the latter.
+#[test]
+fn terminal_environment_carries_the_tracked_identity_and_theme() {
+    let overrides = HashMap::from([
+        ("ROLE".to_owned(), "server".to_owned()),
+        ("ZETTA_ATTENTION_ID".to_owned(), "spoofed".to_owned()),
+    ]);
+    let environment: HashMap<String, String> = TerminalEnvironment {
+        profile: &Shell::Program("bash".to_owned()),
+        overrides: &overrides,
+        attention_id: 7,
+        tracking_id: 9,
+        routing_id: 11,
+        wsl_cwd_file: None,
+        theme_name: "One Dark",
+        no_mux: false,
+    }
+    .build()
+    .expect("a native profile needs no CWD-tracking setup");
+
+    assert_eq!(environment["ROLE"], "server");
+    assert_eq!(environment["ZETTA_ATTENTION_ID"], "7");
+    assert_eq!(environment["ZETTA_PANE_ID"], "9");
+    assert_eq!(environment["ZETTA_PANE_ROUTING_ID"], "11");
+    assert_eq!(environment["ZETTA_THEME"], "One Dark");
+    assert_eq!(
+        environment["ZETTA_PROCESS_ID"],
+        std::process::id().to_string()
+    );
+    assert!(
+        environment.contains_key("ZETTA_HOST_EXECUTABLE"),
+        "a native terminal inherits this process's environment"
+    );
+}
+
+/// A WSL profile starts from an empty environment rather than this process's:
+/// the Windows-side variables mean nothing inside the distribution, so only
+/// the ones WSL is told to forward may cross.
+#[test]
+fn wsl_terminal_environment_does_not_inherit_the_native_environment() {
+    let overrides = HashMap::from([("ROLE".to_owned(), "server".to_owned())]);
+    let environment: HashMap<String, String> = TerminalEnvironment {
+        profile: &Shell::Program("wsl.exe".to_owned()),
+        overrides: &overrides,
+        attention_id: 7,
+        tracking_id: 9,
+        routing_id: 11,
+        wsl_cwd_file: None,
+        theme_name: "One Dark",
+        no_mux: false,
+    }
+    .build()
+    .expect("a WSL profile needs no CWD-tracking setup");
+
+    assert_eq!(environment["ROLE"], "server");
+    assert_eq!(environment["ZETTA_PANE_ID"], "9");
+    assert!(
+        !environment.contains_key("PATH"),
+        "the Windows-side PATH must not reach the distribution"
+    );
+    assert!(
+        !environment.contains_key("ZETTA_HOST_EXECUTABLE"),
+        "the Windows-side executable path is forwarded by WSLENV, not inherited"
+    );
+}
+
 #[test]
 fn pane_template_commands_preserve_the_program_and_argument_boundaries() {
     let command = PaneSplitCommand {

@@ -1431,16 +1431,15 @@ impl Zetta {
             prefill,
         ) in restore_spawns
         {
-            self.spawn_restored_terminal(
-                tab_id,
-                pane_id,
-                profile,
-                working_directory,
-                wsl_directory,
-                wsl_cwd_file,
-                environment_overrides,
-                replay,
-                prefill,
+            self.spawn_terminal_for_pane(
+                TerminalSpawnRequest {
+                    working_directory,
+                    wsl_directory,
+                    wsl_cwd_file,
+                    environment: environment_overrides,
+                    ..TerminalSpawnRequest::new(tab_id, pane_id, profile)
+                }
+                .restored(replay, prefill),
                 window,
                 cx,
             );

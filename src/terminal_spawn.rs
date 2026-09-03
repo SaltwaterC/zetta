@@ -56,94 +56,184 @@ fn shell_integration_startup_command(shell: &Shell) -> Option<Vec<u8>> {
 }
 
 #[derive(Clone)]
-struct RestoredTerminalOptions {
+pub(crate) struct RestoredTerminalOptions {
     replay: Option<Vec<u8>>,
     prefill: Option<String>,
 }
 
-impl Zetta {
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn spawn_terminal(
-        &mut self,
-        tab_id: u64,
-        pane_id: u64,
-        profile: Profile,
-        working_directory: Option<PathBuf>,
-        wsl_directory: Option<String>,
-        wsl_cwd_file: Option<PathBuf>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let (pane_theme_override, tab_theme_override) = self
-            .tabs
-            .iter()
-            .find(|tab| tab.id == tab_id)
-            .map(|tab| {
-                (
-                    tab.pane(pane_id)
-                        .and_then(|pane| pane.theme_override.as_deref()),
-                    tab.theme_override.as_deref(),
-                )
-            })
-            .unwrap_or((None, None));
-        let terminal_theme = match resolve_terminal_theme(
-            pane_theme_override,
-            tab_theme_override,
-            &profile,
-            self.project_config_for_tab(tab_id).map(Arc::as_ref),
-            cx,
-        ) {
-            Ok(theme) => theme,
-            Err(error) => {
-                if let Some(pane) = self
-                    .tabs
-                    .iter_mut()
-                    .find(|tab| tab.id == tab_id)
-                    .and_then(|tab| tab.pane_mut(pane_id))
-                {
-                    pane.error = Some(format!("Could not apply profile theme: {error:#}"));
-                }
-                cx.notify();
-                return;
-            }
-        };
-        let mut terminal_settings = TerminalSpawnSettings::current(cx);
-        let path_hyperlink_regexes = terminal_settings.path_hyperlink_regexes(true);
-        self.spawn_terminal_with_theme(
+/// Everything one interactive-terminal spawn needs. The tab, the pane and the
+/// profile are always known; every other input has a default, so a caller
+/// names only what it varies. This replaced a ladder of forwarding
+/// constructors that differed from each other by one defaulted argument.
+pub(crate) struct TerminalSpawnRequest {
+    pub(crate) tab_id: u64,
+    pub(crate) pane_id: u64,
+    pub(crate) profile: Profile,
+    /// The shell to run. `None` derives it from `profile.command`, wrapping it
+    /// in the WSL or Cygwin CWD-tracking launcher when the profile needs one.
+    /// A caller that has already built a shell — a `zetta pane` command, say —
+    /// passes it here, and both the derivation and `wsl_directory`, which only
+    /// feeds it, are skipped.
+    pub(crate) shell: Option<Shell>,
+    pub(crate) working_directory: Option<PathBuf>,
+    pub(crate) wsl_directory: Option<String>,
+    pub(crate) wsl_cwd_file: Option<PathBuf>,
+    pub(crate) terminal_theme: Option<Arc<Theme>>,
+    pub(crate) path_hyperlink_regexes: Vec<String>,
+    /// Environment overrides layered over the tab's project environment.
+    pub(crate) environment: HashMap<String, String>,
+    pub(crate) tracked_multi_command_launch: bool,
+    /// Set through [`TerminalSpawnRequest::restored`]; only visible so that
+    /// callers can use struct-update syntax against `new`.
+    pub(crate) restore: Option<RestoredTerminalOptions>,
+}
+
+impl TerminalSpawnRequest {
+    pub(crate) fn new(tab_id: u64, pane_id: u64, profile: Profile) -> Self {
+        Self {
             tab_id,
             pane_id,
             profile,
-            working_directory,
-            wsl_directory,
-            wsl_cwd_file,
-            terminal_theme,
-            &terminal_settings,
-            path_hyperlink_regexes,
-            false,
-            window,
-            cx,
-        );
+            shell: None,
+            working_directory: None,
+            wsl_directory: None,
+            wsl_cwd_file: None,
+            terminal_theme: None,
+            path_hyperlink_regexes: Vec::new(),
+            environment: HashMap::new(),
+            tracked_multi_command_launch: false,
+            restore: None,
+        }
     }
 
-    /// Starts a new shell in a daemon-created restore session. The saved
-    /// screen is handed to the provider as a one-shot replay, while the shell
-    /// itself is always created by the daemon from the saved profile and CWD.
+    /// Starts the shell in a daemon-created restore session. The saved screen
+    /// is handed to the provider as a one-shot replay, while the shell itself
+    /// is always created by the daemon from the saved profile and CWD.
     #[cfg(feature = "session-persistence")]
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn spawn_restored_terminal(
+    pub(crate) fn restored(mut self, replay: Option<Vec<u8>>, prefill: Option<String>) -> Self {
+        self.restore = Some(RestoredTerminalOptions { replay, prefill });
+        self
+    }
+}
+
+/// The inputs the environment of a spawned terminal is built from.
+struct TerminalEnvironment<'a> {
+    /// The profile's own command, not the shell derived from it: the CWD
+    /// tracking a profile needs is chosen from how the user configured it.
+    profile: &'a Shell,
+    /// Overrides layered over the inherited environment. `ZETTA_`-prefixed
+    /// names are ignored; see [`apply_terminal_environment_overrides`].
+    overrides: &'a HashMap<String, String>,
+    attention_id: u64,
+    /// The terminal's identity for shell integration: the pane id for an
+    /// interactive shell, the stack entry id for a command terminal.
+    tracking_id: u64,
+    routing_id: u64,
+    wsl_cwd_file: Option<&'a Path>,
+    theme_name: &'a str,
+    no_mux: bool,
+}
+
+impl TerminalEnvironment<'_> {
+    /// Builds the environment: the inherited native environment plus the
+    /// profile's CWD-tracking variables, the caller's overrides, and the
+    /// pane's routing identity. Errors already carry the "Could not configure
+    /// … CWD tracking" context a pane's error field wants.
+    ///
+    /// The hasher is the caller's: the root package does not depend on Zed's
+    /// `collections` crate, so the map's `FxBuildHasher` can only be inferred
+    /// from the [`TerminalBuilder`] the environment is handed to.
+    fn build<S>(self) -> Result<HashMap<String, String, S>>
+    where
+        S: std::hash::BuildHasher + Default,
+    {
+        let is_wsl = is_wsl_shell(self.profile);
+        let mut environment = if is_wsl {
+            HashMap::default()
+        } else {
+            let native_environment = native_terminal_environment();
+            #[cfg(windows)]
+            let inherited_path = native_environment
+                .iter()
+                .find(|(name, _)| name == "PATH")
+                .map(|(_, value)| value.clone());
+            let msys2_environment =
+                msys2_cwd_tracking_environment(self.profile, self.tracking_id, &env::temp_dir())
+                    .context("Could not configure MSYS2 CWD tracking")?;
+            #[cfg(windows)]
+            let cygwin_environment = cygwin_cwd_tracking_environment_with_path(
+                self.profile,
+                self.tracking_id,
+                &env::temp_dir(),
+                inherited_path.as_deref(),
+            )
+            .context("Could not configure Cygwin CWD tracking")?;
+            #[cfg(not(windows))]
+            let cygwin_environment = Vec::new();
+            native_environment
+                .into_iter()
+                .chain(msys2_environment)
+                .chain(cygwin_environment)
+                .collect()
+        };
+        if is_wsl {
+            wsl_terminal_environment(&mut environment, self.wsl_cwd_file);
+        }
+        apply_terminal_environment_overrides(
+            &mut environment,
+            self.overrides,
+            std::process::id(),
+            self.attention_id,
+            self.tracking_id,
+            self.routing_id,
+            self.no_mux,
+        );
+        #[cfg(windows)]
+        ensure_cygwin_environment(self.profile, &mut environment);
+        environment.insert("ZETTA_THEME".to_owned(), self.theme_name.to_owned());
+        if is_wsl {
+            add_wsl_environment_variable_names(
+                &mut environment,
+                self.overrides.keys().map(String::as_str),
+            );
+            add_wsl_environment_variables(&mut environment);
+        }
+        Ok(environment)
+    }
+}
+
+impl Zetta {
+    /// Spawns the terminal for a pane, resolving the pane's theme and this
+    /// process's current terminal settings first — so `terminal_theme` and
+    /// `path_hyperlink_regexes` are filled in here and anything the caller put
+    /// in them is replaced. A caller that spawns a batch of panes resolves both
+    /// once for the batch and calls [`Zetta::spawn_terminal`] instead.
+    pub(crate) fn spawn_terminal_for_pane(
         &mut self,
-        tab_id: u64,
-        pane_id: u64,
-        profile: Profile,
-        working_directory: Option<PathBuf>,
-        wsl_directory: Option<String>,
-        wsl_cwd_file: Option<PathBuf>,
-        environment_overrides: HashMap<String, String>,
-        replay: Option<Vec<u8>>,
-        prefill: Option<String>,
+        mut request: TerminalSpawnRequest,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(terminal_theme) =
+            self.resolve_pane_spawn_theme(request.tab_id, request.pane_id, &request.profile, cx)
+        else {
+            return;
+        };
+        let mut settings = TerminalSpawnSettings::current(cx);
+        request.path_hyperlink_regexes = settings.path_hyperlink_regexes(true);
+        request.terminal_theme = terminal_theme;
+        self.spawn_terminal(request, &settings, window, cx);
+    }
+
+    /// Resolves the theme a pane's terminal starts with. `None` means the
+    /// failure has already been reported on the pane and the spawn must stop.
+    fn resolve_pane_spawn_theme(
+        &mut self,
+        tab_id: u64,
+        pane_id: u64,
+        profile: &Profile,
+        cx: &mut Context<Self>,
+    ) -> Option<Option<Arc<Theme>>> {
         let (pane_theme_override, tab_theme_override) = self
             .tabs
             .iter()
@@ -156,45 +246,45 @@ impl Zetta {
                 )
             })
             .unwrap_or((None, None));
-        let terminal_theme = match resolve_terminal_theme(
+        match resolve_terminal_theme(
             pane_theme_override,
             tab_theme_override,
-            &profile,
+            profile,
             self.project_config_for_tab(tab_id).map(Arc::as_ref),
             cx,
         ) {
-            Ok(theme) => theme,
+            Ok(theme) => Some(theme),
             Err(error) => {
-                if let Some(pane) = self
-                    .tabs
-                    .iter_mut()
-                    .find(|tab| tab.id == tab_id)
-                    .and_then(|tab| tab.pane_mut(pane_id))
-                {
-                    pane.error = Some(format!("Could not apply profile theme: {error:#}"));
-                }
-                cx.notify();
-                return;
+                self.report_pane_spawn_error(
+                    tab_id,
+                    pane_id,
+                    format!("Could not apply profile theme: {error:#}"),
+                    cx,
+                );
+                None
             }
-        };
-        let mut settings = TerminalSpawnSettings::current(cx);
-        let path_hyperlink_regexes = settings.path_hyperlink_regexes(true);
-        self.spawn_terminal_with_theme_and_environment_options(
-            tab_id,
-            pane_id,
-            profile,
-            working_directory,
-            wsl_directory,
-            wsl_cwd_file,
-            terminal_theme,
-            &settings,
-            path_hyperlink_regexes,
-            environment_overrides,
-            false,
-            Some(RestoredTerminalOptions { replay, prefill }),
-            window,
-            cx,
-        );
+        }
+    }
+
+    /// Reports a synchronous spawn failure on the pane the terminal was meant
+    /// for. Failures raised once the spawn is asynchronous instead coalesce
+    /// their redraw through [`Zetta::schedule_terminal_spawn_notify`].
+    fn report_pane_spawn_error(
+        &mut self,
+        tab_id: u64,
+        pane_id: u64,
+        error: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(pane) = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id == tab_id)
+            .and_then(|tab| tab.pane_mut(pane_id))
+        {
+            pane.error = Some(error);
+        }
+        cx.notify();
     }
 
     #[cfg(windows)]
@@ -207,55 +297,21 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (pane_theme_override, tab_theme_override) = self
-            .tabs
-            .iter()
-            .find(|tab| tab.id == tab_id)
-            .map(|tab| {
-                (
-                    tab.pane(pane_id)
-                        .and_then(|pane| pane.theme_override.as_deref()),
-                    tab.theme_override.as_deref(),
-                )
-            })
-            .unwrap_or((None, None));
-        let terminal_theme = match resolve_terminal_theme(
-            pane_theme_override,
-            tab_theme_override,
-            &profile,
-            self.project_config_for_tab(tab_id).map(Arc::as_ref),
-            cx,
-        ) {
-            Ok(theme) => theme,
-            Err(error) => {
-                if let Some(pane) = self
-                    .tabs
-                    .iter_mut()
-                    .find(|tab| tab.id == tab_id)
-                    .and_then(|tab| tab.pane_mut(pane_id))
-                {
-                    pane.error = Some(format!("Could not apply profile theme: {error:#}"));
-                }
-                cx.notify();
-                return;
-            }
+        let Some(terminal_theme) = self.resolve_pane_spawn_theme(tab_id, pane_id, &profile, cx)
+        else {
+            return;
         };
         let mut settings = TerminalSpawnSettings::current(cx);
         let path_hyperlink_regexes = settings.path_hyperlink_regexes(true);
         let child_handle = match request.duplicate_child_handle() {
             Ok(handle) => handle,
             Err(error) => {
-                if let Some(pane) = self
-                    .tabs
-                    .iter_mut()
-                    .find(|tab| tab.id == tab_id)
-                    .and_then(|tab| tab.pane_mut(pane_id))
-                {
-                    pane.error = Some(format!(
-                        "Could not monitor the handed-over process: {error}"
-                    ));
-                }
-                cx.notify();
+                self.report_pane_spawn_error(
+                    tab_id,
+                    pane_id,
+                    format!("Could not monitor the handed-over process: {error}"),
+                    cx,
+                );
                 return;
             }
         };
@@ -469,57 +525,17 @@ impl Zetta {
             .detach();
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn spawn_terminal_with_theme(
+    /// Spawns the terminal a [`TerminalSpawnRequest`] describes. The single
+    /// spawn path: every interactive pane, split, profile replacement, pane
+    /// template and restored session reaches the PTY through here.
+    pub(crate) fn spawn_terminal(
         &mut self,
-        tab_id: u64,
-        pane_id: u64,
-        profile: Profile,
-        working_directory: Option<PathBuf>,
-        wsl_directory: Option<String>,
-        wsl_cwd_file: Option<PathBuf>,
-        terminal_theme: Option<Arc<Theme>>,
+        request: TerminalSpawnRequest,
         settings: &TerminalSpawnSettings,
-        path_hyperlink_regexes: Vec<String>,
-        tracked_multi_command_launch: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.spawn_terminal_with_theme_and_environment(
-            tab_id,
-            pane_id,
-            profile,
-            working_directory,
-            wsl_directory,
-            wsl_cwd_file,
-            terminal_theme,
-            settings,
-            path_hyperlink_regexes,
-            HashMap::new(),
-            tracked_multi_command_launch,
-            window,
-            cx,
-        );
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn spawn_terminal_with_shell(
-        &mut self,
-        tab_id: u64,
-        pane_id: u64,
-        profile: Profile,
-        shell: Shell,
-        working_directory: Option<PathBuf>,
-        wsl_directory: Option<String>,
-        wsl_cwd_file: Option<PathBuf>,
-        terminal_theme: Option<Arc<Theme>>,
-        settings: &TerminalSpawnSettings,
-        path_hyperlink_regexes: Vec<String>,
-        tracked_multi_command_launch: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.spawn_terminal_with_shell_and_environment(
+        let TerminalSpawnRequest {
             tab_id,
             pane_id,
             profile,
@@ -528,176 +544,43 @@ impl Zetta {
             wsl_directory,
             wsl_cwd_file,
             terminal_theme,
-            settings,
             path_hyperlink_regexes,
-            HashMap::new(),
+            environment: environment_overrides,
             tracked_multi_command_launch,
-            window,
-            cx,
-        );
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn spawn_terminal_with_theme_and_environment(
-        &mut self,
-        tab_id: u64,
-        pane_id: u64,
-        profile: Profile,
-        working_directory: Option<PathBuf>,
-        wsl_directory: Option<String>,
-        wsl_cwd_file: Option<PathBuf>,
-        terminal_theme: Option<Arc<Theme>>,
-        settings: &TerminalSpawnSettings,
-        path_hyperlink_regexes: Vec<String>,
-        environment_overrides: HashMap<String, String>,
-        tracked_multi_command_launch: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.spawn_terminal_with_theme_and_environment_options(
-            tab_id,
-            pane_id,
-            profile,
-            working_directory,
-            wsl_directory,
-            wsl_cwd_file,
-            terminal_theme,
-            settings,
-            path_hyperlink_regexes,
-            environment_overrides,
-            tracked_multi_command_launch,
-            None,
-            window,
-            cx,
-        );
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn spawn_terminal_with_theme_and_environment_options(
-        &mut self,
-        tab_id: u64,
-        pane_id: u64,
-        profile: Profile,
-        working_directory: Option<PathBuf>,
-        wsl_directory: Option<String>,
-        wsl_cwd_file: Option<PathBuf>,
-        terminal_theme: Option<Arc<Theme>>,
-        settings: &TerminalSpawnSettings,
-        path_hyperlink_regexes: Vec<String>,
-        environment_overrides: HashMap<String, String>,
-        tracked_multi_command_launch: bool,
-        restore_options: Option<RestoredTerminalOptions>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let shell = if is_wsl_shell(&profile.command) {
-            wsl_shell_with_tracking(
+            restore: restore_options,
+        } = request;
+        let shell = match shell {
+            Some(shell) => shell,
+            None if is_wsl_shell(&profile.command) => wsl_shell_with_tracking(
                 profile.command.clone(),
                 wsl_directory.as_deref(),
                 wsl_cwd_file.as_deref(),
-            )
-        } else if cfg!(windows) && cygwin_profile(&profile.command).is_some() {
-            #[cfg(windows)]
-            {
-                match cygwin_shell_with_tracking(profile.command.clone(), pane_id, &env::temp_dir())
+            ),
+            None if cfg!(windows) && cygwin_profile(&profile.command).is_some() => {
+                #[cfg(windows)]
                 {
-                    Ok(shell) => shell,
-                    Err(error) => {
-                        if let Some(pane) = self
-                            .tabs
-                            .iter_mut()
-                            .find(|tab| tab.id == tab_id)
-                            .and_then(|tab| tab.pane_mut(pane_id))
-                        {
-                            pane.error = Some(format!(
-                                "Could not configure Cygwin CWD tracking: {error:#}"
-                            ));
+                    match cygwin_shell_with_tracking(
+                        profile.command.clone(),
+                        pane_id,
+                        &env::temp_dir(),
+                    ) {
+                        Ok(shell) => shell,
+                        Err(error) => {
+                            self.report_pane_spawn_error(
+                                tab_id,
+                                pane_id,
+                                format!("Could not configure Cygwin CWD tracking: {error:#}"),
+                                cx,
+                            );
+                            return;
                         }
-                        cx.notify();
-                        return;
                     }
                 }
+                #[cfg(not(windows))]
+                unreachable!()
             }
-            #[cfg(not(windows))]
-            unreachable!()
-        } else {
-            profile.command.clone()
+            None => profile.command.clone(),
         };
-        self.spawn_terminal_with_shell_and_environment_options(
-            tab_id,
-            pane_id,
-            profile,
-            shell,
-            working_directory,
-            wsl_directory,
-            wsl_cwd_file,
-            terminal_theme,
-            settings,
-            path_hyperlink_regexes,
-            environment_overrides,
-            tracked_multi_command_launch,
-            restore_options,
-            window,
-            cx,
-        );
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn spawn_terminal_with_shell_and_environment(
-        &mut self,
-        tab_id: u64,
-        pane_id: u64,
-        profile: Profile,
-        shell: Shell,
-        working_directory: Option<PathBuf>,
-        _wsl_directory: Option<String>,
-        wsl_cwd_file: Option<PathBuf>,
-        terminal_theme: Option<Arc<Theme>>,
-        settings: &TerminalSpawnSettings,
-        path_hyperlink_regexes: Vec<String>,
-        environment_overrides: HashMap<String, String>,
-        tracked_multi_command_launch: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.spawn_terminal_with_shell_and_environment_options(
-            tab_id,
-            pane_id,
-            profile,
-            shell,
-            working_directory,
-            _wsl_directory,
-            wsl_cwd_file,
-            terminal_theme,
-            settings,
-            path_hyperlink_regexes,
-            environment_overrides,
-            tracked_multi_command_launch,
-            None,
-            window,
-            cx,
-        );
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn spawn_terminal_with_shell_and_environment_options(
-        &mut self,
-        tab_id: u64,
-        pane_id: u64,
-        profile: Profile,
-        shell: Shell,
-        working_directory: Option<PathBuf>,
-        _wsl_directory: Option<String>,
-        wsl_cwd_file: Option<PathBuf>,
-        terminal_theme: Option<Arc<Theme>>,
-        settings: &TerminalSpawnSettings,
-        path_hyperlink_regexes: Vec<String>,
-        environment_overrides: HashMap<String, String>,
-        tracked_multi_command_launch: bool,
-        restore_options: Option<RestoredTerminalOptions>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
         let mut combined_environment = self.project_environment_for_tab(tab_id);
         combined_environment.extend(environment_overrides);
         let is_wsl = is_wsl_shell(&profile.command);
@@ -710,97 +593,35 @@ impl Zetta {
                     .map(|pane| (tab.attention_id, pane.routing_id))
             })
         else {
-            if let Some(pane) = self
-                .tabs
-                .iter_mut()
-                .find(|tab| tab.id == tab_id)
-                .and_then(|tab| tab.pane_mut(pane_id))
-            {
-                pane.error = Some("Could not identify the terminal's Zetta tab".to_owned());
-            }
-            cx.notify();
+            self.report_pane_spawn_error(
+                tab_id,
+                pane_id,
+                "Could not identify the terminal's Zetta tab".to_owned(),
+                cx,
+            );
             return;
         };
-        let mut environment = if is_wsl {
-            HashMap::default()
-        } else {
-            let native_environment = native_terminal_environment();
-            #[cfg(windows)]
-            let inherited_path = native_environment
-                .iter()
-                .find(|(name, _)| name == "PATH")
-                .map(|(_, value)| value.clone());
-            let msys2_environment =
-                match msys2_cwd_tracking_environment(&profile.command, pane_id, &env::temp_dir()) {
-                    Ok(environment) => environment,
-                    Err(error) => {
-                        if let Some(pane) = self
-                            .tabs
-                            .iter_mut()
-                            .find(|tab| tab.id == tab_id)
-                            .and_then(|tab| tab.pane_mut(pane_id))
-                        {
-                            pane.error =
-                                Some(format!("Could not configure MSYS2 CWD tracking: {error:#}"));
-                        }
-                        cx.notify();
-                        return;
-                    }
-                };
-            #[cfg(windows)]
-            let cygwin_environment = match cygwin_cwd_tracking_environment_with_path(
-                &profile.command,
-                pane_id,
-                &env::temp_dir(),
-                inherited_path.as_deref(),
-            ) {
-                Ok(environment) => environment,
-                Err(error) => {
-                    if let Some(pane) = self
-                        .tabs
-                        .iter_mut()
-                        .find(|tab| tab.id == tab_id)
-                        .and_then(|tab| tab.pane_mut(pane_id))
-                    {
-                        pane.error = Some(format!(
-                            "Could not configure Cygwin CWD tracking: {error:#}"
-                        ));
-                    }
-                    cx.notify();
-                    return;
-                }
-            };
-            #[cfg(not(windows))]
-            let cygwin_environment = Vec::new();
-            native_environment
-                .into_iter()
-                .chain(msys2_environment)
-                .chain(cygwin_environment)
-                .collect()
-        };
-        if is_wsl {
-            wsl_terminal_environment(&mut environment, wsl_cwd_file.as_deref());
-        }
         let effective_theme = terminal_theme.clone().unwrap_or_else(|| cx.theme().clone());
-        apply_terminal_environment_overrides(
-            &mut environment,
-            &combined_environment,
-            std::process::id(),
+        // The `mut` is for the zsh history step below, which is Unix-only.
+        #[cfg_attr(windows, allow(unused_mut))]
+        let mut environment = match (TerminalEnvironment {
+            profile: &profile.command,
+            overrides: &combined_environment,
             attention_id,
-            pane_id,
-            pane_routing_id,
-            self.no_mux,
-        );
-        #[cfg(windows)]
-        ensure_cygwin_environment(&profile.command, &mut environment);
-        environment.insert("ZETTA_THEME".to_owned(), effective_theme.name.to_string());
-        if is_wsl {
-            add_wsl_environment_variable_names(
-                &mut environment,
-                combined_environment.keys().map(String::as_str),
-            );
-            add_wsl_environment_variables(&mut environment);
-        }
+            tracking_id: pane_id,
+            routing_id: pane_routing_id,
+            wsl_cwd_file: wsl_cwd_file.as_deref(),
+            theme_name: &effective_theme.name,
+            no_mux: self.no_mux,
+        })
+        .build()
+        {
+            Ok(environment) => environment,
+            Err(error) => {
+                self.report_pane_spawn_error(tab_id, pane_id, format!("{error:#}"), cx);
+                return;
+            }
+        };
         #[cfg(not(windows))]
         if let Err(error) = configure_zsh_history_environment(&shell, &mut environment, pane_id) {
             log::warn!("could not configure early zsh history filtering: {error:#}");
@@ -811,27 +632,21 @@ impl Zetta {
         let restore_replay = restore_options
             .as_ref()
             .and_then(|options| options.replay.clone());
-        let mux_provider = match self.mux_provider_for_tab_with_restore_replay(
-            tab_id,
-            restore_replay,
-            cx,
-        ) {
-            Ok(provider) => provider,
-            Err(error) => {
-                if let Some(pane) = self
-                    .tabs
-                    .iter_mut()
-                    .find(|tab| tab.id == tab_id)
-                    .and_then(|tab| tab.pane_mut(pane_id))
-                {
-                    pane.error = Some(format!(
+        let mux_provider =
+            match self.mux_provider_for_tab_with_restore_replay(tab_id, restore_replay, cx) {
+                Ok(provider) => provider,
+                Err(error) => {
+                    self.report_pane_spawn_error(
+                    tab_id,
+                    pane_id,
+                    format!(
                         "Could not start the terminal through the session multiplexer: {error:#}"
-                    ));
+                    ),
+                    cx,
+                );
+                    return;
                 }
-                cx.notify();
-                return;
-            }
-        };
+            };
         let initial_console_palette =
             (!is_wsl).then(|| terminal::console_palette_for_theme(effective_theme.as_ref()));
         let restored_working_directory = restore_options
@@ -1292,18 +1107,23 @@ pub(crate) fn stacked_task_shell(
 #[path = "tests/terminal_spawn.rs"]
 mod tests;
 
+/// The inputs one stacked command terminal needs. Its `entry_id` addresses
+/// the [`PaneStack`] entry that shares `pane_id`'s layout region.
+pub(crate) struct StackedTerminalSpawnRequest {
+    pub(crate) tab_id: u64,
+    pub(crate) pane_id: u64,
+    pub(crate) entry_id: u64,
+    pub(crate) command: String,
+    pub(crate) profile: Profile,
+    pub(crate) working_directory: Option<PathBuf>,
+    pub(crate) wsl_directory: Option<String>,
+    pub(crate) terminal_theme: Option<Arc<Theme>>,
+}
+
 impl Zetta {
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn spawn_stacked_terminal(
         &mut self,
-        tab_id: u64,
-        pane_id: u64,
-        entry_id: u64,
-        command: String,
-        profile: Profile,
-        working_directory: Option<PathBuf>,
-        wsl_directory: Option<String>,
-        terminal_theme: Option<Arc<Theme>>,
+        request: StackedTerminalSpawnRequest,
         settings: &mut TerminalSpawnSettings,
         // `final_spawn` lets the last terminal of a batch move the shared
         // hyperlink regexes instead of cloning them.
@@ -1311,6 +1131,16 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let StackedTerminalSpawnRequest {
+            tab_id,
+            pane_id,
+            entry_id,
+            command,
+            profile,
+            working_directory,
+            wsl_directory,
+            terminal_theme,
+        } = request;
         let is_wsl = is_wsl_shell(&profile.command);
         let Some(attention_id) = self.attention_id_for_tab(tab_id) else {
             self.stacked_terminal_failed(
@@ -1337,82 +1167,26 @@ impl Zetta {
             })
             .unwrap_or(entry_id);
         let shell = stacked_task_shell(&profile.command, &command, wsl_directory.as_deref());
-        let mut environment = if is_wsl {
-            let mut environment = HashMap::default();
-            wsl_terminal_environment(&mut environment, None);
-            environment
-        } else {
-            let native_environment = native_terminal_environment();
-            #[cfg(windows)]
-            let inherited_path = native_environment
-                .iter()
-                .find(|(name, _)| name == "PATH")
-                .map(|(_, value)| value.clone());
-            let msys2_environment = match msys2_cwd_tracking_environment(
-                &profile.command,
-                entry_id,
-                &env::temp_dir(),
-            ) {
-                Ok(environment) => environment,
-                Err(error) => {
-                    self.stacked_terminal_failed(
-                        tab_id,
-                        pane_id,
-                        entry_id,
-                        format!("Could not configure MSYS2 CWD tracking: {error:#}"),
-                        cx,
-                    );
-                    return;
-                }
-            };
-            #[cfg(windows)]
-            let cygwin_environment = match cygwin_cwd_tracking_environment_with_path(
-                &profile.command,
-                entry_id,
-                &env::temp_dir(),
-                inherited_path.as_deref(),
-            ) {
-                Ok(environment) => environment,
-                Err(error) => {
-                    self.stacked_terminal_failed(
-                        tab_id,
-                        pane_id,
-                        entry_id,
-                        format!("Could not configure Cygwin CWD tracking: {error:#}"),
-                        cx,
-                    );
-                    return;
-                }
-            };
-            #[cfg(not(windows))]
-            let cygwin_environment = Vec::new();
-            native_environment
-                .into_iter()
-                .chain(msys2_environment)
-                .chain(cygwin_environment)
-                .collect()
-        };
         let project_environment = self.project_environment_for_tab(tab_id);
         let effective_theme = terminal_theme.clone().unwrap_or_else(|| cx.theme().clone());
-        apply_terminal_environment_overrides(
-            &mut environment,
-            &project_environment,
-            std::process::id(),
+        let environment = match (TerminalEnvironment {
+            profile: &profile.command,
+            overrides: &project_environment,
             attention_id,
-            entry_id,
-            pane_routing_id,
-            self.no_mux,
-        );
-        #[cfg(windows)]
-        ensure_cygwin_environment(&profile.command, &mut environment);
-        environment.insert("ZETTA_THEME".to_owned(), effective_theme.name.to_string());
-        if is_wsl {
-            add_wsl_environment_variable_names(
-                &mut environment,
-                project_environment.keys().map(String::as_str),
-            );
-            add_wsl_environment_variables(&mut environment);
-        }
+            tracking_id: entry_id,
+            routing_id: pane_routing_id,
+            wsl_cwd_file: None,
+            theme_name: &effective_theme.name,
+            no_mux: self.no_mux,
+        })
+        .build()
+        {
+            Ok(environment) => environment,
+            Err(error) => {
+                self.stacked_terminal_failed(tab_id, pane_id, entry_id, format!("{error:#}"), cx);
+                return;
+            }
+        };
 
         let (completion_tx, completion_rx) = async_channel::unbounded();
         let task = SpawnInTerminal {
@@ -1443,17 +1217,14 @@ impl Zetta {
         let mux_provider = match self.mux_provider_for_tab(tab_id, cx) {
             Ok(provider) => provider,
             Err(error) => {
-                if let Some(pane) = self
-                    .tabs
-                    .iter_mut()
-                    .find(|tab| tab.id == tab_id)
-                    .and_then(|tab| tab.pane_mut(pane_id))
-                {
-                    pane.error = Some(format!(
+                self.report_pane_spawn_error(
+                    tab_id,
+                    pane_id,
+                    format!(
                         "Could not start the stacked terminal through the session multiplexer: {error:#}"
-                    ));
-                }
-                cx.notify();
+                    ),
+                    cx,
+                );
                 return;
             }
         };

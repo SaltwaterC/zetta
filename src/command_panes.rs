@@ -684,18 +684,17 @@ impl Zetta {
         apply_pane_overlay(&mut pane, overlay);
         tab.push_pane(pane);
         tab.activate_pane(pane_id);
-        self.spawn_terminal_with_shell(
-            tab_id,
-            pane_id,
-            profile,
-            shell,
-            working_directory,
-            wsl_directory,
-            wsl_cwd_file,
-            terminal_theme,
+        self.spawn_terminal(
+            TerminalSpawnRequest {
+                shell: Some(shell),
+                working_directory,
+                wsl_directory,
+                wsl_cwd_file,
+                terminal_theme,
+                path_hyperlink_regexes,
+                ..TerminalSpawnRequest::new(tab_id, pane_id, profile)
+            },
             &settings,
-            path_hyperlink_regexes,
-            false,
             window,
             cx,
         );
@@ -862,14 +861,16 @@ impl Zetta {
             .is_some_and(|pane| pane.stack.push(entry));
         anyhow::ensure!(inserted, "could not add the stacked command");
         self.spawn_stacked_terminal(
-            tab_id,
-            pane_id,
-            entry_id,
-            command,
-            profile,
-            working_directory,
-            wsl_directory,
-            terminal_theme,
+            StackedTerminalSpawnRequest {
+                tab_id,
+                pane_id,
+                entry_id,
+                command,
+                profile,
+                working_directory,
+                wsl_directory,
+                terminal_theme,
+            },
             &mut settings,
             true,
             window,

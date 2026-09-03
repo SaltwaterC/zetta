@@ -249,14 +249,16 @@ impl Zetta {
             return;
         };
         self.spawn_stacked_terminal(
-            tab_id,
-            pane_id,
-            entry_id,
-            command,
-            profile,
-            working_directory,
-            wsl_directory,
-            terminal_theme,
+            StackedTerminalSpawnRequest {
+                tab_id,
+                pane_id,
+                entry_id,
+                command,
+                profile,
+                working_directory,
+                wsl_directory,
+                terminal_theme,
+            },
             &mut settings,
             true,
             window,

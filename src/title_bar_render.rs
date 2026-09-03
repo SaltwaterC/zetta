@@ -610,6 +610,44 @@ pub(crate) struct TitleBarChrome {
     pub(crate) tab_bar: Option<AnyElement>,
 }
 
+/// The per-frame inputs the title bar renders from, gathered once by
+/// [`Zetta::render_title_bar_chrome`]. Named fields rather than a parameter
+/// list because eleven of them are adjacent `bool`s: transposing two would be
+/// a silent bug that only shows up as a control rendering in the wrong state.
+pub(crate) struct TitleBarLayout {
+    pub(crate) title_bar_height: Pixels,
+    pub(crate) title_bar_background: Hsla,
+    pub(crate) rounded_top_left: bool,
+    pub(crate) rounded_top_right: bool,
+    pub(crate) corner_radius: Pixels,
+    pub(crate) compact_mode: bool,
+    pub(crate) is_macos_fullscreen: bool,
+    /// The tab row, when compact mode folds it into the title bar.
+    pub(crate) compact_tab_bar: Option<AnyElement>,
+    pub(crate) left_window_controls: AnyElement,
+    /// The trailing group: the reconnect indicator that stays beside the
+    /// window controls, the application label, and the window controls.
+    pub(crate) right_title_bar_controls: AnyElement,
+    pub(crate) show_title_bar_menus: bool,
+    pub(crate) application_menu: AnyElement,
+    pub(crate) profile_menu: AnyElement,
+    pub(crate) show_title_bar_buttons: bool,
+    /// Whether every control that has one renders its text label beside its
+    /// icon; the title bar drops the labels as the window narrows.
+    pub(crate) show_title_bar_control_labels: bool,
+    pub(crate) no_mux: bool,
+    pub(crate) auto_background_tab: bool,
+    pub(crate) auto_background_protected: bool,
+    pub(crate) reconnect_control: Option<AnyElement>,
+    pub(crate) show_broadcast_control: bool,
+    pub(crate) broadcast_input: bool,
+    pub(crate) show_silent_control: bool,
+    pub(crate) silent_mode: bool,
+    pub(crate) system_silent: bool,
+    pub(crate) focus_status_access: FocusStatusAccess,
+    pub(crate) active_pane_size: Option<String>,
+}
+
 impl Zetta {
     /// Assembles the whole top-of-window chrome: window controls, tab bar,
     /// title-bar menus, and the reconnect/broadcast controls.
@@ -766,41 +804,49 @@ impl Zetta {
             .into_any_element();
 
         let title_bar = self.render_title_bar(
-            title_bar_height,
-            title_bar_background,
-            frame.rounded_top_left,
-            frame.rounded_top_right,
-            frame.corner_radius,
-            left_window_controls,
-            compact_mode,
-            is_macos_fullscreen,
-            title_bar_menus_visible(self.launch_config.hide_title_bar_menus),
-            self.render_application_menu(
+            TitleBarLayout {
+                title_bar_height,
+                title_bar_background,
+                rounded_top_left: frame.rounded_top_left,
+                rounded_top_right: frame.rounded_top_right,
+                corner_radius: frame.corner_radius,
+                compact_mode,
+                is_macos_fullscreen,
+                compact_tab_bar,
+                left_window_controls,
+                right_title_bar_controls,
+                show_title_bar_menus: title_bar_menus_visible(
+                    self.launch_config.hide_title_bar_menus,
+                ),
+                application_menu: self.render_application_menu(
+                    show_title_bar_control_labels,
+                    handle,
+                    active_terminal_focus.clone(),
+                ),
+                profile_menu: self.render_profile_menu(
+                    show_title_bar_control_labels,
+                    handle,
+                    active_terminal_focus,
+                    cx,
+                ),
+                show_title_bar_buttons,
                 show_title_bar_control_labels,
-                handle,
-                active_terminal_focus.clone(),
-            ),
-            self.render_profile_menu(
-                show_title_bar_control_labels,
-                handle,
-                active_terminal_focus,
-                cx,
-            ),
-            show_title_bar_buttons,
-            self.no_mux,
-            show_title_bar_control_labels,
-            auto_background_tab,
-            auto_background_protected,
-            reconnect_control,
-            title_bar_broadcast_visible(self.launch_config.hide_title_bar_buttons),
-            broadcast_input,
-            title_bar_silent_visible(self.launch_config.hide_title_bar_buttons),
-            silent_mode_state.effective(),
-            silent_mode_state.system_active(),
-            focus_status_access,
-            compact_tab_bar,
-            active_pane_size,
-            right_title_bar_controls,
+                no_mux: self.no_mux,
+                auto_background_tab,
+                auto_background_protected,
+                reconnect_control,
+                show_broadcast_control: title_bar_broadcast_visible(
+                    self.launch_config.hide_title_bar_buttons,
+                ),
+                broadcast_input,
+                show_silent_control: title_bar_silent_visible(
+                    self.launch_config.hide_title_bar_buttons,
+                ),
+                silent_mode: silent_mode_state.effective(),
+                system_silent: silent_mode_state.system_active(),
+                focus_status_access,
+                active_pane_size,
+            },
             cx,
         );
 
@@ -1053,37 +1099,39 @@ impl Zetta {
             .into_any_element()
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_title_bar(
         &self,
-        title_bar_height: Pixels,
-        title_bar_background: Hsla,
-        rounded_top_left: bool,
-        rounded_top_right: bool,
-        corner_radius: Pixels,
-        left_window_controls: AnyElement,
-        compact_mode: bool,
-        is_macos_fullscreen: bool,
-        show_title_bar_menus: bool,
-        application_menu: AnyElement,
-        profile_menu: AnyElement,
-        show_title_bar_buttons: bool,
-        no_mux: bool,
-        show_title_bar_control_labels: bool,
-        auto_background_tab: bool,
-        auto_background_protected: bool,
-        reconnect_control: Option<AnyElement>,
-        show_broadcast_control: bool,
-        broadcast_input: bool,
-        show_silent_control: bool,
-        silent_mode: bool,
-        system_silent: bool,
-        focus_status_access: FocusStatusAccess,
-        compact_tab_bar: Option<AnyElement>,
-        active_pane_size: Option<String>,
-        right_title_bar_controls: AnyElement,
+        layout: TitleBarLayout,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let TitleBarLayout {
+            title_bar_height,
+            title_bar_background,
+            rounded_top_left,
+            rounded_top_right,
+            corner_radius,
+            compact_mode,
+            is_macos_fullscreen,
+            compact_tab_bar,
+            left_window_controls,
+            right_title_bar_controls,
+            show_title_bar_menus,
+            application_menu,
+            profile_menu,
+            show_title_bar_buttons,
+            show_title_bar_control_labels,
+            no_mux,
+            auto_background_tab,
+            auto_background_protected,
+            reconnect_control,
+            show_broadcast_control,
+            broadcast_input,
+            show_silent_control,
+            silent_mode,
+            system_silent,
+            focus_status_access,
+            active_pane_size,
+        } = layout;
         let reserve_macos_title_bar_space =
             macos_title_bar_reservations_enabled(is_macos_fullscreen);
         let reserve_compact_leading_controls =

@@ -280,17 +280,17 @@ impl Zetta {
                 continue;
             }
             let path_hyperlink_regexes = launch.settings.path_hyperlink_regexes.clone();
-            self.spawn_terminal_with_theme(
-                launch.tab_id,
-                launch.pane_id,
-                launch.profile,
-                launch.working_directory,
-                launch.wsl_directory,
-                launch.wsl_cwd_file,
-                launch.terminal_theme,
+            self.spawn_terminal(
+                TerminalSpawnRequest {
+                    working_directory: launch.working_directory,
+                    wsl_directory: launch.wsl_directory,
+                    wsl_cwd_file: launch.wsl_cwd_file,
+                    terminal_theme: launch.terminal_theme,
+                    path_hyperlink_regexes,
+                    tracked_multi_command_launch: true,
+                    ..TerminalSpawnRequest::new(launch.tab_id, launch.pane_id, launch.profile)
+                },
                 &launch.settings,
-                path_hyperlink_regexes,
-                true,
                 window,
                 cx,
             );

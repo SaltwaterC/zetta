@@ -376,6 +376,7 @@ mod pane_controls;
 mod rename;
 mod terminal_spawn;
 use pane_controls::*;
+use terminal_spawn::{StackedTerminalSpawnRequest, TerminalSpawnRequest};
 mod pane_resize;
 use pane_resize::*;
 mod app_render;
