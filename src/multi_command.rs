@@ -113,9 +113,7 @@ pub(crate) struct MultiCommandExpansion {
 }
 
 pub(crate) struct MultiCommandPrompt {
-    pub(crate) query: String,
-    pub(crate) cursor: usize,
-    pub(crate) select_all: bool,
+    pub(crate) query: TextField,
     pub(crate) error: Option<String>,
     pub(crate) completion_candidates: Vec<SharedString>,
     pub(crate) completion_selected: Option<usize>,
@@ -138,9 +136,7 @@ impl MultiCommandPrompt {
     pub(crate) fn new(catalog: CompletionCatalog) -> Self {
         let home = util::paths::home_dir().clone();
         Self {
-            query: String::new(),
-            cursor: 0,
-            select_all: false,
+            query: TextField::default(),
             error: None,
             completion_candidates: Vec::new(),
             completion_selected: None,
@@ -180,8 +176,8 @@ impl MultiCommandPrompt {
             return false;
         }
         let completed_directory =
-            self.query[self.completion_start..self.completion_end].ends_with(['/', '\\']);
-        let followed_by_whitespace = self.query[self.completion_end..]
+            self.query.text[self.completion_start..self.completion_end].ends_with(['/', '\\']);
+        let followed_by_whitespace = self.query.text[self.completion_end..]
             .chars()
             .next()
             .is_some_and(char::is_whitespace);
@@ -189,9 +185,9 @@ impl MultiCommandPrompt {
             self.completion_add_space && !completed_directory && !followed_by_whitespace;
         self.clear_completion();
         if add_space {
-            self.query.insert(self.completion_end, ' ');
+            self.query.text.insert(self.completion_end, ' ');
             self.completion_end += 1;
-            self.cursor = self.completion_end;
+            self.query.cursor = self.completion_end;
             self.mark_query_changed();
         }
         true
@@ -214,8 +210,8 @@ impl MultiCommandPrompt {
         self.completion_loading = true;
         let generation = self.completion_generation;
         let cancellation = CompletionCancellation::default();
-        let query = self.query.clone();
-        let cursor = self.cursor;
+        let query = self.query.text.clone();
+        let cursor = self.query.cursor;
         let (start, kind) = completion_context(&query, cursor);
         let source =
             match kind {
@@ -263,10 +259,10 @@ impl MultiCommandPrompt {
         }
         self.completion_start = request.start;
         self.completion_end = request.cursor;
-        self.completion_add_space = !inside_double_brace_group(&self.query, request.start);
+        self.completion_add_space = !inside_double_brace_group(&self.query.text, request.start);
         self.completion_candidates = candidates;
 
-        let current = &self.query[self.completion_start..self.completion_end];
+        let current = &self.query.text[self.completion_start..self.completion_end];
         let common_prefix = longest_common_prefix(&self.completion_candidates).to_owned();
         if common_prefix.len() > current.len() {
             self.replace_completion(&common_prefix);
@@ -315,15 +311,15 @@ impl MultiCommandPrompt {
     }
 
     pub(crate) fn delete_previous_word(&mut self) {
-        if self.select_all {
-            self.query.clear();
-            self.cursor = 0;
+        if self.query.select_all {
+            self.query.text.clear();
+            self.query.cursor = 0;
         } else {
-            let end = self.cursor.min(self.query.len());
+            let end = self.query.cursor.min(self.query.text.len());
             let mut start = end;
             while start > 0 {
-                let previous = previous_char_boundary(&self.query, start);
-                let character = self.query[previous..start]
+                let previous = previous_char_boundary(&self.query.text, start);
+                let character = self.query.text[previous..start]
                     .chars()
                     .next()
                     .expect("character boundaries contain one character");
@@ -333,8 +329,8 @@ impl MultiCommandPrompt {
                 start = previous;
             }
             while start > 0 {
-                let previous = previous_char_boundary(&self.query, start);
-                let character = self.query[previous..start]
+                let previous = previous_char_boundary(&self.query.text, start);
+                let character = self.query.text[previous..start]
                     .chars()
                     .next()
                     .expect("character boundaries contain one character");
@@ -343,18 +339,17 @@ impl MultiCommandPrompt {
                 }
                 start = previous;
             }
-            self.query.replace_range(start..end, "");
-            self.cursor = start;
+            self.query.text.replace_range(start..end, "");
+            self.query.cursor = start;
         }
-        self.select_all = false;
+        self.query.select_all = false;
         self.error = None;
         self.mark_query_changed();
     }
 
     pub(crate) fn rendered_query_parts(&mut self) -> (SharedString, SharedString) {
         if self.rendered_query_generation != self.query_generation {
-            let cursor = self.cursor.min(self.query.len());
-            let (before, after) = self.query.split_at(cursor);
+            let (before, after) = self.query.split_at_cursor();
             self.rendered_query_before = SharedString::from(before.to_owned());
             self.rendered_query_after = SharedString::from(after.to_owned());
             self.rendered_query_generation = self.query_generation;
@@ -367,10 +362,11 @@ impl MultiCommandPrompt {
 
     fn replace_completion(&mut self, replacement: &str) {
         self.query
+            .text
             .replace_range(self.completion_start..self.completion_end, replacement);
         self.completion_end = self.completion_start + replacement.len();
-        self.cursor = self.completion_end;
-        self.select_all = false;
+        self.query.cursor = self.completion_end;
+        self.query.select_all = false;
         self.error = None;
         self.mark_query_changed();
     }
@@ -511,8 +507,8 @@ pub(crate) fn completion_request_is_current(
 ) -> bool {
     prompt.is_some_and(|prompt| {
         prompt.completion_generation == request.generation
-            && prompt.query == request.query
-            && prompt.cursor == request.cursor
+            && prompt.query.text == request.query
+            && prompt.query.cursor == request.cursor
     })
 }
 

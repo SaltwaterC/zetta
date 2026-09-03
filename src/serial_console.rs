@@ -183,9 +183,7 @@ fn linux_generic_serial8250_device_path(path: &Path) -> bool {
 pub(crate) struct SerialConsolePrompt {
     pub(crate) devices: Vec<SerialDevice>,
     pub(crate) selected_device: usize,
-    pub(crate) baud_rate: String,
-    pub(crate) baud_cursor: usize,
-    pub(crate) baud_select_all: bool,
+    pub(crate) baud_rate: TextField,
     pub(crate) field: SerialField,
     pub(crate) data_bits: serialport::DataBits,
     pub(crate) parity: serialport::Parity,
@@ -201,9 +199,7 @@ impl Default for SerialConsolePrompt {
         Self {
             devices: Vec::new(),
             selected_device: 0,
-            baud_rate: "115200".to_owned(),
-            baud_cursor: 6,
-            baud_select_all: false,
+            baud_rate: TextField::new("115200"),
             field: SerialField::Device,
             data_bits: serialport::DataBits::Eight,
             parity: serialport::Parity::None,
@@ -235,15 +231,13 @@ impl SerialConsolePrompt {
                 }
             }
             SerialField::BaudRate => {
-                let current = self.baud_rate.parse::<u32>().unwrap_or(0);
+                let current = self.baud_rate.text.parse::<u32>().unwrap_or(0);
                 let index = match COMMON_BAUD_RATES.binary_search(&current) {
                     Ok(index) => cycle_index(index, COMMON_BAUD_RATES.len(), reverse),
                     Err(index) if reverse => index.saturating_sub(1),
                     Err(index) => index.min(COMMON_BAUD_RATES.len() - 1),
                 };
-                self.baud_rate = COMMON_BAUD_RATES[index].to_string();
-                self.baud_cursor = self.baud_rate.len();
-                self.baud_select_all = false;
+                self.baud_rate = TextField::new(COMMON_BAUD_RATES[index].to_string());
             }
             SerialField::DataBits => {
                 const VALUES: [serialport::DataBits; 4] = [

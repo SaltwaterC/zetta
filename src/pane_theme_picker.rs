@@ -121,12 +121,7 @@ impl Zetta {
         };
         // Settled before this picker's own keys, so `Ctrl-X` cuts rather than
         // typing an `x` and `Shift-Delete` cuts rather than forward-deleting.
-        let edit = TextEdit::new(
-            &mut picker.query,
-            &mut picker.cursor,
-            &mut picker.select_all,
-        );
-        match apply_clipboard_shortcut(edit, &event.keystroke, cx) {
+        match apply_clipboard_shortcut(&mut picker.query, &event.keystroke, cx) {
             ClipboardOutcome::Ignored => {}
             ClipboardOutcome::Unchanged => {
                 cx.notify();
@@ -160,88 +155,19 @@ impl Zetta {
                     self.run_pane_theme_picker_command(command, window, cx);
                 }
             }
-            "backspace" => {
-                if picker.select_all {
-                    picker.query.clear();
-                    picker.cursor = 0;
-                    picker.refresh_matches();
-                } else if picker.cursor > 0 {
-                    let previous = previous_char_boundary(&picker.query, picker.cursor);
-                    picker.query.replace_range(previous..picker.cursor, "");
-                    picker.cursor = previous;
-                    picker.refresh_matches();
-                }
-                picker.select_all = false;
-                picker.selected = 0;
-                picker.scroll_to_selected();
-                cx.notify();
-            }
-            "delete" => {
-                if picker.select_all {
-                    picker.query.clear();
-                    picker.cursor = 0;
-                    picker.refresh_matches();
-                } else if picker.cursor < picker.query.len() {
-                    let next = next_char_boundary(&picker.query, picker.cursor);
-                    picker.query.replace_range(picker.cursor..next, "");
-                    picker.refresh_matches();
-                }
-                picker.select_all = false;
-                picker.selected = 0;
-                picker.scroll_to_selected();
-                cx.notify();
-            }
-            "left" => {
-                picker.cursor = if picker.select_all {
-                    0
-                } else {
-                    previous_char_boundary(&picker.query, picker.cursor)
-                };
-                picker.select_all = false;
-                cx.notify();
-            }
-            "right" => {
-                picker.cursor = if picker.select_all {
-                    picker.query.len()
-                } else {
-                    next_char_boundary(&picker.query, picker.cursor)
-                };
-                picker.select_all = false;
-                cx.notify();
-            }
-            "home" => {
-                picker.cursor = 0;
-                picker.select_all = false;
-                cx.notify();
-            }
-            "end" => {
-                picker.cursor = picker.query.len();
-                picker.select_all = false;
-                cx.notify();
-            }
-            "a" if event.keystroke.modifiers.control || event.keystroke.modifiers.platform => {
-                picker.select_all = !picker.query.is_empty();
-                cx.notify();
-            }
-            _ if !event.keystroke.modifiers.control
-                && !event.keystroke.modifiers.platform
-                && !event.keystroke.modifiers.alt =>
-            {
-                if let Some(text) = event.keystroke.key_char.as_ref() {
-                    if picker.select_all {
-                        picker.query.clear();
-                        picker.cursor = 0;
-                        picker.select_all = false;
-                    }
-                    picker.query.insert_str(picker.cursor, text);
-                    picker.cursor += text.len();
+            _ => match apply_text_field_key(&mut picker.query, &event.keystroke) {
+                TextFieldEdit::Ignored => {}
+                TextFieldEdit::CursorMoved => cx.notify(),
+                TextFieldEdit::Edited => {
+                    // The query filters the theme list, so the list is rebuilt
+                    // and the selection returns to the first match rather than
+                    // pointing into the old one.
                     picker.refresh_matches();
                     picker.selected = 0;
                     picker.scroll_to_selected();
                     cx.notify();
                 }
-            }
-            _ => {}
+            },
         }
     }
 
@@ -393,17 +319,12 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let picker = self.theme_picker.as_ref()?;
-        let cursor = picker.cursor.min(picker.query.len());
-        let (query_before, query_after) = picker.query.split_at(cursor);
-        let query_before = query_before.to_owned();
-        let query_after = query_after.to_owned();
-        let query_empty = picker.query.is_empty();
-        let query_selected = picker.select_all;
         let theme_scope = self.theme_picker_scope;
         let search_placeholder = match theme_scope {
             ThemeScope::Pane => "Search pane themes",
             ThemeScope::Tab => "Search tab themes",
         };
+        let query = field_query_run(&picker.query, Some(search_placeholder), colors);
         let result_count = picker.matches().len();
         let row_handle = handle.clone();
         let row_colors = colors.clone();
@@ -520,33 +441,7 @@ impl Zetta {
                                 .border_color(colors.border)
                                 .text_color(colors.text)
                                 .child(div().text_color(colors.text_accent).mr_2().child("◑"))
-                                .child(
-                                    h_flex()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
-                                        .when(query_selected, |input| {
-                                            input.bg(colors.element_selection_background)
-                                        })
-                                        .child(div().whitespace_nowrap().child(query_before))
-                                        .when(!query_selected, |input| {
-                                            input.child(
-                                                div()
-                                                    .flex_none()
-                                                    .w(px(1.0))
-                                                    .h(px(16.0))
-                                                    .bg(colors.text_accent),
-                                            )
-                                        })
-                                        .child(div().whitespace_nowrap().child(query_after))
-                                        .when(query_empty, |input| {
-                                            input.child(
-                                                div()
-                                                    .text_color(colors.text_placeholder)
-                                                    .child(search_placeholder),
-                                            )
-                                        }),
-                                ),
+                                .child(query),
                         )
                         .child(
                             div()

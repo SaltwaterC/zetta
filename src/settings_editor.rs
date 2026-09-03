@@ -20,6 +20,7 @@ use crate::config::{
 use crate::pane::MAX_PANES_PER_TAB;
 use crate::profile_icon::ProfileIcon;
 use crate::startup::{keymap_keystroke_display, keymap_keystroke_storage};
+use crate::text_edit::TextField;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsPage {
@@ -28,93 +29,6 @@ pub enum SettingsPage {
     Keymap,
     PaneTemplates,
     Projects,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct TextField {
-    pub text: String,
-    pub cursor: usize,
-    pub select_all: bool,
-}
-
-impl TextField {
-    pub fn new(text: impl Into<String>) -> Self {
-        let text = text.into();
-        Self {
-            cursor: text.len(),
-            text,
-            select_all: false,
-        }
-    }
-
-    pub fn insert(&mut self, text: &str) {
-        self.delete_selection();
-        let text = text.replace(['\r', '\n'], "");
-        self.text.insert_str(self.cursor, &text);
-        self.cursor += text.len();
-    }
-
-    pub fn backspace(&mut self) {
-        if self.delete_selection() {
-            return;
-        }
-        if self.cursor > 0 {
-            let previous = super::previous_char_boundary(&self.text, self.cursor);
-            self.text.replace_range(previous..self.cursor, "");
-            self.cursor = previous;
-        }
-    }
-
-    pub fn delete(&mut self) {
-        if self.delete_selection() {
-            return;
-        }
-        if self.cursor < self.text.len() {
-            let next = super::next_char_boundary(&self.text, self.cursor);
-            self.text.replace_range(self.cursor..next, "");
-        }
-    }
-
-    pub fn move_left(&mut self) {
-        self.cursor = if self.select_all {
-            0
-        } else {
-            super::previous_char_boundary(&self.text, self.cursor)
-        };
-        self.select_all = false;
-    }
-
-    pub fn move_right(&mut self) {
-        self.cursor = if self.select_all {
-            self.text.len()
-        } else {
-            super::next_char_boundary(&self.text, self.cursor)
-        };
-        self.select_all = false;
-    }
-
-    pub fn select_all(&mut self) {
-        self.select_all = !self.text.is_empty();
-    }
-
-    /// This field as the borrowed shape the shared clipboard shortcuts act on.
-    ///
-    /// `TextField` is one of several ways a surface stores a single-line field;
-    /// see [`crate::text_edit`] for why they all present the same view rather
-    /// than each answering the shortcuts themselves.
-    pub(crate) fn edit(&mut self) -> crate::text_edit::TextEdit<'_> {
-        crate::text_edit::TextEdit::new(&mut self.text, &mut self.cursor, &mut self.select_all)
-    }
-
-    fn delete_selection(&mut self) -> bool {
-        if !self.select_all {
-            return false;
-        }
-        self.text.clear();
-        self.cursor = 0;
-        self.select_all = false;
-        true
-    }
 }
 
 /// A compact, copyable path into a recursive pane-template tree.

@@ -310,9 +310,7 @@ impl Zetta {
                     let bounds = terminal.read(cx).last_content().terminal_bounds;
                     terminal_size_label(bounds.num_columns(), bounds.num_lines())
                 });
-                let pane_label_selected = tab.renaming_pane == Some(*pane_id)
-                    && tab.rename_select_all
-                    && tab.rename_buffer.is_some();
+                let pane_label_selected = tab.pane_rename_selected(*pane_id);
                 let pane_overlay_editing = tab.editing_overlay_pane == Some(*pane_id);
                 let pane_overlay_font_size =
                     pane.overlay_font_size.unwrap_or(OverlayFontSize::DEFAULT);

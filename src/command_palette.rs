@@ -4,6 +4,7 @@ use gpui::{Action, ScrollStrategy, UniformListScrollHandle};
 
 use crate::{
     OpenProject, ToggleAutoBackgroundTab, ToggleTabSharing, project::project_display_name,
+    text_edit::TextField,
 };
 
 /// The two session-lifecycle actions are mode-specific. Keep explicit user
@@ -25,9 +26,7 @@ pub struct PaletteCommand {
 }
 
 pub struct CommandPalette {
-    pub query: String,
-    pub cursor: usize,
-    pub select_all: bool,
+    pub query: TextField,
     pub selected: usize,
     pub commands: Vec<PaletteCommand>,
     pub scroll: UniformListScrollHandle,
@@ -62,9 +61,7 @@ impl CommandPalette {
             .collect();
         let matches = (0..commands.len()).collect();
         Self {
-            select_all: false,
-            query: String::new(),
-            cursor: 0,
+            query: TextField::default(),
             selected: 0,
             commands,
             scroll: UniformListScrollHandle::new(),
@@ -85,7 +82,7 @@ impl CommandPalette {
     }
 
     pub fn refresh_matches(&mut self) {
-        let query = self.query.trim().to_lowercase();
+        let query = self.query.text.trim().to_lowercase();
         let mut matches = self
             .normalized_names
             .iter()

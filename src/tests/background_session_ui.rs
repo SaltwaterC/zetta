@@ -124,12 +124,8 @@ fn background_session_is_reaped_after_its_final_pane_exits() {
         pinned: false,
         renaming_pane: None,
         rename_buffer: None,
-        rename_cursor: 0,
-        rename_select_all: false,
         editing_overlay_pane: None,
         overlay_buffer: None,
-        overlay_cursor: 0,
-        overlay_select_all: false,
         overlay_style_picker: None,
     };
     let mut sessions = BackgroundSessionRunner::default();
@@ -324,12 +320,8 @@ fn attached_tab_with_a_stacked_command() -> Tab {
         pinned: false,
         renaming_pane: None,
         rename_buffer: None,
-        rename_cursor: 0,
-        rename_select_all: false,
         editing_overlay_pane: None,
         overlay_buffer: None,
-        overlay_cursor: 0,
-        overlay_select_all: false,
         overlay_style_picker: None,
     }
 }

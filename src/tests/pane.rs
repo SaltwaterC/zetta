@@ -587,12 +587,8 @@ fn tab_pane_index_resolves_panes_without_scanning() {
         pinned: false,
         renaming_pane: None,
         rename_buffer: None,
-        rename_cursor: 0,
-        rename_select_all: false,
         editing_overlay_pane: None,
         overlay_buffer: None,
-        overlay_cursor: 0,
-        overlay_select_all: false,
         overlay_style_picker: None,
     };
     for pane in &tab.panes {
@@ -794,12 +790,8 @@ fn split_profile_comes_from_the_active_pane() {
         pinned: false,
         renaming_pane: None,
         rename_buffer: None,
-        rename_cursor: 0,
-        rename_select_all: false,
         editing_overlay_pane: None,
         overlay_buffer: None,
-        overlay_cursor: 0,
-        overlay_select_all: false,
         overlay_style_picker: None,
     };
 
@@ -870,12 +862,8 @@ fn closing_active_pane_restores_previous_focus() {
         pinned: false,
         renaming_pane: None,
         rename_buffer: None,
-        rename_cursor: 0,
-        rename_select_all: false,
         editing_overlay_pane: None,
         overlay_buffer: None,
-        overlay_cursor: 0,
-        overlay_select_all: false,
         overlay_style_picker: None,
     };
 
@@ -948,12 +936,8 @@ fn closing_inactive_pane_preserves_focus() {
         pinned: false,
         renaming_pane: None,
         rename_buffer: None,
-        rename_cursor: 0,
-        rename_select_all: false,
         editing_overlay_pane: None,
         overlay_buffer: None,
-        overlay_cursor: 0,
-        overlay_select_all: false,
         overlay_style_picker: None,
     };
 
@@ -1359,12 +1343,8 @@ fn pane_management_tab() -> Tab {
         pinned: false,
         renaming_pane: None,
         rename_buffer: None,
-        rename_cursor: 0,
-        rename_select_all: false,
         editing_overlay_pane: None,
         overlay_buffer: None,
-        overlay_cursor: 0,
-        overlay_select_all: false,
         overlay_style_picker: None,
     }
 }
@@ -1573,8 +1553,8 @@ fn custom_pane_labels_replace_the_fallback_and_render_while_editing() {
     assert_eq!(tab.pane(2).unwrap().label(), "API server");
 
     tab.renaming_pane = Some(2);
-    tab.rename_buffer = Some("Database".to_owned());
-    tab.rename_cursor = 4;
+    tab.rename_buffer = Some(TextField::new("Database"));
+    tab.rename_buffer.as_mut().unwrap().cursor = 4;
     assert_eq!(tab.displayed_pane_label(2).as_deref(), Some("Data|base"));
 
     tab.pane_mut(2).unwrap().custom_label = None;
@@ -1617,20 +1597,18 @@ fn pane_overlay_is_hidden_by_default_and_renders_while_editing() {
     assert_eq!(tab.displayed_pane_overlay(2).as_deref(), Some("Prod"));
 
     tab.editing_overlay_pane = Some(2);
-    tab.overlay_buffer = Some("Staging".to_owned());
-    tab.overlay_cursor = 4;
+    tab.overlay_buffer = Some(TextField::new("Staging"));
+    tab.overlay_buffer.as_mut().unwrap().cursor = 4;
     assert_eq!(tab.displayed_pane_overlay(2).as_deref(), Some("Stag|ing"));
 
-    tab.overlay_select_all = true;
+    tab.overlay_buffer.as_mut().unwrap().select_all = true;
     assert_eq!(tab.displayed_pane_overlay(2).as_deref(), Some("Staging"));
 
-    tab.overlay_buffer = Some(String::new());
-    tab.overlay_cursor = 0;
+    tab.overlay_buffer = Some(TextField::selected(""));
     assert_eq!(tab.displayed_pane_overlay(2).as_deref(), Some("|"));
 
     tab.editing_overlay_pane = None;
     tab.overlay_buffer = None;
-    tab.overlay_select_all = false;
     assert_eq!(tab.displayed_pane_overlay(2).as_deref(), Some("Prod"));
 
     tab.pane_mut(2).unwrap().overlay_text = None;

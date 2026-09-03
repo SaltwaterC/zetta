@@ -196,17 +196,14 @@ impl Zetta {
             .get(previous.selected)
             .and_then(|index| previous.commands.get(*index))
             .map(|command| command.name.clone());
-        let query = previous.query;
-        let cursor = previous.cursor;
-        let select_all = previous.select_all;
+        let mut query = previous.query;
+        query.cursor = query.cursor.min(query.text.len());
 
         self.toggle_command_palette(&ToggleCommandPalette, window, cx);
         let Some(palette) = self.command_palette.as_mut() else {
             return;
         };
         palette.query = query;
-        palette.cursor = cursor.min(palette.query.len());
-        palette.select_all = select_all;
         palette.refresh_matches();
         if let Some(selected_name) = selected_name
             && let Some(selected) = palette
@@ -295,12 +292,7 @@ impl Zetta {
         };
         // Settled before the palette's own keys, so `Ctrl-X` cuts rather than
         // typing an `x` and `Shift-Delete` cuts rather than forward-deleting.
-        let edit = TextEdit::new(
-            &mut palette.query,
-            &mut palette.cursor,
-            &mut palette.select_all,
-        );
-        match apply_clipboard_shortcut(edit, &event.keystroke, cx) {
+        match apply_clipboard_shortcut(&mut palette.query, &event.keystroke, cx) {
             ClipboardOutcome::Ignored => {}
             ClipboardOutcome::Unchanged => {
                 cx.notify();
@@ -333,88 +325,19 @@ impl Zetta {
                     self.run_palette_command(command, window, cx);
                 }
             }
-            "backspace" => {
-                if palette.select_all {
-                    palette.query.clear();
-                    palette.cursor = 0;
-                    palette.refresh_matches();
-                } else if palette.cursor > 0 {
-                    let previous = previous_char_boundary(&palette.query, palette.cursor);
-                    palette.query.replace_range(previous..palette.cursor, "");
-                    palette.cursor = previous;
-                    palette.refresh_matches();
-                }
-                palette.select_all = false;
-                palette.selected = 0;
-                palette.scroll_to_selected();
-                cx.notify();
-            }
-            "delete" => {
-                if palette.select_all {
-                    palette.query.clear();
-                    palette.cursor = 0;
-                    palette.refresh_matches();
-                } else if palette.cursor < palette.query.len() {
-                    let next = next_char_boundary(&palette.query, palette.cursor);
-                    palette.query.replace_range(palette.cursor..next, "");
-                    palette.refresh_matches();
-                }
-                palette.select_all = false;
-                palette.selected = 0;
-                palette.scroll_to_selected();
-                cx.notify();
-            }
-            "left" => {
-                palette.cursor = if palette.select_all {
-                    0
-                } else {
-                    previous_char_boundary(&palette.query, palette.cursor)
-                };
-                palette.select_all = false;
-                cx.notify();
-            }
-            "right" => {
-                palette.cursor = if palette.select_all {
-                    palette.query.len()
-                } else {
-                    next_char_boundary(&palette.query, palette.cursor)
-                };
-                palette.select_all = false;
-                cx.notify();
-            }
-            "home" => {
-                palette.cursor = 0;
-                palette.select_all = false;
-                cx.notify();
-            }
-            "end" => {
-                palette.cursor = palette.query.len();
-                palette.select_all = false;
-                cx.notify();
-            }
-            "a" if event.keystroke.modifiers.control || event.keystroke.modifiers.platform => {
-                palette.select_all = !palette.query.is_empty();
-                cx.notify();
-            }
-            _ if !event.keystroke.modifiers.control
-                && !event.keystroke.modifiers.platform
-                && !event.keystroke.modifiers.alt =>
-            {
-                if let Some(text) = event.keystroke.key_char.as_ref() {
-                    if palette.select_all {
-                        palette.query.clear();
-                        palette.cursor = 0;
-                        palette.select_all = false;
-                    }
-                    palette.query.insert_str(palette.cursor, text);
-                    palette.cursor += text.len();
+            _ => match apply_text_field_key(&mut palette.query, &event.keystroke) {
+                TextFieldEdit::Ignored => {}
+                TextFieldEdit::CursorMoved => cx.notify(),
+                TextFieldEdit::Edited => {
+                    // The query is the filter, so the match list is rebuilt and
+                    // the selection returns to the first match rather than
+                    // pointing into the old one.
                     palette.refresh_matches();
                     palette.selected = 0;
                     palette.scroll_to_selected();
                     cx.notify();
                 }
-            }
-            _ => {}
+            },
         }
     }
 
@@ -432,8 +355,7 @@ impl Zetta {
         };
         // Settled before this prompt's own keys, so `Ctrl-X` cuts rather than
         // typing an `x` and `Shift-Delete` cuts rather than forward-deleting.
-        let edit = TextEdit::new(buffer, &mut tab.rename_cursor, &mut tab.rename_select_all);
-        match apply_clipboard_shortcut(edit, &event.keystroke, cx) {
+        match apply_clipboard_shortcut(buffer, &event.keystroke, cx) {
             ClipboardOutcome::Ignored => {}
             ClipboardOutcome::Unchanged | ClipboardOutcome::Edited => {
                 cx.notify();
@@ -441,12 +363,9 @@ impl Zetta {
                 return;
             }
         }
-        let Some(buffer) = tab.rename_buffer.as_mut() else {
-            return;
-        };
         match event.keystroke.key.as_str() {
             "enter" => {
-                let title = buffer.trim().to_string();
+                let title = buffer.text.trim().to_owned();
                 let title = (!title.is_empty()).then_some(title);
                 if let Some(pane_id) = tab.renaming_pane.take() {
                     if let Some(pane) = tab.pane_mut(pane_id) {
@@ -456,86 +375,18 @@ impl Zetta {
                     set_tab_title(tab, title);
                 }
                 tab.rename_buffer = None;
-                tab.rename_select_all = false;
                 self.focus_active(window, cx);
             }
             "escape" => {
                 tab.renaming_pane = None;
                 tab.rename_buffer = None;
-                tab.rename_select_all = false;
                 self.focus_active(window, cx);
             }
-            "backspace" => {
-                if tab.rename_select_all {
-                    buffer.clear();
-                    tab.rename_cursor = 0;
-                    tab.rename_select_all = false;
-                } else if tab.rename_cursor > 0 {
-                    let previous = previous_char_boundary(buffer, tab.rename_cursor);
-                    buffer.replace_range(previous..tab.rename_cursor, "");
-                    tab.rename_cursor = previous;
-                }
-                cx.notify();
-            }
-            "delete" => {
-                if tab.rename_select_all {
-                    buffer.clear();
-                    tab.rename_cursor = 0;
-                    tab.rename_select_all = false;
-                } else if tab.rename_cursor < buffer.len() {
-                    let next = next_char_boundary(buffer, tab.rename_cursor);
-                    buffer.replace_range(tab.rename_cursor..next, "");
-                }
-                cx.notify();
-            }
-            "left" => {
-                tab.rename_cursor = if tab.rename_select_all {
-                    0
-                } else {
-                    previous_char_boundary(buffer, tab.rename_cursor)
-                };
-                tab.rename_select_all = false;
-                cx.notify();
-            }
-            "right" => {
-                tab.rename_cursor = if tab.rename_select_all {
-                    buffer.len()
-                } else {
-                    next_char_boundary(buffer, tab.rename_cursor)
-                };
-                tab.rename_select_all = false;
-                cx.notify();
-            }
-            "home" => {
-                tab.rename_cursor = 0;
-                tab.rename_select_all = false;
-                cx.notify();
-            }
-            "end" => {
-                tab.rename_cursor = buffer.len();
-                tab.rename_select_all = false;
-                cx.notify();
-            }
-            "a" if event.keystroke.modifiers.control || event.keystroke.modifiers.platform => {
-                tab.rename_select_all = !buffer.is_empty();
-                cx.notify();
-            }
-            _ if !event.keystroke.modifiers.control
-                && !event.keystroke.modifiers.platform
-                && !event.keystroke.modifiers.alt =>
-            {
-                if let Some(text) = event.keystroke.key_char.as_ref() {
-                    if tab.rename_select_all {
-                        buffer.clear();
-                        tab.rename_cursor = 0;
-                        tab.rename_select_all = false;
-                    }
-                    buffer.insert_str(tab.rename_cursor, text);
-                    tab.rename_cursor += text.len();
+            _ => {
+                if apply_text_field_key(buffer, &event.keystroke) != TextFieldEdit::Ignored {
                     cx.notify();
                 }
             }
-            _ => {}
         }
         cx.stop_propagation();
     }
@@ -554,8 +405,7 @@ impl Zetta {
         };
         // Settled before this prompt's own keys, so `Ctrl-X` cuts rather than
         // typing an `x` and `Shift-Delete` cuts rather than forward-deleting.
-        let edit = TextEdit::new(buffer, &mut tab.overlay_cursor, &mut tab.overlay_select_all);
-        match apply_clipboard_shortcut(edit, &event.keystroke, cx) {
+        match apply_clipboard_shortcut(buffer, &event.keystroke, cx) {
             ClipboardOutcome::Ignored => {}
             ClipboardOutcome::Unchanged | ClipboardOutcome::Edited => {
                 cx.notify();
@@ -563,98 +413,27 @@ impl Zetta {
                 return;
             }
         }
-        let Some(buffer) = tab.overlay_buffer.as_mut() else {
-            return;
-        };
         match event.keystroke.key.as_str() {
             "enter" => {
-                let text = buffer.trim().to_string();
+                let text = buffer.text.trim().to_owned();
                 let text = (!text.is_empty()).then_some(text);
                 if let Some(pane_id) = tab.editing_overlay_pane.take() {
                     self.commit_overlay_text_then_pick_style(pane_id, text, window, cx);
                     return;
                 }
                 tab.overlay_buffer = None;
-                tab.overlay_select_all = false;
                 self.focus_active(window, cx);
             }
             "escape" => {
                 tab.editing_overlay_pane = None;
                 tab.overlay_buffer = None;
-                tab.overlay_select_all = false;
                 self.focus_active(window, cx);
             }
-            "backspace" => {
-                if tab.overlay_select_all {
-                    buffer.clear();
-                    tab.overlay_cursor = 0;
-                    tab.overlay_select_all = false;
-                } else if tab.overlay_cursor > 0 {
-                    let previous = previous_char_boundary(buffer, tab.overlay_cursor);
-                    buffer.replace_range(previous..tab.overlay_cursor, "");
-                    tab.overlay_cursor = previous;
-                }
-                cx.notify();
-            }
-            "delete" => {
-                if tab.overlay_select_all {
-                    buffer.clear();
-                    tab.overlay_cursor = 0;
-                    tab.overlay_select_all = false;
-                } else if tab.overlay_cursor < buffer.len() {
-                    let next = next_char_boundary(buffer, tab.overlay_cursor);
-                    buffer.replace_range(tab.overlay_cursor..next, "");
-                }
-                cx.notify();
-            }
-            "left" => {
-                tab.overlay_cursor = if tab.overlay_select_all {
-                    0
-                } else {
-                    previous_char_boundary(buffer, tab.overlay_cursor)
-                };
-                tab.overlay_select_all = false;
-                cx.notify();
-            }
-            "right" => {
-                tab.overlay_cursor = if tab.overlay_select_all {
-                    buffer.len()
-                } else {
-                    next_char_boundary(buffer, tab.overlay_cursor)
-                };
-                tab.overlay_select_all = false;
-                cx.notify();
-            }
-            "home" => {
-                tab.overlay_cursor = 0;
-                tab.overlay_select_all = false;
-                cx.notify();
-            }
-            "end" => {
-                tab.overlay_cursor = buffer.len();
-                tab.overlay_select_all = false;
-                cx.notify();
-            }
-            "a" if event.keystroke.modifiers.control || event.keystroke.modifiers.platform => {
-                tab.overlay_select_all = !buffer.is_empty();
-                cx.notify();
-            }
-            _ if !event.keystroke.modifiers.control
-                && !event.keystroke.modifiers.platform
-                && !event.keystroke.modifiers.alt =>
-            {
-                if let Some(text) = event.keystroke.key_char.as_ref() {
-                    if tab.overlay_select_all {
-                        buffer.clear();
-                        tab.overlay_cursor = 0;
-                        tab.overlay_select_all = false;
-                    }
-                    buffer.insert_str(tab.overlay_cursor, text);
-                    tab.overlay_cursor += text.len();
+            _ => {
+                if apply_text_field_key(buffer, &event.keystroke) != TextFieldEdit::Ignored {
                     cx.notify();
                 }
             }
-            _ => {}
         }
         cx.stop_propagation();
     }
@@ -746,12 +525,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let palette = self.command_palette.as_ref()?;
-        let cursor = palette.cursor.min(palette.query.len());
-        let (query_before, query_after) = palette.query.split_at(cursor);
-        let query_before = query_before.to_owned();
-        let query_after = query_after.to_owned();
-        let query_empty = palette.query.is_empty();
-        let query_selected = palette.select_all;
+        let query = field_query_run(&palette.query, Some("Type a command"), colors);
         let result_count = palette.matches().len();
         let row_handle = handle.clone();
         let row_colors = colors.clone();
@@ -859,33 +633,7 @@ impl Zetta {
                                 .border_color(colors.border)
                                 .text_color(colors.text)
                                 .child(div().text_color(colors.text_accent).mr_2().child(">"))
-                                .child(
-                                    h_flex()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
-                                        .when(query_selected, |input| {
-                                            input.bg(colors.element_selection_background)
-                                        })
-                                        .child(div().whitespace_nowrap().child(query_before))
-                                        .when(!query_selected, |input| {
-                                            input.child(
-                                                div()
-                                                    .flex_none()
-                                                    .w(px(1.0))
-                                                    .h(px(16.0))
-                                                    .bg(colors.text_accent),
-                                            )
-                                        })
-                                        .child(div().whitespace_nowrap().child(query_after))
-                                        .when(query_empty, |input| {
-                                            input.child(
-                                                div()
-                                                    .text_color(colors.text_placeholder)
-                                                    .child("Type a command"),
-                                            )
-                                        }),
-                                ),
+                                .child(query),
                         )
                         .child(
                             div()

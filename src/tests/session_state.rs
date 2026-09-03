@@ -1,5 +1,5 @@
 use super::*;
-use crate::{OverlayFontSize, PaneStackSelection, SplitPosition};
+use crate::{OverlayFontSize, PaneStackSelection, SplitPosition, TextField};
 use ui::IconName;
 
 fn profile(name: &str) -> Profile {
@@ -46,12 +46,8 @@ fn populated_tab() -> Tab {
         pinned: true,
         renaming_pane: None,
         rename_buffer: None,
-        rename_cursor: 0,
-        rename_select_all: false,
         editing_overlay_pane: None,
         overlay_buffer: None,
-        overlay_cursor: 0,
-        overlay_select_all: false,
         overlay_style_picker: None,
     };
     tab.layout
@@ -275,9 +271,9 @@ fn the_multiplexers_pane_identifiers_are_carried_per_pane() {
 fn transient_editing_state_is_not_restored() {
     let mut original = populated_tab();
     original.renaming_pane = Some(10);
-    original.rename_buffer = Some("half typed".to_owned());
+    original.rename_buffer = Some(TextField::new("half typed"));
     original.editing_overlay_pane = Some(11);
-    original.overlay_buffer = Some("unfinished".to_owned());
+    original.overlay_buffer = Some(TextField::new("unfinished"));
 
     let restored = round_trip(&original);
 

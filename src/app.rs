@@ -1320,12 +1320,8 @@ impl Zetta {
             pinned: false,
             renaming_pane: None,
             rename_buffer: None,
-            rename_cursor: 0,
-            rename_select_all: false,
             editing_overlay_pane: None,
             overlay_buffer: None,
-            overlay_cursor: 0,
-            overlay_select_all: false,
             overlay_style_picker: None,
         });
         self.active_tab = self.tabs.len() - 1;

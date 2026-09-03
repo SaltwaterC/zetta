@@ -2082,13 +2082,9 @@ pub(crate) struct Tab {
     /// prefix and are independent from the keep-running close policy.
     pub(crate) pinned: bool,
     pub(crate) renaming_pane: Option<u64>,
-    pub(crate) rename_buffer: Option<String>,
-    pub(crate) rename_cursor: usize,
-    pub(crate) rename_select_all: bool,
+    pub(crate) rename_buffer: Option<TextField>,
     pub(crate) editing_overlay_pane: Option<u64>,
-    pub(crate) overlay_buffer: Option<String>,
-    pub(crate) overlay_cursor: usize,
-    pub(crate) overlay_select_all: bool,
+    pub(crate) overlay_buffer: Option<TextField>,
     /// Live overlay-style selector, opened right after the overlay's text is
     /// entered from the command palette. Combines font size, colour, and
     /// opacity.
@@ -2176,13 +2172,26 @@ impl Tab {
         if self.renaming_pane != Some(id) {
             return Some(pane.label());
         }
-        let buffer = self.rename_buffer.as_ref()?;
-        if self.rename_select_all {
-            return Some(buffer.clone());
-        }
-        let cursor = self.rename_cursor.min(buffer.len());
-        let (before, after) = buffer.split_at(cursor);
-        Some(format!("{before}|{after}"))
+        Some(self.rename_buffer.as_ref()?.caret_marker_display())
+    }
+
+    /// Whether `id` is the pane being renamed with its whole label selected.
+    /// The pane's label carries the selection highlight, since the label is
+    /// rendered as text rather than as a field.
+    pub(crate) fn pane_rename_selected(&self, id: u64) -> bool {
+        self.renaming_pane == Some(id) && self.rename_selected()
+    }
+
+    /// The same for the tab title, which is renamed through the same buffer:
+    /// `renaming_pane` is what distinguishes the two.
+    pub(crate) fn tab_rename_selected(&self) -> bool {
+        self.renaming_pane.is_none() && self.rename_selected()
+    }
+
+    fn rename_selected(&self) -> bool {
+        self.rename_buffer
+            .as_ref()
+            .is_some_and(|field| field.select_all)
     }
 
     /// The pane's overlay text: the committed `overlay_text` normally, or the
@@ -2193,16 +2202,7 @@ impl Tab {
         if self.editing_overlay_pane != Some(id) {
             return pane.overlay_text.clone();
         }
-        let buffer = self.overlay_buffer.as_ref()?;
-        if self.overlay_select_all {
-            if buffer.is_empty() {
-                return Some("|".to_owned());
-            }
-            return Some(buffer.clone());
-        }
-        let cursor = self.overlay_cursor.min(buffer.len());
-        let (before, after) = buffer.split_at(cursor);
-        Some(format!("{before}|{after}"))
+        Some(self.overlay_buffer.as_ref()?.caret_marker_display())
     }
 
     pub(crate) fn pane(&self, id: u64) -> Option<&TerminalPane> {
@@ -2425,7 +2425,6 @@ impl Tab {
         if self.renaming_pane == Some(closed) {
             self.renaming_pane = None;
             self.rename_buffer = None;
-            self.rename_select_all = false;
         }
         if self.maximized_pane == Some(closed) {
             self.maximized_pane = None;

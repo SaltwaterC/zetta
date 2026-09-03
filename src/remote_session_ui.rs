@@ -305,8 +305,7 @@ impl Zetta {
                     RemoteSessionField::Port => &mut picker.port,
                     RemoteSessionField::List => unreachable!(),
                 };
-                let edit = TextEdit::new(&mut field.text, &mut field.cursor, &mut field.select_all);
-                match apply_clipboard_shortcut(edit, &event.keystroke, cx) {
+                match apply_clipboard_shortcut(field, &event.keystroke, cx) {
                     ClipboardOutcome::Unchanged => {
                         cx.notify();
                         cx.stop_propagation();
@@ -320,36 +319,17 @@ impl Zetta {
                     }
                     ClipboardOutcome::Ignored => {}
                 }
-                let command =
-                    event.keystroke.modifiers.control || event.keystroke.modifiers.platform;
-                match event.keystroke.key.as_str() {
-                    "backspace" => field.backspace(),
-                    "delete" => field.delete(),
-                    "left" => field.move_left(),
-                    "right" => field.move_right(),
-                    "home" => {
-                        field.cursor = 0;
-                        field.select_all = false;
-                    }
-                    "end" => {
-                        field.cursor = field.text.len();
-                        field.select_all = false;
-                    }
-                    "a" if command => field.select_all(),
-                    "v" if command => {
-                        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                            field.insert(&text);
-                        }
-                    }
-                    _ if !command && !event.keystroke.modifiers.alt => {
-                        if let Some(text) = event.keystroke.key_char.as_ref()
-                            && (picker.field == RemoteSessionField::Target
-                                || text.chars().all(|character| character.is_ascii_digit()))
-                        {
-                            field.insert(text);
-                        }
-                    }
-                    _ => {}
+                // The port field takes digits only, so a character that is not
+                // one is dropped before the field sees it; everything else is
+                // the shared editing behaviour.
+                let typed_a_rejected_character = picker.field == RemoteSessionField::Port
+                    && event
+                        .keystroke
+                        .key_char
+                        .as_ref()
+                        .is_some_and(|text| !text.chars().all(|c| c.is_ascii_digit()));
+                if !typed_a_rejected_character {
+                    apply_text_field_key(field, &event.keystroke);
                 }
                 picker.invalidate_results();
                 cx.notify();
@@ -528,25 +508,10 @@ impl Zetta {
                             click_handle: WeakEntity<Self>|
          -> AnyElement {
             let focused = field == selected_field;
-            let cursor = value.cursor.min(value.text.len());
-            let (before, after) = value.text.split_at(cursor);
-            div()
-                .id(id)
-                .h_9()
+            let (before, after) = value.split_at_cursor();
+            field_box(id, focused, colors)
                 .flex_1()
                 .min_w_0()
-                .px_2()
-                .flex()
-                .items_center()
-                .overflow_hidden()
-                .rounded(px(4.))
-                .border_1()
-                .border_color(if focused {
-                    colors.border_focused
-                } else {
-                    colors.border
-                })
-                .bg(colors.editor_background)
                 .cursor_text()
                 .when(value.select_all && focused, |input| {
                     input.bg(colors.element_selection_background)
@@ -554,13 +519,7 @@ impl Zetta {
                 .when(focused && !value.select_all, |input| {
                     input
                         .child(div().whitespace_nowrap().child(before.to_owned()))
-                        .child(
-                            div()
-                                .flex_none()
-                                .w(px(1.))
-                                .h(px(16.))
-                                .bg(colors.text_accent),
-                        )
+                        .child(caret(colors))
                         .child(div().whitespace_nowrap().child(after.to_owned()))
                 })
                 .when(focused && value.select_all, |input| {

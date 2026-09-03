@@ -29,7 +29,8 @@ use crate::project_commands::{
     parse_command_environment, validate_command_environment_entry, validate_command_name,
     validate_command_string, validate_environment_entry,
 };
-use crate::settings_editor::{PaneTemplatesForm, TextField};
+use crate::settings_editor::PaneTemplatesForm;
+use crate::text_edit::TextField;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProjectTextField {

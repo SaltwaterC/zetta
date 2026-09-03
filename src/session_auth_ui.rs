@@ -1012,30 +1012,17 @@ impl Zetta {
                 let command =
                     event.keystroke.modifiers.control || event.keystroke.modifiers.platform;
                 match key {
-                    "backspace" => field.backspace(),
-                    "delete" => field.delete(),
-                    "left" => field.move_left(),
-                    "right" => field.move_right(),
-                    "home" => {
-                        field.cursor = 0;
-                        field.select_all = false;
-                    }
-                    "end" => {
-                        field.cursor = field.text.len();
-                        field.select_all = false;
-                    }
-                    "a" if command => field.select_all(),
+                    // Paste only, and handled here rather than through the shared
+                    // clipboard shortcuts: a masked secret must not be copyable
+                    // or cuttable out of the field it was typed into.
                     "v" if command => {
                         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
                             field.insert(&text);
                         }
                     }
-                    _ if !command && !event.keystroke.modifiers.alt => {
-                        if let Some(text) = event.keystroke.key_char.as_ref() {
-                            field.insert(text);
-                        }
+                    _ => {
+                        apply_text_field_key(field, &event.keystroke);
                     }
-                    _ => {}
                 }
                 prompt.error = None;
                 cx.notify();
@@ -1056,24 +1043,12 @@ impl Zetta {
                      selected: SessionAuthenticationField|
          -> gpui::AnyElement {
             let focused = prompt.field == selected;
-            let cursor = value.cursor.min(value.text.len());
-            let (before, after) = value.text.split_at(cursor);
+            let (before, after) = value.split_at_cursor();
             let click_handle = handle.clone();
-            div()
-                .id(id)
-                .h_9()
+            // A masked field, so the run is bullets rather than the text and
+            // `text_edit_ui`'s shared run does not apply — only its frame does.
+            field_box(id, focused, &colors)
                 .w_full()
-                .px_2()
-                .flex()
-                .items_center()
-                .rounded(px(4.))
-                .border_1()
-                .border_color(if focused {
-                    colors.border_focused
-                } else {
-                    colors.border
-                })
-                .bg(colors.editor_background)
                 .cursor_text()
                 .when(value.select_all && focused, |input| {
                     input.bg(colors.element_selection_background)
@@ -1084,13 +1059,7 @@ impl Zetta {
                         .child("•".repeat(before.chars().count())),
                 )
                 .when(focused && !value.select_all, |input| {
-                    input.child(
-                        div()
-                            .flex_none()
-                            .w(px(1.))
-                            .h(px(16.))
-                            .bg(colors.text_accent),
-                    )
+                    input.child(caret(&colors))
                 })
                 .child(
                     div()

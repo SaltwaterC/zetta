@@ -483,27 +483,12 @@ impl Zetta {
         let keymap_global_placeholder = (field.text.is_empty()
             && matches!(input, SettingsInput::Keymap(KeymapTextField::Context(_))))
         .then_some(GLOBAL_CONTEXT_LABEL);
-        let cursor = field.cursor.min(field.text.len());
-        let (before, after) = field.text.split_at(cursor);
+        let (before, after) = field.split_at_cursor();
         let input_handle = handle.clone();
-        div()
-            .id(id)
-            .h_9()
+        field_box(id, focused, &colors)
             .w_full()
             .min_w(px(180.))
-            .px_2()
-            .flex()
-            .items_center()
             .when(centered, |input| input.justify_center().text_center())
-            .overflow_hidden()
-            .rounded(px(4.))
-            .border_1()
-            .border_color(if focused {
-                colors.border_focused
-            } else {
-                colors.border
-            })
-            .bg(colors.editor_background)
             .cursor_text()
             .when(field.select_all && focused, |input| {
                 input.bg(colors.element_selection_background)
@@ -530,15 +515,7 @@ impl Zetta {
             .when(focused, |input| {
                 input
                     .child(div().whitespace_nowrap().child(before.to_owned()))
-                    .when(!field.select_all, |input| {
-                        input.child(
-                            div()
-                                .flex_none()
-                                .w(px(1.))
-                                .h(px(16.))
-                                .bg(colors.text_accent),
-                        )
-                    })
+                    .when(!field.select_all, |input| input.child(caret(&colors)))
                     .child(div().whitespace_nowrap().child(after.to_owned()))
             })
             .on_click(move |_, window, cx| {

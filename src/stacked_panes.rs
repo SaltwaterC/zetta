@@ -147,7 +147,7 @@ impl Zetta {
         let Some(command) = self
             .multi_command
             .as_ref()
-            .map(|prompt| prompt.query.clone())
+            .map(|prompt| prompt.query.text.clone())
         else {
             return;
         };

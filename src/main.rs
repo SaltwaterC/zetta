@@ -32,6 +32,7 @@ mod settings_editor;
 mod shell_integration;
 mod silent_mode;
 mod text_edit;
+mod text_edit_ui;
 #[cfg(tftp_enabled)]
 mod tftp;
 mod theme_extensions;
@@ -102,7 +103,7 @@ use session_auth_ui::SessionAuthenticationPrompt;
 use settings::{KeymapFile, KeymapFileLoadResult, Settings as _};
 use settings_editor::{
     BindingForm, ConfigTextField, ConfigurationForm, KeymapForm, KeymapSectionForm,
-    KeymapTextField, PaneTemplateNodePath, PaneTemplateTextField, SettingsPage, TextField,
+    KeymapTextField, PaneTemplateNodePath, PaneTemplateTextField, SettingsPage,
     save as save_settings_file,
 };
 use silent_mode::{FocusStatusAccess, SilentModeState};
@@ -116,7 +117,11 @@ use terminal_view::{
     SavePaneOutput, SearchNextMatch, SearchPreviousMatch, SearchScrollback, SelectAll,
     SelectAllSearchText, SetPaneOverlay, TerminalInput, TerminalView, TerminalViewEvent,
 };
-use text_edit::{ClipboardOutcome, TextEdit, apply_clipboard_shortcut, is_copy_chord};
+use text_edit::{
+    ClipboardOutcome, TextField, TextFieldEdit, apply_clipboard_shortcut, apply_text_field_key,
+    is_copy_chord, previous_char_boundary,
+};
+use text_edit_ui::{caret, field_box, field_query_run, field_text_run};
 use theme::{
     ActiveTheme, ClientDecorationsExt as _, GlobalTheme, SystemAppearance, Theme, ThemeColors,
     ThemeRegistry,

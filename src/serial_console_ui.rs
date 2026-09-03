@@ -30,7 +30,7 @@ impl Zetta {
                     })
                     .bg(colors.editor_background)
                     .when(
-                        selected && field == SerialField::BaudRate && prompt.baud_select_all,
+                        selected && field == SerialField::BaudRate && prompt.baud_rate.select_all,
                         |row| row.bg(colors.element_selection_background),
                     )
                     .cursor_pointer()
@@ -75,14 +75,9 @@ impl Zetta {
                 .unwrap_or_else(|| "No devices found".to_owned())
         };
         let baud_value = if prompt.field == SerialField::BaudRate {
-            let cursor = prompt.baud_cursor.min(prompt.baud_rate.len());
-            format!(
-                "{}|{}",
-                &prompt.baud_rate[..cursor],
-                &prompt.baud_rate[cursor..]
-            )
+            prompt.baud_rate.caret_marker_display()
         } else {
-            prompt.baud_rate.clone()
+            prompt.baud_rate.text.clone()
         };
         let status = if prompt.connecting {
             "Connecting…".to_owned()
@@ -130,7 +125,7 @@ impl Zetta {
                                     Label::new(format!(
                                         "{} · {} baud",
                                         prompt.framing_label(),
-                                        prompt.baud_rate
+                                        prompt.baud_rate.text
                                     ))
                                     .size(LabelSize::Small)
                                     .color(Color::Custom(colors.text_muted)),
@@ -272,7 +267,7 @@ impl Zetta {
             cx.notify();
             return;
         };
-        let baud_rate = match prompt.baud_rate.parse::<u32>() {
+        let baud_rate = match prompt.baud_rate.text.parse::<u32>() {
             Ok(baud_rate) if baud_rate > 0 => baud_rate,
             _ => {
                 prompt.error = Some("Baud rate must be a positive whole number".to_owned());
@@ -368,12 +363,7 @@ impl Zetta {
         // Only the baud rate is typed into; the other rows are cycled with the
         // arrow keys and have no text a clipboard could carry.
         if prompt.field == SerialField::BaudRate {
-            let edit = TextEdit::new(
-                &mut prompt.baud_rate,
-                &mut prompt.baud_cursor,
-                &mut prompt.baud_select_all,
-            );
-            match apply_clipboard_shortcut(edit, &event.keystroke, cx) {
+            match apply_clipboard_shortcut(&mut prompt.baud_rate, &event.keystroke, cx) {
                 ClipboardOutcome::Ignored => {}
                 ClipboardOutcome::Unchanged | ClipboardOutcome::Edited => {
                     cx.notify();
@@ -385,15 +375,15 @@ impl Zetta {
             "escape" => self.dismiss_serial_console(window, cx),
             "enter" => self.submit_serial_console(cx),
             "tab" => {
-                prompt.baud_select_all = false;
+                prompt.baud_rate.select_all = false;
                 prompt.field = prompt.field.adjacent(event.keystroke.modifiers.shift);
                 cx.notify();
             }
             "a" if prompt.field == SerialField::BaudRate
                 && (event.keystroke.modifiers.control || event.keystroke.modifiers.platform) =>
             {
-                prompt.baud_cursor = prompt.baud_rate.len();
-                prompt.baud_select_all = true;
+                prompt.baud_rate.move_to_end();
+                prompt.baud_rate.select_all = true;
                 cx.notify();
             }
             "up" | "left" => {
@@ -408,27 +398,14 @@ impl Zetta {
                 self.refresh_serial_devices(cx)
             }
             "backspace" if prompt.field == SerialField::BaudRate => {
-                if prompt.baud_select_all {
-                    prompt.baud_rate.clear();
-                    prompt.baud_cursor = 0;
-                } else if prompt.baud_cursor > 0 {
-                    prompt.baud_cursor -= 1;
-                    prompt.baud_rate.remove(prompt.baud_cursor);
-                }
-                prompt.baud_select_all = false;
+                prompt.baud_rate.backspace();
                 cx.notify();
             }
             key if prompt.field == SerialField::BaudRate
                 && key.len() == 1
                 && key.as_bytes()[0].is_ascii_digit() =>
             {
-                if prompt.baud_select_all {
-                    prompt.baud_rate.clear();
-                    prompt.baud_cursor = 0;
-                    prompt.baud_select_all = false;
-                }
-                prompt.baud_rate.insert_str(prompt.baud_cursor, key);
-                prompt.baud_cursor += 1;
+                prompt.baud_rate.insert(key);
                 cx.notify();
             }
             _ => {}

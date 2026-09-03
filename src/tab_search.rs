@@ -9,9 +9,7 @@ pub(crate) struct TabSearchMatch {
 
 pub(crate) struct TabSearch {
     pub(crate) tab_id: u64,
-    pub(crate) query: String,
-    pub(crate) cursor: usize,
-    pub(crate) select_all: bool,
+    pub(crate) query: TextField,
     pub(crate) generation: u64,
     pub(crate) matches: Vec<TabSearchMatch>,
     pub(crate) active_match: Option<usize>,
@@ -27,7 +25,7 @@ pub(crate) fn tab_search_request_is_current(
     query: &str,
 ) -> bool {
     search.is_some_and(|search| {
-        search.tab_id == tab_id && search.generation == generation && search.query == query
+        search.tab_id == tab_id && search.generation == generation && search.query.text == query
     })
 }
 
@@ -72,9 +70,7 @@ impl Zetta {
             self.command_palette = None;
             self.tab_search = Some(TabSearch {
                 tab_id,
-                query: String::new(),
-                cursor: 0,
-                select_all: false,
+                query: TextField::default(),
                 generation: 0,
                 matches: Vec::new(),
                 active_match: None,
@@ -132,7 +128,7 @@ impl Zetta {
         search_state.limit_reached = false;
         search_state.total_count = 0;
         let tab_id = search_state.tab_id;
-        let query = search_state.query.clone();
+        let query = search_state.query.text.clone();
         let generation = search_state.generation;
 
         let terminals = self
@@ -295,20 +291,6 @@ impl Zetta {
         self.activate_tab_search_match(index, cx);
     }
 
-    pub(crate) fn insert_tab_search_text(&mut self, text: &str, cx: &mut Context<Self>) {
-        let Some(search) = self.tab_search.as_mut() else {
-            return;
-        };
-        if search.select_all {
-            search.query.clear();
-            search.cursor = 0;
-        }
-        search.query.insert_str(search.cursor, text);
-        search.cursor += text.len();
-        search.select_all = false;
-        self.refresh_tab_search(cx);
-    }
-
     pub(crate) fn tab_search_key_down(
         &mut self,
         event: &KeyDownEvent,
@@ -318,12 +300,7 @@ impl Zetta {
         // Settled before this overlay's own keys, so `Ctrl-X` cuts rather than
         // typing an `x` and `Shift-Delete` cuts rather than forward-deleting.
         if let Some(search) = self.tab_search.as_mut() {
-            let edit = TextEdit::new(
-                &mut search.query,
-                &mut search.cursor,
-                &mut search.select_all,
-            );
-            match apply_clipboard_shortcut(edit, &event.keystroke, cx) {
+            match apply_clipboard_shortcut(&mut search.query, &event.keystroke, cx) {
                 ClipboardOutcome::Ignored => {}
                 ClipboardOutcome::Unchanged => {
                     cx.notify();
@@ -341,84 +318,19 @@ impl Zetta {
             "escape" => self.dismiss_tab_search(window, cx),
             "enter" | "f3" if event.keystroke.modifiers.shift => self.navigate_tab_search(true, cx),
             "enter" | "f3" => self.navigate_tab_search(false, cx),
-            "backspace" => {
-                if let Some(search) = self.tab_search.as_mut() {
-                    if search.select_all {
-                        search.query.clear();
-                        search.cursor = 0;
-                    } else if search.cursor > 0 {
-                        let previous = previous_char_boundary(&search.query, search.cursor);
-                        search.query.replace_range(previous..search.cursor, "");
-                        search.cursor = previous;
-                    }
-                    search.select_all = false;
-                }
-                self.refresh_tab_search(cx);
-            }
-            "delete" => {
-                if let Some(search) = self.tab_search.as_mut() {
-                    if search.select_all {
-                        search.query.clear();
-                        search.cursor = 0;
-                    } else if search.cursor < search.query.len() {
-                        let next = next_char_boundary(&search.query, search.cursor);
-                        search.query.replace_range(search.cursor..next, "");
-                    }
-                    search.select_all = false;
-                }
-                self.refresh_tab_search(cx);
-            }
-            "left" => {
-                if let Some(search) = self.tab_search.as_mut() {
-                    search.cursor = if search.select_all {
-                        0
-                    } else {
-                        previous_char_boundary(&search.query, search.cursor)
-                    };
-                    search.select_all = false;
-                }
-                cx.notify();
-            }
-            "right" => {
-                if let Some(search) = self.tab_search.as_mut() {
-                    search.cursor = if search.select_all {
-                        search.query.len()
-                    } else {
-                        next_char_boundary(&search.query, search.cursor)
-                    };
-                    search.select_all = false;
-                }
-                cx.notify();
-            }
-            "home" => {
-                if let Some(search) = self.tab_search.as_mut() {
-                    search.cursor = 0;
-                    search.select_all = false;
-                }
-                cx.notify();
-            }
-            "end" => {
-                if let Some(search) = self.tab_search.as_mut() {
-                    search.cursor = search.query.len();
-                    search.select_all = false;
-                }
-                cx.notify();
-            }
-            "a" if event.keystroke.modifiers.control || event.keystroke.modifiers.platform => {
-                if let Some(search) = self.tab_search.as_mut() {
-                    search.select_all = !search.query.is_empty();
-                }
-                cx.notify();
-            }
-            _ if !event.keystroke.modifiers.control
-                && !event.keystroke.modifiers.platform
-                && !event.keystroke.modifiers.alt =>
-            {
-                if let Some(text) = event.keystroke.key_char.as_ref() {
-                    self.insert_tab_search_text(text, cx);
+            _ => {
+                let edited = self
+                    .tab_search
+                    .as_mut()
+                    .map(|search| apply_text_field_key(&mut search.query, &event.keystroke));
+                match edited {
+                    Some(TextFieldEdit::CursorMoved) => cx.notify(),
+                    // The query drives the match list, so an edit has to run the
+                    // search again rather than only redraw.
+                    Some(TextFieldEdit::Edited) => self.refresh_tab_search(cx),
+                    Some(TextFieldEdit::Ignored) | None => {}
                 }
             }
-            _ => {}
         }
         cx.stop_propagation();
     }
@@ -426,11 +338,7 @@ impl Zetta {
     /// The scrollback search field anchored below the title bar.
     pub(crate) fn render_tab_search_overlay(&self, colors: &ThemeColors) -> Option<AnyElement> {
         let search = self.tab_search.as_ref()?;
-        let cursor = search.cursor.min(search.query.len());
-        let (before, after) = search.query.split_at(cursor);
-        let before = before.to_owned();
-        let after = after.to_owned();
-        let selected = search.select_all;
+        let query = field_query_run(&search.query, None, colors);
         let retained_match_count = search.matches.len();
         let status = if search.limit_reached {
             let position = search
@@ -479,25 +387,7 @@ impl Zetta {
                                 .w_full()
                                 .justify_between()
                                 .gap_3()
-                                .child(
-                                    h_flex()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .when(selected, |input| {
-                                            input.bg(colors.element_selection_background)
-                                        })
-                                        .child(div().whitespace_nowrap().child(before))
-                                        .when(!selected, |input| {
-                                            input.child(
-                                                div()
-                                                    .flex_none()
-                                                    .w(px(1.0))
-                                                    .h(px(16.0))
-                                                    .bg(colors.text_accent),
-                                            )
-                                        })
-                                        .child(div().whitespace_nowrap().child(after)),
-                                )
+                                .child(query)
                                 .child(
                                     div()
                                         .flex_none()

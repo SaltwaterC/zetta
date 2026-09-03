@@ -66,14 +66,6 @@ impl Zetta {
 
         let picker = self.tab_icon_picker.as_ref()?;
         let query = picker.query.clone();
-        let query_empty = query.text.is_empty();
-        let (query_before, query_after) = if query.select_all {
-            (query.text.clone(), String::new())
-        } else {
-            let cursor = query.cursor.min(query.text.len());
-            let (before, after) = query.text.split_at(cursor);
-            (before.to_owned(), after.to_owned())
-        };
 
         // Grid constants
         const ICON_CELL_WIDTH: Pixels = px(84.);
@@ -86,50 +78,16 @@ impl Zetta {
 
         // Build search bar
         let search_handle = handle.clone();
-        let search = div()
-            .id("tab-icon-search")
-            .h_9()
+        // The picker has one field and it always holds the focus while the
+        // picker is open, so the frame is always the focused one.
+        let search = field_box("tab-icon-search", true, &colors)
             .min_w_0()
             .flex_1()
-            .px_2()
-            .flex()
-            .items_center()
-            .overflow_hidden()
-            .rounded(px(4.))
-            .border_1()
-            .border_color(colors.border_focused)
-            .bg(colors.editor_background)
             .when(query.select_all, |input| {
                 input.bg(colors.element_selection_background)
             })
             .text_color(colors.text)
-            .child(
-                h_flex()
-                    .min_w_0()
-                    .when(!query.select_all, |input| {
-                        input.child(div().whitespace_nowrap().child(query_before.clone()))
-                    })
-                    .when(!query.select_all, |input| {
-                        input.child(
-                            div()
-                                .flex_none()
-                                .w(px(1.))
-                                .h(px(16.))
-                                .bg(colors.text_accent),
-                        )
-                    })
-                    .when(query.select_all, |input| {
-                        input
-                            .text_color(colors.text)
-                            .child(div().whitespace_nowrap().child(query_before.clone()))
-                    })
-                    .child(div().whitespace_nowrap().child(query_after))
-                    .when(query_empty, |input| {
-                        input
-                            .text_color(colors.text_placeholder)
-                            .child("Search icons…")
-                    }),
-            )
+            .child(field_query_run(&query, Some("Search icons…"), &colors))
             .on_click(move |_, window, cx| {
                 search_handle
                     .update(cx, |this, cx| {

@@ -35,12 +35,8 @@ fn pin_test_tab(id: u64, pinned: bool) -> Tab {
         pinned,
         renaming_pane: None,
         rename_buffer: None,
-        rename_cursor: 0,
-        rename_select_all: false,
         editing_overlay_pane: None,
         overlay_buffer: None,
-        overlay_cursor: 0,
-        overlay_select_all: false,
         overlay_style_picker: None,
     }
 }

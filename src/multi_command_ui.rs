@@ -77,7 +77,7 @@ impl Zetta {
         let Some(template) = self
             .multi_command
             .as_ref()
-            .map(|prompt| prompt.query.clone())
+            .map(|prompt| prompt.query.text.clone())
         else {
             return;
         };
@@ -390,12 +390,7 @@ impl Zetta {
         };
         // Settled before this prompt's own keys, so `Ctrl-X` cuts rather than
         // typing an `x` and `Shift-Delete` cuts rather than forward-deleting.
-        let edit = TextEdit::new(
-            &mut prompt.query,
-            &mut prompt.cursor,
-            &mut prompt.select_all,
-        );
-        match apply_clipboard_shortcut(edit, &event.keystroke, cx) {
+        match apply_clipboard_shortcut(&mut prompt.query, &event.keystroke, cx) {
             ClipboardOutcome::Ignored => {}
             ClipboardOutcome::Unchanged => {
                 cx.notify();
@@ -424,100 +419,29 @@ impl Zetta {
                 prompt.navigate_completion(false);
                 cx.notify();
             }
-            "backspace" => {
-                prompt.clear_completion();
-                if prompt.select_all {
-                    prompt.query.clear();
-                    prompt.cursor = 0;
-                } else if prompt.cursor > 0 {
-                    let previous = previous_char_boundary(&prompt.query, prompt.cursor);
-                    prompt.query.replace_range(previous..prompt.cursor, "");
-                    prompt.cursor = previous;
-                }
-                prompt.select_all = false;
-                prompt.error = None;
-                prompt.mark_query_changed();
-                cx.notify();
-            }
-            "delete" => {
-                prompt.clear_completion();
-                if prompt.select_all {
-                    prompt.query.clear();
-                    prompt.cursor = 0;
-                } else if prompt.cursor < prompt.query.len() {
-                    let next = next_char_boundary(&prompt.query, prompt.cursor);
-                    prompt.query.replace_range(prompt.cursor..next, "");
-                }
-                prompt.select_all = false;
-                prompt.error = None;
-                prompt.mark_query_changed();
-                cx.notify();
-            }
-            "left" => {
-                prompt.clear_completion();
-                prompt.cursor = if prompt.select_all {
-                    0
-                } else {
-                    previous_char_boundary(&prompt.query, prompt.cursor)
-                };
-                prompt.select_all = false;
-                prompt.mark_query_changed();
-                cx.notify();
-            }
-            "right" => {
-                prompt.clear_completion();
-                prompt.cursor = if prompt.select_all {
-                    prompt.query.len()
-                } else {
-                    next_char_boundary(&prompt.query, prompt.cursor)
-                };
-                prompt.select_all = false;
-                prompt.mark_query_changed();
-                cx.notify();
-            }
-            "home" => {
-                prompt.clear_completion();
-                prompt.cursor = 0;
-                prompt.select_all = false;
-                prompt.mark_query_changed();
-                cx.notify();
-            }
-            "end" => {
-                prompt.clear_completion();
-                prompt.cursor = prompt.query.len();
-                prompt.select_all = false;
-                prompt.mark_query_changed();
-                cx.notify();
-            }
             "w" if event.keystroke.modifiers.control => {
                 prompt.clear_completion();
                 prompt.delete_previous_word();
                 cx.notify();
             }
-            "a" if event.keystroke.modifiers.control || event.keystroke.modifiers.platform => {
-                prompt.clear_completion();
-                prompt.select_all = !prompt.query.is_empty();
-                cx.notify();
-            }
-            _ if !event.keystroke.modifiers.control
-                && !event.keystroke.modifiers.platform
-                && !event.keystroke.modifiers.alt =>
-            {
-                if let Some(text) = event.keystroke.key_char.as_ref() {
+            // Every key the field answers to invalidates the completion, whose
+            // candidates describe the query they were requested for and the
+            // position they were requested at. An edit also clears the error,
+            // which no longer describes what is in the field.
+            _ => match apply_text_field_key(&mut prompt.query, &event.keystroke) {
+                TextFieldEdit::Ignored => {}
+                TextFieldEdit::CursorMoved => {
                     prompt.clear_completion();
-                    if prompt.select_all {
-                        prompt.query.clear();
-                        prompt.cursor = 0;
-                        prompt.select_all = false;
-                    }
-                    prompt.query.insert_str(prompt.cursor, text);
-                    prompt.cursor += text.len();
+                    prompt.mark_query_changed();
+                    cx.notify();
+                }
+                TextFieldEdit::Edited => {
+                    prompt.clear_completion();
                     prompt.error = None;
                     prompt.mark_query_changed();
                     cx.notify();
                 }
-            }
-            _ => {}
+            },
         }
         cx.stop_propagation();
     }
@@ -533,8 +457,22 @@ impl Zetta {
         let stacked_prompt = self.multi_command_mode == CommandPromptMode::Stacked;
         let prompt = self.multi_command.as_mut()?;
         let (query_before, query_after) = prompt.rendered_query_parts();
-        let query_empty = prompt.query.is_empty();
-        let query_selected = prompt.select_all;
+        let query_empty = prompt.query.text.is_empty();
+        let query_selected = prompt.query.select_all;
+        let placeholder = query_empty.then(|| {
+            SharedString::from(if stacked_prompt {
+                "git status"
+            } else {
+                "ssh {{a,b,c,d}}.example.com"
+            })
+        });
+        let query = field_text_run(
+            query_before,
+            query_after,
+            query_selected,
+            placeholder,
+            colors,
+        );
         let error = prompt.error.clone();
         let completion_selected = prompt.completion_selected;
         let completion_count = prompt.completion_candidates.len();
@@ -620,37 +558,7 @@ impl Zetta {
                                 .items_center()
                                 .text_color(colors.text)
                                 .child(div().text_color(colors.text_accent).mr_2().child("$"))
-                                .child(
-                                    h_flex()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
-                                        .when(query_selected, |input| {
-                                            input.bg(colors.element_selection_background)
-                                        })
-                                        .child(div().whitespace_nowrap().child(query_before))
-                                        .when(!query_selected, |input| {
-                                            input.child(
-                                                div()
-                                                    .flex_none()
-                                                    .w(px(1.0))
-                                                    .h(px(16.0))
-                                                    .bg(colors.text_accent),
-                                            )
-                                        })
-                                        .child(div().whitespace_nowrap().child(query_after))
-                                        .when(query_empty, |input| {
-                                            input.child(
-                                                div()
-                                                    .text_color(colors.text_placeholder)
-                                                    .child(if stacked_prompt {
-                                                        "git status"
-                                                    } else {
-                                                        "ssh {{a,b,c,d}}.example.com"
-                                                    }),
-                                            )
-                                        }),
-                                ),
+                                .child(query),
                         )
                         .when(completion_count > 0, |prompt| {
                             prompt.child(

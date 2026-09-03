@@ -70,7 +70,7 @@ fn matches_are_cached_until_the_query_changes() {
     ]);
     assert_eq!(palette.matches(), &[0, 1]);
 
-    palette.query = "paste".into();
+    palette.query = TextField::new("paste");
     palette.refresh_matches();
     assert_eq!(palette.matches(), &[0]);
     assert_eq!(
@@ -117,7 +117,7 @@ fn project_commands_are_found_by_their_directory_name() {
     let mut palette = CommandPalette::new(project_palette_commands(&[PathBuf::from(
         "/home/user/source/zetta",
     )]));
-    palette.query = "zetta".into();
+    palette.query = TextField::new("zetta");
     palette.refresh_matches();
 
     assert_eq!(palette.matches().len(), 1);

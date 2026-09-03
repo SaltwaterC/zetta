@@ -4,9 +4,7 @@ use super::*;
 fn stale_tab_search_work_is_rejected() {
     let search = TabSearch {
         tab_id: 7,
-        query: "cargo".into(),
-        cursor: 0,
-        select_all: false,
+        query: TextField::new("cargo"),
         generation: 4,
         matches: Vec::new(),
         active_match: None,
@@ -23,9 +21,7 @@ fn stale_tab_search_work_is_rejected() {
 fn tab_search_is_targeted_only_by_its_own_tab() {
     let search = TabSearch {
         tab_id: 7,
-        query: String::new(),
-        cursor: 0,
-        select_all: false,
+        query: TextField::default(),
         generation: 0,
         matches: Vec::new(),
         active_match: None,

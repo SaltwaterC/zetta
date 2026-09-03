@@ -96,8 +96,14 @@ is a sibling under `src/`.
 
 ### Overlays, pickers, and prompts
 
-- `text_edit.rs`: the shared single-line editing primitives — cursor/selection
-  arithmetic and the clipboard chords every text field and picker query uses
+- `text_edit.rs`: the single-line field every text field and picker query is
+  built from — `TextField` itself, the char-boundary cursor arithmetic, the
+  editing keys (`apply_text_field_key`) and the clipboard chords
+  (`apply_clipboard_shortcut`). A surface holds a `TextField` and keeps only
+  the keys that are its own; see the module docs for the two that deliberately
+  do not
+- `text_edit_ui.rs`: the rendering half of a field — the caret, the inline
+  query run the overlays share, and the bordered frame the boxed fields share
 - `tab_search.rs`: cross-pane scrollback search and its overlay
 - `tab_icon_picker.rs`: tab icon picker model, rendering, and the
   `Zetta` methods that drive it

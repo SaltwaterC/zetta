@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn defaults_to_115200_8n1_without_flow_control() {
     let prompt = SerialConsolePrompt::default();
-    assert_eq!(prompt.baud_rate, "115200");
+    assert_eq!(prompt.baud_rate.text, "115200");
     assert_eq!(prompt.framing_label(), "8N1");
     assert_eq!(prompt.flow_control, serialport::FlowControl::None);
 }
@@ -36,16 +36,16 @@ fn baud_rate_arrows_cycle_common_values_and_keep_custom_entry_available() {
         ..Default::default()
     };
     prompt.cycle_current_value(false);
-    assert_eq!(prompt.baud_rate, "230400");
-    prompt.baud_rate = "100000".to_owned();
+    assert_eq!(prompt.baud_rate.text, "230400");
+    prompt.baud_rate = TextField::new("100000");
     prompt.cycle_current_value(true);
-    assert_eq!(prompt.baud_rate, "57600");
+    assert_eq!(prompt.baud_rate.text, "57600");
 }
 
 #[test]
 fn baud_rate_selection_defaults_to_inactive() {
     let prompt = SerialConsolePrompt::default();
-    assert!(!prompt.baud_select_all);
+    assert!(!prompt.baud_rate.select_all);
 }
 
 #[cfg(target_os = "linux")]

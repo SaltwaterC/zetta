@@ -341,6 +341,65 @@ pub(crate) fn open_zetta_window(
             gpui_platform::activate_window_with_token(window, &activation_token)
         })?;
     }
+    if let Ok(surface) = std::env::var("ZETTA_SCREENSHOT_SURFACE") {
+        cx.spawn(async move |cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(3))
+                .await;
+            window_handle
+                .update(cx, |zetta, window, cx| match surface.as_str() {
+
+                    "palette" => {
+                        zetta.toggle_command_palette(&ToggleCommandPalette, window, cx);
+                        if let Some(palette) = zetta.command_palette.as_mut() {
+                            palette.query.insert("tab");
+                            palette.refresh_matches();
+                        }
+                    }
+                    "theme" => {
+                        zetta.open_theme_picker(crate::ThemeScope::Pane, window, cx);
+                        if let Some(picker) = zetta.theme_picker.as_mut() {
+                            picker.query.insert("dark");
+                            picker.refresh_matches();
+                        }
+                    }
+                    "icons" => {
+                        zetta.open_tab_icon_picker(0, window, cx);
+                        if let Some(picker) = zetta.tab_icon_picker.as_mut() {
+                            picker.query.insert("term");
+                        }
+                    }
+                    "search" => {
+                        zetta.search_tab_scrollback(&SearchTabScrollback, window, cx);
+                        if let Some(search) = zetta.tab_search.as_mut() {
+                            search.query.insert("zetta");
+                        }
+                    }
+                    "command" => {
+                        zetta.toggle_multi_command(&ToggleMultiCommand, window, cx);
+                    }
+                    "rename" => {
+                        zetta.rename_tab(&RenameTab, window, cx);
+                    }
+                    "overlay" => {
+                        zetta.set_pane_overlay(&SetPaneOverlay, window, cx);
+                    }
+                    "settings" => {
+                        zetta.toggle_settings(&ToggleSettings, window, cx);
+                        zetta.focus_settings_input(
+                            crate::settings_ui::SettingsInput::Configuration(
+                                ConfigTextField::FontSize,
+                            ),
+                            window,
+                            cx,
+                        );
+                    }
+                    _ => {}
+                })
+                .ok();
+        })
+        .detach();
+    }
     cx.activate(true);
     Ok(())
 }

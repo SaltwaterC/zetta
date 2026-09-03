@@ -660,13 +660,7 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, tab_theme: Arc<Theme>, cx: &App)
         .as_ref()
         .filter(|_| tab.renaming_pane.is_none())
     {
-        if tab.rename_select_all {
-            buffer.clone().into()
-        } else {
-            let cursor = tab.rename_cursor.min(buffer.len());
-            let (before, after) = buffer.split_at(cursor);
-            format!("{before}|{after}").into()
-        }
+        buffer.caret_marker_display().into()
     } else {
         resolve_tab_title(tab, || {
             if let Some(view) = tab.active_view() {
@@ -684,7 +678,7 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, tab_theme: Arc<Theme>, cx: &App)
         .as_ref()
         .filter(|_| tab.renaming_pane.is_none())
     {
-        buffer.clone().into()
+        buffer.text.clone().into()
     } else {
         tab_overflow_entry_label(tab, cx)
     };
@@ -754,12 +748,9 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, tab_theme: Arc<Theme>, cx: &App)
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .text_sm()
-                    .when(
-                        tab.rename_buffer.is_some()
-                            && tab.renaming_pane.is_none()
-                            && tab.rename_select_all,
-                        |title| title.bg(tab_colors.element_selection_background),
-                    )
+                    .when(tab.tab_rename_selected(), |title| {
+                        title.bg(tab_colors.element_selection_background)
+                    })
                     .text_color(tab_text)
                     .child(title),
             )

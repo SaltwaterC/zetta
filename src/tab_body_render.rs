@@ -63,9 +63,7 @@ impl Zetta {
                             pane_id,
                             tab.displayed_pane_label(pane_id)
                                 .unwrap_or_else(|| pane.label()),
-                            tab.renaming_pane == Some(pane_id)
-                                && tab.rename_select_all
-                                && tab.rename_buffer.is_some(),
+                            tab.pane_rename_selected(pane_id),
                         )
                     })
                 });

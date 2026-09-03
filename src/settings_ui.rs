@@ -372,14 +372,6 @@ pub(crate) fn settings_save_in_flight(editor: &SettingsEditor) -> bool {
             .is_some_and(|project| project.save_in_progress)
 }
 
-pub(crate) fn previous_char_boundary(text: &str, cursor: usize) -> usize {
-    text[..cursor]
-        .char_indices()
-        .next_back()
-        .map(|(index, _)| index)
-        .unwrap_or(0)
-}
-
 pub(crate) fn matching_font_indices(normalized_fonts: &[String], query: &str) -> Arc<[usize]> {
     let search = query.to_lowercase();
     normalized_fonts
@@ -481,14 +473,6 @@ pub(crate) fn adjusted_scroll_history(current: u64, direction: i32, maximum: u64
     } else {
         current.saturating_add(step).min(maximum)
     }
-}
-
-pub(crate) fn next_char_boundary(text: &str, cursor: usize) -> usize {
-    text[cursor..]
-        .chars()
-        .next()
-        .map(|character| cursor + character.len_utf8())
-        .unwrap_or(text.len())
 }
 
 impl Zetta {
@@ -1126,7 +1110,7 @@ impl Zetta {
                     Some(SettingsControl::ProjectOpacity) => {
                         self.adjust_settings_opacity(OpacityTarget::Project, direction, cx);
                     }
-                    Some(SettingsControl::Input(_)) => self.edit_settings_input(event, command, cx),
+                    Some(SettingsControl::Input(_)) => self.edit_settings_input(event, cx),
                     _ => self.focus_adjacent_settings_control(direction < 0, window, cx),
                 }
             }
@@ -1161,7 +1145,7 @@ impl Zetta {
                         self.open_settings_dropdown(dropdown, window.mouse_position(), cx);
                         self.move_open_settings_dropdown(direction, cx);
                     }
-                    Some(SettingsControl::Input(_)) => self.edit_settings_input(event, command, cx),
+                    Some(SettingsControl::Input(_)) => self.edit_settings_input(event, cx),
                     _ => self.focus_adjacent_settings_control(direction < 0, window, cx),
                 }
             }
@@ -1204,12 +1188,12 @@ impl Zetta {
                 {
                     self.activate_settings_control(control, window, cx);
                 } else {
-                    self.edit_settings_input(event, command, cx);
+                    self.edit_settings_input(event, cx);
                 }
             }
             key => {
                 let _ = key;
-                self.edit_settings_input(event, command, cx);
+                self.edit_settings_input(event, cx);
             }
         }
         cx.stop_propagation();

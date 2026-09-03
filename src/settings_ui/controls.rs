@@ -1012,12 +1012,7 @@ impl Zetta {
         }
     }
 
-    pub(crate) fn edit_settings_input(
-        &mut self,
-        event: &KeyDownEvent,
-        command: bool,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn edit_settings_input(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         let Some(editor) = self.settings_editor.as_mut() else {
             return;
         };
@@ -1052,10 +1047,9 @@ impl Zetta {
         let Some(field) = field else {
             return;
         };
-        let key = event.keystroke.key.as_str();
         // Settled before the surface's own keys, so `Ctrl-X` cuts rather than
         // typing an `x` and `Shift-Delete` cuts rather than forward-deleting.
-        let clipboard = apply_clipboard_shortcut(field.edit(), &event.keystroke, cx);
+        let clipboard = apply_clipboard_shortcut(field, &event.keystroke, cx);
         // Whether the keystroke changed the text. Moving the cursor, selecting
         // and copying do not, and used to be treated as edits all the same: an
         // arrow key was enough to make the dialog believe it had unsaved changes,
@@ -1063,48 +1057,9 @@ impl Zetta {
         let edited = match clipboard {
             ClipboardOutcome::Edited => true,
             ClipboardOutcome::Unchanged => false,
-            ClipboardOutcome::Ignored => match key {
-                "backspace" => {
-                    field.backspace();
-                    true
-                }
-                "delete" => {
-                    field.delete();
-                    true
-                }
-                "left" => {
-                    field.move_left();
-                    false
-                }
-                "right" => {
-                    field.move_right();
-                    false
-                }
-                "home" => {
-                    field.cursor = 0;
-                    field.select_all = false;
-                    false
-                }
-                "end" => {
-                    field.cursor = field.text.len();
-                    field.select_all = false;
-                    false
-                }
-                _ if command && key.eq_ignore_ascii_case("a") => {
-                    field.select_all();
-                    false
-                }
-                _ if !command && !event.keystroke.modifiers.alt => {
-                    match event.keystroke.key_char.as_ref() {
-                        Some(text) => {
-                            field.insert(text);
-                            true
-                        }
-                        None => false,
-                    }
-                }
-                _ => false,
-            },
+            ClipboardOutcome::Ignored => {
+                apply_text_field_key(field, &event.keystroke) == TextFieldEdit::Edited
+            }
         };
         if !edited {
             // Copying is otherwise silent, and a clipboard that may or may not

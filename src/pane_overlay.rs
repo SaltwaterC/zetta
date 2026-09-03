@@ -37,9 +37,7 @@ impl Zetta {
         let text = pane.overlay_text.clone().unwrap_or_default();
         tab.activate_pane(pane_id);
         tab.editing_overlay_pane = Some(pane_id);
-        tab.overlay_cursor = text.len();
-        tab.overlay_buffer = Some(text);
-        tab.overlay_select_all = true;
+        tab.overlay_buffer = Some(TextField::selected(text));
         self.rename_focus.focus(window, cx);
         cx.notify();
     }
@@ -474,7 +472,6 @@ impl Zetta {
                 pane.overlay_text = text;
             }
             tab.overlay_buffer = None;
-            tab.overlay_select_all = false;
         }
         if has_text {
             self.begin_overlay_style_picker(pane_id, window, cx);

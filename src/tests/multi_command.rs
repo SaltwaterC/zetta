@@ -6,8 +6,7 @@ fn prompt_with(query: &str, commands: &[&str], ssh_hosts: &[&str]) -> MultiComma
         ssh_hosts.iter().map(|value| (*value).to_owned()).collect(),
     );
     let mut prompt = MultiCommandPrompt::new(catalog);
-    prompt.query = query.to_owned();
-    prompt.cursor = query.len();
+    prompt.query = TextField::new(query);
     prompt.home = PathBuf::from("/home/test");
     prompt
 }
@@ -179,7 +178,7 @@ fn ssh_alias_completion_works_inside_a_multi_command_group() {
     let request = apply_ready_completion(&mut prompt, false);
 
     assert_eq!(&request.query[..request.start], "ssh {{");
-    assert_eq!(prompt.query, "ssh {{production");
+    assert_eq!(prompt.query.text, "ssh {{production");
 }
 
 #[test]
@@ -187,7 +186,7 @@ fn ssh_alias_completion_preserves_an_explicit_user() {
     let mut prompt = prompt_with("ssh admin@pro", &[], &["production", "staging"]);
     apply_ready_completion(&mut prompt, false);
 
-    assert_eq!(prompt.query, "ssh admin@production");
+    assert_eq!(prompt.query.text, "ssh admin@production");
 }
 
 #[test]
@@ -204,11 +203,11 @@ fn tab_cycles_prompt_native_completions_in_both_directions() {
     let mut prompt = prompt_with("ca", &["cargo", "cat"], &[]);
 
     apply_ready_completion(&mut prompt, false);
-    assert_eq!(prompt.query, "cargo");
+    assert_eq!(prompt.query.text, "cargo");
     assert!(prompt.cycle_existing_completion(false));
-    assert_eq!(prompt.query, "cat");
+    assert_eq!(prompt.query.text, "cat");
     assert!(prompt.cycle_existing_completion(true));
-    assert_eq!(prompt.query, "cargo");
+    assert_eq!(prompt.query.text, "cargo");
 }
 
 #[test]
@@ -220,16 +219,16 @@ fn completion_navigation_applies_candidates_and_wraps() {
 
     prompt.navigate_completion(false);
     assert_eq!(prompt.completion_selected, Some(0));
-    assert_eq!(prompt.query, "cargo");
+    assert_eq!(prompt.query.text, "cargo");
     prompt.navigate_completion(false);
     assert_eq!(prompt.completion_selected, Some(1));
-    assert_eq!(prompt.query, "cat");
+    assert_eq!(prompt.query.text, "cat");
     prompt.navigate_completion(false);
     assert_eq!(prompt.completion_selected, Some(0));
-    assert_eq!(prompt.query, "cargo");
+    assert_eq!(prompt.query.text, "cargo");
     prompt.navigate_completion(true);
     assert_eq!(prompt.completion_selected, Some(1));
-    assert_eq!(prompt.query, "cat");
+    assert_eq!(prompt.query.text, "cat");
 }
 
 #[test]
@@ -240,7 +239,7 @@ fn selecting_a_completion_ignores_out_of_range_rows() {
     prompt.completion_end = 2;
 
     prompt.select_completion(99);
-    assert_eq!(prompt.query, "ca");
+    assert_eq!(prompt.query.text, "ca");
     assert_eq!(prompt.completion_selected, None);
 }
 
@@ -254,7 +253,7 @@ fn enter_accepts_the_completion_layer_before_command_submission() {
     prompt.completion_add_space = true;
 
     assert!(prompt.accept_completion());
-    assert_eq!(prompt.query, "cargo ");
+    assert_eq!(prompt.query.text, "cargo ");
     assert!(prompt.completion_candidates.is_empty());
     assert_eq!(prompt.completion_selected, None);
     assert!(!prompt.accept_completion());
@@ -265,15 +264,15 @@ fn accepting_a_double_brace_completion_does_not_add_space() {
     let mut prompt = prompt_with("ssh {{production, sta", &[], &["staging"]);
 
     apply_ready_completion(&mut prompt, false);
-    assert_eq!(prompt.query, "ssh {{production, staging");
+    assert_eq!(prompt.query.text, "ssh {{production, staging");
     assert!(prompt.accept_completion());
-    assert_eq!(prompt.query, "ssh {{production, staging");
+    assert_eq!(prompt.query.text, "ssh {{production, staging");
 }
 
 #[test]
 fn accepting_a_completion_does_not_duplicate_existing_whitespace() {
     let mut prompt = prompt_with("cargo --version", &[], &[]);
-    prompt.cursor = 5;
+    prompt.query.cursor = 5;
     prompt.completion_candidates = vec!["cargo".into()];
     prompt.completion_selected = Some(0);
     prompt.completion_start = 0;
@@ -281,7 +280,7 @@ fn accepting_a_completion_does_not_duplicate_existing_whitespace() {
     prompt.completion_add_space = true;
 
     assert!(prompt.accept_completion());
-    assert_eq!(prompt.query, "cargo --version");
+    assert_eq!(prompt.query.text, "cargo --version");
 }
 
 #[test]
@@ -326,13 +325,12 @@ fn stale_completion_results_are_rejected() {
     let request = prompt.begin_completion_request(PathBuf::from("/work"), false);
     assert!(completion_request_is_current(Some(&prompt), &request));
 
-    prompt.query.push('x');
-    prompt.cursor += 1;
+    prompt.query.insert("x");
     prompt.clear_completion();
 
     assert!(!completion_request_is_current(Some(&prompt), &request));
     assert!(!prompt.apply_completion_result(&request, vec!["stale".into()]));
-    assert_eq!(prompt.query, "cat sx");
+    assert_eq!(prompt.query.text, "cat sx");
 }
 
 #[test]
@@ -355,11 +353,10 @@ fn filesystem_completion_is_returned_as_deferred_work() {
 fn normalized_catalog_matching_is_case_insensitive_without_changing_display() {
     let catalog = CompletionCatalog::new(Vec::new(), vec!["Production-EU".to_owned()]);
     let mut prompt = MultiCommandPrompt::new(catalog);
-    prompt.query = "ssh production".to_owned();
-    prompt.cursor = prompt.query.len();
+    prompt.query = TextField::new("ssh production");
 
     apply_ready_completion(&mut prompt, false);
-    assert_eq!(prompt.query, "ssh Production-EU");
+    assert_eq!(prompt.query.text, "ssh Production-EU");
 }
 
 #[test]
@@ -457,7 +454,7 @@ fn rendered_query_parts_are_reused_until_the_query_changes() {
         &[],
         &[],
     );
-    prompt.cursor = "a-command-long-enough-to-use-shared-storage".len();
+    prompt.query.cursor = "a-command-long-enough-to-use-shared-storage".len();
 
     let (before, after) = prompt.rendered_query_parts();
     let (cached_before, cached_after) = prompt.rendered_query_parts();
@@ -466,11 +463,11 @@ fn rendered_query_parts_are_reused_until_the_query_changes() {
     assert_eq!(before.as_ptr(), cached_before.as_ptr());
     assert_eq!(after.as_ptr(), cached_after.as_ptr());
 
-    prompt.query.push_str(" --changed");
-    prompt.cursor = prompt.query.len();
+    prompt.query.move_to_end();
+    prompt.query.insert(" --changed");
     prompt.mark_query_changed();
     let (changed_before, changed_after) = prompt.rendered_query_parts();
-    assert_eq!(changed_before, prompt.query);
+    assert_eq!(changed_before, prompt.query.text);
     assert_eq!(changed_after, "");
 }
 
@@ -480,9 +477,9 @@ fn delete_previous_word_removes_whitespace_and_unicode_word() {
 
     prompt.delete_previous_word();
 
-    assert_eq!(prompt.query, "ssh host ");
-    assert_eq!(prompt.cursor, prompt.query.len());
-    assert!(!prompt.select_all);
+    assert_eq!(prompt.query.text, "ssh host ");
+    assert_eq!(prompt.query.cursor, prompt.query.text.len());
+    assert!(!prompt.query.select_all);
 }
 
 #[test]
@@ -491,20 +488,20 @@ fn delete_previous_word_stops_at_a_multi_command_comma() {
 
     prompt.delete_previous_word();
 
-    assert_eq!(prompt.query, "ssh {{foo,");
-    assert_eq!(prompt.cursor, prompt.query.len());
+    assert_eq!(prompt.query.text, "ssh {{foo,");
+    assert_eq!(prompt.query.cursor, prompt.query.text.len());
 }
 
 #[test]
 fn delete_previous_word_removes_selected_query() {
     let mut prompt = prompt_with("ssh host", &[], &[]);
-    prompt.select_all = true;
+    prompt.query.select_all = true;
 
     prompt.delete_previous_word();
 
-    assert_eq!(prompt.query, "");
-    assert_eq!(prompt.cursor, 0);
-    assert!(!prompt.select_all);
+    assert_eq!(prompt.query.text, "");
+    assert_eq!(prompt.query.cursor, 0);
+    assert!(!prompt.query.select_all);
 }
 
 #[test]

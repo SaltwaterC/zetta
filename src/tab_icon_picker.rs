@@ -360,7 +360,7 @@ impl Zetta {
         // Settled before this picker's own keys, so `Ctrl-X` cuts rather than
         // typing an `x` and `Shift-Delete` cuts rather than forward-deleting.
         if let Some(picker) = self.tab_icon_picker.as_mut() {
-            match apply_clipboard_shortcut(picker.query.edit(), &event.keystroke, cx) {
+            match apply_clipboard_shortcut(&mut picker.query, &event.keystroke, cx) {
                 ClipboardOutcome::Ignored => {}
                 ClipboardOutcome::Unchanged => {
                     cx.notify();
@@ -391,8 +391,6 @@ impl Zetta {
             };
             let options = picker.options();
             match event.keystroke.key.as_str() {
-                "left" if !command => picker.query.move_left(),
-                "right" if !command => picker.query.move_right(),
                 "up" if !command => {
                     picker.selected = picker.selected.saturating_sub(TAB_ICON_COLUMNS);
                     selection_changed = true;
@@ -417,33 +415,13 @@ impl Zetta {
                         .copied()
                         .map(|option| picker.icon_for_option(option));
                 }
-                "backspace" => {
-                    picker.query.backspace();
-                    query_changed = true;
-                }
-                "delete" => {
-                    picker.query.delete();
-                    query_changed = true;
-                }
-                "home" => {
-                    picker.query.cursor = 0;
-                    picker.query.select_all = false;
-                }
-                "end" => {
-                    picker.query.cursor = picker.query.text.len();
-                    picker.query.select_all = false;
-                }
-                "a" if command => picker.query.select_all(),
-                _ if !command
-                    && !event.keystroke.modifiers.alt
-                    && event.keystroke.key_char.is_some() =>
-                {
-                    if let Some(text) = event.keystroke.key_char.as_ref() {
-                        picker.query.insert(text);
-                        query_changed = true;
-                    }
-                }
-                _ => return,
+                _ => match apply_text_field_key(&mut picker.query, &event.keystroke) {
+                    // The grid's own keys are settled above, so anything left
+                    // that the field does not answer to is not for this picker.
+                    TextFieldEdit::Ignored => return,
+                    TextFieldEdit::CursorMoved => {}
+                    TextFieldEdit::Edited => query_changed = true,
+                },
             }
             if query_changed {
                 picker.selected = 0;

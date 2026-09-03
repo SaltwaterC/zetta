@@ -182,9 +182,7 @@ impl Zetta {
         if let Some(tab) = self.tabs.get_mut(tab_index) {
             let title = resolve_tab_title(tab, || automatic_title.into()).to_string();
             tab.renaming_pane = None;
-            tab.rename_cursor = title.len();
-            tab.rename_buffer = Some(title);
-            tab.rename_select_all = false;
+            tab.rename_buffer = Some(TextField::new(title));
         }
         self.rename_focus.focus(window, cx);
         cx.notify();
@@ -216,9 +214,7 @@ impl Zetta {
         };
         tab.activate_pane(pane_id);
         tab.renaming_pane = Some(pane_id);
-        tab.rename_cursor = label.len();
-        tab.rename_buffer = Some(label);
-        tab.rename_select_all = true;
+        tab.rename_buffer = Some(TextField::selected(label));
         self.rename_focus.focus(window, cx);
         cx.notify();
     }
